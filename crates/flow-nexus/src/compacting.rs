@@ -389,7 +389,7 @@ impl WatchesCompactions for RunningNexus {
         };
         match signal {
             CodexContextSignal::TokenUsage(tokens) => {
-                if self.perform(Operation::Record(Record_Data::Context(
+                if self.perform_ingress(Operation::Record(Record_Data::Context(
                     Record_Data_Context_Data {
                         flow_id: node.flow_id.clone(),
                         tokens,

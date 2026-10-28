@@ -103,7 +103,7 @@ use store::{
     RegistersExistingFlow, RegistersFlowIdentity,
 };
 use waking::SleepsAndWakesSeats;
-use waking::{RestsEndedAwake, SettlesStopsAtConfirmation};
+use waking::{PerformsWakeAndDrain, RestsEndedAwake, SettlesStopsAtConfirmation};
 
 pub struct RunningNexus {
     /// The exact typed runtime value that opened this Nexus.
@@ -263,6 +263,8 @@ pub(crate) struct ConfiguredEffects<'a> {
     codex_context_signal: Box<dyn Fn(&str, compacting::CodexContextSignal) + Send + Sync + 'a>,
     wake_due: Box<dyn Fn(signal_flow::Address) + Send + Sync + 'a>,
     rest_ended_awake: Box<dyn Fn(&signal_flow::Address) + Send + Sync + 'a>,
+    wake: Box<dyn Fn(signal_flow::Address) -> Outcome + Send + Sync + 'a>,
+    drain: Box<dyn Fn(signal_flow::Address) -> Outcome + Send + Sync + 'a>,
 }
 
 impl RunningNexus {
@@ -287,6 +289,8 @@ impl RunningNexus {
             rest_ended_awake: Box::new(move |address| {
                 self.rest_ended_awake(address);
             }),
+            wake: Box::new(move |address| self.wake_configured(configured, address)),
+            drain: Box::new(move |address| self.drain_configured(configured, address)),
         }
     }
 }
@@ -310,6 +314,12 @@ impl ConfiguredEffects<'_> {
     }
     pub(crate) fn rest_ended_awake(&self, address: &signal_flow::Address) {
         (self.rest_ended_awake)(address)
+    }
+    pub(crate) fn wake(&self, address: signal_flow::Address) -> Outcome {
+        (self.wake)(address)
+    }
+    pub(crate) fn drain(&self, address: signal_flow::Address) -> Outcome {
+        (self.drain)(address)
     }
 }
 
@@ -509,7 +519,7 @@ impl Dispatches for RunningNexus {
                         signal_flow::PaneCloseFailure::IdentityUnavailable,
                     ));
                 }
-                if self.perform(Operation::Record(Record_Data::Stopped(flow_id.clone())))
+                if self.perform_ingress(Operation::Record(Record_Data::Stopped(flow_id.clone())))
                     != Outcome::Recorded
                 {
                     return Response::StopRejected(signal_flow::StopRejection::PersistenceRefused);
@@ -748,7 +758,7 @@ impl Dispatches for RunningNexus {
                         );
                     }
                 }
-                if self.perform(Operation::Record(Record_Data::Retired(flow_id.clone())))
+                if self.perform_ingress(Operation::Record(Record_Data::Retired(flow_id.clone())))
                     != Outcome::Recorded
                 {
                     return meta_signal_flow::Response::RetireRejected(
@@ -4412,19 +4422,21 @@ mod tests {
         assert_eq!(
             fixture
                 .nexus
-                .perform(Operation::Record(Record_Data::Stopped("unknown".into()))),
+                .perform_ingress(Operation::Record(Record_Data::Stopped("unknown".into()))),
             Outcome::Failed(Failed_Data::StoreRefused)
         );
         // Confirming a launch the store never bound does not start it.
         assert_eq!(
-            fixture.nexus.perform(Operation::Confirm("unknown".into())),
+            fixture
+                .nexus
+                .perform_ingress(Operation::Confirm("unknown".into())),
             Outcome::Failed(Failed_Data::Unstarted)
         );
         // A witnessed exit of a live flow is recorded, and the row says so.
         assert_eq!(
             fixture
                 .nexus
-                .perform(Operation::Record(Record_Data::Exited("908786".into()))),
+                .perform_ingress(Operation::Record(Record_Data::Exited("908786".into()))),
             Outcome::Recorded
         );
         assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Exited);
@@ -4432,7 +4444,7 @@ mod tests {
         assert_eq!(
             fixture
                 .nexus
-                .perform(Operation::Record(Record_Data::Exited("908786".into()))),
+                .perform_ingress(Operation::Record(Record_Data::Exited("908786".into()))),
             Outcome::Failed(Failed_Data::StoreRefused)
         );
     }

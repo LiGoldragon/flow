@@ -84,7 +84,7 @@ impl RecordsReports for RunningNexus {
                 signal_flow::Unknown_Data::FlowId(unresolved),
             ));
         };
-        match self.perform(Operation::Record(Record_Data::Harness(
+        match self.perform_ingress(Operation::Record(Record_Data::Harness(
             Record_Data_Harness_Data {
                 flow_id: flow_id.clone(),
                 event,

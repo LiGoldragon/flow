@@ -242,7 +242,7 @@ impl RunningNexus {
             }
             PaneAgent::Absent => {
                 if record_exit {
-                    let _ = self.perform(Operation::Record(Record_Data::Exited(
+                    let _ = self.perform_ingress(Operation::Record(Record_Data::Exited(
                         target.node.flow_id.clone(),
                     )));
                 }
@@ -770,7 +770,7 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         //
         // A Pending flow seen reacting to a real Deliver is witnessed live.
         if self.target.node.flow_lifecycle == FlowLifecycle::Pending {
-            let _ = self.nexus.perform(Operation::Record(Record_Data::Active(
+            let _ = self.nexus.perform_ingress(Operation::Record(Record_Data::Active(
                 self.target.node.flow_id.clone(),
             )));
         }

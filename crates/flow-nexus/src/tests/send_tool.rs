@@ -2069,7 +2069,7 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
         vec![history_turn("turn-unrelated", "completed", None)],
     );
     assert_eq!(
-        fixture.nexus.perform(Operation::Drain(seat_at())),
+        fixture.nexus.perform_ingress(Operation::Drain(seat_at())),
         Outcome::Failed(crate::generated::operation::Failed_Data::HerdrRefused)
     );
     assert_eq!(
@@ -2081,7 +2081,7 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
 
     // Run 3 has no answer: the app-server is unreadable.
     assert!(!matches!(
-        fixture.nexus.perform(Operation::Drain(seat_at())),
+        fixture.nexus.perform_ingress(Operation::Drain(seat_at())),
         Outcome::Drained(_)
     ));
     assert_eq!(

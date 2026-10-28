@@ -1286,7 +1286,7 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
         "a second request starts no second wake"
     );
 
-    let Outcome::Woken(flow_id) = fixture.nexus.perform(Operation::Wake(at.clone())) else {
+    let Outcome::Woken(flow_id) = fixture.nexus.perform_ingress(Operation::Wake(at.clone())) else {
         panic!(
             "the wake starts a fresh flow; Herdr calls: {}",
             world.calls()
@@ -1342,7 +1342,7 @@ fn a_wake_that_cannot_start_puts_the_work_back_and_stays_asleep() {
         queue.clone(),
     ));
     assert!(matches!(
-        fixture.nexus.perform(Operation::Wake(at.clone())),
+        fixture.nexus.perform_ingress(Operation::Wake(at.clone())),
         Outcome::Failed(_)
     ));
     let asleep = stored(&fixture, Layer::Secondary);
@@ -1428,7 +1428,7 @@ fn a_wake_is_refused_while_a_pane_already_runs_the_session() {
     fixture.set_agents(vec![running]);
 
     assert_eq!(
-        fixture.nexus.perform(Operation::Wake(at.clone())),
+        fixture.nexus.perform_ingress(Operation::Wake(at.clone())),
         Outcome::Failed(crate::generated::operation::Failed_Data::ConflictingBinding)
     );
     let asleep = stored(&fixture, Layer::Secondary);
@@ -1471,7 +1471,7 @@ fn a_wake_is_refused_while_a_remote_resumed_codex_tui_runs_the_thread() {
     assert_eq!(
         fixture
             .nexus
-            .perform(Operation::Wake(address(Layer::Secondary))),
+            .perform_ingress(Operation::Wake(address(Layer::Secondary))),
         Outcome::Failed(crate::generated::operation::Failed_Data::ConflictingBinding)
     );
     let asleep = stored(&fixture, Layer::Secondary);
@@ -1495,7 +1495,7 @@ fn a_recorded_codex_pane_reporting_another_thread_does_not_hold_the_flow() {
     assert_eq!(
         fixture
             .nexus
-            .perform(Operation::Wake(address(Layer::Secondary))),
+            .perform_ingress(Operation::Wake(address(Layer::Secondary))),
         Outcome::Failed(crate::generated::operation::Failed_Data::HerdrRefused)
     );
     assert_eq!(stored(&fixture, Layer::Secondary).state, State::Asleep);
@@ -3232,7 +3232,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         identity = FRESH_THREAD.replace('-', ""),
     ));
 
-    let outcome = fixture.nexus.perform(Operation::Wake(at.clone()));
+    let outcome = fixture.nexus.perform_ingress(Operation::Wake(at.clone()));
     assert_eq!(
         outcome,
         Outcome::Woken(FRESH_CODEX_FLOW.into()),
@@ -3293,7 +3293,7 @@ fn a_sleeping_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it() {
     let at = address(Layer::Secondary);
     let world = fixture.fresh_claude_world();
 
-    let Outcome::Woken(flow_id) = fixture.nexus.perform(Operation::Wake(at.clone())) else {
+    let Outcome::Woken(flow_id) = fixture.nexus.perform_ingress(Operation::Wake(at.clone())) else {
         panic!(
             "the fresh Claude wake starts; Herdr calls: {}",
             fs::read_to_string(world.state.join("calls")).unwrap_or_default()
@@ -3341,7 +3341,7 @@ fn a_fresh_wake_from_a_claude_alias_opens_nothing_and_keeps_its_work() {
     let world = fixture.fresh_world("unused");
 
     assert_eq!(
-        fixture.nexus.perform(Operation::Wake(at.clone())),
+        fixture.nexus.perform_ingress(Operation::Wake(at.clone())),
         Outcome::Failed(
             crate::generated::operation::Failed_Data::CompositionRefused(
                 signal_flow::CompositionRefusal::InexactModel
@@ -3356,7 +3356,7 @@ fn a_fresh_wake_from_a_claude_alias_opens_nothing_and_keeps_its_work() {
     assert!(!calls.contains("--session-id"), "{calls}");
 
     configure_secondary_model(&fixture, "claude-fixture");
-    let Outcome::Woken(flow_id) = fixture.nexus.perform(Operation::Wake(at.clone())) else {
+    let Outcome::Woken(flow_id) = fixture.nexus.perform_ingress(Operation::Wake(at.clone())) else {
         panic!(
             "the exact Claude model wakes; Herdr calls: {}",
             fs::read_to_string(world.state.join("calls")).unwrap_or_default()
@@ -3413,7 +3413,7 @@ fn a_refused_wake_keeps_its_queue_and_each_delivery_names_why() {
     let world = fixture.fresh_world("unused");
 
     assert_eq!(
-        fixture.nexus.perform(Operation::Wake(at.clone())),
+        fixture.nexus.perform_ingress(Operation::Wake(at.clone())),
         Outcome::Failed(
             crate::generated::operation::Failed_Data::CompositionRefused(
                 signal_flow::CompositionRefusal::InexactModel
@@ -3460,7 +3460,7 @@ fn a_refused_wake_keeps_its_queue_and_each_delivery_names_why() {
     assert!(!calls.contains("--session-id"), "{calls}");
 
     configure_secondary_model(&fixture, "claude-fixture");
-    let Outcome::Woken(flow_id) = fixture.nexus.perform(Operation::Wake(at.clone())) else {
+    let Outcome::Woken(flow_id) = fixture.nexus.perform_ingress(Operation::Wake(at.clone())) else {
         panic!(
             "the retried wake starts; Herdr calls: {}",
             fs::read_to_string(world.state.join("calls")).unwrap_or_default()
@@ -3512,7 +3512,7 @@ fn a_fresh_wake_takes_the_model_of_its_layer_and_aspect() {
     let world = fixture.fresh_world("unused");
 
     assert_eq!(
-        fixture.nexus.perform(Operation::Wake(at.clone())),
+        fixture.nexus.perform_ingress(Operation::Wake(at.clone())),
         Outcome::Failed(
             crate::generated::operation::Failed_Data::CompositionRefused(
                 signal_flow::CompositionRefusal::Unconfigured
@@ -3532,7 +3532,7 @@ fn a_fresh_wake_takes_the_model_of_its_layer_and_aspect() {
             (Aspect::Mind, "claude-fixture"),
         ],
     );
-    let Outcome::Woken(flow_id) = fixture.nexus.perform(Operation::Wake(at.clone())) else {
+    let Outcome::Woken(flow_id) = fixture.nexus.perform_ingress(Operation::Wake(at.clone())) else {
         panic!(
             "Mind's Secondary model wakes the seat; Herdr calls: {}",
             fs::read_to_string(world.state.join("calls")).unwrap_or_default()
@@ -4610,7 +4610,7 @@ fn a_terminal_sender_retracts_its_locks() {
         let fixture = NexusFixture::new();
         let recipient = sender_holding_a_lock(&fixture);
         assert_eq!(
-            fixture.nexus.perform(Operation::Record(end.clone())),
+            fixture.nexus.perform_ingress(Operation::Record(end.clone())),
             Outcome::Recorded,
             "{end:?}"
         );
@@ -4677,7 +4677,7 @@ fn a_maintained_metaflow_ended_by_an_exit_is_owed_a_successor() {
         assert_eq!(
             fixture
                 .nexus
-                .perform(Operation::Record(Record_Data::Exited(CLAUDE_SEAT.into()))),
+                .perform_ingress(Operation::Record(Record_Data::Exited(CLAUDE_SEAT.into()))),
             Outcome::Recorded
         );
         let intent = fixture
@@ -4721,7 +4721,7 @@ fn a_maintained_metaflow_stopped_deliberately_is_owed_no_successor() {
         Record_Data::Stopped(CLAUDE_SEAT.into()),
         Record_Data::Retired(CLAUDE_SEAT.into()),
     ] {
-        let _ = fixture.nexus.perform(Operation::Record(end));
+        let _ = fixture.nexus.perform_ingress(Operation::Record(end));
     }
     assert_eq!(
         fixture

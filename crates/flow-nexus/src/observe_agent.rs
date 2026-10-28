@@ -66,7 +66,7 @@ impl RecordsWitnessedExit for RunningNexus {
                 .ok()
                 .flatten()
                 .map(|metaflow| metaflow.address);
-            if self.perform(Operation::Record(Record_Data::Exited(flow_id.to_owned())))
+            if self.perform_ingress(Operation::Record(Record_Data::Exited(flow_id.to_owned())))
                 != Outcome::Recorded
             {
                 eprintln!("flow-nexus: flow {flow_id} seen gone but not recorded Exited");

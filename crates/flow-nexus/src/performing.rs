@@ -31,7 +31,7 @@ use crate::store::{
 use crate::store::{ManagesMetaflowState, ReadsFlowRows};
 use crate::title::TitleRefused;
 use crate::waking::PerformsWakeAndDrain;
-use crate::{ConfiguredUse, RunningNexus};
+use crate::{ConfiguredEffects, ConfiguredUse, RunningNexus};
 use signal_flow::{
     HarnessKind, LaunchAttemptReservation, NativeLaunchFailure, NativeLaunchRefusal,
     NativeLaunchStage, Response, StartRejection,
@@ -215,24 +215,9 @@ impl<E> AnswersRecord for Result<(), E> {
         }
     }
 }
-impl Performs for RunningNexus {
+impl Performs for ConfiguredEffects<'_> {
     fn perform(&self, operation: Operation) -> Outcome {
-        let configured = match self.configured_use() {
-            Ok(configured) => configured,
-            Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
-        };
-        self.perform_configured(&configured, operation)
-    }
-}
-
-impl RunningNexus {
-    /// Performs one part of an external effect with the complete immutable
-    /// configuration generation that effect selected at its boundary.
-    pub(crate) fn perform_configured(
-        &self,
-        configured: &ConfiguredUse,
-        operation: Operation,
-    ) -> Outcome {
+        let configured = self.configured;
         match operation {
             // A model that is not exact on its harness is never launched: its
             // receipt could not match the model the transcript records.
@@ -285,7 +270,7 @@ impl RunningNexus {
                 // records the composer reads into its first message.
                 let remembered_flows = {
                     use crate::store::metaflow::ResolvesRemembering;
-                    match self.store.remembered_flows(&profile) {
+                    match self.operational.remembered_flows(&profile) {
                         Ok(flows) => flows,
                         Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
                     }
@@ -315,7 +300,7 @@ impl RunningNexus {
             Operation::Reserve(reserve) => self.reserve(configured, reserve),
             Operation::Record(record) => self.record(configured, record),
             Operation::Register(Register_Data { flow_node, caller }) => {
-                match self.store.register_flow_in_role(flow_node, caller) {
+                match self.operational.register_flow_in_role(flow_node, caller) {
                     Ok(FlowRegistration::Registered(node)) => Outcome::Registered(*node),
                     Ok(FlowRegistration::ConflictingBinding) => {
                         Outcome::Failed(Failed_Data::ConflictingBinding)
@@ -323,7 +308,7 @@ impl RunningNexus {
                     Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
                 }
             }
-            Operation::Confirm(flow_id) => match self.store.confirm_started(&flow_id) {
+            Operation::Confirm(flow_id) => match self.operational.confirm_started(&flow_id) {
                 Ok(Response::Started(started)) => Outcome::Started(started),
                 Ok(Response::StartRejected(StartRejection::AddressAwake)) => {
                     Outcome::Failed(Failed_Data::AddressAwake)
@@ -365,7 +350,7 @@ impl RunningNexus {
                                     crate::codex::CodexAdapterUnavailable::Protocol(detail)
                                 };
                                 if !self
-                                    .store
+                                    .operational
                                     .record_opened_thread(
                                         &composed_launch.launch_profile.launch_request_id,
                                         thread,
@@ -390,8 +375,7 @@ impl RunningNexus {
                         // That connection answers the thread's calls while
                         // the launch holds the gate.
                         Ok((thread, connection)) => {
-                            self.configured_effects(configured)
-                                .hold_launch_responder(connection);
+                            self.hold_launch_responder(connection);
                             Some(thread)
                         }
                         Err(error) => {
@@ -507,23 +491,20 @@ impl RunningNexus {
                 let submission = match composed_launch.harness_kind {
                     // The part's turn may call the send tool at once: the
                     // launch, holding the gate, answers it meanwhile.
-                    HarnessKind::Codex => {
-                        self.configured_effects(configured)
-                            .serving_launch_calls(|| {
-                                configured
-                                    .codex_endpoints
-                                    .adapter_for(&composed_launch.launch_profile.model_name)
+                    HarnessKind::Codex => self.serving_launch_calls(|| {
+                        configured
+                            .codex_endpoints
+                            .adapter_for(&composed_launch.launch_profile.model_name)
+                            .map_err(|_| Failed_Data::CodexRefused)
+                            .and_then(|adapter| {
+                                adapter
+                                    .submit_bound_codex_part(
+                                        &composed_launch,
+                                        &prompt_delivery_intent,
+                                    )
                                     .map_err(|_| Failed_Data::CodexRefused)
-                                    .and_then(|adapter| {
-                                        adapter
-                                            .submit_bound_codex_part(
-                                                &composed_launch,
-                                                &prompt_delivery_intent,
-                                            )
-                                            .map_err(|_| Failed_Data::CodexRefused)
-                                    })
                             })
-                    }
+                    }),
                     HarnessKind::Claude => configured
                         .herdr
                         .submit_startup_part(&composed_launch, &prompt_delivery_intent)
@@ -541,8 +522,29 @@ impl RunningNexus {
                     Outcome::Failed(Failed_Data::PaneCloseRefused(failure))
                 }
             },
-            Operation::Wake(address) => self.wake_configured(configured, address),
-            Operation::Drain(address) => self.drain_configured(configured, address),
+            Operation::Wake(address) => self.wake(address),
+            Operation::Drain(address) => self.drain(address),
+        }
+    }
+}
+
+impl RunningNexus {
+    /// Performs one part of an external effect with the configuration selected
+    /// by its ingress, then exposes only the configured effects capability.
+    pub(crate) fn perform_configured(
+        &self,
+        configured: &ConfiguredUse,
+        operation: Operation,
+    ) -> Outcome {
+        self.configured_effects(configured).perform(operation)
+    }
+
+    /// Root ingress for effects whose callback has not yet been given its
+    /// configured capability. Effect code must instead retain ConfiguredEffects.
+    pub(crate) fn perform_ingress(&self, operation: Operation) -> Outcome {
+        match self.configured_use() {
+            Ok(configured) => self.configured_effects(&configured).perform(operation),
+            Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
         }
     }
 }
@@ -561,7 +563,7 @@ trait PerformsInParts {
     fn release(&self, configured: &ConfiguredUse, flow_id: &str) -> Outcome;
 }
 
-impl PerformsInParts for RunningNexus {
+impl PerformsInParts for ConfiguredEffects<'_> {
     fn reserve(&self, configured: &ConfiguredUse, reserve: Reserve_Data) -> Outcome {
         use crate::herdr::reservation::ReservesFlowIdentity;
         use crate::store::events::RecordsHarnessEvents;
@@ -569,7 +571,10 @@ impl PerformsInParts for RunningNexus {
             composed_launch,
             origin,
         } = reserve;
-        let reservation = match self.store.reserve_launch_attempt(&composed_launch, origin) {
+        let reservation = match self
+            .operational
+            .reserve_launch_attempt(&composed_launch, origin)
+        {
             Ok(reservation) => reservation,
             Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
         };
@@ -589,7 +594,7 @@ impl PerformsInParts for RunningNexus {
             LaunchAttemptReservation::Existing(_) | LaunchAttemptReservation::Conflict => None,
         };
         if let Some(flow_id) = &flow_id_option
-            && self.store.hold_reserved_flow(flow_id).is_err()
+            && self.operational.hold_reserved_flow(flow_id).is_err()
         {
             // The claim was made but the flow is not held: give it back.
             let _ = self.release(configured, flow_id);
@@ -604,7 +609,7 @@ impl PerformsInParts for RunningNexus {
     fn release(&self, configured: &ConfiguredUse, flow_id: &str) -> Outcome {
         use crate::herdr::reservation::ReleasesFlowIdentity;
         use crate::store::events::RecordsHarnessEvents;
-        if let Err(error) = self.store.release_reserved_flow(flow_id) {
+        if let Err(error) = self.operational.release_reserved_flow(flow_id) {
             eprintln!("flow-nexus: reserved flow {flow_id} not released: {error:?}");
             return Outcome::Failed(Failed_Data::StoreRefused);
         }
@@ -619,25 +624,29 @@ impl PerformsInParts for RunningNexus {
 
     fn record(&self, configured: &ConfiguredUse, record: Record_Data) -> Outcome {
         match record {
-            Record_Data::Intent(intent) => {
-                self.store.record_native_launch_intent(intent).recorded()
-            }
-            Record_Data::Binding(binding) => {
-                self.store.record_native_launch_binding(binding).recorded()
-            }
+            Record_Data::Intent(intent) => self
+                .operational
+                .record_native_launch_intent(intent)
+                .recorded(),
+            Record_Data::Binding(binding) => self
+                .operational
+                .record_native_launch_binding(binding)
+                .recorded(),
             Record_Data::Acknowledgement(acknowledgement) => self
-                .store
+                .operational
                 .record_registration_acknowledgement(acknowledgement)
                 .recorded(),
-            Record_Data::Delivery(intent) => {
-                self.store.record_prompt_delivery_intent(intent).recorded()
-            }
-            Record_Data::Delivered(result) => {
-                self.store.record_prompt_delivery_result(result).recorded()
-            }
-            Record_Data::Active(flow_id) => self.store.record_active(&flow_id).recorded(),
-            Record_Data::Stopped(flow_id) => self.store.record_stopped(&flow_id).recorded(),
-            Record_Data::Retired(flow_id) => self.store.record_retired(&flow_id).recorded(),
+            Record_Data::Delivery(intent) => self
+                .operational
+                .record_prompt_delivery_intent(intent)
+                .recorded(),
+            Record_Data::Delivered(result) => self
+                .operational
+                .record_prompt_delivery_result(result)
+                .recorded(),
+            Record_Data::Active(flow_id) => self.operational.record_active(&flow_id).recorded(),
+            Record_Data::Stopped(flow_id) => self.operational.record_stopped(&flow_id).recorded(),
+            Record_Data::Retired(flow_id) => self.operational.record_retired(&flow_id).recorded(),
             // No pane outlives its flow: a flow that exited with its pane
             // still there, its harness gone or its own session ended, has
             // that pane closed in the event that records the exit. A pane
@@ -645,8 +654,8 @@ impl PerformsInParts for RunningNexus {
             // no pane lease: an exit is recorded where a write may already
             // hold it, and nothing more is typed into an exited flow.
             Record_Data::Exited(flow_id) => {
-                let node = self.store.flow_node(&flow_id).ok().flatten();
-                let recorded = self.store.record_exited(&flow_id).recorded();
+                let node = self.operational.flow_node(&flow_id).ok().flatten();
+                let recorded = self.operational.record_exited(&flow_id).recorded();
                 if recorded == Outcome::Recorded
                     && let Some(node) = node
                     && matches!(
@@ -663,22 +672,24 @@ impl PerformsInParts for RunningNexus {
                 recorded
             }
             Record_Data::Replacing(replacement) => {
-                self.store.record_replacement(replacement).recorded()
+                self.operational.record_replacement(replacement).recorded()
             }
             Record_Data::Withdrawn(launch_request_id) => self
-                .store
+                .operational
                 .withdraw_replacement(&launch_request_id)
                 .recorded(),
             Record_Data::Settled(Record_Data_Settled_Data {
                 launch_request_id,
                 launch_outcome,
             }) => self
-                .store
+                .operational
                 .record_launch_outcome(&launch_request_id, launch_outcome)
                 .recorded(),
             Record_Data::Asleep(Record_Data_Asleep_Data { address, flow_id }) => {
                 use crate::store::metaflow::SleepsMetaflows;
-                self.store.sleep_metaflow(&address, &flow_id).recorded()
+                self.operational
+                    .sleep_metaflow(&address, &flow_id)
+                    .recorded()
             }
             Record_Data::Awoken(Record_Data_Awoken_Data {
                 address,
@@ -688,7 +699,7 @@ impl PerformsInParts for RunningNexus {
                 use crate::store::metaflow::SleepsMetaflows;
                 match usize::try_from(delivered) {
                     Ok(delivered) => self
-                        .store
+                        .operational
                         .awaken_metaflow(&address, &flow_id, delivered)
                         .recorded(),
                     Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
@@ -696,11 +707,13 @@ impl PerformsInParts for RunningNexus {
             }
             Record_Data::Context(Record_Data_Context_Data { flow_id, tokens }) => {
                 use crate::store::context::RecordsContextSize;
-                self.store.record_context_size(&flow_id, tokens).recorded()
+                self.operational
+                    .record_context_size(&flow_id, tokens)
+                    .recorded()
             }
             Record_Data::Harness(Record_Data_Harness_Data { flow_id, event }) => {
                 use crate::store::events::{EventRecording, RecordsHarnessEvents};
-                match self.store.record_event(&flow_id, event) {
+                match self.operational.record_event(&flow_id, event) {
                     Ok(EventRecording::Recorded) => Outcome::Recorded,
                     Ok(EventRecording::UnknownFlow) => Outcome::Failed(Failed_Data::UnknownFlow),
                     Err(_) => Outcome::Failed(Failed_Data::StoreRefused),

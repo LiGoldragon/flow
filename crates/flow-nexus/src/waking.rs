@@ -231,7 +231,7 @@ impl RestsEndedAwake for RunningNexus {
         if !ended || !matches!(self.store.address_hold(&flow_id), Ok(None)) {
             return false;
         }
-        match self.perform(Operation::Record(Record_Data::Asleep(
+        match self.perform_ingress(Operation::Record(Record_Data::Asleep(
             Record_Data_Asleep_Data {
                 address: address.clone(),
                 flow_id: flow_id.clone(),
@@ -1502,7 +1502,7 @@ impl SleepsAndWakesSeats for RunningNexus {
             return;
         }
         // A refused wake has logged its reason; its work stays queued.
-        if let Outcome::Woken(_) = self.perform(Operation::Wake(address.clone())) {
+        if let Outcome::Woken(_) = self.perform_ingress(Operation::Wake(address.clone())) {
             self.drain_woken(&address, lease);
         }
         self.settle_stops_at_confirmation();
@@ -1514,7 +1514,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            match self.perform(Operation::Drain(address.clone())) {
+            match self.perform_ingress(Operation::Drain(address.clone())) {
                 Outcome::Drained(typed) if typed.is_empty() => {
                     drop(lease);
                     return;

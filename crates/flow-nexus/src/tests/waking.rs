@@ -1643,7 +1643,7 @@ fn a_launch_takes_its_address_by_binds_rules() {
 pub(super) fn message_peer(fixture: &NexusFixture) -> (super::MarkedProcess, signal_flow::Process) {
     use crate::metaflow::DispatchesMetaflowPeer;
     use crate::store::metaflow::MutatesMetaflows;
-    use crate::store::{FlowStore, ReadsFlowMemory};
+    use crate::store::{FlowStore, ManagesMetaflowState as _, ReadsFlowMemory};
     use signal_flow::{Bind_Data, Response};
     // Message runs as its own process, an ancestor of no seat.
     let message_child = super::MarkedProcess::spawn("sleep", &["30"], "w0:p0");
@@ -1651,32 +1651,20 @@ pub(super) fn message_peer(fixture: &NexusFixture) -> (super::MarkedProcess, sig
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    use crate::store::SeedsConfiguration;
-    let settings = crate::store::DefaultConfiguration {
-        home: fixture.directory.path().join("home"),
-        runtime_directory: fixture.directory.path().join("runtime"),
-    }
-    .configuration();
+    let mut nexus = fixture
+        .nexus
+        .store
+        .configuration_snapshot()
+        .expect("fixture configuration read")
+        .expect("fixture configured")
+        .configured_nexus;
+    // This fixture changes only Message's identity. Herdr, its flows root,
+    // and every other setting remain the current committed generation.
+    nexus.message_nexus_binary = message_executable;
     fixture
         .nexus
         .store
-        .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
-            meta_signal_flow::ConfigureNexus {
-                source_root: settings.source_root.clone(),
-                flows_root: "/tmp/flows".into(),
-                meta_aspects: settings.meta_aspects,
-                message_nexus_path: settings.message_nexus_path,
-                message_nexus_binary: message_executable,
-                curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                lease: 30,
-                executables: meta_signal_flow::Executables {
-                    herdr: "herdr".into(),
-                    flow_id_claimer: "flow-id".into(),
-                    hook: "flow-hook".into(),
-                },
-                default_herdr_session: "default".into(),
-            },
-        ))
+        .configure_change(meta_signal_flow::ConfigurationChange::Nexus(nexus))
         .expect("Nexus configured");
     let message = FlowStore::process_identity_for_pid(message_child.0.id()).unwrap();
     let message_address = Address {
@@ -3049,7 +3037,7 @@ fn configure_secondary_model(fixture: &NexusFixture, native: &str) {
                 curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                 lease: 30,
                 executables: meta_signal_flow::Executables {
-                    herdr: "herdr".into(),
+                    herdr: fixture.snapshot_program.to_string_lossy().into_owned(),
                     flow_id_claimer: "flow-id".into(),
                     hook: "flow-hook".into(),
                 },
@@ -3628,7 +3616,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 30,
                     executables: meta_signal_flow::Executables {
-                        herdr: "herdr".into(),
+                        herdr: self.snapshot_program.to_string_lossy().into_owned(),
                         flow_id_claimer: "flow-id".into(),
                         hook: "flow-hook".into(),
                     },
@@ -4548,7 +4536,7 @@ fn sender_holding_a_lock(fixture: &NexusFixture) -> Address {
                 curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                 lease: 30,
                 executables: meta_signal_flow::Executables {
-                    herdr: "herdr".into(),
+                    herdr: fixture.snapshot_program.to_string_lossy().into_owned(),
                     flow_id_claimer: "flow-id".into(),
                     hook: "flow-hook".into(),
                 },

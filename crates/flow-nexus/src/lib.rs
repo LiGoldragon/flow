@@ -136,6 +136,33 @@ pub struct RunningNexus {
     pub compactions: compacting::CompactionWatch,
 }
 
+impl RunningNexus {
+    /// Reads one complete committed configuration generation and constructs
+    /// the strict Herdr transport view used for the whole external effect.
+    /// Existing-resource lifecycle authority remains in `self.herdr`'s one
+    /// shared registry; only configuration is rebuilt here.
+    pub(crate) fn herdr_operation_view(
+        &self,
+    ) -> Result<herdr::HerdrOperationView, store::StoreError> {
+        let configuration = self
+            .store
+            .committed_configuration_snapshot()?
+            .ok_or(store::StoreError::NotConfigured)?;
+        let codex_endpoints = CodexEndpoints::configured(&configuration.snapshot)
+            .with_texts(configuration.snapshot.texts.clone());
+        let herdr = herdr::HerdrCli::configured_view(
+            &configuration.snapshot,
+            codex_endpoints,
+            Path::new(&self.runtime.ordinary_socket_path),
+            self.herdr.owned_resources(),
+        );
+        Ok(herdr::HerdrOperationView {
+            configuration,
+            herdr,
+        })
+    }
+}
+
 pub trait Dispatches {
     /// A query no calling process stands behind: its origin is Unbound.
     fn dispatch(&self, query: Query) -> Response {

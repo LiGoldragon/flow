@@ -184,6 +184,16 @@ pub struct HerdrCli {
     requires_owned_pane_binding: bool,
 }
 
+/// One coherent committed configuration view for one Herdr-facing effect.
+///
+/// The configuration is immutable for the effect. `herdr` is only a view of
+/// that configuration: every such view shares the running Nexus's single
+/// owned-resource registry.
+pub(crate) struct HerdrOperationView {
+    pub(crate) configuration: crate::store::CommittedConfigurationSnapshot,
+    pub(crate) herdr: HerdrCli,
+}
+
 #[derive(Debug)]
 pub(crate) struct OwnedClaudeProcess {
     pub(crate) process_id: u32,

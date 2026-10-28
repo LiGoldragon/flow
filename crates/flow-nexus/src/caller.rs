@@ -22,11 +22,11 @@
 //! ResolvePeer (meta) answers the same question for a process named by
 //! Message, which reads its own peer from the kernel.
 
+use crate::RunningNexus;
 use crate::generated::starter::{CallerProcessing, DerivesOrigin};
 use crate::herdr::PanePresence;
 use crate::herdr::ReadsHerdrPanes;
 use crate::store::{ReadsFlowRoles, ReadsFlowRows, StoreError};
-use crate::RunningNexus;
 use signal_flow::{Caller, CallerResolutionRejection, FlowId, FlowNode, Response};
 use std::collections::BTreeSet;
 use std::{fs, os::unix::net::UnixStream, path::PathBuf};
@@ -379,9 +379,23 @@ pub trait ResolvesCaller {
 
 impl ResolvesCaller for RunningNexus {
     fn resolve_caller(&self, pane: Option<CallerPane>, claim: Option<FlowId>) -> Response {
+        let Ok(view) = self.herdr_operation_view() else {
+            return Response::CallerResolutionRejected(CallerResolutionRejection::CallerUnknown);
+        };
+        self.resolve_caller_with(&view.herdr, pane, claim)
+    }
+}
+
+impl RunningNexus {
+    pub(crate) fn resolve_caller_with(
+        &self,
+        herdr: &crate::herdr::HerdrCli,
+        pane: Option<CallerPane>,
+        claim: Option<FlowId>,
+    ) -> Response {
         let caller = pane
             .ok_or(CallerResolutionRejection::CallerUnknown)
-            .and_then(|pane| self.bound_caller(&pane));
+            .and_then(|pane| self.bound_caller_with(herdr, &pane));
         match (caller, claim) {
             (Err(rejection), _) => Response::CallerResolutionRejected(rejection),
             (Ok(caller), Some(claimed)) if claimed != caller.flow_id => {
@@ -399,10 +413,13 @@ impl ResolvesCaller for RunningNexus {
 /// Unbound when it is no bound flow (a deploy script, a shell).
 impl DerivesOrigin for RunningNexus {
     fn origin_of<N: CallerProcessing>(&self, input: N) -> signal_flow::Origin {
+        let Ok(view) = self.herdr_operation_view() else {
+            return signal_flow::Origin::Unbound;
+        };
         input
             .caller_process()
-            .and_then(|process| process.caller_pane(&self.herdr))
-            .and_then(|pane| self.bound_caller(&pane).ok())
+            .and_then(|process| process.caller_pane(&view.herdr))
+            .and_then(|pane| self.bound_caller_with(&view.herdr, &pane).ok())
             .and_then(|caller| self.store.flow_node(&caller.flow_id).ok().flatten())
             .map(|node| {
                 signal_flow::Origin::Flow(signal_flow::FlowOrigin {
@@ -421,13 +438,26 @@ pub(crate) trait BindsCallerPane {
 
 impl BindsCallerPane for RunningNexus {
     fn bound_caller(&self, pane: &CallerPane) -> Result<Caller, CallerResolutionRejection> {
+        let view = self
+            .herdr_operation_view()
+            .map_err(|_| CallerResolutionRejection::CallerUnknown)?;
+        self.bound_caller_with(&view.herdr, pane)
+    }
+}
+
+impl RunningNexus {
+    pub(crate) fn bound_caller_with(
+        &self,
+        herdr: &crate::herdr::HerdrCli,
+        pane: &CallerPane,
+    ) -> Result<Caller, CallerResolutionRejection> {
         let unknown = |_: StoreError| CallerResolutionRejection::CallerUnknown;
         let mut present = self
             .store
             .flows_in_pane(&pane.herdr_session_name, &pane.herdr_pane_id)
             .map_err(unknown)?
             .into_iter()
-            .filter(|node: &FlowNode| self.herdr.pane_presence(node) == PanePresence::Present);
+            .filter(|node: &FlowNode| herdr.pane_presence(node) == PanePresence::Present);
         // No binding, or more than one, names no caller.
         let (Some(node), None) = (present.next(), present.next()) else {
             return Err(CallerResolutionRejection::CallerUnknown);

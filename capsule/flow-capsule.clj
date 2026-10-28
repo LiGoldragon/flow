@@ -276,7 +276,7 @@
   "The text blocks the Claude prompt_snapshot records for one session."
   [native]
   (when native
-    (when-let [file (first (fs/glob (str home "/.claude/projects") (str "*/" native ".jsonl")))]
+    (when-let [file (first (fs/glob capsule-transcripts (str native ".jsonl")))]
       (some (fn [line]
               (let [entry (try (json/parse-string line true) (catch Exception _ nil))
                     attachment (:attachment entry)]

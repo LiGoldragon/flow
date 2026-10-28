@@ -46,7 +46,6 @@ struct HarnessHook {
     input: serde_json::Value,
     flow_id: Option<String>,
     herdr_executable: Option<PathBuf>,
-    herdr_session: Option<String>,
     herdr_pane_id: Option<String>,
     readiness_socket: Option<PathBuf>,
 }
@@ -100,9 +99,6 @@ impl ReadsHookInput for HarnessHook {
                 .ok()
                 .filter(|flow_id| !flow_id.is_empty()),
             herdr_executable: env::var_os("FLOW_HERDR_EXECUTABLE").map(PathBuf::from),
-            herdr_session: env::var("FLOW_HERDR_SESSION")
-                .ok()
-                .filter(|session| !session.is_empty()),
             herdr_pane_id: env::var("HERDR_PANE_ID")
                 .ok()
                 .filter(|pane| !pane.is_empty()),
@@ -113,11 +109,7 @@ impl ReadsHookInput for HarnessHook {
 
 impl ReportsOwnedClaudeLifecycle for HarnessHook {
     fn lifecycle_run(&self) -> String {
-        let (Some(herdr), Some(session), Some(pane)) = (
-            &self.herdr_executable,
-            &self.herdr_session,
-            &self.herdr_pane_id,
-        ) else {
+        let (Some(herdr), Some(pane)) = (&self.herdr_executable, &self.herdr_pane_id) else {
             return "lifecycle-unconfigured".into();
         };
         let state = match self.event_name().as_str() {
@@ -128,8 +120,6 @@ impl ReportsOwnedClaudeLifecycle for HarnessHook {
         };
         let mut command = Command::new(herdr);
         command.args([
-            "--session",
-            session,
             "pane",
             "report-agent",
             pane,
@@ -150,14 +140,41 @@ impl ReportsOwnedClaudeLifecycle for HarnessHook {
         }
         match command.output() {
             Ok(output) if output.status.success() => {
-                if self.event_name() == "SessionStart"
-                    && let Some(socket) = &self.readiness_socket
-                    && let Ok(sender) = std::os::unix::net::UnixDatagram::unbound()
-                {
-                    // This endpoint carries only an event edge. The typed
-                    // Herdr report above and the actual argv carry and
-                    // validate the session identity.
-                    let _ = sender.send_to(&[], socket);
+                if self.event_name() == "SessionStart" {
+                    let readiness = match &self.readiness_socket {
+                        None => Err("readiness-unconfigured"),
+                        Some(socket) => std::os::unix::net::UnixDatagram::unbound()
+                            .map_err(|_| "readiness-sender-refused")
+                            .and_then(|sender| {
+                                // This endpoint carries only an event edge.
+                                // The typed Herdr report above and the actual
+                                // argv carry and validate the session identity.
+                                sender
+                                    .send_to(&[], socket)
+                                    .map(|_| ())
+                                    .map_err(|_| "readiness-delivery-refused")
+                            }),
+                    };
+                    if let Err(problem) = readiness {
+                        // A fixed category on the same typed Herdr lifecycle
+                        // record makes a failed readiness edge observable.
+                        // Raw paths and OS errors never cross this boundary.
+                        let _ = Command::new(herdr)
+                            .args([
+                                "pane",
+                                "report-agent",
+                                pane,
+                                "--source",
+                                "flow",
+                                "--agent",
+                                "claude",
+                                "--state",
+                                "blocked",
+                                "--message",
+                                problem,
+                            ])
+                            .output();
+                    }
                 }
                 format!("lifecycle-{state}")
             }
@@ -317,7 +334,6 @@ mod tests {
             input,
             flow_id: flow_id.map(str::to_owned),
             herdr_executable: None,
-            herdr_session: None,
             herdr_pane_id: None,
             readiness_socket: None,
         }
@@ -486,6 +502,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let log = directory.path().join("arguments");
         let executable = directory.path().join("herdr");
+        let readiness_path = directory.path().join("ready.sock");
+        let readiness = std::os::unix::net::UnixDatagram::bind(&readiness_path).unwrap();
         std::fs::write(
             &executable,
             format!("#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\n", log.display()),
@@ -501,15 +519,16 @@ mod tests {
             }),
             flow_id: Some("5a4d0b".into()),
             herdr_executable: Some(executable),
-            herdr_session: Some("flow-session".into()),
             herdr_pane_id: Some("w7:p1".into()),
-            readiness_socket: None,
+            readiness_socket: Some(readiness_path),
         };
 
         assert_eq!(hook.lifecycle_run(), "lifecycle-idle");
+        let mut event = [0_u8; 1];
+        assert_eq!(readiness.recv(&mut event).unwrap(), 0);
         assert_eq!(
             std::fs::read_to_string(log).unwrap().trim_end(),
-            "--session flow-session pane report-agent w7:p1 --source flow --agent claude --state idle --agent-session-id native-session"
+            "pane report-agent w7:p1 --source flow --agent claude --state idle --agent-session-id native-session"
         );
     }
 

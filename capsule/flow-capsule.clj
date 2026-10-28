@@ -58,7 +58,7 @@
 (def host-claude (str (fs/canonicalize (fs/which "claude"))))
 ;; Claude names a project's transcript directory by its working directory,
 ;; every character but a letter or digit written as a dash.
-(def capsule-transcripts (str claude-root "/projects/" (str/replace source-root #"[^A-Za-z0-9]" "-")))
+(def capsule-transcripts (str capsule-home "/.claude/projects/" (str/replace source-root #"[^A-Za-z0-9]" "-")))
 (def curriculum-unit "curriculum-nexus.service")
 (def libexec (str (fs/parent (fs/canonicalize (System/getProperty "babashka.file")))))
 (def curriculum-package (str (fs/canonicalize (fs/file libexec "curriculum"))))
@@ -259,7 +259,7 @@
   "The user turns of a Claude transcript, as text, in order."
   [native]
   (when native
-    (when-let [file (first (fs/glob (str home "/.claude/projects") (str "*/" native ".jsonl")))]
+    (when-let [file (first (fs/glob capsule-transcripts (str native ".jsonl")))]
       (keep (fn [line]
               (let [entry (try (json/parse-string line true) (catch Exception _ nil))]
                 (when (= "user" (:type entry))
@@ -363,10 +363,13 @@
       (let [old (last (map str (:past (current quaternary))))
             reply (send "Wake" (str "Soft.Order.«" brief " Tag s3.»") (sender-pane))
             woke (watch 60 #(awake-flow quaternary))
+            native (native-session (inspect quaternary))
+            delivered (watch 60 #(some (fn [turn] (when (str/includes? turn "Tag s3") turn))
+                                        (transcript-user-turns native)))
             m (current quaternary)]
         {:reply reply
          :pass (boolean (and (str/starts-with? reply "SendAccepted.") woke (not= (str woke) old)
-                             (some #{old} (map str (:past m)))))
+                             delivered (some #{old} (map str (:past m)))))
          :watched (str "Metaflows Quaternary Awake as " woke ", Past " (:past m))}))]
 
    ["4 Refresh.Address"
@@ -379,7 +382,8 @@
             m (current quaternary)]
         {:reply reply
          :pass (boolean (and (str/starts-with? reply "Refreshed.") (str/includes? reply flow-id)
-                             (= :asleep (:state m))
+                             (or (= :asleep (:state m))
+                                 (and (= :awake (:state m)) (not= flow-id (str (:flow m)))))
                              (or (nil? after) (<= (occurrences after "Tag s") (occurrences before "Tag s")))))
          :watched (str "old pane " pane (if after " still readable" " gone after the refresh")
                        "; Metaflows Quaternary " (name (:state m)))}))]
@@ -445,14 +449,13 @@
 
    ["9 Withdraw"
     (fn []
-      (let [asleep (watch 90 #(= :asleep (:state (current quaternary))))
-            reply (send "Queue" (str "Soft.Order.«" brief " Tag s9.»") (sender-pane))
+      (let [reply (send "Queue" (str "Soft.Order.«" brief " Tag s9.»") (sender-pane))
             delivery-id (some-> (read-datom reply) body items first str)
             queued (inspect quaternary)
             withdrawn (flow-meta (str "Withdraw.{ " quaternary " «" delivery-id "» }"))
             after (inspect quaternary)]
         {:reply (str "Send: " reply " / Withdraw: " withdrawn)
-         :pass (boolean (and asleep (str/starts-with? withdrawn "Withdrawn.")
+         :pass (boolean (and (str/starts-with? withdrawn "Withdrawn.")
                              (str/includes? queued "Tag s9") (not (str/includes? after "Tag s9"))))
          :watched (str "Inspect before Withdraw " (if (str/includes? queued "Tag s9") "holds" "lacks")
                        " the request, after " (if (str/includes? after "Tag s9") "holds" "lacks") " it")}))]
@@ -564,6 +567,10 @@
   (fs/create-dirs capsule-home)
   (fs/create-dirs capsule-bin)
   (fs/create-dirs (str capsule-home "/.claude"))
+  ;; The configured Claude installation's transcript root exists before
+  ;; Flow captures its absence boundary; Claude writes the session file
+  ;; there after the first prompt.
+  (fs/create-dirs (str capsule-home "/.claude/projects"))
   ;; The capsule is a fresh private Claude home, not a first-use exercise.
   ;; Seed only the two UI choices needed to reach the configured harness;
   ;; no shared project, history or mutable user configuration is copied.

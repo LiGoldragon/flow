@@ -2095,26 +2095,6 @@ impl RunsFlowOwnedClaude for HerdrCli {
                 pane.herdr_pane_id.clone(),
                 PathBuf::from(configured_program),
             );
-        #[cfg(test)]
-        {
-            // The fixture command records the exact typed argv but runs no
-            // Claude process or hook. Emit the same typed readiness frame
-            // that the hook test independently proves, at this exact fake
-            // launch boundary.
-            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&flow_native::ClaudeReadiness)
-                .map_err(|_| {
-                    SpawnFailure::Unattempted("fixture Claude readiness type is unavailable".into())
-                })?;
-            let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
-            frame.extend_from_slice(&payload);
-            std::os::unix::net::UnixDatagram::unbound()
-                .and_then(|sender| sender.send_to(&frame, &readiness_path))
-                .map_err(|error| {
-                    SpawnFailure::Unattempted(format!(
-                        "fixture Claude readiness could not report: {error}"
-                    ))
-                })?;
-        }
         // `herdr pane run` is a status-only command: unlike the query
         // commands, success is deliberately silent.  Its exit status is the
         // complete acknowledgement that the line and Enter were accepted.
@@ -3407,7 +3387,40 @@ printf '%s\n' "$alias"
             path: flow_id.clone(),
         }
         .install(&flow_id_script);
+        let readiness_runtime = root.path().join("native-transcripts");
         let adapter = HerdrCli::at(executable, flows);
+        let owned_command = root.path().join("owned-command");
+        std::thread::spawn(move || {
+            for _ in 0..2000 {
+                if let Ok(entries) = fs::read_dir(&readiness_runtime) {
+                    for entry in entries.flatten() {
+                        if entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("claude-ready-")
+                        {
+                            let launched = fs::read_to_string(&owned_command)
+                                .is_ok_and(|command| command.contains("--session-id"));
+                            if let (true, Ok(sender)) =
+                                (launched, std::os::unix::net::UnixDatagram::unbound())
+                            {
+                                let payload = rkyv::to_bytes::<rkyv::rancor::Error>(
+                                    &flow_native::ClaudeReadiness,
+                                )
+                                .expect("fixture Claude readiness payload");
+                                let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+                                frame.extend_from_slice(&payload);
+                                sender
+                                    .send_to(&frame, entry.path())
+                                    .expect("fixture SessionStart reports typed Claude readiness");
+                                return;
+                            }
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
         (root, adapter)
     }
 

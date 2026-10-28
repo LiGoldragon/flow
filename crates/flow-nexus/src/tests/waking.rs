@@ -2715,6 +2715,38 @@ impl BuildsFreshWorld for NexusFixture {
         let root = self.directory.path().to_path_buf();
         let state = root.join("fresh-world");
         fs::create_dir_all(&state).unwrap();
+        let readiness_root = root.join("native-transcripts");
+        let readiness_state = state.clone();
+        std::thread::spawn(move || {
+            let mut reported = 0;
+            while readiness_state.exists() {
+                let starts = fs::read_to_string(readiness_state.join("claude-session-starts"))
+                    .unwrap_or_default()
+                    .lines()
+                    .count();
+                while reported < starts {
+                    let endpoint = fs::read_dir(&readiness_root).ok().and_then(|entries| {
+                        entries.flatten().map(|entry| entry.path()).find(|path| {
+                            path.file_name().is_some_and(|name| {
+                                name.to_string_lossy().starts_with("claude-ready-")
+                            })
+                        })
+                    });
+                    let Some(endpoint) = endpoint else { break };
+                    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(
+                        &flow_native::ClaudeReadiness,
+                    )
+                    .expect("fixture Claude readiness payload");
+                    let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+                    frame.extend_from_slice(&payload);
+                    std::os::unix::net::UnixDatagram::unbound()
+                        .and_then(|sender| sender.send_to(&frame, endpoint))
+                        .expect("fixture SessionStart reports typed Claude readiness");
+                    reported += 1;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
         let claude_root = root.join("native-transcripts/claude/projects/-home-li-primary");
         fs::create_dir_all(&claude_root).unwrap();
         let herdr = format!(
@@ -2755,6 +2787,7 @@ case "$*" in
         done
         printf '%s' "$(cat "$S/title")" > "$S/name"
         printf '{{"type":"custom-title","customTitle":"%s","sessionId":"%s"}}\n' "$(cat "$S/title")" "$(cat "$S/session")" >> '{claude_root}/'"$(cat "$S/session")"'.jsonl'
+        printf '%s\n' "$(cat "$S/session")" >> "$S/claude-session-starts"
         printf '%s\n' '{{"result":{{}}}}'
         ;;
     esac ;;

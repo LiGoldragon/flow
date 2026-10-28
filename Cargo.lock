@@ -264,6 +264,7 @@ dependencies = [
 name = "flow-native"
 version = "0.40.0"
 dependencies = [
+ "rkyv",
  "sha2",
 ]
 
@@ -476,8 +477,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "meta-signal-flow"
-version = "47.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=b188ec9f4901f13c14129d7b7335232b1df184e4#b188ec9f4901f13c14129d7b7335232b1df184e4"
+version = "48.0.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=288c2df79d4587d3ec0a361c577bd2c5481b3b29#288c2df79d4587d3ec0a361c577bd2c5481b3b29"
 dependencies = [
  "datom-codec",
  "ethos-zero 17.0.0",

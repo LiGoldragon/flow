@@ -8,8 +8,8 @@
 //! harness came up as that session. A Codex launch reserves nothing: its
 //! session is named by its app server, and Bind claims from that.
 
-use super::launch::ClaimsNativeIdentity;
 use super::HerdrCli;
+use super::launch::ClaimsNativeIdentity;
 use sha2::{Digest, Sha256};
 use signal_flow::{ComposedLaunch, HarnessKind};
 

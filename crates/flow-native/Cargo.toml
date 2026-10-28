@@ -5,3 +5,4 @@ edition.workspace = true
 
 [dependencies]
 sha2 = "0.10"
+rkyv.workspace = true

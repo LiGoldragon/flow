@@ -16,7 +16,8 @@ use std::{
 };
 
 use signal_flow::{
-    EndpointSelection, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection, RouteReadiness,
+    EndpointSelection, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection, Origin,
+    RouteReadiness,
 };
 
 /// Reads Herdr's documented session snapshot and validates one complete route.
@@ -148,6 +149,39 @@ pub struct HerdrCli {
         std::collections::HashMap<String, (std::os::unix::net::UnixDatagram, std::path::PathBuf)>,
     >,
     pub(crate) flow_owned_claude_readiness_root: PathBuf,
+    /// The exact configured installation typed into each reserved pane,
+    /// retained across spawn and bind so binding does not select
+    /// configuration a second time.
+    pub(crate) flow_owned_claude_programs:
+        std::sync::Mutex<std::collections::HashMap<String, PathBuf>>,
+    /// The stable kernel identity selected when a Flow-owned Claude binds,
+    /// keyed by Herdr's pane. A Nexus restart deliberately loses this
+    /// authority: a later Stop refuses rather than selecting a fresh PID by
+    /// matching text.
+    pub(crate) flow_owned_claude_processes:
+        std::sync::Mutex<std::collections::HashMap<String, OwnedClaudeProcess>>,
+    /// Legacy fixture rows model a rested Claude pane without a real
+    /// process. They exercise store transitions, not process authority.
+    #[cfg(test)]
+    fixture_unretained_claude: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct OwnedClaudeProcess {
+    pub(crate) process_id: u32,
+    pub(crate) process_start: u64,
+    pub(crate) process_executable: PathBuf,
+    pub(crate) configured_executable: PathBuf,
+    pub(crate) session_id: String,
+    pub(crate) pidfd: i32,
+}
+
+impl Drop for OwnedClaudeProcess {
+    fn drop(&mut self) {
+        // SAFETY: this descriptor is created by pidfd_open and uniquely
+        // owned by this record.
+        unsafe { libc::close(self.pidfd) };
+    }
 }
 
 impl Default for HerdrCli {
@@ -187,6 +221,10 @@ impl Default for HerdrCli {
                 .parent()
                 .unwrap_or_else(|| Path::new("/"))
                 .to_path_buf(),
+            flow_owned_claude_programs: Default::default(),
+            flow_owned_claude_processes: Default::default(),
+            #[cfg(test)]
+            fixture_unretained_claude: false,
         }
     }
 }
@@ -227,17 +265,27 @@ impl OperatesHerdrPane for HerdrCli {
         // close the pane it owns.  Closing the pane is not used as a proxy
         // for stopping the native process.
         let ownership = self.pane_ownership(node);
-        if node.harness_kind == HarnessKind::Claude
-            && !matches!(ownership, PaneOwnership::Owned | PaneOwnership::Bare)
-        {
+        let retained_flow_owned_claude = node.harness_kind == HarnessKind::Claude
+            && self
+                .flow_owned_claude_processes
+                .lock()
+                .is_ok_and(|processes| processes.contains_key(&route.herdr_pane_id));
+        if retained_flow_owned_claude {
             match self.stop_flow_owned_claude(route, &node.session_id) {
                 Some(true) => return self.close_pane(route),
                 Some(false) => return false,
-                // An imported Herdr-managed Claude, or a Flow-owned Claude
-                // that has already exited, continues through the ownership
-                // proof below. It is never signalled by guesswork.
-                None => {}
+                None => return false,
             }
+        }
+        // A Flow-launched Claude without its retained kernel identity is a
+        // Nexus-restart uncertainty. Current argv or Herdr ownership never
+        // recreates authority to stop it.
+        if node.harness_kind == HarnessKind::Claude
+            && matches!(node.origin, Origin::Flow(_))
+            && !self.fixture_accepts_unretained_claude()
+            && ownership != PaneOwnership::Bare
+        {
+            return false;
         }
         // A pane is closed when Herdr shows it running the Flow's own native
         // session, or running none, whatever its readiness and whether its
@@ -252,6 +300,17 @@ impl OperatesHerdrPane for HerdrCli {
 }
 
 impl HerdrCli {
+    fn fixture_accepts_unretained_claude(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.fixture_unretained_claude
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
+
     fn close_pane(&self, route: &HerdrRoute) -> bool {
         Command::new(&self.executable)
             .args([
@@ -272,26 +331,67 @@ impl HerdrCli {
         if session.is_empty() {
             return Some(false);
         }
-        let Some(processes) = self.foreground_processes(route) else {
+        let Ok(mut owned) = self.flow_owned_claude_processes.lock() else {
             return Some(false);
         };
-        let mut selected = processes.into_iter().filter(|process| {
-            process
-                .arguments
-                .windows(2)
-                .any(|pair| pair[0] == "--session-id" && pair[1] == session)
-        });
-        let Some(process) = selected.next() else {
-            return None;
+        let Some(process) = owned.get(&route.herdr_pane_id) else {
+            // A restarted Nexus has no stable launch identity. Never recover
+            // authority from a current argv match.
+            return Some(false);
         };
-        if selected.next().is_some() {
+        if process.session_id != session {
             return Some(false);
         }
-        let Ok(timeout) = u64::try_from(self.timings.launch_rest_wait) else {
+        if pidfd_exited(process.pidfd, 0) {
+            // The retained identity reports that the original exited. A
+            // fresh matching foreground process is not its replacement,
+            // and closing the pane could kill that unrelated process.
+            return Some(false);
+        }
+        let exact_process = retained_process_matches(
+            process.process_start,
+            &process.process_executable,
+            process_start(process.process_id),
+            fs::canonicalize(format!("/proc/{}/exe", process.process_id)).ok(),
+        );
+        let configured_association = fs::canonicalize(&process.configured_executable)
+            .ok()
+            .as_ref()
+            == Some(&process.configured_executable);
+        let corroborated = self.foreground_processes(route).is_some_and(|processes| {
+            processes.iter().any(|current| {
+                current.process_id == process.process_id
+                    && current
+                        .arguments
+                        .windows(2)
+                        .any(|pair| pair[0] == "--session-id" && pair[1] == process.session_id)
+            })
+        });
+        if !exact_process || !configured_association || !corroborated {
+            return Some(false);
+        }
+        let Ok(timeout) = u64::try_from(self.timings.stop_wait) else {
             return Some(false);
         };
-        Some(stop_process(process.process_id, timeout).is_some())
+        if stop_owned_process(process.pidfd, timeout).is_some() {
+            owned.remove(&route.herdr_pane_id);
+            Some(true)
+        } else {
+            // A failed bounded stop keeps the exact retained handle so a
+            // retry cannot replace it with a fresh argv match.
+            Some(false)
+        }
     }
+}
+
+fn retained_process_matches(
+    recorded_start: u64,
+    recorded_executable: &Path,
+    observed_start: Option<u64>,
+    observed_executable: Option<PathBuf>,
+) -> bool {
+    observed_start == Some(recorded_start)
+        && observed_executable.as_deref() == Some(recorded_executable)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,6 +411,13 @@ fn stop_process(process_id: u32, timeout_milliseconds: u64) -> Option<ProcessSto
     if pidfd < 0 {
         return None;
     }
+    let stopped = stop_owned_process(pidfd, timeout_milliseconds);
+    // SAFETY: pidfd is an owned descriptor returned by pidfd_open.
+    unsafe { libc::close(pidfd) };
+    stopped
+}
+
+fn stop_owned_process(pidfd: i32, timeout_milliseconds: u64) -> Option<ProcessStop> {
     let signal = |signal: i32| {
         // SAFETY: pidfd_send_signal is called with the live pidfd above,
         // a signal number, and no siginfo payload or flags.
@@ -324,30 +431,34 @@ fn stop_process(process_id: u32, timeout_milliseconds: u64) -> Option<ProcessSto
             ) == 0
         }
     };
-    let exited = |timeout: i32| {
-        let mut event = libc::pollfd {
-            fd: pidfd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: event points to one initialized pollfd for the length
-        // of the blocking call.
-        (unsafe { libc::poll(&mut event, 1, timeout) == 1 })
-            && event.revents & (libc::POLLIN | libc::POLLHUP) != 0
-    };
     let timeout = i32::try_from(timeout_milliseconds).ok()?;
     let stopped = if !signal(libc::SIGTERM) {
         None
-    } else if exited(timeout) {
+    } else if pidfd_exited(pidfd, timeout) {
         Some(ProcessStop::Graceful)
-    } else if signal(libc::SIGKILL) && exited(timeout) {
+    } else if signal(libc::SIGKILL) && pidfd_exited(pidfd, timeout) {
         Some(ProcessStop::Forced)
     } else {
         None
     };
-    // SAFETY: pidfd is an owned descriptor returned by pidfd_open.
-    unsafe { libc::close(pidfd) };
     stopped
+}
+
+fn pidfd_exited(pidfd: i32, timeout: i32) -> bool {
+    let mut event = libc::pollfd {
+        fd: pidfd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: event points to one initialized pollfd for the blocking call.
+    (unsafe { libc::poll(&mut event, 1, timeout) == 1 })
+        && event.revents & (libc::POLLIN | libc::POLLHUP) != 0
+}
+
+pub(crate) fn process_start(process_id: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{process_id}/stat")).ok()?;
+    let after_name = stat.rsplit_once(") ")?.1;
+    after_name.split_whitespace().nth(19)?.parse().ok()
 }
 
 /// Herdr's answer to one `agent prompt`, read for what it proves about the
@@ -533,6 +644,9 @@ impl ConfiguresHerdrCli for HerdrCli {
             held_system_prompts: Default::default(),
             flow_owned_claude_readiness: Default::default(),
             flow_owned_claude_readiness_root: fixture_root.to_path_buf(),
+            flow_owned_claude_programs: Default::default(),
+            flow_owned_claude_processes: Default::default(),
+            fixture_unretained_claude: true,
         }
     }
 }
@@ -1109,7 +1223,9 @@ impl DecodesFlowClaim for FlowClaim {
 
 #[cfg(test)]
 mod tests {
-    use super::{HerdrCli, ProcessStop, VerifiesFlowClaim, stop_process};
+    use super::{
+        HerdrCli, ProcessStop, VerifiesFlowClaim, pidfd_exited, stop_owned_process, stop_process,
+    };
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
     use crate::herdr::ReadsHerdrSnapshot;
@@ -1345,5 +1461,49 @@ mod tests {
         let mut process = command.spawn().expect("term-refusing sleep starts");
         assert_eq!(stop_process(process.id(), 10), Some(ProcessStop::Forced));
         assert!(process.wait().expect("sleep reaped").code().is_none());
+    }
+
+    #[test]
+    fn an_exited_owned_process_is_never_replaced_by_a_new_matching_process() {
+        let mut original = Command::new("sleep").arg("0.01").spawn().unwrap();
+        // SAFETY: pidfd_open has no pointer arguments.
+        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, original.id(), 0) as i32 };
+        assert!(pidfd >= 0);
+        original.wait().unwrap();
+        assert!(pidfd_exited(pidfd, 1000));
+
+        let mut replacement = Command::new("sleep").arg("60").spawn().unwrap();
+        assert_eq!(stop_owned_process(pidfd, 10), None);
+        assert!(replacement.try_wait().unwrap().is_none());
+        replacement.kill().unwrap();
+        replacement.wait().unwrap();
+        // SAFETY: this test owns the pidfd.
+        unsafe { libc::close(pidfd) };
+    }
+
+    #[test]
+    fn a_reused_numeric_pid_with_another_start_identity_is_not_the_owned_process() {
+        let executable = PathBuf::from("/fixture/claude");
+        assert!(!super::retained_process_matches(
+            100,
+            &executable,
+            Some(101),
+            Some(executable.clone()),
+        ));
+        assert!(super::retained_process_matches(
+            100,
+            &executable,
+            Some(100),
+            Some(executable.clone()),
+        ));
+    }
+
+    #[test]
+    fn a_stop_wait_outside_poll_range_is_refused_without_signalling() {
+        let mut process = Command::new("sleep").arg("60").spawn().unwrap();
+        assert_eq!(stop_process(process.id(), i32::MAX as u64 + 1), None);
+        assert!(process.try_wait().unwrap().is_none());
+        process.kill().unwrap();
+        process.wait().unwrap();
     }
 }

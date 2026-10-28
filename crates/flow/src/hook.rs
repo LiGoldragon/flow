@@ -32,7 +32,7 @@
 //! writes one tab-separated line on stderr (event, datom, the CLI's exit
 //! code, the CLI's whole output) for whoever reads it.
 
-use flow_native::{DigestsPrompt, ReadsClaudePaste};
+use flow_native::{ClaudeReadiness, DigestsPrompt, ReadsClaudePaste};
 use std::{
     env,
     io::Read,
@@ -142,17 +142,21 @@ impl ReportsOwnedClaudeLifecycle for HarnessHook {
                 if self.event_name() == "SessionStart" {
                     let readiness = match &self.readiness_socket {
                         None => Err("readiness-unconfigured"),
-                        Some(socket) => std::os::unix::net::UnixDatagram::unbound()
-                            .map_err(|_| "readiness-sender-refused")
-                            .and_then(|sender| {
-                                // This endpoint carries only an event edge.
-                                // The typed Herdr report above and the actual
-                                // argv carry and validate the session identity.
-                                sender
-                                    .send_to(&[], socket)
+                        Some(socket) => {
+                            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&ClaudeReadiness)
+                                .map_err(|_| "readiness-encoding-refused");
+                            payload.and_then(|payload| {
+                                let length = u32::try_from(payload.len())
+                                    .map_err(|_| "readiness-frame-refused")?;
+                                let mut frame = length.to_be_bytes().to_vec();
+                                frame.extend_from_slice(&payload);
+                                std::os::unix::net::UnixDatagram::unbound()
+                                    .map_err(|_| "readiness-sender-refused")?
+                                    .send_to(&frame, socket)
                                     .map(|_| ())
                                     .map_err(|_| "readiness-delivery-refused")
-                            }),
+                            })
+                        }
                     };
                     if let Err(problem) = readiness {
                         // A fixed category on the same typed Herdr lifecycle
@@ -309,6 +313,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{ChoosesHookCall, HarnessHook, HookCall, ReportsOwnedClaudeLifecycle};
+    use flow_native::ClaudeReadiness;
 
     fn hook(input: serde_json::Value, flow_id: Option<&str>) -> HarnessHook {
         HarnessHook {
@@ -497,8 +502,14 @@ mod tests {
         };
 
         assert_eq!(hook.lifecycle_run(), "lifecycle-idle");
-        let mut event = [0_u8; 1];
-        assert_eq!(readiness.recv(&mut event).unwrap(), 0);
+        let mut event = [0_u8; 64];
+        let received = readiness.recv(&mut event).unwrap();
+        let length = u32::from_be_bytes(event[..4].try_into().unwrap()) as usize;
+        assert_eq!(received, length + 4);
+        assert_eq!(
+            rkyv::from_bytes::<ClaudeReadiness, rkyv::rancor::Error>(&event[4..received]).unwrap(),
+            ClaudeReadiness
+        );
         assert_eq!(
             std::fs::read_to_string(log).unwrap().trim_end(),
             "pane report-agent w7:p1 --source flow --agent claude --state idle --agent-session-id native-session"

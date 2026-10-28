@@ -457,11 +457,13 @@ fn each_family_is_its_last_declaration() {
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
     assert_eq!(snapshot(&nexus).default_leave_outs, second);
-    assert!(nexus
-        .store
-        .default_leave_outs(&ConfiguredStore::message(), &HarnessKind::Claude)
-        .unwrap()
-        .is_empty());
+    assert!(
+        nexus
+            .store
+            .default_leave_outs(&ConfiguredStore::message(), &HarnessKind::Claude)
+            .unwrap()
+            .is_empty()
+    );
     // A fresh store trusts no send server; a declaration names each pair.
     assert!(snapshot(&nexus).send_servers.is_empty());
     let send_servers = vec![meta_signal_flow::ConfigureSendServer {
@@ -483,6 +485,14 @@ fn each_family_is_its_last_declaration() {
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
     assert_eq!(snapshot(&nexus).timings, timings);
+    let accepted_timings = timings.clone();
+    timings.stop_wait = -1;
+    assert_eq!(
+        configure(&nexus, ConfigurationChange::Timings(timings)),
+        MetaResponse::ConfigureRejected(ConfigureRejection::TimingOutOfRange)
+    );
+    assert_eq!(snapshot(&nexus).timings, accepted_timings);
+    let timings = accepted_timings;
     let mut limits = snapshot(&nexus).limits;
     limits.send_body += 1;
     assert_eq!(

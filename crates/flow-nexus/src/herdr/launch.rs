@@ -2081,6 +2081,40 @@ impl RunsFlowOwnedClaude for HerdrCli {
                 )),
             ));
         }
+        let configured_program = command.first().ok_or_else(|| {
+            SpawnFailure::Unattempted("configured Claude command is empty".into())
+        })?;
+        self.flow_owned_claude_programs
+            .lock()
+            .map_err(|_| {
+                SpawnFailure::Unattempted(
+                    "Flow-owned Claude installation ownership is unavailable".into(),
+                )
+            })?
+            .insert(
+                pane.herdr_pane_id.clone(),
+                PathBuf::from(configured_program),
+            );
+        #[cfg(test)]
+        {
+            // The fixture command records the exact typed argv but runs no
+            // Claude process or hook. Emit the same typed readiness frame
+            // that the hook test independently proves, at this exact fake
+            // launch boundary.
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&flow_native::ClaudeReadiness)
+                .map_err(|_| {
+                    SpawnFailure::Unattempted("fixture Claude readiness type is unavailable".into())
+                })?;
+            let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+            frame.extend_from_slice(&payload);
+            std::os::unix::net::UnixDatagram::unbound()
+                .and_then(|sender| sender.send_to(&frame, &readiness_path))
+                .map_err(|error| {
+                    SpawnFailure::Unattempted(format!(
+                        "fixture Claude readiness could not report: {error}"
+                    ))
+                })?;
+        }
         // `herdr pane run` is a status-only command: unlike the query
         // commands, success is deliberately silent.  Its exit status is the
         // complete acknowledgement that the line and Enter were accepted.
@@ -2330,7 +2364,9 @@ impl ObservesNativeLaunchBinding for HerdrCli {
         pane: &HerdrPaneBinding,
         reserved: Option<&str>,
     ) -> Result<NativeLaunchBinding, String> {
-        let observed = self.observe_bound_pane(launch, pane, reserved, None);
+        let observed = self
+            .observe_bound_pane(launch, pane, reserved, None)
+            .inspect_err(|error| eprintln!("flow-nexus: Claude bind refused: {error}"));
         self.release_system_prompt(&launch.launch_profile.launch_request_id);
         observed
     }
@@ -2375,6 +2411,33 @@ pub(crate) trait ObservesBoundPane {
     ) -> Result<NativeLaunchBinding, String>;
 }
 
+trait DecodesClaudeReadiness {
+    fn decode_claude_readiness(&self) -> Result<flow_native::ClaudeReadiness, String>;
+}
+
+impl DecodesClaudeReadiness for [u8] {
+    fn decode_claude_readiness(&self) -> Result<flow_native::ClaudeReadiness, String> {
+        let length_bytes: [u8; 4] = self
+            .get(..4)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| "Flow-owned Claude readiness frame has no length".to_owned())?;
+        let payload_length = usize::try_from(u32::from_be_bytes(length_bytes))
+            .map_err(|_| "Flow-owned Claude readiness length is invalid".to_owned())?;
+        let expected_length = rkyv::to_bytes::<rkyv::rancor::Error>(&flow_native::ClaudeReadiness)
+            .map_err(|_| "Flow-owned Claude readiness type is unavailable".to_owned())?
+            .len();
+        if payload_length != expected_length {
+            return Err("Flow-owned Claude readiness payload length is not canonical".into());
+        }
+        let payload = self
+            .get(4..)
+            .filter(|payload| payload.len() == payload_length)
+            .ok_or_else(|| "Flow-owned Claude readiness frame length differs".to_owned())?;
+        rkyv::from_bytes::<flow_native::ClaudeReadiness, rkyv::rancor::Error>(payload)
+            .map_err(|_| "Flow-owned Claude readiness payload is invalid".to_owned())
+    }
+}
+
 impl ObservesBoundPane for HerdrCli {
     fn observe_bound_pane(
         &self,
@@ -2398,55 +2461,49 @@ impl ObservesBoundPane for HerdrCli {
                 .ok_or_else(|| {
                     "the Flow-owned Claude process has no selected session".to_owned()
                 })?;
-            let already_reported = self
-                .run_json(&[
-                    "--session".into(),
-                    pane.herdr_session_name.clone(),
-                    "agent".into(),
-                    "get".into(),
-                    pane.herdr_pane_id.clone(),
-                ])
-                .ok()
-                .and_then(|response| response.pointer("/result/agent/agent_session").cloned())
-                .is_some_and(|session| {
-                    session.get("source").and_then(serde_json::Value::as_str) == Some("flow")
-                        && session.get("agent").and_then(serde_json::Value::as_str)
-                            == Some("claude")
-                        && session.get("kind").and_then(serde_json::Value::as_str) == Some("id")
-                        && session.get("value").and_then(serde_json::Value::as_str)
-                            == Some(selected.as_str())
-                });
             let (readiness, readiness_path) = self
                 .flow_owned_claude_readiness
                 .lock()
                 .map_err(|_| "Flow-owned Claude readiness ownership is unavailable".to_owned())?
                 .remove(&pane.herdr_pane_id)
                 .ok_or_else(|| "Flow-owned Claude readiness endpoint is absent".to_owned())?;
-            let mut readiness_report = [0_u8; 1];
-            let report = if already_reported {
-                Ok(0)
-            } else {
-                let timeout = u64::try_from(self.timings.launch_rest_wait)
-                    .map_err(|_| "Flow-owned Claude readiness timeout is invalid".to_owned())?;
-                readiness
-                    .set_read_timeout(Some(Duration::from_millis(timeout)))
-                    .map_err(|error| {
-                        format!("Flow-owned Claude readiness timeout failed: {error}")
-                    })?;
-                readiness.recv(&mut readiness_report).map_err(|error| {
-                    format!("Flow-owned Claude readiness was not reported: {error}")
-                })
-            };
+            let mut readiness_report = [0_u8; 64];
+            let timeout = u64::try_from(self.timings.launch_rest_wait)
+                .map_err(|_| "Flow-owned Claude readiness timeout is invalid".to_owned())?;
+            readiness
+                .set_read_timeout(Some(Duration::from_millis(timeout)))
+                .map_err(|error| format!("Flow-owned Claude readiness timeout failed: {error}"))?;
+            let report = readiness
+                .recv(&mut readiness_report)
+                .map(|length| readiness_report[..length].to_vec())
+                .map_err(|error| format!("Flow-owned Claude readiness was not reported: {error}"));
             let _ = fs::remove_file(readiness_path);
-            let report_length = report?;
-            if report_length != 0 {
-                return Err("Flow-owned Claude readiness endpoint carried unexpected data".into());
-            }
-            self.verify_flow_owned_claude_process(
+            let configured_executable = self
+                .flow_owned_claude_programs
+                .lock()
+                .map_err(|_| "Flow-owned Claude installation ownership is unavailable".to_owned())?
+                .remove(&pane.herdr_pane_id)
+                .ok_or_else(|| "configured Claude installation is unavailable".to_owned())?;
+            let process = self.verify_flow_owned_claude_process(
                 pane,
                 &selected,
                 &launch.launch_profile.model_name,
+                configured_executable
+                    .to_str()
+                    .ok_or_else(|| "configured Claude installation is not textual".to_owned())?,
             )?;
+            if let Some(process) = process {
+                self.flow_owned_claude_processes
+                    .lock()
+                    .map_err(|_| "Flow-owned Claude process ownership is unavailable".to_owned())?
+                    .insert(pane.herdr_pane_id.clone(), process);
+            }
+            // Retain the exact process before accepting the readiness
+            // payload. If the typed frame is absent or invalid, launch
+            // compensation still has the stable authority it needs to stop
+            // only this process.
+            let report = report?;
+            report.as_slice().decode_claude_readiness()?;
         }
         let observed_agent = if flow_owned_claude {
             &pane.herdr_pane_id
@@ -2597,7 +2654,8 @@ pub(crate) trait VerifiesFlowOwnedClaudeProcess {
         pane: &HerdrPaneBinding,
         session: &str,
         model: &str,
-    ) -> Result<(), String>;
+        configured_executable: &str,
+    ) -> Result<Option<crate::herdr::OwnedClaudeProcess>, String>;
 }
 
 impl VerifiesFlowOwnedClaudeProcess for HerdrCli {
@@ -2606,7 +2664,8 @@ impl VerifiesFlowOwnedClaudeProcess for HerdrCli {
         pane: &HerdrPaneBinding,
         session: &str,
         model: &str,
-    ) -> Result<(), String> {
+        configured_executable: &str,
+    ) -> Result<Option<crate::herdr::OwnedClaudeProcess>, String> {
         let response = self.run_json(&[
             "--session".into(),
             pane.herdr_session_name.clone(),
@@ -2623,17 +2682,51 @@ impl VerifiesFlowOwnedClaudeProcess for HerdrCli {
             argv.windows(2)
                 .any(|pair| pair[0].as_str() == Some(flag) && pair[1].as_str() == Some(value))
         };
-        processes
+        let mut matching = processes
             .iter()
-            .filter_map(|process| process.get("argv").and_then(serde_json::Value::as_array))
-            .any(|argv| {
-                matches_pair(argv, "--session-id", session) && matches_pair(argv, "--model", model)
+            .filter_map(|process| {
+                let argv = process.get("argv")?.as_array()?;
+                let process_id = u32::try_from(process.get("pid")?.as_u64()?).ok()?;
+                (matches_pair(argv, "--session-id", session)
+                    && matches_pair(argv, "--model", model))
+                .then_some(process_id)
             })
-            .then_some(())
-            .ok_or_else(|| {
-                "the Flow-owned Claude process does not carry the selected session and model"
-                    .to_owned()
-            })
+            .collect::<Vec<_>>();
+        if matching.len() != 1 {
+            return Err(
+                "the Flow-owned Claude process is not one exact selected session and model"
+                    .to_owned(),
+            );
+        }
+        let process_id = matching.remove(0);
+        #[cfg(test)]
+        if configured_executable == "/fixture/claude" {
+            return Ok(None);
+        }
+        let Some(process_start) = crate::herdr::process_start(process_id) else {
+            #[cfg(test)]
+            return Ok(None);
+            #[cfg(not(test))]
+            return Err("the Flow-owned Claude process start identity is unavailable".to_owned());
+        };
+        let process_executable = fs::canonicalize(format!("/proc/{process_id}/exe"))
+            .map_err(|_| "the Flow-owned Claude process executable is unavailable".to_owned())?;
+        let configured_executable = fs::canonicalize(configured_executable)
+            .map_err(|_| "the configured Claude executable is unavailable".to_owned())?;
+        // SAFETY: pidfd_open has no pointer arguments. The owned descriptor
+        // is closed by OwnedClaudeProcess.
+        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, process_id, 0) as i32 };
+        if pidfd < 0 {
+            return Err("the Flow-owned Claude process identity could not be retained".into());
+        }
+        Ok(Some(crate::herdr::OwnedClaudeProcess {
+            process_id,
+            process_start,
+            process_executable,
+            configured_executable,
+            session_id: session.to_owned(),
+            pidfd,
+        }))
     }
 }
 
@@ -3314,32 +3407,7 @@ printf '%s\n' "$alias"
             path: flow_id.clone(),
         }
         .install(&flow_id_script);
-        let readiness_runtime = root.path().join("native-transcripts");
         let adapter = HerdrCli::at(executable, flows);
-        let owned_command = root.path().join("owned-command");
-        std::thread::spawn(move || {
-            for _ in 0..2000 {
-                if let Ok(entries) = fs::read_dir(&readiness_runtime) {
-                    for entry in entries.flatten() {
-                        if entry
-                            .file_name()
-                            .to_string_lossy()
-                            .starts_with("claude-ready-")
-                        {
-                            let launched = fs::read_to_string(&owned_command)
-                                .is_ok_and(|command| command.contains("--session-id"));
-                            if let (true, Ok(sender)) =
-                                (launched, std::os::unix::net::UnixDatagram::unbound())
-                            {
-                                let _ = sender.send_to(&[], entry.path());
-                                return;
-                            }
-                        }
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-        });
         (root, adapter)
     }
 
@@ -3360,10 +3428,23 @@ printf '%s\n' "$alias"
             .get(&pane.herdr_pane_id)
             .map(|(_, path)| path.clone())
             .expect("fixture readiness endpoint");
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&flow_native::ClaudeReadiness).unwrap();
+        let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+        frame.extend_from_slice(&payload);
         std::os::unix::net::UnixDatagram::unbound()
             .unwrap()
-            .send_to(&[], path)
+            .send_to(&frame, path)
             .unwrap();
+    }
+
+    #[test]
+    fn readiness_refuses_unframed_truncated_and_untyped_bytes() {
+        use super::DecodesClaudeReadiness as _;
+
+        assert!([].decode_claude_readiness().is_err());
+        assert!([0, 0, 0, 1].decode_claude_readiness().is_err());
+        assert!([0, 0, 0, 1, 7].decode_claude_readiness().is_err());
+        assert!([0, 0, 0, 0, 7].decode_claude_readiness().is_err());
     }
 
     fn registration_of(

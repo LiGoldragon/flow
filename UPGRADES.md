@@ -6,7 +6,10 @@ flows root, Flow executables and default Herdr session. A fresh store has no
 harness; configured model service, executable/home/socket, pane profile and
 composer data are read from the committed harness snapshot. The Nexus family
 upgrades v2 to v3 and the new harness family is v1. Default Codex endpoints
-leave Flow. Pins signal-flow 37.0.0 and meta-signal-flow 47.0.0.
+leave Flow. Pins signal-flow 37.0.0 and meta-signal-flow 48.0.0. The timing
+singleton advances from v1 to v2 with `stop_wait`; an archived v1 value
+supplies its former `launch_rest_wait` for the new field. Both waits are
+range-checked before configuration is committed.
 The store migration reads frozen v8 launch outcomes with the corresponding
 launch attempts in one typed context snapshot. A unique attempt supplies the
 Address for `RequirementUnmet`; a missing or conflicting attempt moves the

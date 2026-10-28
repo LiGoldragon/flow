@@ -626,7 +626,7 @@ pub trait AccountsQueueDelivery {
     /// Kept archive identities are not eligible pending sender deliveries.
     /// Their original lifecycle events and native evidence remain unchanged.
     fn archived_legacy_request_ids(&self)
-        -> Result<std::collections::BTreeSet<String>, StoreError>;
+    -> Result<std::collections::BTreeSet<String>, StoreError>;
 
     /// Gives the oldest queued request distinct durable request, attempt and
     /// native request identities before any native send occurs.
@@ -1698,15 +1698,17 @@ mod tests {
         let old_id = prepare_claude(&store).attempt_id;
         // This store-only fixture has performed no native I/O; the transport
         // refusal is explicit evidence, not inferred from replacement.
-        assert!(store
-            .mark_delivery_absent(
-                &old_id,
-                AbsenceRecord {
-                    proof: AbsenceProof::HandOverRefused,
-                    observation: "fixture transport refused before native I/O".into(),
-                }
-            )
-            .unwrap());
+        assert!(
+            store
+                .mark_delivery_absent(
+                    &old_id,
+                    AbsenceRecord {
+                        proof: AbsenceProof::HandOverRefused,
+                        observation: "fixture transport refused before native I/O".into(),
+                    }
+                )
+                .unwrap()
+        );
         let old = store.queue_delivery_attempt(&old_id).unwrap().unwrap();
         assert!(store.awaken_metaflow(&address(), "successor", 0).unwrap());
         let PrepareQueueDelivery::Prepared(new) = store
@@ -1735,9 +1737,11 @@ mod tests {
         let (_fixture, store) = Fixture::new();
         let old = prepare_claude(&store);
         let native_receipt = receipt(&old);
-        assert!(store
-            .record_delivery_receipt(&old.attempt_id, native_receipt.clone())
-            .unwrap());
+        assert!(
+            store
+                .record_delivery_receipt(&old.attempt_id, native_receipt.clone())
+                .unwrap()
+        );
         assert!(store.awaken_metaflow(&address(), "successor", 0).unwrap());
         assert!(store.settle_recorded_delivery(&old.attempt_id).unwrap());
         assert_eq!(
@@ -1821,20 +1825,24 @@ mod tests {
         let before = store
             .read_logical_delivery_snapshots(&sender, None)
             .unwrap();
-        assert!(before
-            .delivery_snapshot_vector
-            .iter()
-            .any(|snapshot| snapshot.logical_delivery_id == legacy.logical_delivery_id));
+        assert!(
+            before
+                .delivery_snapshot_vector
+                .iter()
+                .any(|snapshot| snapshot.logical_delivery_id == legacy.logical_delivery_id)
+        );
         store.archive_legacy_queue().unwrap();
         let after = store
             .read_logical_delivery_snapshots(&sender, None)
             .unwrap();
         assert_eq!(after.delivery_cursor, before.delivery_cursor);
         assert_eq!(after.delivery_snapshot_vector.len(), 2);
-        assert!(after
-            .delivery_snapshot_vector
-            .iter()
-            .all(|snapshot| !snapshot.logical_delivery_id.starts_with("legacy:")));
+        assert!(
+            after
+                .delivery_snapshot_vector
+                .iter()
+                .all(|snapshot| !snapshot.logical_delivery_id.starts_with("legacy:"))
+        );
         assert_eq!(
             store
                 .read_logical_delivery_snapshots(&sender, Some(0))
@@ -1903,9 +1911,11 @@ mod tests {
                 .unwrap(),
             PrepareQueueDelivery::Outstanding(recovered[0].clone())
         );
-        assert!(!reopened
-            .settle_recorded_delivery(&prepared.attempt_id)
-            .unwrap());
+        assert!(
+            !reopened
+                .settle_recorded_delivery(&prepared.attempt_id)
+                .unwrap()
+        );
         assert_eq!(
             reopened.metaflow(&address()).unwrap().unwrap().queue,
             vec![queued("first"), queued("second")]
@@ -1952,12 +1962,16 @@ mod tests {
             snapshot.logical_delivery_id == queued("first").logical_delivery_id
                 && snapshot.delivery_state == DeliveryState::Uncertain
         }));
-        assert!(reopened
-            .record_delivery_receipt(&prepared.attempt_id, receipt(&prepared))
-            .unwrap());
-        assert!(reopened
-            .settle_recorded_delivery(&prepared.attempt_id)
-            .unwrap());
+        assert!(
+            reopened
+                .record_delivery_receipt(&prepared.attempt_id, receipt(&prepared))
+                .unwrap()
+        );
+        assert!(
+            reopened
+                .settle_recorded_delivery(&prepared.attempt_id)
+                .unwrap()
+        );
         assert_eq!(
             reopened.metaflow(&address()).unwrap().unwrap().queue,
             vec![queued("second")]
@@ -2003,32 +2017,44 @@ mod tests {
         let exact = receipt(&prepared);
         let mut wrong = exact.clone();
         wrong.native_request_id = 99;
-        assert!(!store
-            .record_delivery_receipt(&prepared.attempt_id, wrong)
-            .unwrap());
-        assert!(store
-            .record_delivery_receipt(&prepared.attempt_id, exact.clone())
-            .unwrap());
+        assert!(
+            !store
+                .record_delivery_receipt(&prepared.attempt_id, wrong)
+                .unwrap()
+        );
+        assert!(
+            store
+                .record_delivery_receipt(&prepared.attempt_id, exact.clone())
+                .unwrap()
+        );
         drop(store);
 
         let reopened = fixture.reopen();
         // Opening reconciles the durable native receipt and settles the
         // local queue without another native submission.
-        assert!(reopened
-            .recover_outstanding_deliveries()
-            .unwrap()
-            .is_empty());
-        assert!(reopened
-            .settle_recorded_delivery(&prepared.attempt_id)
-            .unwrap());
+        assert!(
+            reopened
+                .recover_outstanding_deliveries()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            reopened
+                .settle_recorded_delivery(&prepared.attempt_id)
+                .unwrap()
+        );
         // A duplicate completion observes the retained settled attempt and
         // neither removes nor sends the next request.
-        assert!(reopened
-            .record_delivery_receipt(&prepared.attempt_id, exact.clone())
-            .unwrap());
-        assert!(reopened
-            .settle_recorded_delivery(&prepared.attempt_id)
-            .unwrap());
+        assert!(
+            reopened
+                .record_delivery_receipt(&prepared.attempt_id, exact.clone())
+                .unwrap()
+        );
+        assert!(
+            reopened
+                .settle_recorded_delivery(&prepared.attempt_id)
+                .unwrap()
+        );
         assert_eq!(
             reopened.metaflow(&address()).unwrap().unwrap().queue,
             vec![queued("second")]
@@ -2059,9 +2085,11 @@ mod tests {
             panic!("oldest request prepared")
         };
         assert!(store.mark_delivery_uncertain(&first.attempt_id).unwrap());
-        assert!(store
-            .mark_delivery_undecided(&first.attempt_id, Undecided::SeatNotResting)
-            .unwrap());
+        assert!(
+            store
+                .mark_delivery_undecided(&first.attempt_id, Undecided::SeatNotResting)
+                .unwrap()
+        );
         drop(store);
         let store = fixture.reopen();
         let [recovered] = store
@@ -2090,15 +2118,21 @@ mod tests {
             proof: AbsenceProof::HistoryAbsent,
             observation: "idle; no turn after turn-1 carries the request".into(),
         };
-        assert!(store
-            .mark_delivery_absent(&first.attempt_id, absence.clone())
-            .unwrap());
-        assert!(store
-            .mark_delivery_absent(&first.attempt_id, absence.clone())
-            .unwrap());
-        assert!(!store
-            .record_delivery_receipt(&first.attempt_id, receipt(&first))
-            .is_ok_and(|recorded| recorded));
+        assert!(
+            store
+                .mark_delivery_absent(&first.attempt_id, absence.clone())
+                .unwrap()
+        );
+        assert!(
+            store
+                .mark_delivery_absent(&first.attempt_id, absence.clone())
+                .unwrap()
+        );
+        assert!(
+            !store
+                .record_delivery_receipt(&first.attempt_id, receipt(&first))
+                .is_ok_and(|recorded| recorded)
+        );
         assert_eq!(
             store.metaflow(&address()).unwrap().unwrap().queue,
             vec![queued("first"), queued("second")]
@@ -2158,12 +2192,16 @@ mod tests {
             past: vec![],
             queue: vec![queued("second"), queued("first")],
         });
-        assert!(store
-            .record_delivery_receipt(&prepared.attempt_id, receipt(&prepared))
-            .unwrap());
-        assert!(!store
-            .settle_recorded_delivery(&prepared.attempt_id)
-            .unwrap());
+        assert!(
+            store
+                .record_delivery_receipt(&prepared.attempt_id, receipt(&prepared))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .settle_recorded_delivery(&prepared.attempt_id)
+                .unwrap()
+        );
         assert_eq!(
             store.metaflow(&address()).unwrap().unwrap().queue,
             vec![queued("second"), queued("first")]
@@ -2204,9 +2242,11 @@ mod tests {
             panic!("oldest request prepared")
         };
         assert!(store.mark_delivery_uncertain(&attempt.attempt_id).unwrap());
-        assert!(store
-            .mark_delivery_undecided(&attempt.attempt_id, Undecided::AbsenceUnprovable)
-            .unwrap());
+        assert!(
+            store
+                .mark_delivery_undecided(&attempt.attempt_id, Undecided::AbsenceUnprovable)
+                .unwrap()
+        );
         attempt
     }
 
@@ -2297,12 +2337,16 @@ mod tests {
             panic!("the later queued request is eligible")
         };
         let exact = receipt(&first);
-        assert!(reopened
-            .record_delivery_receipt(&first.attempt_id, exact)
-            .unwrap());
-        assert!(reopened
-            .settle_recorded_delivery(&first.attempt_id)
-            .unwrap());
+        assert!(
+            reopened
+                .record_delivery_receipt(&first.attempt_id, exact)
+                .unwrap()
+        );
+        assert!(
+            reopened
+                .settle_recorded_delivery(&first.attempt_id)
+                .unwrap()
+        );
         assert_eq!(
             reopened
                 .queue_delivery_attempt(&first.attempt_id)
@@ -2391,9 +2435,11 @@ mod tests {
             store.metaflow(&address()).unwrap().unwrap().queue,
             vec![queued("first"), queued("second")]
         );
-        assert!(store
-            .record_delivery_receipt(&attempt.attempt_id, receipt(&attempt))
-            .unwrap());
+        assert!(
+            store
+                .record_delivery_receipt(&attempt.attempt_id, receipt(&attempt))
+                .unwrap()
+        );
         assert!(!store.settle_recorded_delivery(&attempt.attempt_id).unwrap());
         assert_eq!(store.observe_legacy_archive().unwrap(), archive);
         assert!(store.recover_outstanding_deliveries().unwrap().is_empty());
@@ -2476,10 +2522,12 @@ mod tests {
         assert_eq!(reopened.observe_legacy_archive().unwrap(), archive);
         reopened.archive_legacy_queue().unwrap();
         assert_eq!(reopened.observe_legacy_archive().unwrap(), archive);
-        assert!(reopened
-            .recover_outstanding_deliveries()
-            .unwrap()
-            .is_empty());
+        assert!(
+            reopened
+                .recover_outstanding_deliveries()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2500,14 +2548,16 @@ mod tests {
         let before_duplicate = store
             .read_logical_delivery_snapshots(&sender, None)
             .unwrap();
-        assert!(before_duplicate
-            .delivery_snapshot_vector
-            .iter()
-            .any(|snapshot| {
-                snapshot.logical_delivery_id == queued("first").logical_delivery_id
-                    && snapshot.delivery_state
-                        == DeliveryState::Retryable(RetryCause::OwnerResolvedAbsent)
-            }));
+        assert!(
+            before_duplicate
+                .delivery_snapshot_vector
+                .iter()
+                .any(|snapshot| {
+                    snapshot.logical_delivery_id == queued("first").logical_delivery_id
+                        && snapshot.delivery_state
+                            == DeliveryState::Retryable(RetryCause::OwnerResolvedAbsent)
+                })
+        );
         assert_eq!(
             store
                 .resolve_uncertain_delivery(&attempt.attempt_id, record.clone())
@@ -2620,18 +2670,22 @@ mod tests {
         );
 
         // ReceiptRecorded is not Uncertain.
-        assert!(store
-            .record_delivery_receipt(&prepared.attempt_id, receipt(&prepared))
-            .unwrap());
+        assert!(
+            store
+                .record_delivery_receipt(&prepared.attempt_id, receipt(&prepared))
+                .unwrap()
+        );
         assert_eq!(
             store
                 .resolve_uncertain_delivery(&prepared.attempt_id, delivered.clone())
                 .unwrap(),
             Err(Rejected::NotUncertain)
         );
-        assert!(store
-            .settle_recorded_delivery(&prepared.attempt_id)
-            .unwrap());
+        assert!(
+            store
+                .settle_recorded_delivery(&prepared.attempt_id)
+                .unwrap()
+        );
         // Settled is not Uncertain.
         assert_eq!(
             store
@@ -2853,10 +2907,12 @@ mod tests {
         let reopened = fixture.reopen();
         let archive = reopened.observe_legacy_archive().unwrap();
         for entry in &migrated_metaflow.queue {
-            assert!(archive
-                .iter()
-                .any(|record| record.address == migrated_metaflow.address
-                    && record.queue_evidence == QueueEvidence::Logical(entry.clone())));
+            assert!(
+                archive
+                    .iter()
+                    .any(|record| record.address == migrated_metaflow.address
+                        && record.queue_evidence == QueueEvidence::Logical(entry.clone()))
+            );
         }
         migrated_metaflow.queue.clear();
         assert_eq!(
@@ -2911,9 +2967,11 @@ mod tests {
             delivery: flow_ethos::Delivery::Queue,
             message: flow_ethos::Message::Soft(Request::Order("investigate".into())),
         };
-        assert!(reopened
-            .queue_flow_request(&address(), raised.clone())
-            .unwrap());
+        assert!(
+            reopened
+                .queue_flow_request(&address(), raised.clone())
+                .unwrap()
+        );
         drop(reopened);
         let queue = fixture
             .reopen()

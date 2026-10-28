@@ -5,12 +5,12 @@
 //! never closed.
 
 use super::refreshing::close_answers;
-use super::waking::{address, claude_agent, claude_seat, CLAUDE_SEAT, CLAUDE_SESSION};
+use super::waking::{CLAUDE_SEAT, CLAUDE_SESSION, address, claude_agent, claude_seat};
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
+use crate::Dispatches;
 use crate::reporting::RecordsReports;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
-use crate::Dispatches;
 use flow_ethos::State;
 use signal_flow::{Event, FlowLifecycle, Layer, Metaflow, Report_Data, Response};
 use std::fs;
@@ -278,7 +278,11 @@ fn a_retire_whose_close_herdr_refuses_answers_close_refused_and_records_nothing(
                 gate: meta_signal_flow::Gate::Kept
             }
         )),
-        meta_signal_flow::Response::RetireRejected(meta_signal_flow::RetireRejection::CloseRefused)
+        meta_signal_flow::Response::RetireRejected(
+            meta_signal_flow::RetireRejection::CloseRefused(
+                signal_flow::PaneCloseFailure::HerdrCloseFailed,
+            ),
+        )
     );
     assert_eq!(lifecycle(&fixture), live);
     assert_eq!(state(&fixture), State::Awake(CLAUDE_SEAT.into()));

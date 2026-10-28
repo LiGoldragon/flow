@@ -1586,7 +1586,9 @@ impl RefreshesMetaflows for RunningNexus {
         }
         if let Err(outcome) = self.close_at_rest(&flow_id, &node) {
             return Response::RefreshRejected(match *outcome {
-                Outcome::Failed(Failed_Data::HerdrRefused) => RefreshRejection::CloseRefused,
+                Outcome::Failed(Failed_Data::PaneCloseRefused(failure)) => {
+                    RefreshRejection::CloseRefused(failure)
+                }
                 _ => RefreshRejection::PersistenceRefused,
             });
         }

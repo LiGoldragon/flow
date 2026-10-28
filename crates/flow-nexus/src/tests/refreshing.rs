@@ -7,15 +7,15 @@
 //! the metaflow is held, nothing reaches the ending flow and a Send queues.
 
 use super::refresh_and_compaction::{
-    declare_seat, owe_staged_successor, staged_refresh_successor, SUCCESSOR_REQUEST,
+    SUCCESSOR_REQUEST, declare_seat, owe_staged_successor, staged_refresh_successor,
 };
 use super::waking::{
-    address, claude_agent, claude_seat, launched_claude_ended_by, ReadsFreshWorld,
-    WakesFreshClaude, CLAUDE_SEAT,
+    CLAUDE_SEAT, ReadsFreshWorld, WakesFreshClaude, address, claude_agent, claude_seat,
+    launched_claude_ended_by,
 };
 use super::{
-    bind_existing_caller, codex_agent_in, ControlsHerdrSnapshot, MarkedProcess, NexusFixture,
-    PromptFixture,
+    ControlsHerdrSnapshot, MarkedProcess, NexusFixture, PromptFixture, bind_existing_caller,
+    codex_agent_in,
 };
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::sending::SendsRequests;
@@ -428,7 +428,9 @@ fn a_refused_close_or_an_unreadable_herdr_answers_refresh_s_own_rejection() {
     close_answers(&fixture, "exit 1");
     assert_eq!(
         fixture.nexus.dispatch(Query::Refresh(seat_address())),
-        Response::RefreshRejected(RefreshRejection::CloseRefused)
+        Response::RefreshRejected(RefreshRejection::CloseRefused(
+            signal_flow::PaneCloseFailure::HerdrCloseFailed,
+        ))
     );
     assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
@@ -713,12 +715,14 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
                     else {
                         panic!("the oldest request is prepared")
                     };
-                    assert!(fixture
-                        .nexus
-                        .store
-                        .outstanding_delivery(&seat_address())
-                        .unwrap()
-                        .is_some());
+                    assert!(
+                        fixture
+                            .nexus
+                            .store
+                            .outstanding_delivery(&seat_address())
+                            .unwrap()
+                            .is_some()
+                    );
                 }
                 Busy::PastThreshold => {
                     super::refresh_and_compaction::seat_refreshing_at(&fixture, 200_000);

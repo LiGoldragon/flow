@@ -17,7 +17,7 @@ use std::{
 
 use signal_flow::{
     EndpointSelection, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection, Origin,
-    RouteReadiness,
+    PaneCloseFailure, PaneCloseOutcome, RouteReadiness,
 };
 
 /// Reads Herdr's documented session snapshot and validates one complete route.
@@ -87,7 +87,7 @@ pub enum PaneOwnership {
 /// (`PaneOwnership::Owned` or `Bare`). Every write into a pane is the pane
 /// writer's (see `pane` and `crate::delivery`).
 pub trait OperatesHerdrPane {
-    fn close(&self, node: &FlowNode) -> bool;
+    fn close(&self, node: &FlowNode) -> PaneCloseOutcome;
 }
 
 /// Names the directory a harness writes its native transcripts under.
@@ -143,8 +143,9 @@ pub struct HerdrCli {
     pub(crate) held_system_prompts:
         std::sync::Mutex<std::collections::HashMap<String, std::fs::File>>,
     /// One blocking, launch-owned readiness endpoint per Flow-owned Claude
-    /// pane.  SessionStart sends the selected native identity to it; binding
-    /// consumes it once and removes the endpoint.
+    /// pane. SessionStart sends one typed unit readiness signal to it;
+    /// process and session identity are verified separately. Binding consumes
+    /// the endpoint once and removes it.
     pub(crate) flow_owned_claude_readiness: std::sync::Mutex<
         std::collections::HashMap<String, (std::os::unix::net::UnixDatagram, std::path::PathBuf)>,
     >,
@@ -255,9 +256,9 @@ impl ReadsHerdrRoster for HerdrCli {
 }
 
 impl OperatesHerdrPane for HerdrCli {
-    fn close(&self, node: &FlowNode) -> bool {
+    fn close(&self, node: &FlowNode) -> PaneCloseOutcome {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
-            return false;
+            return PaneCloseOutcome::Refused(PaneCloseFailure::IdentityUnavailable);
         };
         // A reserved Claude is Flow-owned rather than a Herdr-managed
         // agent.  Stop the exact native session Flow selected, wait for the
@@ -272,9 +273,39 @@ impl OperatesHerdrPane for HerdrCli {
                 .is_ok_and(|processes| processes.contains_key(&route.herdr_pane_id));
         if retained_flow_owned_claude {
             match self.stop_flow_owned_claude(route, &node.session_id) {
-                Some(true) => return self.close_pane(route),
-                Some(false) => return false,
-                None => return false,
+                Ok(OwnedProcessDisposition::Stopped) => {
+                    return self.close_flow_owned_claude_pane(route);
+                }
+                Ok(OwnedProcessDisposition::AlreadyExited) => {
+                    let foreground = match self.foreground_processes(route) {
+                        Some(foreground) => foreground,
+                        None => {
+                            return PaneCloseOutcome::Refused(
+                                PaneCloseFailure::IdentityUnavailable,
+                            );
+                        }
+                    };
+                    if !foreground.is_empty() {
+                        return PaneCloseOutcome::Refused(PaneCloseFailure::IdentityMismatch);
+                    }
+                    return match ownership {
+                        PaneOwnership::Owned | PaneOwnership::Bare => {
+                            self.close_flow_owned_claude_pane(route)
+                        }
+                        PaneOwnership::Absent => {
+                            PaneCloseOutcome::Refused(PaneCloseFailure::IdentityUnavailable)
+                        }
+                        PaneOwnership::Foreign => {
+                            PaneCloseOutcome::Refused(PaneCloseFailure::IdentityMismatch)
+                        }
+                        PaneOwnership::Unproven
+                        | PaneOwnership::Unidentified
+                        | PaneOwnership::Unknown => {
+                            PaneCloseOutcome::Refused(PaneCloseFailure::IdentityUnavailable)
+                        }
+                    };
+                }
+                Err(failure) => return PaneCloseOutcome::Refused(failure),
             }
         }
         // A Flow-launched Claude without its retained kernel identity is a
@@ -283,19 +314,22 @@ impl OperatesHerdrPane for HerdrCli {
         if node.harness_kind == HarnessKind::Claude
             && matches!(node.origin, Origin::Flow(_))
             && !self.fixture_accepts_unretained_claude()
-            && ownership != PaneOwnership::Bare
         {
-            return false;
+            return PaneCloseOutcome::Refused(PaneCloseFailure::IdentityUnavailable);
         }
         // A pane is closed when Herdr shows it running the Flow's own native
         // session, or running none, whatever its readiness and whether its
         // FlowId claim was given back: closing needs the pane, not a route a
         // prompt could take. A pane now running another session is never
         // closed, and a Flow with no recorded session closes nothing.
-        if !matches!(ownership, PaneOwnership::Owned | PaneOwnership::Bare) {
-            return false;
+        match ownership {
+            PaneOwnership::Owned | PaneOwnership::Bare => self.close_owned_pane(route),
+            PaneOwnership::Absent => PaneCloseOutcome::Closed,
+            PaneOwnership::Foreign => PaneCloseOutcome::Refused(PaneCloseFailure::IdentityMismatch),
+            PaneOwnership::Unproven | PaneOwnership::Unidentified | PaneOwnership::Unknown => {
+                PaneCloseOutcome::Refused(PaneCloseFailure::IdentityUnavailable)
+            }
         }
-        self.close_pane(route)
     }
 }
 
@@ -324,62 +358,99 @@ impl HerdrCli {
             .is_ok_and(|output| output.status.success())
     }
 
+    fn close_owned_pane(&self, route: &HerdrRoute) -> PaneCloseOutcome {
+        if self.close_pane(route) {
+            PaneCloseOutcome::Closed
+        } else {
+            PaneCloseOutcome::Refused(PaneCloseFailure::HerdrCloseFailed)
+        }
+    }
+
+    fn close_flow_owned_claude_pane(&self, route: &HerdrRoute) -> PaneCloseOutcome {
+        let outcome = self.close_owned_pane(route);
+        if outcome == PaneCloseOutcome::Closed
+            && let Ok(mut processes) = self.flow_owned_claude_processes.lock()
+        {
+            processes.remove(&route.herdr_pane_id);
+        }
+        outcome
+    }
+
     /// Stops the one actual foreground process carrying Flow's selected
     /// Claude session. A pidfd keeps the selected kernel process identity
     /// stable across signalling and provides an event-driven exit witness.
-    fn stop_flow_owned_claude(&self, route: &HerdrRoute, session: &str) -> Option<bool> {
+    fn stop_flow_owned_claude(
+        &self,
+        route: &HerdrRoute,
+        session: &str,
+    ) -> Result<OwnedProcessDisposition, PaneCloseFailure> {
         if session.is_empty() {
-            return Some(false);
+            return Err(PaneCloseFailure::IdentityUnavailable);
         }
-        let Ok(mut owned) = self.flow_owned_claude_processes.lock() else {
-            return Some(false);
-        };
+        let owned = self
+            .flow_owned_claude_processes
+            .lock()
+            .map_err(|_| PaneCloseFailure::IdentityUnavailable)?;
         let Some(process) = owned.get(&route.herdr_pane_id) else {
             // A restarted Nexus has no stable launch identity. Never recover
             // authority from a current argv match.
-            return Some(false);
+            return Err(PaneCloseFailure::IdentityUnavailable);
         };
         if process.session_id != session {
-            return Some(false);
+            return Err(PaneCloseFailure::IdentityMismatch);
         }
         if pidfd_exited(process.pidfd, 0) {
             // The retained identity reports that the original exited. A
             // fresh matching foreground process is not its replacement,
             // and closing the pane could kill that unrelated process.
-            return Some(false);
+            return Ok(OwnedProcessDisposition::AlreadyExited);
+        }
+        let observed_start = process_start(process.process_id);
+        let observed_executable = fs::canonicalize(format!("/proc/{}/exe", process.process_id));
+        if observed_start.is_none() || observed_executable.is_err() {
+            return if pidfd_exited(process.pidfd, 0) {
+                Ok(OwnedProcessDisposition::AlreadyExited)
+            } else {
+                Err(PaneCloseFailure::IdentityUnavailable)
+            };
         }
         let exact_process = retained_process_matches(
             process.process_start,
             &process.process_executable,
-            process_start(process.process_id),
-            fs::canonicalize(format!("/proc/{}/exe", process.process_id)).ok(),
+            observed_start,
+            observed_executable.ok(),
         );
+        if !exact_process {
+            return Err(PaneCloseFailure::IdentityMismatch);
+        }
         let configured_association = fs::canonicalize(&process.configured_executable)
-            .ok()
-            .as_ref()
-            == Some(&process.configured_executable);
-        let corroborated = self.foreground_processes(route).is_some_and(|processes| {
-            processes.iter().any(|current| {
+            .map_err(|_| PaneCloseFailure::IdentityUnavailable)?;
+        if configured_association != process.configured_executable {
+            return Err(PaneCloseFailure::IdentityMismatch);
+        }
+        let corroborated = self
+            .foreground_processes(route)
+            .ok_or(PaneCloseFailure::IdentityUnavailable)?
+            .iter()
+            .any(|current| {
                 current.process_id == process.process_id
                     && current
                         .arguments
                         .windows(2)
                         .any(|pair| pair[0] == "--session-id" && pair[1] == process.session_id)
-            })
-        });
-        if !exact_process || !configured_association || !corroborated {
-            return Some(false);
+            });
+        if !corroborated {
+            return Err(PaneCloseFailure::IdentityMismatch);
         }
-        let Ok(timeout) = u64::try_from(self.timings.stop_wait) else {
-            return Some(false);
-        };
-        if stop_owned_process(process.pidfd, timeout).is_some() {
-            owned.remove(&route.herdr_pane_id);
-            Some(true)
-        } else {
-            // A failed bounded stop keeps the exact retained handle so a
-            // retry cannot replace it with a fresh argv match.
-            Some(false)
+        let timeout =
+            u64::try_from(self.timings.stop_wait).map_err(|_| PaneCloseFailure::StopTimedOut)?;
+        match stop_owned_process(process.pidfd, timeout) {
+            Ok(ProcessStop::Graceful | ProcessStop::Forced) => Ok(OwnedProcessDisposition::Stopped),
+            Ok(ProcessStop::AlreadyExited) => Ok(OwnedProcessDisposition::AlreadyExited),
+            Err(ProcessStopFailure::IdentityUnavailable) => {
+                Err(PaneCloseFailure::IdentityUnavailable)
+            }
+            Err(ProcessStopFailure::TimedOut) => Err(PaneCloseFailure::StopTimedOut),
         }
     }
 }
@@ -398,18 +469,35 @@ fn retained_process_matches(
 enum ProcessStop {
     Graceful,
     Forced,
+    AlreadyExited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessStopFailure {
+    IdentityUnavailable,
+    TimedOut,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnedProcessDisposition {
+    Stopped,
+    AlreadyExited,
 }
 
 /// Signals one stable Linux process identity and blocks on its kernel exit
 /// event. A native process that does not honor SIGTERM is compensated with
 /// SIGKILL; a timeout never becomes a successful stop.
-fn stop_process(process_id: u32, timeout_milliseconds: u64) -> Option<ProcessStop> {
-    let process_id = i32::try_from(process_id).ok()?;
+fn stop_process(
+    process_id: u32,
+    timeout_milliseconds: u64,
+) -> Result<ProcessStop, ProcessStopFailure> {
+    let process_id =
+        i32::try_from(process_id).map_err(|_| ProcessStopFailure::IdentityUnavailable)?;
     // SAFETY: pidfd_open has no pointer arguments. The returned owned
     // descriptor is closed on every path below.
     let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, process_id, 0) as i32 };
     if pidfd < 0 {
-        return None;
+        return Err(ProcessStopFailure::IdentityUnavailable);
     }
     let stopped = stop_owned_process(pidfd, timeout_milliseconds);
     // SAFETY: pidfd is an owned descriptor returned by pidfd_open.
@@ -417,7 +505,10 @@ fn stop_process(process_id: u32, timeout_milliseconds: u64) -> Option<ProcessSto
     stopped
 }
 
-fn stop_owned_process(pidfd: i32, timeout_milliseconds: u64) -> Option<ProcessStop> {
+fn stop_owned_process(
+    pidfd: i32,
+    timeout_milliseconds: u64,
+) -> Result<ProcessStop, ProcessStopFailure> {
     let signal = |signal: i32| {
         // SAFETY: pidfd_send_signal is called with the live pidfd above,
         // a signal number, and no siginfo payload or flags.
@@ -431,17 +522,30 @@ fn stop_owned_process(pidfd: i32, timeout_milliseconds: u64) -> Option<ProcessSt
             ) == 0
         }
     };
-    let timeout = i32::try_from(timeout_milliseconds).ok()?;
-    let stopped = if !signal(libc::SIGTERM) {
-        None
+    let timeout = i32::try_from(timeout_milliseconds).map_err(|_| ProcessStopFailure::TimedOut)?;
+    if pidfd_exited(pidfd, 0) {
+        return Ok(ProcessStop::AlreadyExited);
+    }
+    if !signal(libc::SIGTERM) {
+        return if pidfd_exited(pidfd, 0) {
+            Ok(ProcessStop::AlreadyExited)
+        } else {
+            Err(ProcessStopFailure::IdentityUnavailable)
+        };
+    }
+    if pidfd_exited(pidfd, timeout) {
+        Ok(ProcessStop::Graceful)
+    } else if !signal(libc::SIGKILL) {
+        if pidfd_exited(pidfd, 0) {
+            Ok(ProcessStop::Graceful)
+        } else {
+            Err(ProcessStopFailure::IdentityUnavailable)
+        }
     } else if pidfd_exited(pidfd, timeout) {
-        Some(ProcessStop::Graceful)
-    } else if signal(libc::SIGKILL) && pidfd_exited(pidfd, timeout) {
-        Some(ProcessStop::Forced)
+        Ok(ProcessStop::Forced)
     } else {
-        None
-    };
-    stopped
+        Err(ProcessStopFailure::TimedOut)
+    }
 }
 
 fn pidfd_exited(pidfd: i32, timeout: i32) -> bool {
@@ -1224,7 +1328,8 @@ impl DecodesFlowClaim for FlowClaim {
 #[cfg(test)]
 mod tests {
     use super::{
-        HerdrCli, ProcessStop, VerifiesFlowClaim, pidfd_exited, stop_owned_process, stop_process,
+        HerdrCli, OperatesHerdrPane, ProcessStop, ProcessStopFailure, VerifiesFlowClaim,
+        pidfd_exited, stop_owned_process, stop_process,
     };
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
@@ -1439,10 +1544,7 @@ mod tests {
             .arg("60")
             .spawn()
             .expect("sleep starts");
-        assert_eq!(
-            stop_process(process.id(), 1000),
-            Some(ProcessStop::Graceful)
-        );
+        assert_eq!(stop_process(process.id(), 1000), Ok(ProcessStop::Graceful));
         assert!(process.wait().expect("sleep reaped").code().is_none());
     }
 
@@ -1459,7 +1561,7 @@ mod tests {
             });
         }
         let mut process = command.spawn().expect("term-refusing sleep starts");
-        assert_eq!(stop_process(process.id(), 10), Some(ProcessStop::Forced));
+        assert_eq!(stop_process(process.id(), 10), Ok(ProcessStop::Forced));
         assert!(process.wait().expect("sleep reaped").code().is_none());
     }
 
@@ -1473,12 +1575,236 @@ mod tests {
         assert!(pidfd_exited(pidfd, 1000));
 
         let mut replacement = Command::new("sleep").arg("60").spawn().unwrap();
-        assert_eq!(stop_owned_process(pidfd, 10), None);
+        assert_eq!(
+            stop_owned_process(pidfd, 10),
+            Ok(ProcessStop::AlreadyExited)
+        );
         assert!(replacement.try_wait().unwrap().is_none());
         replacement.kill().unwrap();
         replacement.wait().unwrap();
         // SAFETY: this test owns the pidfd.
         unsafe { libc::close(pidfd) };
+    }
+
+    #[test]
+    fn an_exited_owned_process_does_not_stop_a_new_matching_foreground_process() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let replacement_program = root.path().join("claude");
+        std::fs::write(&replacement_program, "#!/bin/sh\nsleep 60\n").unwrap();
+        let mut permissions = std::fs::metadata(&replacement_program)
+            .unwrap()
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&replacement_program, permissions).unwrap();
+        let mut replacement = Command::new(&replacement_program)
+            .args(["--session-id", "native-session"])
+            .spawn()
+            .unwrap();
+
+        let mut original = Command::new("sleep").arg("0.01").spawn().unwrap();
+        let original_start = super::process_start(original.id()).unwrap();
+        let original_executable =
+            std::fs::canonicalize(format!("/proc/{}/exe", original.id())).unwrap();
+        // SAFETY: pidfd_open has no pointer arguments.
+        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, original.id(), 0) as i32 };
+        assert!(pidfd >= 0);
+        original.wait().unwrap();
+
+        let herdr = root.path().join("herdr");
+        std::fs::write(
+            &herdr,
+            format!(
+                "#!/bin/sh\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{{\"result\":{{\"snapshot\":{{\"agents\":[],\"panes\":[{{\"pane_id\":\"w1:p2\",\"terminal_id\":\"term-current\"}}]}}}}}}' ;;\n  \"pane process-info\") printf '%s\\n' '{{\"result\":{{\"process_info\":{{\"pane_id\":\"w1:p2\",\"foreground_processes\":[{{\"pid\":{}}}]}}}}}}' ;;\n  \"pane close\") touch '{}' ;;\nesac\n",
+                replacement.id(),
+                root.path().join("closed").display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&herdr).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&herdr, permissions).unwrap();
+        let adapter = HerdrCli::at(herdr, root.path().join("flows"));
+        adapter.flow_owned_claude_processes.lock().unwrap().insert(
+            route().herdr_pane_id.clone(),
+            super::OwnedClaudeProcess {
+                process_id: original.id(),
+                process_start: original_start,
+                process_executable: original_executable.clone(),
+                configured_executable: original_executable,
+                session_id: "native-session".into(),
+                pidfd,
+            },
+        );
+
+        let node = FlowNode {
+            flow_id: "owner".into(),
+            session_id: "native-session".into(),
+            harness_kind: HarnessKind::Claude,
+            endpoint_selection: EndpointSelection::Unavailable,
+            herdr_route_selection: HerdrRouteSelection::Available(route()),
+            origin: Origin::Flow(FlowOrigin {
+                flow_id: "owner".into(),
+                session_id: "native-session".into(),
+            }),
+            flow_lifecycle: FlowLifecycle::Active,
+        };
+        assert_eq!(
+            adapter.close(&node),
+            signal_flow::PaneCloseOutcome::Refused(signal_flow::PaneCloseFailure::IdentityMismatch)
+        );
+        assert!(replacement.try_wait().unwrap().is_none());
+        assert!(!root.path().join("closed").exists());
+        replacement.kill().unwrap();
+        replacement.wait().unwrap();
+    }
+
+    #[test]
+    fn an_exited_owned_process_closes_only_a_positively_owned_bare_pane() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        for (name, panes, expected, closes) in [
+            (
+                "bare",
+                "[{\"pane_id\":\"w1:p2\",\"terminal_id\":\"term-current\"}]",
+                signal_flow::PaneCloseOutcome::Closed,
+                true,
+            ),
+            (
+                "absent",
+                "[]",
+                signal_flow::PaneCloseOutcome::Refused(
+                    signal_flow::PaneCloseFailure::IdentityUnavailable,
+                ),
+                false,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut original = Command::new("sleep").arg("0.01").spawn().unwrap();
+            let original_start = super::process_start(original.id()).unwrap();
+            let original_executable =
+                std::fs::canonicalize(format!("/proc/{}/exe", original.id())).unwrap();
+            // SAFETY: pidfd_open has no pointer arguments.
+            let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, original.id(), 0) as i32 };
+            assert!(pidfd >= 0);
+            original.wait().unwrap();
+
+            let closed = root.path().join(format!("closed-{name}"));
+            let herdr = root.path().join("herdr");
+            let snapshot =
+                r#"{"result":{"snapshot":{"agents":[],"panes":PANES}}}"#.replace("PANES", panes);
+            let process_info =
+                r#"{"result":{"process_info":{"pane_id":"w1:p2","foreground_processes":[]}}}"#;
+            std::fs::write(
+                &herdr,
+                format!(
+                    "#!/bin/sh\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{snapshot}' ;;\n  \"pane process-info\") printf '%s\\n' '{process_info}' ;;\n  \"pane close\") touch '{}' ;;\nesac\n",
+                    closed.display()
+                ),
+            )
+            .unwrap();
+            let mut permissions = std::fs::metadata(&herdr).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&herdr, permissions).unwrap();
+            let adapter = HerdrCli::at(herdr, root.path().join("flows"));
+            adapter.flow_owned_claude_processes.lock().unwrap().insert(
+                route().herdr_pane_id.clone(),
+                super::OwnedClaudeProcess {
+                    process_id: original.id(),
+                    process_start: original_start,
+                    process_executable: original_executable.clone(),
+                    configured_executable: original_executable,
+                    session_id: "native-session".into(),
+                    pidfd,
+                },
+            );
+            let node = FlowNode {
+                flow_id: "owner".into(),
+                session_id: "native-session".into(),
+                harness_kind: HarnessKind::Claude,
+                endpoint_selection: EndpointSelection::Unavailable,
+                herdr_route_selection: HerdrRouteSelection::Available(route()),
+                origin: Origin::Flow(FlowOrigin {
+                    flow_id: "owner".into(),
+                    session_id: "native-session".into(),
+                }),
+                flow_lifecycle: FlowLifecycle::Active,
+            };
+            assert_eq!(adapter.close(&node), expected, "{name}");
+            assert_eq!(closed.exists(), closes, "{name}");
+        }
+    }
+
+    #[test]
+    fn an_invalid_bounded_stop_refuses_as_timed_out_without_signalling_or_closing() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let program = root.path().join("claude");
+        std::fs::write(&program, "#!/bin/sh\nsleep 60\n").unwrap();
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&program, permissions).unwrap();
+        let mut process = Command::new(&program)
+            .args(["--session-id", "native-session", "--model", "fixture-model"])
+            .spawn()
+            .unwrap();
+        let process_start = super::process_start(process.id()).unwrap();
+        let process_executable =
+            std::fs::canonicalize(format!("/proc/{}/exe", process.id())).unwrap();
+        let configured_executable = std::fs::canonicalize(&program).unwrap();
+        // SAFETY: pidfd_open has no pointer arguments.
+        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, process.id(), 0) as i32 };
+        assert!(pidfd >= 0);
+
+        let closed = root.path().join("closed");
+        let herdr = root.path().join("herdr");
+        std::fs::write(
+            &herdr,
+            format!(
+                "#!/bin/sh\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{{\"result\":{{\"snapshot\":{{\"agents\":[],\"panes\":[{{\"pane_id\":\"w1:p2\",\"terminal_id\":\"term-current\"}}]}}}}}}' ;;\n  \"pane process-info\") printf '%s\\n' '{{\"result\":{{\"process_info\":{{\"pane_id\":\"w1:p2\",\"foreground_processes\":[{{\"pid\":{}}}]}}}}}}' ;;\n  \"pane close\") touch '{}' ;;\nesac\n",
+                process.id(),
+                closed.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&herdr).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&herdr, permissions).unwrap();
+        let mut adapter = HerdrCli::at(herdr, root.path().join("flows"));
+        adapter.timings.stop_wait = -1;
+        adapter.flow_owned_claude_processes.lock().unwrap().insert(
+            route().herdr_pane_id.clone(),
+            super::OwnedClaudeProcess {
+                process_id: process.id(),
+                process_start,
+                process_executable,
+                configured_executable,
+                session_id: "native-session".into(),
+                pidfd,
+            },
+        );
+        let node = FlowNode {
+            flow_id: "owner".into(),
+            session_id: "native-session".into(),
+            harness_kind: HarnessKind::Claude,
+            endpoint_selection: EndpointSelection::Unavailable,
+            herdr_route_selection: HerdrRouteSelection::Available(route()),
+            origin: Origin::Flow(FlowOrigin {
+                flow_id: "owner".into(),
+                session_id: "native-session".into(),
+            }),
+            flow_lifecycle: FlowLifecycle::Active,
+        };
+        assert_eq!(
+            adapter.close(&node),
+            signal_flow::PaneCloseOutcome::Refused(signal_flow::PaneCloseFailure::StopTimedOut)
+        );
+        assert!(process.try_wait().unwrap().is_none());
+        assert!(!closed.exists());
+        process.kill().unwrap();
+        process.wait().unwrap();
     }
 
     #[test]
@@ -1501,7 +1827,10 @@ mod tests {
     #[test]
     fn a_stop_wait_outside_poll_range_is_refused_without_signalling() {
         let mut process = Command::new("sleep").arg("60").spawn().unwrap();
-        assert_eq!(stop_process(process.id(), i32::MAX as u64 + 1), None);
+        assert_eq!(
+            stop_process(process.id(), i32::MAX as u64 + 1),
+            Err(ProcessStopFailure::TimedOut)
+        );
         assert!(process.try_wait().unwrap().is_none());
         process.kill().unwrap();
         process.wait().unwrap();

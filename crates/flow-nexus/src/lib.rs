@@ -65,7 +65,7 @@ use codex::{CodexEndpoints, ConsumesResetCredit};
 use composition::{LaunchComposer, OpensLaunchComposer};
 use context::{CurriculumComposer, OpensCurriculumComposer};
 use delivery::{DeliversMessages, lease::LeasesPanes};
-use generated::operation::{Operation, Outcome, Record_Data};
+use generated::operation::{Failed_Data, Operation, Outcome, Record_Data};
 use generated::starter::DerivesOrigin;
 use launching::{AdmitsLaunch, LaunchesFlows, ObservesLaunch};
 use observe_agent::ObservesAgent;
@@ -271,8 +271,14 @@ impl Dispatches for RunningNexus {
                     let _lease = self.pane_leases.hold(route);
                     self.perform(Operation::Close(node.clone()))
                 };
-                if closed != Outcome::Closed {
-                    return Response::StopRejected(signal_flow::StopRejection::CloseRefused);
+                if let Outcome::Failed(Failed_Data::PaneCloseRefused(failure)) = closed {
+                    return Response::StopRejected(signal_flow::StopRejection::CloseRefused(
+                        failure,
+                    ));
+                } else if closed != Outcome::Closed {
+                    return Response::StopRejected(signal_flow::StopRejection::CloseRefused(
+                        signal_flow::PaneCloseFailure::IdentityUnavailable,
+                    ));
                 }
                 if self.perform(Operation::Record(Record_Data::Stopped(flow_id.clone())))
                     != Outcome::Recorded
@@ -454,9 +460,15 @@ impl Dispatches for RunningNexus {
                         let _lease = self.pane_leases.hold(route);
                         self.perform(Operation::Close(node.clone()))
                     };
-                    if closed != Outcome::Closed {
+                    if let Outcome::Failed(Failed_Data::PaneCloseRefused(failure)) = closed {
                         return meta_signal_flow::Response::RetireRejected(
-                            meta_signal_flow::RetireRejection::CloseRefused,
+                            meta_signal_flow::RetireRejection::CloseRefused(failure),
+                        );
+                    } else if closed != Outcome::Closed {
+                        return meta_signal_flow::Response::RetireRejected(
+                            meta_signal_flow::RetireRejection::CloseRefused(
+                                signal_flow::PaneCloseFailure::IdentityUnavailable,
+                            ),
                         );
                     }
                 }
@@ -4569,7 +4581,9 @@ mod tests {
         launch.write_receipt();
 
         let rejection =
-            signal_flow::ReplaceRejection::ReapRefused(signal_flow::StopRejection::CloseRefused);
+            signal_flow::ReplaceRejection::ReapRefused(signal_flow::StopRejection::CloseRefused(
+                signal_flow::PaneCloseFailure::HerdrCloseFailed,
+            ));
         let refused = Response::ReplaceRejected(rejection.clone());
         assert_eq!(
             fixture.nexus.dispatch(Query::Replace(launch.request())),

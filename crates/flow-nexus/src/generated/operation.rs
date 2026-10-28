@@ -132,6 +132,7 @@ pub enum Failed_Data {
     ConflictingBinding,
     Unstarted,
     HerdrRefused,
+    PaneCloseRefused(signal_flow::PaneCloseFailure),
     CodexRefused,
     UnknownFlow,
     ClaimRefused,

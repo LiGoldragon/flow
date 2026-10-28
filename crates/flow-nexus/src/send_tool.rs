@@ -386,15 +386,27 @@ impl HandlesSendCall for ConfiguredEffects<'_> {
                 Ok(Err(refusal)) => return Self::refused(refusal),
                 Err(error) => return store_refused(error),
             };
-            let sender_flow_id = match self.operational.list_metaflows() {
-                Ok(metaflows) => metaflows
-                    .into_iter()
-                    .find_map(|metaflow| (metaflow.address == sender).then_some(metaflow.state)),
+            // The sender is the flow that owns this exact authenticated
+            // thread, never whichever successor happens to be Awake at the
+            // same Address when the call is handled.
+            let sender_flow_id = match self.operational.flow_nodes() {
+                Ok(nodes) => {
+                    let mut owners = nodes.into_iter().filter(|node| {
+                        node.harness_kind == HarnessKind::Codex
+                            && node.session_id == root_thread
+                            && node.flow_lifecycle.is_live()
+                    });
+                    match (owners.next(), owners.next()) {
+                        (Some(owner), None) => Some(owner.flow_id),
+                        (None, None) => None,
+                        _ => return store_refused(crate::store::StoreError::StateInvariant),
+                    }
+                }
                 Err(error) => return store_refused(error),
             };
             let sender_flow_id = match sender_flow_id {
-                Some(flow_ethos::State::Awake(flow_id)) => Some(flow_id),
-                _ => match self.operational.thread_launch(&root_thread) {
+                Some(flow_id) => Some(flow_id),
+                None => match self.operational.thread_launch(&root_thread) {
                     Ok(Some(launch_request_id)) => {
                         match self.operational.launch_attempt(&launch_request_id) {
                             Ok(Some(attempt)) => attempt

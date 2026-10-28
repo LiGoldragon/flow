@@ -3400,7 +3400,9 @@ mod tests {
     /// The pane text of a MiddleAbrupt from the owner, written out by hand:
     /// the head comes first, then the id, the sender and the text.
     fn rendered(text: &str) -> String {
-        format!("MiddleAbrupt.{{ Notice {{ {{ Psyche core Secondary }} e167d8 }} Words.«{text}» }}")
+        format!(
+            "[ MiddleAbrupt.{{ Notice {{ {{ Psyche core Secondary }} e167d8 }} Words.«{text}» }} ]"
+        )
     }
 
     fn prompts(operation_log: &std::path::Path) -> Vec<String> {
@@ -3412,7 +3414,7 @@ mod tests {
             .collect()
     }
 
-    const OBSERVED_PROMPT: &str = "--session messaging-build agent prompt w1:p3 MiddleAbrupt.{ Notice { { Psyche core Secondary } e167d8 } Words.«bare prompt» } --wait --until working --until idle --until done --until blocked --timeout 10000";
+    const OBSERVED_PROMPT: &str = "--session messaging-build agent prompt w1:p3 [ MiddleAbrupt.{ Notice { { Psyche core Secondary } e167d8 } Words.«bare prompt» } ] --wait --until working --until idle --until done --until blocked --timeout 10000";
 
     #[test]
     fn observed_send_promotes_a_pending_flow_and_types_only_the_bare_input() {

@@ -71,6 +71,22 @@ fn typed_text(request: &TestRequest) -> String {
     .to_owned()
 }
 
+fn parse_queue_payload(text: &str) -> Vec<meta_signal_flow::Message> {
+    use datom_codec::{Actualizing, Budget, Potential};
+    use protos::ReaderBudget;
+    let mut budget = Budget {
+        remaining: 1_000_000,
+        reader: ReaderBudget {
+            remaining: 1_000_000,
+        },
+        depth: 0,
+        maximum_depth: 1024,
+    };
+    Potential::<Vec<meta_signal_flow::Message>>::from(text)
+        .actualize(&mut budget)
+        .expect("the complete native prompt is one typed message vector")
+}
+
 fn queue_entry(request: &TestRequest) -> QueueEntry {
     QueueEntry {
         logical_delivery_id: request.logical_delivery_id.clone(),
@@ -363,11 +379,23 @@ fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
 
     report(&fixture, claude_stop(&fixture));
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
+    assert_eq!(typed_count(&fixture, "second-request-body"), 1);
+    assert_eq!(queue(&fixture), vec![], "both typed, out of the queue");
+    let typed = fixture.typed().unwrap_or_default();
+    let expected = vec![expected_message(&first), expected_message(&second)];
+    assert_eq!(parse_queue_payload(&typed), expected);
     assert_eq!(
-        queue(&fixture),
-        vec![first.clone(), second.clone()],
-        "typed, not yet received"
+        expected.datomize(Vec::new()).protosize().compact(),
+        typed,
+        "the captured native prompt is the canonical complete vector"
     );
+    assert!(matches!(
+        standings(&fixture).as_slice(),
+        [
+            QueueDeliveryStanding::Uncertain(_),
+            QueueDeliveryStanding::Uncertain(_)
+        ]
+    ));
 
     // The same turn end again: the unresolved logical request remains
     // uncertain in its journal but is parked out of the active queue.
@@ -416,39 +444,43 @@ fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
         .store
         .read_logical_delivery_snapshots(&first_sender, None)
         .unwrap();
-    assert!(settled.delivery_snapshot_vector.iter().any(|snapshot| {
-        snapshot.logical_delivery_id == first.logical_delivery_id
-            && matches!(
-                &snapshot.delivery_state,
-                signal_flow::DeliveryState::Uncertain
-            )
-    }));
-    assert!(settled.delivery_snapshot_vector.iter().any(|snapshot| {
-        snapshot.logical_delivery_id == second.logical_delivery_id
-            && matches!(
-                &snapshot.delivery_state,
-                signal_flow::DeliveryState::Delivered(_)
-            )
-    }));
-    report(
-        &fixture,
-        submitted(CLAUDE_SESSION, "prompt-first", &typed_text(&first)),
+    for request in [&first, &second] {
+        assert!(settled.delivery_snapshot_vector.iter().any(|snapshot| {
+            snapshot.logical_delivery_id == request.logical_delivery_id
+                && matches!(
+                    &snapshot.delivery_state,
+                    signal_flow::DeliveryState::Delivered(_)
+                )
+        }));
+    }
+    assert!(standings(&fixture).is_empty());
+    assert!(matches!(
+        fixture.nexus.drain_all(address(Layer::Secondary)),
+        Outcome::Drained(_)
+    ));
+    assert_eq!(typed_count(&fixture, "first-request-body"), 1, "no replay");
+    assert_eq!(typed_count(&fixture, "second-request-body"), 1, "no replay");
+}
+
+/// Admission measures each complete typed message. Once accepted, the
+/// indivisible cohort is rendered whole; Flow neither splits it nor leaves
+/// it permanently queued merely because the vector is larger than one
+/// member's admission ceiling.
+#[test]
+fn a_large_accepted_cohort_reaches_the_native_boundary_as_one_vector() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![working_claude_agent(&fixture)],
+        PromptFixture::PromptedUnrecorded("w1:p3"),
     );
-    assert!(queue(&fixture).is_empty());
-    assert_eq!(
-        fixture
-            .nexus
-            .store
-            .read_logical_delivery_snapshots(&first_sender, None)
-            .unwrap(),
-        settled,
-        "duplicate exact native receipt changes neither state nor cursor"
-    );
-    assert_eq!(
-        typed_count(&fixture, "second-request-body"),
-        1,
-        "the second request was handed over once and then receipted"
-    );
+    let first = from_core(&"a".repeat(33_000));
+    let second = from_core(&"b".repeat(33_000));
+    assert!(queue_payload(std::slice::from_ref(&first)).len() < 64 * 1024);
+    assert!(queue_payload(std::slice::from_ref(&second)).len() < 64 * 1024);
+    let expected_text = queue_payload(&[first.clone(), second.clone()]);
+    assert!(expected_text.len() > 64 * 1024);
+    seat(&fixture, vec![first.clone(), second.clone()]);
+    append_main_rows(&fixture, &[end_turn("before")]);
 
     assert!(
         !matches!(
@@ -460,45 +492,14 @@ fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
     assert_eq!(typed_count(&fixture, "first-request-body"), 1, "no replay");
     assert!(queue(&fixture).is_empty());
 
-    // A later exact receipt can still correlate the parked attempt without
-    // putting it back into the active queue or handing it over again.
-    append_main_rows(
-        &fixture,
-        &[
-            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u-first-late",
-            "message":{"content":format!("\n\n<pasted_content id=\"04ee\">\n{}\n</pasted_content id=\"04ee\">\n", typed_text(&first))}}),
-        ],
+    let captured = fixture.typed().expect("the full cohort reached Herdr");
+    assert_eq!(captured, expected_text);
+    assert_eq!(
+        parse_queue_payload(&captured),
+        vec![expected_message(&first), expected_message(&second)]
     );
-    report(
-        &fixture,
-        submitted(CLAUDE_SESSION, "prompt-first-late", &typed_text(&first)),
-    );
-    let settled_late = fixture
-        .nexus
-        .store
-        .read_logical_delivery_snapshots(&first_sender, None)
-        .unwrap();
-    assert!(
-        settled_late
-            .delivery_snapshot_vector
-            .iter()
-            .any(|snapshot| {
-                snapshot.logical_delivery_id == first.logical_delivery_id
-                    && matches!(
-                        &snapshot.delivery_state,
-                        signal_flow::DeliveryState::Delivered(_)
-                    )
-            })
-    );
-    assert!(queue(&fixture).is_empty());
-    assert_eq!(typed_count(&fixture, "first-request-body"), 1);
-    assert_eq!(typed_count(&fixture, "second-request-body"), 1);
-    let typed = fixture.typed().unwrap_or_default();
-    assert!(typed.find("first-request-body") < typed.find("second-request-body"));
-    assert_eq!(typed.matches("first-request-body").count(), 1);
-    assert_eq!(typed.matches("second-request-body").count(), 1);
-    assert!(typed.contains("Psyche core Secondary"));
-    assert!(standings(&fixture).is_empty());
+    assert_eq!(queue(&fixture), vec![]);
+    assert_eq!(standings(&fixture).len(), 2, "one cohort attempt");
 }
 
 /// A background task's notification takes the main turn before the typed

@@ -85,7 +85,10 @@ pub trait RendersPaneText {
 impl RendersPaneText for Message {
     fn pane_text(&self) -> PaneText {
         PaneText {
-            text: self.datomize(Vec::new()).protosize().compact(),
+            text: vec![self.clone()]
+                .datomize(Vec::new())
+                .protosize()
+                .compact(),
         }
     }
 
@@ -247,7 +250,7 @@ mod tests {
             soft("Stage 1 is deployed; run the tier tests.")
                 .pane_text()
                 .as_str(),
-            "Soft.{ Notice { { Psyche core Secondary } e167d8 } Words.«Stage 1 is deployed; run the tier tests.» }"
+            "[ Soft.{ Notice { { Psyche core Secondary } e167d8 } Words.«Stage 1 is deployed; run the tier tests.» } ]"
         );
         let hard = Message::HardAbrupt(Letter {
             kind: Kind::Order,
@@ -257,7 +260,7 @@ mod tests {
         assert!(
             hard.pane_text()
                 .as_str()
-                .starts_with("HardAbrupt.{ Order { { Psyche core Secondary } e167d8 } ")
+                .starts_with("[ HardAbrupt.{ Order { { Psyche core Secondary } e167d8 } ")
         );
     }
 
@@ -297,7 +300,7 @@ mod tests {
             message
                 .pane_text()
                 .as_str()
-                .starts_with("HardAbrupt.{ Order ")
+                .starts_with("[ HardAbrupt.{ Order ")
         );
         assert!(message.pane_text().as_str().contains("Words.«keep"));
         assert_eq!(refusal(&message, HarnessKind::Codex), None);

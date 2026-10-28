@@ -196,10 +196,10 @@ impl MutatesMetaflows for FlowStore {
                 request.sender,
             ))));
         };
-        match sender.metaflow.state {
+        let sender_flow_id = match sender.metaflow.state {
             MetaflowState::Asleep => return Ok(Response::Refused(Refusal::Asleep)),
-            MetaflowState::Awake(_) => {}
-        }
+            MetaflowState::Awake(flow_id) => flow_id,
+        };
         let address = match request.recipient {
             Recipient::Address(address) => address,
             Recipient::Up => {
@@ -242,7 +242,10 @@ impl MutatesMetaflows for FlowStore {
             address,
             until,
         };
-        let row = StoredMetaflowLock { lock: lock.clone() };
+        let row = StoredMetaflowLock {
+            lock: lock.clone(),
+            sender_flow_id_option: Some(sender_flow_id),
+        };
         let commit = self.engine.begin_atomic_commit();
         let commit = if self.stored_metaflow_lock(&lock.address)?.is_some() {
             commit.mutate(self.metaflow_locks, row)
@@ -272,6 +275,19 @@ impl MutatesMetaflows for FlowStore {
                 request.lock.address,
             ))));
         };
+        let Some(sender_flow_id) = held.sender_flow_id_option else {
+            let released = self.release_metaflow_lock(request.lock.clone(), now)?;
+            if released != Response::Released {
+                return Ok(released);
+            }
+            return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
+                request.lock.sender,
+            ))));
+        };
+        let sender = meta_signal_flow::Sender {
+            address: request.lock.sender.clone(),
+            flow_id: sender_flow_id,
+        };
         let maximum_bytes = self
             .configuration_snapshot()?
             .ok_or(StoreError::NotConfigured)?
@@ -279,7 +295,7 @@ impl MutatesMetaflows for FlowStore {
             .send_body as usize;
         if let Some(refusal) = request
             .message
-            .oversized_refusal(&request.lock.sender, maximum_bytes)
+            .oversized_refusal(&sender.address, maximum_bytes)
         {
             let released = self.release_metaflow_lock(request.lock.clone(), now)?;
             if released != Response::Released {
@@ -287,15 +303,7 @@ impl MutatesMetaflows for FlowStore {
             }
             return Ok(Response::Refused(refusal));
         }
-        let sender_option = self
-            .stored_metaflow(&request.lock.sender)?
-            .and_then(|stored| match stored.metaflow.state {
-                flow_ethos::State::Awake(flow_id) => Some(meta_signal_flow::Sender {
-                    address: request.lock.sender.clone(),
-                    flow_id,
-                }),
-                _ => None,
-            });
+        let sender_option = Some(sender);
         self.accept_logical_delivery(
             &request.lock.address,
             SentBy::Sender(request.lock.sender.clone()),
@@ -736,6 +744,26 @@ impl ResolvesRemembering for FlowStore {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_historical_lock_has_no_invented_sender_flow() {
+        let address = Address {
+            aspect: Aspect::Psyche,
+            topic: "core".into(),
+            layer: Layer::Secondary,
+        };
+        let upgraded = match StoredMetaflowLock::upgrade_from(StoredMetaflowLockV1 {
+            lock: Lock {
+                sender: address.clone(),
+                address,
+                until: 42,
+            },
+        }) {
+            Decision::Ready(upgraded) => upgraded,
+            Decision::Refused(refusal) => match refusal {},
+        };
+        assert_eq!(upgraded.sender_flow_id_option, None);
+    }
+
     struct Fixture {
         _directory: tempfile::TempDir,
         store: FlowStore,
@@ -829,7 +857,9 @@ mod tests {
             .store
             .bind_metaflow(binding.clone(), &fixture.peer, None)
             .unwrap();
-        assert!(matches!(&first, Response::Bound(_)));
+        let Response::Bound(authenticated_flow_id) = &first else {
+            panic!("binding expected")
+        };
         assert_eq!(
             fixture
                 .store
@@ -890,20 +920,30 @@ mod tests {
                 .queue
                 .is_empty()
         );
-        assert!(matches!(
+        let accepted = fixture
+            .store
+            .queue_metaflow(
+                Deliver_Data {
+                    lock: lock.clone(),
+                    delivery: flow_ethos::Delivery::Queue,
+                    message: flow_ethos::Message::Soft(body.clone()),
+                },
+                101,
+            )
+            .unwrap();
+        let Response::SendAccepted(accepted) = accepted else {
+            panic!("accepted delivery expected")
+        };
+        assert_eq!(
             fixture
                 .store
-                .queue_metaflow(
-                    Deliver_Data {
-                        lock: lock.clone(),
-                        delivery: flow_ethos::Delivery::Queue,
-                        message: flow_ethos::Message::Soft(body.clone())
-                    },
-                    101
-                )
-                .unwrap(),
-            Response::SendAccepted(_)
-        ));
+                .logical_delivery_sender(&accepted.logical_delivery_id)
+                .unwrap()
+                .unwrap()
+                .flow_id,
+            *authenticated_flow_id,
+            "the lock retains the issuer, never a later current flow"
+        );
         // Queued with the Sender its Lock named.
         assert_eq!(
             fixture.store.metaflow(&target).unwrap().unwrap().queue[0].sent_by,

@@ -71,7 +71,7 @@ use sema_engine::{
     TableRegistration, UpgradeFrom, UpgradeOutcome,
 };
 use signal_flow::{
-    Address, Aspect, Caller, CallerResolutionRejection, ComposedLaunch, EndpointSelection,
+    Address, Aspect, Caller, CallerResolutionRejection, ComposedLaunch, EndpointSelection, FlowId,
     FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding, HerdrRoute,
     HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
     LaunchProfile, Launched, Layer, Lock, Metaflow, NativeLaunchBinding, NativeLaunchIntent,
@@ -1084,11 +1084,56 @@ impl EngineRecord for StoredMetaflowProcess {
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredMetaflowLock {
     lock: Lock,
+    /// The flow authenticated when the lease was created. A historical
+    /// lease has no authentic flow identity and can never deliver.
+    sender_flow_id_option: Option<FlowId>,
 }
 
 impl EngineRecord for StoredMetaflowLock {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(FlowStore::address_record_key(&self.lock.address))
+    }
+}
+
+impl MemoryDefinition for StoredMetaflowLock {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-metaflow-lock-v2")
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredMetaflowLockV1 {
+    lock: Lock,
+}
+
+impl EngineRecord for StoredMetaflowLockV1 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.lock.address))
+    }
+}
+
+impl MemoryDefinition for StoredMetaflowLockV1 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-metaflow-lock-v1")
+    }
+}
+
+impl UpgradeFrom<StoredMetaflowLockV1> for StoredMetaflowLock {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: StoredMetaflowLockV1) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            lock: previous.lock,
+            sender_flow_id_option: None,
+        })
     }
 }
 
@@ -4353,6 +4398,10 @@ pub enum StoreError {
 /// launch attempt names its context by module identity, or keeps what a
 /// 0.34 launch named instead.
 trait UpgradesFlowFamilies {
+    fn upgraded_metaflow_locks(
+        &mut self,
+        descriptor: TableDescriptor<StoredMetaflowLock>,
+    ) -> Result<TableReference<StoredMetaflowLock>, StoreError>;
     /// A store before 0.35.7 keeps queues of bare requests; each is carried
     /// with its sender Unknown. A store before 0.35.22 may keep an ended
     /// metaflow; it is carried Asleep.
@@ -5603,8 +5652,9 @@ impl OpensFlowStore for FlowStore {
         let metaflow_locks_descriptor = TableDescriptor::<StoredMetaflowLock>::new(
             METAFLOW_LOCK_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow-lock"),
-            SchemaHash::for_label("flow-nexus-metaflow-lock-v1"),
-        );
+            SchemaHash::for_label("flow-nexus-metaflow-lock-v2"),
+        )
+        .with_predecessor::<StoredMetaflowLockV1>();
         let configuration_descriptor = TableDescriptor::<FlowStoreConfiguration>::new(
             FLOW_CONFIGURATION_TABLE_NAME,
             FamilyName::new("flow-nexus-configuration"),
@@ -5754,7 +5804,7 @@ impl OpensFlowStore for FlowStore {
         let state = engine.register_table(state_descriptor)?;
         let metaflows = engine.upgraded_metaflows(metaflows_descriptor)?;
         let metaflow_processes = engine.register_table(metaflow_processes_descriptor)?;
-        let metaflow_locks = engine.register_table(metaflow_locks_descriptor)?;
+        let metaflow_locks = engine.upgraded_metaflow_locks(metaflow_locks_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
         let herdr_routes = engine.register_table(herdr_routes_descriptor)?;
         let quarantined_launch_attempts =
@@ -5881,7 +5931,7 @@ impl OpensFlowStore for FlowStore {
         let metaflow_locks = engine.register_table(TableDescriptor::new(
             METAFLOW_LOCK_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow-lock"),
-            SchemaHash::for_label("flow-nexus-metaflow-lock-v1"),
+            SchemaHash::for_label("flow-nexus-metaflow-lock-v2"),
         ))?;
         let configuration = engine.register_table(TableDescriptor::new(
             FLOW_CONFIGURATION_TABLE_NAME,
@@ -8820,7 +8870,7 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-metaflow-process-v1",
             ),
             "flow_nexus_metaflow_locks" => {
-                ("flow-nexus-metaflow-lock", "flow-nexus-metaflow-lock-v1")
+                ("flow-nexus-metaflow-lock", "flow-nexus-metaflow-lock-v2")
             }
             "flow_nexus_deliveries" => {
                 return Some((
@@ -9061,6 +9111,10 @@ pub(crate) trait ReadsFlowMemory {
                 ("flow-nexus-metaflow", StoredMetaflowV3::schema_hash()),
                 ("flow-nexus-metaflow", StoredMetaflowV4::schema_hash()),
             ],
+            "flow_nexus_metaflow_locks" => &[(
+                "flow-nexus-metaflow-lock",
+                StoredMetaflowLockV1::schema_hash(),
+            )],
             "flow_nexus_meta_model_configuration" => &[(
                 "flow-nexus-meta-model-configuration",
                 StoredMetaModelConfigurationV1::schema_hash(),
@@ -13145,6 +13199,65 @@ mod tests {
             assert!(archive.iter().any(|record| record.address == address
                 && record.queue_evidence
                     == meta_signal_flow::QueueEvidence::Logical(entry.clone())));
+        }
+    }
+
+    #[test]
+    fn a_v1_delivery_lock_reopens_without_inventing_a_sender_flow() {
+        use sema_engine::{MemoryDefinition, MemoryUpgrades, UpgradeOutcome};
+        let fixture = StoreFixture::new();
+        drop(fixture.store());
+        let table_name = TableName::new("fixture_metaflow_locks");
+        let address = Address {
+            aspect: Aspect::Psyche,
+            topic: "core".into(),
+            layer: Layer::Secondary,
+        };
+        let old = super::StoredMetaflowLockV1 {
+            lock: signal_flow::Lock {
+                sender: address.clone(),
+                address: address.clone(),
+                until: 42,
+            },
+        };
+        {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("v1 store opens");
+            let table = engine
+                .register_table(TableDescriptor::new(
+                    table_name,
+                    FamilyName::new("fixture-metaflow-lock"),
+                    super::StoredMetaflowLockV1::schema_hash(),
+                ))
+                .expect("v1 lock family registers");
+            engine
+                .assert(Assertion::new(table, old))
+                .expect("v1 lock persists");
+        }
+
+        for _ in 0..2 {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("store reopens");
+            let descriptor = TableDescriptor::<super::StoredMetaflowLock>::new(
+                table_name,
+                FamilyName::new("fixture-metaflow-lock"),
+                super::StoredMetaflowLock::schema_hash(),
+            )
+            .with_predecessor::<super::StoredMetaflowLockV1>();
+            let table = match engine
+                .upgrade_table::<super::StoredMetaflowLockV1, super::StoredMetaflowLock>(descriptor)
+            {
+                UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+                UpgradeOutcome::AlreadyCurrent(table) => table,
+                other => panic!("lock upgrade failed: {other:?}"),
+            };
+            let rows = engine
+                .match_records(QueryPlan::all(table))
+                .expect("upgraded rows read");
+            let [carried] = rows.records() else {
+                panic!("one lock is carried")
+            };
+            assert_eq!(carried.sender_flow_id_option, None);
         }
     }
 

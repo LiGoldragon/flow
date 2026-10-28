@@ -5,11 +5,15 @@
 use super::send_v31::DeliverySnapshotV31;
 use super::send_v32::DeliverySnapshotV32;
 use super::*;
+use crate::delivery::body::TypesPaneMessage;
 use crate::generated::send_tool::{
     Accepted_Data, SendCall, SendOutcome as ToolSendOutcome, SendRefusal as ToolSendRefusal,
     Target, ToolCallKey,
 };
+use crate::sending::MAX_NATIVE_COHORT_BYTES;
+use datom_codec::Datomizable;
 use flow_ethos::{Delivery, Message, QueueEntry};
+use protos::{Compactable, Protosizable};
 use sema_engine::AtomicCommit;
 use signal_flow::{
     Address, DeliverySnapshot, DeliveryState, Lock, LogicalDeliveryId, NativeReceipt, Refusal,
@@ -449,6 +453,16 @@ pub(crate) trait RecordsLogicalDeliveries {
         state: DeliveryState,
         commit: AtomicCommit,
     ) -> Result<DeliverySnapshot, StoreError>;
+    /// Adds a transition for every exact queue member to one caller-owned
+    /// atomic commit.  This is the multi-message counterpart of
+    /// `commit_logical_transition`: it allocates one contiguous event range
+    /// and does not expose a partial durability boundary.
+    fn stage_logical_transitions(
+        &self,
+        queue: &[QueueEntry],
+        state: DeliveryState,
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError>;
     fn logical_delivery_snapshot(
         &self,
         id: &LogicalDeliveryId,
@@ -935,6 +949,24 @@ impl RecordsLogicalDeliveries for FlowStore {
         } else {
             None
         };
+        let mut prospective = Vec::with_capacity(stored.metaflow.queue.len() + 1);
+        for queued in &stored.metaflow.queue {
+            if let Some(queued_sender) =
+                self.logical_delivery_sender(&queued.logical_delivery_id)?
+            {
+                prospective.push(queued.message.typed_pane_message(queued_sender));
+            }
+        }
+        prospective.push(message.typed_pane_message(sender.clone()));
+        let cohort_bytes = prospective.datomize(Vec::new()).protosize().compact().len();
+        if cohort_bytes > MAX_NATIVE_COHORT_BYTES {
+            return Ok(Response::Refused(Refusal::Oversized(
+                signal_flow::SendPayloadSize {
+                    actual_bytes: i64::try_from(cohort_bytes).unwrap_or(i64::MAX),
+                    maximum_bytes: MAX_NATIVE_COHORT_BYTES as i64,
+                },
+            )));
+        }
         let allocation = self.allocate_logical_cursor()?;
         let next = allocation.cursor;
         let create = !allocation.existing;
@@ -1104,6 +1136,61 @@ impl RecordsLogicalDeliveries for FlowStore {
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
         Ok(snapshot)
+    }
+    fn stage_logical_transitions(
+        &self,
+        queue: &[QueueEntry],
+        state: DeliveryState,
+        mut commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError> {
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut current_rows = Vec::with_capacity(queue.len());
+        for entry in queue {
+            let rows = self.engine.match_records(QueryPlan::key(
+                self.logical_deliveries.current,
+                RecordKey::new(entry.logical_delivery_id.clone()),
+            ))?;
+            let [current] = rows.records() else {
+                return Err(StoreError::StateInvariant);
+            };
+            if current.sender_option.is_none() || current.snapshot.sent_by != entry.sent_by {
+                return Err(StoreError::StateInvariant);
+            }
+            current_rows.push(current.clone());
+        }
+        let allocation = self.allocate_logical_cursor()?;
+        let mut next = allocation.cursor;
+        for current in current_rows {
+            let mut snapshot = current.snapshot.clone();
+            snapshot.delivery_cursor = next;
+            snapshot.delivery_state = state.clone();
+            next = next.checked_add(1).ok_or(StoreError::StateInvariant)?;
+            commit = commit
+                .mutate(
+                    self.logical_deliveries.current,
+                    CurrentLogicalDelivery {
+                        snapshot: snapshot.clone(),
+                        sender_option: current.sender_option,
+                    },
+                )
+                .assert(
+                    self.logical_deliveries.events,
+                    LogicalDeliveryEvent { snapshot },
+                );
+        }
+        if queue.is_empty() {
+            return Ok(commit);
+        }
+        let counter = LogicalDeliveryCounter { next_cursor: next };
+        Ok(if allocation.existing {
+            commit.mutate(self.logical_deliveries.counter, counter)
+        } else {
+            commit.assert(self.logical_deliveries.counter, counter)
+        })
     }
     fn logical_delivery_snapshot(
         &self,

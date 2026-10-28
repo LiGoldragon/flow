@@ -290,25 +290,17 @@ mod tests {
     }
 
     #[test]
-    fn deliver_is_one_inline_datom_carrying_a_typed_message() {
+    fn deliver_is_one_inline_datom_carrying_a_durable_reference() {
         let client = FlowMetaClient {
             socket: "unused".into(),
         };
         let Query::Deliver(request) = client
-            .parse_command(
-                ["Deliver.{ m-7f3a2c:7d41e0:0 7d41e0 Soft.{ Notice { { Psyche core Secondary } e167d8 } Words.«Stage 1 is deployed; run the tier tests.» } }".into()]
-                    .into_iter(),
-            )
-            .expect("deliver datom parses")
+            .parse_command(["Deliver.{ queue-attempt-0000000000000003 }".into()].into_iter())
+            .expect("delivery reference parses")
         else {
             panic!("Deliver datom must stay a Deliver query")
         };
-        assert_eq!(request.delivery_id, "m-7f3a2c:7d41e0:0");
-        assert_eq!(request.flow_id, "7d41e0");
-        assert!(matches!(
-            request.message,
-            meta_signal_flow::Message::Soft(_)
-        ));
+        assert_eq!(request.delivery_id, "queue-attempt-0000000000000003");
     }
 
     #[test]

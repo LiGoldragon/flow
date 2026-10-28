@@ -54,6 +54,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Flow's maximum UTF-8 byte length for one rendered native Send prompt.
 pub const MAX_SEND_PAYLOAD_BYTES: usize = 64 * 1024;
+/// Linux accepts at most 131072 bytes in one argv string, including its NUL.
+/// Herdr carries one canonical cohort as one argument, so Flow reserves the
+/// final byte for that terminator. Individual messages retain their separate
+/// 64 KiB admission bound above.
+pub const MAX_NATIVE_COHORT_BYTES: usize = 128 * 1024 - 1;
 
 /// Measures a Request as it would appear in the recipient's native prompt.
 pub trait MeasuresSendPayload {

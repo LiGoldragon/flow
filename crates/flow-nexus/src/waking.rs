@@ -89,6 +89,7 @@ use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes, Read
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
+use crate::sending::MAX_NATIVE_COHORT_BYTES;
 use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
@@ -988,7 +989,10 @@ impl RunningNexus {
         Some(entry.message.typed_pane_message(sender))
     }
 
-    fn typed_queue_cohort(&self, entries: &[QueueEntry]) -> Option<Vec<meta_signal_flow::Message>> {
+    pub(crate) fn typed_queue_cohort(
+        &self,
+        entries: &[QueueEntry],
+    ) -> Option<Vec<meta_signal_flow::Message>> {
         entries
             .iter()
             .map(|entry| self.typed_queue_message(entry))
@@ -1030,6 +1034,7 @@ impl ReconcilesQueueDelivery for RunningNexus {
                     meta_signal_flow::QueueResolutionOutcome::Absent => Reconciled::Absent,
                 };
             }
+            QueueDeliveryPhase::TransportOverlimit(_) => return Reconciled::Refused,
             QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_) => {}
         }
         match self.find_receipt(attempt) {
@@ -1897,6 +1902,19 @@ impl PerformsWakeAndDrain for RunningNexus {
                 return refused(drained, Failed_Data::StoreRefused);
             }
         };
+        if text.len() > MAX_NATIVE_COHORT_BYTES {
+            let size = signal_flow::SendPayloadSize {
+                actual_bytes: i64::try_from(text.len()).unwrap_or(i64::MAX),
+                maximum_bytes: MAX_NATIVE_COHORT_BYTES as i64,
+            };
+            return match self
+                .store
+                .fail_transport_overlimit(&attempt.attempt_id, size)
+            {
+                Ok(failed) => Outcome::Drained(failed),
+                Err(_) => refused(drained, Failed_Data::StoreRefused),
+            };
+        }
         let absent = |observation: String| {
             self.store
                 .mark_delivery_absent(

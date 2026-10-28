@@ -814,6 +814,75 @@ fn a_send_to_a_primary_keeps_every_authenticated_sender() {
     );
 }
 
+#[test]
+fn admission_refuses_the_request_that_would_overfill_one_native_cohort() {
+    use crate::sending::MAX_NATIVE_COHORT_BYTES;
+    use crate::store::logical_delivery::RecordsLogicalDeliveries as _;
+    let fixture = NexusFixture::new();
+    let target = seat_address();
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: target.clone(),
+        state: State::Asleep,
+        past: vec![],
+        queue: vec![],
+    });
+    let sender = meta_signal_flow::Sender {
+        address: Address {
+            aspect: signal_flow::Aspect::Mind,
+            topic: "cohortSender".into(),
+            layer: Layer::Secondary,
+        },
+        flow_id: "authenticated-sender".into(),
+    };
+    let body = "x".repeat(44_000);
+    for _ in 0..2 {
+        assert!(matches!(
+            fixture
+                .nexus
+                .store
+                .accept_logical_delivery(
+                    &target,
+                    sender.clone(),
+                    Delivery::Queue,
+                    Message::Soft(Request::Notice(body.clone())),
+                    None,
+                )
+                .unwrap(),
+            Response::SendAccepted(_)
+        ));
+    }
+    assert!(matches!(
+        fixture
+            .nexus
+            .store
+            .accept_logical_delivery(
+                &target,
+                sender,
+                Delivery::Queue,
+                Message::Soft(Request::Notice(body)),
+                None,
+            )
+            .unwrap(),
+        Response::Refused(signal_flow::Refusal::Oversized(signal_flow::SendPayloadSize {
+            actual_bytes,
+            maximum_bytes,
+        })) if actual_bytes > MAX_NATIVE_COHORT_BYTES as i64
+            && maximum_bytes == MAX_NATIVE_COHORT_BYTES as i64
+    ));
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .metaflow(&target)
+            .unwrap()
+            .unwrap()
+            .queue
+            .len(),
+        2,
+        "the refused trigger never enters the durable queue"
+    );
+}
+
 /// A Launch addressed to a metaflow Awake as a live flow, from any caller,
 /// names the Replace of that flow: no AddressAwake, and the flow it is
 /// Awake as is the predecessor.

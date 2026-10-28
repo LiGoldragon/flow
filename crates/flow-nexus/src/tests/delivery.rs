@@ -9,8 +9,8 @@ use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::{Dispatches, peer::AdmitsMetaPeer};
 use meta_signal_flow::{
     Body, BodyRefusal, CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Delivery,
-    DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommand, InterruptWitness, Letter,
-    Message, Query as MetaQuery, Response as MetaResponse,
+    DeliveryGrade, DeliveryRejection, HarnessCommand, InterruptWitness, Letter, Message,
+    Query as MetaQuery, Response as MetaResponse,
 };
 use signal_flow::{AgentObservation, AgentState, FlowLifecycle, ObserveSelection, Query, Response};
 use std::fs;
@@ -26,11 +26,7 @@ fn letter(text: &str) -> Letter {
 impl NexusFixture {
     fn deliver(&self, delivery_id: &str, message: Message) -> MetaResponse {
         self.nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
-                delivery_id: delivery_id.into(),
-                flow_id: "908786".into(),
-                message,
-            }))
+            .deliver_cohort(delivery_id.into(), "908786".into(), vec![message])
     }
 
     fn blocked_agent(&self) -> serde_json::Value {
@@ -356,11 +352,9 @@ fn bodies_carrying_commands_or_keys_are_refused_and_nothing_is_typed() {
             "{text:?}"
         );
         assert_eq!(
-            fixture.nexus.dispatch_meta(MetaQuery::Vet(DeliveryRequest {
-                delivery_id: "vet".into(),
-                flow_id: "908786".into(),
-                message: middle_abrupt(text),
-            })),
+            fixture
+                .nexus
+                .vet_cohort_for_test("908786", &[middle_abrupt(text)]),
             MetaResponse::DeliveryRejected(DeliveryRejection::BodyRefused(refusal)),
             "{text:?}"
         );
@@ -378,11 +372,9 @@ fn a_path_and_a_later_command_line_are_ordinary_text() {
         );
         fixture.register_with(FlowLifecycle::Active);
         assert_eq!(
-            fixture.nexus.dispatch_meta(MetaQuery::Vet(DeliveryRequest {
-                delivery_id: "vet".into(),
-                flow_id: "908786".into(),
-                message: middle_abrupt(text),
-            })),
+            fixture
+                .nexus
+                .vet_cohort_for_test("908786", &[middle_abrupt(text)]),
             MetaResponse::Vetted("908786".into())
         );
         assert_eq!(
@@ -763,13 +755,11 @@ fn a_deliver_into_a_flow_past_its_threshold_is_refused() {
         .record_context_size("908786", 200_000)
         .expect("context size recorded");
     assert_eq!(
-        fixture
-            .nexus
-            .dispatch_meta(MetaQuery::Deliver(meta_signal_flow::DeliveryRequest {
-                delivery_id: "delivery-past".into(),
-                flow_id: "908786".into(),
-                message: middle_abrupt("one more thing"),
-            })),
+        fixture.nexus.deliver_cohort(
+            "delivery-past".into(),
+            "908786".into(),
+            vec![middle_abrupt("one more thing")],
+        ),
         MetaResponse::DeliveryRejected(meta_signal_flow::DeliveryRejection::PastThreshold)
     );
     assert!(prompts(&log).is_empty(), "nothing reached the pane");

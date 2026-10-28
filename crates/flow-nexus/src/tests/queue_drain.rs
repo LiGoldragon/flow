@@ -9,23 +9,26 @@
 
 use super::waking::{
     CLAUDE_SEAT, CLAUDE_SESSION, address, append_main_rows, claude_agent, claude_seat, claude_stop,
-    end_turn, stored, working_claude_agent,
+    claude_transcript, end_turn, stored, working_claude_agent,
 };
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::Dispatches;
 use crate::generated::operation::Outcome;
 use crate::reporting::RecordsReports;
+use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries};
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::SeedsMetaflow;
-use crate::store::queue_delivery::AccountsQueueDelivery;
+use crate::store::queue_delivery::{
+    AccountsQueueDelivery, NativeHistoryAnchor, NativeTranscriptCursor, PrepareQueueDelivery,
+};
 use crate::waking::{PerformsWakeAndDrain, ReconcilesQueueDelivery, SettlesStopsAtConfirmation};
 use datom_codec::Datomizable;
 use flow_ethos::State;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{
-    ProcessIdentity, Query as MetaQuery, QueueDeliveryResolution, QueueDeliveryStanding,
-    QueueResolutionOutcome, ResolveQueueDeliveryRejected_Data, ResolverIdentity,
-    Response as MetaResponse, Undecided,
+    DeliveryRequest, ProcessIdentity, Query as MetaQuery, QueueDeliveryResolution,
+    QueueDeliveryStanding, QueueResolutionOutcome, ResolveQueueDeliveryRejected_Data,
+    ResolverIdentity, Response as MetaResponse, Undecided,
 };
 use protos::{Compactable, Protosizable};
 use signal_flow::{
@@ -462,6 +465,161 @@ fn two_queued_claude_requests_go_in_one_payload_and_settle_on_its_receipt() {
     assert_eq!(typed_count(&fixture, "second-request-body"), 1, "no replay");
 }
 
+/// The public meta operation names only a durable delivery reference. When
+/// that reference froze several messages, its one native vector parks and
+/// settles every exact member, including after the store is read again.
+#[test]
+fn public_deliver_parks_and_settles_the_entire_frozen_cohort() {
+    use std::os::unix::fs::MetadataExt;
+
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::PromptedUnrecorded("w1:p3"),
+    );
+    let first = from_core("public-first-request");
+    let second = from_core("public-second-request");
+    seat(&fixture, vec![first.clone(), second.clone()]);
+    append_main_rows(&fixture, &[end_turn("before-public-deliver")]);
+    let transcript = claude_transcript(&fixture);
+    let metadata = std::fs::metadata(&transcript).unwrap();
+    let prepared = fixture
+        .nexus
+        .store
+        .prepare_oldest_delivery(
+            &address(Layer::Secondary),
+            CLAUDE_SEAT,
+            CLAUDE_SESSION,
+            signal_flow::HarnessKind::Claude,
+            NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                offset: metadata.len(),
+            }),
+        )
+        .unwrap();
+    let PrepareQueueDelivery::Prepared(attempt) = prepared else {
+        panic!("oldest delivery was prepared: {prepared:?}")
+    };
+
+    let delivered = fixture
+        .nexus
+        .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+            delivery_id: attempt.attempt_id.clone(),
+        }));
+    assert!(
+        matches!(delivered, MetaResponse::Delivered(_)),
+        "{delivered:?}"
+    );
+    let payload = fixture.typed().expect("one native vector was typed");
+    assert_eq!(
+        parse_queue_payload(&payload),
+        vec![expected_message(&first), expected_message(&second)]
+    );
+    assert!(queue(&fixture).is_empty());
+    assert!(matches!(
+        standings(&fixture).as_slice(),
+        [
+            QueueDeliveryStanding::Uncertain(_),
+            QueueDeliveryStanding::Uncertain(_)
+        ]
+    ));
+
+    append_main_rows(
+        &fixture,
+        &[
+            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u-public",
+        "message":{"content":payload}}),
+        ],
+    );
+    report(
+        &fixture,
+        submitted(CLAUDE_SESSION, "prompt-public", &fixture.typed().unwrap()),
+    );
+    assert!(standings(&fixture).is_empty(), "one receipt settled both");
+    assert!(queue(&fixture).is_empty());
+    report(&fixture, claude_stop(&fixture));
+    assert_eq!(typed_count(&fixture, "public-first-request"), 1);
+    assert_eq!(typed_count(&fixture, "public-second-request"), 1);
+}
+
+/// A crash after the native vector was typed but before its whole-cohort
+/// commit leaves the pane lease and prepared reference. Retrying the public
+/// operation completes that exact cohort as Uncertain without typing again;
+/// its one native receipt then settles every member.
+#[test]
+fn public_deliver_recovers_a_leased_prepared_cohort_without_retyping() {
+    use std::os::unix::fs::MetadataExt;
+
+    let fixture = NexusFixture::new();
+    let first = from_core("leased-first-request");
+    let second = from_core("leased-second-request");
+    seat(&fixture, vec![first.clone(), second.clone()]);
+    let transcript = claude_transcript(&fixture);
+    let metadata = std::fs::metadata(&transcript).unwrap();
+    let prepared = fixture
+        .nexus
+        .store
+        .prepare_oldest_delivery(
+            &address(Layer::Secondary),
+            CLAUDE_SEAT,
+            CLAUDE_SESSION,
+            signal_flow::HarnessKind::Claude,
+            NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                offset: metadata.len(),
+            }),
+        )
+        .unwrap();
+    let PrepareQueueDelivery::Prepared(attempt) = prepared else {
+        panic!("oldest delivery was prepared: {prepared:?}")
+    };
+    fixture
+        .nexus
+        .store
+        .record_lease_step(PaneLease {
+            delivery_id: attempt.attempt_id.clone(),
+            flow_id: CLAUDE_SEAT.into(),
+            herdr_pane_id: "w1:p3".into(),
+            lease_step: LeaseStep::Submitted,
+        })
+        .unwrap();
+
+    assert!(matches!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+                delivery_id: attempt.attempt_id.clone(),
+            })),
+        MetaResponse::Delivered(meta_signal_flow::Delivery {
+            delivery_grade: meta_signal_flow::DeliveryGrade::Uncertain,
+            ..
+        })
+    ));
+    assert_eq!(
+        fixture.typed(),
+        None,
+        "recovery never types the vector again"
+    );
+    assert!(queue(&fixture).is_empty());
+    assert_eq!(standings(&fixture).len(), 2);
+
+    let payload = queue_payload(&[first, second]);
+    append_main_rows(
+        &fixture,
+        &[
+            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u-leased",
+        "message":{"content":payload.clone()}}),
+        ],
+    );
+    report(
+        &fixture,
+        submitted(CLAUDE_SESSION, "prompt-leased", &payload),
+    );
+    assert!(standings(&fixture).is_empty());
+}
+
 /// Admission measures each complete typed message. Once accepted, the
 /// indivisible cohort is rendered whole; Flow neither splits it nor leaves
 /// it permanently queued merely because the vector is larger than one
@@ -492,6 +650,63 @@ fn a_large_accepted_cohort_reaches_the_native_boundary_as_one_vector() {
     );
     assert_eq!(queue(&fixture), vec![]);
     assert_eq!(standings(&fixture).len(), 2, "one cohort attempt");
+}
+
+/// A cohort accepted by an older limit is remeasured at dispatch. It ends
+/// whole and durably instead of remaining at the head of the runnable queue
+/// forever or reaching the native adapter in pieces.
+#[test]
+fn an_already_accepted_native_overlimit_cohort_fails_whole_without_pane_io() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![working_claude_agent(&fixture)],
+        PromptFixture::PromptedUnrecorded("w1:p3"),
+    );
+    let first = from_core(&"a".repeat(66_000));
+    let second = from_core(&"b".repeat(66_000));
+    let expected_text = queue_payload(&[first.clone(), second.clone()]);
+    assert!(expected_text.len() > crate::sending::MAX_NATIVE_COHORT_BYTES);
+    // `seat` is the predecessor-store boundary: these rows already exist,
+    // so current admission cannot retroactively refuse their trigger.
+    seat(&fixture, vec![first.clone(), second.clone()]);
+    append_main_rows(&fixture, &[end_turn("before")]);
+
+    report(&fixture, claude_stop(&fixture));
+
+    assert_eq!(fixture.typed(), None, "nothing reached the pane");
+    assert!(
+        queue(&fixture).is_empty(),
+        "the terminal cohort is not runnable"
+    );
+    assert_eq!(
+        standings(&fixture),
+        vec![QueueDeliveryStanding::TransportOverlimit(
+            signal_flow::SendPayloadSize {
+                actual_bytes: expected_text.len() as i64,
+                maximum_bytes: crate::sending::MAX_NATIVE_COHORT_BYTES as i64,
+            }
+        )]
+    );
+    let sender = match &first.sent_by {
+        SentBy::Sender(sender) => sender,
+        _ => unreachable!(),
+    };
+    let observed = fixture
+        .nexus
+        .store
+        .read_logical_delivery_snapshots(sender, None)
+        .unwrap();
+    for request in [&first, &second] {
+        assert!(observed.delivery_snapshot_vector.iter().any(|snapshot| {
+            snapshot.logical_delivery_id == request.logical_delivery_id
+                && matches!(
+                    snapshot.delivery_state,
+                    signal_flow::DeliveryState::Failed(signal_flow::Refusal::Oversized(_))
+                )
+        }));
+    }
+    report(&fixture, claude_stop(&fixture));
+    assert_eq!(fixture.typed(), None, "terminal work does not replay");
 }
 
 /// A background task's notification takes the main turn before the typed

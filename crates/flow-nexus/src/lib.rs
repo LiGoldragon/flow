@@ -2299,13 +2299,11 @@ mod tests {
         }
 
         fn send_to(&self, flow_id: &str, text: &str) -> Sent {
-            match self.nexus.dispatch_meta(meta_signal_flow::Query::Deliver(
-                meta_signal_flow::DeliveryRequest {
-                    delivery_id: format!("delivery-{flow_id}-{text}"),
-                    flow_id: flow_id.into(),
-                    message: middle_abrupt(text),
-                },
-            )) {
+            match self.nexus.deliver_cohort(
+                format!("delivery-{flow_id}-{text}"),
+                flow_id.into(),
+                vec![middle_abrupt(text)],
+            ) {
                 meta_signal_flow::Response::Delivered(delivery) => {
                     assert_eq!(delivery.flow_id, flow_id);
                     assert_eq!(

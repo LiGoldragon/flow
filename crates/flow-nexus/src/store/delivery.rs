@@ -8,6 +8,7 @@
 //! opens is a delivery a crash interrupted: it settles `Uncertain` then and
 //! there and is never retried, since what reached the pane is not known.
 
+use super::queue_delivery::AccountsQueueDelivery;
 use super::{DefaultConfiguration, FlowStore, SeedsConfiguration, StoreError};
 use crate::store::ManagesMetaflowState;
 use meta_signal_flow::{
@@ -85,6 +86,12 @@ impl SettlesInterruptedLease for PaneLease {
             },
             delivery_grade: DeliveryGrade::Uncertain,
         }
+    }
+}
+
+impl PaneLease {
+    pub(crate) fn uncertain_delivery(&self) -> Delivery {
+        self.uncertain()
     }
 }
 
@@ -297,6 +304,10 @@ impl RecordsDeliveries for FlowStore {
             .to_vec();
         let mut settled = Vec::with_capacity(leases.len());
         for lease in leases {
+            if let Some(delivery) = self.settle_interrupted_typed_cohort(&lease.delivery_id)? {
+                settled.push(delivery);
+                continue;
+            }
             let delivery = lease.uncertain();
             self.settle_delivery(delivery.clone())?;
             settled.push(delivery);

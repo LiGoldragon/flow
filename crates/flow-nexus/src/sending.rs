@@ -97,11 +97,19 @@ impl AdmitsSendPayload for Message {
 
 /// Names the metaflow the calling process runs in.
 pub trait IdentifiesSender {
-    fn sending_address(&self, peer: &Process) -> Result<Address, Box<Response>>;
+    fn sending_address(
+        &self,
+        configured: &crate::ConfiguredUse,
+        peer: &Process,
+    ) -> Result<Address, Box<Response>>;
 }
 
 impl IdentifiesSender for RunningNexus {
-    fn sending_address(&self, peer: &Process) -> Result<Address, Box<Response>> {
+    fn sending_address(
+        &self,
+        configured: &crate::ConfiguredUse,
+        peer: &Process,
+    ) -> Result<Address, Box<Response>> {
         let unidentified = || Box::new(Response::Refused(Refusal::Unidentified(peer.clone())));
         match self.identify_peer_process(peer.clone()) {
             Ok(Response::Identified(address)) => return Ok(address),
@@ -122,9 +130,6 @@ impl IdentifiesSender for RunningNexus {
         let Some(thread) = (CallerProcess { process_id }).codex_thread(&app_servers) else {
             return Err(unidentified());
         };
-        let configured = self
-            .configured_use()
-            .map_err(|error| Box::new(Response::Refused(Refusal::Store(error.to_string()))))?;
         let root_thread = configured.codex_endpoints.root_thread(&thread);
         match self.store.thread_sender(&root_thread) {
             Ok(Ok(address)) => Ok(address),
@@ -195,15 +200,30 @@ impl From<Response> for SendAnswer {
 
 pub trait SendsRequests {
     /// Answers a Send from `peer`, under the dispatch gate.
-    fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer;
+    fn send_request(
+        &self,
+        configured: &crate::ConfiguredUse,
+        send: SendRequest,
+        peer: Option<&Process>,
+    ) -> SendAnswer;
     /// Delivers every durable request currently queued at `address`.
-    fn deliver_all(&self, address: Address, peer: Option<&Process>) -> Response;
+    fn deliver_all(
+        &self,
+        configured: &crate::ConfiguredUse,
+        address: Address,
+        peer: Option<&Process>,
+    ) -> Response;
     /// The flow the metaflow at `address` is Awake as, when it is live.
     fn live_awake_flow(&self, address: &Address) -> Option<String>;
 }
 
 impl SendsRequests for RunningNexus {
-    fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer {
+    fn send_request(
+        &self,
+        configured: &crate::ConfiguredUse,
+        send: SendRequest,
+        peer: Option<&Process>,
+    ) -> SendAnswer {
         use sha2::{Digest, Sha256};
 
         let abrupt = !matches!(&send.message, Message::Soft(_));
@@ -213,7 +233,7 @@ impl SendsRequests for RunningNexus {
         let recipient = match &send.recipient {
             Recipient::Address(address) => Some(address.clone()),
             Recipient::Up => peer
-                .and_then(|peer| self.sending_address(peer).ok())
+                .and_then(|peer| self.sending_address(configured, peer).ok())
                 .and_then(|sender| {
                     sender.layer.above().map(|layer| Address {
                         aspect: sender.aspect,
@@ -222,7 +242,7 @@ impl SendsRequests for RunningNexus {
                     })
                 }),
         };
-        let sender = peer.and_then(|peer| self.sending_address(peer).ok());
+        let sender = peer.and_then(|peer| self.sending_address(configured, peer).ok());
         let mut answer = (|| -> SendAnswer {
             let _turn = self
                 .dispatch_gate
@@ -250,7 +270,7 @@ impl SendsRequests for RunningNexus {
                 ))
                 .into();
             };
-            let sender = match self.sending_address(peer) {
+            let sender = match self.sending_address(configured, peer) {
                 Ok(sender) => sender,
                 Err(refusal) => return (*refusal).into(),
             };
@@ -272,7 +292,7 @@ impl SendsRequests for RunningNexus {
             // submit this same request independently. A metaflow another
             // holds takes the request into its queue instead.
             let direct_lease = if direct {
-                match self.direct_send_lease(&recipient) {
+                match self.direct_send_lease(configured, &recipient) {
                     Ok(lease) => lease,
                     Err(refusal) => return (*refusal).into(),
                 }
@@ -302,9 +322,11 @@ impl SendsRequests for RunningNexus {
             );
             drop(_turn);
             match admitted {
-                Ok(Response::SendAccepted(acceptance)) if direct => {
-                    self.complete_direct_send(&recipient, acceptance.logical_delivery_id)
-                }
+                Ok(Response::SendAccepted(acceptance)) if direct => self.complete_direct_send(
+                    configured,
+                    &recipient,
+                    acceptance.logical_delivery_id,
+                ),
                 Ok(response) => {
                     let pending =
                         matches!(response, Response::SendAccepted(_)).then(|| PendingSend {
@@ -353,7 +375,12 @@ impl SendsRequests for RunningNexus {
             .map(|_| flow_id)
     }
 
-    fn deliver_all(&self, address: Address, peer: Option<&Process>) -> Response {
+    fn deliver_all(
+        &self,
+        configured: &crate::ConfiguredUse,
+        address: Address,
+        peer: Option<&Process>,
+    ) -> Response {
         let turn = self
             .dispatch_gate
             .lock()
@@ -361,7 +388,7 @@ impl SendsRequests for RunningNexus {
         let Some(peer) = peer else {
             return Response::Refused(Refusal::Unidentified(Process { pid: 0, started: 0 }));
         };
-        if let Err(refusal) = self.sending_address(peer) {
+        if let Err(refusal) = self.sending_address(configured, peer) {
             return *refusal;
         }
         self.rest_ended_awake(&address);
@@ -425,6 +452,7 @@ pub trait LaunchesDeclared {
     /// dispatched as any other.
     fn declared_launch(
         &self,
+        configured: &crate::ConfiguredUse,
         launch: Launch_Data,
         caller: Option<&Process>,
     ) -> Result<signal_flow::Query, Box<Response>>;
@@ -433,6 +461,7 @@ pub trait LaunchesDeclared {
 impl LaunchesDeclared for RunningNexus {
     fn declared_launch(
         &self,
+        configured: &crate::ConfiguredUse,
         launch: Launch_Data,
         caller: Option<&Process>,
     ) -> Result<signal_flow::Query, Box<Response>> {
@@ -449,7 +478,6 @@ impl LaunchesDeclared for RunningNexus {
                 )));
             }
         }
-        let configured = self.configured_use().map_err(store_refused)?;
         let configuration = &configured.snapshot;
         let Some(declaration) = configuration
             .configured_metaflows
@@ -646,21 +674,27 @@ impl FindsSeat for RunningNexus {
 
 pub trait BindsSeats {
     /// Binds the seat `peer` runs in as the metaflow at `address`.
-    fn bind_seat(&self, address: Address, peer: Option<&Process>) -> Response;
+    fn bind_seat(
+        &self,
+        configured: &crate::ConfiguredUse,
+        address: Address,
+        peer: Option<&Process>,
+    ) -> Response;
 }
 
 impl BindsSeats for RunningNexus {
-    fn bind_seat(&self, address: Address, peer: Option<&Process>) -> Response {
+    fn bind_seat(
+        &self,
+        configured: &crate::ConfiguredUse,
+        address: Address,
+        peer: Option<&Process>,
+    ) -> Response {
         let _turn = self
             .dispatch_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(peer) = peer else {
             return Response::Refused(Refusal::Unidentified(Process { pid: 0, started: 0 }));
-        };
-        let configured = match self.configured_use() {
-            Ok(configured) => configured,
-            Err(_) => return Response::Refused(Refusal::NotConfigured),
         };
         let unidentified = || Response::Refused(Refusal::Unidentified(peer.clone()));
         if !FlowStore::process_is_live(peer) {
@@ -804,9 +838,15 @@ pub(crate) trait CompletesDirectSends {
     /// an ending or starting pane.
     fn direct_send_lease(
         &self,
+        configured: &crate::ConfiguredUse,
         address: &Address,
     ) -> Result<Option<crate::waking::WakingLease<'_>>, Box<Response>>;
-    fn complete_direct_send(&self, address: &Address, logical_id: String) -> SendAnswer;
+    fn complete_direct_send(
+        &self,
+        configured: &crate::ConfiguredUse,
+        address: &Address,
+        logical_id: String,
+    ) -> SendAnswer;
 }
 
 impl CompletesDirectSends for RunningNexus {
@@ -848,6 +888,7 @@ impl CompletesDirectSends for RunningNexus {
     }
     fn direct_send_lease(
         &self,
+        configured: &crate::ConfiguredUse,
         address: &Address,
     ) -> Result<Option<crate::waking::WakingLease<'_>>, Box<Response>> {
         use signal_flow::{SendFailure, SendFailureReason};
@@ -874,11 +915,6 @@ impl CompletesDirectSends for RunningNexus {
             )));
         }
         let flow_id = self.live_awake_flow(address);
-        let configured = self.configured_use().map_err(|error| {
-            failed(SendFailureReason::Refused(Refusal::Store(
-                error.to_string(),
-            )))
-        })?;
         let model_is_configured = configured
             .snapshot
             .configured_models
@@ -911,16 +947,15 @@ impl CompletesDirectSends for RunningNexus {
         }
         Ok(Some(lease))
     }
-    fn complete_direct_send(&self, address: &Address, logical_id: String) -> SendAnswer {
+    fn complete_direct_send(
+        &self,
+        configured: &crate::ConfiguredUse,
+        address: &Address,
+        logical_id: String,
+    ) -> SendAnswer {
         use crate::store::AnnouncesLaunchChanges;
         use signal_flow::{DeliveryState, SendFailure, SendFailureReason, SendReceipt};
         use std::time::{Duration, Instant};
-        let configured = match self.configured_use() {
-            Ok(configured) => configured,
-            Err(error) => {
-                return Response::Refused(Refusal::Store(error.to_string())).into();
-            }
-        };
         let send_wait = configured.snapshot.timings.send_wait;
         // A configured sleeping recipient starts through the existing
         // fresh Curriculum composition. The Address lease prevents another

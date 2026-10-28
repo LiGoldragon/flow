@@ -346,14 +346,18 @@ trait RefusesSendCall {
 impl RefusesSendCall for RunningNexus {}
 
 impl HandlesSendCall for RunningNexus {
-    fn handle_send_call<N: ToolCallCarrying>(&self, input: N) -> SendOutcome {
+    fn handle_send_call<N: ToolCallCarrying>(
+        &self,
+        configured: &crate::ConfiguredUse,
+        input: N,
+    ) -> SendOutcome {
         let call = input.tool_call();
         let outcome = {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.handle_held_send_call(call)
+            self.handle_held_send_call(configured, call)
         };
         if let SendOutcome::Accepted(accepted) = &outcome
             && accepted.send_acceptance.delivery_state == signal_flow::DeliveryState::Queued
@@ -363,7 +367,11 @@ impl HandlesSendCall for RunningNexus {
         outcome
     }
 
-    fn handle_held_send_call<N: ToolCallCarrying>(&self, input: N) -> SendOutcome {
+    fn handle_held_send_call<N: ToolCallCarrying>(
+        &self,
+        configured: &crate::ConfiguredUse,
+        input: N,
+    ) -> SendOutcome {
         let call = input.tool_call();
         let outcome = (|| {
             if call.tool_name != SendTool::tool_name() {
@@ -376,10 +384,6 @@ impl HandlesSendCall for RunningNexus {
                     key.call_id, key.thread_id
                 );
                 Self::refused(SendRefusal::Store)
-            };
-            let configured = match self.configured_use() {
-                Ok(configured) => configured,
-                Err(error) => return store_refused(error),
             };
             // The sender is read again for every call, a replayed one included.
             let root_thread = configured.codex_endpoints.root_thread(&key.thread_id);
@@ -522,6 +526,7 @@ pub(crate) trait RespondsToSendCalls {
     /// reconnecting whenever it closes.
     fn respond_for(
         &self,
+        configured: &crate::ConfiguredUse,
         thread: &str,
         adapter: &CodexAdapter,
         signals: mpsc::Sender<ResponderSignal>,
@@ -533,6 +538,7 @@ pub(crate) trait RespondsToSendCalls {
     /// Wake. Err when the answer could not be written.
     fn answer_request(
         &self,
+        configured: &crate::ConfiguredUse,
         subscription: &mut ThreadSubscription,
         request: serde_json::Value,
     ) -> Result<(), crate::codex::CodexAdapterUnavailable>;
@@ -543,6 +549,7 @@ impl PacesReconnection for RunningNexus {}
 impl RespondsToSendCalls for RunningNexus {
     fn respond_for(
         &self,
+        configured: &crate::ConfiguredUse,
         thread: &str,
         adapter: &CodexAdapter,
         signals: mpsc::Sender<ResponderSignal>,
@@ -554,10 +561,6 @@ impl RespondsToSendCalls for RunningNexus {
             // A reconnect is a new external operation.  It takes the next
             // complete committed generation; an already-open subscription
             // keeps the generation with which this iteration began.
-            let Ok(configured) = self.configured_use() else {
-                eprintln!("flow-nexus: send tool for thread {thread}: configuration unavailable");
-                return;
-            };
             let first_wait =
                 Duration::from_millis(configured.snapshot.timings.send_tool_first_wait as u64);
             let longest_wait =
@@ -582,7 +585,7 @@ impl RespondsToSendCalls for RunningNexus {
                     wait = first_wait;
                     let early = std::mem::take(&mut subscription.early);
                     let mut open = early.into_iter().all(|request| {
-                        self.answer_request(&mut subscription, request)
+                        self.answer_request(configured, &mut subscription, request)
                             .inspect_err(|error| {
                                 eprintln!("flow-nexus: send tool for thread {thread}: {error}")
                             })
@@ -604,7 +607,8 @@ impl RespondsToSendCalls for RunningNexus {
                                 return;
                             }
                             Ok(ProxyEvent::Reply(Ok(message))) => {
-                                if let Err(error) = self.answer_request(&mut subscription, message)
+                                if let Err(error) =
+                                    self.answer_request(configured, &mut subscription, message)
                                 {
                                     eprintln!("flow-nexus: send tool for thread {thread}: {error}");
                                     open = false;
@@ -631,6 +635,7 @@ impl RespondsToSendCalls for RunningNexus {
 
     fn answer_request(
         &self,
+        configured: &crate::ConfiguredUse,
         subscription: &mut ThreadSubscription,
         request: serde_json::Value,
     ) -> Result<(), crate::codex::CodexAdapterUnavailable> {
@@ -657,7 +662,7 @@ impl RespondsToSendCalls for RunningNexus {
             .cloned()
             .and_then(ToolCall::read_tool_call::<serde_json::Value>)
         {
-            Some(call) => self.handle_send_call(call),
+            Some(call) => self.handle_send_call(configured, call),
             None => Self::refused(SendRefusal::Malformed),
         };
         let answered = subscription.answer(id, outcome.tool_response());
@@ -690,30 +695,35 @@ pub(crate) trait ServesLaunchCalls {
     /// looks again whether the work it waits on has ended.
     /// Keeps the connection that opened the launch's thread as its
     /// responder.
-    fn hold_launch_responder(&self, responder: LaunchResponder);
+    fn hold_launch_responder(&self, configured: &crate::ConfiguredUse, responder: LaunchResponder);
     /// Runs `work`, an outside wait that writes nothing to the store, while
     /// the caller, holding the dispatch gate, answers the calls the
     /// launch's connection brings. Without a launch responder, `work` runs
     /// alone.
-    fn serving_launch_calls<T: Send>(&self, work: impl FnOnce() -> T + Send) -> T;
+    fn serving_launch_calls<T: Send>(
+        &self,
+        configured: &crate::ConfiguredUse,
+        work: impl FnOnce() -> T + Send,
+    ) -> T;
     /// Handles one server request of the launch's connection as the gate's
     /// holder and answers it.
     fn answer_launch_call(
         &self,
+        configured: &crate::ConfiguredUse,
         responder: &mut LaunchResponder,
         request: serde_json::Value,
     ) -> Result<(), crate::codex::CodexAdapterUnavailable>;
     /// At the launch's end, whatever it came to: answers the calls already
     /// read, then closes the connection. A later call is the Nexus's
     /// responders' (`ServesSendTool`).
-    fn close_launch_responder(&self);
+    fn close_launch_responder(&self, configured: &crate::ConfiguredUse);
     /// Off the dispatch gate, considers every target admitted during launch.
     fn wake_deferred(&self);
 }
 
 impl ServesLaunchCalls for RunningNexus {
-    fn hold_launch_responder(&self, responder: LaunchResponder) {
-        self.close_launch_responder();
+    fn hold_launch_responder(&self, configured: &crate::ConfiguredUse, responder: LaunchResponder) {
+        self.close_launch_responder(configured);
         *self
             .launch_calls
             .responder
@@ -721,7 +731,11 @@ impl ServesLaunchCalls for RunningNexus {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(responder);
     }
 
-    fn serving_launch_calls<T: Send>(&self, work: impl FnOnce() -> T + Send) -> T {
+    fn serving_launch_calls<T: Send>(
+        &self,
+        configured: &crate::ConfiguredUse,
+        work: impl FnOnce() -> T + Send,
+    ) -> T {
         let taken = self
             .launch_calls
             .responder
@@ -731,10 +745,6 @@ impl ServesLaunchCalls for RunningNexus {
         let Some(mut responder) = taken else {
             return work();
         };
-        let Ok(configured) = self.configured_use() else {
-            responder.subscription.close();
-            return work();
-        };
         let serving_slice =
             Duration::from_millis(configured.snapshot.timings.send_tool_serving_slice as u64);
         let mut open = true;
@@ -742,7 +752,7 @@ impl ServesLaunchCalls for RunningNexus {
             let running = scope.spawn(work);
             // The calls that arrived before the subscription was answered.
             for request in std::mem::take(&mut responder.subscription.early) {
-                if let Err(error) = self.answer_launch_call(&mut responder, request) {
+                if let Err(error) = self.answer_launch_call(configured, &mut responder, request) {
                     eprintln!("flow-nexus: launch send tool: {error}");
                     open = false;
                 }
@@ -754,7 +764,9 @@ impl ServesLaunchCalls for RunningNexus {
                     .next_event(&responder.inbox, Some(deadline))
                 {
                     Ok(ProxyEvent::Reply(Ok(message))) => {
-                        if let Err(error) = self.answer_launch_call(&mut responder, message) {
+                        if let Err(error) =
+                            self.answer_launch_call(configured, &mut responder, message)
+                        {
                             eprintln!("flow-nexus: launch send tool: {error}");
                             open = false;
                         }
@@ -788,6 +800,7 @@ impl ServesLaunchCalls for RunningNexus {
 
     fn answer_launch_call(
         &self,
+        configured: &crate::ConfiguredUse,
         responder: &mut LaunchResponder,
         request: serde_json::Value,
     ) -> Result<(), crate::codex::CodexAdapterUnavailable> {
@@ -820,7 +833,7 @@ impl ServesLaunchCalls for RunningNexus {
             .cloned()
             .and_then(ToolCall::read_tool_call::<serde_json::Value>)
         {
-            Some(call) => self.handle_held_send_call(call),
+            Some(call) => self.handle_held_send_call(configured, call),
             None => Self::refused(SendRefusal::Malformed),
         };
         let answered = responder.subscription.answer(id, outcome.tool_response());
@@ -834,7 +847,7 @@ impl ServesLaunchCalls for RunningNexus {
         answered
     }
 
-    fn close_launch_responder(&self) {
+    fn close_launch_responder(&self, configured: &crate::ConfiguredUse) {
         let taken = self
             .launch_calls
             .responder
@@ -844,12 +857,8 @@ impl ServesLaunchCalls for RunningNexus {
         let Some(mut responder) = taken else {
             return;
         };
-        let Ok(configured) = self.configured_use() else {
-            responder.subscription.close();
-            return;
-        };
         for request in std::mem::take(&mut responder.subscription.early) {
-            let _ = self.answer_launch_call(&mut responder, request);
+            let _ = self.answer_launch_call(configured, &mut responder, request);
         }
         let deadline = Instant::now()
             + Duration::from_millis(configured.snapshot.timings.send_tool_serving_slice as u64);
@@ -857,7 +866,10 @@ impl ServesLaunchCalls for RunningNexus {
             .subscription
             .next_event(&responder.inbox, Some(deadline))
         {
-            if self.answer_launch_call(&mut responder, message).is_err() {
+            if self
+                .answer_launch_call(configured, &mut responder, message)
+                .is_err()
+            {
                 break;
             }
         }
@@ -899,18 +911,25 @@ pub(crate) trait RefusesInterruptedCalls {
     /// window: from its record when one holds the same call, else refused
     /// (`ThreadUnowned`; `KeyReused` when its key's record holds another
     /// call).
-    fn refuse_interrupted_calls(&self, thread: &str, adapter: &CodexAdapter) -> InterruptedCalls;
+    fn refuse_interrupted_calls(
+        &self,
+        configured: &crate::ConfiguredUse,
+        thread: &str,
+        adapter: &CodexAdapter,
+    ) -> InterruptedCalls;
     /// The answer to one replayed call; true when it came from its record.
     fn interrupted_call_outcome(&self, thread: &str, call: Option<ToolCall>)
     -> (SendOutcome, bool);
 }
 
 impl RefusesInterruptedCalls for RunningNexus {
-    fn refuse_interrupted_calls(&self, thread: &str, adapter: &CodexAdapter) -> InterruptedCalls {
+    fn refuse_interrupted_calls(
+        &self,
+        configured: &crate::ConfiguredUse,
+        thread: &str,
+        adapter: &CodexAdapter,
+    ) -> InterruptedCalls {
         let mut tally = InterruptedCalls::default();
-        let Ok(configured) = self.configured_use() else {
-            return tally;
-        };
         let (signals, inbox) = mpsc::channel();
         let mut subscription = match adapter.subscribe_thread(thread, 1, &signals, &inbox) {
             Ok(subscription) => subscription,
@@ -1009,7 +1028,12 @@ pub trait KeepsSendToolResponders {
     ) -> BTreeMap<String, CodexAdapter>;
     /// Starts a responder for each wanted thread that has none and stops
     /// each responder whose thread is no longer wanted.
-    fn pass<'scope, 'env>(&mut self, nexus: &'env RunningNexus, scope: &'scope Scope<'scope, 'env>);
+    fn pass<'scope, 'env>(
+        &mut self,
+        nexus: &'env RunningNexus,
+        configured: &'env crate::ConfiguredUse,
+        scope: &'scope Scope<'scope, 'env>,
+    );
     fn stop_all(&mut self);
 }
 
@@ -1065,16 +1089,9 @@ impl KeepsSendToolResponders for SendToolResponders {
     fn pass<'scope, 'env>(
         &mut self,
         nexus: &'env RunningNexus,
+        configured: &'env crate::ConfiguredUse,
         scope: &'scope Scope<'scope, 'env>,
     ) {
-        let configured = match nexus.configured_use() {
-            Ok(configured) => configured,
-            Err(error) => {
-                eprintln!("flow-nexus: send tool configuration unreadable: {error}");
-                self.stop_all();
-                return;
-            }
-        };
         let wanted = self.wanted(nexus, &configured);
         self.responders.retain(|thread, (generation, stop)| {
             let keep = wanted.contains_key(thread) && generation == &configured.generation;
@@ -1092,7 +1109,7 @@ impl KeepsSendToolResponders for SendToolResponders {
                 thread.clone(),
                 (configured.generation.clone(), signals.clone()),
             );
-            scope.spawn(move || nexus.respond_for(&thread, &adapter, signals, inbox));
+            scope.spawn(move || nexus.respond_for(configured, &thread, &adapter, signals, inbox));
         }
     }
 
@@ -1108,16 +1125,24 @@ impl KeepsSendToolResponders for SendToolResponders {
 /// step with Flow's records at its start and at every change the store
 /// announces, and all are stopped when the Nexus stops.
 pub trait ServesSendTool {
-    fn serve_send_tool<'scope, 'env>(&'env self, scope: &'scope Scope<'scope, 'env>);
+    fn serve_send_tool<'scope, 'env>(
+        &'env self,
+        configured: &'env crate::ConfiguredUse,
+        scope: &'scope Scope<'scope, 'env>,
+    );
 }
 
 impl ServesSendTool for RunningNexus {
-    fn serve_send_tool<'scope, 'env>(&'env self, scope: &'scope Scope<'scope, 'env>) {
+    fn serve_send_tool<'scope, 'env>(
+        &'env self,
+        configured: &'env crate::ConfiguredUse,
+        scope: &'scope Scope<'scope, 'env>,
+    ) {
         let changes = self.store.launch_changes.clone();
         let mut responders = SendToolResponders::default();
         while !self.stopping.requested() {
             let seen = changes.current();
-            responders.pass(self, scope);
+            responders.pass(self, configured, scope);
             changes.after(seen);
         }
         responders.stop_all();

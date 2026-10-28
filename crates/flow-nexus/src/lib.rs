@@ -104,34 +104,34 @@ use waking::SleepsAndWakesSeats;
 
 pub struct RunningNexus {
     /// The exact typed runtime value that opened this Nexus.
-    pub runtime: flow_ethos::Start,
-    pub store: FlowStore,
-    pub codex_endpoints: CodexEndpoints,
-    pub herdr: herdr::HerdrCli,
-    pub composer: LaunchComposer,
+    pub(crate) runtime: flow_ethos::Start,
+    pub(crate) store: FlowStore,
+    pub(crate) codex_endpoints: CodexEndpoints,
+    pub(crate) herdr: herdr::HerdrCli,
+    pub(crate) composer: LaunchComposer,
     /// Serializes dispatch; see `dispatch_serially`.
-    pub dispatch_gate: Mutex<()>,
+    pub(crate) dispatch_gate: Mutex<()>,
     /// The exclusive hold on each pane Flow is writing; see
     /// `delivery::lease`.
-    pub pane_leases: delivery::lease::PaneLeases,
+    pub(crate) pane_leases: delivery::lease::PaneLeases,
     /// The metaflows a wake is running for; see `waking`.
-    pub waking: waking::WakingMetaflows,
+    pub(crate) waking: waking::WakingMetaflows,
     /// Flows confirmed after their Stop, awaiting settlement; see `waking`.
-    pub stopped_at_confirmation: waking::StoppedAtConfirmation,
+    pub(crate) stopped_at_confirmation: waking::StoppedAtConfirmation,
     /// Set once the Nexus is told to stop; see [`StopsNexus`].
-    pub stopping: Stopping,
+    pub(crate) stopping: Stopping,
     /// The send-tool responder of the Codex launch running now; see
     /// `send_tool::ServesLaunchCalls`.
-    pub launch_calls: send_tool::LaunchCalls,
+    pub(crate) launch_calls: send_tool::LaunchCalls,
     /// Whether each Codex thread is in a turn, as its app-server's events
     /// show it; see `codex_turns`.
-    pub codex_turns: codex_turns::CodexTurns,
+    pub(crate) codex_turns: codex_turns::CodexTurns,
     /// How far each flow's compactions have been read; see `compacting`.
-    pub compactions: compacting::CompactionWatch,
+    pub(crate) compactions: compacting::CompactionWatch,
     /// Tests may supply explicit in-memory/executable I/O providers while
     /// configuration still owns every value the provider consumes.
     #[cfg(test)]
-    pub fixture_configuration_io: bool,
+    pub(crate) fixture_configuration_io: bool,
 }
 
 /// One external operation's immutable complete configuration generation and

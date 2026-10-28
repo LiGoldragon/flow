@@ -3,10 +3,10 @@
 //! shapes; what each test expects is written out by hand.
 
 use super::{
-    middle_abrupt, prompts, rendered, ControlsHerdrSnapshot, NexusFixture, PromptFixture, Sent,
+    ControlsHerdrSnapshot, NexusFixture, PromptFixture, Sent, middle_abrupt, prompts, rendered,
 };
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
-use crate::{peer::AdmitsMetaPeer, Dispatches};
+use crate::{Dispatches, peer::AdmitsMetaPeer};
 use meta_signal_flow::{
     Body, BodyRefusal, CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Delivery,
     DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommand, InterruptWitness, Letter,
@@ -104,9 +104,9 @@ impl NexusFixture {
     /// The fixture flow Awake as { Psyche flow Secondary }, running
     /// claude-opus-5-5, whose refresh threshold is `refresh` tokens.
     fn at_secondary_refreshing_at(&self, refresh: i64) {
-        use crate::store::metaflow::SeedsMetaflow as _;
         use crate::store::ManagesMetaflowState as _;
         use crate::store::SeedsRole as _;
+        use crate::store::metaflow::SeedsMetaflow as _;
         self.nexus.store.seed_role(signal_flow::Caller {
             flow_id: "908786".into(),
             aspect: signal_flow::Aspect::Psyche,
@@ -149,6 +149,119 @@ impl NexusFixture {
             harness_command,
         }))
     }
+}
+
+/// A Herdr-facing operation reads the next committed configuration once.
+/// Replacing Herdr after one operation sends every read and write of the
+/// next operation to the replacement, never the adapter cached at open.
+#[test]
+fn pane_operations_use_the_next_committed_herdr_view_whole() {
+    use crate::store::ManagesMetaflowState as _;
+    let fixture = NexusFixture::new();
+    let log_a = fixture.accept_pane_operations(
+        vec![fixture.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.register_with(FlowLifecycle::Active);
+    assert!(matches!(
+        fixture.command(HarnessCommand::Line("through-a".into())),
+        MetaResponse::Commanded(_)
+    ));
+
+    let herdr_b = fixture.directory.path().join("herdr-fixture-b");
+    let log_b = fixture.directory.path().join("herdr-operations-b.log");
+    let typed_b = fixture.directory.path().join("pane-typed-b.txt");
+    let body_a = fs::read_to_string(&fixture.snapshot_program).expect("Herdr A fixture");
+    FixtureExecutable {
+        path: herdr_b.clone(),
+    }
+    .install(
+        &body_a
+            .replace(
+                fixture
+                    .directory
+                    .path()
+                    .join("herdr-operations.log")
+                    .to_string_lossy()
+                    .as_ref(),
+                log_b.to_string_lossy().as_ref(),
+            )
+            .replace(
+                fixture
+                    .directory
+                    .path()
+                    .join("pane-typed.txt")
+                    .to_string_lossy()
+                    .as_ref(),
+                typed_b.to_string_lossy().as_ref(),
+            ),
+    );
+    let mut nexus = fixture
+        .nexus
+        .store
+        .configuration_snapshot()
+        .expect("configuration read")
+        .expect("configuration present")
+        .configured_nexus;
+    nexus.executables.herdr = herdr_b.to_string_lossy().into_owned();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Nexus(nexus))
+        .expect("Herdr B committed");
+    // A is now unusable. A cached adapter would fail the next operation.
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install("#!/bin/sh\nexit 64\n");
+
+    assert!(matches!(
+        fixture.command(HarnessCommand::Line("through-b".into())),
+        MetaResponse::Commanded(_)
+    ));
+    assert!(matches!(
+        fixture.command(HarnessCommand::Keys(vec!["ctrl+x".into()])),
+        MetaResponse::Commanded(_)
+    ));
+    assert!(matches!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::ReadPane("908786".into())),
+        MetaResponse::PaneRead(_)
+    ));
+    assert!(
+        fs::read_to_string(log_a)
+            .unwrap_or_default()
+            .contains("through-a")
+    );
+    let b = fs::read_to_string(log_b).expect("Herdr B operations");
+    assert!(b.contains("through-b"), "{b}");
+    assert!(b.contains("ctrl+x"), "{b}");
+
+    let mut unavailable = fixture
+        .nexus
+        .store
+        .configuration_snapshot()
+        .expect("configuration read")
+        .expect("configuration present")
+        .configured_nexus;
+    unavailable.executables.herdr = fixture
+        .directory
+        .path()
+        .join("missing-herdr-c")
+        .to_string_lossy()
+        .into_owned();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Nexus(unavailable))
+        .expect("unavailable Herdr committed");
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::ReadPane("908786".into())),
+        MetaResponse::ReadPaneRejected(ReadPaneRejected_Data::HerdrUnavailable)
+    );
 }
 
 #[test]
@@ -562,10 +675,12 @@ fn a_delivery_a_crash_left_under_its_lease_settles_uncertain_and_is_never_retrie
             delivery_grade: DeliveryGrade::Uncertain,
         })
     );
-    assert!(store
-        .settle_interrupted_deliveries()
-        .expect("no rows left")
-        .is_empty());
+    assert!(
+        store
+            .settle_interrupted_deliveries()
+            .expect("no rows left")
+            .is_empty()
+    );
 }
 
 #[test]

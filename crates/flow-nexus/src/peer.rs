@@ -11,12 +11,9 @@
 //! ancestry and reads as the owner: this gate stops accidents and model
 //! mistakes, not an adversary (F4).
 
-use crate::binding::{ChecksProcessIdentity, ReadsProcessIdentity};
-use crate::caller::{CallerPane, CallerProcess, LocatesCallerPane, ReadsProcess, ResolvesCaller};
-use crate::store::delivery::RecordsDeliveries;
-use crate::store::ManagesMetaflowState;
-use crate::store::ReadsFlowRoles;
 use crate::RunningNexus;
+use crate::binding::{ChecksProcessIdentity, ReadsProcessIdentity};
+use crate::caller::{CallerProcess, LocatesCallerPane, ReadsProcess};
 use meta_signal_flow::{MetaRefusal, ProcessIdentity, ResolverIdentity, Response};
 use signal_flow::CallerResolutionRejection;
 use std::fs;
@@ -28,6 +25,9 @@ pub trait ResolvesPeer {
 
 impl ResolvesPeer for RunningNexus {
     fn resolve_peer(&self, identity: &ProcessIdentity) -> Response {
+        let Ok(view) = self.herdr_operation_view() else {
+            return Response::PeerResolutionRejected(CallerResolutionRejection::CallerUnknown);
+        };
         // The identity must still name the same live process (user and start
         // time), so a reused process ID names no one.
         if !identity.is_live_process() {
@@ -36,8 +36,8 @@ impl ResolvesPeer for RunningNexus {
         let Ok(process_id) = u32::try_from(identity.process_id) else {
             return Response::PeerResolutionRejected(CallerResolutionRejection::CallerUnknown);
         };
-        let pane = CallerProcess { process_id }.caller_pane(&self.herdr);
-        match self.resolve_caller(pane, None) {
+        let pane = CallerProcess { process_id }.caller_pane(&view.herdr);
+        match self.resolve_caller_with(&view.herdr, pane, None) {
             signal_flow::Response::CallerResolved(caller) => Response::PeerResolved(caller),
             signal_flow::Response::CallerResolutionRejected(rejection) => {
                 Response::PeerResolutionRejected(rejection)
@@ -58,19 +58,21 @@ impl AdmitsMetaPeer for RunningNexus {
         let Some(peer) = peer else {
             return Some(MetaRefusal::PeerUnknown);
         };
-        let (message_binary, meta_aspects) = match self.store.configuration_snapshot() {
-            Ok(Some(snapshot)) => (
-                snapshot.configured_nexus.message_nexus_binary,
-                snapshot.configured_nexus.meta_aspects,
-            ),
-            Ok(None) | Err(_) => return Some(MetaRefusal::PeerUnknown),
+        let Ok(view) = self.herdr_operation_view() else {
+            return Some(MetaRefusal::PeerUnknown);
         };
-        if !message_binary.is_empty() && peer.executable() == fs::canonicalize(&message_binary).ok()
+        let message_binary = &view
+            .configuration
+            .snapshot
+            .configured_nexus
+            .message_nexus_binary;
+        let meta_aspects = &view.configuration.snapshot.configured_nexus.meta_aspects;
+        if !message_binary.is_empty() && peer.executable() == fs::canonicalize(message_binary).ok()
         {
             return None;
         }
-        let pane = peer.caller_pane(&self.herdr);
-        let caller = match self.resolve_caller(pane.clone(), None) {
+        let pane = peer.caller_pane(&view.herdr);
+        let caller = match self.resolve_caller_with(&view.herdr, pane.clone(), None) {
             signal_flow::Response::CallerResolved(caller) => caller,
             // An unbound pane is admitted under its process identity.
             _ => return None,
@@ -92,12 +94,14 @@ pub trait NamesMetaPeer {
 
 impl NamesMetaPeer for RunningNexus {
     fn meta_resolver(&self, peer: Option<CallerProcess>) -> Option<ResolverIdentity> {
+        let view = self.herdr_operation_view().ok()?;
         let peer = peer?;
         let process_identity = ProcessIdentity::of(peer.process_id)?;
-        let flow_id_option = match self.resolve_caller(peer.caller_pane(&self.herdr), None) {
-            signal_flow::Response::CallerResolved(caller) => Some(caller.flow_id),
-            _ => None,
-        };
+        let flow_id_option =
+            match self.resolve_caller_with(&view.herdr, peer.caller_pane(&view.herdr), None) {
+                signal_flow::Response::CallerResolved(caller) => Some(caller.flow_id),
+                _ => None,
+            };
         Some(ResolverIdentity {
             process_identity,
             flow_id_option,

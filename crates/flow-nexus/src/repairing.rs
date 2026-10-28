@@ -4,13 +4,13 @@
 //! `Withdraw` takes one queued request out of its queue and closes the
 //! attempt that holds it back.
 
+use crate::RunningNexus;
 use crate::herdr::{PaneRoute, ReadsHerdrPanes};
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::repair::RepairsMetaflows;
 use crate::store::{ReadsFlowRows, RebindsNativeSession};
-use crate::RunningNexus;
 use meta_signal_flow::{
-    InspectRejected_Data, RebindRejected_Data, Rebind_Data, Rebinding, Response, StoreRefusal,
+    InspectRejected_Data, Rebind_Data, RebindRejected_Data, Rebinding, Response, StoreRefusal,
     Withdraw_Data,
 };
 use signal_flow::{Address, HerdrRouteSelection};
@@ -49,6 +49,12 @@ impl RepairsFromMeta for RunningNexus {
         let Rebind_Data { address, rebinding } = rebind;
         let rebound = match rebinding {
             Rebinding::Pane(herdr_pane_id) => {
+                let view = match self.herdr_operation_view() {
+                    Ok(view) => view,
+                    Err(_) => {
+                        return Response::RebindRejected(RebindRejected_Data::HerdrUnavailable);
+                    }
+                };
                 let flow_id = match self.store.current_flow(&address) {
                     Ok(Ok(flow_id)) => flow_id,
                     Ok(Err(rejection)) => return Response::RebindRejected(rejection),
@@ -64,7 +70,7 @@ impl RepairsFromMeta for RunningNexus {
                 let HerdrRouteSelection::Available(recorded) = &node.herdr_route_selection else {
                     return Response::RebindRejected(RebindRejected_Data::PaneAbsent);
                 };
-                let route = match self.herdr.pane_route(
+                let route = match view.herdr.pane_route(
                     &recorded.herdr_session_name,
                     &herdr_pane_id,
                     &node.harness_kind,

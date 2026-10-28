@@ -1386,14 +1386,15 @@ impl ReconcilesQueueDelivery for RunningNexus {
             turn_id,
             native_receipt,
         };
-        if self
-            .store
-            .record_delivery_receipt(&attempt.attempt_id, receipt)
-            .unwrap_or(false)
-            && self
-                .store
-                .settle_recorded_delivery(&attempt.attempt_id)
-                .unwrap_or(false)
+        if attempt.cohort.len() > 1 {
+            return if self.store.settle_received_cohort(&attempt.attempt_id, receipt).is_ok() {
+                attempt.as_settled(seat_after)
+            } else {
+                Reconciled::Refused
+            };
+        }
+        if self.store.record_delivery_receipt(&attempt.attempt_id, receipt).unwrap_or(false)
+            && self.store.settle_recorded_delivery(&attempt.attempt_id).unwrap_or(false)
         {
             attempt.as_settled(seat_after)
         } else {
@@ -2302,31 +2303,35 @@ impl PerformsWakeAndDrain for RunningNexus {
                     oldest.logical_delivery_id, attempt.attempt_id
                 );
             }
-
-            // Park first so every member of the one native vector has its
-            // own durable attempt. A successful turn/start response is then
-            // the exact native receipt for that whole run; it need not be
-            // rediscovered by matching text in paged history.
-            let _ = self.store.mark_delivery_uncertain(&attempt.attempt_id);
-            let typed = self.park_cohort(&attempt, &cohort);
             if let Ok(receipt) = submitted {
-                let run = self.typed_group(&attempt);
-                if matches!(
-                    self.settle_received(
-                        &attempt,
-                        &run,
-                        receipt.turn_id,
-                        receipt.native_receipt,
-                        SeatAfter::InItsTurn,
-                    ),
-                    Reconciled::Settled(..)
+                match self.store.settle_received_cohort(
+                    &attempt.attempt_id,
+                    NativeDeliveryReceipt {
+                        native_request_id: receipt.native_request_id,
+                        thread_id: receipt.thread_id,
+                        turn_id: receipt.turn_id,
+                        native_receipt: receipt.native_receipt,
+                    },
                 ) {
-                    self.codex_turns.delivered(&node.session_id);
+                    Ok(settled) => {
+                        self.codex_turns.delivered(&node.session_id);
+                        drained.extend(settled);
+                        return Outcome::Drained(drained);
+                    }
+                    Err(error) => eprintln!(
+                        "flow-nexus: exact Codex receipt for {} could not settle atomically: {error:?}",
+                        attempt.attempt_id
+                    ),
                 }
             }
-            drained.extend(typed);
-            return Outcome::Drained(drained);
+
+            // The prepared attempt retains the complete frozen cohort.  A
+            // failed or ambiguous local transition is never submitted a
+            // second time; native history reconciles that exact vector.
+            let _ = self.store.mark_delivery_uncertain(&attempt.attempt_id);
+            return Outcome::AwaitingReceipt(oldest.logical_delivery_id);
         } else if let Err(refusal) = self.hand_over(configured, &flow_id, &text) {
+
             return if absent(format!("{refusal:?}")) {
 
                 refused(drained, Failed_Data::HerdrRefused)
@@ -2395,6 +2400,38 @@ impl PerformsWakeAndDrain for RunningNexus {
                 };
             }
         }
+    }
+
+    fn cohort_runs(
+        &self,
+        attempt: &QueueDeliveryAttempt,
+    ) -> Vec<(Vec<QueueDeliveryAttempt>, String)> {
+        let Some(alone_text) = self.typed_attempt_text(attempt) else {
+            return Vec::new();
+        };
+        let alone = (vec![attempt.clone()], alone_text);
+        let group = self.typed_group(attempt);
+        if group.len() < 2 {
+            if attempt.cohort.len() > 1
+                && let Some(messages) = self.typed_queue_cohort(&attempt.cohort)
+            {
+                let text = messages.datomize(Vec::new()).protosize().compact();
+                return vec![(vec![attempt.clone()], text), alone];
+            }
+            return vec![alone];
+        }
+        let entries = group
+            .iter()
+            .filter_map(|member| match &member.queue_evidence {
+                meta_signal_flow::QueueEvidence::Logical(entry) => Some(entry.clone()),
+                meta_signal_flow::QueueEvidence::Legacy(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let Some(messages) = self.typed_queue_cohort(&entries) else {
+            return vec![alone];
+        };
+        let text = messages.datomize(Vec::new()).protosize().compact();
+        vec![(group, text), alone]
     }
 }
 

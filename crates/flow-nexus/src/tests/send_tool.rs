@@ -2022,8 +2022,7 @@ fn a_codex_turn_a_crash_left_unacknowledged_is_found_in_thread_history() {
     use crate::waking::ReconcilesQueueDelivery;
     let mut fixture = NexusFixture::new();
     let first = from_core(Request::Order("First.".into()));
-    let second = from_core(Request::Order("Second.".into()));
-    fixture.awake_codex_seat(vec![first.clone(), second.clone()]);
+    fixture.awake_codex_seat(vec![first.clone()]);
     let fake = FakeAppServer::install(vec![]);
     fixture.adapter("gpt-sol", &fake);
     let queued = crashed_before_receipt(&fixture);
@@ -2041,7 +2040,7 @@ fn a_codex_turn_a_crash_left_unacknowledged_is_found_in_thread_history() {
     );
 
     fixture.nexus.recover_deliveries();
-    assert_eq!(fixture.seat_queue(), vec![second]);
+    assert!(fixture.seat_queue().is_empty());
     assert!(fake.queued_turn_texts().is_empty(), "no second turn/start");
     assert_eq!(codex_standings(&fixture), vec![]);
     let reads = fake.written_on(1, |m| m["method"] == "thread/turns/list");
@@ -2051,6 +2050,40 @@ fn a_codex_turn_a_crash_left_unacknowledged_is_found_in_thread_history() {
             .any(|m| m["method"] == "thread/turns/list" && m["params"]["itemsView"] == "full"),
         "{reads:?}"
     );
+}
+
+/// A successful native write can precede the store transaction that records
+/// its response.  The one prepared head retains the complete frozen vector,
+/// so restart history attributes that vector as a unit rather than searching
+/// for (and losing) its later members as singleton text.
+#[test]
+fn a_codex_cohort_crash_before_receipt_persistence_recovers_the_full_vector() {
+    use crate::waking::ReconcilesQueueDelivery;
+    let mut fixture = NexusFixture::new();
+    let first = from_core(Request::Order("First.".into()));
+    let second = from_core(Request::Question("Second?".into()));
+    fixture.awake_codex_seat(vec![first.clone(), second.clone()]);
+    let fake = FakeAppServer::install(vec![]);
+    fixture.adapter("gpt-sol", &fake);
+    crashed_before_receipt(&fixture);
+    let full_text = canonical_test_payload(&[first, second]);
+    fake.serve_turn_history(
+        1,
+        SEAT_THREAD,
+        true,
+        vec![
+            history_turn("turn-full", "completed", Some(&full_text)),
+            history_turn("turn-before", "completed", None),
+        ],
+    );
+
+    fixture.nexus.recover_deliveries();
+    assert!(fixture.seat_queue().is_empty());
+    assert!(
+        fake.queued_turn_texts().is_empty(),
+        "no duplicate turn/start"
+    );
+    assert_eq!(codex_standings(&fixture), vec![]);
 }
 
 /// The thread is idle but no native user-message receipt identifies the

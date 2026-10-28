@@ -1958,6 +1958,29 @@ impl PerformsWakeAndDrain for RunningNexus {
                     oldest.logical_delivery_id, attempt.attempt_id
                 );
             }
+            // Park first so every member of the one native vector has its
+            // own durable attempt. A successful turn/start response is then
+            // the exact native receipt for that whole run; it need not be
+            // rediscovered by matching text in paged history.
+            let _ = self.store.mark_delivery_uncertain(&attempt.attempt_id);
+            let typed = self.park_cohort(&attempt, &cohort);
+            if let Ok(receipt) = submitted {
+                let run = self.typed_group(&attempt);
+                if matches!(
+                    self.settle_received(
+                        &attempt,
+                        &run,
+                        receipt.turn_id,
+                        receipt.native_receipt,
+                        SeatAfter::InItsTurn,
+                    ),
+                    Reconciled::Settled(..)
+                ) {
+                    self.codex_turns.delivered(&node.session_id);
+                }
+            }
+            drained.extend(typed);
+            return Outcome::Drained(drained);
         } else if let Err(refusal) = self.hand_over(&flow_id, &text) {
             return if absent(format!("{refusal:?}")) {
                 refused(drained, Failed_Data::HerdrRefused)

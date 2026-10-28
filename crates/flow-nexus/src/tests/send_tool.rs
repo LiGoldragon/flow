@@ -1723,9 +1723,10 @@ fn seat_responding(
 }
 
 /// The seat's first turn completion offers both queued requests to its
-/// thread as one payload, in order; both leave the queue, typed once.
+/// thread as one payload, in order. The exact successful turn/start receipt
+/// settles both immediately; no later text-history match is required.
 #[test]
-fn a_codex_first_turn_completion_keeps_requests_until_native_receipts() {
+fn a_codex_first_turn_completion_settles_the_cohort_on_its_native_receipt() {
     let mut fixture = NexusFixture::new();
     let psyche = from_core(Request::Psyche(flow_ethos::Said {
         context: "The living".into(),
@@ -1760,6 +1761,20 @@ fn a_codex_first_turn_completion_keeps_requests_until_native_receipts() {
         "the captured Codex input is the canonical complete vector"
     );
     assert_eq!(fixture.seat_queue(), vec![]);
+    let snapshots = fixture
+        .nexus
+        .store
+        .read_logical_delivery_snapshots(&core(), None)
+        .unwrap();
+    for id in ["seat-0", "seat-1"] {
+        assert!(snapshots.delivery_snapshot_vector.iter().any(|snapshot| {
+            snapshot.logical_delivery_id == id
+                && matches!(
+                    snapshot.delivery_state,
+                    signal_flow::DeliveryState::Delivered(_)
+                )
+        }));
+    }
 }
 
 /// A completion read twice cannot settle a request without native history.

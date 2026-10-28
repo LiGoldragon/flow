@@ -328,11 +328,11 @@ pub trait WatchesCompactions {
 
 impl WatchesCompactions for RunningNexus {
     fn watch_claude_compactions(&self, flow_id: &str) {
-        let configuration = match self.configured_use() {
-            Ok(configured) => configured.snapshot,
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
             _ => return,
         };
-        let floor = compaction_floor(configuration.timings.compaction_watch_margin as u64);
+        let floor = compaction_floor(configured.snapshot.timings.compaction_watch_margin as u64);
         let Ok(Some(node)) = self.store.flow_node(flow_id) else {
             return;
         };
@@ -370,7 +370,7 @@ impl WatchesCompactions for RunningNexus {
                 &node,
                 &compaction.uuid,
                 compaction.pre_tokens,
-                &configuration.texts,
+                &configured.snapshot.texts,
             );
         }
     }

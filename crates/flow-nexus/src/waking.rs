@@ -298,12 +298,28 @@ pub trait SettlesStopsAtConfirmation {
     /// the last event its harness reported is `Stopped`, or, for a Codex
     /// flow, when its thread is resting.
     fn note_stop_at_confirmation(&self, flow_id: &str);
+    fn note_stop_at_confirmation_configured(
+        &self,
+        configured: &crate::ConfiguredUse,
+        flow_id: &str,
+    );
     /// Off the dispatch gate: settles every noted flow's Stop.
     fn settle_stops_at_confirmation(&self);
 }
 
 impl SettlesStopsAtConfirmation for RunningNexus {
     fn note_stop_at_confirmation(&self, flow_id: &str) {
+        let Ok(configured) = self.configured_use() else {
+            return;
+        };
+        self.note_stop_at_confirmation_configured(&configured, flow_id)
+    }
+
+    fn note_stop_at_confirmation_configured(
+        &self,
+        configured: &crate::ConfiguredUse,
+        flow_id: &str,
+    ) {
         // A Claude flow's own Stop, or the main end_turn its transcript
         // records, landed before confirmation stands as its turn end; a
         // Codex flow reports no Stop: its thread's rest, as its app-server's
@@ -802,6 +818,11 @@ trait WakesInParts {
 
 pub(crate) trait ReadsClaudeDelivery {
     fn claude_transcript(&self, node: &FlowNode) -> Option<std::path::PathBuf>;
+    fn claude_transcript_configured(
+        &self,
+        configured: &crate::ConfiguredUse,
+        node: &FlowNode,
+    ) -> Option<std::path::PathBuf>;
     fn claude_main_turn_ended(&self, node: &FlowNode) -> bool;
     fn claude_main_turn_ended_configured(
         &self,
@@ -827,8 +848,16 @@ pub(crate) trait ReadsClaudeDelivery {
 
 impl ReadsClaudeDelivery for RunningNexus {
     fn claude_transcript(&self, node: &FlowNode) -> Option<std::path::PathBuf> {
-        self.configured_use()
-            .ok()?
+        let configured = self.configured_use().ok()?;
+        self.claude_transcript_configured(&configured, node)
+    }
+
+    fn claude_transcript_configured(
+        &self,
+        configured: &crate::ConfiguredUse,
+        node: &FlowNode,
+    ) -> Option<std::path::PathBuf> {
+        configured
             .herdr
             .native_transcript_root(&HarnessKind::Claude, "")
             .ok()?

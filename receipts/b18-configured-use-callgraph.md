@@ -24,3 +24,15 @@ rg -n '\.configured_use\(\)' crates/flow-nexus/src -g'*.rs' | grep -v '/tests/'
 The unrestricted launch convenience methods `start`, `settled`, `settle`, `replace`, `reap`, `confirmed`, and `resume_reaping` are removed. The unrestricted requirement and successor-refresh methods are removed. Their internal callgraph accepts `&ConfiguredUse`: requirements → fresh launch → compose/open/spawn/bind/title/submit → confirm → settle → replace/reap; queued drain → target/readiness/placement/reconciliation; lifecycle refresh → successor replace → original-resource close.
 
 A resource view carries the one shared ownership registry. Current configuration selects new I/O; the registry selects the exact original backend and pidfd for an existing resource. Missing or mismatched authority is a typed refusal.
+
+## Herdr-only acquisition boundaries
+
+A second mechanical scan is required:
+
+```
+rg -n 'herdr_operation_view\(\)' crates/flow-nexus/src -g'*.rs' | grep -v '/tests/'
+```
+
+Its remaining sites are the public caller, delivery, peer and repair effects. Nested paths use their `_with` forms and the `HerdrCli` already owned by the enclosing `ConfiguredUse`; for example metaflow peer identification calls `bound_caller_with(&configured.herdr, ...)` rather than reacquiring a Herdr view.
+
+The provider remains crate-visible while Rust modules hold several external entry implementations. Compile enforcement is presently at the removed unrestricted effect methods and their configured-only nested callgraph; crate-level provider visibility is recorded here rather than represented as a completed stronger visibility boundary.

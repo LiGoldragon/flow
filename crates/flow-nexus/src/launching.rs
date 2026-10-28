@@ -1271,7 +1271,7 @@ impl ResumesReplacement for RunningNexus {
                 // A Stop that landed before this commit found the seat
                 // unconfirmed and left it; it is settled once the gate is
                 // released.
-                self.note_stop_at_confirmation(flow_id);
+                self.note_stop_at_confirmation_configured(configured, flow_id);
                 Response::Started(started)
             }
             Outcome::Failed(Failed_Data::Unstarted) => {

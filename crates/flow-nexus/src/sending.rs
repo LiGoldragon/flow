@@ -792,7 +792,11 @@ impl BindsSeats for RunningNexus {
 /// A direct reply is based on native receipt evidence, never admission,
 /// placement, an interrupt, or a successful bridge submission.
 pub(crate) trait CompletesDirectSends {
-    fn direct_receipt_watch(&self, address: &Address) -> Option<notify::RecommendedWatcher>;
+    fn direct_receipt_watch(
+        &self,
+        configured: &crate::ConfiguredUse,
+        address: &Address,
+    ) -> Option<notify::RecommendedWatcher>;
     /// The caller holds the dispatch gate until admission completes. None
     /// while the metaflow is held, by a refresh, a threshold refresh
     /// starting its successor or a waking: the request is then queued on
@@ -806,7 +810,11 @@ pub(crate) trait CompletesDirectSends {
 }
 
 impl CompletesDirectSends for RunningNexus {
-    fn direct_receipt_watch(&self, address: &Address) -> Option<notify::RecommendedWatcher> {
+    fn direct_receipt_watch(
+        &self,
+        configured: &crate::ConfiguredUse,
+        address: &Address,
+    ) -> Option<notify::RecommendedWatcher> {
         use crate::store::{AnnouncesLaunchChanges, ReadsFlowRows};
         use crate::waking::ReadsClaudeDelivery;
         use notify::Watcher;
@@ -907,21 +915,22 @@ impl CompletesDirectSends for RunningNexus {
         use crate::store::AnnouncesLaunchChanges;
         use signal_flow::{DeliveryState, SendFailure, SendFailureReason, SendReceipt};
         use std::time::{Duration, Instant};
-        let send_wait = match self.configured_use() {
-            Ok(configured) => configured.snapshot.timings.send_wait,
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
             Err(error) => {
                 return Response::Refused(Refusal::Store(error.to_string())).into();
             }
         };
+        let send_wait = configured.snapshot.timings.send_wait;
         // A configured sleeping recipient starts through the existing
         // fresh Curriculum composition. The Address lease prevents another
         // wake or submission while this direct operation owns its request.
         if self.live_awake_flow(address).is_none() {
-            let _ = self.wake(address.clone());
+            let _ = self.wake_configured(&configured, address.clone());
         }
         // Subscribe before input. File events only schedule the existing
         // exact session/inode/cursor/content correlation, never delivery.
-        let _receipt_watch = self.direct_receipt_watch(address);
+        let _receipt_watch = self.direct_receipt_watch(&configured, address);
         let outcome = {
             let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
             self.drain_all(address.clone())
@@ -935,7 +944,7 @@ impl CompletesDirectSends for RunningNexus {
             let state = {
                 let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
                 if let Ok(Some(attempt)) = self.store.outstanding_delivery(address) {
-                    let _ = self.reconcile_delivery(&attempt);
+                    let _ = self.reconcile_delivery_configured(&configured, &attempt);
                 }
                 self.store.logical_delivery_snapshot(&logical_id)
             };
@@ -965,7 +974,7 @@ impl CompletesDirectSends for RunningNexus {
             // final correlated reconciliation follows the bounded event
             // wait; timeout alone is never evidence of absence.
             if let Ok(Some(attempt)) = self.store.outstanding_delivery(address) {
-                let _ = self.reconcile_delivery(&attempt);
+                let _ = self.reconcile_delivery_configured(&configured, &attempt);
             }
             self.store
                 .finish_failed_direct(address, &logical_id, &observed)

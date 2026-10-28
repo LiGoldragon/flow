@@ -61,7 +61,7 @@ impl IdentifiesPeerProcess for RunningNexus {
         if !FlowStore::process_is_live(&process) {
             return unidentified();
         }
-        let Ok(caller) = self.bound_caller(&pane) else {
+        let Ok(caller) = self.bound_caller_with(&configured.herdr, &pane) else {
             return unidentified();
         };
         match self.store.metaflow_awake_as(&caller.flow_id)? {
@@ -149,7 +149,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
             let launched = u32::try_from(peer.pid)
                 .ok()
                 .and_then(|process_id| CallerProcess { process_id }.caller_pane(&configured.herdr))
-                .and_then(|pane| self.bound_caller(&pane).ok())
+                .and_then(|pane| self.bound_caller_with(&configured.herdr, &pane).ok())
                 .map(|caller| caller.flow_id);
             return match self.store.bind_metaflow(binding, peer, launched) {
                 Ok(response) => response.into(),

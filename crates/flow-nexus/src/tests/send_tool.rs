@@ -1554,7 +1554,7 @@ fn core_primary() -> Address {
 }
 
 #[test]
-fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
+fn tool_send_to_a_primary_preserves_each_authenticated_sender() {
     let fixture = NexusFixture::new();
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: core_primary(),
@@ -1602,15 +1602,7 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
             0,
         )
         .unwrap();
-    assert_eq!(
-        unauthorized,
-        SendOutcome::Refused(SendRefusal::PrimaryRequiresOwnSecondary(
-            signal_flow::PrimaryRouteRefused {
-                sender_address: unauthorized_sender.clone(),
-                target_address: core_primary(),
-            }
-        ))
-    );
+    assert!(matches!(unauthorized, SendOutcome::Accepted(_)));
     let queued = fixture
         .nexus
         .store
@@ -1618,11 +1610,16 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
         .unwrap()
         .unwrap()
         .queue;
-    assert_eq!(queued.len(), 1);
+    assert_eq!(queued.len(), 2);
     assert_eq!(queued[0].sent_by, SentBy::Sender(core()));
     assert_eq!(
         queued[0].message,
         Message::Soft(Request::Question("source".into()))
+    );
+    assert_eq!(queued[1].sent_by, SentBy::Sender(unauthorized_sender));
+    assert_eq!(
+        queued[1].message,
+        Message::Soft(Request::Question("must not enter".into()))
     );
 }
 

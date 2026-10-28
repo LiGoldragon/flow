@@ -1099,6 +1099,13 @@ pub(crate) struct StoredMetaflowProcessV1 {
     address: Address,
 }
 
+pub(crate) enum ProcessSenderResolution {
+    NoBinding,
+    MissingFlowIdentity,
+    StaleFlowIdentity,
+    Sender(meta_signal_flow::Sender),
+}
+
 impl EngineRecord for StoredMetaflowProcessV1 {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(FlowStore::address_record_key(&self.address))
@@ -6265,7 +6272,7 @@ pub(crate) trait ManagesMetaflowState: Sized {
     fn identify_process_sender(
         &self,
         process: Process,
-    ) -> Result<Option<meta_signal_flow::Sender>, StoreError>;
+    ) -> Result<ProcessSenderResolution, StoreError>;
     fn release_metaflow_lock(
         &self,
         lock: Lock,
@@ -6442,10 +6449,10 @@ impl ManagesMetaflowState for FlowStore {
     fn identify_process_sender(
         &self,
         process: Process,
-    ) -> Result<Option<meta_signal_flow::Sender>, StoreError> {
+    ) -> Result<ProcessSenderResolution, StoreError> {
         let lineage = FlowStore::process_lineage(&process);
         if lineage.is_empty() {
-            return Ok(None);
+            return Ok(ProcessSenderResolution::NoBinding);
         }
         for ancestor in lineage {
             let rows = self
@@ -6457,20 +6464,20 @@ impl ManagesMetaflowState for FlowStore {
                 continue;
             };
             let Some(flow_id) = binding.flow_id_option.clone() else {
-                return Ok(None);
+                return Ok(ProcessSenderResolution::MissingFlowIdentity);
             };
             let Some(stored) = self.stored_metaflow(&binding.address)? else {
-                return Ok(None);
+                return Ok(ProcessSenderResolution::StaleFlowIdentity);
             };
             if stored.metaflow.state != MetaflowState::Awake(flow_id.clone()) {
-                return Ok(None);
+                return Ok(ProcessSenderResolution::StaleFlowIdentity);
             }
-            return Ok(Some(meta_signal_flow::Sender {
+            return Ok(ProcessSenderResolution::Sender(meta_signal_flow::Sender {
                 address: binding.address.clone(),
                 flow_id,
             }));
         }
-        Ok(None)
+        Ok(ProcessSenderResolution::NoBinding)
     }
 
     fn release_metaflow_lock(

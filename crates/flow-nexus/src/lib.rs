@@ -6189,6 +6189,25 @@ mod tests {
             send(Recipient::Up, Request::Result("done".into()), &peer),
             Response::SendAccepted(_)
         ));
+        assert!(matches!(
+            send(
+                Recipient::Address(sibling_primary.clone()),
+                Request::Question("cross-topic Primary".into()),
+                &peer,
+            ),
+            Response::SendAccepted(_)
+        ));
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .metaflow(&sibling_primary)
+                .unwrap()
+                .unwrap()
+                .queue
+                .len(),
+            1
+        );
         assert_eq!(
             fixture
                 .nexus

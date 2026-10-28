@@ -758,11 +758,11 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
     }
 }
 
-/// A Primary accepts only its own Secondary. A current admission always has
-/// an authenticated Sender, so neither a Primary nor another topic's
-/// Secondary can enter its queue unsigned.
+/// A current admission always has an authenticated Sender. A Primary remains
+/// reachable from another Primary and another topic's Secondary; the layer
+/// is not an admission policy.
 #[test]
-fn a_send_to_a_primary_refuses_every_sender_but_its_own_secondary() {
+fn a_send_to_a_primary_keeps_every_authenticated_sender() {
     use crate::store::logical_delivery::RecordsLogicalDeliveries as _;
     let fixture = NexusFixture::new();
     let primary = |topic: &str| Address {
@@ -795,21 +795,11 @@ fn a_send_to_a_primary_refuses_every_sender_but_its_own_secondary() {
                     Message::Soft(request),
                     None,
                 )
-                .expect("admission is decided before mutating the queue");
-            if sender == seat_address() {
-                assert!(
-                    matches!(response, Response::SendAccepted(_)),
-                    "{response:?}"
-                );
-            } else {
-                assert!(
-                    matches!(
-                        response,
-                        Response::Refused(Refusal::PrimaryRequiresOwnSecondary(_))
-                    ),
-                    "{sender:?}: {response:?}"
-                );
-            }
+                .expect("authenticated admission is decided");
+            assert!(
+                matches!(response, Response::SendAccepted(_)),
+                "{response:?}"
+            );
         }
     }
     assert_eq!(
@@ -821,8 +811,8 @@ fn a_send_to_a_primary_refuses_every_sender_but_its_own_secondary() {
             .unwrap()
             .queue
             .len(),
-        2,
-        "only the own Secondary's two requests enter"
+        4,
+        "both authenticated senders' requests enter"
     );
 }
 

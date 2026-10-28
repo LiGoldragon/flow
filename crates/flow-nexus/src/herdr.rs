@@ -1825,6 +1825,125 @@ mod tests {
     }
 
     #[test]
+    fn a_reused_pid_identity_refuses_without_signalling_or_closing_the_pane() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let mut process = Command::new("sh")
+            .args([
+                "-c",
+                "trap '' TERM; while :; do sleep 1; done",
+                "claude",
+                "--session-id",
+                "native-session",
+            ])
+            .spawn()
+            .unwrap();
+        let actual_start = super::process_start(process.id()).unwrap();
+        let process_executable =
+            std::fs::canonicalize(format!("/proc/{}/exe", process.id())).unwrap();
+        // SAFETY: pidfd_open has no pointer arguments. The retained record
+        // owns this descriptor until the adapter is dropped.
+        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, process.id(), 0) as i32 };
+        assert!(pidfd >= 0);
+
+        let closed = root.path().join("closed");
+        let herdr = root.path().join("herdr");
+        std::fs::write(
+            &herdr,
+            format!(
+                "#!/bin/sh\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{{\"result\":{{\"snapshot\":{{\"agents\":[],\"panes\":[{{\"pane_id\":\"w1:p2\",\"terminal_id\":\"term-current\"}}]}}}}}}' ;;\n  \"pane close\") touch '{}' ;;\nesac\n",
+                closed.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&herdr).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&herdr, permissions).unwrap();
+        let adapter = HerdrCli::at(herdr, root.path().join("flows"));
+        adapter
+            .flow_owned_claude_processes
+            .lock()
+            .unwrap()
+            .insert(
+                route().herdr_pane_id.clone(),
+                super::OwnedClaudeProcess {
+                    process_id: process.id(),
+                    process_start: actual_start + 1,
+                    process_executable: process_executable.clone(),
+                    configured_executable: process_executable,
+                    session_id: "native-session".into(),
+                    pidfd,
+                },
+            );
+        let node = FlowNode {
+            flow_id: "owner".into(),
+            session_id: "native-session".into(),
+            harness_kind: HarnessKind::Claude,
+            endpoint_selection: EndpointSelection::Unavailable,
+            herdr_route_selection: HerdrRouteSelection::Available(route()),
+            origin: Origin::Flow(FlowOrigin {
+                flow_id: "owner".into(),
+                session_id: "native-session".into(),
+            }),
+            flow_lifecycle: FlowLifecycle::Active,
+        };
+
+        assert_eq!(
+            adapter.close(&node),
+            signal_flow::PaneCloseOutcome::Refused(
+                signal_flow::PaneCloseFailure::IdentityMismatch
+            )
+        );
+        assert!(process.try_wait().unwrap().is_none());
+        assert!(!closed.exists());
+        process.kill().unwrap();
+        process.wait().unwrap();
+    }
+
+    #[test]
+    fn a_lost_retained_process_identity_refuses_without_closing_the_pane() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let closed = root.path().join("closed");
+        let herdr = root.path().join("herdr");
+        std::fs::write(
+            &herdr,
+            format!(
+                "#!/bin/sh\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{{\"result\":{{\"snapshot\":{{\"agents\":[],\"panes\":[{{\"pane_id\":\"w1:p2\",\"terminal_id\":\"term-current\"}}]}}}}}}' ;;\n  \"pane close\") touch '{}' ;;\nesac\n",
+                closed.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&herdr).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&herdr, permissions).unwrap();
+        let mut adapter = HerdrCli::at(herdr, root.path().join("flows"));
+        adapter.fixture_unretained_claude = false;
+        let node = FlowNode {
+            flow_id: "owner".into(),
+            session_id: "native-session".into(),
+            harness_kind: HarnessKind::Claude,
+            endpoint_selection: EndpointSelection::Unavailable,
+            herdr_route_selection: HerdrRouteSelection::Available(route()),
+            origin: Origin::Flow(FlowOrigin {
+                flow_id: "owner".into(),
+                session_id: "native-session".into(),
+            }),
+            flow_lifecycle: FlowLifecycle::Active,
+        };
+
+        assert_eq!(
+            adapter.close(&node),
+            signal_flow::PaneCloseOutcome::Refused(
+                signal_flow::PaneCloseFailure::IdentityUnavailable
+            )
+        );
+        assert!(!closed.exists());
+    }
+
+    #[test]
     fn a_stop_wait_outside_poll_range_is_refused_without_signalling() {
         let mut process = Command::new("sleep").arg("60").spawn().unwrap();
         assert_eq!(

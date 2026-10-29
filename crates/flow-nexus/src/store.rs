@@ -11,6 +11,7 @@ pub mod context;
 mod created_pane;
 pub mod delivery;
 pub mod events;
+mod full_configuration;
 pub(crate) mod harness;
 pub(crate) mod launch_cleanup;
 pub(crate) mod logical_delivery;
@@ -65,7 +66,7 @@ use meta_signal_flow::{
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, DatabaseMarker, Decision, Engine, EngineOpen, EngineRecord, FamilyName,
+    Assertion, AtomicCommit, DatabaseMarker, Decision, Engine, EngineOpen, EngineRecord, FamilyName,
     KeyedMutation, MemoryDefinition, MemoryUpgrades, MemoryVersion, QueryPlan, RecordKey,
     Retraction, SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
     TableRegistration, UpgradeFrom, UpgradeOutcome,
@@ -359,6 +360,8 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_logical_delivery_current",
     "flow_nexus_logical_delivery_events",
     "flow_nexus_simplified_reply_bindings",
+    "flow_nexus_full_configuration_state",
+    "flow_nexus_full_configuration_receipts",
 ];
 /// The tables a configuration-only store may hold beside its own, each
 /// added by a later Flow.
@@ -372,6 +375,8 @@ const CONFIGURATION_ONLY_ADDED_TABLES: &[&str] = &[
     "flow_nexus_meta_timings_configuration",
     "flow_nexus_meta_limits_configuration",
     "flow_nexus_meta_texts_configuration",
+    "flow_nexus_full_configuration_state",
+    "flow_nexus_full_configuration_receipts",
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -5135,6 +5140,8 @@ pub(crate) struct MetaConfigurationTables {
     timings: TableReference<timings_limits::StoredTimings>,
     limits: TableReference<timings_limits::StoredLimits>,
     texts: TableReference<texts::StoredTexts>,
+    full_state: TableReference<full_configuration::StoredFullConfigurationState>,
+    full_receipts: TableReference<full_configuration::StoredFullConfigurationReceipt>,
 }
 
 trait RegistersMetaConfigurationTables: Sized {
@@ -5145,7 +5152,7 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
     fn register(engine: &mut Engine) -> Result<Self, StoreError> {
         let thresholds =
             engine.upgraded_thresholds(StoredMetaThresholdConfiguration::descriptor())?;
-        Ok(Self {
+        let tables = Self {
             nexus: engine
                 .upgraded_nexus_configuration(StoredMetaNexusConfiguration::descriptor())?,
             harnesses: engine.upgraded_harnesses(harness::StoredHarness::descriptor())?,
@@ -5159,15 +5166,22 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             timings: engine.upgraded_timings(timings_limits::timings_descriptor())?,
             limits: engine.register_limits()?,
             texts: engine.register_texts()?,
+            full_state: engine.register_table(full_configuration::state_descriptor())?,
+            full_receipts: engine.register_table(full_configuration::receipt_descriptor())?,
             metaflows: engine.upgraded_metaflow_declarations(
                 <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor(),
             )?,
-        })
+        };
+        if engine.match_records(QueryPlan::all(tables.full_state))?.records().is_empty() {
+            engine.assert(Assertion::new(tables.full_state, full_configuration::StoredFullConfigurationState { revision: 0 }))?;
+        }
+        Ok(tables)
     }
 }
 
 pub struct FlowStore {
     engine: Engine,
+    configuration_guard: Mutex<()>,
     native_owner_environment_override: Option<NativeOwnerEnvironment>,
     flows: TableReference<FlowRecord>,
     native_owner_proofs: TableReference<NativeOwnerProofRecord>,
@@ -5223,6 +5237,7 @@ impl SetsNativeOwnerEnvironmentForTests for FlowStore {
 /// listener owns the meta socket.
 pub struct ConfigurationOnlyStore {
     engine: Engine,
+    configuration_guard: Mutex<()>,
     configuration: TableReference<FlowStoreConfiguration>,
     meta_configuration_tables: MetaConfigurationTables,
 }
@@ -5238,6 +5253,8 @@ pub trait ConfiguresOnlyStore: Sized {
     ) -> Result<(meta_signal_flow::Timings, meta_signal_flow::Limits), StoreError>;
     fn configure_change(&self, change: ConfigurationChange)
     -> Result<ConfigureOutcome, StoreError>;
+    fn configure_full(&self, request: meta_signal_flow::FullConfigurationRequest)
+    -> Result<meta_signal_flow::FullConfigurationReceipt, StoreError>;
     fn configure_entry(&self, entry: ConfigurationEntry) -> Result<ConfigureOutcome, StoreError>;
     fn remove_entry(&self, key: EntryKey) -> Result<ConfigureOutcome, StoreError>;
 }
@@ -5284,6 +5301,8 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let timings_descriptor = timings_limits::timings_descriptor();
         let limits_descriptor = timings_limits::limits_descriptor();
         let texts_descriptor = texts::texts_descriptor();
+        let full_state_descriptor = full_configuration::state_descriptor();
+        let full_receipt_descriptor = full_configuration::receipt_descriptor();
         if recognized {
             FlowStore::migrate_retired_leave_outs(path)?;
             FlowStore::drop_retired_tables(path)?;
@@ -5304,7 +5323,9 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_metaflows_descriptor)
                 .with_family(&timings_descriptor)
                 .with_family(&limits_descriptor)
-                .with_family(&texts_descriptor),
+                .with_family(&texts_descriptor)
+                .with_family(&full_state_descriptor)
+                .with_family(&full_receipt_descriptor),
         )?;
         let state = engine.register_table(state_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
@@ -5319,7 +5340,12 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             timings: engine.upgraded_timings(timings_descriptor)?,
             limits: engine.register_limits()?,
             texts: engine.register_texts()?,
+            full_state: engine.register_table(full_state_descriptor)?,
+            full_receipts: engine.register_table(full_receipt_descriptor)?,
         };
+        if engine.match_records(QueryPlan::all(meta_configuration_tables.full_state))?.records().is_empty() {
+            engine.assert(Assertion::new(meta_configuration_tables.full_state, full_configuration::StoredFullConfigurationState { revision: 0 }))?;
+        }
         if !recognized {
             let defaults = DefaultConfiguration::from_environment();
             let source_root = defaults.source_root();
@@ -5377,6 +5403,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         }
         Ok(Self {
             engine,
+            configuration_guard: Mutex::new(()),
             configuration,
             meta_configuration_tables,
         })
@@ -5410,6 +5437,11 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         change: ConfigurationChange,
     ) -> Result<ConfigureOutcome, StoreError> {
         FlowStore::configure_meta_change(&self.engine, &self.meta_configuration_tables, change)
+    }
+
+    fn configure_full(&self, request: meta_signal_flow::FullConfigurationRequest) -> Result<meta_signal_flow::FullConfigurationReceipt, StoreError> {
+        let _guard = self.configuration_guard.lock().unwrap_or_else(|e| e.into_inner());
+        <FlowStore as ReadsFlowMemory>::configure_full(&self.engine, &self.meta_configuration_tables, request)
     }
 
     fn configure_entry(&self, entry: ConfigurationEntry) -> Result<ConfigureOutcome, StoreError> {
@@ -5823,6 +5855,8 @@ impl OpensFlowStore for FlowStore {
         let timings_descriptor = timings_limits::timings_descriptor();
         let limits_descriptor = timings_limits::limits_descriptor();
         let texts_descriptor = texts::texts_descriptor();
+        let full_state_descriptor = full_configuration::state_descriptor();
+        let full_receipt_descriptor = full_configuration::receipt_descriptor();
         let events_descriptor = <events::FlowEvents as events::DescribesEventTable>::descriptor();
         let context_sizes_descriptor =
             <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor();
@@ -5864,6 +5898,8 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&timings_descriptor)
                 .with_family(&limits_descriptor)
                 .with_family(&texts_descriptor)
+                .with_family(&full_state_descriptor)
+                .with_family(&full_receipt_descriptor)
                 .with_family(&compactions_descriptor)
                 .with_family(&successor_intents_descriptor)
                 .with_family(&<metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor())
@@ -5926,6 +5962,7 @@ impl OpensFlowStore for FlowStore {
             LogicalDeliveryTables::register(&mut engine, logical_delivery_descriptors)?;
         let store = Self {
             engine,
+            configuration_guard: Mutex::new(()),
             native_owner_environment_override: None,
             flows,
             native_owner_proofs,
@@ -6158,6 +6195,7 @@ impl OpensFlowStore for FlowStore {
             LogicalDeliveryTables::register(&mut engine, LogicalDeliveryTables::descriptors())?;
         let store = Self {
             engine,
+            configuration_guard: Mutex::new(()),
             native_owner_environment_override: None,
             flows,
             native_owner_proofs,
@@ -6267,6 +6305,8 @@ pub(crate) trait ManagesMetaflowState: Sized {
     /// Replace one configuration family whole with its declaration.
     fn configure_change(&self, change: ConfigurationChange)
     -> Result<ConfigureOutcome, StoreError>;
+    fn configure_full(&self, request: meta_signal_flow::FullConfigurationRequest)
+    -> Result<meta_signal_flow::FullConfigurationReceipt, StoreError>;
     fn configure_entry(&self, entry: ConfigurationEntry) -> Result<ConfigureOutcome, StoreError>;
     fn remove_entry(&self, key: EntryKey) -> Result<ConfigureOutcome, StoreError>;
     /// The refresh threshold configured for one model, if any.
@@ -6319,6 +6359,11 @@ impl ManagesMetaflowState for FlowStore {
         change: ConfigurationChange,
     ) -> Result<ConfigureOutcome, StoreError> {
         FlowStore::configure_meta_change(&self.engine, &self.meta_configuration_tables, change)
+    }
+
+    fn configure_full(&self, request: meta_signal_flow::FullConfigurationRequest) -> Result<meta_signal_flow::FullConfigurationReceipt, StoreError> {
+        let _guard = self.configuration_guard.lock().unwrap_or_else(|e| e.into_inner());
+        <FlowStore as ReadsFlowMemory>::configure_full(&self.engine, &self.meta_configuration_tables, request)
     }
 
     fn configure_entry(&self, entry: ConfigurationEntry) -> Result<ConfigureOutcome, StoreError> {
@@ -9092,6 +9137,12 @@ pub(crate) trait ReadsFlowMemory {
                     texts::StoredTexts::schema_hash(),
                 ));
             }
+            "flow_nexus_full_configuration_state" => {
+                return Some(("flow-nexus-full-configuration-state", full_configuration::StoredFullConfigurationState::schema_hash()));
+            }
+            "flow_nexus_full_configuration_receipts" => {
+                return Some(("flow-nexus-full-configuration-receipt", full_configuration::StoredFullConfigurationReceipt::schema_hash()));
+            }
             "flow_nexus_flow_events" => (events::FLOW_EVENT_FAMILY, events::FLOW_EVENT_SCHEMA),
             "flow_nexus_flow_context_sizes" => (
                 context::FLOW_CONTEXT_SIZE_FAMILY,
@@ -10041,6 +10092,96 @@ pub(crate) trait ReadsFlowMemory {
         }
         engine.commit_atomic(commit)?;
         Ok(ConfigureOutcome::Replaced)
+    }
+
+    fn append_configuration_family<T>(
+        engine: &Engine,
+        table: TableReference<T>,
+        declared: Vec<T>,
+        mut commit: AtomicCommit,
+    ) -> Result<(AtomicCommit, bool), StoreError>
+    where
+        T: sema_engine::EngineStoredRecord + PartialEq + Clone + Send + Sync + 'static,
+        <T as rkyv::Archive>::Archived: rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
+            + for<'validation> rkyv::bytecheck::CheckBytes<rkyv::rancor::Strategy<rkyv::validation::Validator<rkyv::validation::archive::ArchiveValidator<'validation>, rkyv::validation::shared::SharedValidator>, rkyv::rancor::Error>>,
+    {
+        let keys = declared.iter().map(EngineRecord::record_key).collect::<Vec<_>>();
+        if keys.iter().enumerate().any(|(i, key)| keys[..i].contains(key)) { return Err(StoreError::DuplicateConfigurationEntry); }
+        let stored = engine.match_records(QueryPlan::all(table))?.records().to_vec();
+        let mut changed = false;
+        for row in &stored { if !keys.contains(&row.record_key()) { commit = commit.retract(table, row.record_key()); changed = true; } }
+        for row in declared {
+            match stored.iter().find(|old| old.record_key() == row.record_key()) {
+                Some(old) if old == &row => {}
+                Some(_) => { commit = commit.mutate(table, row); changed = true; }
+                None => { commit = commit.assert(table, row); changed = true; }
+            }
+        }
+        Ok((commit, changed))
+    }
+
+    fn configure_full(
+        engine: &Engine,
+        tables: &MetaConfigurationTables,
+        request: meta_signal_flow::FullConfigurationRequest,
+    ) -> Result<meta_signal_flow::FullConfigurationReceipt, StoreError> {
+        use meta_signal_flow::{FullConfigurationDisposition as Disposition, Historical};
+        let existing = engine.match_records(QueryPlan::key(
+            tables.full_receipts,
+            RecordKey::new(&request.configuration_request_id),
+        ))?;
+        if let [stored] = existing.records() {
+            if stored.request == request {
+                let mut receipt = stored.receipt.clone();
+                receipt.historical = Historical::Replay;
+                return Ok(receipt);
+            }
+            return Ok(meta_signal_flow::FullConfigurationReceipt {
+                full_configuration_request: request,
+                observed_revision: stored.receipt.resulting_revision,
+                resulting_revision: stored.receipt.resulting_revision,
+                full_configuration_disposition: Disposition::IdentifierConflict,
+                historical: Historical::Replay,
+            });
+        } else if !existing.records().is_empty() { return Err(StoreError::StateInvariant); }
+        let state = engine.match_records(QueryPlan::all(tables.full_state))?;
+        let [state] = state.records() else { return Err(StoreError::StateInvariant) };
+        let observed = state.revision;
+        let candidate = &request.full_configuration;
+        let current = FlowStore::meta_configuration_snapshot(engine, tables)?.ok_or(StoreError::NotConfigured)?;
+        let equal = current.configured_harnesses == candidate.harnesses
+            && current.configured_models == candidate.models
+            && current.configured_thresholds == candidate.thresholds
+            && current.configured_nexus == candidate.nexus
+            && current.configured_send_servers == candidate.send_servers
+            && current.configured_metaflows == candidate.metaflows
+            && current.configured_investigation == candidate.investigation
+            && current.timings == candidate.timings && current.limits == candidate.limits && current.texts == candidate.texts;
+        let (disposition, resulting) = if request.configuration_revision != observed {
+            (Disposition::Stale(observed), observed)
+        } else if equal { (Disposition::Unchanged, observed) } else { (Disposition::Replaced, observed + 1) };
+        let receipt = meta_signal_flow::FullConfigurationReceipt {
+            full_configuration_request: request.clone(), observed_revision: observed,
+            resulting_revision: resulting, full_configuration_disposition: disposition.clone(), historical: Historical::New,
+        };
+        let mut commit = engine.begin_atomic_commit();
+        if matches!(disposition, Disposition::Replaced) {
+            macro_rules! family { ($table:expr, $rows:expr) => {{ let next = FlowStore::append_configuration_family(engine, $table, $rows, commit)?; commit = next.0; }} }
+            family!(tables.harnesses, candidate.harnesses.iter().cloned().map(|harness| harness::StoredHarness { harness }).collect());
+            family!(tables.models, candidate.models.iter().cloned().map(|model| StoredMetaModelConfiguration { model }).collect());
+            family!(tables.thresholds, candidate.thresholds.iter().cloned().map(|threshold| StoredMetaThresholdConfiguration { threshold }).collect());
+            family!(tables.nexus, vec![StoredMetaNexusConfiguration { nexus: candidate.nexus.clone() }]);
+            family!(tables.send_servers, candidate.send_servers.iter().cloned().map(|send_server| send_server::StoredMetaSendServerConfiguration { send_server }).collect());
+            family!(tables.metaflows, candidate.metaflows.iter().cloned().map(|metaflow| metaflow_declaration::StoredMetaMetaflowConfiguration { metaflow }).collect());
+            family!(tables.investigation, candidate.investigation.iter().cloned().map(|investigation| StoredMetaInvestigationConfiguration { investigation }).collect());
+            family!(tables.timings, vec![timings_limits::StoredTimings { timings: candidate.timings.clone() }]);
+            family!(tables.limits, vec![timings_limits::StoredLimits { limits: candidate.limits.clone() }]);
+            family!(tables.texts, vec![texts::StoredTexts { texts: candidate.texts.clone() }]);
+            commit = commit.mutate(tables.full_state, full_configuration::StoredFullConfigurationState { revision: resulting });
+        }
+        commit = commit.assert(tables.full_receipts, full_configuration::StoredFullConfigurationReceipt { request, receipt: receipt.clone() });
+        engine.commit_atomic(commit)?;
+        Ok(receipt)
     }
 
     /// One declared configuration family replaces the committed family

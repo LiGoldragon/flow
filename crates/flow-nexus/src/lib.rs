@@ -721,11 +721,10 @@ impl Dispatches for RunningNexus {
             meta_signal_flow::Query::Configure(change) => {
                 configured_response(self.store.configure_change(change))
             }
-            meta_signal_flow::Query::FullConfigure(_) => meta_signal_flow::Response::Refused(
-                meta_signal_flow::StoreRefusal::Store(
-                    "full configuration transaction is unavailable".into(),
-                ),
-            ),
+            meta_signal_flow::Query::FullConfigure(request) => match self.store.configure_full(request) {
+                Ok(receipt) => meta_signal_flow::Response::FullConfigured(receipt),
+                Err(error) => meta_signal_flow::Response::Refused(meta_signal_flow::StoreRefusal::Store(error.to_string())),
+            },
             meta_signal_flow::Query::ConfigureEntry(entry) => {
                 configured_response(self.store.configure_entry(entry))
             }

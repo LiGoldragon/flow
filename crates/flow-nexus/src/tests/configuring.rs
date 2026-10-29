@@ -305,6 +305,92 @@ fn configure(nexus: &RunningNexus, change: ConfigurationChange) -> MetaResponse 
     nexus.dispatch_meta(meta_signal_flow::Query::Configure(change))
 }
 
+fn full_candidate(nexus: &RunningNexus) -> meta_signal_flow::FullConfiguration {
+    let value = snapshot(nexus);
+    meta_signal_flow::FullConfiguration {
+        harnesses: value.configured_harnesses,
+        models: value.configured_models,
+        thresholds: value.configured_thresholds,
+        nexus: value.configured_nexus,
+        send_servers: value.configured_send_servers,
+        metaflows: value.configured_metaflows,
+        investigation: value.configured_investigation,
+        timings: value.timings,
+        limits: value.limits,
+        texts: value.texts,
+    }
+}
+
+#[test]
+fn full_configuration_receipts_bind_exact_requests_before_revision_decisions() {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let candidate = full_candidate(&nexus);
+    let request = meta_signal_flow::FullConfigurationRequest {
+        configuration_request_id: "full-1".into(), configuration_revision: 0,
+        full_configuration: candidate.clone(),
+    };
+    let MetaResponse::FullConfigured(first) = nexus.dispatch_meta(meta_signal_flow::Query::FullConfigure(request.clone())) else { panic!("full configured") };
+    assert!(matches!(first.full_configuration_disposition, meta_signal_flow::FullConfigurationDisposition::Unchanged));
+    assert_eq!(first.resulting_revision, 0);
+    let MetaResponse::FullConfigured(replay) = nexus.dispatch_meta(meta_signal_flow::Query::FullConfigure(request)) else { panic!("replayed") };
+    assert!(matches!(replay.historical, meta_signal_flow::Historical::Replay));
+    let mut different = candidate;
+    different.timings.send_wait += 1;
+    let conflict = meta_signal_flow::FullConfigurationRequest { configuration_request_id: "full-1".into(), configuration_revision: 0, full_configuration: different };
+    let MetaResponse::FullConfigured(conflict) = nexus.dispatch_meta(meta_signal_flow::Query::FullConfigure(conflict)) else { panic!("conflict") };
+    assert!(matches!(conflict.full_configuration_disposition, meta_signal_flow::FullConfigurationDisposition::IdentifierConflict));
+}
+
+#[test]
+fn full_configuration_checks_stale_before_equal_and_replaces_once() {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let candidate = full_candidate(&nexus);
+    let stale = meta_signal_flow::FullConfigurationRequest { configuration_request_id: "stale".into(), configuration_revision: 7, full_configuration: candidate.clone() };
+    let MetaResponse::FullConfigured(stale) = nexus.dispatch_meta(meta_signal_flow::Query::FullConfigure(stale)) else { panic!("stale") };
+    assert!(matches!(stale.full_configuration_disposition, meta_signal_flow::FullConfigurationDisposition::Stale(0)));
+    let mut changed = candidate;
+    changed.timings.send_wait += 1;
+    let replace = meta_signal_flow::FullConfigurationRequest { configuration_request_id: "replace".into(), configuration_revision: 0, full_configuration: changed.clone() };
+    let MetaResponse::FullConfigured(replaced) = nexus.dispatch_meta(meta_signal_flow::Query::FullConfigure(replace)) else { panic!("replaced") };
+    assert!(matches!(replaced.full_configuration_disposition, meta_signal_flow::FullConfigurationDisposition::Replaced));
+    assert_eq!(replaced.resulting_revision, 1);
+    assert_eq!(snapshot(&nexus).timings, changed.timings);
+}
+
+#[test]
+fn full_configuration_receipt_survives_restart_and_stopped_store_replays_it() {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let request = meta_signal_flow::FullConfigurationRequest {
+        configuration_request_id: "durable".into(), configuration_revision: 0,
+        full_configuration: full_candidate(&nexus),
+    };
+    assert!(matches!(nexus.dispatch_meta(meta_signal_flow::Query::FullConfigure(request.clone())), MetaResponse::FullConfigured(_)));
+    drop(nexus);
+    let stopped = ConfigurationOnlyStore::open(std::path::Path::new(&fixture.start.store_path)).expect("stopped store opens");
+    let replay = stopped.configure_full(request).expect("durable receipt replays");
+    assert!(matches!(replay.historical, meta_signal_flow::Historical::Replay));
+}
+
+#[test]
+fn concurrent_full_configuration_requests_serialize_on_one_revision() {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let mut first = full_candidate(&nexus);
+    first.timings.send_wait += 1;
+    let mut second = first.clone();
+    second.timings.send_wait += 1;
+    let outcomes = std::thread::scope(|scope| {
+        let a = scope.spawn(|| nexus.store.configure_full(meta_signal_flow::FullConfigurationRequest { configuration_request_id: "concurrent-a".into(), configuration_revision: 0, full_configuration: first }).unwrap());
+        let b = scope.spawn(|| nexus.store.configure_full(meta_signal_flow::FullConfigurationRequest { configuration_request_id: "concurrent-b".into(), configuration_revision: 0, full_configuration: second }).unwrap());
+        [a.join().unwrap(), b.join().unwrap()]
+    });
+    assert_eq!(outcomes.iter().filter(|r| matches!(r.full_configuration_disposition, meta_signal_flow::FullConfigurationDisposition::Replaced)).count(), 1);
+    assert_eq!(outcomes.iter().filter(|r| matches!(r.full_configuration_disposition, meta_signal_flow::FullConfigurationDisposition::Stale(1))).count(), 1);
+}
+
 fn quaternary_field() -> Address {
     Address {
         aspect: Aspect::Field,

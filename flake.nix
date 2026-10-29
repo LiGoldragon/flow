@@ -313,28 +313,28 @@
             "store::harness::tests::production_harnesses_join_only_typed_installation_overrides";
           flow-production-harnesses-refuse-bad-installations = context.exactTest "flow-nexus"
             "store::harness::tests::production_harnesses_refuse_incomplete_ambiguous_or_mistyped_overrides";
-          flow-user-settings-leave-out-refused = context.exactTest "flow-nexus"
-            "lean::tests::user_settings_are_indispensable_and_the_agent_tool_is_not";
-          flow-leave-outs-reach-the-harness = context.exactTest "flow-nexus"
-            "herdr::launch::tests::a_claude_start_carries_its_leave_outs_as_flags_environment_and_settings";
-          flow-start-leave-outs-replace-the-default = context.exactTest "flow-nexus"
-            "composition::tests::a_start_naming_leave_outs_replaces_its_metaflow_default";
-          flow-leave-out-default-for-another-harness-refused = context.exactTest "flow-nexus"
-            "tests::configuring::a_leave_out_default_naming_another_harness_is_refused_and_writes_nothing";
-          flow-codex-start-takes-no-claude-default = context.exactTest "flow-nexus"
-            "tests::configuring::a_codex_start_naming_none_takes_no_claude_default";
-          flow-codex-start-claude-leave-out-refused-before-reserve = context.exactTest "flow-nexus"
-            "tests::reservation::a_codex_start_naming_a_claude_leave_out_is_refused_before_reserve_or_open";
-          flow-leave-out-defaults-upgrade-under-their-harness = context.exactTest "flow-nexus"
-            "store::tests::production_leave_out_defaults_upgrade_each_under_its_harness";
-          flow-0-35-11-store-upgrades-in-one-open = context.exactTest "flow-nexus"
-            "store::tests::a_0_35_11_store_upgrades_models_leave_outs_and_events_in_one_open";
+          flow-user-settings-is-a-configured-module = context.exactTest "flow-nexus"
+            "store::harness::tests::claude_2_1_294_seed_is_one_complete_harness";
+          flow-left-out-reaches-the-harness = context.exactTest "flow-nexus"
+            "herdr::launch::tests::a_claude_start_carries_its_left_out_as_flags_environment_and_settings";
+          flow-start-left-out-replaces-the-default = context.exactTest "flow-nexus"
+            "composition::tests::a_start_naming_left_out_replaces_its_metaflow_default";
+          flow-left-out-is-known-and-removable = context.exactTest "flow-nexus"
+            "store::tests::metaflow_left_out_names_are_known_and_removable";
+          flow-start-without-left-out-takes-the-declared-default = context.exactTest "flow-nexus"
+            "composition::tests::a_start_naming_left_out_replaces_its_metaflow_default";
+          flow-codex-left-out-block-refused-before-launch = context.exactTest "flow-nexus"
+            "herdr::launch::tests::a_codex_request_carrying_a_left_out_block_is_refused";
+          flow-retired-left-outs-become-declaration-modules = context.exactTest "flow-nexus"
+            "store::tests::retired_leave_outs_become_declaration_modules_once";
+          flow-retired-left-outs-migrate-on-one-open = context.exactTest "flow-nexus"
+            "store::tests::retired_leave_outs_become_declaration_modules_once";
           flow-production-models-upgrade-as-psyche = context.exactTest "flow-nexus"
             "store::tests::production_models_upgrade_each_as_its_layers_psyche_model";
-          flow-configuration-only-upgrades-leave-out-defaults = context.exactTest "flow-nexus"
-            "store::tests::the_configuration_only_open_upgrades_v1_leave_out_defaults";
-          flow-mixed-leave-out-default-refuses-upgrade = context.exactTest "flow-nexus"
-            "store::tests::a_v1_leave_out_default_mixing_harnesses_refuses_the_upgrade_by_its_entry";
+          flow-configuration-open-migrates-retired-left-outs = context.exactTest "flow-nexus"
+            "store::tests::retired_leave_outs_become_declaration_modules_once";
+          flow-left-out-declaration-refuses-unknown-or-fixed-modules = context.exactTest "flow-nexus"
+            "store::tests::metaflow_left_out_names_are_known_and_removable";
           flow-codex-frame-sixty-four-bit-length = context.exactTest "flow-nexus"
             "codex::tests::an_outbound_frame_past_sixty_five_kilobytes_takes_the_sixty_four_bit_length";
           flow-gone-pane-lists-exited = context.exactTest "flow-nexus"
@@ -409,10 +409,10 @@
             "the_meta_client_reaches_the_default_meta_socket_under_the_runtime_directory";
           flow-configuration-only-over-meta = context.exactTest "flow-nexus"
             "configure_only_commits_before_normal_start_uses_the_declared_store";
-          flow-configure-family-is-its-last-declaration = context.exactTest "flow-nexus"
-            "tests::configuring::each_family_is_its_last_declaration";
-          flow-launch-takes-replaced-defaults = context.exactTest "flow-nexus"
-            "tests::configuring::a_launch_after_a_replaced_declaration_takes_the_new_defaults";
+          flow-configure-entry-replaces-its-key = context.exactTest "flow-nexus"
+            "tests::configuring::each_keyed_family_changes_one_entry_and_removes_that_entry";
+          flow-next-launch-takes-the-replaced-generation = context.exactTest "flow-nexus"
+            "tests::configuring::a_paused_launch_keeps_a_and_the_next_launch_composes_with_b";
           flow-claude-named-at-launch = context.exactTest "flow-nexus"
             "herdr::launch::tests::claude_is_named_at_launch_and_its_title_read_back";
           flow-workspace-titled-both-harnesses = context.exactTest "flow-nexus"
@@ -481,8 +481,8 @@
             "tests::reservation::a_claude_start_herdr_refuses_is_answered_with_herdrs_own_refusal";
           flow-opened-thread-accounted = context.exactTest "flow-nexus"
             "codex::tests::an_opened_thread_is_accounted_for_and_archived";
-          flow-v3-outcomes-upgrade-to-refused-spawn = context.exactTest "flow-nexus"
-            "store::tests::v3_launch_outcomes_upgrade_to_the_refused_spawn_shape";
+          flow-current-outcomes-upgrade-to-staged-refusal = context.exactTest "flow-nexus"
+            "store::tests::v4_launch_outcomes_upgrade_to_the_staged_refusal_shape";
           flow-registration-stage-on-wire = context.exactTest "flow-nexus"
             "herdr::launch::tests::every_registration_stage_is_carried_on_the_wire";
           flow-registration-refusal-reported = context.exactTest "flow-nexus"
@@ -527,14 +527,14 @@
             "tests::waking::a_sender_observe_reports_gone_is_exited_and_its_lock_released";
           flow-topic-refused = context.exactTest "flow-nexus"
             "tests::secondary::a_topic_that_is_not_camel_case_is_refused_at_start_and_configure";
-          flow-primary-needs-awake-secondary = context.exactTest "flow-nexus"
-            "tests::secondary::a_primary_start_is_refused_until_its_secondary_is_awake";
+          flow-primary-starts-its-sleeping-requirement = context.exactTest "flow-nexus"
+            "tests::waking::a_primary_whose_declared_secondary_sleeps_starts_its_requirements_first";
           flow-declared-tool-set-passed-exactly = context.exactTest "flow-nexus"
-            "lean::tests::a_declared_tool_set_is_passed_exactly_and_the_default_passes_none";
+            "a_declared_tool_set_is_passed_exactly_and_the_default_passes_none";
           flow-remembered-records-composed = context.exactTest "flow-nexus"
             "composition::tests::remembered_flows_raw_records_follow_the_user_modules_in_the_first_message";
-          flow-secondary-starts-first = context.exactTest "flow-nexus"
-            "tests::waking::a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first";
+          flow-requirements-start-first = context.exactTest "flow-nexus"
+            "tests::waking::a_primary_whose_declared_secondary_sleeps_starts_its_requirements_first";
           flow-session-end-exits = context.exactTest "flow-nexus"
             "tests::waking::a_reported_session_end_exits_the_flow_and_owes_a_maintained_successor";
           flow-modules-placed-by-kind = context.exactTest "flow-nexus"

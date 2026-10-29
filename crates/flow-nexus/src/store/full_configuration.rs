@@ -12,6 +12,11 @@ impl MemoryDefinition for StoredFullConfigurationState {
     fn memory_version() -> MemoryVersion { MemoryVersion::new(1) }
     fn schema_hash() -> SchemaHash { SchemaHash::for_label("flow-nexus-full-configuration-state-v1") }
 }
+impl StoredFullConfigurationState {
+    pub(crate) fn descriptor() -> TableDescriptor<Self> {
+        TableDescriptor::new(STATE_TABLE, FamilyName::new("flow-nexus-full-configuration-state"), Self::schema_hash())
+    }
+}
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredFullConfigurationReceipt {
@@ -25,10 +30,8 @@ impl MemoryDefinition for StoredFullConfigurationReceipt {
     fn memory_version() -> MemoryVersion { MemoryVersion::new(1) }
     fn schema_hash() -> SchemaHash { SchemaHash::for_label("flow-nexus-full-configuration-receipt-v1") }
 }
-
-pub(crate) fn state_descriptor() -> TableDescriptor<StoredFullConfigurationState> {
-    TableDescriptor::new(STATE_TABLE, FamilyName::new("flow-nexus-full-configuration-state"), StoredFullConfigurationState::schema_hash())
-}
-pub(crate) fn receipt_descriptor() -> TableDescriptor<StoredFullConfigurationReceipt> {
-    TableDescriptor::new(RECEIPT_TABLE, FamilyName::new("flow-nexus-full-configuration-receipt"), StoredFullConfigurationReceipt::schema_hash())
+impl StoredFullConfigurationReceipt {
+    pub(crate) fn descriptor() -> TableDescriptor<Self> {
+        TableDescriptor::new(RECEIPT_TABLE, FamilyName::new("flow-nexus-full-configuration-receipt"), Self::schema_hash())
+    }
 }

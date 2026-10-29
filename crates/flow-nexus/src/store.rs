@@ -5166,8 +5166,8 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             timings: engine.upgraded_timings(timings_limits::timings_descriptor())?,
             limits: engine.register_limits()?,
             texts: engine.register_texts()?,
-            full_state: engine.register_table(full_configuration::state_descriptor())?,
-            full_receipts: engine.register_table(full_configuration::receipt_descriptor())?,
+            full_state: engine.register_table(full_configuration::StoredFullConfigurationState::descriptor())?,
+            full_receipts: engine.register_table(full_configuration::StoredFullConfigurationReceipt::descriptor())?,
             metaflows: engine.upgraded_metaflow_declarations(
                 <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor(),
             )?,
@@ -5301,8 +5301,8 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let timings_descriptor = timings_limits::timings_descriptor();
         let limits_descriptor = timings_limits::limits_descriptor();
         let texts_descriptor = texts::texts_descriptor();
-        let full_state_descriptor = full_configuration::state_descriptor();
-        let full_receipt_descriptor = full_configuration::receipt_descriptor();
+        let full_state_descriptor = full_configuration::StoredFullConfigurationState::descriptor();
+        let full_receipt_descriptor = full_configuration::StoredFullConfigurationReceipt::descriptor();
         if recognized {
             FlowStore::migrate_retired_leave_outs(path)?;
             FlowStore::drop_retired_tables(path)?;
@@ -5855,8 +5855,8 @@ impl OpensFlowStore for FlowStore {
         let timings_descriptor = timings_limits::timings_descriptor();
         let limits_descriptor = timings_limits::limits_descriptor();
         let texts_descriptor = texts::texts_descriptor();
-        let full_state_descriptor = full_configuration::state_descriptor();
-        let full_receipt_descriptor = full_configuration::receipt_descriptor();
+        let full_state_descriptor = full_configuration::StoredFullConfigurationState::descriptor();
+        let full_receipt_descriptor = full_configuration::StoredFullConfigurationReceipt::descriptor();
         let events_descriptor = <events::FlowEvents as events::DescribesEventTable>::descriptor();
         let context_sizes_descriptor =
             <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor();

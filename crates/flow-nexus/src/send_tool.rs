@@ -55,8 +55,8 @@ use crate::store::send_call::KeepsSendCalls;
 use crate::store::{NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt};
 use crate::waking::{RestsEndedAwake, SleepsAndWakesSeats};
 use crate::{
-    BuildsConfiguredEffects, ConfiguredEffects, HoldsStopRequest, RunningNexus,
-    store::AnnouncesLaunchChanges,
+    BuildsConfiguredEffects, ConfiguredEffects, HoldsStopRequest, InvokesConfiguredEffects,
+    RunningNexus, store::AnnouncesLaunchChanges,
 };
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};

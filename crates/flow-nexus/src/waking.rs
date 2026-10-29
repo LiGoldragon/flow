@@ -2625,7 +2625,7 @@ impl WakesInParts for RunningNexus {
             left_out_option: fresh.left_out_option,
             tool_set: fresh.tool_set,
             prompt: crate::composition::JoinsPurpose::with_configured_purpose(
-                text.as_str(),
+                text,
                 &fresh.purpose,
                 &configured.snapshot.texts,
             ),

@@ -80,7 +80,7 @@ use observe_agent::ObservesAgent;
 use observe_sends::ObservesLogicalSends;
 use operational::RecordsOperationalState;
 use peer::{AdmitsMetaPeer, NamesMetaPeer, ResolvesPeer};
-use performing::Performs;
+use performing::{Performs, PerformsConfiguredOperations};
 use reporting::RecordsReports;
 use send_tool::{ServesLaunchCalls, ServesSendTool, WakesDeferred};
 use sending::{BindsSeats, LaunchesDeclared, SendsRequests};
@@ -108,7 +108,7 @@ use store::{
     ReadsFlowRows, RegistersExistingFlow, RegistersFlowIdentity,
 };
 use waking::SleepsAndWakesSeats;
-use waking::{PerformsWakeAndDrain, RestsEndedAwake, SettlesStopsAtConfirmation};
+use waking::{PerformsWakeAndDrain, RestsEndedAwake};
 
 /// The running component. Configuration generation selection is an ingress
 /// authority, not an effect capability.

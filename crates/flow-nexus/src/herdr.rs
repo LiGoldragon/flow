@@ -364,7 +364,7 @@ impl OperatesHerdrPane for HerdrCli {
     }
 }
 
-pub(crate) trait ConfiguresHerdr {
+pub(crate) trait ConfiguresHerdr: Sized {
     fn configured_view(
         snapshot: &crate::store::StoredConfigurationSnapshot,
         codex_endpoints: CodexEndpoints,

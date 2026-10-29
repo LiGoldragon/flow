@@ -33,7 +33,10 @@ use crate::store::{
 use crate::store::{ManagesMetaflowState, ReadsFlowRows};
 use crate::title::TitleRefused;
 use crate::waking::PerformsWakeAndDrain;
-use crate::{BuildsConfiguredEffects, ConfiguredEffects, ConfiguredUse, RunningNexus};
+use crate::{
+    BuildsConfiguredEffects, ConfiguredEffects, ConfiguredUse, InvokesConfiguredEffects,
+    RunningNexus,
+};
 use signal_flow::{
     HarnessKind, LaunchAttemptReservation, NativeLaunchFailure, NativeLaunchRefusal,
     NativeLaunchStage, Response, StartRejection,

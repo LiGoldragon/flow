@@ -5313,7 +5313,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             FamilyName::new("flow-nexus-state"),
             SchemaHash::for_label("flow-nexus-state-v2"),
         );
-        let configuration_descriptor = TableDescriptor::new(
+        let configuration_descriptor = TableDescriptor::<FlowStoreConfiguration>::new(
             FLOW_CONFIGURATION_TABLE_NAME,
             FamilyName::new("flow-nexus-configuration"),
             SchemaHash::for_label("flow-nexus-configuration-v1"),

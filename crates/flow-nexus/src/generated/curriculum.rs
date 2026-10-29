@@ -50,6 +50,8 @@ pub type SystemModules = std::vec::Vec<ModuleIdentity>;
 #[rustfmt::skip]
 pub type UserModules = std::vec::Vec<ModuleIdentity>;
 #[rustfmt::skip]
+pub type OmittedModules = std::vec::Vec<ModuleIdentity>;
+#[rustfmt::skip]
 pub type FlowId = String;
 #[rustfmt::skip]
 pub type SystemText = String;
@@ -97,6 +99,7 @@ pub struct StartupComposition {
     pub system_payload_sha256: SystemPayloadSha256,
     pub user_payload_sha256: UserPayloadSha256,
     pub records_payload_sha256: RecordsPayloadSha256,
+    pub omitted_modules: OmittedModules,
     pub context_provenance_vector: std::vec::Vec<ContextProvenance>,
 }
 #[rustfmt::skip]
@@ -241,6 +244,7 @@ pub struct RoleComposition {
     pub context_text: ContextText,
     pub role_tools: RoleTools,
     pub role_callers: RoleCallers,
+    pub omitted_modules: OmittedModules,
     pub context_provenance_vector: std::vec::Vec<ContextProvenance>,
     pub description_payload_sha256: DescriptionPayloadSha256,
     pub context_payload_sha256: ContextPayloadSha256,

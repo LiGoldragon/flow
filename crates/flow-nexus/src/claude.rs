@@ -158,7 +158,8 @@ pub enum ClaudeQueuedHistory {
 /// own transcript.  Background-agent rows are not main-thread activity.
 pub trait ReadsClaudeTurns {
     /// True only when the last main user/assistant activity is an assistant
-    /// completion with `end_turn`.
+    /// row that ends its turn: any stop reason except `tool_use`. A row
+    /// without a stop reason is still streaming.
     fn main_turn_ended(&self, session_id: &str) -> bool;
     /// The exact file and byte boundary before native submission.
     fn claude_cursor(&self) -> Option<ClaudeTranscriptCursor>;
@@ -188,8 +189,9 @@ impl ReadsClaudeTurns for Path {
                 match row.get("type").and_then(Value::as_str) {
                     Some("user") => Some(false),
                     Some("assistant") => Some(
-                        row.pointer("/message/stop_reason").and_then(Value::as_str)
-                            == Some("end_turn"),
+                        row.pointer("/message/stop_reason")
+                            .and_then(Value::as_str)
+                            .is_some_and(|reason| reason != "tool_use"),
                     ),
                     _ => state,
                 }
@@ -457,6 +459,34 @@ mod tests {
             )
             .unwrap();
         assert!(!transcript.main_turn_ended("s"));
+    }
+
+    #[test]
+    fn any_stop_reason_except_tool_use_ends_the_main_turn() {
+        let directory = tempdir().unwrap();
+        for (reason, ended) in [
+            ("stop_sequence", true),
+            ("max_tokens", true),
+            ("end_turn", true),
+            ("tool_use", false),
+        ] {
+            let transcript = directory.path().join(format!("{reason}.jsonl"));
+            fs::write(
+                &transcript,
+                row(serde_json::json!({"type":"assistant","sessionId":"s","uuid":"a",
+                    "message":{"stop_reason":reason}})),
+            )
+            .unwrap();
+            assert_eq!(transcript.main_turn_ended("s"), ended, "{reason}");
+        }
+        let streaming = directory.path().join("streaming.jsonl");
+        fs::write(
+            &streaming,
+            row(serde_json::json!({"type":"assistant","sessionId":"s","uuid":"a",
+                "message":{"stop_reason":null}})),
+        )
+        .unwrap();
+        assert!(!streaming.main_turn_ended("s"));
     }
 
     #[test]

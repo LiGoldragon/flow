@@ -17,6 +17,7 @@ Library
   StartupPlacement.[ System User ]
   SystemModules.Vector<ModuleIdentity>
   UserModules.Vector<ModuleIdentity>
+  OmittedModules.Vector<ModuleIdentity>
   FlowId.String
   SystemText.String
   UserText.String
@@ -26,7 +27,7 @@ Library
   RecordsPayloadSha256.String
   StartupSelection.{ CallerMetaflow Target SystemModules UserModules Vector<FlowId> }
   ContextProvenance.{ ModuleIdentity RepositoryName SourceRevision SourceRelativePath SourceSha256 BodySha256 RenderedSha256 StartupPlacement Integer }
-  StartupComposition.{ SystemText UserText RecordsText SystemPayloadSha256 UserPayloadSha256 RecordsPayloadSha256 Vector<ContextProvenance> }
+  StartupComposition.{ SystemText UserText RecordsText SystemPayloadSha256 UserPayloadSha256 RecordsPayloadSha256 OmittedModules Vector<ContextProvenance> }
   ResolvedModule.{ ModuleIdentity RepositoryName SourceRevision SourceRoot SourceRelativePath ModuleType ModuleSubject DeclaredPlacement SourceSha256 BodySha256 String Vector<String> }
   DeploymentDestination.String
   RepositoryRevision.{ RepositoryName SourceRevision }
@@ -51,7 +52,7 @@ Library
   Roles.{ Vector<RoleDefinition> }
   RolesDocument.[ Roles.Roles ]
   RoleSelection.{ RoleName Surface }
-  RoleComposition.{ RoleName Surface ModelId Effort Permission DescriptionText ContextText RoleTools RoleCallers Vector<ContextProvenance> DescriptionPayloadSha256 ContextPayloadSha256 }
+  RoleComposition.{ RoleName Surface ModelId Effort Permission DescriptionText ContextText RoleTools RoleCallers OmittedModules Vector<ContextProvenance> DescriptionPayloadSha256 ContextPayloadSha256 }
   CliRequest.[ ResolveSkills.Vector<ModuleIdentity>
                ResolveSources.Vector<ModuleIdentity>
                ComposeStartup.StartupSelection

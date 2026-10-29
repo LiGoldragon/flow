@@ -7,7 +7,9 @@ pub mod launch;
 pub mod pane;
 pub mod reservation;
 
-use crate::codex::{CodexEndpoint, CodexEndpoints};
+#[cfg(test)]
+use crate::codex::CodexEndpoint;
+use crate::codex::CodexEndpoints;
 use std::collections::BTreeSet;
 use std::{
     fs,
@@ -656,7 +658,7 @@ enum ProcessStopFailure {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OwnedProcessDisposition {
+pub(crate) enum OwnedProcessDisposition {
     Stopped,
     AlreadyExited,
 }
@@ -1688,8 +1690,8 @@ impl DecodesFlowClaim for FlowClaim {
 #[cfg(test)]
 mod tests {
     use super::{
-        HerdrCli, OperatesHerdrPane, ProcessStop, ProcessStopFailure, VerifiesFlowClaim,
-        pidfd_exited, stop_owned_process, stop_process,
+        ConfiguresHerdr, HerdrCli, OperatesHerdrPane, ProcessStop, ProcessStopFailure,
+        StopsOwnedProcess, StopsProcess, VerifiesFlowClaim,
     };
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;

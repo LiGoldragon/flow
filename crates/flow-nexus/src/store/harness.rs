@@ -184,7 +184,7 @@ impl UpgradesHarnesses for Engine {
     }
 }
 
-pub(crate) trait ReadsStoredHarness {
+pub(crate) trait ReadsStoredHarness: Sized {
     fn descriptor() -> TableDescriptor<Self>;
 }
 

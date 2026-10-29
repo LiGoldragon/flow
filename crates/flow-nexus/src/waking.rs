@@ -79,6 +79,9 @@ use crate::delivery::lease::LeasesPanes;
 use crate::delivery::{
     DeliversMessages, FindsDeliveryTarget, PaneRefusal, ReadsLeasedPane, TargetRefusal,
 };
+use crate::delivery::body::TypesPaneMessage;
+use datom_codec::Datomizable;
+use protos::{Compactable, Protosizable};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
     Record_Data_Context_Data,
@@ -89,7 +92,6 @@ use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes, Read
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
 use crate::send_tool::{ServesLaunchCalls, WakesDeferred};
-use crate::sending::MAX_NATIVE_COHORT_BYTES;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
 use crate::store::events::RecordsHarnessEvents;
@@ -1175,7 +1177,7 @@ pub(crate) fn render_message(
         ),
         signal_flow::Request::Psyche(said) => (
             meta_signal_flow::Kind::Psyche,
-            meta_signal_flow::Body::Psyche(meta_signal_flow::Psyche_Data {
+            meta_signal_flow::Body::Psyche(meta_signal_flow::PsycheWords {
                 first_string: said.context.clone(),
                 second_string: said.verbatim.clone(),
             }),
@@ -2153,10 +2155,7 @@ impl PerformsWakeAndDrain for RunningNexus {
         let Some(oldest) = queue.first().cloned() else {
             return Outcome::Drained(drained);
         };
-        let simplified = self
-            .last_launch_profile(&flow_id)
-            .is_some_and(|profile| profile.flow_kind == signal_flow::FlowKind::Simplified);
-        let cohort: Vec<QueueEntry> = if simplified { vec![oldest.clone()] } else { queue };
+        let cohort: Vec<QueueEntry> = queue;
         let soft = |entry: &QueueEntry| matches!(entry.message, signal_flow::Message::Soft(_));
         if cohort.iter().all(soft) {
             let resting = match node.harness_kind {
@@ -2217,10 +2216,11 @@ impl PerformsWakeAndDrain for RunningNexus {
                 return refused(drained, Failed_Data::StoreRefused);
             }
         };
-        if text.len() > MAX_NATIVE_COHORT_BYTES {
+        let maximum_bytes = configured.snapshot.limits.cohort;
+        if text.len() > usize::try_from(maximum_bytes).unwrap_or(0) {
             let size = signal_flow::SendPayloadSize {
                 actual_bytes: i64::try_from(text.len()).unwrap_or(i64::MAX),
-                maximum_bytes: MAX_NATIVE_COHORT_BYTES as i64,
+                maximum_bytes,
             };
             return match self.store.fail_transport_overlimit(&attempt.attempt_id, size) {
                 Ok(failed) => Outcome::Drained(failed),
@@ -2286,6 +2286,30 @@ impl PerformsWakeAndDrain for RunningNexus {
             return refused(drained, Failed_Data::HerdrRefused);
         }
         if let Some(adapter) = model {
+            let wire_bytes = match crate::codex::queued_turn_wire_bytes(
+                &node.session_id,
+                &attempt.attempt_id,
+                attempt.native_request_id,
+                &text,
+            ) {
+                Ok(bytes) => bytes,
+                Err(_) => return refused(drained, Failed_Data::CodexRefused),
+            };
+            let wire_limit = configured
+                .snapshot
+                .limits
+                .frame
+                .min(configured.snapshot.limits.app_server_message);
+            if wire_bytes > usize::try_from(wire_limit).unwrap_or(0) {
+                let size = signal_flow::SendPayloadSize {
+                    actual_bytes: i64::try_from(wire_bytes).unwrap_or(i64::MAX),
+                    maximum_bytes: wire_limit,
+                };
+                return match self.store.fail_transport_overlimit(&attempt.attempt_id, size) {
+                    Ok(failed) => Outcome::Drained(failed),
+                    Err(_) => refused(drained, Failed_Data::StoreRefused),
+                };
+            }
             let submitted = adapter.submit_queued_turn(
                 &node.session_id,
                 &attempt.attempt_id,
@@ -2402,37 +2426,7 @@ impl PerformsWakeAndDrain for RunningNexus {
         }
     }
 
-    fn cohort_runs(
-        &self,
-        attempt: &QueueDeliveryAttempt,
-    ) -> Vec<(Vec<QueueDeliveryAttempt>, String)> {
-        let Some(alone_text) = self.typed_attempt_text(attempt) else {
-            return Vec::new();
-        };
-        let alone = (vec![attempt.clone()], alone_text);
-        let group = self.typed_group(attempt);
-        if group.len() < 2 {
-            if attempt.cohort.len() > 1
-                && let Some(messages) = self.typed_queue_cohort(&attempt.cohort)
-            {
-                let text = messages.datomize(Vec::new()).protosize().compact();
-                return vec![(vec![attempt.clone()], text), alone];
-            }
-            return vec![alone];
-        }
-        let entries = group
-            .iter()
-            .filter_map(|member| match &member.queue_evidence {
-                meta_signal_flow::QueueEvidence::Logical(entry) => Some(entry.clone()),
-                meta_signal_flow::QueueEvidence::Legacy(_) => None,
-            })
-            .collect::<Vec<_>>();
-        let Some(messages) = self.typed_queue_cohort(&entries) else {
-            return vec![alone];
-        };
-        let text = messages.datomize(Vec::new()).protosize().compact();
-        vec![(group, text), alone]
-    }
+
 }
 
 impl WakesInParts for RunningNexus {

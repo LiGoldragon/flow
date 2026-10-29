@@ -421,11 +421,10 @@ fn a_request_to_an_idle_awake_claude_flow_is_delivered_into_its_pane() {
         .store
         .accept_logical_delivery(
             &address(Layer::Secondary),
-            SentBy::Sender(address(Layer::Primary)),
-            Some(meta_signal_flow::Sender {
+            meta_signal_flow::Sender {
                 address: address(Layer::Primary),
                 flow_id: "e167d8".into(),
-            }),
+            },
             Delivery::Wake,
             Message::Soft(Request::Order("Read the new ruling.".into())),
             None,
@@ -3401,8 +3400,10 @@ fn a_refused_wake_keeps_its_queue_and_each_delivery_names_why() {
                 .store
                 .accept_logical_delivery(
                     &at,
-                    SentBy::Sender(sender.clone()),
-                    None,
+                    meta_signal_flow::Sender {
+                        address: sender.clone(),
+                        flow_id: "fixture-sender".into(),
+                    },
                     Delivery::Queue,
                     Message::Soft(Request::Order(body.into())),
                     None,

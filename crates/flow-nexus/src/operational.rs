@@ -153,6 +153,9 @@ impl<'a> OperationalStore<'a> {
     pub(crate) fn flow_node(&self, flow_id: &str) -> Result<Option<FlowNode>, StoreError> {
         self.store.flow_node(flow_id)
     }
+    pub(crate) fn flow_nodes(&self) -> Result<Vec<FlowNode>, StoreError> {
+        self.store.flow_nodes()
+    }
     pub(crate) fn record_replacement(&self, value: Replacement) -> Result<(), StoreError> {
         self.store.record_replacement(value)
     }

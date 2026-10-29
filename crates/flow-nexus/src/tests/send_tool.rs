@@ -7,7 +7,9 @@
 
 use super::{ControlsHerdrSnapshot, NexusFixture};
 use crate::codex::{CodexAdapter, ResponderSignal, SelectsCodexEndpoint};
-use crate::delivery::body::{RendersPaneText, ShowsPaneText};
+use crate::delivery::body::{RendersPaneText, ShowsPaneText, TypesPaneMessage};
+use datom_codec::Datomizable;
+use protos::{Compactable, Protosizable};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::send_tool::{
     HandlesSendCall, ReadsToolCall, SendCall, SendOutcome, SendRefusal, ToolCall, ToolCallKey,

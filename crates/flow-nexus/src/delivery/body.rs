@@ -18,6 +18,48 @@ use datom_codec::Datomizable;
 use meta_signal_flow::{Body, BodyRefusal, HarnessProfile, Letter, Message};
 use protos::{Compactable, Protosizable};
 
+/// Projects one ordinary message with its authenticated sender into the
+/// complete typed message stored in a native delivery cohort.
+pub(crate) trait TypesPaneMessage {
+    fn typed_pane_message(&self, sender: meta_signal_flow::Sender) -> Message;
+}
+
+impl TypesPaneMessage for signal_flow::Message {
+    fn typed_pane_message(&self, sender: meta_signal_flow::Sender) -> Message {
+        let (priority, request) = match self {
+            signal_flow::Message::HardAbrupt(request) => (0, request),
+            signal_flow::Message::MiddleAbrupt(request) => (1, request),
+            signal_flow::Message::Soft(request) => (2, request),
+        };
+        let (kind, body) = match request {
+            signal_flow::Request::Order(text) => (meta_signal_flow::Kind::Order, Body::Words(text.clone())),
+            signal_flow::Request::Result(text) => (meta_signal_flow::Kind::Result, Body::Words(text.clone())),
+            signal_flow::Request::Notice(text) => (meta_signal_flow::Kind::Notice, Body::Words(text.clone())),
+            signal_flow::Request::Question(text) => (meta_signal_flow::Kind::Question, Body::Words(text.clone())),
+            signal_flow::Request::Psyche(data) => (
+                meta_signal_flow::Kind::Psyche,
+                Body::Psyche(meta_signal_flow::PsycheWords {
+                    first_string: data.context.clone(),
+                    second_string: data.verbatim.clone(),
+                }),
+            ),
+            signal_flow::Request::Psyches(data) => (
+                meta_signal_flow::Kind::Psyche,
+                Body::Psyches(data.iter().map(|said| meta_signal_flow::PsycheWords {
+                    first_string: said.context.clone(),
+                    second_string: said.verbatim.clone(),
+                }).collect()),
+            ),
+        };
+        let letter = Letter { kind, sender, body };
+        match priority {
+            0 => Message::HardAbrupt(letter),
+            1 => Message::MiddleAbrupt(letter),
+            _ => Message::Soft(letter),
+        }
+    }
+}
+
 /// The text a Message becomes in a pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneText {
@@ -147,6 +189,7 @@ impl ReadsBody for Body {
         match self {
             Body::Words(text) => text.trim().is_empty(),
             Body::Psyche(psyche) => psyche.second_string.trim().is_empty(),
+            Body::Psyches(psychē) => psychē.is_empty() || psychē.iter().all(|said| said.second_string.trim().is_empty()),
         }
     }
 
@@ -154,6 +197,7 @@ impl ReadsBody for Body {
         match self {
             Body::Words(text) => vec![text.clone()],
             Body::Psyche(psyche) => vec![psyche.first_string.clone(), psyche.second_string.clone()],
+            Body::Psyches(psychē) => psychē.iter().flat_map(|said| [said.first_string.clone(), said.second_string.clone()]).collect(),
         }
     }
 }
@@ -222,7 +266,7 @@ mod tests {
     use super::{RecognizesLetter, RendersNativeContent, RendersPaneText, VetsBody};
     use crate::delivery::body::ShowsPaneText;
     use crate::store::delivery::DefaultsHarnessProfile;
-    use meta_signal_flow::{Body, BodyRefusal, Kind, Letter, Message, Psyche_Data, Sender};
+    use meta_signal_flow::{Body, BodyRefusal, Kind, Letter, Message, PsycheWords, Sender};
     use signal_flow::HarnessKind;
 
     fn soft(text: &str) -> Message {
@@ -408,7 +452,7 @@ mod tests {
         let relay = Message::MiddleAbrupt(Letter {
             kind: Kind::Psyche,
             sender: soft("x").letter().sender.clone(),
-            body: Body::Psyche(Psyche_Data {
+            body: Body::Psyche(PsycheWords {
                 first_string: "context".into(),
                 second_string: " ".into(),
             }),

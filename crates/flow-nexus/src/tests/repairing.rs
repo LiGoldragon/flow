@@ -394,11 +394,10 @@ fn withdraw_takes_one_request_out_and_closes_its_attempt() {
         .store
         .accept_logical_delivery(
             &seat_address(),
-            SentBy::Sender(seat_address()),
-            Some(meta_signal_flow::Sender {
+            meta_signal_flow::Sender {
                 address: seat_address(),
                 flow_id: "repair-sender".into(),
-            }),
+            },
             Delivery::Queue,
             Message::Soft(Request::Order("Never handed over.".into())),
             None,

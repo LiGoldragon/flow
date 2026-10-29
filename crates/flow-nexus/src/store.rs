@@ -4532,6 +4532,30 @@ trait UpgradesFlowFamilies {
 }
 
 impl UpgradesFlowFamilies for Engine {
+    fn upgraded_metaflow_processes(
+        &mut self,
+        descriptor: TableDescriptor<StoredMetaflowProcess>,
+    ) -> Result<TableReference<StoredMetaflowProcess>, StoreError> {
+        match self.upgrade_table::<StoredMetaflowProcessV1, StoredMetaflowProcess>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure) => Err(StoreError::MetaflowUpgrade(format!("{failure:?}"))),
+        }
+    }
+
+    fn upgraded_metaflow_locks(
+        &mut self,
+        descriptor: TableDescriptor<StoredMetaflowLock>,
+    ) -> Result<TableReference<StoredMetaflowLock>, StoreError> {
+        match self.upgrade_table::<StoredMetaflowLockV1, StoredMetaflowLock>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure) => Err(StoreError::MetaflowUpgrade(format!("{failure:?}"))),
+        }
+    }
+
     fn upgraded_quarantined_launch_outcomes(
         &mut self,
         descriptor: TableDescriptor<QuarantinedLaunchOutcome>,
@@ -10161,11 +10185,31 @@ pub(crate) trait ReadsFlowMemory {
                     vec![timings_limits::StoredTimings { timings }],
                 )
             }
-            ConfigurationChange::Limits(limits) => FlowStore::replace_configuration_family(
-                engine,
-                tables.limits,
-                vec![timings_limits::StoredLimits { limits }],
-            ),
+            ConfigurationChange::Limits(limits) => {
+                // A cohort is one canonical vector carried as one native
+                // submission. Its configured ceiling must fit every native
+                // transport it can reach; one message retains the distinct
+                // 64 KiB admission ceiling.
+                let native_ceiling = limits
+                    .herdr_line
+                    .min(crate::sending::MAX_NATIVE_COHORT_BYTES as i64);
+                let codex_bound = limits.cohort.saturating_mul(2).saturating_add(4096);
+                if limits.send_body != 64 * 1024
+                    || limits.cohort <= 0
+                    || limits.cohort > native_ceiling
+                    || codex_bound > limits.frame
+                    || codex_bound > limits.app_server_message
+                {
+                    return Err(StoreError::ConfigurationSeed(
+                        "Limits must keep SendBody at 64 KiB and Cohort within every native transport ceiling".into(),
+                    ));
+                }
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.limits,
+                    vec![timings_limits::StoredLimits { limits }],
+                )
+            }
             ConfigurationChange::Texts(texts) => FlowStore::replace_configuration_family(
                 engine,
                 tables.texts,

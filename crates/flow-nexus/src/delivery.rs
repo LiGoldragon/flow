@@ -438,7 +438,10 @@ impl RunningNexus {
 
     #[cfg(test)]
     pub(crate) fn vet_cohort_for_test(&self, flow_id: &str, messages: &[Message]) -> Response {
-        let target = match self.delivery_target(flow_id) {
+        let Ok(configured) = self.test_configured_use() else {
+            return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused);
+        };
+        let target = match self.delivery_target(&configured, flow_id) {
             Ok(target) => target,
             Err(refusal) => return Response::DeliveryRejected(refusal.into()),
         };

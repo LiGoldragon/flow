@@ -276,6 +276,28 @@ pub trait SubmitsQueuedCodexTurn {
     ) -> Result<QueuedTurnReceipt, CodexAdapterUnavailable>;
 }
 
+/// The exact JSON-RPC payload bytes placed in the WebSocket text frame for
+/// a queued turn. Admission can conservatively bound this representation;
+/// dispatch measures this exact value again immediately before submission.
+pub(crate) fn queued_turn_wire_bytes(
+    thread_id: &str,
+    attempt_id: &str,
+    native_request_id: u64,
+    text: &str,
+) -> Result<usize, CodexAdapterUnavailable> {
+    serde_json::to_vec(&serde_json::json!({
+        "id": native_request_id,
+        "method": "turn/start",
+        "params": {
+            "threadId": thread_id,
+            "input": [{ "type": "text", "text": text, "text_elements": [] }],
+            "turnTrigger": format!("flow-nexus:{attempt_id}")
+        }
+    }))
+    .map(|payload| payload.len())
+    .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string()))
+}
+
 /// What a Codex thread's own history shows of one queued turn, read after
 /// the newest turn the thread had before `turn/start`.
 ///

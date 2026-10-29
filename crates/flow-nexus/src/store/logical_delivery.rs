@@ -10,7 +10,6 @@ use crate::generated::send_tool::{
     Accepted_Data, SendCall, SendOutcome as ToolSendOutcome, SendRefusal as ToolSendRefusal,
     Target, ToolCallKey,
 };
-use crate::sending::MAX_NATIVE_COHORT_BYTES;
 use datom_codec::Datomizable;
 use flow_ethos::{Delivery, Message, QueueEntry};
 use protos::{Compactable, Protosizable};
@@ -831,11 +830,16 @@ impl RecordsLogicalDeliveries for FlowStore {
         }
         prospective.push(message.typed_pane_message(sender.clone()));
         let cohort_bytes = prospective.datomize(Vec::new()).protosize().compact().len();
-        if cohort_bytes > MAX_NATIVE_COHORT_BYTES {
+        let maximum_bytes = self
+            .configuration_snapshot()?
+            .ok_or(StoreError::StateInvariant)?
+            .limits
+            .cohort;
+        if cohort_bytes > usize::try_from(maximum_bytes).unwrap_or(0) {
             return Ok(Response::Refused(Refusal::Oversized(
                 signal_flow::SendPayloadSize {
                     actual_bytes: i64::try_from(cohort_bytes).unwrap_or(i64::MAX),
-                    maximum_bytes: MAX_NATIVE_COHORT_BYTES as i64,
+                    maximum_bytes,
                 },
             )));
         }
@@ -909,7 +913,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             return Err(StoreError::StateInvariant);
         };
         let mut historical = current.clone();
-        historical.sender_option = None;
+        historical.sender_identity = LogicalSenderIdentity::MissingHistoricalSender;
         self.engine.mutate(sema_engine::Mutation::new(
             self.logical_deliveries.current,
             historical,
@@ -1029,7 +1033,9 @@ impl RecordsLogicalDeliveries for FlowStore {
             let [current] = rows.records() else {
                 return Err(StoreError::StateInvariant);
             };
-            if current.sender_option.is_none() || current.snapshot.sent_by != entry.sent_by {
+            if matches!(current.sender_identity, LogicalSenderIdentity::MissingHistoricalSender)
+                || current.snapshot.sent_by != entry.sent_by
+            {
                 return Err(StoreError::StateInvariant);
             }
             current_rows.push(current.clone());
@@ -1046,7 +1052,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     self.logical_deliveries.current,
                     CurrentLogicalDelivery {
                         snapshot: snapshot.clone(),
-                        sender_option: current.sender_option,
+                        sender_identity: current.sender_identity,
                     },
                 )
                 .assert(

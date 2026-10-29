@@ -721,6 +721,11 @@ impl Dispatches for RunningNexus {
             meta_signal_flow::Query::Configure(change) => {
                 configured_response(self.store.configure_change(change))
             }
+            meta_signal_flow::Query::FullConfigure(_) => meta_signal_flow::Response::Refused(
+                meta_signal_flow::StoreRefusal::Store(
+                    "full configuration transaction is unavailable".into(),
+                ),
+            ),
             meta_signal_flow::Query::ConfigureEntry(entry) => {
                 configured_response(self.store.configure_entry(entry))
             }
@@ -6129,6 +6134,7 @@ mod tests {
         };
         let sender = address(Aspect::Mind, "core", Layer::Secondary);
         let sibling = address(Aspect::Mind, "flow", Layer::Secondary);
+        let sibling_primary = address(Aspect::Mind, "flow", Layer::Primary);
         let field = address(Aspect::Field, "core", Layer::Secondary);
         let elsewhere = address(Aspect::Psyche, "flow", Layer::Secondary);
         for (held, state) in [
@@ -6136,10 +6142,7 @@ mod tests {
             (sibling.clone(), flow_ethos::State::Asleep),
             (field.clone(), flow_ethos::State::Asleep),
             (elsewhere.clone(), flow_ethos::State::Asleep),
-            (
-                address(Aspect::Mind, "core", Layer::Primary),
-                flow_ethos::State::Asleep,
-            ),
+            (sibling_primary.clone(), flow_ethos::State::Asleep),
         ] {
             fixture.nexus.store.seed_metaflow(Metaflow {
                 address: held,

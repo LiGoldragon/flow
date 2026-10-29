@@ -248,13 +248,13 @@ mod tests {
     }
 
     #[test]
-    fn deliver_is_one_inline_datom_carrying_a_typed_message() {
+    fn deliver_is_one_inline_datom_carrying_only_a_durable_reference() {
         let client = FlowMetaClient {
             socket: "unused".into(),
         };
         let Query::Deliver(request) = client
             .parse_command(
-                ["Deliver.{ m-7f3a2c:7d41e0:0 7d41e0 Soft.{ Notice { { Psyche core Secondary } e167d8 } Words.«Stage 1 is deployed; run the tier tests.» } Kept }".into()]
+                ["Deliver.{ m-7f3a2c:7d41e0:0 }".into()]
                     .into_iter(),
             )
             .expect("deliver datom parses")
@@ -262,11 +262,6 @@ mod tests {
             panic!("Deliver datom must stay a Deliver query")
         };
         assert_eq!(request.delivery_id, "m-7f3a2c:7d41e0:0");
-        assert_eq!(request.flow_id, "7d41e0");
-        assert!(matches!(
-            request.message,
-            meta_signal_flow::Message::Soft(_)
-        ));
     }
 
     #[test]
@@ -401,6 +396,7 @@ mod tests {
             },
             limits: meta_signal_flow::Limits {
                 send_body: 65536,
+                cohort: 122880,
                 frame: 1048576,
                 curriculum_answer: 67108864,
                 app_server_header: 16384,

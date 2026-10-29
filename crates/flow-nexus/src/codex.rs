@@ -2,7 +2,6 @@
 //! The proxy is a byte bridge, so this module owns its bounded WebSocket and
 //! JSON-RPC conversation; it never falls back to a direct Unix-socket client.
 
-use crate::generated::send_tool::DeclaresSendTool;
 use crate::send_tool::{RunsSendTool, SendTool};
 use crate::store::CodexEndpointConfiguration;
 use base64::{Engine as _, engine::general_purpose::STANDARD};

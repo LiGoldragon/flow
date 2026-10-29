@@ -10,13 +10,11 @@ use crate::generated::operation::{
     Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Settled_Data,
     Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
 };
-use crate::generated::starter::CarriesFlowId;
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::{ChecksComposedLaunch, ObservesNativeLaunchBinding};
 use crate::performing::ClassifiesNativeLaunchFailure;
-use crate::performing::{Performs, PerformsConfiguredOperations};
+use crate::performing::PerformsConfiguredOperations;
 use crate::send_tool::ServesLaunchCalls;
-use crate::store::NamesConfiguredModel;
 use crate::store::NamesLiveFlow;
 use crate::store::ReadsLaunchInspectionRecords;
 use crate::store::address_hold::HoldsLaunchAddress;
@@ -28,9 +26,9 @@ use crate::store::{
     RecordsNativeLaunchBinding,
 };
 use crate::store::{AnswersLaunchOutcome, LaunchedRecord, ReplacedRecord};
-use crate::waking::{RestsEndedAwake, SettlesStopsAtConfirmation, WakePolicy};
+use crate::waking::{RestsEndedAwake, SettlesStopsAtConfirmation};
 use crate::{
-    BuildsConfiguredEffects, ConfiguredUse, RunningNexus,
+    ConfiguredUse, RunningNexus,
     herdr::{PaneOwnership, PanePresence, launch::AcceptsLaunchRegistration},
     store::{
         LaunchInspectionRecords, LaunchOutcome, ReadsFlowRows, ReadsLaunchAttempt,
@@ -338,7 +336,7 @@ impl LaunchesFlows for RunningNexus {
             Err(_) => return persistence(),
         }
         // A metaflow an older Nexus left Awake as an ended flow is Asleep.
-        self.rest_ended_awake(&configured, &profile.address);
+        self.rest_ended_awake(configured, &profile.address);
         // A seat whose Address it could not take is never launched.
         match self.store.launch_address_refusal(&profile) {
             Ok(None) => {}
@@ -718,12 +716,12 @@ impl LaunchesFlows for RunningNexus {
         match self.store.replacement(&launch_request_id) {
             Ok(Some(_)) => {
                 // A replacement already under way or settled: resume it.
-                if let Some(settled) = self.settled_configured(&configured, &profile, &origin) {
+                if let Some(settled) = self.settled_configured(configured, &profile, &origin) {
                     return Self::as_replacement(settled);
                 }
-                let response = self.start_configured(&configured, profile, origin);
+                let response = self.start_configured(configured, profile, origin);
                 return Self::as_replacement(self.settle_configured(
-                    &configured,
+                    configured,
                     &launch_request_id,
                     response,
                 ));
@@ -758,7 +756,7 @@ impl LaunchesFlows for RunningNexus {
             Err(_) => return persistence(),
         }
         if self.perform_configured(
-            &configured,
+            configured,
             Operation::Record(Record_Data::Replacing(Replacement {
                 launch_request_id: launch_request_id.clone(),
                 predecessor,
@@ -767,8 +765,8 @@ impl LaunchesFlows for RunningNexus {
         {
             return persistence();
         }
-        let response = self.start_configured(&configured, profile, origin);
-        Self::as_replacement(self.settle_configured(&configured, &launch_request_id, response))
+        let response = self.start_configured(configured, profile, origin);
+        Self::as_replacement(self.settle_configured(configured, &launch_request_id, response))
     }
 
     fn reap_configured(
@@ -779,7 +777,7 @@ impl LaunchesFlows for RunningNexus {
     ) -> Response {
         let refuse = |rejection: ReplaceRejection| {
             let _ = self.perform_configured(
-                &configured,
+                configured,
                 Self::settled_as(
                     &replacement.launch_request_id,
                     LaunchOutcome::ReplaceRejected(rejection.clone()),
@@ -800,7 +798,7 @@ impl LaunchesFlows for RunningNexus {
         // ResolveRecipient and Deliver refuse.
         if node.flow_lifecycle != FlowLifecycle::Stopped
             && self.perform_configured(
-                &configured,
+                configured,
                 Operation::Record(Record_Data::Stopped(replacement.predecessor.clone())),
             ) != Outcome::Recorded
         {
@@ -820,7 +818,7 @@ impl LaunchesFlows for RunningNexus {
                 ));
             }
             PanePresence::Present | PanePresence::Bare => {
-                match self.perform_configured(&configured, Operation::Close(node)) {
+                match self.perform_configured(configured, Operation::Close(node)) {
                     Outcome::Closed => {}
                     Outcome::Failed(Failed_Data::PaneCloseRefused(failure)) => {
                         return refuse(ReplaceRejection::ReapRefused(StopRejection::CloseRefused(
@@ -974,7 +972,7 @@ impl ReconcilesInterruptedLaunches for RunningNexus {
                 {
                     Ok(adapter) => {
                         let answered = self
-                            .configured_effects(&configured)
+                            .configured_effects(configured)
                             .refuse_interrupted_calls(&thread, &adapter);
                         let account = adapter.account_opened_thread(&thread);
                         eprintln!(
@@ -1117,7 +1115,7 @@ impl AbandonsRefusedLaunch for RunningNexus {
             match configured.herdr.pane_ownership(&node) {
                 PaneOwnership::Absent => {}
                 PaneOwnership::Owned | PaneOwnership::Bare => {
-                    let _lease = self.pane_leases.hold(&route);
+                    let _lease = self.pane_leases.hold(route);
                     if self.perform_configured(configured, Operation::Close(node.clone()))
                         != Outcome::Closed
                     {

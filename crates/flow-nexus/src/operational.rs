@@ -20,7 +20,7 @@ use crate::store::{
 use meta_signal_flow::Sender;
 use signal_flow::{
     Address, Caller, ComposedLaunch, Delivery, Event, FlowNode, LaunchAttempt,
-    LaunchAttemptReservation, LaunchProfile, Message, Metaflow, NativeLaunchBinding,
+    LaunchAttemptReservation, LaunchProfile, Message, NativeLaunchBinding,
     NativeLaunchIntent, Origin, PromptDeliveryIntent, PromptDeliveryResult,
     RegistrationAcknowledgement, Response,
 };
@@ -30,24 +30,25 @@ pub(crate) struct OperationalStore<'a> {
     store: &'a FlowStore,
 }
 
+pub(crate) struct ToolSendAcceptance<'a> {
+    pub(crate) key: &'a ToolCallKey,
+    pub(crate) content_sha256: &'a str,
+    pub(crate) sender: Sender,
+    pub(crate) target: &'a Target,
+    pub(crate) delivery: Delivery,
+    pub(crate) message: Message,
+    pub(crate) now: i64,
+}
+
 pub(crate) trait RecordsOperationalState<'a> {
     fn new(store: &'a FlowStore) -> Self;
     fn thread_sender(&self, thread: &str) -> Result<Result<Address, SendRefusal>, StoreError>;
-    fn list_metaflows(&self) -> Result<Vec<Metaflow>, StoreError>;
     fn thread_launch(&self, thread: &str) -> Result<Option<String>, StoreError>;
     fn launch_attempt(&self, request: &str) -> Result<Option<LaunchAttempt>, StoreError>;
     fn send_call(&self, key: &ToolCallKey) -> Result<Option<SendCall>, StoreError>;
     fn record_send_call(&self, call: SendCall) -> Result<(), StoreError>;
-    fn accept_tool_send(
-        &self,
-        key: &ToolCallKey,
-        content_sha256: &str,
-        sender: Sender,
-        target: &Target,
-        delivery: Delivery,
-        message: Message,
-        now: i64,
-    ) -> Result<SendOutcome, StoreError>;
+    fn accept_tool_send(&self, acceptance: ToolSendAcceptance<'_>)
+        -> Result<SendOutcome, StoreError>;
     fn remembered_flows(&self, profile: &LaunchProfile) -> Result<Vec<String>, StoreError>;
     fn register_flow_in_role(
         &self,
@@ -109,9 +110,6 @@ impl<'a> RecordsOperationalState<'a> for OperationalStore<'a> {
     fn thread_sender(&self, thread: &str) -> Result<Result<Address, SendRefusal>, StoreError> {
         self.store.thread_sender(thread)
     }
-    fn list_metaflows(&self) -> Result<Vec<Metaflow>, StoreError> {
-        self.store.list_metaflows()
-    }
     fn thread_launch(&self, thread: &str) -> Result<Option<String>, StoreError> {
         self.store.thread_launch(thread)
     }
@@ -126,16 +124,17 @@ impl<'a> RecordsOperationalState<'a> for OperationalStore<'a> {
     }
     fn accept_tool_send(
         &self,
-        key: &ToolCallKey,
-        content_sha256: &str,
-        sender: Sender,
-        target: &Target,
-        delivery: Delivery,
-        message: Message,
-        now: i64,
+        acceptance: ToolSendAcceptance<'_>,
     ) -> Result<SendOutcome, StoreError> {
-        self.store
-            .accept_tool_send(key, content_sha256, sender, target, delivery, message, now)
+        self.store.accept_tool_send(
+            acceptance.key,
+            acceptance.content_sha256,
+            acceptance.sender,
+            acceptance.target,
+            acceptance.delivery,
+            acceptance.message,
+            acceptance.now,
+        )
     }
     fn remembered_flows(&self, profile: &LaunchProfile) -> Result<Vec<String>, StoreError> {
         self.store.remembered_flows(profile)

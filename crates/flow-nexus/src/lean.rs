@@ -32,11 +32,11 @@ impl RendersLeanStart for LeanStart {
             arguments.push("--disallowedTools".into());
             arguments.push(tools.join(","));
         }
-        if self.harness_kind == HarnessKind::Claude {
-            if let ToolSet::Explicit(tools) = &self.tool_set {
-                arguments.push("--tools".into());
-                arguments.push(tools.join(","));
-            }
+        if self.harness_kind == HarnessKind::Claude
+            && let ToolSet::Explicit(tools) = &self.tool_set
+        {
+            arguments.push("--tools".into());
+            arguments.push(tools.join(","));
         }
         arguments
     }
@@ -69,10 +69,10 @@ impl RendersLeanStart for LeanStart {
                 continue;
             }
             for switch in &module.switches {
-                if let Switch::Environment(assignment) = switch {
-                    if !out.contains(&assignment.environment_name) {
-                        out.push(assignment.environment_name.clone());
-                    }
+                if let Switch::Environment(assignment) = switch
+                    && !out.contains(&assignment.environment_name)
+                {
+                    out.push(assignment.environment_name.clone());
                 }
             }
         }
@@ -86,13 +86,12 @@ impl RendersLeanStart for LeanStart {
                 continue;
             }
             for switch in &module.switches {
-                if let Switch::Setting(setting) = switch {
-                    if !out
+                if let Switch::Setting(setting) = switch
+                    && !out
                         .iter()
                         .any(|known: &Setting| known.setting_key == setting.setting_key)
-                    {
-                        out.push(setting.clone());
-                    }
+                {
+                    out.push(setting.clone());
                 }
             }
         }

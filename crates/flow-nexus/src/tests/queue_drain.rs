@@ -13,14 +13,12 @@ use super::waking::{
 };
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::Dispatches;
-use crate::delivery::body::{RendersPaneText, ShowsPaneText};
 use crate::generated::operation::Outcome;
 use crate::reporting::RecordsReports;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::SeedsMetaflow;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::waking::{PerformsWakeAndDrain, ReconcilesQueueDelivery, SettlesStopsAtConfirmation};
-use datom_codec::Datomizable;
 use flow_ethos::State;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{
@@ -28,7 +26,6 @@ use meta_signal_flow::{
     QueueResolutionOutcome, ResolveQueueDeliveryRejected_Data, ResolverIdentity,
     Response as MetaResponse, Sender, Undecided,
 };
-use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, Aspect, Delivery, Event, Layer, Message, Metaflow, NativePrompt, NativeStop,
     QueueEntry, Report_Data, Request, Response, SentBy,

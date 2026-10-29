@@ -27,8 +27,8 @@ use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
 use signal_flow::{
-    Address, Aspect, ComposedLaunch, CompositionRefusal, ContextRefusal, FirstPromptPayload,
-    HarnessKind, LaunchProfile, Layer, PromptPart, QueueEntry, SystemPrompt, TargetReceiptRequest,
+    Address, ComposedLaunch, CompositionRefusal, ContextRefusal, FirstPromptPayload, HarnessKind,
+    LaunchProfile, PromptPart, SystemPrompt, TargetReceiptRequest,
 };
 use std::collections::HashSet;
 
@@ -158,7 +158,6 @@ impl OpensLaunchComposer for LaunchComposer {
 
 pub(crate) trait ConfiguresLaunchComposer {
     fn configured_view(&self, snapshot: &crate::store::StoredConfigurationSnapshot) -> Self;
-    fn with_context_and_limits(context: ContextComposer, limits: meta_signal_flow::Limits) -> Self;
     fn with_context_limits_and_texts(
         context: ContextComposer,
         limits: meta_signal_flow::Limits,
@@ -188,15 +187,6 @@ impl ConfiguresLaunchComposer for LaunchComposer {
             snapshot.limits.clone(),
             snapshot.texts.clone(),
         )
-    }
-
-    fn with_context_and_limits(context: ContextComposer, limits: meta_signal_flow::Limits) -> Self {
-        Self {
-            context,
-            limits,
-            harness_modules: Vec::new(),
-            texts: <crate::store::texts::StoredTexts as crate::store::texts::ProvidesTextsSeed>::seed_texts().expect("authored texts seed"),
-        }
     }
 
     fn with_context_limits_and_texts(
@@ -559,12 +549,11 @@ impl RendersConfiguredBrief for HarnessedProfile {
 /// configures, checked against its harness.
 impl ResolvesLeftOut for HarnessedProfile {
     fn effective_left_out<N: LeaveOutListing>(&self, input: N) -> Vec<String> {
-        let left_out = self
+        self
             .launch_profile
             .left_out_option
             .clone()
-            .unwrap_or_else(|| input.left_out());
-        left_out
+            .unwrap_or_else(|| input.left_out())
     }
 }
 
@@ -812,11 +801,13 @@ impl PlacesModuleByKind for str {
 /// A brief joined with the purpose its metaflow's declaration names: the
 /// purpose first, then the brief; either alone when the other is empty.
 pub(crate) trait JoinsPurpose {
+    #[cfg(test)]
     fn with_purpose(&self, purpose: &str) -> String;
     fn with_configured_purpose(&self, purpose: &str, texts: &meta_signal_flow::Texts) -> String;
 }
 
 impl JoinsPurpose for str {
+    #[cfg(test)]
     fn with_purpose(&self, purpose: &str) -> String {
         self.with_configured_purpose(
             purpose,

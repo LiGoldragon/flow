@@ -1,6 +1,6 @@
 //! The ordinary Message bridge uses the accepted socket's kernel identity.
 use crate::caller::{
-    BindsCallerPane, BindsCallerWith, CallerProcess, LocatesCallerPane, NamesRootThread,
+    BindsCallerWith, CallerProcess, LocatesCallerPane, NamesRootThread,
 };
 use crate::sending::{CompletesDirectSends, IdentifiesSender};
 use crate::store::metaflow::SleepsMetaflows;
@@ -205,7 +205,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
                 Err(error) => return Response::Refused(Refusal::Store(error.to_string())).into(),
             }
             match query {
-                Query::Identify(process) => Ok(match self.sending_address(&configured, &process) {
+                Query::Identify(process) => Ok(match self.sending_address(configured, &process) {
                     Ok(address) => Response::Identified(address),
                     Err(response) => *response,
                 }),
@@ -218,13 +218,13 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     let digest = format!("{:x}", Sha256::digest(digest_text.as_bytes()));
                     let sender = request.lock.sender.clone();
                     let recipient = request.lock.address.clone();
-                    self.rest_ended_awake(&configured, &request.lock.address);
+                    self.rest_ended_awake(configured, &request.lock.address);
                     let abrupt = !matches!(&request.message, signal_flow::Message::Soft(_));
                     let direct = abrupt && request.delivery == signal_flow::Delivery::Wake;
                     // A metaflow another holds takes the request into its
                     // queue instead.
                     let direct_lease = if direct {
-                        match self.direct_send_lease(&configured, &recipient) {
+                        match self.direct_send_lease(configured, &recipient) {
                             Ok(lease) => lease,
                             Err(refusal) => return (*refusal).into(),
                         }
@@ -242,7 +242,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
                         response.response = match response.response {
                             Response::SendAccepted(accepted) => {
                                 self.complete_direct_send(
-                                    &configured,
+                                    configured,
                                     &recipient,
                                     accepted.logical_delivery_id,
                                 )

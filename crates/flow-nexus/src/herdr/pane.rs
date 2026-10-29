@@ -55,7 +55,6 @@ pub trait WritesPane {
     /// Stop hook while its spinner is still on screen, and Herdr reads its
     /// state from the screen, so Herdr shows it working for a moment after
     /// the turn has ended.
-
     fn pane_agent(&self, node: &FlowNode) -> PaneAgent;
     /// The pane's visible screen exactly as Herdr reads it.
     fn screen(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Option<String>;
@@ -400,7 +399,7 @@ impl ReadsAgentStatus for Option<&str> {
 
 /// A harness's composer as its screen shows it. The prompt glyph is harness
 /// knowledge of the version witnessed, not a setup value, so it lives here.
-struct Composer {
+pub struct Composer {
     glyph: char,
     submit_keys: Vec<String>,
     composer_lines: usize,

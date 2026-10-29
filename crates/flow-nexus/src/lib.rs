@@ -13,7 +13,7 @@ use crate::codex::{
     QueuedCodexTurnWire, SelectsCodexEndpoint,
 };
 use crate::herdr::ReadsHerdrPanes;
-use crate::herdr::{ConfiguresHerdr, ConfiguresHerdrCli};
+use crate::herdr::ConfiguresHerdr;
 use crate::store::AnnouncesLaunchChanges;
 use crate::waking::{StartsRequirementsFirst, TypesQueuedCohorts};
 pub use caller::CallerProcess;
@@ -70,19 +70,18 @@ use caller::{DerivesConfiguredOrigin, IdentifiesPeer, LocatesCallerPane, Resolve
 use codex::{CodexEndpoints, ConsumesResetCredit};
 use codex_turns::SettlesRestingCodexSeats;
 use compacting::WatchesCompactions;
-use composition::{ConfiguresLaunchComposer, LaunchComposer, OpensLaunchComposer};
-use context::{ConfiguresCurriculumComposer, CurriculumComposer, OpensCurriculumComposer};
+use composition::{ConfiguresLaunchComposer, LaunchComposer};
+use context::{ConfiguresCurriculumComposer, CurriculumComposer};
 use delivery::{DeliversMessages, lease::LeasesPanes};
 use generated::operation::{Failed_Data, Operation, Outcome, Record_Data};
-use generated::starter::DerivesOrigin;
 use launching::{AdmitsLaunch, LaunchesFlows, ObservesLaunch, ReconcilesInterruptedLaunches};
 use observe_agent::ObservesAgent;
 use observe_sends::ObservesLogicalSends;
 use operational::RecordsOperationalState;
 use peer::{AdmitsMetaPeer, NamesMetaPeer, ResolvesPeer};
-use performing::{Performs, PerformsConfiguredOperations};
+use performing::PerformsConfiguredOperations;
 use reporting::RecordsReports;
-use send_tool::{ServesLaunchCalls, ServesSendTool, WakesDeferred};
+use send_tool::{ServesSendTool, WakesDeferred};
 use sending::{BindsSeats, LaunchesDeclared, SendsRequests};
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRouteSelection, ObserveSelection, Origin,
@@ -153,7 +152,7 @@ pub struct RunningNexus {
 /// One external operation's immutable complete configuration generation and
 /// the clients derived from it. Nested helpers receive this value instead of
 /// rereading families independently.
-pub(crate) struct ConfiguredUse {
+pub struct ConfiguredUse {
     pub(crate) generation: sema_engine::DatabaseMarker,
     pub(crate) snapshot: store::StoredConfigurationSnapshot,
     codex_endpoints: CodexEndpoints,
@@ -335,15 +334,18 @@ impl BuildsHerdrOperationView for ConfiguredUse {
 
 /// Capability-limited receiver for one configured external effect. It owns no
 /// provider and exposes no raw Nexus or configuration store.
+type CodexEventsEffect<'a> = Box<dyn Fn(&str, Vec<codex_turns::TurnEvent>) + Send + Sync + 'a>;
+type CodexContextSignalEffect<'a> =
+    Box<dyn Fn(&str, compacting::CodexContextSignal) + Send + Sync + 'a>;
+
 pub(crate) struct ConfiguredEffects<'a> {
     pub(crate) configured: &'a ConfiguredUse,
     pub(crate) operational: operational::OperationalStore<'a>,
     pub(crate) dispatch_gate: &'a Mutex<()>,
     pub(crate) launch_calls: &'a send_tool::LaunchCalls,
-    pub(crate) stopping: &'a Stopping,
-    codex_events: Box<dyn Fn(&str, Vec<codex_turns::TurnEvent>) + Send + Sync + 'a>,
-    observe_codex_events: Box<dyn Fn(&str, Vec<codex_turns::TurnEvent>) + Send + Sync + 'a>,
-    codex_context_signal: Box<dyn Fn(&str, compacting::CodexContextSignal) + Send + Sync + 'a>,
+    codex_events: CodexEventsEffect<'a>,
+    observe_codex_events: CodexEventsEffect<'a>,
+    codex_context_signal: CodexContextSignalEffect<'a>,
     wake_due: Box<dyn Fn(signal_flow::Address) + Send + Sync + 'a>,
     rest_ended_awake: Box<dyn Fn(&signal_flow::Address) + Send + Sync + 'a>,
     wake: Box<dyn Fn(signal_flow::Address) -> Outcome + Send + Sync + 'a>,
@@ -361,7 +363,6 @@ impl BuildsConfiguredEffects for RunningNexus {
             operational: operational::OperationalStore::new(&self.store),
             dispatch_gate: &self.dispatch_gate,
             launch_calls: &self.launch_calls,
-            stopping: &self.stopping,
             codex_events: Box::new(move |thread, events| {
                 self.codex_events_configured(configured, thread, events)
             }),
@@ -638,7 +639,7 @@ impl Dispatches for RunningNexus {
                 }
                 // No write is left half-typed into a pane as it closes.
                 let closed = {
-                    let _lease = self.pane_leases.hold(&route);
+                    let _lease = self.pane_leases.hold(route);
                     self.perform_configured(&configured, Operation::Close(node.clone()))
                 };
                 if let Outcome::Failed(Failed_Data::PaneCloseRefused(failure)) = closed {
@@ -891,7 +892,7 @@ impl Dispatches for RunningNexus {
                     )
                 {
                     let closed = {
-                        let _lease = self.pane_leases.hold(&route);
+                        let _lease = self.pane_leases.hold(route);
                         self.perform_configured(&configured, Operation::Close(node.clone()))
                     };
                     if let Outcome::Failed(Failed_Data::PaneCloseRefused(failure)) = closed {
@@ -4726,7 +4727,6 @@ mod tests {
     #[test]
     fn an_operation_is_answered_by_its_own_outcome() {
         use crate::generated::operation::{Failed_Data, Operation, Outcome, Record_Data};
-        use crate::performing::Performs;
         let fixture = NexusFixture::new();
         fixture.set_agents(vec![fixture.current_agent()]);
         fixture.register_with(FlowLifecycle::Active);

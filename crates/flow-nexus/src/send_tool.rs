@@ -38,8 +38,8 @@ use crate::codex::{
     CodexAdapter, ExchangesOnSubscription, ProxyEvent, ResponderSignal, SelectsCodexEndpoint,
     SubscribesThread, SubscriptionEnd, ThreadConnection, ThreadSubscription,
 };
-use crate::codex_turns::{ReadsThreadStatus, ReadsTurnEvent, SettlesRestingCodexSeats, TurnEvent};
-use crate::compacting::{ReadsCodexContextSignal, WatchesCompactions};
+use crate::codex_turns::{ReadsThreadStatus, ReadsTurnEvent, TurnEvent};
+use crate::compacting::ReadsCodexContextSignal;
 use crate::generated::send_tool::{
     AnswersToolCall, DeclaresSendTool, HandlesSendCall, ParamsCarrying, ReadsSendArguments,
     ReadsToolCall, SendArguments, SendCall, SendInvocation, SendKind, SendOutcome, SendPriority,
@@ -49,14 +49,11 @@ use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::launching::NamesTopic;
 use crate::operational::RecordsOperationalState;
 use crate::sending::{AdmitsSendPayload, MintsId};
-use crate::store::logical_delivery::RecordsLogicalDeliveries;
-use crate::store::opened_thread::RecordsOpenedThreads;
-use crate::store::send_call::KeepsSendCalls;
-use crate::store::{NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt};
-use crate::waking::{RestsEndedAwake, SleepsAndWakesSeats};
+use crate::store::{NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows};
+use crate::waking::SleepsAndWakesSeats;
 use crate::{
-    BuildsConfiguredEffects, ConfiguredEffects, HoldsStopRequest, InvokesConfiguredEffects,
-    RunningNexus, store::AnnouncesLaunchChanges,
+    ConfiguredEffects, HoldsStopRequest, InvokesConfiguredEffects, RunningNexus,
+    store::AnnouncesLaunchChanges,
 };
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
@@ -488,15 +485,15 @@ impl HandlesSendCall for ConfiguredEffects<'_> {
             }
             let outcome = self
                 .operational
-                .accept_tool_send(
+                .accept_tool_send(crate::operational::ToolSendAcceptance {
                     key,
-                    &content_sha256,
+                    content_sha256: &content_sha256,
                     sender,
-                    &arguments.target,
-                    arguments.delivery,
+                    target: &arguments.target,
+                    delivery: arguments.delivery,
                     message,
                     now,
-                )
+                })
                 .unwrap_or_else(store_refused);
             if matches!(outcome, SendOutcome::Accepted(_)) {
                 // Restore a formerly-awake target only after its logical
@@ -1097,7 +1094,7 @@ impl KeepsSendToolResponders for SendToolResponders {
         configured: &'env crate::ConfiguredUse,
         scope: &'scope Scope<'scope, 'env>,
     ) {
-        let wanted = self.wanted(nexus, &configured);
+        let wanted = self.wanted(nexus, configured);
         self.responders.retain(|thread, (generation, stop)| {
             let keep = wanted.contains_key(thread) && generation == &configured.generation;
             if !keep {
@@ -1112,7 +1109,7 @@ impl KeepsSendToolResponders for SendToolResponders {
             let (signals, inbox) = mpsc::channel();
             self.responders.insert(
                 thread.clone(),
-                (configured.generation.clone(), signals.clone()),
+                (configured.generation, signals.clone()),
             );
             let effects = nexus.configured_effects(configured);
             scope.spawn(move || effects.respond_for(&thread, &adapter, signals, inbox));

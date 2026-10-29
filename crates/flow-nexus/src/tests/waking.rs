@@ -14,7 +14,6 @@ use crate::generated::starter::ProfilesFreshSeat;
 use crate::herdr::launch::ChecksComposedLaunch;
 use crate::herdr::pane::PaneAgent;
 use crate::herdr::reservation::ChoosesNativeSession;
-use crate::performing::Performs;
 use crate::reporting::RecordsReports;
 use crate::store::ManagesMetaflowState;
 use crate::store::context::RecordsContextSize;

@@ -19,7 +19,6 @@ use crate::caller::{
     BindsCallerPane, CallerProcess, KnowsHerdrServers, LocatesCallerPane, LocatesCodexThread,
     NamesRootThread,
 };
-use crate::composition::JoinsPurpose;
 use crate::delivery::body::RendersNativeContent;
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::ClaimsNativeIdentity;
@@ -36,7 +35,7 @@ use crate::store::send_call::KeepsSendCalls;
 use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::sent::NamesCodexAppServers;
 use crate::store::{
-    ExistingSeatAdoption, FlowStore, ManagesMetaflowState, NamesConfiguredModel, NamesLiveFlow,
+    ExistingSeatAdoption, FlowStore, ManagesMetaflowState, NamesLiveFlow,
     ProcessSenderResolution, ReadsFlowMemory, ReadsFlowRows, RegistersExistingFlow,
 };
 use crate::waking::{
@@ -46,7 +45,7 @@ use crate::waking::{
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
-    Address, Aspect, Bind_Data, Caller, Delivery, HarnessKind, HerdrRoute, Launch_Data,
+    Address, Bind_Data, Caller, Delivery, HarnessKind, HerdrRoute, Launch_Data,
     LaunchProfile, Layer, Message, Process, Recipient, Refusal, Request, Response, SendPayloadSize,
     SendRequest, StartRejection, Unknown_Data,
 };
@@ -364,7 +363,7 @@ impl SendsRequests for RunningNexus {
                     None => return Response::Refused(Refusal::NoneAbove).into(),
                 },
             };
-            self.rest_ended_awake(&configured, &recipient);
+            self.rest_ended_awake(configured, &recipient);
             // Own the address until the direct call has a receipt or a
             // durable non-retryable failure. Background drain/wake may not
             // submit this same request independently. A metaflow another
@@ -456,7 +455,7 @@ impl SendsRequests for RunningNexus {
         if let Err(refusal) = self.sending_address(configured, peer) {
             return *refusal;
         }
-        self.rest_ended_awake(&configured, &address);
+        self.rest_ended_awake(configured, &address);
         let asleep = match self.store.metaflow(&address) {
             Ok(Some(metaflow)) => {
                 if metaflow.queue.is_empty() {
@@ -530,9 +529,6 @@ impl LaunchesDeclared for RunningNexus {
         launch: Launch_Data,
         caller: Option<&Process>,
     ) -> Result<signal_flow::Query, Box<Response>> {
-        let store_refused = |error: crate::store::StoreError| {
-            Box::new(Response::Refused(Refusal::Store(error.to_string())))
-        };
         let address = launch.address;
         // The topic is input: checked before the declaration is looked up.
         {
@@ -799,7 +795,7 @@ impl BindsSeats for RunningNexus {
         let Some(process_id) = u32::try_from(peer.pid).ok() else {
             return unidentified();
         };
-        let Some((seat, thread)) = self.seat_of(&configured, CallerProcess { process_id }) else {
+        let Some((seat, thread)) = self.seat_of(configured, CallerProcess { process_id }) else {
             return unidentified();
         };
         let text = |pointer: &str| {
@@ -1064,11 +1060,11 @@ impl CompletesDirectSends for RunningNexus {
         // fresh Curriculum composition. The Address lease prevents another
         // wake or submission while this direct operation owns its request.
         if self.live_awake_flow(address).is_none() {
-            let _ = self.wake_configured(&configured, address.clone());
+            let _ = self.wake_configured(configured, address.clone());
         }
         // Subscribe before input. File events only schedule the existing
         // exact session/inode/cursor/content correlation, never delivery.
-        let _receipt_watch = self.direct_receipt_watch(&configured, address);
+        let _receipt_watch = self.direct_receipt_watch(configured, address);
         let outcome = {
             let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
             self.drain_all_configured(configured, address.clone())
@@ -1082,7 +1078,7 @@ impl CompletesDirectSends for RunningNexus {
             let state = {
                 let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
                 if let Ok(Some(attempt)) = self.store.outstanding_delivery(address) {
-                    let _ = self.reconcile_delivery_configured(&configured, &attempt);
+                    let _ = self.reconcile_delivery_configured(configured, &attempt);
                 }
                 self.store.logical_delivery_snapshot(&logical_id)
             };
@@ -1112,7 +1108,7 @@ impl CompletesDirectSends for RunningNexus {
             // final correlated reconciliation follows the bounded event
             // wait; timeout alone is never evidence of absence.
             if let Ok(Some(attempt)) = self.store.outstanding_delivery(address) {
-                let _ = self.reconcile_delivery_configured(&configured, &attempt);
+                let _ = self.reconcile_delivery_configured(configured, &attempt);
             }
             self.store
                 .finish_failed_direct(address, &logical_id, &observed)

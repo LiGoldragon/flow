@@ -74,13 +74,13 @@ use crate::codex::{
     SelectsCodexEndpoint, SubmitsQueuedCodexTurn,
 };
 use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
-use crate::composition::{FreshSeat, JoinsPurpose};
+use crate::composition::FreshSeat;
 use crate::delivery::body::TypesPaneMessage;
-use crate::delivery::body::{RendersNativeContent, RendersPaneText, ShowsPaneText};
+use crate::delivery::body::RendersNativeContent;
 use crate::delivery::lease::LeasesPanes;
 use crate::delivery::{
-    DeliversCohortsWithView, DeliversConfiguredCohorts, DeliversMessages, FindsDeliveryTarget,
-    PaneRefusal, ReadsConfiguredDeliveryState, ReadsLeasedPane, TargetRefusal,
+    DeliversCohortsWithView, DeliversConfiguredCohorts, PaneRefusal,
+    ReadsConfiguredDeliveryState, TargetRefusal,
 };
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
@@ -91,7 +91,7 @@ use crate::herdr::pane::{PaneAgent, Placement, WritesPane};
 use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes, ReadsHerdrRoster};
 use crate::launching::LaunchesFlows;
 use crate::performing::{Performs, PerformsConfiguredOperations};
-use crate::send_tool::{ServesLaunchCalls, WakesDeferred};
+use crate::send_tool::WakesDeferred;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
 use crate::store::events::RecordsHarnessEvents;
@@ -102,19 +102,19 @@ use crate::store::queue_delivery::{
     NativeTranscriptCursor, PrepareQueueDelivery, QueueDeliveryAttempt, QueueDeliveryPhase,
 };
 use crate::store::successor::{OwesSuccessors, ReadsContinuity, SuccessionCause, SuccessorIntent};
-use crate::store::{FlowStore, NamesConfiguredModel};
+use crate::store::FlowStore;
 use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
     RecordsFlowLifecycle,
 };
-use crate::{BuildsConfiguredEffects, ConfiguredUse, RunningNexus};
+use crate::{ConfiguredUse, RunningNexus};
 use datom_codec::Datomizable;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
 use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, AgentState, Event, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
-    Layer, Metaflow, NativePrompt, NativeStop, Origin, QueueEntry, Response,
+    Metaflow, NativePrompt, NativeStop, Origin, QueueEntry, Response,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -577,7 +577,6 @@ pub trait PerformsWakeAndDrain {
 /// not start and confirm, rejects the requested Start naming that Address.
 pub(crate) trait StartsRequirementsFirst {
     /// Runs off the dispatch gate, taking it per requirement as a wake does.
-
     fn requirements_first_configured(
         &self,
         configured: &crate::ConfiguredUse,
@@ -825,7 +824,6 @@ trait WakesInParts {
     /// or drain runs meanwhile: the successor is started and confirmed
     /// through Replace before the predecessor is stopped and closed. The
     /// successor is owed for `cause` until it is confirmed.
-
     fn refresh_successor_first_configured(
         &self,
         configured: &crate::ConfiguredUse,
@@ -937,15 +935,12 @@ impl ReadsClaudeDelivery for RunningNexus {
         configured: &crate::ConfiguredUse,
         node: &FlowNode,
     ) -> Option<NativeTranscriptCursor> {
-        let cursor = match configured
+        let cursor = configured
             .herdr
             .native_transcript_root(&HarnessKind::Claude, "")
             .ok()?
             .session_transcript(&node.session_id)
-        {
-            Some(transcript) => transcript.claude_cursor()?,
-            None => return None,
-        };
+            .and_then(|transcript| transcript.claude_cursor())?;
         Some(NativeTranscriptCursor {
             device: cursor.device,
             inode: cursor.inode,
@@ -1070,10 +1065,10 @@ impl CorrelatesNativeEvents for RunningNexus {
             .rev()
             .find_map(|event| match event {
                 Event::Stopped(stop) => self
-                    .correlated_stop_configured(configured, flow_id, &stop)
+                    .correlated_stop_configured(configured, flow_id, stop)
                     .then_some(true),
                 Event::PromptSubmitted(prompt) => {
-                    self.correlated_prompt(flow_id, &prompt).then_some(false)
+                    self.correlated_prompt(flow_id, prompt).then_some(false)
                 }
                 Event::Started(_)
                 | Event::ToolUsed(_)
@@ -1151,10 +1146,12 @@ pub(crate) trait ReconcilesQueueDelivery {
     fn recover_deliveries_configured(&self, configured: &ConfiguredUse);
 }
 
+#[cfg(test)]
 pub(crate) trait RendersQueuedMessage {
     fn rendered_message(&self, sender: meta_signal_flow::Sender) -> meta_signal_flow::Message;
 }
 
+#[cfg(test)]
 impl RendersQueuedMessage for QueueEntry {
     fn rendered_message(&self, sender: meta_signal_flow::Sender) -> meta_signal_flow::Message {
         let request = match &self.message {
@@ -1248,7 +1245,6 @@ impl RendersAttemptInput for QueueDeliveryAttempt {
 pub(crate) trait TypesQueuedCohorts {
     fn typed_queue_message(&self, entry: &QueueEntry) -> Option<meta_signal_flow::Message>;
     fn typed_queue_cohort(&self, entries: &[QueueEntry]) -> Option<Vec<meta_signal_flow::Message>>;
-    fn typed_attempt_text(&self, attempt: &QueueDeliveryAttempt) -> Option<String>;
 }
 
 impl TypesQueuedCohorts for RunningNexus {
@@ -1265,14 +1261,6 @@ impl TypesQueuedCohorts for RunningNexus {
             .iter()
             .map(|entry| self.typed_queue_message(entry))
             .collect()
-    }
-
-    fn typed_attempt_text(&self, attempt: &QueueDeliveryAttempt) -> Option<String> {
-        let meta_signal_flow::QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
-            return None;
-        };
-        let messages = self.typed_queue_cohort(std::slice::from_ref(entry))?;
-        Some(messages.datomize(Vec::new()).protosize().compact())
     }
 }
 
@@ -2296,7 +2284,7 @@ impl PerformsWakeAndDrain for RunningNexus {
         if !cohort.iter().all(soft) {
             let view = crate::herdr::HerdrOperationView {
                 configuration: crate::store::CommittedConfigurationSnapshot {
-                    generation: configured.generation.clone(),
+                    generation: configured.generation,
                     snapshot: configured.snapshot.clone(),
                 },
                 herdr: configured.herdr.clone(),
@@ -3083,7 +3071,7 @@ impl WakesInParts for RunningNexus {
                                 .ok()
                                 .and_then(|target| self
                                     .writable_state_with(
-                                        &configured,
+                                        configured,
                                         &configured.herdr,
                                         &target,
                                         false,
@@ -3113,7 +3101,7 @@ impl WakesInParts for RunningNexus {
                 // keeps any wake or drain of the metaflow out meanwhile.
                 drop(turn);
                 let refreshed = self.refresh_successor_first_configured(
-                    &configured,
+                    configured,
                     flow_id,
                     &metaflow,
                     SuccessionCause::Refresh,

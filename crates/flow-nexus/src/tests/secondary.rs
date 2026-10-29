@@ -120,7 +120,6 @@ fn an_unstartable_requirement_is_named() {
 #[test]
 fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
     use crate::Dispatches;
-    use crate::store::ManagesMetaflowState;
     use crate::store::ReadsLaunchAttempt;
     let fixture = NexusFixture::new();
     fixture.claims_flow_ids();
@@ -244,7 +243,6 @@ fn a_send_to_a_bad_topic_is_topic_refused() {
 #[test]
 fn launch_with_a_bad_topic_is_topic_refused() {
     use crate::Dispatches;
-    use crate::store::ManagesMetaflowState;
     use signal_flow::{Address, Launch_Data, Remembering};
     let fixture = NexusFixture::new();
     fixture.claims_flow_ids();

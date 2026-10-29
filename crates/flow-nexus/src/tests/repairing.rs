@@ -123,13 +123,6 @@ fn inspect_answers_the_metaflow_whole() {
         queue: vec![],
     });
     // A lock lasts the configured lease.
-    let root = fixture.directory.path().to_string_lossy().into_owned();
-    let endpoint = |name: &str| meta_signal_flow::CodexEndpoint {
-        client_path: format!("{root}/{name}"),
-        home: format!("{root}/{name}-home"),
-        control_socket_path: format!("{root}/{name}.sock"),
-        model_name_vector: vec![format!("{name}-model")],
-    };
     fixture
         .nexus
         .store

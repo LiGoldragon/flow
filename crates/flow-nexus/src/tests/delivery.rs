@@ -11,7 +11,6 @@ use meta_signal_flow::{
     Body, BodyRefusal, CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Delivery,
     DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommand, InterruptWitness, Letter,
     Message, PaneRead_Data, Query as MetaQuery, ReadPaneRejected_Data, Response as MetaResponse,
-    Sender,
 };
 use signal_flow::{AgentObservation, AgentState, FlowLifecycle, ObserveSelection, Query, Response};
 use std::fs;

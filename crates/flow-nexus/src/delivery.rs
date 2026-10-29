@@ -10,7 +10,6 @@
 //! requires the agent Idle or Done. The screen read is not atomic with the
 //! typing; that is stated, not solved.
 
-use crate::delivery::body::ShowsPaneText;
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 pub mod body;
@@ -20,14 +19,14 @@ use crate::compacting::WatchesCompactions;
 use crate::generated::operation::{Operation, Record_Data};
 use crate::herdr::HerdrCli;
 use crate::herdr::pane::{Interruption, PaneAgent, Placement, Submission, WritesPane};
-use crate::performing::{Performs, PerformsConfiguredOperations};
+use crate::performing::PerformsConfiguredOperations;
 use crate::store::context::{JudgesCompaction, JudgesThreshold};
-use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
+use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries};
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::{ReadsFlowRows, RecordsReplacement};
 use crate::waking::TypesQueuedCohorts;
 use crate::{BuildsHerdrOperationView, ConfiguredUse, RunningNexus};
-use body::{RecognizesLetter, RendersPaneText, VetsBody};
+use body::{RecognizesLetter, VetsBody};
 use lease::LeasesPanes;
 use meta_signal_flow::{
     CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Delivery, DeliveryGrade,
@@ -82,7 +81,7 @@ pub struct DeliveryTarget {
     pub profile: HarnessProfile,
 }
 
-struct DeliveryReadiness {
+pub struct DeliveryReadiness {
     agent_state: AgentState,
     composer_was_blank: bool,
 }
@@ -462,6 +461,7 @@ impl DeliversCohortsWithView for RunningNexus {
             .iter()
             .all(|message| matches!(message, Message::Soft(_)));
         let text = messages.datomize(Vec::new()).protosize().compact();
+        let rendered = RenderedDelivery { text, hard, soft };
         let request = DeliveryRequest { delivery_id };
         let _lease = self.pane_leases.hold(&target.route);
         let delivery = if persist_outcome {
@@ -471,9 +471,7 @@ impl DeliversCohortsWithView for RunningNexus {
                 &view.herdr,
                 &request,
                 &target,
-                text,
-                hard,
-                soft,
+                rendered,
             )
         } else {
             LeasedDelivery::new_rendered_unsettled(
@@ -482,9 +480,7 @@ impl DeliversCohortsWithView for RunningNexus {
                 &view.herdr,
                 &request,
                 &target,
-                text,
-                hard,
-                soft,
+                rendered,
             )
         };
         match delivery.run() {
@@ -670,7 +666,7 @@ impl DeliversMessages for RunningNexus {
                     Placement::Placed { observed: false } => CommandGrade::Transported,
                 }
             }
-            HarnessCommand::Line(ref line) => match herdr.place(&target.route, &line, true) {
+            HarnessCommand::Line(ref line) => match herdr.place(&target.route, line, true) {
                 Placement::Refused => {
                     return Response::CommandRejected(CommandRejection::NotDelivered);
                 }
@@ -757,6 +753,12 @@ struct LeasedDelivery<'run> {
     persist_outcome: bool,
 }
 
+struct RenderedDelivery {
+    text: String,
+    hard: bool,
+    soft: bool,
+}
+
 trait RunsLeasedDelivery<'run> {
     fn new_rendered(
         nexus: &'run RunningNexus,
@@ -764,9 +766,7 @@ trait RunsLeasedDelivery<'run> {
         herdr: &'run HerdrCli,
         request: &'run DeliveryRequest,
         target: &'run DeliveryTarget,
-        text: String,
-        hard: bool,
-        soft: bool,
+        rendered: RenderedDelivery,
     ) -> Self;
     fn new_rendered_unsettled(
         nexus: &'run RunningNexus,
@@ -774,9 +774,7 @@ trait RunsLeasedDelivery<'run> {
         herdr: &'run HerdrCli,
         request: &'run DeliveryRequest,
         target: &'run DeliveryTarget,
-        text: String,
-        hard: bool,
-        soft: bool,
+        rendered: RenderedDelivery,
     ) -> Self;
     fn step(&self, lease_step: LeaseStep) -> Result<(), DeliveryRejection>;
     /// Nothing reached the pane's composer: the lease row goes, and nothing
@@ -809,9 +807,7 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         herdr: &'run HerdrCli,
         request: &'run DeliveryRequest,
         target: &'run DeliveryTarget,
-        text: String,
-        hard: bool,
-        soft: bool,
+        rendered: RenderedDelivery,
     ) -> Self {
         Self {
             nexus,
@@ -819,9 +815,9 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             herdr,
             request,
             target,
-            text,
-            hard,
-            soft,
+            text: rendered.text,
+            hard: rendered.hard,
+            soft: rendered.soft,
             persist_outcome: true,
         }
     }
@@ -832,9 +828,7 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         herdr: &'run HerdrCli,
         request: &'run DeliveryRequest,
         target: &'run DeliveryTarget,
-        text: String,
-        hard: bool,
-        soft: bool,
+        rendered: RenderedDelivery,
     ) -> Self {
         Self {
             nexus,
@@ -842,9 +836,9 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             herdr,
             request,
             target,
-            text,
-            hard,
-            soft,
+            text: rendered.text,
+            hard: rendered.hard,
+            soft: rendered.soft,
             persist_outcome: false,
         }
     }

@@ -3,7 +3,7 @@
 
 use crate::{
     RunningNexus,
-    store::{NamesConfiguredModel, ReadsFlowRows},
+    store::ReadsFlowRows,
 };
 use meta_signal_flow::{
     FlowBinding, FlowBindingRefusalReason, FlowBindingResult, FlowContainer, ProcessIdentity,

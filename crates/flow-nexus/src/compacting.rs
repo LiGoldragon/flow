@@ -41,22 +41,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// still be raised, when a transcript is first read in this run: a Nexus
 /// restarted in the middle of a flow's work misses none it made just before.
 /// What Flow keeps of the compactions it watches, in memory.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct CompactionWatch {
     /// How far each Claude flow's transcript has been read.
     read_to: Mutex<HashMap<String, (PathBuf, u64)>>,
     /// The Codex flows a Compact was typed into: the next compaction of
     /// each is the one asked for.
     requested: Mutex<HashSet<String>>,
-}
-
-impl Default for CompactionWatch {
-    fn default() -> Self {
-        Self {
-            read_to: Mutex::default(),
-            requested: Mutex::default(),
-        }
-    }
 }
 
 trait ReadsCompactionFloor {

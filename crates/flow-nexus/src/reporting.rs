@@ -19,7 +19,7 @@
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Harness_Data,
 };
-use crate::performing::{Performs, PerformsConfiguredOperations};
+use crate::performing::PerformsConfiguredOperations;
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::metaflow::SleepsMetaflows;
@@ -136,7 +136,7 @@ impl RecordsReports for RunningNexus {
                 if own {
                     crate::observe_agent::RecordsWitnessedExit::exited_as_witnessed(
                         self,
-                        &configured,
+                        configured,
                         flow_id,
                     );
                 } else {

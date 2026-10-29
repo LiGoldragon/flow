@@ -2129,7 +2129,6 @@ fn a_codex_turn_absent_from_an_idle_thread_remains_uncertain() {
 #[test]
 fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
     use crate::generated::operation::{Operation, Outcome};
-    use crate::performing::Performs;
     use crate::waking::ReconcilesQueueDelivery;
     use meta_signal_flow::{QueueDeliveryStanding, Undecided};
     let mut fixture = NexusFixture::new();

@@ -121,7 +121,6 @@ pub trait LaysOutDefaults {
     fn curriculum_socket_path(&self) -> PathBuf {
         self.runtime_directory().join(Self::CURRICULUM_SOCKET)
     }
-
 }
 
 impl LaysOutDefaults for DefaultConfiguration {

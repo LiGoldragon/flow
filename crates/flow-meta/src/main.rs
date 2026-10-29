@@ -253,10 +253,7 @@ mod tests {
             socket: "unused".into(),
         };
         let Query::Deliver(request) = client
-            .parse_command(
-                ["Deliver.{ m-7f3a2c:7d41e0:0 }".into()]
-                    .into_iter(),
-            )
+            .parse_command(["Deliver.{ m-7f3a2c:7d41e0:0 }".into()].into_iter())
             .expect("deliver datom parses")
         else {
             panic!("Deliver datom must stay a Deliver query")

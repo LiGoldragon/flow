@@ -62,8 +62,8 @@ use std::{
 };
 
 use meta_signal_flow::{
-    ConfigurationChange, ConfigurationEntry, ConfigureModel, ConfigureNexus, ConfigureOutcome,
-    ConfigureThreshold, EntryKey,
+    ConfigurationChange, ConfigurationEntry, ConfigureModel, ConfigureOutcome, ConfigureThreshold,
+    EntryKey,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -218,8 +218,6 @@ const FLOW_CONFIGURATION_TABLE_NAME: TableName = TableName::new("flow_nexus_conf
 const FLOW_HERDR_ROUTE_TABLE_NAME: TableName = TableName::new("flow_nexus_herdr_routes");
 const FLOW_LAUNCH_PANE_TABLE_NAME: TableName = TableName::new("flow_nexus_launch_panes");
 const FLOW_LAUNCH_ATTEMPT_TABLE_NAME: TableName = TableName::new("flow_nexus_launch_attempts");
-const FLOW_RUNTIME_CONFIGURATION_TABLE_NAME: TableName =
-    TableName::new("flow_nexus_runtime_configuration");
 const FLOW_LAUNCH_OUTCOME_TABLE_NAME: TableName = TableName::new("flow_nexus_launch_outcomes");
 const FLOW_REPLACEMENT_TABLE_NAME: TableName = TableName::new("flow_nexus_replacements");
 const FLOW_ROLE_TABLE_NAME: TableName = TableName::new("flow_nexus_roles");
@@ -1447,7 +1445,6 @@ impl EngineRecord for StoredMetaLeaveOutConfigurationV1 {
 pub(crate) trait NamesConfiguredModel {
     /// The model configured for the Address's layer and aspect, if any.
     fn configured_model(&self, address: &Address) -> Result<Option<String>, StoreError>;
-    fn configured_effort(&self, address: &Address) -> Result<Option<String>, StoreError>;
 }
 
 impl NamesConfiguredModel for FlowStore {
@@ -1459,16 +1456,6 @@ impl NamesConfiguredModel for FlowStore {
             .records()
             .first()
             .map(|stored| stored.model.model_name.clone()))
-    }
-
-    fn configured_effort(&self, address: &Address) -> Result<Option<String>, StoreError> {
-        let key = RecordKey::new(FlowStore::model_record_key(&address.layer, &address.aspect));
-        Ok(self
-            .engine
-            .match_records(QueryPlan::key(self.meta_configuration_tables.models, key))?
-            .records()
-            .first()
-            .map(|stored| stored.model.effort.clone()))
     }
 }
 
@@ -3957,7 +3944,7 @@ impl TryFrom<ReplaceRejectionV22> for ReplaceRejectionV30 {
             ReplaceRejectionV22::LaunchRefused(rejection) => {
                 Self::LaunchRefused(rejection.try_into()?)
             }
-            ReplaceRejectionV22::ReapRefused(rejection) => Self::ReapRefused(rejection.into()),
+            ReplaceRejectionV22::ReapRefused(rejection) => Self::ReapRefused(rejection),
         })
     }
 }
@@ -4106,7 +4093,7 @@ impl From<ReplaceRejectionV18> for ReplaceRejectionV22 {
             ReplaceRejectionV18::UnknownPredecessor => Self::UnknownPredecessor,
             ReplaceRejectionV18::PredecessorStopped => Self::PredecessorStopped,
             ReplaceRejectionV18::LaunchRefused(rejection) => Self::LaunchRefused(rejection.into()),
-            ReplaceRejectionV18::ReapRefused(rejection) => Self::ReapRefused(rejection.into()),
+            ReplaceRejectionV18::ReapRefused(rejection) => Self::ReapRefused(rejection),
         }
     }
 }
@@ -4225,7 +4212,7 @@ impl From<ReplaceRejectionV17> for ReplaceRejectionV22 {
             ReplaceRejectionV17::UnknownPredecessor => Self::UnknownPredecessor,
             ReplaceRejectionV17::PredecessorStopped => Self::PredecessorStopped,
             ReplaceRejectionV17::LaunchRefused(rejection) => Self::LaunchRefused(rejection.into()),
-            ReplaceRejectionV17::ReapRefused(rejection) => Self::ReapRefused(rejection.into()),
+            ReplaceRejectionV17::ReapRefused(rejection) => Self::ReapRefused(rejection),
         }
     }
 }
@@ -5277,7 +5264,6 @@ impl SetsNativeOwnerEnvironmentForTests for FlowStore {
 pub struct ConfigurationOnlyStore {
     engine: Engine,
     configuration_guard: Mutex<()>,
-    configuration: TableReference<FlowStoreConfiguration>,
     meta_configuration_tables: MetaConfigurationTables,
 }
 
@@ -5372,7 +5358,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&full_receipt_descriptor),
         )?;
         let state = engine.register_table(state_descriptor)?;
-        let configuration = engine.register_table(configuration_descriptor)?;
+        engine.register_table(configuration_descriptor)?;
         let meta_configuration_tables = MetaConfigurationTables {
             nexus: engine.upgraded_nexus_configuration(meta_nexus_descriptor)?,
             harnesses: engine.upgraded_harnesses(meta_harnesses_descriptor)?,
@@ -5458,7 +5444,6 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         Ok(Self {
             engine,
             configuration_guard: Mutex::new(()),
-            configuration,
             meta_configuration_tables,
         })
     }
@@ -5751,7 +5736,6 @@ trait ReadsFlowStore {
     fn state(&self) -> Result<FlowStoreState, StoreError>;
     fn flow(&self, flow_id: &str) -> Result<Option<FlowRecord>, StoreError>;
     fn herdr_route(&self, flow_id: &str) -> Result<Option<FlowHerdrRouteRecord>, StoreError>;
-    fn stored_configuration(&self) -> Result<FlowStoreConfiguration, StoreError>;
     fn stored_launch_attempt(
         &self,
         launch_request_id: &str,
@@ -6383,13 +6367,6 @@ pub(crate) trait ManagesMetaflowState: Sized {
         &self,
         model_name: &str,
     ) -> Result<Option<ConfigureThreshold>, StoreError>;
-    /// The leave-outs a metaflow's Start on one harness takes when it names
-    /// none; empty when none are configured for that harness.
-    fn default_left_out(
-        &self,
-        address: &Address,
-        harness_kind: &HarnessKind,
-    ) -> Result<Vec<LeaveOut>, StoreError>;
     fn stored_metaflow(&self, address: &Address) -> Result<Option<StoredMetaflow>, StoreError>;
     fn stored_metaflow_process(
         &self,
@@ -6466,24 +6443,6 @@ impl ManagesMetaflowState for FlowStore {
             [stored] => Ok(Some(stored.threshold.clone())),
             _ => Err(StoreError::StateInvariant),
         }
-    }
-
-    fn default_left_out(
-        &self,
-        address: &Address,
-        harness_kind: &HarnessKind,
-    ) -> Result<Vec<LeaveOut>, StoreError> {
-        let _ = harness_kind;
-        Ok(self
-            .configuration_snapshot()?
-            .and_then(|snapshot| {
-                snapshot
-                    .configured_metaflows
-                    .into_iter()
-                    .find(|row| &row.address == address)
-                    .map(|row| row.left_out)
-            })
-            .unwrap_or_default())
     }
 
     fn stored_metaflow(&self, address: &Address) -> Result<Option<StoredMetaflow>, StoreError> {
@@ -7408,14 +7367,13 @@ impl RegistersExistingFlow for FlowStore {
         metaflow.state = MetaflowState::Awake(flow_node.flow_id.clone());
 
         let existing_flow = self.flow(&flow_node.flow_id)?;
-        if let Some(existing) = &existing_flow {
-            if existing.thread_id.as_deref() != Some(flow_node.session_id.as_str())
-                || existing.harness_kind != flow_node.harness_kind
-            {
-                return Ok(ExistingSeatAdoption::Refused(
-                    Refusal::NativeIdentityMismatch,
-                ));
-            }
+        if let Some(existing) = &existing_flow
+            && (existing.thread_id.as_deref() != Some(flow_node.session_id.as_str())
+                || existing.harness_kind != flow_node.harness_kind)
+        {
+            return Ok(ExistingSeatAdoption::Refused(
+                Refusal::NativeIdentityMismatch,
+            ));
         }
         let lifecycle = match flow_node.flow_lifecycle {
             SignalFlowLifecycle::Pending | SignalFlowLifecycle::Active => FlowLifecycle::Active,
@@ -8117,21 +8075,6 @@ impl ReadsFlowStore for FlowStore {
         match records.as_slice() {
             [] => Ok(None),
             [route] => Ok(Some(route.clone())),
-            _ => Err(StoreError::StateInvariant),
-        }
-    }
-
-    fn stored_configuration(&self) -> Result<FlowStoreConfiguration, StoreError> {
-        let records = self
-            .engine
-            .match_records(QueryPlan::key(
-                self.configuration,
-                RecordKey::new(CONFIGURATION_KEY),
-            ))?
-            .records()
-            .to_vec();
-        match records.as_slice() {
-            [configuration] => Ok(configuration.clone()),
             _ => Err(StoreError::StateInvariant),
         }
     }
@@ -9540,7 +9483,7 @@ pub(crate) trait ReadsFlowMemory {
     /// Drops each retired table a store holds, its rows and its catalog
     /// registration, in one write before the engine opens the store.
     fn drop_retired_tables(path: &Path) -> Result<(), StoreError> {
-        use redb::{ReadableDatabase as _, ReadableTable as _};
+        use redb::ReadableTable as _;
         let failed = |error: String| StoreError::RetiredTableDrop(error);
         let database = redb::Database::open(path).map_err(|error| failed(error.to_string()))?;
         let write = database
@@ -9582,7 +9525,7 @@ pub(crate) trait ReadsFlowMemory {
     /// staged store generation, so the merge and the later table retirement
     /// become visible together only when the staged generation activates.
     fn migrate_retired_leave_outs(path: &Path) -> Result<(), StoreError> {
-        use redb::{ReadableDatabase as _, ReadableTable as _};
+        use redb::ReadableDatabase as _;
         let database = redb::Database::open(path)
             .map_err(|error| StoreError::LeaveOutUpgradeFailed(error.to_string()))?;
         let read = database
@@ -11423,7 +11366,7 @@ mod tests {
         CompositionRefusalV37, LaunchOutcomeV9, ReplaceRejectionV37, StartRejectionV37,
         StoredLaunchOutcomeV9,
     };
-    use super::{Configuration, ConfiguresOnlyStore, ReadsFlowMemory};
+    use super::{ConfiguresOnlyStore, ReadsFlowMemory};
     use super::{
         ContextRefusalV30, LaunchOutcomeV6, ReplaceRejectionV30, StartRejectionV30,
         StoredLaunchOutcomeV6,
@@ -11436,7 +11379,7 @@ mod tests {
     use super::{LaunchOutcomeV10, ReplaceRejectionV38, StopRejectionV38, StoredLaunchOutcomeV10};
     use super::{LaunchOutcomeV11, ReplaceRejectionV39, StartRejectionV39, StoredLaunchOutcomeV11};
     use super::{LaunchedRecord, ReplacedRecord};
-    use super::{LaysOutDefaults, SeedsConfiguration};
+    use super::SeedsConfiguration;
     use crate::store::RegistersBindings;
     use crate::store::delivery::RecordsDeliveries;
     use crate::store::delivery::{LeaseStep, PaneLease};
@@ -15876,10 +15819,7 @@ mod v3_attempts {
             },
         };
         let Decision::Ready(current) =
-            super::StoredMetaThresholdConfiguration::upgrade_from(previous)
-        else {
-            panic!("threshold upgrade is total")
-        };
+            super::StoredMetaThresholdConfiguration::upgrade_from(previous);
         assert_eq!(current.threshold.refresh_tokens, 150_000);
     }
 

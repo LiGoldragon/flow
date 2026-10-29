@@ -560,10 +560,9 @@ impl ReadsMetaflowDeclarations for FlowStore {
 mod tests {
     use super::{
         AvailabilityV3, ConfigureMetaflowV1, ConfigureMetaflowV2, ConfigureMetaflowV3,
-        ConfigureMetaflowV4, ConfigureMetaflowV5, FlowKindV4, StoredMetaMetaflowConfiguration,
+        ConfigureMetaflowV4, FlowKindV4, StoredMetaMetaflowConfiguration,
         StoredMetaMetaflowConfigurationV1, StoredMetaMetaflowConfigurationV2,
         StoredMetaMetaflowConfigurationV3, StoredMetaMetaflowConfigurationV4,
-        StoredMetaMetaflowConfigurationV5,
     };
     use meta_signal_flow::Continuity;
     use sema_engine::{Decision, UpgradeFrom};

@@ -165,6 +165,8 @@ impl RepairsMetaflows for FlowStore {
     }
 }
 
+type ContextRepairState = Option<(Option<i64>, Option<i64>)>;
+
 /// Store-only owner repairs. These methods never touch a harness.
 pub(crate) trait RepairsStoredState {
     fn enqueue_repair(
@@ -195,7 +197,7 @@ pub(crate) trait RepairsStoredState {
     fn context_repair(
         &self,
         flow_id: &str,
-    ) -> Result<Option<(Option<i64>, Option<i64>)>, StoreError>;
+    ) -> Result<ContextRepairState, StoreError>;
     fn settle_launch_repair(
         &self,
         request: &str,
@@ -352,7 +354,7 @@ impl RepairsStoredState for FlowStore {
     fn context_repair(
         &self,
         flow_id: &str,
-    ) -> Result<Option<(Option<i64>, Option<i64>)>, StoreError> {
+    ) -> Result<ContextRepairState, StoreError> {
         if self.flow(flow_id)?.is_none() {
             return Ok(None);
         }

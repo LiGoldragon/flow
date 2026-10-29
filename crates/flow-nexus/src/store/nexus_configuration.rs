@@ -185,7 +185,7 @@ impl MigratesNexusConfiguration for StoredMetaNexusConfiguration {
     /// Reads the v1/v2 Nexus row before Engine upgrades its table, so the fields
     /// that move to the Harness family can be written there without loss.
     fn legacy_nexus(path: &std::path::Path) -> Result<Option<ConfigureNexusV2>, StoreError> {
-        use redb::{ReadableDatabase as _, ReadableTable as _};
+        use redb::ReadableDatabase as _;
         if !path.exists() {
             return Ok(None);
         }

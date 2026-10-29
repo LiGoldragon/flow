@@ -1078,13 +1078,13 @@ impl AccountsQueueDelivery for FlowStore {
             .match_records(QueryPlan::all(self.logical_deliveries.current))?
             .records()
             .iter()
-            .filter_map(|current| {
+            .filter(|current| {
                 matches!(
                     current.sender_identity,
                     LogicalSenderIdentity::MissingHistoricalSender
                 )
-                .then(|| current.snapshot.logical_delivery_id.clone())
             })
+            .map(|current| current.snapshot.logical_delivery_id.clone())
             .collect::<std::collections::BTreeSet<_>>();
         if missing.is_empty() {
             return Ok(());

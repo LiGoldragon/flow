@@ -217,6 +217,10 @@
             // {
               inherit (context) cargoArtifacts;
               cargoTestExtraArgs = "--workspace";
+              # Process, pane and store fixtures deliberately exercise
+              # singleton native resources; the acceptance suite serializes
+              # them instead of turning fixture contention into a result.
+              RUST_TEST_THREADS = "1";
               # The approval pipeline's tests read a real git repository.
               nativeCheckInputs = [ context.pkgs.git ];
             }

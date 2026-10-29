@@ -32,10 +32,18 @@ impl TypesPaneMessage for signal_flow::Message {
             signal_flow::Message::Soft(request) => (2, request),
         };
         let (kind, body) = match request {
-            signal_flow::Request::Order(text) => (meta_signal_flow::Kind::Order, Body::Words(text.clone())),
-            signal_flow::Request::Result(text) => (meta_signal_flow::Kind::Result, Body::Words(text.clone())),
-            signal_flow::Request::Notice(text) => (meta_signal_flow::Kind::Notice, Body::Words(text.clone())),
-            signal_flow::Request::Question(text) => (meta_signal_flow::Kind::Question, Body::Words(text.clone())),
+            signal_flow::Request::Order(text) => {
+                (meta_signal_flow::Kind::Order, Body::Words(text.clone()))
+            }
+            signal_flow::Request::Result(text) => {
+                (meta_signal_flow::Kind::Result, Body::Words(text.clone()))
+            }
+            signal_flow::Request::Notice(text) => {
+                (meta_signal_flow::Kind::Notice, Body::Words(text.clone()))
+            }
+            signal_flow::Request::Question(text) => {
+                (meta_signal_flow::Kind::Question, Body::Words(text.clone()))
+            }
             signal_flow::Request::Psyche(data) => (
                 meta_signal_flow::Kind::Psyche,
                 Body::Psyche(meta_signal_flow::PsycheWords {
@@ -45,10 +53,14 @@ impl TypesPaneMessage for signal_flow::Message {
             ),
             signal_flow::Request::Psyches(data) => (
                 meta_signal_flow::Kind::Psyche,
-                Body::Psyches(data.iter().map(|said| meta_signal_flow::PsycheWords {
-                    first_string: said.context.clone(),
-                    second_string: said.verbatim.clone(),
-                }).collect()),
+                Body::Psyches(
+                    data.iter()
+                        .map(|said| meta_signal_flow::PsycheWords {
+                            first_string: said.context.clone(),
+                            second_string: said.verbatim.clone(),
+                        })
+                        .collect(),
+                ),
             ),
         };
         let letter = Letter { kind, sender, body };
@@ -150,7 +162,7 @@ pub trait RecognizesLetter {
 
 impl RecognizesLetter for str {
     fn opens_a_letter(&self) -> bool {
-        ["HardAbrupt.{ ", "MiddleAbrupt.{ ", "Soft.{ "]
+        ["[ HardAbrupt.{ ", "[ MiddleAbrupt.{ ", "[ Soft.{ "]
             .iter()
             .any(|head| self.starts_with(head))
     }
@@ -189,7 +201,12 @@ impl ReadsBody for Body {
         match self {
             Body::Words(text) => text.trim().is_empty(),
             Body::Psyche(psyche) => psyche.second_string.trim().is_empty(),
-            Body::Psyches(psychē) => psychē.is_empty() || psychē.iter().all(|said| said.second_string.trim().is_empty()),
+            Body::Psyches(psychē) => {
+                psychē.is_empty()
+                    || psychē
+                        .iter()
+                        .all(|said| said.second_string.trim().is_empty())
+            }
         }
     }
 
@@ -197,7 +214,10 @@ impl ReadsBody for Body {
         match self {
             Body::Words(text) => vec![text.clone()],
             Body::Psyche(psyche) => vec![psyche.first_string.clone(), psyche.second_string.clone()],
-            Body::Psyches(psychē) => psychē.iter().flat_map(|said| [said.first_string.clone(), said.second_string.clone()]).collect(),
+            Body::Psyches(psychē) => psychē
+                .iter()
+                .flat_map(|said| [said.first_string.clone(), said.second_string.clone()])
+                .collect(),
         }
     }
 }
@@ -311,8 +331,9 @@ mod tests {
     #[test]
     fn recognizes_flow_minted_abrupt_send_letters() {
         for prefix in ["HardAbrupt", "MiddleAbrupt"] {
-            let text =
-                format!("{prefix}.{{ Order {{ {{ Psyche core Secondary }} e167d8 }} Words.work }}");
+            let text = format!(
+                "[ {prefix}.{{ Order {{ {{ Psyche core Secondary }} e167d8 }} Words.work }} ]"
+            );
             assert!(text.as_str().opens_a_letter(), "{text}");
         }
     }

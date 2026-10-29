@@ -251,17 +251,17 @@ fn delivered(delivery_id: &str, delivery_grade: DeliveryGrade) -> MetaResponse {
 }
 
 #[test]
-fn a_letter_herdr_calls_prompted_but_the_composer_still_holds_is_not_presented() {
+fn a_letter_herdr_calls_prompted_but_the_composer_still_holds_is_taken_back() {
     let fixture = NexusFixture::new();
-    fixture.resting_recipient(Composer::SubmitsOnEnter);
+    fixture.resting_recipient(Composer::ClearsOnKill);
     // Herdr answered agent_prompted after a state change; the composer
-    // kept the letter until Flow pressed the submit key once itself. The
-    // reaction Herdr saw was not this letter's, so it is Transported.
+    // kept the letter. This configured Codex composer has no pane submit
+    // key, so Flow takes its own text back and refuses the transport.
     assert_eq!(
         fixture.deliver_soft("stuck-1", "when you rest"),
-        delivered("stuck-1", DeliveryGrade::Transported)
+        MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
     );
-    assert_eq!(fixture.key_presses(), ["enter"]);
+    assert_eq!(fixture.key_presses(), ["ctrl+u backspace"]);
     assert_eq!(fixture.composer_holds(), None);
 }
 
@@ -274,10 +274,7 @@ fn a_letter_that_will_not_submit_is_taken_back_and_parked() {
         MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
     );
     // One submit, then a kill-line and a join for each line of the letter.
-    assert_eq!(
-        fixture.key_presses(),
-        ["enter", "ctrl+u backspace ctrl+u backspace"]
-    );
+    assert_eq!(fixture.key_presses(), ["ctrl+u backspace ctrl+u backspace"]);
     assert_eq!(fixture.composer_holds(), None, "the pane is free again");
     // Nothing of a taken-back letter is kept: Message may deliver it again
     // under the same DeliveryId, and this time it submits.
@@ -326,19 +323,19 @@ fn a_letter_seen_leaving_the_composer_is_presented_with_no_key_pressed() {
 /// Herdr's `agent_prompt_stalled` follows typed input: the letter may sit
 /// in the composer. It is submitted there too, and the pane is let go.
 #[test]
-fn a_stalled_prompt_left_in_the_composer_is_submitted() {
+fn a_stalled_prompt_left_in_the_composer_is_taken_back() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.settled_agent()],
         PromptFixture::FailedAfterInput("agent_prompt_stalled"),
     );
-    fixture.composer_keeps_the_letter(Composer::SubmitsOnEnter);
+    fixture.composer_keeps_the_letter(Composer::ClearsOnKill);
     fixture.register_with(FlowLifecycle::Active);
     assert_eq!(
         fixture.deliver_soft("stalled-1", "when you rest"),
-        delivered("stalled-1", DeliveryGrade::Transported)
+        MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
     );
-    assert_eq!(fixture.key_presses(), ["enter"]);
+    assert_eq!(fixture.key_presses(), ["ctrl+u backspace"]);
     assert_eq!(fixture.composer_holds(), None);
 }
 
@@ -356,7 +353,7 @@ fn hard_abrupt(text: &str) -> Message {
 /// ComposerOccupied, Message parked it, and the restored letter held the
 /// pane against every later letter.
 #[test]
-fn an_interrupt_restored_prompt_is_resubmitted_without_claiming_its_syntax() {
+fn an_interrupt_restored_flow_cohort_is_retracted_before_the_new_delivery() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.current_agent()],
@@ -364,7 +361,7 @@ fn an_interrupt_restored_prompt_is_resubmitted_without_claiming_its_syntax() {
     );
     fixture.interrupt_restores(
         FixtureComposer::Codex,
-        "Soft.{ m-18d8ebf6d76a13da009 Owner Text.«sleep» }",
+        "[ Soft.{ m-18d8ebf6d76a13da009 Owner Text.«sleep» } ]",
     );
     fixture.register_under(FixtureComposer::Codex);
     assert_eq!(
@@ -382,8 +379,8 @@ fn an_interrupt_restored_prompt_is_resubmitted_without_claiming_its_syntax() {
     );
     let presses = fixture.key_presses();
     assert_eq!(presses[0], "esc", "Codex's interrupt");
-    assert_eq!(presses, ["esc", "enter"]);
-    assert!(presses.iter().all(|key| !key.contains("backspace")));
+    assert_eq!(presses[0], "esc");
+    assert!(presses[1].contains("backspace"));
 }
 
 /// The same path under Claude Code, which is where it was witnessed and
@@ -393,7 +390,7 @@ fn an_interrupt_restored_prompt_is_resubmitted_without_claiming_its_syntax() {
 /// Claude's vim NORMAL mode, which the second `esc` leaves it in, is what
 /// makes the line-by-line take-back unfit here.
 #[test]
-fn claudes_interrupt_restored_prompt_is_resubmitted_not_retracted() {
+fn claudes_interrupt_restored_flow_cohort_is_retracted() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.working_agent(FixtureComposer::Claude)],
@@ -401,7 +398,7 @@ fn claudes_interrupt_restored_prompt_is_resubmitted_not_retracted() {
     );
     fixture.interrupt_restores(
         FixtureComposer::Claude,
-        "Soft.{ m-18d8ebf6d76a13da009 Owner Text.«sleep» }",
+        "[ Soft.{ m-18d8ebf6d76a13da009 Owner Text.«sleep» } ]",
     );
     fixture.register_under(FixtureComposer::Claude);
     assert_eq!(
@@ -419,8 +416,8 @@ fn claudes_interrupt_restored_prompt_is_resubmitted_not_retracted() {
     );
     assert_eq!(
         fixture.key_presses(),
-        ["esc esc", "enter", "enter"],
-        "the cancelled prompt is resubmitted, then the new delivery lands"
+        ["esc esc", "ctrl+c", "enter"],
+        "the restored Flow cohort is retracted, then the new delivery lands"
     );
 }
 
@@ -562,7 +559,7 @@ fn a_native_input_matching_a_letter_shaped_prompt_is_submitted_again_never_retra
 }
 
 #[test]
-fn a_prompt_codexs_interrupt_put_back_is_submitted_again() {
+fn a_prompt_codexs_interrupt_put_back_is_preserved_when_no_submit_key_is_configured() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.current_agent()],
@@ -570,21 +567,19 @@ fn a_prompt_codexs_interrupt_put_back_is_submitted_again() {
     );
     fixture.interrupt_restores(FixtureComposer::Codex, "half a thought of my own");
     fixture.register_under(FixtureComposer::Codex);
-    assert!(matches!(
+    assert_eq!(
         fixture.nexus.deliver_cohort(
             "hard-cancelled".into(),
             "908786".into(),
             vec![hard_abrupt("stop")],
         ),
-        MetaResponse::Delivered(_)
-    ));
-    assert_eq!(fixture.key_presses(), ["esc", "enter"]);
+        MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
+    );
+    assert_eq!(fixture.key_presses(), ["esc"]);
+    assert_eq!(fixture.resubmitted(), None);
     assert_eq!(
-        fixture.resubmitted().as_deref(),
+        fixture.composer_holds().as_deref(),
         Some("half a thought of my own")
     );
-    assert_eq!(
-        fixture.typed().as_deref(),
-        Some("[ HardAbrupt.{ Order { { Psyche core Secondary } e167d8 } Words.stop } ]")
-    );
+    assert_eq!(fixture.typed(), None);
 }

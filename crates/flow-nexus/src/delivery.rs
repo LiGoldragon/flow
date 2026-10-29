@@ -117,14 +117,7 @@ impl RunningNexus {
             return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused);
         };
         let view = configured.herdr_operation_view();
-        self.deliver_cohort_with_view(
-            &configured,
-            &view,
-            delivery_id,
-            &flow_id,
-            messages,
-            true,
-        )
+        self.deliver_cohort_with_view(&configured, &view, delivery_id, &flow_id, messages, true)
     }
 
     pub(crate) fn delivery_target_with(
@@ -385,19 +378,14 @@ impl RunningNexus {
             match self.store.delivery(&delivery_id) {
                 Ok(Some(delivery)) => return Response::Delivered(delivery),
                 Ok(None) => {}
-                Err(_) => {
-                    return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused)
-                }
+                Err(_) => return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused),
             }
         }
-        let target = match self.checked_cohort_target(
-            &view.configuration.snapshot,
-            flow_id,
-            &messages,
-        ) {
-            Ok(target) => target,
-            Err(refusal) => return Response::DeliveryRejected(refusal),
-        };
+        let target =
+            match self.checked_cohort_target(&view.configuration.snapshot, flow_id, &messages) {
+                Ok(target) => target,
+                Err(refusal) => return Response::DeliveryRejected(refusal),
+            };
         let hard = messages
             .iter()
             .any(|message| matches!(message, Message::HardAbrupt(_)));
@@ -441,23 +429,31 @@ impl RunningNexus {
         let Ok(configured) = self.test_configured_use() else {
             return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused);
         };
-        let target = match self.delivery_target(&configured, flow_id) {
-            Ok(target) => target,
-            Err(refusal) => return Response::DeliveryRejected(refusal.into()),
-        };
-        match messages
+        let view = configured.herdr_operation_view();
+        let target =
+            match self.checked_cohort_target(&view.configuration.snapshot, flow_id, messages) {
+                Ok(target) => target,
+                Err(refusal) => return Response::DeliveryRejected(refusal),
+            };
+        let hard = messages
             .iter()
-            .find_map(|message| message.refusal(&target.profile))
-        {
-            Some(refusal) => Response::DeliveryRejected(DeliveryRejection::BodyRefused(refusal)),
-            None => Response::Vetted(target.node.flow_id),
+            .any(|message| matches!(message, Message::HardAbrupt(_)));
+        let soft = messages
+            .iter()
+            .all(|message| matches!(message, Message::Soft(_)));
+        match self.delivery_readiness(&configured, &view.herdr, &target, hard, soft, false) {
+            Ok(_) => Response::Vetted(target.node.flow_id),
+            Err(refusal) => Response::DeliveryRejected(refusal),
         }
     }
 }
 
 impl DeliversMessages for RunningNexus {
     fn deliver(&self, configured: &ConfiguredUse, request: DeliveryRequest) -> Response {
-        match self.store.settle_interrupted_typed_cohort(&request.delivery_id) {
+        match self
+            .store
+            .settle_interrupted_typed_cohort(&request.delivery_id)
+        {
             Ok(Some(delivery)) => return Response::Delivered(delivery),
             Ok(None) => {}
             Err(_) => return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused),
@@ -484,8 +480,13 @@ impl DeliversMessages for RunningNexus {
             messages,
             false,
         );
-        let Response::Delivered(delivery) = response else { return response };
-        match self.store.settle_typed_cohort(&attempt.attempt_id, delivery.clone()) {
+        let Response::Delivered(delivery) = response else {
+            return response;
+        };
+        match self
+            .store
+            .settle_typed_cohort(&attempt.attempt_id, delivery.clone())
+        {
             Ok(true) => Response::Delivered(delivery),
             Ok(false) | Err(_) => Response::DeliveryRejected(DeliveryRejection::PersistenceRefused),
         }
@@ -509,8 +510,12 @@ impl DeliversMessages for RunningNexus {
             Ok(target) => target,
             Err(refusal) => return Response::DeliveryRejected(refusal),
         };
-        let hard = messages.iter().any(|message| matches!(message, Message::HardAbrupt(_)));
-        let soft = messages.iter().all(|message| matches!(message, Message::Soft(_)));
+        let hard = messages
+            .iter()
+            .any(|message| matches!(message, Message::HardAbrupt(_)));
+        let soft = messages
+            .iter()
+            .all(|message| matches!(message, Message::Soft(_)));
         match self.delivery_readiness(configured, &view.herdr, &target, hard, soft, false) {
             Ok(_) => Response::Vetted(target.node.flow_id),
             Err(refusal) => Response::DeliveryRejected(refusal),
@@ -522,7 +527,6 @@ impl DeliversMessages for RunningNexus {
         let herdr = &view.herdr;
         let target = match self.delivery_target_with(&request.flow_id, &view.configuration.snapshot)
         {
-
             Ok(target) => target,
             Err(refusal) => return Response::CommandRejected(refusal.into()),
         };
@@ -724,7 +728,17 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         hard: bool,
         soft: bool,
     ) -> Self {
-        Self { nexus, configured, herdr, request, target, text, hard, soft, persist_outcome: true }
+        Self {
+            nexus,
+            configured,
+            herdr,
+            request,
+            target,
+            text,
+            hard,
+            soft,
+            persist_outcome: true,
+        }
     }
 
     fn new_rendered_unsettled(
@@ -737,7 +751,17 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         hard: bool,
         soft: bool,
     ) -> Self {
-        Self { nexus, configured, herdr, request, target, text, hard, soft, persist_outcome: false }
+        Self {
+            nexus,
+            configured,
+            herdr,
+            request,
+            target,
+            text,
+            hard,
+            soft,
+            persist_outcome: false,
+        }
     }
 
     fn step(&self, lease_step: LeaseStep) -> Result<(), DeliveryRejection> {

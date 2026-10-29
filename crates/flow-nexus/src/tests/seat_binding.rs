@@ -299,7 +299,10 @@ fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
     let bound_peer = FlowStore::process_identity_for_pid(root.0.id()).unwrap();
     let configured = fixture.nexus.configured_use().unwrap();
     assert_eq!(
-        fixture.nexus.sending_sender(&configured, &bound_peer).unwrap(),
+        fixture
+            .nexus
+            .sending_sender(&configured, &bound_peer)
+            .unwrap(),
         meta_signal_flow::Sender {
             address: address.clone(),
             flow_id: CLAUDE_SEAT.into(),
@@ -320,7 +323,9 @@ fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
             if *response == Response::Refused(Refusal::Unidentified(bound_peer.clone()))
     ));
     assert_eq!(
-        fixture.nexus.bind_seat(&configured, address.clone(), Some(&bound_peer)),
+        fixture
+            .nexus
+            .bind_seat(&configured, address.clone(), Some(&bound_peer)),
         Response::Refused(Refusal::Unidentified(bound_peer.clone())),
         "a predecessor's explicit binding cannot acquire its successor's identity"
     );

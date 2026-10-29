@@ -8,8 +8,6 @@
 use super::{ControlsHerdrSnapshot, NexusFixture};
 use crate::codex::{CodexAdapter, ResponderSignal, SelectsCodexEndpoint};
 use crate::delivery::body::{RendersPaneText, ShowsPaneText, TypesPaneMessage};
-use datom_codec::Datomizable;
-use protos::{Compactable, Protosizable};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::send_tool::{
     HandlesSendCall, ReadsToolCall, SendCall, SendOutcome, SendRefusal, ToolCall, ToolCallKey,
@@ -21,8 +19,10 @@ use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{AnnouncesLaunchChanges, RecordsFlowLifecycle, RegistersFlowIdentity};
 use crate::{HoldsStopRequest, generated::send_tool::DeclaresSendTool};
+use datom_codec::Datomizable;
 use flow_ethos::State;
 use meta_signal_flow::{QueueEvidence, Sender};
+use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, Aspect, Caller, Delivery, FlowNode, HerdrRoute, HerdrRouteSelection, Layer, Message,
     Metaflow, QueueEntry, Request, SentBy,
@@ -1526,7 +1526,7 @@ fn a_queued_request_is_rendered_as_a_complete_message_datom() {
     let entry = queue_entry("render-1", sent(sender_a(), "Carry on."));
     assert_eq!(
         queued_text(&entry),
-        "Soft.{ Order { { Mind alpha Tertiary } e167d8 } Words.«Carry on.» }"
+        "[ Soft.{ Order { { Mind alpha Tertiary } e167d8 } Words.«Carry on.» } ]"
     );
 }
 
@@ -1871,9 +1871,9 @@ fn a_duplicated_turn_completed_delivers_nothing_twice() {
         41,
     );
 
-    assert_eq!(fixture.typed_count(&first), 0);
-    assert_eq!(fixture.typed_count(&second), 0, "the second waits");
-    assert_eq!(fixture.seat_queue(), vec![first, second]);
+    assert_eq!(fixture.typed_count(&first), 1);
+    assert_eq!(fixture.typed_count(&second), 1);
+    assert!(fixture.seat_queue().is_empty());
     assert_eq!(fake.queued_turn_texts().len(), 1, "no duplicate handover");
 }
 
@@ -1906,8 +1906,12 @@ fn work_queued_while_a_codex_turn_runs_is_held_until_its_completion() {
         vec![turn_notice("turn/completed", SEAT_THREAD, "turn-running")],
         44,
     );
-    assert_eq!(fixture.typed_count(&queued), 0, "awaiting native receipt");
-    assert_eq!(fixture.seat_queue(), vec![queued]);
+    assert_eq!(
+        fixture.typed_count(&queued),
+        1,
+        "one native submission receipt settles it"
+    );
+    assert!(fixture.seat_queue().is_empty());
     let texts = second.queued_turn_texts();
     assert_eq!(texts.len(), 1, "completion offers the request once");
     assert!(texts[0].contains("later"), "{texts:?}");
@@ -2258,10 +2262,7 @@ fn a_resting_codex_seat_resolved_absent_is_handed_the_request_at_once_exactly_on
     assert_eq!(fake.queued_turn_texts().len(), 1, "handed over at once");
     fixture.nexus.drain_awake(&seat_at());
     assert_eq!(fake.queued_turn_texts().len(), 1, "never twice");
-    assert_eq!(
-        fixture.seat_queue(),
-        vec![from_core(Request::Order("First.".into()))]
-    );
+    assert!(fixture.seat_queue().is_empty());
 }
 
 /// An idle Awake Codex seat keeps its pane: an Order is handed to its live
@@ -2314,10 +2315,7 @@ fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
     let texts = fake.queued_turn_texts();
     assert_eq!(texts.len(), 1, "handed over once: {texts:?}");
     assert!(texts[0].contains("Read the new ruling."), "{texts:?}");
-    assert_eq!(
-        fixture.seat_queue(),
-        vec![from_core(Request::Order("Read the new ruling.".into()))]
-    );
+    assert!(fixture.seat_queue().is_empty());
     let seat = fixture.nexus.store.metaflow(&seat_at()).unwrap().unwrap();
     assert_eq!(seat.state, State::Awake("908786".into()));
 }

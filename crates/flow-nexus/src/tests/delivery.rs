@@ -28,11 +28,17 @@ fn letter(text: &str) -> Letter {
 fn a_delivery_reference_is_not_authority_for_an_unidentified_meta_caller() {
     let fixture = NexusFixture::new();
     assert_eq!(
-        fixture.nexus.dispatch_meta(MetaQuery::Deliver(DeliveryRequest { delivery_id: "known-or-unknown".into() })),
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+                delivery_id: "known-or-unknown".into()
+            })),
         MetaResponse::DeliveryRejected(DeliveryRejection::CallerNotAuthorized)
     );
     assert_eq!(
-        fixture.nexus.dispatch_meta(MetaQuery::Vet(DeliveryRequest { delivery_id: "known-or-unknown".into() })),
+        fixture.nexus.dispatch_meta(MetaQuery::Vet(DeliveryRequest {
+            delivery_id: "known-or-unknown".into()
+        })),
         MetaResponse::DeliveryRejected(DeliveryRejection::CallerNotAuthorized)
     );
 }
@@ -328,22 +334,22 @@ fn a_blocked_recipient_is_refused_at_every_tier() {
 }
 
 #[test]
-fn forced_delivery_types_past_a_blocked_state() {
+fn a_delivery_reference_cannot_bypass_a_blocked_state() {
     let fixture = NexusFixture::new();
     let log = fixture.accept_pane_operations(
         vec![fixture.blocked_agent()],
         PromptFixture::Prompted("w1:p3"),
     );
     fixture.register_with(FlowLifecycle::Active);
-    assert!(matches!(
+    assert_eq!(
         fixture.deliver_with_gate(
             "forced-blocked",
             Message::Soft(letter("answer the dialog")),
             meta_signal_flow::Gate::Forced,
         ),
-        MetaResponse::Delivered(_)
-    ));
-    assert_eq!(prompts(&log).len(), 1);
+        MetaResponse::DeliveryRejected(DeliveryRejection::RecipientBlocked)
+    );
+    assert!(prompts(&log).is_empty());
 }
 
 #[test]
@@ -363,7 +369,7 @@ fn vet_applies_the_delivery_gate_without_typing_or_leasing() {
     );
     assert_eq!(
         fixture.vet_with_gate(middle_abrupt("note"), meta_signal_flow::Gate::Forced),
-        MetaResponse::Vetted("908786".into())
+        MetaResponse::DeliveryRejected(DeliveryRejection::RecipientBlocked)
     );
 
     let body = fs::read_to_string(&fixture.snapshot_program)
@@ -400,7 +406,7 @@ fn vet_applies_the_delivery_gate_without_typing_or_leasing() {
     );
     assert_eq!(
         fixture.vet_with_gate(middle_abrupt("note"), meta_signal_flow::Gate::Forced),
-        MetaResponse::Vetted("908786".into())
+        MetaResponse::DeliveryRejected(DeliveryRejection::PastThreshold)
     );
     assert!(prompts(&log).is_empty());
     assert!(!fixture.operations().contains("agent prompt"));
@@ -598,7 +604,9 @@ fn bodies_carrying_commands_or_keys_are_refused_and_nothing_is_typed() {
             "{text:?}"
         );
         assert_eq!(
-            fixture.nexus.vet_cohort_for_test("908786", &[middle_abrupt(text)]),
+            fixture
+                .nexus
+                .vet_cohort_for_test("908786", &[middle_abrupt(text)]),
             MetaResponse::DeliveryRejected(DeliveryRejection::BodyRefused(refusal)),
             "{text:?}"
         );
@@ -616,7 +624,9 @@ fn a_path_and_a_later_command_line_are_ordinary_text() {
         );
         fixture.register_with(FlowLifecycle::Active);
         assert_eq!(
-            fixture.nexus.vet_cohort_for_test("908786", &[middle_abrupt(text)]),
+            fixture
+                .nexus
+                .vet_cohort_for_test("908786", &[middle_abrupt(text)]),
             MetaResponse::Vetted("908786".into())
         );
         assert_eq!(
@@ -1099,12 +1109,12 @@ fn a_deliver_into_a_flow_past_its_threshold_is_refused() {
     );
     assert!(prompts(&log).is_empty(), "nothing reached the pane");
 
-    assert!(matches!(
+    assert_eq!(
         fixture.deliver_with_gate(
             "delivery-forced-past",
             middle_abrupt("owner override"),
             meta_signal_flow::Gate::Forced,
         ),
-        MetaResponse::Delivered(_)
-    ));
+        MetaResponse::DeliveryRejected(meta_signal_flow::DeliveryRejection::PastThreshold)
+    );
 }

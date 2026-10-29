@@ -66,9 +66,9 @@ use meta_signal_flow::{
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, AtomicCommit, DatabaseMarker, Decision, Engine, EngineOpen, EngineRecord, FamilyName,
-    KeyedMutation, MemoryDefinition, MemoryUpgrades, MemoryVersion, QueryPlan, RecordKey,
-    Retraction, SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
+    Assertion, AtomicCommit, DatabaseMarker, Decision, Engine, EngineOpen, EngineRecord,
+    FamilyName, KeyedMutation, MemoryDefinition, MemoryUpgrades, MemoryVersion, QueryPlan,
+    RecordKey, Retraction, SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
     TableRegistration, UpgradeFrom, UpgradeOutcome,
 };
 use signal_flow::{
@@ -4545,7 +4545,9 @@ impl UpgradesFlowFamilies for Engine {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure) => Err(StoreError::MetaflowUpgrade(format!("{failure:?}"))),
+            UpgradeOutcome::Failed(failure) => {
+                Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
+            }
         }
     }
 
@@ -4557,7 +4559,9 @@ impl UpgradesFlowFamilies for Engine {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure) => Err(StoreError::MetaflowUpgrade(format!("{failure:?}"))),
+            UpgradeOutcome::Failed(failure) => {
+                Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
+            }
         }
     }
 
@@ -5172,8 +5176,15 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
                 <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor(),
             )?,
         };
-        if engine.match_records(QueryPlan::all(tables.full_state))?.records().is_empty() {
-            engine.assert(Assertion::new(tables.full_state, full_configuration::StoredFullConfigurationState { revision: 0 }))?;
+        if engine
+            .match_records(QueryPlan::all(tables.full_state))?
+            .records()
+            .is_empty()
+        {
+            engine.assert(Assertion::new(
+                tables.full_state,
+                full_configuration::StoredFullConfigurationState { revision: 0 },
+            ))?;
         }
         Ok(tables)
     }
@@ -5253,8 +5264,10 @@ pub trait ConfiguresOnlyStore: Sized {
     ) -> Result<(meta_signal_flow::Timings, meta_signal_flow::Limits), StoreError>;
     fn configure_change(&self, change: ConfigurationChange)
     -> Result<ConfigureOutcome, StoreError>;
-    fn configure_full(&self, request: meta_signal_flow::FullConfigurationRequest)
-    -> Result<meta_signal_flow::FullConfigurationReceipt, StoreError>;
+    fn configure_full(
+        &self,
+        request: meta_signal_flow::FullConfigurationRequest,
+    ) -> Result<meta_signal_flow::FullConfigurationReceipt, StoreError>;
     fn configure_entry(&self, entry: ConfigurationEntry) -> Result<ConfigureOutcome, StoreError>;
     fn remove_entry(&self, key: EntryKey) -> Result<ConfigureOutcome, StoreError>;
 }
@@ -5302,7 +5315,8 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let limits_descriptor = timings_limits::limits_descriptor();
         let texts_descriptor = texts::texts_descriptor();
         let full_state_descriptor = full_configuration::StoredFullConfigurationState::descriptor();
-        let full_receipt_descriptor = full_configuration::StoredFullConfigurationReceipt::descriptor();
+        let full_receipt_descriptor =
+            full_configuration::StoredFullConfigurationReceipt::descriptor();
         if recognized {
             FlowStore::migrate_retired_leave_outs(path)?;
             FlowStore::drop_retired_tables(path)?;
@@ -5343,8 +5357,15 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             full_state: engine.register_table(full_state_descriptor)?,
             full_receipts: engine.register_table(full_receipt_descriptor)?,
         };
-        if engine.match_records(QueryPlan::all(meta_configuration_tables.full_state))?.records().is_empty() {
-            engine.assert(Assertion::new(meta_configuration_tables.full_state, full_configuration::StoredFullConfigurationState { revision: 0 }))?;
+        if engine
+            .match_records(QueryPlan::all(meta_configuration_tables.full_state))?
+            .records()
+            .is_empty()
+        {
+            engine.assert(Assertion::new(
+                meta_configuration_tables.full_state,
+                full_configuration::StoredFullConfigurationState { revision: 0 },
+            ))?;
         }
         if !recognized {
             let defaults = DefaultConfiguration::from_environment();
@@ -5439,9 +5460,19 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         FlowStore::configure_meta_change(&self.engine, &self.meta_configuration_tables, change)
     }
 
-    fn configure_full(&self, request: meta_signal_flow::FullConfigurationRequest) -> Result<meta_signal_flow::FullConfigurationReceipt, StoreError> {
-        let _guard = self.configuration_guard.lock().unwrap_or_else(|e| e.into_inner());
-        <FlowStore as ReadsFlowMemory>::configure_full(&self.engine, &self.meta_configuration_tables, request)
+    fn configure_full(
+        &self,
+        request: meta_signal_flow::FullConfigurationRequest,
+    ) -> Result<meta_signal_flow::FullConfigurationReceipt, StoreError> {
+        let _guard = self
+            .configuration_guard
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        <FlowStore as ReadsFlowMemory>::configure_full(
+            &self.engine,
+            &self.meta_configuration_tables,
+            request,
+        )
     }
 
     fn configure_entry(&self, entry: ConfigurationEntry) -> Result<ConfigureOutcome, StoreError> {
@@ -5856,7 +5887,8 @@ impl OpensFlowStore for FlowStore {
         let limits_descriptor = timings_limits::limits_descriptor();
         let texts_descriptor = texts::texts_descriptor();
         let full_state_descriptor = full_configuration::StoredFullConfigurationState::descriptor();
-        let full_receipt_descriptor = full_configuration::StoredFullConfigurationReceipt::descriptor();
+        let full_receipt_descriptor =
+            full_configuration::StoredFullConfigurationReceipt::descriptor();
         let events_descriptor = <events::FlowEvents as events::DescribesEventTable>::descriptor();
         let context_sizes_descriptor =
             <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor();
@@ -6305,8 +6337,10 @@ pub(crate) trait ManagesMetaflowState: Sized {
     /// Replace one configuration family whole with its declaration.
     fn configure_change(&self, change: ConfigurationChange)
     -> Result<ConfigureOutcome, StoreError>;
-    fn configure_full(&self, request: meta_signal_flow::FullConfigurationRequest)
-    -> Result<meta_signal_flow::FullConfigurationReceipt, StoreError>;
+    fn configure_full(
+        &self,
+        request: meta_signal_flow::FullConfigurationRequest,
+    ) -> Result<meta_signal_flow::FullConfigurationReceipt, StoreError>;
     fn configure_entry(&self, entry: ConfigurationEntry) -> Result<ConfigureOutcome, StoreError>;
     fn remove_entry(&self, key: EntryKey) -> Result<ConfigureOutcome, StoreError>;
     /// The refresh threshold configured for one model, if any.
@@ -6361,9 +6395,19 @@ impl ManagesMetaflowState for FlowStore {
         FlowStore::configure_meta_change(&self.engine, &self.meta_configuration_tables, change)
     }
 
-    fn configure_full(&self, request: meta_signal_flow::FullConfigurationRequest) -> Result<meta_signal_flow::FullConfigurationReceipt, StoreError> {
-        let _guard = self.configuration_guard.lock().unwrap_or_else(|e| e.into_inner());
-        <FlowStore as ReadsFlowMemory>::configure_full(&self.engine, &self.meta_configuration_tables, request)
+    fn configure_full(
+        &self,
+        request: meta_signal_flow::FullConfigurationRequest,
+    ) -> Result<meta_signal_flow::FullConfigurationReceipt, StoreError> {
+        let _guard = self
+            .configuration_guard
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        <FlowStore as ReadsFlowMemory>::configure_full(
+            &self.engine,
+            &self.meta_configuration_tables,
+            request,
+        )
     }
 
     fn configure_entry(&self, entry: ConfigurationEntry) -> Result<ConfigureOutcome, StoreError> {
@@ -9138,10 +9182,16 @@ pub(crate) trait ReadsFlowMemory {
                 ));
             }
             "flow_nexus_full_configuration_state" => {
-                return Some(("flow-nexus-full-configuration-state", full_configuration::StoredFullConfigurationState::schema_hash()));
+                return Some((
+                    "flow-nexus-full-configuration-state",
+                    full_configuration::StoredFullConfigurationState::schema_hash(),
+                ));
             }
             "flow_nexus_full_configuration_receipts" => {
-                return Some(("flow-nexus-full-configuration-receipt", full_configuration::StoredFullConfigurationReceipt::schema_hash()));
+                return Some((
+                    "flow-nexus-full-configuration-receipt",
+                    full_configuration::StoredFullConfigurationReceipt::schema_hash(),
+                ));
             }
             "flow_nexus_flow_events" => (events::FLOW_EVENT_FAMILY, events::FLOW_EVENT_SCHEMA),
             "flow_nexus_flow_context_sizes" => (
@@ -10103,18 +10153,52 @@ pub(crate) trait ReadsFlowMemory {
     where
         T: sema_engine::EngineStoredRecord + PartialEq + Clone + Send + Sync + 'static,
         <T as rkyv::Archive>::Archived: rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
-            + for<'validation> rkyv::bytecheck::CheckBytes<rkyv::rancor::Strategy<rkyv::validation::Validator<rkyv::validation::archive::ArchiveValidator<'validation>, rkyv::validation::shared::SharedValidator>, rkyv::rancor::Error>>,
+            + for<'validation> rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'validation>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
     {
-        let keys = declared.iter().map(EngineRecord::record_key).collect::<Vec<_>>();
-        if keys.iter().enumerate().any(|(i, key)| keys[..i].contains(key)) { return Err(StoreError::DuplicateConfigurationEntry); }
-        let stored = engine.match_records(QueryPlan::all(table))?.records().to_vec();
+        let keys = declared
+            .iter()
+            .map(EngineRecord::record_key)
+            .collect::<Vec<_>>();
+        if keys
+            .iter()
+            .enumerate()
+            .any(|(i, key)| keys[..i].contains(key))
+        {
+            return Err(StoreError::DuplicateConfigurationEntry);
+        }
+        let stored = engine
+            .match_records(QueryPlan::all(table))?
+            .records()
+            .to_vec();
         let mut changed = false;
-        for row in &stored { if !keys.contains(&row.record_key()) { commit = commit.retract(table, row.record_key()); changed = true; } }
+        for row in &stored {
+            if !keys.contains(&row.record_key()) {
+                commit = commit.retract(table, row.record_key());
+                changed = true;
+            }
+        }
         for row in declared {
-            match stored.iter().find(|old| old.record_key() == row.record_key()) {
+            match stored
+                .iter()
+                .find(|old| old.record_key() == row.record_key())
+            {
                 Some(old) if old == &row => {}
-                Some(_) => { commit = commit.mutate(table, row); changed = true; }
-                None => { commit = commit.assert(table, row); changed = true; }
+                Some(_) => {
+                    commit = commit.mutate(table, row);
+                    changed = true;
+                }
+                None => {
+                    commit = commit.assert(table, row);
+                    changed = true;
+                }
             }
         }
         Ok((commit, changed))
@@ -10143,12 +10227,17 @@ pub(crate) trait ReadsFlowMemory {
                 full_configuration_disposition: Disposition::IdentifierConflict,
                 historical: Historical::Replay,
             });
-        } else if !existing.records().is_empty() { return Err(StoreError::StateInvariant); }
+        } else if !existing.records().is_empty() {
+            return Err(StoreError::StateInvariant);
+        }
         let state = engine.match_records(QueryPlan::all(tables.full_state))?;
-        let [state] = state.records() else { return Err(StoreError::StateInvariant) };
+        let [state] = state.records() else {
+            return Err(StoreError::StateInvariant);
+        };
         let observed = state.revision;
         let candidate = &request.full_configuration;
-        let current = FlowStore::meta_configuration_snapshot(engine, tables)?.ok_or(StoreError::NotConfigured)?;
+        let current = FlowStore::meta_configuration_snapshot(engine, tables)?
+            .ok_or(StoreError::NotConfigured)?;
         let equal = current.configured_harnesses == candidate.harnesses
             && current.configured_models == candidate.models
             && current.configured_thresholds == candidate.thresholds
@@ -10156,30 +10245,200 @@ pub(crate) trait ReadsFlowMemory {
             && current.configured_send_servers == candidate.send_servers
             && current.configured_metaflows == candidate.metaflows
             && current.configured_investigation == candidate.investigation
-            && current.timings == candidate.timings && current.limits == candidate.limits && current.texts == candidate.texts;
+            && current.timings == candidate.timings
+            && current.limits == candidate.limits
+            && current.texts == candidate.texts;
         let (disposition, resulting) = if request.configuration_revision != observed {
             (Disposition::Stale(observed), observed)
-        } else if equal { (Disposition::Unchanged, observed) } else { (Disposition::Replaced, observed + 1) };
+        } else if equal {
+            (Disposition::Unchanged, observed)
+        } else {
+            (Disposition::Replaced, observed + 1)
+        };
         let receipt = meta_signal_flow::FullConfigurationReceipt {
-            full_configuration_request: request.clone(), observed_revision: observed,
-            resulting_revision: resulting, full_configuration_disposition: disposition.clone(), historical: Historical::New,
+            full_configuration_request: request.clone(),
+            observed_revision: observed,
+            resulting_revision: resulting,
+            full_configuration_disposition: disposition.clone(),
+            historical: Historical::New,
         };
         let mut commit = engine.begin_atomic_commit();
         if matches!(disposition, Disposition::Replaced) {
-            macro_rules! family { ($table:expr, $rows:expr) => {{ let next = FlowStore::append_configuration_family(engine, $table, $rows, commit)?; commit = next.0; }} }
-            family!(tables.harnesses, candidate.harnesses.iter().cloned().map(|harness| harness::StoredHarness { harness }).collect());
-            family!(tables.models, candidate.models.iter().cloned().map(|model| StoredMetaModelConfiguration { model }).collect());
-            family!(tables.thresholds, candidate.thresholds.iter().cloned().map(|threshold| StoredMetaThresholdConfiguration { threshold }).collect());
-            family!(tables.nexus, vec![StoredMetaNexusConfiguration { nexus: candidate.nexus.clone() }]);
-            family!(tables.send_servers, candidate.send_servers.iter().cloned().map(|send_server| send_server::StoredMetaSendServerConfiguration { send_server }).collect());
-            family!(tables.metaflows, candidate.metaflows.iter().cloned().map(|metaflow| metaflow_declaration::StoredMetaMetaflowConfiguration { metaflow }).collect());
-            family!(tables.investigation, candidate.investigation.iter().cloned().map(|investigation| StoredMetaInvestigationConfiguration { investigation }).collect());
-            family!(tables.timings, vec![timings_limits::StoredTimings { timings: candidate.timings.clone() }]);
-            family!(tables.limits, vec![timings_limits::StoredLimits { limits: candidate.limits.clone() }]);
-            family!(tables.texts, vec![texts::StoredTexts { texts: candidate.texts.clone() }]);
-            commit = commit.mutate(tables.full_state, full_configuration::StoredFullConfigurationState { revision: resulting });
+            use crate::launching::NamesTopic;
+            if let Some(refused) = candidate
+                .metaflows
+                .iter()
+                .map(|entry| &entry.address)
+                .chain(candidate.investigation.iter())
+                .find(|address| !address.topic.as_str().is_camel_case_topic())
+            {
+                return Err(StoreError::TopicRefused(refused.topic.clone()));
+            }
+            let mut served_models = std::collections::BTreeSet::new();
+            for model in candidate
+                .harnesses
+                .iter()
+                .flat_map(|harness| harness.served_models.iter())
+            {
+                if !served_models.insert(model.model_name.clone()) {
+                    return Err(StoreError::ModelServedTwice(model.model_name.clone()));
+                }
+            }
+            for name in candidate
+                .metaflows
+                .iter()
+                .flat_map(|metaflow| metaflow.left_out.iter())
+            {
+                let modules = candidate
+                    .harnesses
+                    .iter()
+                    .flat_map(|harness| harness.modules.iter())
+                    .filter(|module| &module.harness_module_name == name)
+                    .collect::<Vec<_>>();
+                if modules.is_empty() {
+                    return Err(StoreError::UnknownHarnessModule(name.clone()));
+                }
+                if modules.iter().all(|module| {
+                    matches!(
+                        module.module_text,
+                        meta_signal_flow::ModuleText::Retained(_)
+                            | meta_signal_flow::ModuleText::Absent
+                    ) && module.tools.is_empty()
+                        && module.switches.is_empty()
+                }) {
+                    return Err(StoreError::IrremovableHarnessModule(name.clone()));
+                }
+            }
+            if !timings_limits::SupportedNativeTimings::supported(&candidate.timings) {
+                return Err(StoreError::TimingOutOfRange);
+            }
+            let limits = &candidate.limits;
+            let native_ceiling = limits
+                .herdr_line
+                .min(crate::sending::MAX_NATIVE_COHORT_BYTES as i64);
+            let codex_bound = limits.cohort.saturating_mul(2).saturating_add(4096);
+            if limits.send_body != 64 * 1024
+                || limits.cohort <= 0
+                || limits.cohort > native_ceiling
+                || limits.herdr_envelope < crate::sending::HERDR_PROMPT_FRAME_BYTES as i64
+                || limits
+                    .cohort
+                    .saturating_add(crate::sending::HERDR_PROMPT_FRAME_BYTES as i64)
+                    > limits.herdr_line
+                || codex_bound > limits.frame
+                || codex_bound > limits.app_server_message
+            {
+                return Err(StoreError::ConfigurationSeed(
+                    "Limits must keep SendBody at 64 KiB and Cohort within every native transport ceiling".into(),
+                ));
+            }
+            macro_rules! family {
+                ($table:expr, $rows:expr) => {{
+                    let next =
+                        FlowStore::append_configuration_family(engine, $table, $rows, commit)?;
+                    commit = next.0;
+                }};
+            }
+            family!(
+                tables.harnesses,
+                candidate
+                    .harnesses
+                    .iter()
+                    .cloned()
+                    .map(|harness| harness::StoredHarness { harness })
+                    .collect()
+            );
+            family!(
+                tables.models,
+                candidate
+                    .models
+                    .iter()
+                    .cloned()
+                    .map(|model| StoredMetaModelConfiguration { model })
+                    .collect()
+            );
+            family!(
+                tables.thresholds,
+                candidate
+                    .thresholds
+                    .iter()
+                    .cloned()
+                    .map(|threshold| StoredMetaThresholdConfiguration { threshold })
+                    .collect()
+            );
+            family!(
+                tables.nexus,
+                vec![StoredMetaNexusConfiguration {
+                    nexus: candidate.nexus.clone()
+                }]
+            );
+            family!(
+                tables.send_servers,
+                candidate
+                    .send_servers
+                    .iter()
+                    .cloned()
+                    .map(
+                        |send_server| send_server::StoredMetaSendServerConfiguration {
+                            send_server
+                        }
+                    )
+                    .collect()
+            );
+            family!(
+                tables.metaflows,
+                candidate
+                    .metaflows
+                    .iter()
+                    .cloned()
+                    .map(
+                        |metaflow| metaflow_declaration::StoredMetaMetaflowConfiguration {
+                            metaflow
+                        }
+                    )
+                    .collect()
+            );
+            family!(
+                tables.investigation,
+                candidate
+                    .investigation
+                    .iter()
+                    .cloned()
+                    .map(|investigation| StoredMetaInvestigationConfiguration { investigation })
+                    .collect()
+            );
+            family!(
+                tables.timings,
+                vec![timings_limits::StoredTimings {
+                    timings: candidate.timings.clone()
+                }]
+            );
+            family!(
+                tables.limits,
+                vec![timings_limits::StoredLimits {
+                    limits: candidate.limits.clone()
+                }]
+            );
+            family!(
+                tables.texts,
+                vec![texts::StoredTexts {
+                    texts: candidate.texts.clone()
+                }]
+            );
+            commit = commit.mutate(
+                tables.full_state,
+                full_configuration::StoredFullConfigurationState {
+                    revision: resulting,
+                },
+            );
         }
-        commit = commit.assert(tables.full_receipts, full_configuration::StoredFullConfigurationReceipt { request, receipt: receipt.clone() });
+        commit = commit.assert(
+            tables.full_receipts,
+            full_configuration::StoredFullConfigurationReceipt {
+                request,
+                receipt: receipt.clone(),
+            },
+        );
         engine.commit_atomic(commit)?;
         Ok(receipt)
     }
@@ -10339,7 +10598,10 @@ pub(crate) trait ReadsFlowMemory {
                     || limits.cohort <= 0
                     || limits.cohort > native_ceiling
                     || limits.herdr_envelope < crate::sending::HERDR_PROMPT_FRAME_BYTES as i64
-                    || limits.cohort.saturating_add(crate::sending::HERDR_PROMPT_FRAME_BYTES as i64) > limits.herdr_line
+                    || limits
+                        .cohort
+                        .saturating_add(crate::sending::HERDR_PROMPT_FRAME_BYTES as i64)
+                        > limits.herdr_line
                     || codex_bound > limits.frame
                     || codex_bound > limits.app_server_message
                 {

@@ -74,14 +74,12 @@ use crate::codex::{
 };
 use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
 use crate::composition::{FreshSeat, JoinsPurpose};
+use crate::delivery::body::TypesPaneMessage;
 use crate::delivery::body::{RendersNativeContent, RendersPaneText, ShowsPaneText};
 use crate::delivery::lease::LeasesPanes;
 use crate::delivery::{
     DeliversMessages, FindsDeliveryTarget, PaneRefusal, ReadsLeasedPane, TargetRefusal,
 };
-use crate::delivery::body::TypesPaneMessage;
-use datom_codec::Datomizable;
-use protos::{Compactable, Protosizable};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
     Record_Data_Context_Data,
@@ -108,8 +106,10 @@ use crate::store::{
     RecordsFlowLifecycle,
 };
 use crate::{ConfiguredUse, RunningNexus};
+use datom_codec::Datomizable;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
+use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, AgentState, Event, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
     Layer, Metaflow, NativePrompt, NativeStop, Origin, QueueEntry, Response,
@@ -1391,14 +1391,24 @@ impl ReconcilesQueueDelivery for RunningNexus {
             native_receipt,
         };
         if attempt.cohort.len() > 1 {
-            return if self.store.settle_received_cohort(&attempt.attempt_id, receipt).is_ok() {
+            return if self
+                .store
+                .settle_received_cohort(&attempt.attempt_id, receipt)
+                .is_ok()
+            {
                 attempt.as_settled(seat_after)
             } else {
                 Reconciled::Refused
             };
         }
-        if self.store.record_delivery_receipt(&attempt.attempt_id, receipt).unwrap_or(false)
-            && self.store.settle_recorded_delivery(&attempt.attempt_id).unwrap_or(false)
+        if self
+            .store
+            .record_delivery_receipt(&attempt.attempt_id, receipt)
+            .unwrap_or(false)
+            && self
+                .store
+                .settle_recorded_delivery(&attempt.attempt_id)
+                .unwrap_or(false)
         {
             attempt.as_settled(seat_after)
         } else {
@@ -2224,13 +2234,18 @@ impl PerformsWakeAndDrain for RunningNexus {
                 actual_bytes: i64::try_from(text.len()).unwrap_or(i64::MAX),
                 maximum_bytes,
             };
-            return match self.store.fail_transport_overlimit(&attempt.attempt_id, size) {
+            return match self
+                .store
+                .fail_transport_overlimit(&attempt.attempt_id, size)
+            {
                 Ok(failed) => Outcome::Drained(failed),
                 Err(_) => refused(drained, Failed_Data::StoreRefused),
             };
         }
         if model.is_none() || !cohort.iter().all(soft) {
-            let actual = text.len().saturating_add(crate::sending::HERDR_PROMPT_FRAME_BYTES);
+            let actual = text
+                .len()
+                .saturating_add(crate::sending::HERDR_PROMPT_FRAME_BYTES);
             let limit = configured.snapshot.limits.herdr_line;
             if text.len() > crate::sending::MAX_NATIVE_COHORT_BYTES
                 || actual > usize::try_from(limit).unwrap_or(0)
@@ -2240,7 +2255,10 @@ impl PerformsWakeAndDrain for RunningNexus {
                     actual_bytes: i64::try_from(actual).unwrap_or(i64::MAX),
                     maximum_bytes: effective,
                 };
-                return match self.store.fail_transport_overlimit(&attempt.attempt_id, size) {
+                return match self
+                    .store
+                    .fail_transport_overlimit(&attempt.attempt_id, size)
+                {
                     Ok(failed) => Outcome::Drained(failed),
                     Err(_) => refused(drained, Failed_Data::StoreRefused),
                 };
@@ -2324,7 +2342,10 @@ impl PerformsWakeAndDrain for RunningNexus {
                     actual_bytes: i64::try_from(wire_bytes).unwrap_or(i64::MAX),
                     maximum_bytes: wire_limit,
                 };
-                return match self.store.fail_transport_overlimit(&attempt.attempt_id, size) {
+                return match self
+                    .store
+                    .fail_transport_overlimit(&attempt.attempt_id, size)
+                {
                     Ok(failed) => Outcome::Drained(failed),
                     Err(_) => refused(drained, Failed_Data::StoreRefused),
                 };
@@ -2374,9 +2395,7 @@ impl PerformsWakeAndDrain for RunningNexus {
             let _ = self.store.mark_delivery_uncertain(&attempt.attempt_id);
             return Outcome::AwaitingReceipt(oldest.logical_delivery_id);
         } else if let Err(refusal) = self.hand_over(configured, &flow_id, &text) {
-
             return if absent(format!("{refusal:?}")) {
-
                 refused(drained, Failed_Data::HerdrRefused)
             } else {
                 refused(drained, Failed_Data::StoreRefused)
@@ -2444,8 +2463,6 @@ impl PerformsWakeAndDrain for RunningNexus {
             }
         }
     }
-
-
 }
 
 impl WakesInParts for RunningNexus {

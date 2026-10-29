@@ -1033,8 +1033,10 @@ impl RecordsLogicalDeliveries for FlowStore {
             let [current] = rows.records() else {
                 return Err(StoreError::StateInvariant);
             };
-            if matches!(current.sender_identity, LogicalSenderIdentity::MissingHistoricalSender)
-                || current.snapshot.sent_by != entry.sent_by
+            if matches!(
+                current.sender_identity,
+                LogicalSenderIdentity::MissingHistoricalSender
+            ) || current.snapshot.sent_by != entry.sent_by
             {
                 return Err(StoreError::StateInvariant);
             }

@@ -379,10 +379,9 @@ fn rebind_flow_makes_another_flow_current() {
     assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
 }
 
-/// Withdraw takes one queued request out and leaves the rest. A request
-/// that never reached the seat ends Withdrawn for its sender. A request
-/// whose hand-over may have reached the seat stays recorded Uncertain, its
-/// attempt no longer outstanding and never handed over again. A request
+/// Withdraw keeps a prepared cohort indivisible. Once any member may have
+/// reached the seat, the whole cohort stays recorded Uncertain, leaves the
+/// retry queue, and is never handed over again. A request
 /// not queued is refused NotQueued; an Address Flow holds no metaflow for,
 /// UnknownAddress.
 #[test]
@@ -424,7 +423,7 @@ fn withdraw_takes_one_request_out_and_closes_its_attempt() {
         withdraw(&never, seat_address()),
         MetaResponse::Withdrawn(never.clone())
     );
-    assert_eq!(stored(&fixture).queue, vec![entry("withdraw-1")]);
+    assert!(stored(&fixture).queue.is_empty());
     assert_eq!(
         fixture
             .nexus
@@ -433,14 +432,14 @@ fn withdraw_takes_one_request_out_and_closes_its_attempt() {
             .unwrap()
             .expect("the sender's delivery is kept")
             .delivery_state,
-        DeliveryState::Withdrawn
+        DeliveryState::Uncertain
     );
 
     assert_eq!(
         withdraw("withdraw-1", seat_address()),
-        MetaResponse::Withdrawn("withdraw-1".into())
+        MetaResponse::WithdrawRejected(WithdrawRejected_Data::NotQueued)
     );
-    assert_eq!(stored(&fixture).queue, vec![]);
+    assert!(stored(&fixture).queue.is_empty());
     assert_eq!(
         fixture
             .nexus
@@ -467,10 +466,6 @@ fn withdraw_takes_one_request_out_and_closes_its_attempt() {
     assert_eq!(inspected.attempt_vector, vec![]);
     assert!(fixture.typed().is_none(), "nothing is handed over again");
 
-    assert_eq!(
-        withdraw("withdraw-1", seat_address()),
-        MetaResponse::WithdrawRejected(WithdrawRejected_Data::NotQueued)
-    );
     assert_eq!(
         withdraw("withdraw-1", elsewhere()),
         MetaResponse::WithdrawRejected(WithdrawRejected_Data::UnknownAddress)

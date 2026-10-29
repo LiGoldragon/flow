@@ -3311,7 +3311,7 @@ pub(crate) mod tests {
     use super::{
         AcceptsLaunchRegistration, CreatesHerdrLaunchPane, HarnessArgumentValues,
         ObservesNativeLaunchBinding, ObservesNativeTargetReceipt, StartsNativeHerdrHarness,
-        StartupProgress, SubmitsStartupPart, TitlesNativeFlow, render_harness_arguments,
+        RendersHarnessArguments, StartupProgress, SubmitsStartupPart, TitlesNativeFlow,
     };
     use crate::composition::{FitsOneMessage, SplitsStartupMessage};
     use crate::fixture_executable::{FixtureExecutable, InstallsScript};

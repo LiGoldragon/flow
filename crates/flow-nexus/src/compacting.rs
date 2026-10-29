@@ -22,7 +22,7 @@
 //! The warning is a journal line at warning priority.
 
 use crate::generated::operation::{Operation, Outcome, Record_Data, Record_Data_Context_Data};
-use crate::performing::{Performs, PerformsConfiguredOperations};
+use crate::performing::PerformsConfiguredOperations;
 use crate::store::compaction::{Compaction, Investigation, RecordsCompactions};
 use crate::store::context::RecordsContextSize;
 use crate::store::metaflow::SleepsMetaflows;
@@ -526,7 +526,8 @@ impl FindsCodexFlow for RunningNexus {
 mod tests {
     use super::{
         ClaudeCompaction, CodexContextSignal, CompactionWarning, ReadsClaudeCompactions,
-        ReadsCodexContextSignal, RendersCompactionWarning, WritesTranscriptTime, compaction_floor,
+        ReadsCodexContextSignal, ReadsCompactionFloor, RendersCompactionWarning,
+        WritesTranscriptTime,
     };
     use signal_flow::{Address, Aspect, HarnessKind, Layer};
     use std::io::Write;

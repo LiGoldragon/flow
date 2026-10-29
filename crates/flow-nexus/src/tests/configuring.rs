@@ -9,11 +9,12 @@ use crate::codex::SelectsCodexEndpoint;
 use crate::composition::{LaunchComposer, OpensLaunchComposer};
 use crate::context::{ContextComposer, FixtureComposer};
 use crate::generated::operation::{Operation, Outcome};
-use crate::performing::Performs;
+use crate::performing::PerformsConfiguredOperations;
 use crate::store::metaflow::MutatesMetaflows;
 use crate::store::{
     ConfigurationOnlyStore, ConfiguresOnlyStore, DefaultConfiguration, FlowStore,
-    ManagesMetaflowState, OpensFlowStore, ReadsFlowRows, RegistersFlowIdentity, SeedsConfiguration,
+    ManagesMetaflowState, OpensFlowStore, ReadsCommittedConfiguration, ReadsFlowRows,
+    RegistersFlowIdentity, SeedsConfiguration,
 };
 use crate::{Dispatches, OpensRunningNexus, ReadsCompleteConfiguration, RunningNexus};
 use meta_signal_flow::{

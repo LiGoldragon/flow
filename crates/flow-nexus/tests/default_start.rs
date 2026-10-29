@@ -78,7 +78,7 @@ fn connect(socket: &Path, nexus: &mut StartedNexus) -> UnixStream {
     panic!("{} never listened", socket.display())
 }
 
-fn wait_successfully(nexus: &mut StartedNexus) {
+fn wait_successfully(mut nexus: StartedNexus) {
     let status = nexus
         .child
         .wait()
@@ -132,7 +132,7 @@ fn configure_fresh(home: &Path, runtime: &Path, start: &Start) {
         meta_signal_flow::Response::Configured(meta_signal_flow::ConfigureOutcome::Replaced)
     ));
     drop(meta);
-    wait_successfully(&mut nexus);
+    wait_successfully(nexus);
 }
 
 #[test]
@@ -200,7 +200,7 @@ fn environment_overrides_do_not_replace_the_explicit_configuration() {
         meta_signal_flow::Response::Configured(meta_signal_flow::ConfigureOutcome::Replaced)
     ));
     drop(meta);
-    wait_successfully(&mut nexus);
+    wait_successfully(nexus);
 
     let stored = ConfigurationOnlyStore::open(Path::new(&start.store_path))
         .expect("typed store reopens")

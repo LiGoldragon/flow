@@ -243,6 +243,11 @@
           );
           flow-v5-flow-row-upgrades-to-derived-origin = context.exactTest "flow-nexus"
             "store::tests::a_v5_flow_row_upgrades_to_its_derived_origin";
+          flow-d0-store-lock-diagnostic =
+            (context.exactTest "flow-nexus"
+              "environment_overrides_do_not_replace_the_explicit_configuration").overrideAttrs (_: {
+                FLOW_LOCK_DIAGNOSTIC = "1";
+              });
           flow-v2-outcomes-upgrade-to-derived-origin = context.exactTest "flow-nexus"
             "store::tests::v2_launch_outcomes_upgrade_to_their_derived_origin";
           flow-0-34-launch-attempt-carried = context.exactTest "flow-nexus"

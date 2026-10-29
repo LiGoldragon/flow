@@ -78,16 +78,33 @@ fn connect(socket: &Path, nexus: &mut StartedNexus) -> UnixStream {
     panic!("{} never listened", socket.display())
 }
 
-fn wait_successfully(mut nexus: StartedNexus) {
+fn wait_successfully(nexus: &mut StartedNexus) {
+    let child = nexus.child.id();
     let status = nexus
         .child
         .wait()
         .expect("flow-nexus exits after Configure");
-    if !status.success() {
-        let mut stderr = String::new();
-        if let Some(mut pipe) = nexus.child.stderr.take() {
-            let _ = pipe.read_to_string(&mut stderr);
+    let mut stderr = String::new();
+    if let Some(mut pipe) = nexus.child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    if std::env::var_os("FLOW_LOCK_DIAGNOSTIC").is_some() {
+        eprintln!(
+            "FLOW_LOCK_DIAGNOSTIC stage=child-wait pid={} thread={:?} child={} status={} child_proc_exists={}",
+            std::process::id(),
+            std::thread::current().id(),
+            child,
+            status,
+            std::path::Path::new(&format!("/proc/{child}")).exists(),
+        );
+        for line in stderr
+            .lines()
+            .filter(|line| line.starts_with("FLOW_LOCK_DIAGNOSTIC"))
+        {
+            eprintln!("{line}");
         }
+    }
+    if !status.success() {
         panic!("flow-nexus exited with {status}: {stderr}");
     }
 }
@@ -132,7 +149,7 @@ fn configure_fresh(home: &Path, runtime: &Path, start: &Start) {
         meta_signal_flow::Response::Configured(meta_signal_flow::ConfigureOutcome::Replaced)
     ));
     drop(meta);
-    wait_successfully(nexus);
+    wait_successfully(&mut nexus);
 }
 
 #[test]
@@ -200,7 +217,7 @@ fn environment_overrides_do_not_replace_the_explicit_configuration() {
         meta_signal_flow::Response::Configured(meta_signal_flow::ConfigureOutcome::Replaced)
     ));
     drop(meta);
-    wait_successfully(nexus);
+    wait_successfully(&mut nexus);
 
     let stored = ConfigurationOnlyStore::open(Path::new(&start.store_path))
         .expect("typed store reopens")

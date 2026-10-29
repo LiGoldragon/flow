@@ -17,6 +17,7 @@ use sema_engine::TableRegistration;
 use super::{
     ADDED_LATER_TABLES, CONFIGURATION_ONLY_ADDED_TABLES, CONFIGURATION_ONLY_TABLES, FlowStore,
     RETIRED_TABLES, RUNNING_TABLES, ReadsFlowMemory, SEMA_CATALOG_TABLE, StoreError,
+    trace_shared_store_lock, trace_store_lock,
 };
 
 /// The tables one entry point registers, and so may add or upgrade.
@@ -121,7 +122,13 @@ impl StagesUpgrade for StagedUpgrade {
         // since a read opens the store under the same whole-file lock.
         {
             let exclusion = File::open(store).map_err(|error| failed("cannot open", &error))?;
-            match exclusion.try_lock() {
+            let locked = exclusion.try_lock();
+            trace_store_lock(
+                "staged-first-exclusive",
+                store,
+                &format!("kernel-exclusive-result={locked:?}"),
+            );
+            match locked {
                 Ok(()) => {}
                 Err(std::fs::TryLockError::WouldBlock) => return Err(held()),
                 Err(error) => return Err(failed("cannot lock", &error)),
@@ -129,11 +136,22 @@ impl StagesUpgrade for StagedUpgrade {
             Self::sweep(store, &failed)?;
             // Released by name, not by closing: a descriptor a concurrent
             // fork still holds would keep the lock until its exec.
-            exclusion
-                .unlock()
-                .map_err(|error| failed("cannot unlock", &error))?;
+            let unlocked = exclusion.unlock();
+            trace_store_lock(
+                "staged-first-exclusive",
+                store,
+                &format!("kernel-exclusive-unlock={unlocked:?}"),
+            );
+            unlocked.map_err(|error| failed("cannot unlock", &error))?;
         }
-        match redb::ReadOnlyDatabase::open(store) {
+        trace_shared_store_lock("staged-read-preflight", store);
+        let opened = redb::ReadOnlyDatabase::open(store);
+        let event = match &opened {
+            Ok(_) => "redb-shared-acquired".to_owned(),
+            Err(error) => format!("redb-shared-refused={error:?}"),
+        };
+        trace_store_lock("staged-read-redb", store, &event);
+        match opened {
             Ok(reader) => {
                 if !FlowStore::upgrade_pending(&reader, scope)? {
                     return Ok(None);
@@ -146,7 +164,13 @@ impl StagesUpgrade for StagedUpgrade {
             Err(error) => return Err(failed("cannot read", &error)),
         }
         let exclusion = File::open(store).map_err(|error| failed("cannot open", &error))?;
-        match exclusion.try_lock() {
+        let locked = exclusion.try_lock();
+        trace_store_lock(
+            "staged-second-exclusive",
+            store,
+            &format!("kernel-exclusive-result={locked:?}"),
+        );
+        match locked {
             Ok(()) => {}
             Err(std::fs::TryLockError::WouldBlock) => return Err(held()),
             Err(error) => return Err(failed("cannot lock", &error)),
@@ -233,7 +257,12 @@ impl Drop for StagedUpgrade {
             let _ = std::fs::remove_file(&self.copy);
         }
         if let Some(exclusion) = self.exclusion.take() {
-            let _ = exclusion.unlock();
+            let unlocked = exclusion.unlock();
+            trace_store_lock(
+                "staged-drop-exclusive",
+                &self.store,
+                &format!("kernel-exclusive-unlock={unlocked:?}"),
+            );
         }
     }
 }

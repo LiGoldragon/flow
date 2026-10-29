@@ -82,6 +82,90 @@ use signal_flow::{
     Replaced, Request, Response, RouteReadiness, StartRejection, StopRejection,
 };
 
+/// Emits the exact lock boundary for the bounded startup-lock diagnostic.
+/// It is silent in every ordinary process.
+pub(crate) fn trace_store_lock(stage: &str, path: &Path, event: &str) {
+    if std::env::var_os("FLOW_LOCK_DIAGNOSTIC").is_none() {
+        return;
+    }
+    let identity = fs::metadata(path)
+        .ok()
+        .map(|metadata| (metadata.dev(), metadata.ino()));
+    let holders = identity
+        .and_then(|(device, inode)| {
+            // Linux renders the lock target as hexadecimal major/minor and
+            // decimal inode in `/proc/locks`.
+            let major = ((device >> 8) & 0xfff) | ((device >> 32) & 0xffff_f000);
+            let minor = (device & 0xff) | ((device >> 12) & 0xffff_ff00);
+            fs::read_to_string("/proc/locks").ok().map(|locks| {
+                locks
+                    .lines()
+                    .filter(|line| {
+                        line.split_whitespace()
+                            .nth(5)
+                            .and_then(|locus| {
+                                let mut parts = locus.split(':');
+                                Some((
+                                    u64::from_str_radix(parts.next()?, 16).ok()?,
+                                    u64::from_str_radix(parts.next()?, 16).ok()?,
+                                    parts.next()?.parse::<u64>().ok()?,
+                                ))
+                            })
+                            .is_some_and(|held| held == (major, minor, inode))
+                    })
+                    .map(|line| {
+                        let pid = line.split_whitespace().nth(4).unwrap_or("unknown");
+                        let command = pid
+                            .parse::<u32>()
+                            .ok()
+                            .and_then(|pid| fs::read(format!("/proc/{pid}/cmdline")).ok())
+                            .and_then(|command| {
+                                command
+                                    .split(|byte| *byte == 0)
+                                    .next()
+                                    .map(|first| String::from_utf8_lossy(first).into_owned())
+                            })
+                            .and_then(|command| {
+                                Path::new(&command)
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().into_owned())
+                            })
+                            .unwrap_or_else(|| "unknown".into());
+                        format!("{line} command={command}")
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .unwrap_or_default();
+    eprintln!(
+        "FLOW_LOCK_DIAGNOSTIC stage={stage} pid={} thread={:?} path={} identity={identity:?} event={event} holders={holders:?}",
+        std::process::id(),
+        std::thread::current().id(),
+        path.display(),
+    );
+}
+
+/// Observes the kernel's shared-lock answer immediately before redb maps its
+/// own shared-lock attempt into `DatabaseAlreadyOpen`.
+pub(crate) fn trace_shared_store_lock(stage: &str, path: &Path) {
+    if std::env::var_os("FLOW_LOCK_DIAGNOSTIC").is_none() {
+        return;
+    }
+    match fs::File::open(path) {
+        Ok(file) => match file.try_lock_shared() {
+            Ok(()) => {
+                trace_store_lock(stage, path, "kernel-shared-acquired");
+                let result = file.unlock();
+                trace_store_lock(stage, path, &format!("kernel-shared-unlock={result:?}"));
+            }
+            Err(error) => {
+                trace_store_lock(stage, path, &format!("kernel-shared-refused={error:?}"))
+            }
+        },
+        Err(error) => trace_store_lock(stage, path, &format!("file-open-refused={error:?}")),
+    }
+}
+
 /// Applies the meta wire's index cursor to an already ordered snapshot.
 /// `after` is the number of rows consumed; `next_page` is the cursor for
 /// the next request and is absent once the snapshot is exhausted.
@@ -9638,7 +9722,14 @@ pub(crate) trait ReadsFlowMemory {
         // In particular, do not use Database::open here: Sema's normal writer open
         // can stamp schema/layout metadata before a caller discovers this is an
         // old or foreign occupant.
-        match redb::ReadOnlyDatabase::open(path) {
+        trace_shared_store_lock("recognize-read-preflight", path);
+        let opened = redb::ReadOnlyDatabase::open(path);
+        let event = match &opened {
+            Ok(_) => "redb-shared-acquired".to_owned(),
+            Err(error) => format!("redb-shared-refused={error:?}"),
+        };
+        trace_store_lock("recognize-read-redb", path, &event);
+        match opened {
             Ok(database) => FlowStore::recognize_open_memory(&database, &reject),
             // A writer that did not close cleanly leaves redb's recovery flag,
             // and a read-only open refuses to repair. The flagged store is

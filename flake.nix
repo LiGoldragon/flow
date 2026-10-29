@@ -373,6 +373,8 @@
             "tests::retire_keeps_the_row_and_takes_the_flow_out_of_receiving";
           flow-deliver-never-interleaves = context.exactTest "flow-nexus"
             "tests::delivery::two_deliveries_to_one_pane_never_interleave";
+          flow-pane-sender-address-only = context.exactTest "flow-nexus"
+            "delivery::body::tests::the_pane_text_begins_with_the_priority_head";
           flow-deliver-refuses-commands-and-keys = context.exactTest "flow-nexus"
             "tests::delivery::bodies_carrying_commands_or_keys_are_refused_and_nothing_is_typed";
           flow-deliver-crash-settles-uncertain = context.exactTest "flow-nexus"

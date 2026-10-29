@@ -314,17 +314,16 @@ mod tests {
             soft("Stage 1 is deployed; run the tier tests.")
                 .pane_text()
                 .as_str(),
-            "[ Soft.{ Notice { { Psyche core Secondary } e167d8 } Words.«Stage 1 is deployed; run the tier tests.» } ]"
+            "[ Soft.{ Notice { Psyche core Secondary } «Stage 1 is deployed; run the tier tests.» } ]"
         );
         let hard = Message::HardAbrupt(Letter {
             kind: Kind::Order,
             sender: soft("x").letter().sender.clone(),
             body: Body::Words("/compact".into()),
         });
-        assert!(
-            hard.pane_text()
-                .as_str()
-                .starts_with("[ HardAbrupt.{ Order { { Psyche core Secondary } e167d8 } ")
+        assert_eq!(
+            hard.pane_text().as_str(),
+            "[ HardAbrupt.{ Order { Psyche core Secondary } «/compact» } ]"
         );
     }
 

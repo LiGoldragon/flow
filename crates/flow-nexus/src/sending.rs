@@ -59,6 +59,10 @@ pub const MAX_SEND_PAYLOAD_BYTES: usize = 64 * 1024;
 /// final byte for that terminator. Individual messages retain their separate
 /// 64 KiB admission bound above.
 pub const MAX_NATIVE_COHORT_BYTES: usize = 128 * 1024 - 1;
+/// Herdr's native `agent prompt` wraps one paste in the two six-byte
+/// bracketed-paste markers. The submitting carriage return is a separate
+/// write and is not part of the text argument.
+pub const HERDR_PROMPT_FRAME_BYTES: usize = 12;
 
 /// Measures a Request as it would appear in the recipient's native prompt.
 pub trait MeasuresSendPayload {

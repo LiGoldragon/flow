@@ -66,7 +66,7 @@ fn expected_message(request: &TestRequest) -> meta_signal_flow::Message {
         Request::Psyche(said) => (meta_signal_flow::Kind::Psyche, meta_signal_flow::Body::Psyche(meta_signal_flow::PsycheWords { first_string: said.context.clone(), second_string: said.verbatim.clone() })),
         Request::Psyches(saids) => (meta_signal_flow::Kind::Psyche, meta_signal_flow::Body::Psyches(saids.iter().map(|said| meta_signal_flow::PsycheWords { first_string: said.context.clone(), second_string: said.verbatim.clone() }).collect())),
     };
-    meta_signal_flow::Message::Soft(meta_signal_flow::Letter { kind, sender: meta_signal_flow::Sender { address: address.clone(), flow_id: "fixture-sender".into() }, body })
+    meta_signal_flow::Message::Soft(meta_signal_flow::Letter { kind, sender: meta_signal_flow::Sender { address: address.clone(), flow_id: "e167d8".into() }, body })
 }
 
 fn queue_payload(requests: &[TestRequest]) -> String {
@@ -495,8 +495,8 @@ fn a_large_accepted_cohort_reaches_the_native_boundary_as_one_vector() {
         ),
         "DeliverAll cannot report the cohort complete while the first delivery is uncertain"
     );
-    assert_eq!(typed_count(&fixture, "first-request-body"), 1, "no replay");
-    assert!(queue(&fixture).is_empty());
+    assert_eq!(typed_count(&fixture, &"a".repeat(33_000)), 1, "no replay");
+    assert_eq!(queue(&fixture), vec![first.clone(), second.clone()]);
 
     let captured = fixture.typed().expect("the full cohort reached Herdr");
     assert_eq!(captured, expected_text);
@@ -504,8 +504,8 @@ fn a_large_accepted_cohort_reaches_the_native_boundary_as_one_vector() {
         parse_queue_payload(&captured),
         vec![expected_message(&first), expected_message(&second)]
     );
-    assert_eq!(queue(&fixture), vec![]);
-    assert_eq!(standings(&fixture).len(), 2, "one cohort attempt");
+    assert_eq!(queue(&fixture), vec![first, second]);
+    assert_eq!(standings(&fixture).len(), 1, "one cohort attempt");
 }
 
 /// A background task's notification takes the main turn before the typed

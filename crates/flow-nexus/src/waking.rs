@@ -1203,16 +1203,18 @@ trait RendersAttemptInput {
 impl RendersAttemptInput for QueueDeliveryAttempt {
     fn prompt_text(&self, store: &FlowStore) -> Option<String> {
         match &self.queue_evidence {
-            meta_signal_flow::QueueEvidence::Logical(entry) => store
-                .logical_delivery_sender(&entry.logical_delivery_id)
-                .ok()
-                .flatten()
-                .map(|sender| {
-                    render_message(entry, sender)
-                        .pane_text()
-                        .as_str()
-                        .to_owned()
-                }),
+            meta_signal_flow::QueueEvidence::Logical(_) => self
+                .cohort
+                .iter()
+                .map(|entry| {
+                    store
+                        .logical_delivery_sender(&entry.logical_delivery_id)
+                        .ok()
+                        .flatten()
+                        .map(|sender| entry.message.typed_pane_message(sender))
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(|messages| messages.datomize(Vec::new()).protosize().compact()),
             meta_signal_flow::QueueEvidence::Legacy(legacy) => {
                 Some(legacy.request.native_content())
             }
@@ -2226,6 +2228,23 @@ impl PerformsWakeAndDrain for RunningNexus {
                 Ok(failed) => Outcome::Drained(failed),
                 Err(_) => refused(drained, Failed_Data::StoreRefused),
             };
+        }
+        if model.is_none() || !cohort.iter().all(soft) {
+            let actual = text.len().saturating_add(crate::sending::HERDR_PROMPT_FRAME_BYTES);
+            let limit = configured.snapshot.limits.herdr_line;
+            if text.len() > crate::sending::MAX_NATIVE_COHORT_BYTES
+                || actual > usize::try_from(limit).unwrap_or(0)
+            {
+                let effective = limit.min(crate::sending::MAX_NATIVE_COHORT_BYTES as i64);
+                let size = signal_flow::SendPayloadSize {
+                    actual_bytes: i64::try_from(actual).unwrap_or(i64::MAX),
+                    maximum_bytes: effective,
+                };
+                return match self.store.fail_transport_overlimit(&attempt.attempt_id, size) {
+                    Ok(failed) => Outcome::Drained(failed),
+                    Err(_) => refused(drained, Failed_Data::StoreRefused),
+                };
+            }
         }
         let absent = |observation: String| {
             self.store

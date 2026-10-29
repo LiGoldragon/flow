@@ -10338,6 +10338,8 @@ pub(crate) trait ReadsFlowMemory {
                 if limits.send_body != 64 * 1024
                     || limits.cohort <= 0
                     || limits.cohort > native_ceiling
+                    || limits.herdr_envelope < crate::sending::HERDR_PROMPT_FRAME_BYTES as i64
+                    || limits.cohort.saturating_add(crate::sending::HERDR_PROMPT_FRAME_BYTES as i64) > limits.herdr_line
                     || codex_bound > limits.frame
                     || codex_bound > limits.app_server_message
                 {

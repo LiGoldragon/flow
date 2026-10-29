@@ -1638,7 +1638,7 @@ fn canonical_test_payload(requests: &[TestRequest]) -> String {
         .map(|request| {
             Message::Soft(request.request.clone()).typed_pane_message(meta_signal_flow::Sender {
                 address: core(),
-                flow_id: "fixture-sender".into(),
+                flow_id: "e167d8".into(),
             })
         })
         .collect::<Vec<_>>()

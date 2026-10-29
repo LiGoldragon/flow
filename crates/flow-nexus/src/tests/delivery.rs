@@ -24,6 +24,19 @@ fn letter(text: &str) -> Letter {
     }
 }
 
+#[test]
+fn a_delivery_reference_is_not_authority_for_an_unidentified_meta_caller() {
+    let fixture = NexusFixture::new();
+    assert_eq!(
+        fixture.nexus.dispatch_meta(MetaQuery::Deliver(DeliveryRequest { delivery_id: "known-or-unknown".into() })),
+        MetaResponse::DeliveryRejected(DeliveryRejection::CallerNotAuthorized)
+    );
+    assert_eq!(
+        fixture.nexus.dispatch_meta(MetaQuery::Vet(DeliveryRequest { delivery_id: "known-or-unknown".into() })),
+        MetaResponse::DeliveryRejected(DeliveryRejection::CallerNotAuthorized)
+    );
+}
+
 impl NexusFixture {
     fn deliver(&self, delivery_id: &str, message: Message) -> MetaResponse {
         self.deliver_with_gate(delivery_id, message, meta_signal_flow::Gate::Kept)

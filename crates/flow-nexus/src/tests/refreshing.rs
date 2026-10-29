@@ -818,7 +818,6 @@ fn a_send_to_a_primary_keeps_every_authenticated_sender() {
 
 #[test]
 fn admission_refuses_the_request_that_would_overfill_one_native_cohort() {
-    use crate::sending::MAX_NATIVE_COHORT_BYTES;
     use crate::store::logical_delivery::RecordsLogicalDeliveries as _;
     let fixture = NexusFixture::new();
     let target = seat_address();
@@ -868,8 +867,8 @@ fn admission_refuses_the_request_that_would_overfill_one_native_cohort() {
         Response::Refused(signal_flow::Refusal::Oversized(signal_flow::SendPayloadSize {
             actual_bytes,
             maximum_bytes,
-        })) if actual_bytes > MAX_NATIVE_COHORT_BYTES as i64
-            && maximum_bytes == MAX_NATIVE_COHORT_BYTES as i64
+        })) if actual_bytes > 122_880
+            && maximum_bytes == 122_880
     ));
     assert_eq!(
         fixture

@@ -927,12 +927,18 @@ impl Dispatches for RunningNexus {
                     flow_binding_result: result,
                 })
             }
+            meta_signal_flow::Query::Deliver(_) if !resolver.as_ref().is_some_and(|identity| identity.flow_id_option.is_none()) => {
+                meta_signal_flow::Response::DeliveryRejected(meta_signal_flow::DeliveryRejection::CallerNotAuthorized)
+            }
             meta_signal_flow::Query::Deliver(request) => match self.configured_use() {
                 Ok(configured) => self.deliver(&configured, request),
                 Err(_) => meta_signal_flow::Response::DeliveryRejected(
                     meta_signal_flow::DeliveryRejection::PersistenceRefused,
                 ),
             },
+            meta_signal_flow::Query::Vet(_) if !resolver.as_ref().is_some_and(|identity| identity.flow_id_option.is_none()) => {
+                meta_signal_flow::Response::DeliveryRejected(meta_signal_flow::DeliveryRejection::CallerNotAuthorized)
+            }
             meta_signal_flow::Query::Vet(request) => match self.configured_use() {
                 Ok(configured) => self.vet(&configured, &request),
                 Err(_) => meta_signal_flow::Response::DeliveryRejected(

@@ -1445,11 +1445,10 @@ impl AccountsQueueDelivery for FlowStore {
         let Some(mut metaflow) = self.stored_metaflow(&head.address)? else {
             return Err(StoreError::StateInvariant);
         };
-        if metaflow.metaflow.state != flow_ethos::State::Awake(head.flow_id.clone())
-            || !metaflow.metaflow.queue.starts_with(&cohort)
-        {
+        if metaflow.metaflow.state != flow_ethos::State::Awake(head.flow_id.clone()) {
             return Err(StoreError::StateInvariant);
         }
+        let active = metaflow.metaflow.queue.starts_with(&cohort);
         let counters = self
             .engine
             .match_records(QueryPlan::key(
@@ -1492,7 +1491,7 @@ impl AccountsQueueDelivery for FlowStore {
                 [stored]
                     if stored.address == head.address
                         && stored.queue_evidence == request.queue_evidence
-                        && stored.state == RequestState::Queued =>
+                        && matches!(stored.state, RequestState::Queued | RequestState::Parked) =>
                 {
                     commit.mutate(self.queue_delivery.requests, request)
                 }
@@ -1527,7 +1526,9 @@ impl AccountsQueueDelivery for FlowStore {
                 );
             }
         }
-        metaflow.metaflow.queue.drain(..cohort.len());
+        if active {
+            metaflow.metaflow.queue.drain(..cohort.len());
+        }
         let native = NativeReceipt {
             harness_kind: head.harness_kind,
             native_session_id: head.thread_id,
@@ -1607,21 +1608,55 @@ impl AccountsQueueDelivery for FlowStore {
     }
 
     fn replay_transport_overlimit(&self, attempt_id: &str) -> Result<bool, StoreError> {
-        let Some(attempt) = self.queue_delivery_attempt(attempt_id)? else { return Ok(false) };
-        if !matches!(attempt.phase, QueueDeliveryPhase::TransportOverlimit(_)) || attempt.cohort.is_empty() { return Ok(false) }
-        let Some(mut metaflow) = self.stored_metaflow(&attempt.address)? else { return Err(StoreError::StateInvariant) };
+        let Some(attempt) = self.queue_delivery_attempt(attempt_id)? else {
+            return Ok(false);
+        };
+        if !matches!(attempt.phase, QueueDeliveryPhase::TransportOverlimit(_))
+            || attempt.cohort.is_empty()
+        {
+            return Ok(false);
+        }
+        let Some(mut metaflow) = self.stored_metaflow(&attempt.address)? else {
+            return Err(StoreError::StateInvariant);
+        };
         let mut requests = Vec::with_capacity(attempt.cohort.len());
         for entry in &attempt.cohort {
-            let rows = self.engine.match_records(QueryPlan::key(self.queue_delivery.requests, RecordKey::new(&entry.logical_delivery_id)))?;
-            let [stored] = rows.records() else { return Err(StoreError::StateInvariant) };
-            if stored.state == RequestState::Queued { return Ok(true) }
-            if stored.state != RequestState::Parked { return Ok(false) }
-            let mut queued = stored.clone(); queued.state = RequestState::Queued; requests.push(queued);
+            let rows = self.engine.match_records(QueryPlan::key(
+                self.queue_delivery.requests,
+                RecordKey::new(&entry.logical_delivery_id),
+            ))?;
+            let [stored] = rows.records() else {
+                return Err(StoreError::StateInvariant);
+            };
+            if stored.state == RequestState::Queued {
+                return Ok(true);
+            }
+            if stored.state != RequestState::Parked {
+                return Ok(false);
+            }
+            let mut queued = stored.clone();
+            queued.state = RequestState::Queued;
+            requests.push(queued);
         }
-        if attempt.cohort.iter().any(|entry| metaflow.metaflow.queue.iter().any(|queued| queued.logical_delivery_id == entry.logical_delivery_id)) { return Err(StoreError::StateInvariant) }
-        let mut restored = attempt.cohort.clone(); restored.extend(metaflow.metaflow.queue); metaflow.metaflow.queue = restored;
-        let mut commit = self.engine.begin_atomic_commit().mutate(self.metaflows, metaflow);
-        for request in requests { commit = commit.mutate(self.queue_delivery.requests, request); }
+        if attempt.cohort.iter().any(|entry| {
+            metaflow
+                .metaflow
+                .queue
+                .iter()
+                .any(|queued| queued.logical_delivery_id == entry.logical_delivery_id)
+        }) {
+            return Err(StoreError::StateInvariant);
+        }
+        let mut restored = attempt.cohort.clone();
+        restored.extend(metaflow.metaflow.queue);
+        metaflow.metaflow.queue = restored;
+        let mut commit = self
+            .engine
+            .begin_atomic_commit()
+            .mutate(self.metaflows, metaflow);
+        for request in requests {
+            commit = commit.mutate(self.queue_delivery.requests, request);
+        }
         commit = self.stage_logical_transitions(&attempt.cohort, DeliveryState::Queued, commit)?;
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
@@ -1862,36 +1897,52 @@ impl AccountsQueueDelivery for FlowStore {
         if !matches!(attempt.phase, QueueDeliveryPhase::Uncertain(_)) {
             return Ok(false);
         }
-        let QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
+        let QueueEvidence::Logical(_) = &attempt.queue_evidence else {
             return Ok(false);
         };
         let Some(mut metaflow) = self.stored_metaflow(&attempt.address)? else {
             return Ok(false);
         };
-        if metaflow.metaflow.queue.first() != Some(entry) {
+        if attempt.cohort.is_empty() || !metaflow.metaflow.queue.starts_with(&attempt.cohort) {
             return Ok(false);
         }
-        let rows = self.engine.match_records(QueryPlan::key(
-            self.queue_delivery.requests,
-            RecordKey::new(attempt.request_id.clone()),
-        ))?;
-        let [request] = rows.records() else {
-            return Err(StoreError::StateInvariant);
-        };
-        if request.address != attempt.address
-            || request.queue_evidence != attempt.queue_evidence
-            || request.state != RequestState::Queued
-        {
-            return Err(StoreError::StateInvariant);
+        let mut parked = Vec::with_capacity(attempt.cohort.len());
+        for entry in &attempt.cohort {
+            let rows = self.engine.match_records(QueryPlan::key(
+                self.queue_delivery.requests,
+                RecordKey::new(&entry.logical_delivery_id),
+            ))?;
+            let request = match rows.records() {
+                [] => StoredDeliveryRequest {
+                    request_id: entry.logical_delivery_id.clone(),
+                    address: attempt.address.clone(),
+                    queue_evidence: QueueEvidence::Logical(entry.clone()),
+                    state: RequestState::Parked,
+                },
+                [request]
+                    if request.address == attempt.address
+                        && request.state == RequestState::Queued =>
+                {
+                    let mut request = request.clone();
+                    request.state = RequestState::Parked;
+                    request
+                }
+                _ => return Err(StoreError::StateInvariant),
+            };
+            parked.push((rows.records().is_empty(), request));
         }
-        let mut parked = request.clone();
-        parked.state = RequestState::Parked;
-        metaflow.metaflow.queue.remove(0);
-        let commit = self
+        metaflow.metaflow.queue.drain(..attempt.cohort.len());
+        let mut commit = self
             .engine
             .begin_atomic_commit()
-            .mutate(self.metaflows, metaflow)
-            .mutate(self.queue_delivery.requests, parked);
+            .mutate(self.metaflows, metaflow);
+        for (fresh, request) in parked {
+            commit = if fresh {
+                commit.assert(self.queue_delivery.requests, request)
+            } else {
+                commit.mutate(self.queue_delivery.requests, request)
+            };
+        }
         self.engine.commit_atomic(commit)?;
         Ok(true)
     }
@@ -1907,8 +1958,18 @@ impl AccountsQueueDelivery for FlowStore {
                 let commit = self
                     .engine
                     .begin_atomic_commit()
-                    .mutate(self.queue_delivery.attempts, attempt);
-                self.commit_attempt_state(&evidence, DeliveryState::Uncertain, commit)?;
+                    .mutate(self.queue_delivery.attempts, attempt.clone());
+                if let QueueEvidence::Logical(_) = evidence {
+                    let commit = self.stage_logical_transitions(
+                        &attempt.cohort,
+                        DeliveryState::Uncertain,
+                        commit,
+                    )?;
+                    self.engine.commit_atomic(commit)?;
+                    self.launch_changes.announce();
+                } else {
+                    self.commit_attempt_state(&evidence, DeliveryState::Uncertain, commit)?;
+                }
                 Ok(true)
             }
             QueueDeliveryPhase::Uncertain(_) => Ok(true),
@@ -2437,10 +2498,25 @@ mod tests {
                 .phase,
             QueueDeliveryPhase::TransportOverlimit(size)
         );
-        assert!(reopened.replay_transport_overlimit(&attempt.attempt_id).unwrap());
-        assert_eq!(reopened.metaflow(&address()).unwrap().unwrap().queue, original);
-        assert!(reopened.replay_transport_overlimit(&attempt.attempt_id).unwrap(), "same replay reference is idempotent");
-        assert_eq!(reopened.metaflow(&address()).unwrap().unwrap().queue, original);
+        assert!(
+            reopened
+                .replay_transport_overlimit(&attempt.attempt_id)
+                .unwrap()
+        );
+        assert_eq!(
+            reopened.metaflow(&address()).unwrap().unwrap().queue,
+            original
+        );
+        assert!(
+            reopened
+                .replay_transport_overlimit(&attempt.attempt_id)
+                .unwrap(),
+            "same replay reference is idempotent"
+        );
+        assert_eq!(
+            reopened.metaflow(&address()).unwrap().unwrap().queue,
+            original
+        );
     }
 
     #[test]
@@ -2452,13 +2528,11 @@ mod tests {
                 &address(),
                 "flow-delivery",
                 "thread-frozen",
-
                 HarnessKind::Codex,
                 NativeHistoryAnchor::CodexTurns(None),
             )
             .unwrap()
         else {
-
             panic!("the cohort is prepared")
         };
         let later = queued("later");
@@ -2574,7 +2648,6 @@ mod tests {
                 Some(RequestState::Settled)
             );
         }
-
     }
 
     #[test]

@@ -20,15 +20,15 @@ use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::SeedsMetaflow;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::waking::{PerformsWakeAndDrain, ReconcilesQueueDelivery, SettlesStopsAtConfirmation};
+use datom_codec::Datomizable;
 use flow_ethos::State;
 use flow_native::DigestsPrompt;
-use datom_codec::Datomizable;
-use protos::{Compactable, Protosizable};
 use meta_signal_flow::{
     ProcessIdentity, Query as MetaQuery, QueueDeliveryResolution, QueueDeliveryStanding,
     QueueResolutionOutcome, ResolveQueueDeliveryRejected_Data, ResolverIdentity,
     Response as MetaResponse, Sender, Undecided,
 };
+use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, Aspect, Delivery, Event, Layer, Message, Metaflow, NativePrompt, NativeStop,
     QueueEntry, Report_Data, Request, Response, SentBy,
@@ -57,25 +57,71 @@ fn from_core(body: &str) -> TestRequest {
 }
 
 fn expected_message(request: &TestRequest) -> meta_signal_flow::Message {
-    let SentBy::Sender(address) = &request.sent_by else { panic!("typed fixture has sender") };
-    let (kind, body) = match &request.request {
-        Request::Order(text) => (meta_signal_flow::Kind::Order, meta_signal_flow::Body::Words(text.clone())),
-        Request::Question(text) => (meta_signal_flow::Kind::Question, meta_signal_flow::Body::Words(text.clone())),
-        Request::Result(text) => (meta_signal_flow::Kind::Result, meta_signal_flow::Body::Words(text.clone())),
-        Request::Notice(text) => (meta_signal_flow::Kind::Notice, meta_signal_flow::Body::Words(text.clone())),
-        Request::Psyche(said) => (meta_signal_flow::Kind::Psyche, meta_signal_flow::Body::Psyche(meta_signal_flow::PsycheWords { first_string: said.context.clone(), second_string: said.verbatim.clone() })),
-        Request::Psyches(saids) => (meta_signal_flow::Kind::Psyche, meta_signal_flow::Body::Psyches(saids.iter().map(|said| meta_signal_flow::PsycheWords { first_string: said.context.clone(), second_string: said.verbatim.clone() }).collect())),
+    let SentBy::Sender(address) = &request.sent_by else {
+        panic!("typed fixture has sender")
     };
-    meta_signal_flow::Message::Soft(meta_signal_flow::Letter { kind, sender: meta_signal_flow::Sender { address: address.clone(), flow_id: "e167d8".into() }, body })
+    let (kind, body) = match &request.request {
+        Request::Order(text) => (
+            meta_signal_flow::Kind::Order,
+            meta_signal_flow::Body::Words(text.clone()),
+        ),
+        Request::Question(text) => (
+            meta_signal_flow::Kind::Question,
+            meta_signal_flow::Body::Words(text.clone()),
+        ),
+        Request::Result(text) => (
+            meta_signal_flow::Kind::Result,
+            meta_signal_flow::Body::Words(text.clone()),
+        ),
+        Request::Notice(text) => (
+            meta_signal_flow::Kind::Notice,
+            meta_signal_flow::Body::Words(text.clone()),
+        ),
+        Request::Psyche(said) => (
+            meta_signal_flow::Kind::Psyche,
+            meta_signal_flow::Body::Psyche(meta_signal_flow::PsycheWords {
+                first_string: said.context.clone(),
+                second_string: said.verbatim.clone(),
+            }),
+        ),
+        Request::Psyches(saids) => (
+            meta_signal_flow::Kind::Psyche,
+            meta_signal_flow::Body::Psyches(
+                saids
+                    .iter()
+                    .map(|said| meta_signal_flow::PsycheWords {
+                        first_string: said.context.clone(),
+                        second_string: said.verbatim.clone(),
+                    })
+                    .collect(),
+            ),
+        ),
+    };
+    meta_signal_flow::Message::Soft(meta_signal_flow::Letter {
+        kind,
+        sender: meta_signal_flow::Sender {
+            address: address.clone(),
+            flow_id: "e167d8".into(),
+        },
+        body,
+    })
 }
 
 fn queue_payload(requests: &[TestRequest]) -> String {
     use datom_codec::Datomizable;
     use protos::{Compactable, Protosizable};
-    requests.iter().map(expected_message).collect::<Vec<_>>().datomize(Vec::new()).protosize().compact()
+    requests
+        .iter()
+        .map(expected_message)
+        .collect::<Vec<_>>()
+        .datomize(Vec::new())
+        .protosize()
+        .compact()
 }
 
-fn typed_text(request: &TestRequest) -> String { queue_payload(std::slice::from_ref(request)) }
+fn typed_text(request: &TestRequest) -> String {
+    queue_payload(std::slice::from_ref(request))
+}
 
 fn parse_queue_payload(text: &str) -> Vec<meta_signal_flow::Message> {
     use datom_codec::{Actualizing, Budget, Potential};
@@ -306,7 +352,11 @@ fn abrupt_queue_admission_is_durable_without_waking() {
             .accept_logical_delivery(
                 &target,
                 meta_signal_flow::Sender {
-                    address: Address { aspect: Aspect::Psyche, topic: "core".into(), layer: Layer::Secondary },
+                    address: Address {
+                        aspect: Aspect::Psyche,
+                        topic: "core".into(),
+                        layer: Layer::Secondary,
+                    },
                     flow_id: "fixture-sender".into(),
                 },
                 Delivery::Queue,
@@ -354,25 +404,28 @@ fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
 
     report(&fixture, claude_stop(&fixture));
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
-    assert_eq!(typed_count(&fixture, "second-request-body"), 0);
+    assert_eq!(typed_count(&fixture, "second-request-body"), 1);
     assert!(
         fixture
             .typed()
             .unwrap_or_default()
             .contains("Psyche core Secondary")
     );
-    assert_eq!(queue(&fixture), vec![second]);
+    assert!(
+        queue(&fixture).is_empty(),
+        "the one native receipt settles the whole cohort"
+    );
     assert_eq!(
         stored(&fixture, Layer::Secondary).state,
         State::Awake(CLAUDE_SEAT.into())
     );
 }
 
-/// An unprovable first hand-over stays Uncertain and is not replayed, while
-/// the second request is delivered and receipted. DeliverAll does not claim
-/// the whole cohort finished until a late exact receipt settles the first.
+/// One hand-over owns the whole frozen vector. An unprovable hand-over is
+/// parked once, never replayed, and a late exact native receipt settles that
+/// same durable cohort.
 #[test]
-fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
+fn two_queued_claude_requests_form_one_attempt_and_settle_on_their_whole_receipt() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![working_claude_agent(&fixture)],
@@ -382,90 +435,52 @@ fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
     let second = from_core("second-request-body");
     seat(&fixture, vec![first.clone(), second.clone()]);
     append_main_rows(&fixture, &[end_turn("before")]);
-
     report(&fixture, claude_stop(&fixture));
-    assert_eq!(typed_count(&fixture, "first-request-body"), 1);
-    assert_eq!(typed_count(&fixture, "second-request-body"), 1);
-    assert_eq!(queue(&fixture), vec![], "both typed, out of the queue");
-    let typed = fixture.typed().unwrap_or_default();
-    let expected = vec![expected_message(&first), expected_message(&second)];
-    assert_eq!(parse_queue_payload(&typed), expected);
+    let typed = fixture.typed().expect("whole cohort typed");
     assert_eq!(
-        expected.datomize(Vec::new()).protosize().compact(),
-        typed,
-        "the captured native prompt is the canonical complete vector"
+        parse_queue_payload(&typed),
+        vec![expected_message(&first), expected_message(&second)]
+    );
+    assert_eq!(
+        queue(&fixture),
+        vec![first.clone(), second.clone()],
+        "unreceipted cohort remains pending as one unit"
     );
     assert!(matches!(
         standings(&fixture).as_slice(),
-        [
-            QueueDeliveryStanding::Uncertain(_),
-            QueueDeliveryStanding::Uncertain(_)
-        ]
+        [QueueDeliveryStanding::Uncertain(_)]
     ));
-
-    // The same turn end again: the unresolved logical request remains
-    // uncertain in its journal but is parked out of the active queue.
     report(&fixture, claude_stop(&fixture));
-    assert_eq!(typed_count(&fixture, "first-request-body"), 1);
-    assert_eq!(typed_count(&fixture, "second-request-body"), 1);
-    assert_eq!(queue(&fixture), vec![second.clone()]);
-    assert!(matches!(
-        standings(&fixture).as_slice(),
-        [
-            QueueDeliveryStanding::Uncertain(Some(Undecided::AbsenceUnprovable)),
-            QueueDeliveryStanding::Uncertain(_),
-        ]
-    ));
-
-    // The exact prompt in another session is not this seat's receipt.
+    assert_eq!(
+        fixture.typed().unwrap(),
+        typed,
+        "the pending cohort is never typed twice"
+    );
     report(
         &fixture,
-        submitted(
-            "0ther000-0000-4000-8000-000000000009",
-            "elsewhere",
-            &typed_text(&first),
-        ),
+        submitted("0ther000-0000-4000-8000-000000000009", "elsewhere", &typed),
     );
-    assert_eq!(queue(&fixture), vec![second.clone()]);
-
+    assert!(
+        queue(&fixture).is_empty(),
+        "the uncertain cohort is parked outside the retry queue"
+    );
+    assert!(matches!(
+        standings(&fixture).as_slice(),
+        [QueueDeliveryStanding::Uncertain(_)]
+    ));
     append_main_rows(
         &fixture,
         &[
-            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u-second",
-            "message":{"content":format!("\n\n<pasted_content id=\"04ef\">\n{}\n</pasted_content id=\"04ef\">\n", typed_text(&second))}}),
-            end_turn("second-received"),
+            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"whole",
+            "message":{"content":typed}}),
         ],
     );
-    report(&fixture, claude_stop(&fixture));
-    assert_eq!(
-        queue(&fixture),
-        vec![],
-        "the exact native receipt settles the later hand-over"
+    report(&fixture, submitted(CLAUDE_SESSION, "whole", &typed));
+    assert!(
+        queue(&fixture).is_empty(),
+        "one exact native receipt settles the whole cohort"
     );
-    let SentBy::Sender(first_sender) = first.sent_by.clone() else {
-        panic!("first queued request has a sender")
-    };
-    let settled = fixture
-        .nexus
-        .store
-        .read_logical_delivery_snapshots(&first_sender, None)
-        .unwrap();
-    for request in [&first, &second] {
-        assert!(settled.delivery_snapshot_vector.iter().any(|snapshot| {
-            snapshot.logical_delivery_id == request.logical_delivery_id
-                && matches!(
-                    &snapshot.delivery_state,
-                    signal_flow::DeliveryState::Delivered(_)
-                )
-        }));
-    }
     assert!(standings(&fixture).is_empty());
-    assert!(matches!(
-        fixture.nexus.drain_all(address(Layer::Secondary)),
-        Outcome::Drained(_)
-    ));
-    assert_eq!(typed_count(&fixture, "first-request-body"), 1, "no replay");
-    assert_eq!(typed_count(&fixture, "second-request-body"), 1, "no replay");
 }
 
 /// Admission measures each complete typed message. Once accepted, the
@@ -535,7 +550,7 @@ fn a_task_notification_that_takes_the_turn_first_settles_nothing() {
 
     let queued = format!(
         "<pasted_content id=\"q1\">\n{}\n</pasted_content id=\"q1\">",
-        typed_text(&first)
+        fixture.typed().expect("whole cohort typed")
     );
     append_main_rows(
         &fixture,
@@ -548,9 +563,13 @@ fn a_task_notification_that_takes_the_turn_first_settles_nothing() {
         ],
     );
     report(&fixture, claude_stop(&fixture));
-    assert_eq!(queue(&fixture), vec![first.clone(), second.clone()]);
+    assert_eq!(
+        queue(&fixture),
+        vec![first.clone(), second.clone()],
+        "the whole cohort remains pending in Claude's input queue"
+    );
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
-    assert_eq!(typed_count(&fixture, "second-request-body"), 0);
+    assert_eq!(typed_count(&fixture, "second-request-body"), 1);
     assert_eq!(
         standings(&fixture),
         vec![QueueDeliveryStanding::Uncertain(Some(
@@ -571,10 +590,9 @@ fn a_task_notification_that_takes_the_turn_first_settles_nothing() {
     report(&fixture, claude_stop(&fixture));
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
-    assert_eq!(
-        queue(&fixture),
-        vec![second],
-        "the first settled; the second typed"
+    assert!(
+        queue(&fixture).is_empty(),
+        "the exact whole vector settled atomically"
     );
 }
 
@@ -625,7 +643,10 @@ fn a_hand_over_a_crash_left_unreceived_is_reconciled_at_start_without_a_second_t
         "never again"
     );
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
-    assert_eq!(queue(&fixture), vec![second]);
+    assert!(
+        queue(&fixture).is_empty(),
+        "history settles the whole frozen cohort"
+    );
 }
 
 /// A hand-over Herdr refuses before any text reaches the pane is proved
@@ -821,7 +842,7 @@ fn resolve_served(
 /// A Claude hand-over typed and never seen again, its Stop reconciled to
 /// Uncertain(AbsenceUnprovable). Returns the attempt id.
 fn stuck_hand_over(fixture: &NexusFixture, queue: Vec<TestRequest>) -> String {
-    let expected_attempts = queue.len();
+    let expected_attempts = usize::from(!queue.is_empty());
     fixture.accept_pane_operations(
         vec![working_claude_agent(fixture)],
         PromptFixture::PromptedUnrecorded("w1:p3"),
@@ -865,13 +886,12 @@ fn an_uncertain_hand_over_cannot_be_resolved_delivered_without_a_native_receipt(
         ),
         MetaResponse::ResolveQueueDeliveryRejected(ResolveQueueDeliveryRejected_Data::NotOldest,)
     );
-    assert_eq!(queue(&fixture), vec![second.clone()]);
+    assert!(queue(&fixture).is_empty());
     assert!(matches!(
         standings(&fixture).as_slice(),
-        [
-            QueueDeliveryStanding::Uncertain(Some(Undecided::AbsenceUnprovable)),
-            QueueDeliveryStanding::Uncertain(_),
-        ]
+        [QueueDeliveryStanding::Uncertain(Some(
+            Undecided::AbsenceUnprovable
+        ))]
     ));
 
     report(&fixture, claude_stop(&fixture));
@@ -912,13 +932,12 @@ fn a_parked_absence_unprovable_hand_over_is_never_replayed_by_owner_resolution()
         "parked delivery is not replayed"
     );
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
-    assert_eq!(queue(&fixture), vec![second]);
+    assert!(queue(&fixture).is_empty());
     assert!(matches!(
         standings(&fixture).as_slice(),
-        [
-            QueueDeliveryStanding::Uncertain(Some(Undecided::AbsenceUnprovable)),
-            QueueDeliveryStanding::Uncertain(_),
-        ]
+        [QueueDeliveryStanding::Uncertain(Some(
+            Undecided::AbsenceUnprovable
+        ))]
     ));
 }
 
@@ -1022,5 +1041,5 @@ fn a_resting_claude_seat_does_not_advance_after_unwitnessed_delivered_resolution
     );
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
-    assert_eq!(queue(&fixture), vec![second]);
+    assert!(queue(&fixture).is_empty());
 }

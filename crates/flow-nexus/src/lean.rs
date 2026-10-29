@@ -4,7 +4,11 @@ use crate::generated::starter::{LeanStart, RendersLeanStart};
 use meta_signal_flow::{ModuleText, Setting, Switch};
 use signal_flow::{HarnessKind, ToolSet};
 
-impl LeanStart {
+pub(crate) trait ReadsLeanModules {
+    fn left_out_module(&self, name: &str) -> bool;
+}
+
+impl ReadsLeanModules for LeanStart {
     fn left_out_module(&self, name: &str) -> bool {
         self.left_out.iter().any(|left| left == name)
     }

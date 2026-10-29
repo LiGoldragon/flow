@@ -120,56 +120,110 @@ impl DefaultsCurriculumSocket for DefaultConfiguration {
 impl UpgradeFrom<StoredMetaNexusConfigurationV2> for StoredMetaNexusConfiguration {
     type Refusal = std::convert::Infallible;
     fn upgrade_from(previous: StoredMetaNexusConfigurationV2) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(current(previous.nexus))
+        Decision::Ready(StoredMetaNexusConfiguration::current(previous.nexus))
     }
 }
 
 impl UpgradeFrom<StoredMetaNexusConfigurationV1> for StoredMetaNexusConfiguration {
     type Refusal = std::convert::Infallible;
     fn upgrade_from(previous: StoredMetaNexusConfigurationV1) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(current(previous.nexus.with_curriculum(
-            DefaultConfiguration::from_environment().curriculum_socket(),
-        )))
+        Decision::Ready(StoredMetaNexusConfiguration::current(
+            previous
+                .nexus
+                .with_curriculum(DefaultConfiguration::from_environment().curriculum_socket()),
+        ))
     }
 }
 
-fn resolve_program(name: &str) -> String {
-    std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
-        .map(|directory| directory.join(name))
-        .find(|path| path.is_file())
-        .unwrap_or_else(|| std::path::PathBuf::from(name))
-        .to_string_lossy()
-        .into_owned()
+pub(super) trait MigratesNexusConfiguration {
+    fn resolve_program(name: &str) -> String;
+    fn current(previous: ConfigureNexusV2) -> StoredMetaNexusConfiguration;
+    fn legacy_nexus(path: &std::path::Path) -> Result<Option<ConfigureNexusV2>, StoreError>;
 }
 
-fn current(previous: ConfigureNexusV2) -> StoredMetaNexusConfiguration {
-    let hook = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|p| p.join("flow-hook")))
-        .filter(|path| path.is_file())
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|| resolve_program("flow-hook"));
-    StoredMetaNexusConfiguration {
-        nexus: ConfigureNexus {
-            flows_root: std::path::Path::new(&previous.source_root)
-                .join("flows")
-                .to_string_lossy()
-                .into_owned(),
-            source_root: previous.source_root,
-            meta_aspects: previous.meta_aspects,
-            message_nexus_path: previous.message_nexus_path,
-            message_nexus_binary: previous.message_nexus_binary,
-            curriculum_nexus_path: previous.curriculum_nexus_path,
-            lease: previous.lease,
-            executables: meta_signal_flow::Executables {
-                herdr: resolve_program("herdr"),
-                flow_id_claimer: resolve_program("flow-id"),
-                hook,
+impl MigratesNexusConfiguration for StoredMetaNexusConfiguration {
+    fn resolve_program(name: &str) -> String {
+        std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+            .map(|directory| directory.join(name))
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| std::path::PathBuf::from(name))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn current(previous: ConfigureNexusV2) -> StoredMetaNexusConfiguration {
+        let hook = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|p| p.join("flow-hook")))
+            .filter(|path| path.is_file())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| Self::resolve_program("flow-hook"));
+        StoredMetaNexusConfiguration {
+            nexus: ConfigureNexus {
+                flows_root: std::path::Path::new(&previous.source_root)
+                    .join("flows")
+                    .to_string_lossy()
+                    .into_owned(),
+                source_root: previous.source_root,
+                meta_aspects: previous.meta_aspects,
+                message_nexus_path: previous.message_nexus_path,
+                message_nexus_binary: previous.message_nexus_binary,
+                curriculum_nexus_path: previous.curriculum_nexus_path,
+                lease: previous.lease,
+                executables: meta_signal_flow::Executables {
+                    herdr: Self::resolve_program("herdr"),
+                    flow_id_claimer: Self::resolve_program("flow-id"),
+                    hook,
+                },
+                default_herdr_session: "default".into(),
             },
-            default_herdr_session: "default".into(),
-        },
+        }
+    }
+
+    /// Reads the v1/v2 Nexus row before Engine upgrades its table, so the fields
+    /// that move to the Harness family can be written there without loss.
+    fn legacy_nexus(path: &std::path::Path) -> Result<Option<ConfigureNexusV2>, StoreError> {
+        use redb::{ReadableDatabase as _, ReadableTable as _};
+        if !path.exists() {
+            return Ok(None);
+        }
+        // This runs only inside the mutating open (on its staged copy when an
+        // upgrade is needed). A recovery-required redb must be opened writable
+        // so redb can repair it before we read the legacy row; recognition itself
+        // remains read-only and never calls this function.
+        let database = redb::Database::open(path)
+            .map_err(|error| StoreError::NexusUpgrade(error.to_string()))?;
+        let read = database
+            .begin_read()
+            .map_err(|error| StoreError::NexusUpgrade(error.to_string()))?;
+        let table = match read.open_table(redb::TableDefinition::<String, &[u8]>::new(
+            super::META_NEXUS_CONFIGURATION_TABLE_NAME.as_str(),
+        )) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(error) => return Err(StoreError::NexusUpgrade(error.to_string())),
+        };
+        let Some(bytes) = table
+            .get("nexus".to_owned())
+            .map_err(|error| StoreError::NexusUpgrade(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        if let Ok(row) =
+            rkyv::from_bytes::<StoredMetaNexusConfigurationV2, rkyv::rancor::Error>(bytes.value())
+        {
+            return Ok(Some(row.nexus));
+        }
+        if let Ok(row) =
+            rkyv::from_bytes::<StoredMetaNexusConfigurationV1, rkyv::rancor::Error>(bytes.value())
+        {
+            return Ok(Some(row.nexus.with_curriculum(
+                DefaultConfiguration::from_environment().curriculum_socket(),
+            )));
+        }
+        Ok(None)
     }
 }
 
@@ -192,50 +246,6 @@ impl NamesCurriculumSocket for ConfigureNexusV1 {
             lease: self.lease,
         }
     }
-}
-
-/// Reads the v1/v2 Nexus row before Engine upgrades its table, so the fields
-/// that move to the Harness family can be written there without loss.
-pub(super) fn legacy_nexus(path: &std::path::Path) -> Result<Option<ConfigureNexusV2>, StoreError> {
-    use redb::{ReadableDatabase as _, ReadableTable as _};
-    if !path.exists() {
-        return Ok(None);
-    }
-    // This runs only inside the mutating open (on its staged copy when an
-    // upgrade is needed). A recovery-required redb must be opened writable
-    // so redb can repair it before we read the legacy row; recognition itself
-    // remains read-only and never calls this function.
-    let database =
-        redb::Database::open(path).map_err(|error| StoreError::NexusUpgrade(error.to_string()))?;
-    let read = database
-        .begin_read()
-        .map_err(|error| StoreError::NexusUpgrade(error.to_string()))?;
-    let table = match read.open_table(redb::TableDefinition::<String, &[u8]>::new(
-        super::META_NEXUS_CONFIGURATION_TABLE_NAME.as_str(),
-    )) {
-        Ok(table) => table,
-        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-        Err(error) => return Err(StoreError::NexusUpgrade(error.to_string())),
-    };
-    let Some(bytes) = table
-        .get("nexus".to_owned())
-        .map_err(|error| StoreError::NexusUpgrade(error.to_string()))?
-    else {
-        return Ok(None);
-    };
-    if let Ok(row) =
-        rkyv::from_bytes::<StoredMetaNexusConfigurationV2, rkyv::rancor::Error>(bytes.value())
-    {
-        return Ok(Some(row.nexus));
-    }
-    if let Ok(row) =
-        rkyv::from_bytes::<StoredMetaNexusConfigurationV1, rkyv::rancor::Error>(bytes.value())
-    {
-        return Ok(Some(row.nexus.with_curriculum(
-            DefaultConfiguration::from_environment().curriculum_socket(),
-        )));
-    }
-    Ok(None)
 }
 
 /// The Nexus family's descriptor, from v1 on.

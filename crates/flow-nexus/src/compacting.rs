@@ -22,7 +22,7 @@
 //! The warning is a journal line at warning priority.
 
 use crate::generated::operation::{Operation, Outcome, Record_Data, Record_Data_Context_Data};
-use crate::performing::Performs;
+use crate::performing::{Performs, PerformsConfiguredOperations};
 use crate::store::compaction::{Compaction, Investigation, RecordsCompactions};
 use crate::store::context::RecordsContextSize;
 use crate::store::metaflow::SleepsMetaflows;
@@ -59,12 +59,18 @@ impl Default for CompactionWatch {
     }
 }
 
-fn compaction_floor(milliseconds: u64) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or_default();
-    now.saturating_sub(milliseconds / 1000).transcript_time()
+trait ReadsCompactionFloor {
+    fn compaction_floor(&self) -> String;
+}
+
+impl ReadsCompactionFloor for u64 {
+    fn compaction_floor(&self) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or_default();
+        now.saturating_sub(*self / 1000).transcript_time()
+    }
 }
 
 /// A Unix time written as a transcript writes its timestamps.
@@ -265,7 +271,7 @@ impl RendersCompactionWarning for CompactionWarning<'_> {
             }
         };
         use meta_signal_flow::Slot;
-        crate::texts::render_template(template, |slot| match slot {
+        crate::texts::RendersTemplate::rendered_with(template, |slot| match slot {
             Slot::LaunchFlowId => Some(self.flow_id.to_owned()),
             Slot::MetaflowAddress => self.address.map(WritesSeat::seat_text),
             Slot::ContextSize => self.pre_tokens.map(|tokens| tokens.to_string()),
@@ -337,7 +343,7 @@ pub trait WatchesCompactions {
 
 impl WatchesCompactions for RunningNexus {
     fn watch_claude_compactions(&self, configured: &ConfiguredUse, flow_id: &str) {
-        let floor = compaction_floor(configured.snapshot.timings.compaction_watch_margin as u64);
+        let floor = (configured.snapshot.timings.compaction_watch_margin as u64).compaction_floor();
         let Ok(Some(node)) = self.store.flow_node(flow_id) else {
             return;
         };
@@ -533,7 +539,7 @@ mod tests {
 
     #[test]
     fn each_first_read_can_use_the_current_watch_margin() {
-        assert!(compaction_floor(0) > compaction_floor(60_000));
+        assert!(0_u64.compaction_floor() > 60_000_u64.compaction_floor());
     }
 
     #[test]
@@ -661,7 +667,7 @@ mod tests {
             session: "s",
             transcript: Some(&transcript),
             pre_tokens: Some(219141),
-            texts: &crate::store::texts::seed_texts().expect("texts seed"),
+            texts: &<crate::store::texts::StoredTexts as crate::store::texts::ProvidesTextsSeed>::seed_texts().expect("texts seed"),
         }
         .text();
         assert!(text.starts_with(
@@ -673,7 +679,7 @@ mod tests {
 
     #[test]
     fn seated_and_unseated_warnings_select_each_source_with_raw_values() {
-        let texts = crate::store::texts::seed_texts().expect("texts seed");
+        let texts = <crate::store::texts::StoredTexts as crate::store::texts::ProvidesTextsSeed>::seed_texts().expect("texts seed");
         let address = Address {
             aspect: Aspect::Mind,
             topic: "flow".into(),

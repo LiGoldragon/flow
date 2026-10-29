@@ -85,17 +85,20 @@ use signal_flow::{
 /// Applies the meta wire's index cursor to an already ordered snapshot.
 /// `after` is the number of rows consumed; `next_page` is the cursor for
 /// the next request and is absent once the snapshot is exhausted.
-pub(crate) fn page_records<T: Clone>(
-    records: &[T],
-    page: &meta_signal_flow::Page,
-) -> (Vec<T>, meta_signal_flow::NextPage) {
-    let start = usize::try_from(page.after.max(0))
-        .unwrap_or(usize::MAX)
-        .min(records.len());
-    let count = usize::try_from(page.count.max(0)).unwrap_or(usize::MAX);
-    let end = start.saturating_add(count).min(records.len());
-    let next = (end < records.len()).then(|| i64::try_from(end).unwrap_or(i64::MAX));
-    (records[start..end].to_vec(), next)
+pub(crate) trait PagesRecords<T> {
+    fn page_records(&self, page: &meta_signal_flow::Page) -> (Vec<T>, meta_signal_flow::NextPage);
+}
+
+impl<T: Clone> PagesRecords<T> for [T] {
+    fn page_records(&self, page: &meta_signal_flow::Page) -> (Vec<T>, meta_signal_flow::NextPage) {
+        let start = usize::try_from(page.after.max(0))
+            .unwrap_or(usize::MAX)
+            .min(self.len());
+        let count = usize::try_from(page.count.max(0)).unwrap_or(usize::MAX);
+        let end = start.saturating_add(count).min(self.len());
+        let next = (end < self.len()).then(|| i64::try_from(end).unwrap_or(i64::MAX));
+        (self[start..end].to_vec(), next)
+    }
 }
 
 type LeaveOut = String;
@@ -137,7 +140,12 @@ enum LeaveOutRefusalV37 {
     NotForHarness(LeaveOutV37),
 }
 
-impl LeaveOutV37 {
+pub(crate) trait ConvertsLeaveOutV37 {
+    fn harness(&self) -> HarnessKind;
+    fn module_names(&self) -> &'static [&'static str];
+}
+
+impl ConvertsLeaveOutV37 for LeaveOutV37 {
     fn harness(&self) -> HarnessKind {
         match self {
             Self::CodexSkillListing
@@ -3338,7 +3346,12 @@ impl From<LaunchOutcomeV8> for LaunchOutcome {
     }
 }
 
-impl LaunchOutcomeV8 {
+pub(crate) trait ConvertsLaunchOutcomeV8 {
+    fn needs_requirement_address(&self) -> bool;
+    fn with_requirement_address(self, address: Address) -> LaunchOutcome;
+}
+
+impl ConvertsLaunchOutcomeV8 for LaunchOutcomeV8 {
     fn needs_requirement_address(&self) -> bool {
         matches!(self, Self::StartRejected(StartRejectionV34::NoSecondary))
             || matches!(
@@ -3490,7 +3503,11 @@ impl MemoryDefinition for QuarantinedLaunchOutcome {
     }
 }
 
-impl QuarantinedLaunchOutcome {
+pub(crate) trait ConvertsQuarantinedLaunchOutcome {
+    fn reference(&self) -> signal_flow::LaunchOutcomeArchive;
+}
+
+impl ConvertsQuarantinedLaunchOutcome for QuarantinedLaunchOutcome {
     fn reference(&self) -> signal_flow::LaunchOutcomeArchive {
         signal_flow::LaunchOutcomeArchive {
             launch_request_id: self.launch_request_id.clone(),
@@ -3600,11 +3617,17 @@ enum ReplaceRejectionV32 {
     Locked,
 }
 
-fn unrecorded_secondary() -> signal_flow::Address {
-    signal_flow::Address {
-        aspect: signal_flow::Aspect::Psyche,
-        topic: "unrecorded".into(),
-        layer: signal_flow::Layer::Secondary,
+trait NamesUnrecordedSecondary {
+    fn unrecorded_secondary() -> signal_flow::Address;
+}
+
+impl NamesUnrecordedSecondary for StartRejectionV32 {
+    fn unrecorded_secondary() -> signal_flow::Address {
+        signal_flow::Address {
+            aspect: signal_flow::Aspect::Psyche,
+            topic: "unrecorded".into(),
+            layer: signal_flow::Layer::Secondary,
+        }
     }
 }
 
@@ -3628,7 +3651,9 @@ impl From<StartRejectionV32> for StartRejection {
             }
             StartRejectionV32::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
             StartRejectionV32::ModelRefused(refusal) => Self::ModelRefused(refusal),
-            StartRejectionV32::NoSecondary => Self::RequirementUnmet(unrecorded_secondary()),
+            StartRejectionV32::NoSecondary => {
+                Self::RequirementUnmet(StartRejectionV32::unrecorded_secondary())
+            }
             StartRejectionV32::Undeclared => Self::Undeclared,
             StartRejectionV32::TopicRefused(topic) => Self::TopicRefused(topic),
         }
@@ -3783,7 +3808,9 @@ impl From<StartRejectionV30> for StartRejection {
             }
             StartRejectionV30::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
             StartRejectionV30::ModelRefused(refusal) => Self::ModelRefused(refusal),
-            StartRejectionV30::NoSecondary => Self::RequirementUnmet(unrecorded_secondary()),
+            StartRejectionV30::NoSecondary => {
+                Self::RequirementUnmet(StartRejectionV32::unrecorded_secondary())
+            }
             StartRejectionV30::Undeclared => Self::Undeclared,
         }
     }
@@ -5168,7 +5195,7 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             )?,
             investigation: engine
                 .register_table(StoredMetaInvestigationConfiguration::descriptor())?,
-            timings: engine.upgraded_timings(timings_limits::timings_descriptor())?,
+            timings: engine.upgraded_timings(<timings_limits::StoredTimings as timings_limits::ProvidesTimingSeed>::timings_descriptor())?,
             limits: engine.register_limits()?,
             texts: engine.register_texts()?,
             full_state: engine.register_table(full_configuration::StoredFullConfigurationState::descriptor())?,
@@ -5291,7 +5318,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
     fn open_in_place(path: &Path) -> Result<Self, StoreError> {
         let recognized = FlowStore::recognize_flow_memory(path)?;
         let legacy_nexus = if recognized {
-            nexus_configuration::legacy_nexus(path)?
+            <nexus_configuration::StoredMetaNexusConfiguration as nexus_configuration::MigratesNexusConfiguration>::legacy_nexus(path)?
         } else {
             None
         };
@@ -5312,9 +5339,11 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         let meta_metaflows_descriptor = <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor();
-        let timings_descriptor = timings_limits::timings_descriptor();
-        let limits_descriptor = timings_limits::limits_descriptor();
-        let texts_descriptor = texts::texts_descriptor();
+        let timings_descriptor = <timings_limits::StoredTimings as timings_limits::ProvidesTimingSeed>::timings_descriptor();
+        let limits_descriptor =
+            <timings_limits::StoredLimits as timings_limits::ProvidesLimitSeed>::limits_descriptor(
+            );
+        let texts_descriptor = <texts::StoredTexts as texts::ProvidesTextsSeed>::texts_descriptor();
         let full_state_descriptor = full_configuration::StoredFullConfigurationState::descriptor();
         let full_receipt_descriptor =
             full_configuration::StoredFullConfigurationReceipt::descriptor();
@@ -5407,7 +5436,10 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                     .iter()
                     .map(|row| row.model.clone())
                     .collect::<Vec<_>>();
-                let migrated = harness::from_legacy_nexus(&legacy, &models);
+                let migrated =
+                    <harness::StoredHarness as harness::MigratesLegacyHarnesses>::from_legacy_nexus(
+                        &legacy, &models,
+                    );
                 FlowStore::replace_configuration_family(
                     &engine,
                     meta_configuration_tables.harnesses,
@@ -5884,9 +5916,11 @@ impl OpensFlowStore for FlowStore {
             <compaction::Compaction as compaction::DescribesCompactionTable>::descriptor();
         let successor_intents_descriptor =
             <successor::SuccessorIntent as successor::DescribesSuccessorIntentTable>::descriptor();
-        let timings_descriptor = timings_limits::timings_descriptor();
-        let limits_descriptor = timings_limits::limits_descriptor();
-        let texts_descriptor = texts::texts_descriptor();
+        let timings_descriptor = <timings_limits::StoredTimings as timings_limits::ProvidesTimingSeed>::timings_descriptor();
+        let limits_descriptor =
+            <timings_limits::StoredLimits as timings_limits::ProvidesLimitSeed>::limits_descriptor(
+            );
+        let texts_descriptor = <texts::StoredTexts as texts::ProvidesTextsSeed>::texts_descriptor();
         let full_state_descriptor = full_configuration::StoredFullConfigurationState::descriptor();
         let full_receipt_descriptor =
             full_configuration::StoredFullConfigurationReceipt::descriptor();
@@ -6623,10 +6657,16 @@ impl ManagesMetaflowState for FlowStore {
     }
 }
 
-impl FlowStore {
+pub(crate) trait ReadsCommittedConfiguration {
+    fn committed_configuration_snapshot(
+        &self,
+    ) -> Result<Option<CommittedConfigurationSnapshot>, StoreError>;
+}
+
+impl ReadsCommittedConfiguration for FlowStore {
     /// Reads every mutable configuration family from one database marker.
     /// Callers keep this value for the duration of one logical effect.
-    pub(crate) fn committed_configuration_snapshot(
+    fn committed_configuration_snapshot(
         &self,
     ) -> Result<Option<CommittedConfigurationSnapshot>, StoreError> {
         Self::meta_committed_configuration_snapshot(&self.engine, &self.meta_configuration_tables)

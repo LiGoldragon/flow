@@ -12,8 +12,8 @@
 //! mistakes, not an adversary (F4).
 
 use crate::binding::{ChecksProcessIdentity, ReadsProcessIdentity};
-use crate::caller::{CallerProcess, LocatesCallerPane, ReadsProcess};
-use crate::{ConfiguredUse, RunningNexus};
+use crate::caller::{CallerProcess, LocatesCallerPane, ReadsProcess, ResolvesCallerWith};
+use crate::{BuildsHerdrOperationView, ConfiguredUse, RunningNexus};
 use meta_signal_flow::{MetaRefusal, ProcessIdentity, ResolverIdentity, Response};
 use signal_flow::CallerResolutionRejection;
 use std::fs;

@@ -145,7 +145,11 @@ struct OwnedPaneBinding {
     herdr_terminal_id: String,
 }
 
-impl OwnedPaneBinding {
+pub(crate) trait MatchesOwnedPaneBinding {
+    fn matches(&self, route: &HerdrRoute) -> bool;
+}
+
+impl MatchesOwnedPaneBinding for OwnedPaneBinding {
     fn matches(&self, route: &HerdrRoute) -> bool {
         self.herdr_session_name == route.herdr_session_name
             && self.herdr_pane_id == route.herdr_pane_id
@@ -226,16 +230,16 @@ impl Default for HerdrCli {
                 endpoints: Vec::new(),
                 harnesses: Vec::new(),
                 timeout: std::time::Duration::from_millis(
-                    crate::store::timings_limits::seed_timings()
+                    <crate::store::timings_limits::StoredTimings as crate::store::timings_limits::ProvidesTimingSeed>::seed_timings()
                         .expect("authored timings seed")
                         .app_server_timeout as u64,
                 ),
                 workspace_root: workspace_root.clone(),
-                limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
-                texts: crate::store::texts::seed_texts().expect("authored texts seed"),
+                limits: <crate::store::timings_limits::StoredLimits as crate::store::timings_limits::ProvidesLimitSeed>::seed_limits().expect("authored limits seed"),
+                texts: <crate::store::texts::StoredTexts as crate::store::texts::ProvidesTextsSeed>::seed_texts().expect("authored texts seed"),
             },
-            timings: crate::store::timings_limits::seed_timings().expect("authored timings seed"),
-            limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
+            timings: <crate::store::timings_limits::StoredTimings as crate::store::timings_limits::ProvidesTimingSeed>::seed_timings().expect("authored timings seed"),
+            limits: <crate::store::timings_limits::StoredLimits as crate::store::timings_limits::ProvidesLimitSeed>::seed_limits().expect("authored limits seed"),
             harnesses: Vec::new(),
             claude_transcript_root: PathBuf::new(),
             claude_daemon: crate::claude::ClaudeDaemon::under(Path::new("")),
@@ -360,11 +364,35 @@ impl OperatesHerdrPane for HerdrCli {
     }
 }
 
-impl HerdrCli {
+pub(crate) trait ConfiguresHerdr {
+    fn configured_view(
+        snapshot: &crate::store::StoredConfigurationSnapshot,
+        codex_endpoints: CodexEndpoints,
+        ordinary_socket: &Path,
+        owned: std::sync::Arc<HerdrOwnedResources>,
+    ) -> Self;
+    fn owned_resources(&self) -> std::sync::Arc<HerdrOwnedResources>;
+    fn with_owned_resources(self, owned: std::sync::Arc<HerdrOwnedResources>) -> Self;
+    fn retain_pane_binding(&self, pane: &signal_flow::HerdrPaneBinding) -> Result<(), String>;
+    fn owned_pane_executable(&self, route: &HerdrRoute) -> Result<PathBuf, PaneCloseFailure>;
+    fn lifecycle_view(&self, route: &HerdrRoute) -> Result<Self, PaneCloseFailure>;
+    fn release_pane_binding(&self, pane_id: &str);
+    #[cfg(test)]
+    fn retain_exited_fixture_claude(&self, pane_id: &str, session_id: &str);
+    fn close_owned_pane(&self, route: &HerdrRoute) -> PaneCloseOutcome;
+    fn close_flow_owned_claude_pane(&self, route: &HerdrRoute) -> PaneCloseOutcome;
+    fn stop_flow_owned_claude(
+        &self,
+        route: &HerdrRoute,
+        session: &str,
+    ) -> Result<OwnedProcessDisposition, PaneCloseFailure>;
+}
+
+impl ConfiguresHerdr for HerdrCli {
     /// Builds one immutable Herdr view from one committed configuration
     /// snapshot. Every effect receives its own view while all views retain
     /// the running Nexus's one resource authority registry.
-    pub(crate) fn configured_view(
+    fn configured_view(
         snapshot: &crate::store::StoredConfigurationSnapshot,
         codex_endpoints: CodexEndpoints,
         ordinary_socket: &Path,
@@ -380,16 +408,13 @@ impl HerdrCli {
 
     /// The single authority registry shared by all immutable configuration
     /// views made for this running Nexus.
-    pub(crate) fn owned_resources(&self) -> std::sync::Arc<HerdrOwnedResources> {
+    fn owned_resources(&self) -> std::sync::Arc<HerdrOwnedResources> {
         std::sync::Arc::clone(&self.owned)
     }
 
     /// Makes this configuration view use the running Nexus's one authority
     /// registry. Configuration replacement changes the view, never ownership.
-    pub(crate) fn with_owned_resources(
-        mut self,
-        owned: std::sync::Arc<HerdrOwnedResources>,
-    ) -> Self {
+    fn with_owned_resources(mut self, owned: std::sync::Arc<HerdrOwnedResources>) -> Self {
         self.owned = owned;
         self.requires_owned_pane_binding = true;
         self
@@ -449,13 +474,15 @@ impl HerdrCli {
     }
 
     #[cfg(test)]
-    pub(crate) fn retain_exited_fixture_claude(&self, pane_id: &str, session_id: &str) {
+    fn retain_exited_fixture_claude(&self, pane_id: &str, session_id: &str) {
         let mut process = Command::new("sleep")
             .arg("60")
             .spawn()
             .expect("fixture Claude process starts");
         let process_id = process.id();
-        let process_start = process_start(process_id).expect("fixture Claude start identity");
+        let process_start = process_id
+            .process_start()
+            .expect("fixture Claude start identity");
         let process_executable = fs::canonicalize(format!("/proc/{process_id}/exe"))
             .expect("fixture Claude executable identity");
         // SAFETY: pidfd_open has no pointer arguments. The inserted owned
@@ -538,27 +565,22 @@ impl HerdrCli {
         if process.session_id != session {
             return Err(PaneCloseFailure::IdentityMismatch);
         }
-        if pidfd_exited(process.pidfd, 0) {
+        if process.pidfd.exited_within(0) {
             // The retained identity reports that the original exited. A
             // fresh matching foreground process is not its replacement,
             // and closing the pane could kill that unrelated process.
             return Ok(OwnedProcessDisposition::AlreadyExited);
         }
-        let observed_start = process_start(process.process_id);
+        let observed_start = process.process_id.process_start();
         let observed_executable = fs::canonicalize(format!("/proc/{}/exe", process.process_id));
         if observed_start.is_none() || observed_executable.is_err() {
-            return if pidfd_exited(process.pidfd, 0) {
+            return if process.pidfd.exited_within(0) {
                 Ok(OwnedProcessDisposition::AlreadyExited)
             } else {
                 Err(PaneCloseFailure::IdentityUnavailable)
             };
         }
-        let exact_process = retained_process_matches(
-            process.process_start,
-            &process.process_executable,
-            observed_start,
-            observed_executable.ok(),
-        );
+        let exact_process = process.matches_observation(observed_start, observed_executable.ok());
         if !exact_process {
             return Err(PaneCloseFailure::IdentityMismatch);
         }
@@ -583,7 +605,7 @@ impl HerdrCli {
         }
         let timeout =
             u64::try_from(self.timings.stop_wait).map_err(|_| PaneCloseFailure::StopTimedOut)?;
-        match stop_owned_process(process.pidfd, timeout) {
+        match process.pidfd.stop_owned_process(timeout) {
             Ok(ProcessStop::Graceful | ProcessStop::Forced) => Ok(OwnedProcessDisposition::Stopped),
             Ok(ProcessStop::AlreadyExited) => Ok(OwnedProcessDisposition::AlreadyExited),
             Err(ProcessStopFailure::IdentityUnavailable) => {
@@ -594,14 +616,30 @@ impl HerdrCli {
     }
 }
 
-fn retained_process_matches(
-    recorded_start: u64,
-    recorded_executable: &Path,
-    observed_start: Option<u64>,
-    observed_executable: Option<PathBuf>,
-) -> bool {
-    observed_start == Some(recorded_start)
-        && observed_executable.as_deref() == Some(recorded_executable)
+#[cfg(test)]
+impl HerdrCli {
+    pub(crate) fn retain_exited_fixture_claude(&self, pane_id: &str, session_id: &str) {
+        <Self as ConfiguresHerdr>::retain_exited_fixture_claude(self, pane_id, session_id)
+    }
+}
+
+trait MatchesRetainedProcess {
+    fn matches_observation(
+        &self,
+        observed_start: Option<u64>,
+        observed_executable: Option<PathBuf>,
+    ) -> bool;
+}
+
+impl MatchesRetainedProcess for OwnedClaudeProcess {
+    fn matches_observation(
+        &self,
+        observed_start: Option<u64>,
+        observed_executable: Option<PathBuf>,
+    ) -> bool {
+        observed_start == Some(self.process_start)
+            && observed_executable.as_deref() == Some(self.process_executable.as_path())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -626,82 +664,113 @@ enum OwnedProcessDisposition {
 /// Signals one stable Linux process identity and blocks on its kernel exit
 /// event. A native process that does not honor SIGTERM is compensated with
 /// SIGKILL; a timeout never becomes a successful stop.
-fn stop_process(
-    process_id: u32,
-    timeout_milliseconds: u64,
-) -> Result<ProcessStop, ProcessStopFailure> {
-    let process_id =
-        i32::try_from(process_id).map_err(|_| ProcessStopFailure::IdentityUnavailable)?;
-    // SAFETY: pidfd_open has no pointer arguments. The returned owned
-    // descriptor is closed on every path below.
-    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, process_id, 0) as i32 };
-    if pidfd < 0 {
-        return Err(ProcessStopFailure::IdentityUnavailable);
-    }
-    let stopped = stop_owned_process(pidfd, timeout_milliseconds);
-    // SAFETY: pidfd is an owned descriptor returned by pidfd_open.
-    unsafe { libc::close(pidfd) };
-    stopped
+trait StopsProcess {
+    fn stop_process(&self, timeout_milliseconds: u64) -> Result<ProcessStop, ProcessStopFailure>;
 }
 
-fn stop_owned_process(
-    pidfd: i32,
-    timeout_milliseconds: u64,
-) -> Result<ProcessStop, ProcessStopFailure> {
-    let signal = |signal: i32| {
-        // SAFETY: pidfd_send_signal is called with the live pidfd above,
-        // a signal number, and no siginfo payload or flags.
-        unsafe {
+impl StopsProcess for u32 {
+    fn stop_process(&self, timeout_milliseconds: u64) -> Result<ProcessStop, ProcessStopFailure> {
+        let process_id =
+            i32::try_from(*self).map_err(|_| ProcessStopFailure::IdentityUnavailable)?;
+        // SAFETY: pidfd_open has no pointer arguments.
+        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, process_id, 0) as i32 };
+        if pidfd < 0 {
+            return Err(ProcessStopFailure::IdentityUnavailable);
+        }
+        let stopped = pidfd.stop_owned_process(timeout_milliseconds);
+        // SAFETY: pidfd is an owned descriptor returned by pidfd_open.
+        unsafe { libc::close(pidfd) };
+        stopped
+    }
+}
+
+trait StopsOwnedProcess {
+    fn stop_owned_process(
+        &self,
+        timeout_milliseconds: u64,
+    ) -> Result<ProcessStop, ProcessStopFailure>;
+    fn exited_within(&self, timeout: i32) -> bool;
+}
+
+impl StopsOwnedProcess for i32 {
+    fn stop_owned_process(
+        &self,
+        timeout_milliseconds: u64,
+    ) -> Result<ProcessStop, ProcessStopFailure> {
+        let signal = |signal: i32| unsafe {
             libc::syscall(
                 libc::SYS_pidfd_send_signal,
-                pidfd,
+                *self,
                 signal,
                 std::ptr::null::<libc::siginfo_t>(),
                 0,
             ) == 0
-        }
-    };
-    let timeout = i32::try_from(timeout_milliseconds).map_err(|_| ProcessStopFailure::TimedOut)?;
-    if pidfd_exited(pidfd, 0) {
-        return Ok(ProcessStop::AlreadyExited);
-    }
-    if !signal(libc::SIGTERM) {
-        return if pidfd_exited(pidfd, 0) {
-            Ok(ProcessStop::AlreadyExited)
-        } else {
-            Err(ProcessStopFailure::IdentityUnavailable)
         };
-    }
-    if pidfd_exited(pidfd, timeout) {
-        Ok(ProcessStop::Graceful)
-    } else if !signal(libc::SIGKILL) {
-        if pidfd_exited(pidfd, 0) {
-            Ok(ProcessStop::Graceful)
-        } else {
-            Err(ProcessStopFailure::IdentityUnavailable)
+        let timeout =
+            i32::try_from(timeout_milliseconds).map_err(|_| ProcessStopFailure::TimedOut)?;
+        if self.exited_within(0) {
+            return Ok(ProcessStop::AlreadyExited);
         }
-    } else if pidfd_exited(pidfd, timeout) {
-        Ok(ProcessStop::Forced)
-    } else {
-        Err(ProcessStopFailure::TimedOut)
+        if !signal(libc::SIGTERM) {
+            return if self.exited_within(0) {
+                Ok(ProcessStop::AlreadyExited)
+            } else {
+                Err(ProcessStopFailure::IdentityUnavailable)
+            };
+        }
+        if self.exited_within(timeout) {
+            Ok(ProcessStop::Graceful)
+        } else if !signal(libc::SIGKILL) {
+            if self.exited_within(0) {
+                Ok(ProcessStop::Graceful)
+            } else {
+                Err(ProcessStopFailure::IdentityUnavailable)
+            }
+        } else if self.exited_within(timeout) {
+            Ok(ProcessStop::Forced)
+        } else {
+            Err(ProcessStopFailure::TimedOut)
+        }
+    }
+
+    fn exited_within(&self, timeout: i32) -> bool {
+        let mut event = libc::pollfd {
+            fd: *self,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: event points to one initialized pollfd for the blocking call.
+        (unsafe { libc::poll(&mut event, 1, timeout) == 1 })
+            && event.revents & (libc::POLLIN | libc::POLLHUP) != 0
     }
 }
 
-fn pidfd_exited(pidfd: i32, timeout: i32) -> bool {
-    let mut event = libc::pollfd {
-        fd: pidfd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: event points to one initialized pollfd for the blocking call.
-    (unsafe { libc::poll(&mut event, 1, timeout) == 1 })
-        && event.revents & (libc::POLLIN | libc::POLLHUP) != 0
+pub(crate) trait ReadsProcessStart {
+    fn process_start(&self) -> Option<u64>;
 }
 
-pub(crate) fn process_start(process_id: u32) -> Option<u64> {
-    let stat = fs::read_to_string(format!("/proc/{process_id}/stat")).ok()?;
-    let after_name = stat.rsplit_once(") ")?.1;
-    after_name.split_whitespace().nth(19)?.parse().ok()
+impl ReadsProcessStart for u32 {
+    fn process_start(&self) -> Option<u64> {
+        let stat = fs::read_to_string(format!("/proc/{self}/stat")).ok()?;
+        let after_name = stat.rsplit_once(") ")?.1;
+        after_name.split_whitespace().nth(19)?.parse().ok()
+    }
+}
+
+#[cfg(test)]
+fn process_start(process_id: u32) -> Option<u64> {
+    process_id.process_start()
+}
+
+#[cfg(test)]
+fn retained_process_matches(
+    recorded_start: u64,
+    recorded_executable: &Path,
+    observed_start: Option<u64>,
+    observed_executable: Option<PathBuf>,
+) -> bool {
+    observed_start == Some(recorded_start)
+        && observed_executable.as_deref() == Some(recorded_executable)
 }
 
 /// Herdr's answer to one `agent prompt`, read for what it proves about the
@@ -996,7 +1065,7 @@ impl ConfiguresHerdrCli for HerdrCli {
             .expect("fixture flows root has a parent")
             .join("native-transcripts");
         let mut timings =
-            crate::store::timings_limits::seed_timings().expect("authored timings seed");
+            <crate::store::timings_limits::StoredTimings as crate::store::timings_limits::ProvidesTimingSeed>::seed_timings().expect("authored timings seed");
         timings.launch_rest_wait = 1000;
         timings.title_readback_interval = 1;
         Self {
@@ -1029,11 +1098,11 @@ impl ConfiguresHerdrCli for HerdrCli {
                     .parent()
                     .expect("fixture flows root has a parent")
                     .to_path_buf(),
-                limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
-                texts: crate::store::texts::seed_texts().expect("authored texts seed"),
+                limits: <crate::store::timings_limits::StoredLimits as crate::store::timings_limits::ProvidesLimitSeed>::seed_limits().expect("authored limits seed"),
+                texts: <crate::store::texts::StoredTexts as crate::store::texts::ProvidesTextsSeed>::seed_texts().expect("authored texts seed"),
             },
             timings,
-            limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
+            limits: <crate::store::timings_limits::StoredLimits as crate::store::timings_limits::ProvidesLimitSeed>::seed_limits().expect("authored limits seed"),
             harnesses: Vec::new(),
             claude_transcript_root: fixture_root.join("claude"),
             claude_daemon: crate::claude::ClaudeDaemon::under(&fixture_root.join("claude-home")),
@@ -1837,7 +1906,7 @@ mod tests {
             .arg("60")
             .spawn()
             .expect("sleep starts");
-        assert_eq!(stop_process(process.id(), 1000), Ok(ProcessStop::Graceful));
+        assert_eq!(process.id().stop_process(1000), Ok(ProcessStop::Graceful));
         assert!(process.wait().expect("sleep reaped").code().is_none());
     }
 
@@ -1854,7 +1923,7 @@ mod tests {
             });
         }
         let mut process = command.spawn().expect("term-refusing sleep starts");
-        assert_eq!(stop_process(process.id(), 10), Ok(ProcessStop::Forced));
+        assert_eq!(process.id().stop_process(10), Ok(ProcessStop::Forced));
         assert!(process.wait().expect("sleep reaped").code().is_none());
     }
 
@@ -1865,13 +1934,10 @@ mod tests {
         let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, original.id(), 0) as i32 };
         assert!(pidfd >= 0);
         original.wait().unwrap();
-        assert!(pidfd_exited(pidfd, 1000));
+        assert!(pidfd.exited_within(1000));
 
         let mut replacement = Command::new("sleep").arg("60").spawn().unwrap();
-        assert_eq!(
-            stop_owned_process(pidfd, 10),
-            Ok(ProcessStop::AlreadyExited)
-        );
+        assert_eq!(pidfd.stop_owned_process(10), Ok(ProcessStop::AlreadyExited));
         assert!(replacement.try_wait().unwrap().is_none());
         replacement.kill().unwrap();
         replacement.wait().unwrap();
@@ -1987,7 +2053,7 @@ mod tests {
             let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, original.id(), 0) as i32 };
             assert!(pidfd >= 0);
             original.wait().unwrap();
-            assert!(super::pidfd_exited(pidfd, 1000));
+            assert!(pidfd.exited_within(1000));
 
             let closed = root.path().join(format!("closed-{name}"));
             let herdr = root.path().join("herdr");
@@ -2254,7 +2320,7 @@ mod tests {
     fn a_stop_wait_outside_poll_range_is_refused_without_signalling() {
         let mut process = Command::new("sleep").arg("60").spawn().unwrap();
         assert_eq!(
-            stop_process(process.id(), i32::MAX as u64 + 1),
+            process.id().stop_process(i32::MAX as u64 + 1),
             Err(ProcessStopFailure::TimedOut)
         );
         assert!(process.try_wait().unwrap().is_none());

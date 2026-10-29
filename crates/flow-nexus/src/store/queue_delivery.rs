@@ -93,7 +93,11 @@ enum RequestState {
     QuarantinedMissingHistoricalSender,
 }
 
-impl RequestState {
+pub(crate) trait ReadsRequestState {
+    fn is_quarantined(&self) -> bool;
+}
+
+impl ReadsRequestState for RequestState {
     fn is_quarantined(&self) -> bool {
         matches!(
             self,

@@ -8,7 +8,7 @@ use crate::herdr::{PaneRoute, ReadsHerdrPanes};
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::repair::RepairsMetaflows;
 use crate::store::{ReadsFlowRows, RebindsNativeSession};
-use crate::{ConfiguredUse, RunningNexus};
+use crate::{BuildsHerdrOperationView, ConfiguredUse, RunningNexus};
 use meta_signal_flow::{
     InspectRejected_Data, Rebind_Data, RebindRejected_Data, Rebinding, Response, StoreRefusal,
     Withdraw_Data,

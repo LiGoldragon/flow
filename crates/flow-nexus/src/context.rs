@@ -57,19 +57,27 @@ impl OpensCurriculumComposer for CurriculumComposer {
         Self {
             socket: PathBuf::from(input.text()),
             timeout: Duration::from_millis(
-                crate::store::timings_limits::seed_timings()
+                <crate::store::timings_limits::StoredTimings as crate::store::timings_limits::ProvidesTimingSeed>::seed_timings()
                     .expect("authored timings seed")
                     .curriculum_timeout as u64,
             ),
-            answer_frame_limit: crate::store::timings_limits::seed_limits()
+            answer_frame_limit: <crate::store::timings_limits::StoredLimits as crate::store::timings_limits::ProvidesLimitSeed>::seed_limits()
                 .expect("authored limits seed")
                 .curriculum_answer as usize,
         }
     }
 }
 
-impl CurriculumComposer {
-    pub(crate) fn configured(
+pub(crate) trait ConfiguresCurriculumComposer {
+    fn configured(
+        socket: &str,
+        timings: &meta_signal_flow::Timings,
+        limits: &meta_signal_flow::Limits,
+    ) -> Self;
+}
+
+impl ConfiguresCurriculumComposer for CurriculumComposer {
+    fn configured(
         socket: &str,
         timings: &meta_signal_flow::Timings,
         limits: &meta_signal_flow::Limits,

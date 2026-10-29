@@ -8,9 +8,12 @@ use crate::store::send_outcome::RecordsSendOutcomes;
 // `flow_nexus::LaunchedRecord`.
 extern crate self as flow_nexus;
 use crate::claude::ProjectsClaudeReadiness;
-use crate::codex::{MeasuresQueuedCodexTurn, QueuedCodexTurnWire, SelectsCodexEndpoint};
-use crate::herdr::ConfiguresHerdrCli;
+use crate::codex::{
+    ConfiguresCodexEndpointTexts, ConfiguresCodexEndpoints, MeasuresQueuedCodexTurn,
+    QueuedCodexTurnWire, SelectsCodexEndpoint,
+};
 use crate::herdr::ReadsHerdrPanes;
+use crate::herdr::{ConfiguresHerdr, ConfiguresHerdrCli};
 use crate::store::AnnouncesLaunchChanges;
 use crate::waking::{StartsRequirementsFirst, TypesQueuedCohorts};
 pub use caller::CallerProcess;
@@ -63,18 +66,19 @@ pub mod values;
 pub mod waking;
 
 use binding::{ChecksFlowContainer, ChecksProcessIdentity, VerifiesAdoptedSeat};
-use caller::{IdentifiesPeer, LocatesCallerPane, ResolvesCaller};
+use caller::{DerivesConfiguredOrigin, IdentifiesPeer, LocatesCallerPane, ResolvesCaller};
 use codex::{CodexEndpoints, ConsumesResetCredit};
 use codex_turns::SettlesRestingCodexSeats;
 use compacting::WatchesCompactions;
-use composition::{LaunchComposer, OpensLaunchComposer};
-use context::{CurriculumComposer, OpensCurriculumComposer};
+use composition::{ConfiguresLaunchComposer, LaunchComposer, OpensLaunchComposer};
+use context::{ConfiguresCurriculumComposer, CurriculumComposer, OpensCurriculumComposer};
 use delivery::{DeliversMessages, lease::LeasesPanes};
 use generated::operation::{Failed_Data, Operation, Outcome, Record_Data};
 use generated::starter::DerivesOrigin;
 use launching::{AdmitsLaunch, LaunchesFlows, ObservesLaunch, ReconcilesInterruptedLaunches};
 use observe_agent::ObservesAgent;
 use observe_sends::ObservesLogicalSends;
+use operational::RecordsOperationalState;
 use peer::{AdmitsMetaPeer, NamesMetaPeer, ResolvesPeer};
 use performing::Performs;
 use reporting::RecordsReports;
@@ -100,8 +104,8 @@ use std::{
     time::Duration,
 };
 use store::{
-    AppliesFlowQuery, FlowStore, NamesLiveFlow, OpensFlowStore, ReadsFlowRows,
-    RegistersExistingFlow, RegistersFlowIdentity,
+    AppliesFlowQuery, FlowStore, NamesLiveFlow, OpensFlowStore, ReadsCommittedConfiguration,
+    ReadsFlowRows, RegistersExistingFlow, RegistersFlowIdentity,
 };
 use waking::SleepsAndWakesSeats;
 use waking::{PerformsWakeAndDrain, RestsEndedAwake, SettlesStopsAtConfirmation};
@@ -168,8 +172,16 @@ pub(crate) struct ConfiguredUse {
 /// ```
 pub struct SendToolIngress(ConfiguredUse);
 
-impl SendToolIngress {
-    pub fn serve<'scope, 'env>(
+pub trait ServesSendToolIngress {
+    fn serve<'scope, 'env>(
+        &'env self,
+        nexus: &'env RunningNexus,
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+    );
+}
+
+impl ServesSendToolIngress for SendToolIngress {
+    fn serve<'scope, 'env>(
         &'env self,
         nexus: &'env RunningNexus,
         scope: &'scope std::thread::Scope<'scope, 'env>,
@@ -178,39 +190,53 @@ impl SendToolIngress {
     }
 }
 
-impl RunningNexus {
+pub trait UsesCommittedConfiguration {
+    fn recover_wakes_ingress(&self);
+    fn send_tool_ingress(&self) -> Option<SendToolIngress>;
+    fn stop_requested(&self) -> bool;
+    fn reconcile_interrupted_launches_ingress(&self);
+}
+
+pub(crate) trait SelectsCommittedConfiguration {
+    fn settle_stops_at_confirmation_ingress(&self);
+    fn configured_use(&self) -> Result<ConfiguredUse, store::StoreError>;
+}
+
+impl UsesCommittedConfiguration for RunningNexus {
     /// Startup is a true next-item boundary: the authority selects the
     /// committed generation once for the recovery run.
-    pub fn recover_wakes_ingress(&self) {
+    fn recover_wakes_ingress(&self) {
         if let Ok(configured) = self.configured_use() {
             crate::waking::SleepsAndWakesSeats::recover_wakes_configured(self, &configured);
         }
     }
 
-    fn settle_stops_at_confirmation_ingress(&self) {
-        if let Ok(configured) = self.configured_use() {
-            crate::waking::SettlesStopsAtConfirmation::settle_stops_at_confirmation_configured(
-                self,
-                &configured,
-            );
-        }
-    }
-
     /// Selects the configuration generation for the send-tool service at
     /// root ingress and returns only the capability that can serve it.
-    pub fn send_tool_ingress(&self) -> Option<SendToolIngress> {
+    fn send_tool_ingress(&self) -> Option<SendToolIngress> {
         self.configured_use().ok().map(SendToolIngress)
     }
 
     /// Exposes only the stop signal required by the process signal watcher.
-    pub fn stop_requested(&self) -> bool {
+    fn stop_requested(&self) -> bool {
         self.stopping.requested()
     }
 
     /// Reconciles launch recovery from the root startup ingress.
-    pub fn reconcile_interrupted_launches_ingress(&self) {
+    fn reconcile_interrupted_launches_ingress(&self) {
         if let Ok(configured) = self.configured_use() {
             self.reconcile_interrupted_launches_configured(&configured);
+        }
+    }
+}
+
+impl SelectsCommittedConfiguration for RunningNexus {
+    fn settle_stops_at_confirmation_ingress(&self) {
+        if let Ok(configured) = <Self as SelectsCommittedConfiguration>::configured_use(self) {
+            crate::waking::SettlesStopsAtConfirmation::settle_stops_at_confirmation_configured(
+                self,
+                &configured,
+            );
         }
     }
 
@@ -266,19 +292,29 @@ impl RunningNexus {
             ordinary_socket_path: PathBuf::from(&self.runtime.ordinary_socket_path),
         })
     }
+}
 
+#[cfg(test)]
+impl RunningNexus {
     /// Test fixtures cross module boundaries; production effects cannot
     /// acquire a configuration generation.
-    #[cfg(test)]
+    pub(crate) fn configured_use(&self) -> Result<ConfiguredUse, store::StoreError> {
+        <Self as SelectsCommittedConfiguration>::configured_use(self)
+    }
+
     pub(crate) fn test_configured_use(&self) -> Result<ConfiguredUse, store::StoreError> {
         self.configured_use()
     }
 }
 
-impl ConfiguredUse {
+pub(crate) trait BuildsHerdrOperationView {
+    fn herdr_operation_view(&self) -> herdr::HerdrOperationView;
+}
+
+impl BuildsHerdrOperationView for ConfiguredUse {
     /// The strict Herdr view for this already-selected operation generation.
     /// Effect code cannot reacquire configuration through this value.
-    pub(crate) fn herdr_operation_view(&self) -> herdr::HerdrOperationView {
+    fn herdr_operation_view(&self) -> herdr::HerdrOperationView {
         let codex_endpoints =
             CodexEndpoints::configured(&self.snapshot).with_texts(self.snapshot.texts.clone());
         let herdr = herdr::HerdrCli::configured_view(
@@ -314,11 +350,12 @@ pub(crate) struct ConfiguredEffects<'a> {
     drain: Box<dyn Fn(signal_flow::Address) -> Outcome + Send + Sync + 'a>,
 }
 
-impl RunningNexus {
-    pub(crate) fn configured_effects<'a>(
-        &'a self,
-        configured: &'a ConfiguredUse,
-    ) -> ConfiguredEffects<'a> {
+pub(crate) trait BuildsConfiguredEffects {
+    fn configured_effects<'a>(&'a self, configured: &'a ConfiguredUse) -> ConfiguredEffects<'a>;
+}
+
+impl BuildsConfiguredEffects for RunningNexus {
+    fn configured_effects<'a>(&'a self, configured: &'a ConfiguredUse) -> ConfiguredEffects<'a> {
         ConfiguredEffects {
             configured,
             operational: operational::OperationalStore::new(&self.store),
@@ -344,30 +381,46 @@ impl RunningNexus {
     }
 }
 
-impl ConfiguredEffects<'_> {
-    pub(crate) fn codex_events(&self, thread: &str, events: Vec<codex_turns::TurnEvent>) {
+#[cfg(test)]
+impl RunningNexus {
+    pub(crate) fn configured_effects<'a>(
+        &'a self,
+        configured: &'a ConfiguredUse,
+    ) -> ConfiguredEffects<'a> {
+        <Self as BuildsConfiguredEffects>::configured_effects(self, configured)
+    }
+}
+
+pub(crate) trait InvokesConfiguredEffects {
+    fn codex_events(&self, thread: &str, events: Vec<codex_turns::TurnEvent>);
+    fn observe_codex_events(&self, thread: &str, events: Vec<codex_turns::TurnEvent>);
+    fn codex_context_signal(&self, thread: &str, signal: compacting::CodexContextSignal);
+    fn wake_due(&self, address: signal_flow::Address);
+    fn rest_ended_awake(&self, address: &signal_flow::Address);
+    fn wake(&self, address: signal_flow::Address) -> Outcome;
+    fn drain(&self, address: signal_flow::Address) -> Outcome;
+}
+
+impl InvokesConfiguredEffects for ConfiguredEffects<'_> {
+    fn codex_events(&self, thread: &str, events: Vec<codex_turns::TurnEvent>) {
         (self.codex_events)(thread, events)
     }
-    pub(crate) fn observe_codex_events(&self, thread: &str, events: Vec<codex_turns::TurnEvent>) {
+    fn observe_codex_events(&self, thread: &str, events: Vec<codex_turns::TurnEvent>) {
         (self.observe_codex_events)(thread, events)
     }
-    pub(crate) fn codex_context_signal(
-        &self,
-        thread: &str,
-        signal: compacting::CodexContextSignal,
-    ) {
+    fn codex_context_signal(&self, thread: &str, signal: compacting::CodexContextSignal) {
         (self.codex_context_signal)(thread, signal)
     }
-    pub(crate) fn wake_due(&self, address: signal_flow::Address) {
+    fn wake_due(&self, address: signal_flow::Address) {
         (self.wake_due)(address)
     }
-    pub(crate) fn rest_ended_awake(&self, address: &signal_flow::Address) {
+    fn rest_ended_awake(&self, address: &signal_flow::Address) {
         (self.rest_ended_awake)(address)
     }
-    pub(crate) fn wake(&self, address: signal_flow::Address) -> Outcome {
+    fn wake(&self, address: signal_flow::Address) -> Outcome {
         (self.wake)(address)
     }
-    pub(crate) fn drain(&self, address: signal_flow::Address) -> Outcome {
+    fn drain(&self, address: signal_flow::Address) -> Outcome {
         (self.drain)(address)
     }
 }
@@ -392,7 +445,16 @@ pub trait Dispatches {
     ) -> meta_signal_flow::Response;
 }
 
-impl RunningNexus {
+pub(crate) trait DispatchesConfiguredStarts {
+    fn dispatch_start_configured(
+        &self,
+        configured: &ConfiguredUse,
+        profile: signal_flow::LaunchProfile,
+        origin: signal_flow::Origin,
+    ) -> signal_flow::Response;
+}
+
+impl DispatchesConfiguredStarts for RunningNexus {
     fn dispatch_start_configured(
         &self,
         configured: &ConfiguredUse,
@@ -1101,7 +1163,7 @@ impl Dispatches for RunningNexus {
                 match self.store.read_send_outcomes() {
                     Ok(records) => {
                         let (send_outcome_record_vector, next_page) =
-                            store::page_records(&records, &page);
+                            store::PagesRecords::page_records(records.as_slice(), &page);
                         meta_signal_flow::Response::SendOutcomesRead(
                             meta_signal_flow::SendOutcomesRead_Data {
                                 send_outcome_record_vector,
@@ -1128,7 +1190,8 @@ impl Dispatches for RunningNexus {
             }
             meta_signal_flow::Query::ListFlows(page) => match self.store.flow_nodes() {
                 Ok(nodes) => {
-                    let (flow_node_vector, next_page) = store::page_records(&nodes, &page);
+                    let (flow_node_vector, next_page) =
+                        store::PagesRecords::page_records(nodes.as_slice(), &page);
                     meta_signal_flow::Response::FlowsListed(meta_signal_flow::FlowsListed_Data {
                         flow_node_vector,
                         next_page,
@@ -2176,7 +2239,7 @@ pub trait CarriesSignalFrames {
     fn write_frame(&mut self, bytes: &[u8]) -> Result<(), String>;
     fn read_frame_with_limit(&mut self, frame_limit: usize) -> Result<Vec<u8>, String>;
     fn read_frame(&mut self) -> Result<Vec<u8>, String> {
-        let limit = crate::store::timings_limits::seed_limits()
+        let limit = <crate::store::timings_limits::StoredLimits as crate::store::timings_limits::ProvidesLimitSeed>::seed_limits()
             .map_err(|error| error.to_string())?
             .frame as usize;
         self.read_frame_with_limit(limit)
@@ -2395,7 +2458,7 @@ mod tests {
                     recorded: (*model).into(),
                 })
                 .collect(),
-            modules: crate::store::harness::seeded_modules(kind.clone()),
+            modules: <crate::store::harness::StoredHarness as crate::store::harness::SeedsHarnessModules>::seeded_modules(kind.clone()),
             left_out: vec![],
             arguments,
             settings: vec![],
@@ -3126,8 +3189,8 @@ mod tests {
                 harnesses: harnesses.clone(),
                 timeout: Duration::from_secs(1),
                 workspace_root: directory.path().to_path_buf(),
-                limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
-                texts: crate::store::texts::seed_texts().expect("authored texts seed"),
+                limits: <crate::store::timings_limits::StoredLimits as crate::store::timings_limits::ProvidesLimitSeed>::seed_limits().expect("authored limits seed"),
+                texts: <crate::store::texts::StoredTexts as crate::store::texts::ProvidesTextsSeed>::seed_texts().expect("authored texts seed"),
             };
             let mut store =
                 FlowStore::open(&directory.path().join("flow.sema")).expect("fixture store");

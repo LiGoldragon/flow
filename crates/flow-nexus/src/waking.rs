@@ -79,7 +79,8 @@ use crate::delivery::body::TypesPaneMessage;
 use crate::delivery::body::{RendersNativeContent, RendersPaneText, ShowsPaneText};
 use crate::delivery::lease::LeasesPanes;
 use crate::delivery::{
-    DeliversMessages, FindsDeliveryTarget, PaneRefusal, ReadsLeasedPane, TargetRefusal,
+    DeliversCohortsWithView, DeliversConfiguredCohorts, DeliversMessages, FindsDeliveryTarget,
+    PaneRefusal, ReadsConfiguredDeliveryState, ReadsLeasedPane, TargetRefusal,
 };
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
@@ -89,7 +90,7 @@ use crate::generated::starter::ProfilesFreshSeat;
 use crate::herdr::pane::{PaneAgent, Placement, WritesPane};
 use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes, ReadsHerdrRoster};
 use crate::launching::LaunchesFlows;
-use crate::performing::Performs;
+use crate::performing::{Performs, PerformsConfiguredOperations};
 use crate::send_tool::{ServesLaunchCalls, WakesDeferred};
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
@@ -106,7 +107,7 @@ use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
     RecordsFlowLifecycle,
 };
-use crate::{ConfiguredUse, RunningNexus};
+use crate::{BuildsConfiguredEffects, ConfiguredUse, RunningNexus};
 use datom_codec::Datomizable;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
@@ -1150,50 +1151,63 @@ pub(crate) trait ReconcilesQueueDelivery {
     fn recover_deliveries_configured(&self, configured: &ConfiguredUse);
 }
 
+pub(crate) trait RendersQueuedMessage {
+    fn rendered_message(&self, sender: meta_signal_flow::Sender) -> meta_signal_flow::Message;
+}
+
+impl RendersQueuedMessage for QueueEntry {
+    fn rendered_message(&self, sender: meta_signal_flow::Sender) -> meta_signal_flow::Message {
+        let request = match &self.message {
+            signal_flow::Message::HardAbrupt(request)
+            | signal_flow::Message::MiddleAbrupt(request)
+            | signal_flow::Message::Soft(request) => request,
+        };
+        let (kind, body) = match request {
+            signal_flow::Request::Order(words) => (
+                meta_signal_flow::Kind::Order,
+                meta_signal_flow::Body::Words(words.clone()),
+            ),
+            signal_flow::Request::Question(words) => (
+                meta_signal_flow::Kind::Question,
+                meta_signal_flow::Body::Words(words.clone()),
+            ),
+            signal_flow::Request::Result(words) => (
+                meta_signal_flow::Kind::Result,
+                meta_signal_flow::Body::Words(words.clone()),
+            ),
+            signal_flow::Request::Notice(words) => (
+                meta_signal_flow::Kind::Notice,
+                meta_signal_flow::Body::Words(words.clone()),
+            ),
+            signal_flow::Request::Psyche(said) => (
+                meta_signal_flow::Kind::Psyche,
+                meta_signal_flow::Body::Psyche(meta_signal_flow::PsycheWords {
+                    first_string: said.context.clone(),
+                    second_string: said.verbatim.clone(),
+                }),
+            ),
+            signal_flow::Request::Psyches(_) => (
+                meta_signal_flow::Kind::Psyche,
+                meta_signal_flow::Body::Words(request.native_content()),
+            ),
+        };
+        let letter = meta_signal_flow::Letter { kind, sender, body };
+        match &self.message {
+            signal_flow::Message::HardAbrupt(_) => meta_signal_flow::Message::HardAbrupt(letter),
+            signal_flow::Message::MiddleAbrupt(_) => {
+                meta_signal_flow::Message::MiddleAbrupt(letter)
+            }
+            signal_flow::Message::Soft(_) => meta_signal_flow::Message::Soft(letter),
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn render_message(
     entry: &QueueEntry,
     sender: meta_signal_flow::Sender,
 ) -> meta_signal_flow::Message {
-    let request = match &entry.message {
-        signal_flow::Message::HardAbrupt(request)
-        | signal_flow::Message::MiddleAbrupt(request)
-        | signal_flow::Message::Soft(request) => request,
-    };
-    let (kind, body) = match request {
-        signal_flow::Request::Order(words) => (
-            meta_signal_flow::Kind::Order,
-            meta_signal_flow::Body::Words(words.clone()),
-        ),
-        signal_flow::Request::Question(words) => (
-            meta_signal_flow::Kind::Question,
-            meta_signal_flow::Body::Words(words.clone()),
-        ),
-        signal_flow::Request::Result(words) => (
-            meta_signal_flow::Kind::Result,
-            meta_signal_flow::Body::Words(words.clone()),
-        ),
-        signal_flow::Request::Notice(words) => (
-            meta_signal_flow::Kind::Notice,
-            meta_signal_flow::Body::Words(words.clone()),
-        ),
-        signal_flow::Request::Psyche(said) => (
-            meta_signal_flow::Kind::Psyche,
-            meta_signal_flow::Body::Psyche(meta_signal_flow::PsycheWords {
-                first_string: said.context.clone(),
-                second_string: said.verbatim.clone(),
-            }),
-        ),
-        signal_flow::Request::Psyches(_) => (
-            meta_signal_flow::Kind::Psyche,
-            meta_signal_flow::Body::Words(request.native_content()),
-        ),
-    };
-    let letter = meta_signal_flow::Letter { kind, sender, body };
-    match &entry.message {
-        signal_flow::Message::HardAbrupt(_) => meta_signal_flow::Message::HardAbrupt(letter),
-        signal_flow::Message::MiddleAbrupt(_) => meta_signal_flow::Message::MiddleAbrupt(letter),
-        signal_flow::Message::Soft(_) => meta_signal_flow::Message::Soft(letter),
-    }
+    entry.rendered_message(sender)
 }
 
 trait RendersAttemptInput {
@@ -2610,8 +2624,8 @@ impl WakesInParts for RunningNexus {
             user_modules: fresh.user_modules,
             left_out_option: fresh.left_out_option,
             tool_set: fresh.tool_set,
-            prompt: crate::composition::with_purpose_configured(
-                &text,
+            prompt: crate::composition::JoinsPurpose::with_configured_purpose(
+                text.as_str(),
                 &fresh.purpose,
                 &configured.snapshot.texts,
             ),
@@ -2838,7 +2852,7 @@ impl WakesInParts for RunningNexus {
             user_modules: fresh.user_modules,
             left_out_option: fresh.left_out_option,
             tool_set: fresh.tool_set,
-            prompt: crate::composition::with_purpose_configured(
+            prompt: crate::composition::JoinsPurpose::with_configured_purpose(
                 "",
                 &fresh.purpose,
                 &configured.snapshot.texts,

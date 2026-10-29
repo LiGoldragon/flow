@@ -12,7 +12,10 @@
 //! message it is sent in as many numbered parts as it takes, one right
 //! after another.
 
-use crate::context::{ComposesFlowContext, ContextComposer, VerifiedContext, VerifiesContext};
+use crate::context::{
+    ComposesFlowContext, ConfiguresCurriculumComposer, ContextComposer, VerifiedContext,
+    VerifiesContext,
+};
 pub use crate::generated::starter::{
     AssemblesComposedLaunch, CarriesFlowId, ComposesLaunch, ComposesVerifiedContext,
     ContextRequest, FitsOneMessage, HarnessedProfile, JoinsContextAndBrief, LeanStart,
@@ -122,7 +125,7 @@ impl ComposesSystemPrompt for LaunchComposer {
             }
             text.push_str(&segment);
         }
-        let section = render_launch_section(&input_0.profile(), None, &self.texts);
+        let section = input_0.profile().launch_section_with(None, &self.texts);
         if !section.is_empty() {
             if !text.is_empty() && !text.ends_with('\n') {
                 text.push('\n');
@@ -146,22 +149,29 @@ impl OpensLaunchComposer for LaunchComposer {
     fn with_context(context: ContextComposer) -> Self {
         Self {
             context,
-            limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
+            limits: <crate::store::timings_limits::StoredLimits as crate::store::timings_limits::ProvidesLimitSeed>::seed_limits().expect("authored limits seed"),
             harness_modules: Vec::new(),
-            texts: crate::store::texts::seed_texts().expect("authored texts seed"),
+            texts: <crate::store::texts::StoredTexts as crate::store::texts::ProvidesTextsSeed>::seed_texts().expect("authored texts seed"),
         }
     }
 }
 
-impl LaunchComposer {
+pub(crate) trait ConfiguresLaunchComposer {
+    fn configured_view(&self, snapshot: &crate::store::StoredConfigurationSnapshot) -> Self;
+    fn with_context_and_limits(context: ContextComposer, limits: meta_signal_flow::Limits) -> Self;
+    fn with_context_limits_and_texts(
+        context: ContextComposer,
+        limits: meta_signal_flow::Limits,
+        texts: meta_signal_flow::Texts,
+    ) -> Self;
+}
+
+impl ConfiguresLaunchComposer for LaunchComposer {
     /// Makes the composer for one committed configuration generation. The
     /// production provider follows that generation's Curriculum endpoint;
     /// a test fixture keeps its explicit in-memory provider while receiving
     /// the generation's limits and text.
-    pub(crate) fn configured_view(
-        &self,
-        snapshot: &crate::store::StoredConfigurationSnapshot,
-    ) -> Self {
+    fn configured_view(&self, snapshot: &crate::store::StoredConfigurationSnapshot) -> Self {
         let context = match &self.context {
             ContextComposer::Curriculum(_) => {
                 ContextComposer::Curriculum(crate::context::CurriculumComposer::configured(
@@ -180,19 +190,16 @@ impl LaunchComposer {
         )
     }
 
-    pub(crate) fn with_context_and_limits(
-        context: ContextComposer,
-        limits: meta_signal_flow::Limits,
-    ) -> Self {
+    fn with_context_and_limits(context: ContextComposer, limits: meta_signal_flow::Limits) -> Self {
         Self {
             context,
             limits,
             harness_modules: Vec::new(),
-            texts: crate::store::texts::seed_texts().expect("authored texts seed"),
+            texts: <crate::store::texts::StoredTexts as crate::store::texts::ProvidesTextsSeed>::seed_texts().expect("authored texts seed"),
         }
     }
 
-    pub(crate) fn with_context_limits_and_texts(
+    fn with_context_limits_and_texts(
         context: ContextComposer,
         limits: meta_signal_flow::Limits,
         texts: meta_signal_flow::Texts,
@@ -213,42 +220,48 @@ pub trait RendersLaunchSection {
     fn launch_section(&self, flow_id: Option<&str>) -> String;
 }
 
+trait RendersConfiguredLaunchSection {
+    fn launch_section_with(&self, flow_id: Option<&str>, texts: &meta_signal_flow::Texts)
+    -> String;
+}
+
 impl RendersLaunchSection for LaunchProfile {
     fn launch_section(&self, flow_id: Option<&str>) -> String {
-        render_launch_section(
-            self,
+        self.launch_section_with(
             flow_id,
-            &crate::store::texts::seed_texts().expect("authored texts seed"),
+            &<crate::store::texts::StoredTexts as crate::store::texts::ProvidesTextsSeed>::seed_texts().expect("authored texts seed"),
         )
     }
 }
 
-fn render_launch_section(
-    profile: &LaunchProfile,
-    flow_id: Option<&str>,
-    texts: &meta_signal_flow::Texts,
-) -> String {
-    use meta_signal_flow::Slot;
-    let template = if flow_id.is_some() {
-        &texts.launch_section.bound_launch
-    } else {
-        &texts.launch_section.pending_launch
-    };
-    let address = profile.address.datomize(Vec::new()).protosize().compact();
-    let remembering = match &profile.remembering {
-        signal_flow::Remembering::Predecessors(0) => None,
-        remembering => Some(remembering.datomize(Vec::new()).protosize().compact()),
-    };
-    crate::texts::render_template(template, |slot| match slot {
-        Slot::MetaflowAddress => Some(address.clone()),
-        Slot::LaunchModel => Some(profile.model_name.clone()),
-        Slot::LaunchEffort => Some(profile.effort.clone()),
-        Slot::LaunchFlowId => flow_id.map(str::to_owned),
-        Slot::PredecessorId => profile.flow_id_option.clone(),
-        Slot::RememberedFlows => remembering.clone(),
-        _ => None,
-    })
-    .expect("the authored launch-section template uses only launch-section slots")
+impl RendersConfiguredLaunchSection for LaunchProfile {
+    fn launch_section_with(
+        &self,
+        flow_id: Option<&str>,
+        texts: &meta_signal_flow::Texts,
+    ) -> String {
+        use meta_signal_flow::Slot;
+        let template = if flow_id.is_some() {
+            &texts.launch_section.bound_launch
+        } else {
+            &texts.launch_section.pending_launch
+        };
+        let address = self.address.datomize(Vec::new()).protosize().compact();
+        let remembering = match &self.remembering {
+            signal_flow::Remembering::Predecessors(0) => None,
+            remembering => Some(remembering.datomize(Vec::new()).protosize().compact()),
+        };
+        crate::texts::RendersTemplate::rendered_with(template, |slot| match slot {
+            Slot::MetaflowAddress => Some(address.clone()),
+            Slot::LaunchModel => Some(self.model_name.clone()),
+            Slot::LaunchEffort => Some(self.effort.clone()),
+            Slot::LaunchFlowId => flow_id.map(str::to_owned),
+            Slot::PredecessorId => self.flow_id_option.clone(),
+            Slot::RememberedFlows => remembering.clone(),
+            _ => None,
+        })
+        .expect("the authored launch-section template uses only launch-section slots")
+    }
 }
 
 struct MessageBoundary<'a> {
@@ -257,27 +270,40 @@ struct MessageBoundary<'a> {
     texts: &'a meta_signal_flow::Texts,
 }
 
-fn render_part_header(number: i64, count: i64, texts: &meta_signal_flow::Texts) -> String {
-    use meta_signal_flow::Slot;
-    let template = if number == count {
-        &texts.last_part_header
-    } else {
-        &texts.part_header
-    };
-    crate::texts::render_template(template, |slot| match slot {
-        Slot::PartNumber => Some(number.to_string()),
-        Slot::PartCount => Some(count.to_string()),
-        _ => None,
-    })
-    .expect("the authored part-header template uses only part-number slots")
+trait RendersConfiguredPartHeader {
+    fn part_header_with(&self, texts: &meta_signal_flow::Texts) -> String;
 }
 
-fn fits_message(harness: &HarnessKind, limits: &meta_signal_flow::Limits, text: &str) -> bool {
-    match harness {
-        HarnessKind::Claude => serde_json::to_string(&text).is_ok_and(|encoded| {
-            encoded.len() + limits.herdr_envelope as usize <= limits.herdr_line as usize
-        }),
-        HarnessKind::Codex => text.chars().count() <= limits.codex_text as usize,
+impl RendersConfiguredPartHeader for (i64, i64) {
+    fn part_header_with(&self, texts: &meta_signal_flow::Texts) -> String {
+        use meta_signal_flow::Slot;
+        let (number, count) = *self;
+        let template = if number == count {
+            &texts.last_part_header
+        } else {
+            &texts.part_header
+        };
+        crate::texts::RendersTemplate::rendered_with(template, |slot| match slot {
+            Slot::PartNumber => Some(number.to_string()),
+            Slot::PartCount => Some(count.to_string()),
+            _ => None,
+        })
+        .expect("the authored part-header template uses only part-number slots")
+    }
+}
+
+trait FitsConfiguredMessage {
+    fn fits_configured_message(&self, limits: &meta_signal_flow::Limits, text: &str) -> bool;
+}
+
+impl FitsConfiguredMessage for HarnessKind {
+    fn fits_configured_message(&self, limits: &meta_signal_flow::Limits, text: &str) -> bool {
+        match self {
+            HarnessKind::Claude => serde_json::to_string(&text).is_ok_and(|encoded| {
+                encoded.len() + limits.herdr_envelope as usize <= limits.herdr_line as usize
+            }),
+            HarnessKind::Codex => text.chars().count() <= limits.codex_text as usize,
+        }
     }
 }
 
@@ -294,9 +320,8 @@ fn fits_message(harness: &HarnessKind, limits: &meta_signal_flow::Limits, text: 
 impl FitsOneMessage for HarnessKind {
     fn fits_one_message<N: Textual>(&self, input: N) -> bool {
         let text = input.text();
-        fits_message(
-            self,
-            &crate::store::timings_limits::seed_limits().expect("authored limits seed"),
+        self.fits_configured_message(
+            &<crate::store::timings_limits::StoredLimits as crate::store::timings_limits::ProvidesLimitSeed>::seed_limits().expect("authored limits seed"),
             &text,
         )
     }
@@ -304,7 +329,8 @@ impl FitsOneMessage for HarnessKind {
 
 impl FitsOneMessage for MessageBoundary<'_> {
     fn fits_one_message<N: Textual>(&self, input: N) -> bool {
-        fits_message(self.harness, self.limits, &input.text())
+        self.harness
+            .fits_configured_message(self.limits, &input.text())
     }
 }
 
@@ -333,10 +359,8 @@ impl JoinsContextAndBrief for [String] {
 impl SplitsStartupMessage for HarnessKind {
     fn part_header<N: PartNumbering>(input: N) -> String {
         let (number, count) = (input.part_number(), input.part_count());
-        render_part_header(
-            number,
-            count,
-            &crate::store::texts::seed_texts().expect("authored texts seed"),
+        (number, count).part_header_with(
+            &<crate::store::texts::StoredTexts as crate::store::texts::ProvidesTextsSeed>::seed_texts().expect("authored texts seed"),
         )
     }
 
@@ -377,10 +401,8 @@ impl SplitsStartupMessage for HarnessKind {
 impl SplitsStartupMessage for MessageBoundary<'_> {
     fn part_header<N: PartNumbering>(input: N) -> String {
         let (number, count) = (input.part_number(), input.part_count());
-        render_part_header(
-            number,
-            count,
-            &crate::store::texts::seed_texts().expect("authored texts seed"),
+        (number, count).part_header_with(
+            &<crate::store::texts::StoredTexts as crate::store::texts::ProvidesTextsSeed>::seed_texts().expect("authored texts seed"),
         )
     }
 
@@ -394,7 +416,7 @@ impl SplitsStartupMessage for MessageBoundary<'_> {
         if self.fits_one_message(&whole) {
             return Ok(vec![whole]);
         }
-        let widest = render_part_header(1, 999_999, self.texts);
+        let widest = (1, 999_999).part_header_with(self.texts);
         let mut chunks: Vec<String> = Vec::new();
         let mut current = String::new();
         for piece in pieces {
@@ -414,7 +436,7 @@ impl SplitsStartupMessage for MessageBoundary<'_> {
             .map(|(index, chunk)| {
                 format!(
                     "{}{chunk}",
-                    render_part_header((index + 1) as i64, count as i64, self.texts)
+                    ((index + 1) as i64, count as i64).part_header_with(self.texts)
                 )
             })
             .collect())
@@ -508,24 +530,29 @@ impl ValidatesLaunchProfile for LaunchProfile {
 /// a first turn ends in a presentation.
 impl RendersBrief for HarnessedProfile {
     fn brief(&self) -> String {
-        render_brief(
-            self,
-            &crate::store::texts::seed_texts().expect("authored texts seed"),
+        self.brief_with(
+            &<crate::store::texts::StoredTexts as crate::store::texts::ProvidesTextsSeed>::seed_texts().expect("authored texts seed"),
         )
     }
 }
 
-fn render_brief(profile: &HarnessedProfile, texts: &meta_signal_flow::Texts) -> String {
-    if profile.harness_kind == HarnessKind::Claude {
-        return profile.launch_profile.instruction_prompt.clone();
+trait RendersConfiguredBrief {
+    fn brief_with(&self, texts: &meta_signal_flow::Texts) -> String;
+}
+
+impl RendersConfiguredBrief for HarnessedProfile {
+    fn brief_with(&self, texts: &meta_signal_flow::Texts) -> String {
+        if self.harness_kind == HarnessKind::Claude {
+            return self.launch_profile.instruction_prompt.clone();
+        }
+        use meta_signal_flow::Slot;
+        crate::texts::RendersTemplate::rendered_with(&texts.codex_brief, |slot| match slot {
+            Slot::HerdrSession => Some(self.launch_profile.herdr_session_name.clone()),
+            Slot::BriefText => Some(self.launch_profile.instruction_prompt.clone()),
+            _ => None,
+        })
+        .expect("the authored Codex brief template uses only launch brief slots")
     }
-    use meta_signal_flow::Slot;
-    crate::texts::render_template(&texts.codex_brief, |slot| match slot {
-        Slot::HerdrSession => Some(profile.launch_profile.herdr_session_name.clone()),
-        Slot::BriefText => Some(profile.launch_profile.instruction_prompt.clone()),
-        _ => None,
-    })
-    .expect("the authored Codex brief template uses only launch brief slots")
 }
 
 /// The leave-outs a launch takes: its own, else the default its metaflow
@@ -619,10 +646,16 @@ impl CarriesFlowId for ComposedLaunch {
     }
 }
 
-impl LaunchComposer {
-    pub(crate) fn carry_flow_id(&self, launch: &ComposedLaunch, flow_id: &str) -> ComposedLaunch {
-        let previous_section = render_launch_section(&launch.launch_profile, None, &self.texts);
-        let section = render_launch_section(&launch.launch_profile, Some(flow_id), &self.texts);
+pub(crate) trait CarriesConfiguredFlowId {
+    fn carry_flow_id(&self, launch: &ComposedLaunch, flow_id: &str) -> ComposedLaunch;
+}
+
+impl CarriesConfiguredFlowId for LaunchComposer {
+    fn carry_flow_id(&self, launch: &ComposedLaunch, flow_id: &str) -> ComposedLaunch {
+        let previous_section = launch.launch_profile.launch_section_with(None, &self.texts);
+        let section = launch
+            .launch_profile
+            .launch_section_with(Some(flow_id), &self.texts);
         let mut text = launch.system_prompt.system_prompt_text.clone();
         match text.rfind(&previous_section) {
             Some(start) => text.replace_range(start..start + previous_section.len(), &section),
@@ -707,7 +740,7 @@ impl ComposesLaunch for LaunchComposer {
         };
         let left_out = harnessed.effective_left_out(input_1);
         let verified = self.verified_context(&harnessed)?;
-        let brief = render_brief(&harnessed, &self.texts);
+        let brief = harnessed.brief_with(&self.texts);
         let mut segments = verified.user_segments();
         // The raw records of the flows the launch remembers follow its
         // USER modules, as one segment, ahead of the brief.
@@ -780,34 +813,32 @@ impl PlacesModuleByKind for str {
 /// purpose first, then the brief; either alone when the other is empty.
 pub(crate) trait JoinsPurpose {
     fn with_purpose(&self, purpose: &str) -> String;
+    fn with_configured_purpose(&self, purpose: &str, texts: &meta_signal_flow::Texts) -> String;
 }
 
 impl JoinsPurpose for str {
     fn with_purpose(&self, purpose: &str) -> String {
-        with_purpose_configured(
-            self,
+        self.with_configured_purpose(
             purpose,
-            &crate::store::texts::seed_texts().expect("authored texts seed"),
+            &<crate::store::texts::StoredTexts as crate::store::texts::ProvidesTextsSeed>::seed_texts().expect("authored texts seed"),
         )
     }
-}
 
-pub(crate) fn with_purpose_configured(
-    brief: &str,
-    purpose: &str,
-    texts: &meta_signal_flow::Texts,
-) -> String {
-    match (purpose.is_empty(), brief.is_empty()) {
-        (true, _) => brief.to_owned(),
-        (false, true) => purpose.to_owned(),
-        (false, false) => {
-            use meta_signal_flow::Slot;
-            crate::texts::render_template(&texts.purposed_brief, |slot| match slot {
-                Slot::PurposeText => Some(purpose.to_owned()),
-                Slot::BriefText => Some(brief.to_owned()),
-                _ => None,
-            })
-            .expect("the authored purposed-brief template uses only purpose and brief slots")
+    fn with_configured_purpose(&self, purpose: &str, texts: &meta_signal_flow::Texts) -> String {
+        match (purpose.is_empty(), self.is_empty()) {
+            (true, _) => self.to_owned(),
+            (false, true) => purpose.to_owned(),
+            (false, false) => {
+                use meta_signal_flow::Slot;
+                crate::texts::RendersTemplate::rendered_with(&texts.purposed_brief, |slot| {
+                    match slot {
+                        Slot::PurposeText => Some(purpose.to_owned()),
+                        Slot::BriefText => Some(self.to_owned()),
+                        _ => None,
+                    }
+                })
+                .expect("the authored purposed-brief template uses only purpose and brief slots")
+            }
         }
     }
 }

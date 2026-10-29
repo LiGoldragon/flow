@@ -584,8 +584,8 @@ impl LaunchesDeclared for RunningNexus {
             left_out_option: None,
             tool_set: declaration.tool_set.clone(),
             // The declaration's purpose is composed ahead of the brief.
-            instruction_prompt: crate::composition::with_purpose_configured(
-                &launch.instruction_prompt,
+            instruction_prompt: crate::composition::JoinsPurpose::with_configured_purpose(
+                launch.instruction_prompt.as_str(),
                 &declaration.purpose,
                 &configuration.texts,
             ),

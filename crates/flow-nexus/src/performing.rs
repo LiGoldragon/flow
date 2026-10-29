@@ -16,11 +16,13 @@ use crate::generated::operation::{
     Record_Data_Settled_Data, Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
 };
 use crate::generated::starter::DerivesHarness;
+use crate::herdr::launch::ReadsHarnessModules;
 use crate::herdr::launch::{
     CreatesHerdrLaunchPane, NativeTargetRefusal, ObservesNativeLaunchBinding, SpawnFailure,
     StartsNativeHerdrHarness, SubmitsStartupPart, TitleRefusal, TitlesNativeFlow,
 };
 use crate::herdr::{OperatesHerdrPane, ReadsHerdrPanes};
+use crate::operational::RecordsOperationalState;
 use crate::send_tool::ServesLaunchCalls;
 use crate::store::{
     ConfirmsStartedFlow, FlowRegistration, RecordsFlowLifecycle, RecordsLaunchOutcome,
@@ -31,7 +33,7 @@ use crate::store::{
 use crate::store::{ManagesMetaflowState, ReadsFlowRows};
 use crate::title::TitleRefused;
 use crate::waking::PerformsWakeAndDrain;
-use crate::{ConfiguredEffects, ConfiguredUse, RunningNexus};
+use crate::{BuildsConfiguredEffects, ConfiguredEffects, ConfiguredUse, RunningNexus};
 use signal_flow::{
     HarnessKind, LaunchAttemptReservation, NativeLaunchFailure, NativeLaunchRefusal,
     NativeLaunchStage, Response, StartRejection,
@@ -528,24 +530,33 @@ impl Performs for ConfiguredEffects<'_> {
     }
 }
 
-impl RunningNexus {
+pub(crate) trait PerformsConfiguredOperations {
+    fn perform_configured(&self, configured: &ConfiguredUse, operation: Operation) -> Outcome;
+    #[cfg(test)]
+    fn perform_ingress(&self, operation: Operation) -> Outcome;
+}
+
+impl PerformsConfiguredOperations for RunningNexus {
     /// Performs one part of an external effect with the configuration selected
     /// by its ingress, then exposes only the configured effects capability.
-    pub(crate) fn perform_configured(
-        &self,
-        configured: &ConfiguredUse,
-        operation: Operation,
-    ) -> Outcome {
+    fn perform_configured(&self, configured: &ConfiguredUse, operation: Operation) -> Outcome {
         self.configured_effects(configured).perform(operation)
     }
 
     /// Test-only convenience: production ingress always carries ConfiguredEffects.
     #[cfg(test)]
-    pub(crate) fn perform_ingress(&self, operation: Operation) -> Outcome {
+    fn perform_ingress(&self, operation: Operation) -> Outcome {
         match self.test_configured_use() {
             Ok(configured) => self.configured_effects(&configured).perform(operation),
             Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
         }
+    }
+}
+
+#[cfg(test)]
+impl RunningNexus {
+    pub(crate) fn perform_ingress(&self, operation: Operation) -> Outcome {
+        <Self as PerformsConfiguredOperations>::perform_ingress(self, operation)
     }
 }
 

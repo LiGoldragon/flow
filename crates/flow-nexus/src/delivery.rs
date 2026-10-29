@@ -20,13 +20,13 @@ use crate::compacting::WatchesCompactions;
 use crate::generated::operation::{Operation, Record_Data};
 use crate::herdr::HerdrCli;
 use crate::herdr::pane::{Interruption, PaneAgent, Placement, Submission, WritesPane};
-use crate::performing::Performs;
+use crate::performing::{Performs, PerformsConfiguredOperations};
 use crate::store::context::{JudgesCompaction, JudgesThreshold};
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::{ReadsFlowRows, RecordsReplacement};
 use crate::waking::TypesQueuedCohorts;
-use crate::{ConfiguredUse, RunningNexus};
+use crate::{BuildsHerdrOperationView, ConfiguredUse, RunningNexus};
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
 use lease::LeasesPanes;
 use meta_signal_flow::{
@@ -106,9 +106,24 @@ impl FindsDeliveryTarget for RunningNexus {
     }
 }
 
-impl RunningNexus {
+pub(crate) trait DeliversConfiguredCohorts {
     #[cfg(test)]
-    pub(crate) fn deliver_cohort(
+    fn deliver_cohort(
+        &self,
+        delivery_id: String,
+        flow_id: String,
+        messages: Vec<Message>,
+    ) -> Response;
+    fn delivery_target_with(
+        &self,
+        flow_id: &str,
+        configuration: &crate::store::StoredConfigurationSnapshot,
+    ) -> Result<DeliveryTarget, TargetRefusal>;
+}
+
+impl DeliversConfiguredCohorts for RunningNexus {
+    #[cfg(test)]
+    fn deliver_cohort(
         &self,
         delivery_id: String,
         flow_id: String,
@@ -121,7 +136,7 @@ impl RunningNexus {
         self.deliver_cohort_with_view(&configured, &view, delivery_id, &flow_id, messages, true)
     }
 
-    pub(crate) fn delivery_target_with(
+    fn delivery_target_with(
         &self,
         flow_id: &str,
         configuration: &crate::store::StoredConfigurationSnapshot,
@@ -235,7 +250,46 @@ impl ReadsLeasedPane for RunningNexus {
     }
 }
 
-impl RunningNexus {
+pub(crate) trait ReadsConfiguredDeliveryState {
+    fn pane_state(
+        &self,
+        configured: &ConfiguredUse,
+        herdr: &HerdrCli,
+        target: &DeliveryTarget,
+    ) -> Result<AgentState, PaneRefusal>;
+    fn pane_state_with(
+        &self,
+        configured: &ConfiguredUse,
+        herdr: &HerdrCli,
+        target: &DeliveryTarget,
+        record_exit: bool,
+    ) -> Result<AgentState, PaneRefusal>;
+    fn writable_state_with(
+        &self,
+        configured: &ConfiguredUse,
+        herdr: &HerdrCli,
+        target: &DeliveryTarget,
+        permit_blocked: bool,
+        record_exit: bool,
+    ) -> Result<AgentState, PaneRefusal>;
+    fn checked_cohort_target(
+        &self,
+        configuration: &crate::store::StoredConfigurationSnapshot,
+        flow_id: &str,
+        messages: &[Message],
+    ) -> Result<DeliveryTarget, DeliveryRejection>;
+    fn delivery_readiness(
+        &self,
+        configured: &ConfiguredUse,
+        herdr: &HerdrCli,
+        target: &DeliveryTarget,
+        hard: bool,
+        soft: bool,
+        record_exit: bool,
+    ) -> Result<DeliveryReadiness, DeliveryRejection>;
+}
+
+impl ReadsConfiguredDeliveryState for RunningNexus {
     fn pane_state(
         &self,
         configured: &ConfiguredUse,
@@ -272,7 +326,7 @@ impl RunningNexus {
         }
     }
 
-    pub(crate) fn writable_state_with(
+    fn writable_state_with(
         &self,
         configured: &ConfiguredUse,
         herdr: &HerdrCli,
@@ -363,10 +417,24 @@ pub trait DeliversMessages {
     fn read_pane(&self, configured: &ConfiguredUse, flow_id: &str) -> Response;
 }
 
-impl RunningNexus {
+pub(crate) trait DeliversCohortsWithView {
+    fn deliver_cohort_with_view(
+        &self,
+        configured: &ConfiguredUse,
+        view: &crate::herdr::HerdrOperationView,
+        delivery_id: String,
+        flow_id: &str,
+        messages: Vec<Message>,
+        persist_outcome: bool,
+    ) -> Response;
+    #[cfg(test)]
+    fn vet_cohort_for_test(&self, flow_id: &str, messages: &[Message]) -> Response;
+}
+
+impl DeliversCohortsWithView for RunningNexus {
     /// Delivers one immutable queued cohort with the configuration generation
     /// selected by its drain boundary.
-    pub(crate) fn deliver_cohort_with_view(
+    fn deliver_cohort_with_view(
         &self,
         configured: &ConfiguredUse,
         view: &crate::herdr::HerdrOperationView,
@@ -426,7 +494,7 @@ impl RunningNexus {
     }
 
     #[cfg(test)]
-    pub(crate) fn vet_cohort_for_test(&self, flow_id: &str, messages: &[Message]) -> Response {
+    fn vet_cohort_for_test(&self, flow_id: &str, messages: &[Message]) -> Response {
         let Ok(configured) = self.test_configured_use() else {
             return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused);
         };
@@ -446,6 +514,22 @@ impl RunningNexus {
             Ok(_) => Response::Vetted(target.node.flow_id),
             Err(refusal) => Response::DeliveryRejected(refusal),
         }
+    }
+}
+
+#[cfg(test)]
+impl RunningNexus {
+    pub(crate) fn deliver_cohort(
+        &self,
+        delivery_id: String,
+        flow_id: String,
+        messages: Vec<Message>,
+    ) -> Response {
+        <Self as DeliversConfiguredCohorts>::deliver_cohort(self, delivery_id, flow_id, messages)
+    }
+
+    pub(crate) fn vet_cohort_for_test(&self, flow_id: &str, messages: &[Message]) -> Response {
+        <Self as DeliversCohortsWithView>::vet_cohort_for_test(self, flow_id, messages)
     }
 }
 

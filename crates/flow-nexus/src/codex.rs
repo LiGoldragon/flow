@@ -170,8 +170,16 @@ impl From<&CodexEndpointConfiguration> for CodexEndpoint {
     }
 }
 
-impl CodexEndpoints {
-    pub fn configured(snapshot: &crate::store::StoredConfigurationSnapshot) -> Self {
+pub trait ConfiguresCodexEndpoints {
+    fn configured(snapshot: &crate::store::StoredConfigurationSnapshot) -> Self;
+}
+
+pub(crate) trait ConfiguresCodexEndpointTexts {
+    fn with_texts(self, texts: meta_signal_flow::Texts) -> Self;
+}
+
+impl ConfiguresCodexEndpoints for CodexEndpoints {
+    fn configured(snapshot: &crate::store::StoredConfigurationSnapshot) -> Self {
         let endpoints = snapshot
             .configured_harnesses
             .iter()
@@ -199,11 +207,13 @@ impl CodexEndpoints {
             timeout: Duration::from_millis(snapshot.timings.app_server_timeout as u64),
             workspace_root: PathBuf::from(&snapshot.configured_nexus.source_root),
             limits: snapshot.limits.clone(),
-            texts: crate::store::texts::seed_texts().expect("authored texts seed"),
+            texts: <crate::store::texts::StoredTexts as crate::store::texts::ProvidesTextsSeed>::seed_texts().expect("authored texts seed"),
         }
     }
+}
 
-    pub(crate) fn with_texts(mut self, texts: meta_signal_flow::Texts) -> Self {
+impl ConfiguresCodexEndpointTexts for CodexEndpoints {
+    fn with_texts(mut self, texts: meta_signal_flow::Texts) -> Self {
         self.texts = texts;
         self
     }
@@ -2097,8 +2107,8 @@ mod tests {
             model: "gpt-5.6".into(),
             timeout: Duration::from_millis(100),
             workspace_root: std::env::current_dir().unwrap(),
-            limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
-            texts: crate::store::texts::seed_texts().expect("authored texts seed"),
+            limits: <crate::store::timings_limits::StoredLimits as crate::store::timings_limits::ProvidesLimitSeed>::seed_limits().expect("authored limits seed"),
+            texts: <crate::store::texts::StoredTexts as crate::store::texts::ProvidesTextsSeed>::seed_texts().expect("authored texts seed"),
         }
     }
 
@@ -2141,8 +2151,8 @@ mod tests {
             )),
             timeout: Duration::from_secs(10),
             workspace_root: PathBuf::from("/home/test/primary"),
-            limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
-            texts: crate::store::texts::seed_texts().expect("authored texts seed"),
+            limits: <crate::store::timings_limits::StoredLimits as crate::store::timings_limits::ProvidesLimitSeed>::seed_limits().expect("authored limits seed"),
+            texts: <crate::store::texts::StoredTexts as crate::store::texts::ProvidesTextsSeed>::seed_texts().expect("authored texts seed"),
         }
     }
 

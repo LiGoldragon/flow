@@ -139,25 +139,61 @@ pub(crate) trait RegistersTimingAndLimitTables {
     fn register_limits(&mut self) -> Result<TableReference<StoredLimits>, StoreError>;
 }
 
-fn budget() -> Budget {
-    Budget {
-        remaining: 65_536,
-        reader: ReaderBudget { remaining: 65_536 },
-        depth: 0,
-        maximum_depth: 1_024,
+pub(crate) trait ProvidesTimingSeed {
+    fn budget() -> Budget;
+    fn seed_timings() -> Result<Timings, StoreError>;
+    fn timings_descriptor() -> TableDescriptor<StoredTimings>;
+}
+
+impl ProvidesTimingSeed for StoredTimings {
+    fn budget() -> Budget {
+        Budget {
+            remaining: 65_536,
+            reader: ReaderBudget { remaining: 65_536 },
+            depth: 0,
+            maximum_depth: 1_024,
+        }
+    }
+
+    fn seed_timings() -> Result<Timings, StoreError> {
+        Potential::<Timings>::from(include_str!("../../seed/timings.datom"))
+            .actualize(&mut Self::budget())
+            .map_err(|error| {
+                StoreError::ConfigurationSeed(format!("invalid timings seed: {error:?}"))
+            })
+    }
+
+    fn timings_descriptor() -> TableDescriptor<StoredTimings> {
+        TableDescriptor::new(
+            TIMINGS_TABLE_NAME,
+            FamilyName::new("flow-nexus-meta-timings-configuration"),
+            StoredTimings::schema_hash(),
+        )
+        .with_predecessor::<StoredTimingsV1>()
     }
 }
 
-pub(crate) fn seed_timings() -> Result<Timings, StoreError> {
-    Potential::<Timings>::from(include_str!("../../seed/timings.datom"))
-        .actualize(&mut budget())
-        .map_err(|error| StoreError::ConfigurationSeed(format!("invalid timings seed: {error:?}")))
+pub(crate) trait ProvidesLimitSeed {
+    fn seed_limits() -> Result<Limits, StoreError>;
+    fn limits_descriptor() -> TableDescriptor<StoredLimits>;
 }
 
-pub(crate) fn seed_limits() -> Result<Limits, StoreError> {
-    Potential::<Limits>::from(include_str!("../../seed/limits.datom"))
-        .actualize(&mut budget())
-        .map_err(|error| StoreError::ConfigurationSeed(format!("invalid limits seed: {error:?}")))
+impl ProvidesLimitSeed for StoredLimits {
+    fn seed_limits() -> Result<Limits, StoreError> {
+        Potential::<Limits>::from(include_str!("../../seed/limits.datom"))
+            .actualize(&mut StoredTimings::budget())
+            .map_err(|error| {
+                StoreError::ConfigurationSeed(format!("invalid limits seed: {error:?}"))
+            })
+    }
+
+    fn limits_descriptor() -> TableDescriptor<StoredLimits> {
+        TableDescriptor::new(
+            LIMITS_TABLE_NAME,
+            FamilyName::new("flow-nexus-meta-limits-configuration"),
+            StoredLimits::schema_hash(),
+        )
+    }
 }
 
 pub(crate) trait SupportedNativeTimings {
@@ -192,7 +228,7 @@ impl RegistersTimingAndLimitTables for Engine {
             .records()
             .is_empty()
         {
-            let timings = seed_timings()?;
+            let timings = StoredTimings::seed_timings()?;
             self.assert(Assertion::new(table, StoredTimings { timings }))?;
         }
         Ok(table)
@@ -209,28 +245,11 @@ impl RegistersTimingAndLimitTables for Engine {
             .records()
             .is_empty()
         {
-            let limits = seed_limits()?;
+            let limits = StoredLimits::seed_limits()?;
             self.assert(Assertion::new(table, StoredLimits { limits }))?;
         }
         Ok(table)
     }
-}
-
-pub(crate) fn timings_descriptor() -> TableDescriptor<StoredTimings> {
-    TableDescriptor::new(
-        TIMINGS_TABLE_NAME,
-        FamilyName::new("flow-nexus-meta-timings-configuration"),
-        StoredTimings::schema_hash(),
-    )
-    .with_predecessor::<StoredTimingsV1>()
-}
-
-pub(crate) fn limits_descriptor() -> TableDescriptor<StoredLimits> {
-    TableDescriptor::new(
-        LIMITS_TABLE_NAME,
-        FamilyName::new("flow-nexus-meta-limits-configuration"),
-        StoredLimits::schema_hash(),
-    )
 }
 
 #[cfg(test)]
@@ -272,7 +291,7 @@ mod tests {
 
     #[test]
     fn native_lifecycle_timings_reject_negative_and_poll_overflow_values() {
-        let mut timings = seed_timings().unwrap();
+        let mut timings = StoredTimings::seed_timings().unwrap();
         assert!(timings.supported());
         timings.stop_wait = -1;
         assert!(!timings.supported());

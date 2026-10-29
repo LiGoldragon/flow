@@ -15,6 +15,7 @@ use crate::generated::starter::{
     DeliveryIntended, JsonRow, LeanStart, PaneBound, PromptsThroughHerdrSocket, ReadsStartupRecord,
     ReadsTypedUserText, RendersLeanStart, StartupReading, Textual,
 };
+use crate::herdr::ConfiguresHerdr;
 use crate::herdr::reservation::ChoosesNativeSession;
 use crate::title::{NativeTitle, ShowsNativeTitle, TitlesFlow};
 use sha2::{Digest, Sha256};
@@ -88,7 +89,11 @@ struct HarnessArgumentValues {
     thread_id: Option<String>,
 }
 
-impl HarnessArgumentValues {
+pub(crate) trait ReadsHarnessArgumentValues {
+    fn at(&self, slot: &meta_signal_flow::Slot) -> Result<Option<Vec<String>>, String>;
+}
+
+impl ReadsHarnessArgumentValues for HarnessArgumentValues {
     fn at(&self, slot: &meta_signal_flow::Slot) -> Result<Option<Vec<String>>, String> {
         use meta_signal_flow::Slot;
         let one = |value: &Option<String>| value.clone().map(|value| vec![value]);
@@ -112,45 +117,54 @@ impl HarnessArgumentValues {
 /// Renders the configured argument sequence without interpreting literal
 /// text. A direct Slot and a Joined slot are required; Flagged is omitted
 /// together with its flag when its value is absent.
-fn render_harness_arguments(
-    template: &[meta_signal_flow::Piece],
-    values: &HarnessArgumentValues,
-) -> Result<Vec<String>, String> {
-    use meta_signal_flow::Piece;
-    let mut arguments = Vec::new();
-    for piece in template {
-        match piece {
-            Piece::Text(text) => arguments.push(text.clone()),
-            Piece::Slot(slot) => arguments.extend(
-                values
-                    .at(slot)?
-                    .ok_or_else(|| format!("required harness argument slot {slot:?} is absent"))?,
-            ),
-            Piece::Flagged(flagged) => {
-                if let Some(value) = values.at(&flagged.slot)? {
-                    arguments.push(flagged.first_string.clone());
-                    arguments.extend(value);
-                    if !flagged.second_string.is_empty() {
-                        arguments.push(flagged.second_string.clone());
+trait RendersHarnessArguments {
+    fn render_harness_arguments(
+        &self,
+        values: &HarnessArgumentValues,
+    ) -> Result<Vec<String>, String>;
+}
+
+impl RendersHarnessArguments for [meta_signal_flow::Piece] {
+    fn render_harness_arguments(
+        &self,
+        values: &HarnessArgumentValues,
+    ) -> Result<Vec<String>, String> {
+        use meta_signal_flow::Piece;
+        let mut arguments = Vec::new();
+        for piece in self {
+            match piece {
+                Piece::Text(text) => arguments.push(text.clone()),
+                Piece::Slot(slot) => {
+                    arguments.extend(values.at(slot)?.ok_or_else(|| {
+                        format!("required harness argument slot {slot:?} is absent")
+                    })?)
+                }
+                Piece::Flagged(flagged) => {
+                    if let Some(value) = values.at(&flagged.slot)? {
+                        arguments.push(flagged.first_string.clone());
+                        arguments.extend(value);
+                        if !flagged.second_string.is_empty() {
+                            arguments.push(flagged.second_string.clone());
+                        }
                     }
                 }
-            }
-            Piece::Joined(joined) => {
-                let value = values
-                    .at(&joined.slot)?
-                    .ok_or_else(|| format!("required joined slot {:?} is absent", joined.slot))?;
-                let [value] = value.as_slice() else {
-                    return Err(format!(
-                        "joined harness argument slot {:?} has {} values",
-                        joined.slot,
-                        value.len()
-                    ));
-                };
-                arguments.push(format!("{}{}", joined.string, value));
+                Piece::Joined(joined) => {
+                    let value = values.at(&joined.slot)?.ok_or_else(|| {
+                        format!("required joined slot {:?} is absent", joined.slot)
+                    })?;
+                    let [value] = value.as_slice() else {
+                        return Err(format!(
+                            "joined harness argument slot {:?} has {} values",
+                            joined.slot,
+                            value.len()
+                        ));
+                    };
+                    arguments.push(format!("{}{}", joined.string, value));
+                }
             }
         }
+        Ok(arguments)
     }
-    Ok(arguments)
 }
 
 /// The one Herdr `agent start` every launch runs.
@@ -505,7 +519,11 @@ pub(crate) trait PreparesClaudePane {
     ) -> Result<(), String>;
 }
 
-impl HerdrCli {
+pub(crate) trait ReadsHarnessModules {
+    fn harness_modules(&self, launch: &ComposedLaunch) -> Vec<meta_signal_flow::HarnessModule>;
+}
+
+impl ReadsHarnessModules for HerdrCli {
     fn harness_modules(&self, launch: &ComposedLaunch) -> Vec<meta_signal_flow::HarnessModule> {
         self.harnesses
             .iter()
@@ -2092,14 +2110,15 @@ impl SpawnsNativeHarness for HerdrCli {
             remote_socket: codex_endpoint.map(|endpoint| endpoint.socket.clone()),
             thread_id,
         };
-        let rendered = render_harness_arguments(&configured_harness.arguments, &values).map_err(
-            |problem| {
+        let rendered = configured_harness
+            .arguments
+            .render_harness_arguments(&values)
+            .map_err(|problem| {
                 if prompt_file.is_some() {
                     self.release_system_prompt(&launch.launch_profile.launch_request_id);
                 }
                 SpawnFailure::Unattempted(problem)
-            },
-        )?;
+            })?;
         arguments.extend(rendered);
         let typed = std::iter::once(program)
             .chain(arguments[typed_from..].iter().cloned())
@@ -2793,7 +2812,8 @@ impl VerifiesFlowOwnedClaudeProcess for HerdrCli {
         if configured_executable == "/fixture/claude" {
             return Ok(None);
         }
-        let Some(process_start) = crate::herdr::process_start(process_id) else {
+        let Some(process_start) = crate::herdr::ReadsProcessStart::process_start(&process_id)
+        else {
             #[cfg(test)]
             return Ok(None);
             #[cfg(not(test))]
@@ -3368,7 +3388,7 @@ pub(crate) mod tests {
             thread_id: Some("thread-42".into()),
         };
         assert_eq!(
-            render_harness_arguments(&template, &values).unwrap(),
+            template.render_harness_arguments(&values).unwrap(),
             [
                 "--remote",
                 "unix:///run/codex.sock",
@@ -3387,7 +3407,8 @@ pub(crate) mod tests {
 
         let unresolved = [Piece::Slot(Slot::PromptFile)];
         assert!(
-            render_harness_arguments(&unresolved, &values)
+            unresolved
+                .render_harness_arguments(&values)
                 .unwrap_err()
                 .contains("required harness argument slot PromptFile is absent")
         );
@@ -3631,7 +3652,7 @@ printf '%s\n' "$alias"
                     recorded: model.into(),
                 })
                 .collect(),
-            modules: crate::store::harness::seeded_modules(kind.clone()),
+            modules: <crate::store::harness::StoredHarness as crate::store::harness::SeedsHarnessModules>::seeded_modules(kind.clone()),
             left_out: vec![],
             arguments: vec![],
             settings: vec![],

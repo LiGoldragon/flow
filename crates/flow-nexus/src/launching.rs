@@ -4,6 +4,7 @@
 //! predecessor.
 
 use crate::HoldsStopRequest;
+use crate::composition::CarriesConfiguredFlowId;
 use crate::delivery::lease::LeasesPanes;
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Settled_Data,
@@ -13,7 +14,7 @@ use crate::generated::starter::CarriesFlowId;
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::{ChecksComposedLaunch, ObservesNativeLaunchBinding};
 use crate::performing::ClassifiesNativeLaunchFailure;
-use crate::performing::Performs;
+use crate::performing::{Performs, PerformsConfiguredOperations};
 use crate::send_tool::ServesLaunchCalls;
 use crate::store::NamesConfiguredModel;
 use crate::store::NamesLiveFlow;
@@ -29,7 +30,7 @@ use crate::store::{
 use crate::store::{AnswersLaunchOutcome, LaunchedRecord, ReplacedRecord};
 use crate::waking::{RestsEndedAwake, SettlesStopsAtConfirmation, WakePolicy};
 use crate::{
-    ConfiguredUse, RunningNexus,
+    BuildsConfiguredEffects, ConfiguredUse, RunningNexus,
     herdr::{PaneOwnership, PanePresence, launch::AcceptsLaunchRegistration},
     store::{
         LaunchInspectionRecords, LaunchOutcome, ReadsFlowRows, ReadsLaunchAttempt,

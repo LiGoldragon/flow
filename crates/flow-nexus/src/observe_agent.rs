@@ -51,7 +51,7 @@ pub(crate) trait RecordsWitnessedExit {
 impl RecordsWitnessedExit for RunningNexus {
     fn exited_as_witnessed(&self, configured: &ConfiguredUse, flow_id: &str) {
         use crate::generated::operation::{Operation, Outcome, Record_Data};
-        use crate::performing::Performs;
+        use crate::performing::{Performs, PerformsConfiguredOperations};
         use crate::store::metaflow::SleepsMetaflows;
         use crate::waking::SleepsAndWakesSeats;
         let address = {

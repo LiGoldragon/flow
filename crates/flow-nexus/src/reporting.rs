@@ -19,7 +19,7 @@
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Harness_Data,
 };
-use crate::performing::Performs;
+use crate::performing::{Performs, PerformsConfiguredOperations};
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::metaflow::SleepsMetaflows;
@@ -183,7 +183,8 @@ impl RecordsReports for RunningNexus {
         let meta_signal_flow::ReadEvents_Data { flow_id, page } = request;
         match self.store.events(&flow_id) {
             Ok(Some(events)) => {
-                let (event_vector, next_page) = crate::store::page_records(&events, &page);
+                let (event_vector, next_page) =
+                    crate::store::PagesRecords::page_records(events.as_slice(), &page);
                 meta_signal_flow::Response::EventsRead(EventsRead_Data {
                     flow_id,
                     event_vector,

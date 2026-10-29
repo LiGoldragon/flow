@@ -47,13 +47,17 @@ use crate::generated::send_tool::{
 };
 use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::launching::NamesTopic;
+use crate::operational::RecordsOperationalState;
 use crate::sending::{AdmitsSendPayload, MintsId};
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::opened_thread::RecordsOpenedThreads;
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt};
 use crate::waking::{RestsEndedAwake, SleepsAndWakesSeats};
-use crate::{ConfiguredEffects, HoldsStopRequest, RunningNexus, store::AnnouncesLaunchChanges};
+use crate::{
+    BuildsConfiguredEffects, ConfiguredEffects, HoldsStopRequest, RunningNexus,
+    store::AnnouncesLaunchChanges,
+};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
@@ -68,8 +72,12 @@ use std::{
 /// The tool every Codex thread Flow opens declares.
 pub struct SendTool;
 
-impl SendTool {
-    pub(crate) fn tool_spec_with(texts: &meta_signal_flow::Texts) -> serde_json::Value {
+pub(crate) trait RunsSendTool {
+    fn tool_spec_with(texts: &meta_signal_flow::Texts) -> serde_json::Value;
+}
+
+impl RunsSendTool for SendTool {
+    fn tool_spec_with(texts: &meta_signal_flow::Texts) -> serde_json::Value {
         let descriptions = &texts.send_tool_descriptions;
         assert_eq!(descriptions.len(), 5, "authored send-tool descriptions");
         serde_json::json!({
@@ -106,7 +114,7 @@ impl DeclaresSendTool for SendTool {
     }
 
     fn tool_spec() -> serde_json::Value {
-        Self::tool_spec_with(&crate::store::texts::seed_texts().expect("authored texts seed"))
+        Self::tool_spec_with(&<crate::store::texts::StoredTexts as crate::store::texts::ProvidesTextsSeed>::seed_texts().expect("authored texts seed"))
     }
 }
 

@@ -33,19 +33,37 @@ impl MemoryDefinition for StoredTexts {
     }
 }
 
-fn budget() -> Budget {
-    Budget {
-        remaining: 65_536,
-        reader: ReaderBudget { remaining: 65_536 },
-        depth: 0,
-        maximum_depth: 1_024,
-    }
+pub(crate) trait ProvidesTextsSeed {
+    fn budget() -> Budget;
+    fn seed_texts() -> Result<Texts, StoreError>;
+    fn texts_descriptor() -> TableDescriptor<StoredTexts>;
 }
 
-pub(crate) fn seed_texts() -> Result<Texts, StoreError> {
-    Potential::<Texts>::from(include_str!("../../seed/texts.datom"))
-        .actualize(&mut budget())
-        .map_err(|error| StoreError::ConfigurationSeed(format!("invalid texts seed: {error:?}")))
+impl ProvidesTextsSeed for StoredTexts {
+    fn budget() -> Budget {
+        Budget {
+            remaining: 65_536,
+            reader: ReaderBudget { remaining: 65_536 },
+            depth: 0,
+            maximum_depth: 1_024,
+        }
+    }
+
+    fn seed_texts() -> Result<Texts, StoreError> {
+        Potential::<Texts>::from(include_str!("../../seed/texts.datom"))
+            .actualize(&mut Self::budget())
+            .map_err(|error| {
+                StoreError::ConfigurationSeed(format!("invalid texts seed: {error:?}"))
+            })
+    }
+
+    fn texts_descriptor() -> TableDescriptor<StoredTexts> {
+        TableDescriptor::new(
+            TEXTS_TABLE_NAME,
+            FamilyName::new("flow-nexus-meta-texts-configuration"),
+            StoredTexts::schema_hash(),
+        )
+    }
 }
 
 pub(crate) trait RegistersTextsTable {
@@ -54,7 +72,7 @@ pub(crate) trait RegistersTextsTable {
 
 impl RegistersTextsTable for Engine {
     fn register_texts(&mut self) -> Result<TableReference<StoredTexts>, StoreError> {
-        let table = self.register_table(texts_descriptor())?;
+        let table = self.register_table(StoredTexts::texts_descriptor())?;
         if self
             .match_records(QueryPlan::all(table))?
             .records()
@@ -63,18 +81,10 @@ impl RegistersTextsTable for Engine {
             self.assert(Assertion::new(
                 table,
                 StoredTexts {
-                    texts: seed_texts()?,
+                    texts: StoredTexts::seed_texts()?,
                 },
             ))?;
         }
         Ok(table)
     }
-}
-
-pub(crate) fn texts_descriptor() -> TableDescriptor<StoredTexts> {
-    TableDescriptor::new(
-        TEXTS_TABLE_NAME,
-        FamilyName::new("flow-nexus-meta-texts-configuration"),
-        StoredTexts::schema_hash(),
-    )
 }

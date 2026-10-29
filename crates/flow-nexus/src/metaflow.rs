@@ -1,5 +1,7 @@
 //! The ordinary Message bridge uses the accepted socket's kernel identity.
-use crate::caller::{BindsCallerPane, CallerProcess, LocatesCallerPane, NamesRootThread};
+use crate::caller::{
+    BindsCallerPane, BindsCallerWith, CallerProcess, LocatesCallerPane, NamesRootThread,
+};
 use crate::sending::{CompletesDirectSends, IdentifiesSender};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::send_outcome::RecordsSendOutcomes;

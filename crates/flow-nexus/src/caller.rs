@@ -393,8 +393,17 @@ impl ResolvesCaller for RunningNexus {
     }
 }
 
-impl RunningNexus {
-    pub(crate) fn resolve_caller_with(
+pub(crate) trait ResolvesCallerWith {
+    fn resolve_caller_with(
+        &self,
+        herdr: &crate::herdr::HerdrCli,
+        pane: Option<CallerPane>,
+        claim: Option<FlowId>,
+    ) -> Response;
+}
+
+impl ResolvesCallerWith for RunningNexus {
+    fn resolve_caller_with(
         &self,
         herdr: &crate::herdr::HerdrCli,
         pane: Option<CallerPane>,
@@ -418,8 +427,16 @@ impl RunningNexus {
 /// The origin of what a calling process asks: its pane's one bound flow
 /// with that flow's native session, as Identify resolves a caller, or
 /// Unbound when it is no bound flow (a deploy script, a shell).
-impl RunningNexus {
-    pub(crate) fn origin_of_configured<N: CallerProcessing>(
+pub(crate) trait DerivesConfiguredOrigin {
+    fn origin_of_configured<N: CallerProcessing>(
+        &self,
+        configured: &ConfiguredUse,
+        input: N,
+    ) -> signal_flow::Origin;
+}
+
+impl DerivesConfiguredOrigin for RunningNexus {
+    fn origin_of_configured<N: CallerProcessing>(
         &self,
         configured: &ConfiguredUse,
         input: N,
@@ -458,8 +475,16 @@ impl BindsCallerPane for RunningNexus {
     }
 }
 
-impl RunningNexus {
-    pub(crate) fn bound_caller_with(
+pub(crate) trait BindsCallerWith {
+    fn bound_caller_with(
+        &self,
+        herdr: &crate::herdr::HerdrCli,
+        pane: &CallerPane,
+    ) -> Result<Caller, CallerResolutionRejection>;
+}
+
+impl BindsCallerWith for RunningNexus {
+    fn bound_caller_with(
         &self,
         herdr: &crate::herdr::HerdrCli,
         pane: &CallerPane,

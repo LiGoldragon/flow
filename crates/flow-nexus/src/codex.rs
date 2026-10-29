@@ -3,6 +3,8 @@
 //! JSON-RPC conversation; it never falls back to a direct Unix-socket client.
 
 use crate::send_tool::{RunsSendTool, SendTool};
+#[cfg(test)]
+use crate::generated::send_tool::DeclaresSendTool;
 use crate::store::CodexEndpointConfiguration;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha1::{Digest, Sha1};

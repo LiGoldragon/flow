@@ -14,6 +14,8 @@ use crate::codex::{
 };
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::ConfiguresHerdr;
+#[cfg(test)]
+use crate::herdr::ConfiguresHerdrCli;
 use crate::store::AnnouncesLaunchChanges;
 use crate::waking::{StartsRequirementsFirst, TypesQueuedCohorts};
 pub use caller::CallerProcess;

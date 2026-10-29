@@ -107,7 +107,7 @@ use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
     RecordsFlowLifecycle,
 };
-use crate::{ConfiguredUse, RunningNexus};
+use crate::{BuildsConfiguredEffects, ConfiguredUse, RunningNexus};
 use datom_codec::Datomizable;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Continuity, Undecided};

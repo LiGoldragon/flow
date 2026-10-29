@@ -28,7 +28,7 @@ use crate::store::{
 use crate::store::{AnswersLaunchOutcome, LaunchedRecord, ReplacedRecord};
 use crate::waking::{RestsEndedAwake, SettlesStopsAtConfirmation};
 use crate::{
-    ConfiguredUse, RunningNexus,
+    BuildsConfiguredEffects, ConfiguredUse, RunningNexus,
     herdr::{PaneOwnership, PanePresence, launch::AcceptsLaunchRegistration},
     store::{
         LaunchInspectionRecords, LaunchOutcome, ReadsFlowRows, ReadsLaunchAttempt,

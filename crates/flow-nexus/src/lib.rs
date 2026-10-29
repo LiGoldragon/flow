@@ -945,6 +945,38 @@ impl Dispatches for RunningNexus {
                     meta_signal_flow::DeliveryRejection::PersistenceRefused,
                 ),
             },
+            meta_signal_flow::Query::ReplayDelivery(_) if !resolver.as_ref().is_some_and(|identity| identity.flow_id_option.is_none()) => {
+                meta_signal_flow::Response::ReplayDeliveryRejected(meta_signal_flow::ReplayDeliveryRejected_Data::CallerNotAuthorized)
+            }
+            meta_signal_flow::Query::ReplayDelivery(request) => {
+                use crate::store::queue_delivery::{AccountsQueueDelivery, QueueDeliveryPhase};
+                let configured = match self.configured_use() { Ok(value) => value, Err(_) => return meta_signal_flow::Response::ReplayDeliveryRejected(meta_signal_flow::ReplayDeliveryRejected_Data::PersistenceRefused) };
+                let attempt = match self.store.queue_delivery_attempt(&request.delivery_id) {
+                    Ok(Some(value)) => value,
+                    Ok(None) => return meta_signal_flow::Response::ReplayDeliveryRejected(meta_signal_flow::ReplayDeliveryRejected_Data::UnknownDelivery),
+                    Err(_) => return meta_signal_flow::Response::ReplayDeliveryRejected(meta_signal_flow::ReplayDeliveryRejected_Data::PersistenceRefused),
+                };
+                if !matches!(attempt.phase, QueueDeliveryPhase::TransportOverlimit(_)) {
+                    return meta_signal_flow::Response::ReplayDeliveryRejected(meta_signal_flow::ReplayDeliveryRejected_Data::NotTerminal);
+                }
+                let Some(node) = self.store.flow_node(&attempt.flow_id).ok().flatten().filter(|node| node.flow_lifecycle.is_live() && node.session_id == attempt.thread_id) else {
+                    return meta_signal_flow::Response::ReplayDeliveryRejected(meta_signal_flow::ReplayDeliveryRejected_Data::Unsafe);
+                };
+                let Some(messages) = self.typed_queue_cohort(&attempt.cohort) else { return meta_signal_flow::Response::ReplayDeliveryRejected(meta_signal_flow::ReplayDeliveryRejected_Data::Unsafe) };
+                use datom_codec::Datomizable as _; use protos::{Compactable as _, Protosizable as _};
+                let text = messages.datomize(Vec::new()).protosize().compact();
+                let safe = text.len() <= usize::try_from(configured.snapshot.limits.cohort).unwrap_or(0)
+                    && match node.harness_kind {
+                        signal_flow::HarnessKind::Claude => text.len() <= crate::sending::MAX_NATIVE_COHORT_BYTES && text.len().saturating_add(crate::sending::HERDR_PROMPT_FRAME_BYTES) <= usize::try_from(configured.snapshot.limits.herdr_line).unwrap_or(0),
+                        signal_flow::HarnessKind::Codex => crate::codex::queued_turn_wire_bytes(&attempt.thread_id, &attempt.attempt_id, attempt.native_request_id, &text).ok().is_some_and(|bytes| bytes <= usize::try_from(configured.snapshot.limits.frame.min(configured.snapshot.limits.app_server_message)).unwrap_or(0)),
+                    };
+                if !safe { return meta_signal_flow::Response::ReplayDeliveryRejected(meta_signal_flow::ReplayDeliveryRejected_Data::Unsafe) }
+                match self.store.replay_transport_overlimit(&attempt.attempt_id) {
+                    Ok(true) => meta_signal_flow::Response::DeliveryReplayed(request.delivery_id),
+                    Ok(false) => meta_signal_flow::Response::ReplayDeliveryRejected(meta_signal_flow::ReplayDeliveryRejected_Data::NotTerminal),
+                    Err(_) => meta_signal_flow::Response::ReplayDeliveryRejected(meta_signal_flow::ReplayDeliveryRejected_Data::PersistenceRefused),
+                }
+            }
             meta_signal_flow::Query::Command(request) => match self.configured_use() {
                 Ok(configured) => self.command(&configured, request),
                 Err(_) => meta_signal_flow::Response::CommandRejected(

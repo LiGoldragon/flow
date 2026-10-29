@@ -836,6 +836,11 @@ pub trait AccountsQueueDelivery {
         size: signal_flow::SendPayloadSize,
     ) -> Result<Vec<flow_ethos::QueueEntry>, StoreError>;
 
+    /// Re-admits one terminal overlimit cohort after an authorised caller
+    /// has revalidated its current configured native bounds. The retained
+    /// terminal attempt remains the failed-history witness.
+    fn replay_transport_overlimit(&self, attempt_id: &str) -> Result<bool, StoreError>;
+
     /// Removes an unresolved request from active queue processing without
     /// changing its Uncertain delivery record or permitting automatic retry.
     fn park_uncertain_delivery(&self, attempt_id: &str) -> Result<bool, StoreError>;
@@ -1599,6 +1604,28 @@ impl AccountsQueueDelivery for FlowStore {
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
         Ok(attempt.cohort)
+    }
+
+    fn replay_transport_overlimit(&self, attempt_id: &str) -> Result<bool, StoreError> {
+        let Some(attempt) = self.queue_delivery_attempt(attempt_id)? else { return Ok(false) };
+        if !matches!(attempt.phase, QueueDeliveryPhase::TransportOverlimit(_)) || attempt.cohort.is_empty() { return Ok(false) }
+        let Some(mut metaflow) = self.stored_metaflow(&attempt.address)? else { return Err(StoreError::StateInvariant) };
+        let mut requests = Vec::with_capacity(attempt.cohort.len());
+        for entry in &attempt.cohort {
+            let rows = self.engine.match_records(QueryPlan::key(self.queue_delivery.requests, RecordKey::new(&entry.logical_delivery_id)))?;
+            let [stored] = rows.records() else { return Err(StoreError::StateInvariant) };
+            if stored.state == RequestState::Queued { return Ok(true) }
+            if stored.state != RequestState::Parked { return Ok(false) }
+            let mut queued = stored.clone(); queued.state = RequestState::Queued; requests.push(queued);
+        }
+        if attempt.cohort.iter().any(|entry| metaflow.metaflow.queue.iter().any(|queued| queued.logical_delivery_id == entry.logical_delivery_id)) { return Err(StoreError::StateInvariant) }
+        let mut restored = attempt.cohort.clone(); restored.extend(metaflow.metaflow.queue); metaflow.metaflow.queue = restored;
+        let mut commit = self.engine.begin_atomic_commit().mutate(self.metaflows, metaflow);
+        for request in requests { commit = commit.mutate(self.queue_delivery.requests, request); }
+        commit = self.stage_logical_transitions(&attempt.cohort, DeliveryState::Queued, commit)?;
+        self.engine.commit_atomic(commit)?;
+        self.launch_changes.announce();
+        Ok(true)
     }
 
     fn finish_failed_direct(
@@ -2410,6 +2437,10 @@ mod tests {
                 .phase,
             QueueDeliveryPhase::TransportOverlimit(size)
         );
+        assert!(reopened.replay_transport_overlimit(&attempt.attempt_id).unwrap());
+        assert_eq!(reopened.metaflow(&address()).unwrap().unwrap().queue, original);
+        assert!(reopened.replay_transport_overlimit(&attempt.attempt_id).unwrap(), "same replay reference is idempotent");
+        assert_eq!(reopened.metaflow(&address()).unwrap().unwrap().queue, original);
     }
 
     #[test]

@@ -1,4 +1,17 @@
 ; The process identity supplied at startup. These paths select the
 ; listeners; they do not come from or mutate the durable Nexus settings.
 
-Library [] [ Start.{ OrdinarySocketPath.String MetaSocketPath.String StorePath.String } ] [] []
+Library
+[ meta_signal_flow:[ HarnessName HarnessModel ]
+  flow_ethos:[ Home ControlSocketPath ] ]
+[ OrdinarySocketPath.String
+  MetaSocketPath.String
+  StorePath.String
+  Start.{ OrdinarySocketPath MetaSocketPath StorePath }
+  ; Deployment supplies only installation-specific facts. Flow joins these
+  ; to its complete, versioned harness definitions before configuration.
+  Executable.String
+  HarnessOverride.{ HarnessName Executable Home Option<ControlSocketPath> Vector<HarnessModel> }
+  HarnessOverrides.Vector<HarnessOverride> ]
+[]
+[]

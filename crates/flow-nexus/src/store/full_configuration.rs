@@ -26,8 +26,12 @@ impl MemoryDefinition for StoredFullConfigurationState {
         SchemaHash::for_label("flow-nexus-full-configuration-state-v1")
     }
 }
-impl StoredFullConfigurationState {
-    pub(crate) fn descriptor() -> TableDescriptor<Self> {
+pub(crate) trait DescribesFullConfigurationTable: Sized {
+    fn descriptor() -> TableDescriptor<Self>;
+}
+
+impl DescribesFullConfigurationTable for StoredFullConfigurationState {
+    fn descriptor() -> TableDescriptor<Self> {
         TableDescriptor::new(
             STATE_TABLE,
             FamilyName::new("flow-nexus-full-configuration-state"),
@@ -54,8 +58,8 @@ impl MemoryDefinition for StoredFullConfigurationReceipt {
         SchemaHash::for_label("flow-nexus-full-configuration-receipt-v1")
     }
 }
-impl StoredFullConfigurationReceipt {
-    pub(crate) fn descriptor() -> TableDescriptor<Self> {
+impl DescribesFullConfigurationTable for StoredFullConfigurationReceipt {
+    fn descriptor() -> TableDescriptor<Self> {
         TableDescriptor::new(
             RECEIPT_TABLE,
             FamilyName::new("flow-nexus-full-configuration-receipt"),

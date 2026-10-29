@@ -276,26 +276,34 @@ pub trait SubmitsQueuedCodexTurn {
     ) -> Result<QueuedTurnReceipt, CodexAdapterUnavailable>;
 }
 
-/// The exact JSON-RPC payload bytes placed in the WebSocket text frame for
-/// a queued turn. Admission can conservatively bound this representation;
-/// dispatch measures this exact value again immediately before submission.
-pub(crate) fn queued_turn_wire_bytes(
-    thread_id: &str,
-    attempt_id: &str,
-    native_request_id: u64,
-    text: &str,
-) -> Result<usize, CodexAdapterUnavailable> {
-    serde_json::to_vec(&serde_json::json!({
-        "id": native_request_id,
-        "method": "turn/start",
-        "params": {
-            "threadId": thread_id,
-            "input": [{ "type": "text", "text": text, "text_elements": [] }],
-            "turnTrigger": format!("flow-nexus:{attempt_id}")
-        }
-    }))
-    .map(|payload| payload.len())
-    .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string()))
+/// Measures the exact JSON-RPC payload placed in the WebSocket text frame.
+/// Admission can conservatively bound it; dispatch measures it again just
+/// before submission.
+pub(crate) struct QueuedCodexTurnWire<'a> {
+    pub(crate) thread_id: &'a str,
+    pub(crate) attempt_id: &'a str,
+    pub(crate) native_request_id: u64,
+    pub(crate) text: &'a str,
+}
+
+pub(crate) trait MeasuresQueuedCodexTurn {
+    fn wire_bytes(&self) -> Result<usize, CodexAdapterUnavailable>;
+}
+
+impl MeasuresQueuedCodexTurn for QueuedCodexTurnWire<'_> {
+    fn wire_bytes(&self) -> Result<usize, CodexAdapterUnavailable> {
+        serde_json::to_vec(&serde_json::json!({
+            "id": self.native_request_id,
+            "method": "turn/start",
+            "params": {
+                "threadId": self.thread_id,
+                "input": [{ "type": "text", "text": self.text, "text_elements": [] }],
+                "turnTrigger": format!("flow-nexus:{}", self.attempt_id)
+            }
+        }))
+        .map(|payload| payload.len())
+        .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string()))
+    }
 }
 
 /// What a Codex thread's own history shows of one queued turn, read after

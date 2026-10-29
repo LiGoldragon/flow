@@ -309,6 +309,10 @@
             "herdr::launch::tests::a_two_part_claude_message_is_received_part_by_part_in_order";
           flow-parts-advance-one-at-a-time = context.exactTest "flow-nexus"
             "store::tests::parts_advance_one_at_a_time_and_the_receipt_waits_for_the_last";
+          flow-production-harnesses-join-typed-installations = context.exactTest "flow-nexus"
+            "store::harness::tests::production_harnesses_join_only_typed_installation_overrides";
+          flow-production-harnesses-refuse-bad-installations = context.exactTest "flow-nexus"
+            "store::harness::tests::production_harnesses_refuse_incomplete_ambiguous_or_mistyped_overrides";
           flow-user-settings-leave-out-refused = context.exactTest "flow-nexus"
             "lean::tests::user_settings_are_indispensable_and_the_agent_tool_is_not";
           flow-leave-outs-reach-the-harness = context.exactTest "flow-nexus"
@@ -386,7 +390,7 @@
           flow-exited-refusal-names-exited = context.exactTest "flow-nexus"
             "tests::a_flow_whose_pane_left_herdr_is_listed_exited_and_keeps_its_row";
           flow-claude-retract-is-one-ctrl-c = context.exactTest "flow-nexus"
-            "tests::submission::a_letter_claudes_interrupt_put_back_is_taken_out_by_one_ctrl_c";
+            "tests::submission::claudes_interrupt_restored_flow_cohort_is_retracted";
           flow-claude-draft-refuses-hard-before-any-key = context.exactTest "flow-nexus"
             "tests::submission::a_draft_already_in_claudes_composer_refuses_a_hard_abrupt_before_any_key";
           flow-claude-cancelled-prompt-submitted-again = context.exactTest "flow-nexus"
@@ -438,7 +442,7 @@
           flow-claude-end-turn-with-sidechain-drains = context.exactTest "flow-nexus"
             "tests::queue_drain::a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop";
           flow-claude-two-requests-drain-on-receipts = context.exactTest "flow-nexus"
-            "tests::queue_drain::two_queued_claude_requests_drain_in_order_once_each_on_their_receipts";
+            "tests::queue_drain::two_queued_claude_requests_form_one_attempt_and_settle_on_their_whole_receipt";
           flow-claude-notification-settles-nothing = context.exactTest "flow-nexus"
             "tests::queue_drain::a_task_notification_that_takes_the_turn_first_settles_nothing";
           flow-claude-crash-reconciled-at-start = context.exactTest "flow-nexus"

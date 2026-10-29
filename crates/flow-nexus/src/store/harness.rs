@@ -527,6 +527,7 @@ pub(super) fn from_legacy_nexus(
 
 #[cfg(test)]
 mod tests {
+    use super::RendersProductionHarnessConfiguration as _;
     use datom_codec::{Actualizing, Budget, Potential};
     use protos::ReaderBudget;
 
@@ -558,5 +559,289 @@ mod tests {
         }));
         assert!(!harness.left_out.iter().any(|name| name == "Skill"));
         assert!(harness.left_out.iter().any(|name| name == "CodeStyle"));
+    }
+
+    #[test]
+    fn production_harnesses_join_only_typed_installation_overrides() {
+        let rendered = "[ { claude /bin/claude /home/claude None [ { claude-opus claude-opus-recorded } ] } { codexStable /bin/codex-stable /home/stable Some./run/stable.sock [ { gpt-sol gpt-sol-recorded } ] } { codexNext /bin/codex-next /home/next Some./run/next.sock [ { gpt-astra gpt-astra-recorded } ] } ]"
+            .render_production_harness_configuration()
+            .expect("complete typed overrides render");
+        let query = Potential::<meta_signal_flow::Query>::from(rendered)
+            .actualize(&mut budget())
+            .expect("rendered query composes");
+        let meta_signal_flow::Query::Configure(meta_signal_flow::ConfigurationChange::Harnesses(
+            harnesses,
+        )) = query
+        else {
+            panic!("renderer returns one Harnesses configuration query")
+        };
+        assert_eq!(harnesses.len(), 3);
+        let claude = harnesses
+            .iter()
+            .find(|harness| harness.harness_name == "claude")
+            .expect("Claude definition");
+        assert_eq!(claude.harness_version, "2.1.294");
+        assert_eq!(claude.executable, "/bin/claude");
+        assert!(claude.control_socket_path_option.is_none());
+        assert_eq!(claude.modules.len(), 62);
+        let next = harnesses
+            .iter()
+            .find(|harness| harness.harness_name == "codexNext")
+            .expect("Codex next definition");
+        assert_eq!(next.harness_version, "0.161.0-alpha.2");
+        assert_eq!(
+            next.control_socket_path_option.as_deref(),
+            Some("/run/next.sock")
+        );
+        assert!(next.arguments.iter().any(|piece| matches!(
+            piece,
+            meta_signal_flow::Piece::Joined(joined)
+                if joined.slot == meta_signal_flow::Slot::RemoteSocket
+        )));
+        assert_eq!(next.served_models[0].recorded, "gpt-astra-recorded");
+    }
+
+    #[test]
+    fn production_harnesses_refuse_incomplete_ambiguous_or_mistyped_overrides() {
+        let valid = "{ claude /bin/claude /home/claude None [ { claude-opus claude-opus } ] }";
+        assert!(
+            format!("[ {valid} ]")
+                .render_production_harness_configuration()
+                .unwrap_err()
+                .contains("missing production harness")
+        );
+        assert!(
+            format!("[ {valid} {valid} ]")
+                .render_production_harness_configuration()
+                .unwrap_err()
+                .contains("named twice")
+        );
+        assert!(
+            "[ { other /bin/other /home None [] } ]"
+                .render_production_harness_configuration()
+                .unwrap_err()
+                .contains("unknown production harness")
+        );
+        assert!(
+            "[ { claude /bin/claude /home None [ { shared shared } ] } { codexStable /bin/stable /home Some./run/stable [ { shared shared } ] } { codexNext /bin/next /home Some./run/next [] } ]"
+                .render_production_harness_configuration()
+                .unwrap_err()
+                .contains("more than one production harness")
+        );
+        assert!(
+            "[ { claude /bin/claude /home Some./run/wrong [] } { codexStable /bin/stable /home Some./run/stable [] } { codexNext /bin/next /home Some./run/next [] } ]"
+                .render_production_harness_configuration()
+                .unwrap_err()
+                .contains("Claude production harness has no control socket")
+        );
+    }
+}
+
+struct ProductionHarnessDefinitions;
+
+trait DefinesProductionHarnesses {
+    fn pane_profile(&self, kind: flow_ethos::HarnessKind) -> meta_signal_flow::PaneProfile;
+    fn codex(&self, name: &str, version: &str) -> meta_signal_flow::Harness;
+    fn claude(&self) -> Result<meta_signal_flow::Harness, String>;
+}
+
+impl DefinesProductionHarnesses for ProductionHarnessDefinitions {
+    fn pane_profile(&self, kind: flow_ethos::HarnessKind) -> meta_signal_flow::PaneProfile {
+        use meta_signal_flow::{Composer, PaneProfile, Retraction};
+        PaneProfile {
+            command_sigil_vector: match kind {
+                flow_ethos::HarnessKind::Claude => vec!["/".into(), "!".into(), "#".into()],
+                flow_ethos::HarnessKind::Codex => vec!["/".into(), "!".into()],
+            },
+            interrupt_keys: match kind {
+                flow_ethos::HarnessKind::Claude => vec!["esc".into(), "esc".into()],
+                flow_ethos::HarnessKind::Codex => vec!["esc".into()],
+            },
+            submit_keys: match kind {
+                flow_ethos::HarnessKind::Claude => vec!["enter".into()],
+                flow_ethos::HarnessKind::Codex => vec![],
+            },
+            compact_line: "/compact".into(),
+            composer: match kind {
+                flow_ethos::HarnessKind::Claude => Composer {
+                    glyph: "❯".into(),
+                    retraction: Retraction::Keys(vec!["ctrl+c".into()]),
+                    composer_lines: 12,
+                    retracted_lines: 32,
+                },
+                flow_ethos::HarnessKind::Codex => Composer {
+                    glyph: "›".into(),
+                    retraction: Retraction::LineByLine(vec!["ctrl+u".into(), "backspace".into()]),
+                    composer_lines: 12,
+                    retracted_lines: 32,
+                },
+            },
+        }
+    }
+
+    fn codex(&self, name: &str, version: &str) -> meta_signal_flow::Harness {
+        use meta_signal_flow::{Flagged_Data, Harness, Joined_Data, Piece, Setting, Slot};
+        Harness {
+            harness_name: name.into(),
+            harness_kind: flow_ethos::HarnessKind::Codex,
+            harness_version: version.into(),
+            executable: String::new(),
+            home: String::new(),
+            control_socket_path_option: None,
+            served_models: vec![],
+            modules: seeded_modules(flow_ethos::HarnessKind::Codex),
+            left_out: vec![],
+            arguments: vec![
+                Piece::Text("--remote".into()),
+                Piece::Joined(Joined_Data {
+                    string: "unix://".into(),
+                    slot: Slot::RemoteSocket,
+                }),
+                Piece::Text("--model".into()),
+                Piece::Slot(Slot::LaunchModel),
+                Piece::Text("-c".into()),
+                Piece::Joined(Joined_Data {
+                    string: "model_reasoning_effort=".into(),
+                    slot: Slot::LaunchEffort,
+                }),
+                Piece::Text("-c".into()),
+                Piece::Text("tui.terminal_title=[\"thread-title\"]".into()),
+                Piece::Slot(Slot::ModuleSwitches),
+                Piece::Flagged(Flagged_Data {
+                    first_string: "resume".into(),
+                    slot: Slot::ThreadId,
+                    second_string: String::new(),
+                }),
+            ],
+            settings: vec![Setting {
+                setting_key: "shell_environment_policy.inherit".into(),
+                setting_value: "\"core\"".into(),
+            }],
+            parameters: vec![
+                Setting {
+                    setting_key: "approvalPolicy".into(),
+                    setting_value: "\"never\"".into(),
+                },
+                Setting {
+                    setting_key: "sandbox".into(),
+                    setting_value: "\"danger-full-access\"".into(),
+                },
+                Setting {
+                    setting_key: "ephemeral".into(),
+                    setting_value: "false".into(),
+                },
+            ],
+            unset: vec![],
+            pane_profile: self.pane_profile(flow_ethos::HarnessKind::Codex),
+        }
+    }
+
+    fn claude(&self) -> Result<meta_signal_flow::Harness, String> {
+        use datom_codec::{Actualizing as _, Budget, Potential};
+        use protos::ReaderBudget;
+        let mut budget = Budget {
+            remaining: 262_144,
+            reader: ReaderBudget { remaining: 262_144 },
+            depth: 0,
+            maximum_depth: 1_024,
+        };
+        Potential::<meta_signal_flow::Harness>::from(include_str!(
+            "../../../../config/harness/claude-2.1.294.datom"
+        ))
+        .actualize(&mut budget)
+        .map_err(|error| format!("Flow's Claude harness definition is invalid: {error:?}"))
+    }
+}
+
+/// Joins deployment-owned installation paths and bindings to Flow's three
+/// complete production harness definitions and renders one typed Configure
+/// query. Unknown, missing or repeated installations and model overlap are
+/// refused before any configuration request exists.
+pub trait RendersProductionHarnessConfiguration {
+    fn render_production_harness_configuration(&self) -> Result<String, String>;
+}
+
+impl RendersProductionHarnessConfiguration for str {
+    fn render_production_harness_configuration(&self) -> Result<String, String> {
+        use crate::generated::library::HarnessOverride;
+        use datom_codec::{Actualizing as _, Budget, Datomizable as _, Potential};
+        use protos::{Compactable as _, Protosizable as _, ReaderBudget};
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let mut budget = Budget {
+            remaining: 262_144,
+            reader: ReaderBudget { remaining: 262_144 },
+            depth: 0,
+            maximum_depth: 1_024,
+        };
+        let overrides = Potential::<Vec<HarnessOverride>>::from(self)
+            .actualize(&mut budget)
+            .map_err(|error| format!("invalid harness overrides datom: {error:?}"))?;
+        let mut by_name = BTreeMap::new();
+        for installation in overrides {
+            let name = installation.harness_name.clone();
+            if !matches!(name.as_str(), "claude" | "codexStable" | "codexNext") {
+                return Err(format!("unknown production harness: {name}"));
+            }
+            if by_name.insert(name.clone(), installation).is_some() {
+                return Err(format!("production harness named twice: {name}"));
+            }
+        }
+        for name in ["claude", "codexStable", "codexNext"] {
+            if !by_name.contains_key(name) {
+                return Err(format!("missing production harness: {name}"));
+            }
+        }
+        let mut models = BTreeSet::new();
+        for installation in by_name.values() {
+            for model in &installation.harness_model_vector {
+                if !models.insert(model.model_name.clone()) {
+                    return Err(format!(
+                        "model served by more than one production harness: {}",
+                        model.model_name
+                    ));
+                }
+            }
+        }
+
+        let definitions = ProductionHarnessDefinitions;
+        let mut harnesses = vec![
+            definitions.claude()?,
+            definitions.codex("codexStable", "0.153.4"),
+            definitions.codex("codexNext", "0.161.0-alpha.2"),
+        ];
+        for harness in &mut harnesses {
+            let installation = by_name
+                .remove(&harness.harness_name)
+                .expect("all three names established");
+            match harness.harness_kind {
+                flow_ethos::HarnessKind::Claude
+                    if installation.control_socket_path_option.is_some() =>
+                {
+                    return Err("Claude production harness has no control socket".into());
+                }
+                flow_ethos::HarnessKind::Codex
+                    if installation.control_socket_path_option.is_none() =>
+                {
+                    return Err(format!(
+                        "Codex production harness requires a control socket: {}",
+                        harness.harness_name
+                    ));
+                }
+                _ => {}
+            }
+            harness.executable = installation.executable;
+            harness.home = installation.home;
+            harness.control_socket_path_option = installation.control_socket_path_option;
+            harness.served_models = installation.harness_model_vector;
+        }
+        Ok(
+            meta_signal_flow::Query::Configure(meta_signal_flow::ConfigurationChange::Harnesses(
+                harnesses,
+            ))
+            .datomize(vec![])
+            .protosize()
+            .compact(),
+        )
     }
 }

@@ -70,7 +70,8 @@ use crate::claude::{
     ReadsClaudeTurns,
 };
 use crate::codex::{
-    CodexTurnHistory, ReadsCodexTurnHistory, SelectsCodexEndpoint, SubmitsQueuedCodexTurn,
+    CodexTurnHistory, MeasuresQueuedCodexTurn, QueuedCodexTurnWire, ReadsCodexTurnHistory,
+    SelectsCodexEndpoint, SubmitsQueuedCodexTurn,
 };
 use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
 use crate::composition::{FreshSeat, JoinsPurpose};
@@ -1230,7 +1231,13 @@ impl RendersAttemptInput for QueueDeliveryAttempt {
     }
 }
 
-impl RunningNexus {
+pub(crate) trait TypesQueuedCohorts {
+    fn typed_queue_message(&self, entry: &QueueEntry) -> Option<meta_signal_flow::Message>;
+    fn typed_queue_cohort(&self, entries: &[QueueEntry]) -> Option<Vec<meta_signal_flow::Message>>;
+    fn typed_attempt_text(&self, attempt: &QueueDeliveryAttempt) -> Option<String>;
+}
+
+impl TypesQueuedCohorts for RunningNexus {
     fn typed_queue_message(&self, entry: &QueueEntry) -> Option<meta_signal_flow::Message> {
         let sender = self
             .store
@@ -1239,17 +1246,14 @@ impl RunningNexus {
         Some(entry.message.typed_pane_message(sender))
     }
 
-    pub(crate) fn typed_queue_cohort(
-        &self,
-        entries: &[QueueEntry],
-    ) -> Option<Vec<meta_signal_flow::Message>> {
+    fn typed_queue_cohort(&self, entries: &[QueueEntry]) -> Option<Vec<meta_signal_flow::Message>> {
         entries
             .iter()
             .map(|entry| self.typed_queue_message(entry))
             .collect()
     }
 
-    pub(crate) fn typed_attempt_text(&self, attempt: &QueueDeliveryAttempt) -> Option<String> {
+    fn typed_attempt_text(&self, attempt: &QueueDeliveryAttempt) -> Option<String> {
         let meta_signal_flow::QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
             return None;
         };
@@ -2323,12 +2327,14 @@ impl PerformsWakeAndDrain for RunningNexus {
             return refused(drained, Failed_Data::HerdrRefused);
         }
         if let Some(adapter) = model {
-            let wire_bytes = match crate::codex::queued_turn_wire_bytes(
-                &node.session_id,
-                &attempt.attempt_id,
-                attempt.native_request_id,
-                &text,
-            ) {
+            let wire_bytes = match (QueuedCodexTurnWire {
+                thread_id: &node.session_id,
+                attempt_id: &attempt.attempt_id,
+                native_request_id: attempt.native_request_id,
+                text: &text,
+            })
+            .wire_bytes()
+            {
                 Ok(bytes) => bytes,
                 Err(_) => return refused(drained, Failed_Data::CodexRefused),
             };

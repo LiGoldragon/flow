@@ -25,6 +25,7 @@ use crate::store::context::{JudgesCompaction, JudgesThreshold};
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::{ReadsFlowRows, RecordsReplacement};
+use crate::waking::TypesQueuedCohorts;
 use crate::{ConfiguredUse, RunningNexus};
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
 use lease::LeasesPanes;

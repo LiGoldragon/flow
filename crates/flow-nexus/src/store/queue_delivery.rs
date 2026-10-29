@@ -1718,7 +1718,7 @@ impl AccountsQueueDelivery for FlowStore {
         if !matches!(attempt.phase, QueueDeliveryPhase::Prepared) || attempt.cohort.is_empty() {
             return Ok(None);
         }
-        let delivery = lease.uncertain_delivery();
+        let delivery = super::delivery::SettlesInterruptedLease::uncertain(&lease);
         if self.settle_typed_cohort(delivery_id, delivery.clone())? {
             Ok(Some(delivery))
         } else {

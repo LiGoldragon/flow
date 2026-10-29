@@ -128,7 +128,7 @@ impl EngineRecord for PaneLease {
     }
 }
 
-trait SettlesInterruptedLease {
+pub(crate) trait SettlesInterruptedLease {
     /// What a delivery interrupted at this row settles as.
     fn uncertain(&self) -> Delivery;
 }
@@ -146,12 +146,6 @@ impl SettlesInterruptedLease for PaneLease {
             },
             delivery_grade: DeliveryGrade::Uncertain,
         }
-    }
-}
-
-impl PaneLease {
-    pub(crate) fn uncertain_delivery(&self) -> Delivery {
-        self.uncertain()
     }
 }
 

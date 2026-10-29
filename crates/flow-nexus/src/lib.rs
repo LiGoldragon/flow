@@ -8,11 +8,11 @@ use crate::store::send_outcome::RecordsSendOutcomes;
 // `flow_nexus::LaunchedRecord`.
 extern crate self as flow_nexus;
 use crate::claude::ProjectsClaudeReadiness;
-use crate::codex::SelectsCodexEndpoint;
+use crate::codex::{MeasuresQueuedCodexTurn, QueuedCodexTurnWire, SelectsCodexEndpoint};
 use crate::herdr::ConfiguresHerdrCli;
 use crate::herdr::ReadsHerdrPanes;
 use crate::store::AnnouncesLaunchChanges;
-use crate::waking::StartsRequirementsFirst;
+use crate::waking::{StartsRequirementsFirst, TypesQueuedCohorts};
 pub use caller::CallerProcess;
 pub use composition::CompositionError;
 pub use context::VerifiedContext;
@@ -24,6 +24,7 @@ pub use generated::memory::{LaunchOutcome, Replacement};
 pub use generated::operation::Outcome as OperationOutcome;
 pub use generated::starter::{LaunchedRecord, ReplacedRecord};
 pub use store::StoreError;
+pub use store::harness::RendersProductionHarnessConfiguration;
 pub mod binding;
 pub mod caller;
 pub mod claude;
@@ -1030,12 +1031,13 @@ impl Dispatches for RunningNexus {
                                     <= usize::try_from(configured.snapshot.limits.herdr_line)
                                         .unwrap_or(0)
                         }
-                        signal_flow::HarnessKind::Codex => crate::codex::queued_turn_wire_bytes(
-                            &attempt.thread_id,
-                            &attempt.attempt_id,
-                            attempt.native_request_id,
-                            &text,
-                        )
+                        signal_flow::HarnessKind::Codex => (QueuedCodexTurnWire {
+                            thread_id: &attempt.thread_id,
+                            attempt_id: &attempt.attempt_id,
+                            native_request_id: attempt.native_request_id,
+                            text: &text,
+                        })
+                        .wire_bytes()
                         .ok()
                         .is_some_and(|bytes| {
                             bytes

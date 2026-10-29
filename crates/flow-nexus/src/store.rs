@@ -36,6 +36,7 @@ use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
 use flow_ethos::State as MetaflowState;
+use full_configuration::DescribesFullConfigurationTable as _;
 use harness::UpgradesHarnesses;
 use logical_delivery::{
     DeclaresLogicalDeliveryTables, LogicalDeliveryTables, RecordsLogicalDeliveries,

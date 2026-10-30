@@ -385,10 +385,15 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
     assert_ne!(successor, ENDING, "a fresh flow, never the one that ended");
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
     assert_eq!(woken.past, vec![ENDING.to_owned()]);
-    assert_eq!(
-        requests(&woken),
-        vec![request],
-        "the queue waits on the metaflow for its successor"
+    assert!(
+        requests(&woken).is_empty(),
+        "the successor's accepted first prompt settles its fixed queue batch"
+    );
+    let turns = world.user_turns(&fixture);
+    assert_eq!(turns.len(), 1, "the wake submits one first turn: {turns:?}");
+    assert!(
+        turns[0].contains("For the successor."),
+        "the queued request is in the successor's first prompt: {turns:?}"
     );
     assert!(
         fixture.typed().is_none(),

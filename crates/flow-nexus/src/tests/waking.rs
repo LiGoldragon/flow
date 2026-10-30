@@ -576,13 +576,16 @@ fn a_flow_whose_pane_is_gone_is_asleep_and_wakes_fresh() {
     assert_ne!(flow_id, "abc123", "a new flow");
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
     assert_ne!(world.session(), seat.session, "a new native session");
-    assert_eq!(woken.queue, queue.clone().unsent());
+    assert!(
+        woken.queue.is_empty(),
+        "the accepted first prompt took the queue"
+    );
 }
 
 /// An Order queued for an Asleep Primary wakes it as it wakes any layer:
 /// a fresh flow on the Primary's configured model, on a new native
-/// session. The queued Order remains durable until native history receipts
-/// it. Its Secondary is recorded as every Primary starts.
+/// session. The queued Order is its accepted first prompt. Its Secondary is
+/// recorded as every Primary starts.
 #[test]
 fn an_order_wakes_an_asleep_primary_fresh() {
     let mut fixture = NexusFixture::new();
@@ -625,7 +628,10 @@ fn an_order_wakes_an_asleep_primary_fresh() {
         );
     };
     assert_ne!(flow_id, "abc123");
-    assert_eq!(woken.queue, queue.clone().unsent());
+    assert!(
+        woken.queue.is_empty(),
+        "the accepted first prompt took the queue"
+    );
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
     assert_ne!(world.session(), seat.session);
     let node = fixture.nexus.store.flow_node(flow_id).unwrap().unwrap();
@@ -809,7 +815,7 @@ fn explicit_wake_does_not_judge_message_kind() {
 }
 
 #[test]
-fn the_store_sleeps_and_awakens_without_consuming_address_pending_work() {
+fn the_store_sleeps_and_awakens_removing_only_the_confirmed_startup_batch() {
     let fixture = NexusFixture::new();
     let store = &fixture.nexus.store;
     let at = address(Layer::Tertiary);
@@ -838,10 +844,12 @@ fn the_store_sleeps_and_awakens_without_consuming_address_pending_work() {
     store.seed_metaflow(asleep);
     assert!(
         !store.awaken_metaflow(&at, "aaaaaa", 4).unwrap(),
-        "binding cannot claim a delivery"
+        "more delivered than queued"
     );
     assert!(!store.awaken_metaflow(&at, "bbbbbb", 2).unwrap());
     assert!(store.awaken_metaflow(&at, "bbbbbb", 0).unwrap());
+    let startup = vec![Request::Order("A".into()), Request::Order("B".into())].unsent();
+    assert!(store.settle_wake_startup(&at, "bbbbbb", &startup).unwrap());
     let woken = store.metaflow(&at).unwrap().unwrap();
     assert_eq!(woken.state, State::Awake("bbbbbb".into()));
     assert_eq!(
@@ -851,27 +859,14 @@ fn the_store_sleeps_and_awakens_without_consuming_address_pending_work() {
     );
     assert_eq!(
         woken.queue,
-        vec![
-            Request::Order("A".into()),
-            Request::Order("B".into()),
-            Request::Order("C".into())
-        ]
-        .unsent(),
-        "every pending request belongs to the Address, not the seat"
+        vec![Request::Order("C".into())].unsent(),
+        "the later arrival remains behind the confirmed startup batch"
     );
     assert!(
-        !store
+        store
             .remove_oldest_queued(&at, &Request::Order("C".into()).unsent())
-            .unwrap(),
-        "only the oldest, as typed, is removed"
+            .unwrap()
     );
-    for body in ["A", "B", "C"] {
-        assert!(
-            store
-                .remove_oldest_queued(&at, &Request::Order(body.into()).unsent())
-                .unwrap()
-        );
-    }
     assert!(store.metaflow(&at).unwrap().unwrap().queue.is_empty());
     assert_eq!(
         store.metaflow_awake_as("bbbbbb").unwrap().unwrap().address,
@@ -915,7 +910,7 @@ fn every_wake_composes_a_fresh_flow_from_the_last_launch_whatever_its_end() {
 }
 
 #[test]
-fn a_fresh_wake_composes_modules_without_queued_work() {
+fn a_fresh_wake_composes_modules_and_queued_work_in_the_first_prompt() {
     let fixture = NexusFixture::new();
     let queue = [
         Request::Order("first".into()),
@@ -933,11 +928,11 @@ fn a_fresh_wake_composes_modules_without_queued_work() {
         system_modules: vec!["spirit-core".into(), "intent-flow".into()],
         user_modules: vec!["operation-main-flow".into(), "knowledge-flow".into()],
         leave_outs_option: None,
-        prompt: String::new(),
+        prompt: text.clone(),
     };
     let profile = seat.fresh_profile();
     assert_eq!(profile.address, address(Layer::Secondary));
-    assert!(profile.instruction_prompt.is_empty());
+    assert_eq!(profile.instruction_prompt, text);
     assert_eq!(profile.user_modules, seat.user_modules);
     let composed = fixture
         .nexus
@@ -952,7 +947,7 @@ fn a_fresh_wake_composes_modules_without_queued_work() {
         )
         .unwrap();
     // The same full module text a Start of these identities carries, with
-    // no queued work injected into its first prompt.
+    // the fixed queue batch in that first prompt.
     let body = composed.first_prompt_payload.first_prompt_body;
     assert!(body.starts_with("These are your skills, given here; do not reload them."));
     assert!(body.contains("Main flow body.") && body.contains("Knowledge body."));
@@ -962,9 +957,9 @@ fn a_fresh_wake_composes_modules_without_queued_work() {
             .system_prompt_text
             .contains("Spirit body.")
     );
-    assert!(!body.contains(&text));
-    assert!(!body.contains("Order.first"));
-    assert!(!body.contains("Question.second"));
+    assert!(body.contains(&text));
+    assert!(body.contains("Order.first"));
+    assert!(body.contains("Question.second"));
     assert!(!body.contains("seat"));
 }
 
@@ -1359,8 +1354,8 @@ impl ReadsFreshWorld for FreshWorld {
 
 /// A queued Order wakes a fresh Claude flow, never the session that slept:
 /// a new FlowId on a new native session Flow chose, its first prompt
-/// carrying no queued work. The durable queue and what arrives while the
-/// wake holds the metaflow are handed to the woken flow after, oldest first,
+/// carrying the fixed oldest-first queue batch. What arrives while the wake
+/// holds the metaflow is handed to the woken flow after,
 /// and the flow that slept stays Stopped on its own session, in Past.
 #[test]
 fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
@@ -1394,7 +1389,10 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
     assert_ne!(flow_id, "abc123", "a new flow, never the one that slept");
     // D arrives while the wake holds the metaflow.
     let mut woken = stored(&fixture, Layer::Secondary);
-    assert_eq!(woken.queue, queue.clone().unsent());
+    assert!(
+        woken.queue.is_empty(),
+        "the startup batch left on acceptance"
+    );
     woken.queue.push(Request::Order("D".into()).unsent());
     fixture.nexus.store.seed_metaflow(woken);
     fixture.nexus.drain_woken(&at, lease);
@@ -1411,16 +1409,21 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
         world.calls()
     );
     assert!(!world.calls().contains(&seat.session), "{}", world.calls());
-    let expected = [
-        Request::Order("A".into()),
-        Request::Notice("B".into()),
-        Request::Question("C".into()),
-        Request::Order("D".into()),
-    ];
     let woken = stored(&fixture, Layer::Secondary);
     assert_eq!(woken.state, State::Awake(flow_id.clone()));
     assert_eq!(woken.past, vec!["abc123".to_owned()]);
-    assert_eq!(woken.queue, expected.to_vec().unsent());
+    assert_eq!(
+        woken.queue,
+        vec![Request::Order("D".into()).unsent()],
+        "the later arrival stays behind the fixed startup batch"
+    );
+    let turns = world.user_turns(&fixture);
+    assert!(
+        turns.first().is_some_and(|turn| turn.contains("Order.A")
+            && turn.contains("Notice.B")
+            && turn.contains("Question.C")),
+        "the fixed batch is the first turn: {turns:?}"
+    );
     let node = fixture.nexus.store.flow_node(&flow_id).unwrap().unwrap();
     assert_eq!(node.session_id, new_session);
     assert_eq!(node.harness_kind, HarnessKind::Claude);
@@ -1500,34 +1503,10 @@ fn a_simplified_wake_sends_the_first_soft_request_without_an_empty_turn() {
     assert_eq!(receipt.native_session_id, world.session());
 }
 
-/// A Simplified seat's answer reaches its sender whatever order its prompt
-/// hook and its transcript's user row come in: the prompt's hook reports
-/// before Claude writes the row, so the input is not yet Delivered when
-/// the hook reports; at the turn's Stop the answer is taken from the
-/// transcript, the binding completes, and the next request is handed over.
+/// A Simplified startup has one reply binding, so its fixed first-prompt
+/// batch is its oldest request. Later work stays ordered for its next turn.
 #[test]
-fn a_simplified_answer_reaches_its_sender_when_the_prompt_hook_precedes_its_row() {
-    simplified_seat_answers_two_orders(AnswerAtStop::Written);
-}
-
-/// A Stop that finds the answer's row still being written queues nothing;
-/// the seat's next drain, here a wake of its metaflow as a new Send makes,
-/// reads the finished row, queues the answer and hands the next request
-/// over.
-#[test]
-fn a_simplified_answer_half_written_at_its_stop_is_queued_at_the_next_drain() {
-    simplified_seat_answers_two_orders(AnswerAtStop::HalfWritten);
-}
-
-/// How much of the answer's row the transcript holds when the Stop reports.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AnswerAtStop {
-    Written,
-    HalfWritten,
-}
-
-fn simplified_seat_answers_two_orders(at_stop: AnswerAtStop) {
-    use flow_native::DigestsPrompt;
+fn a_simplified_startup_leaves_its_second_request_ordered() {
     let mut fixture = NexusFixture::new();
     ended_simplified_claude(&fixture);
     let at = address(Layer::Secondary);
@@ -1568,147 +1547,34 @@ fn simplified_seat_answers_two_orders(at_stop: AnswerAtStop) {
     let first = accept("judge the first");
     let second = accept("judge the second");
     let world = fixture.fresh_claude_world();
-    fs::write(world.state.join("rows-later"), "").unwrap();
 
     fixture.nexus.wake_due(at.clone());
 
-    let State::Awake(flow_id) = stored(&fixture, Layer::Secondary).state else {
+    let seat = stored(&fixture, Layer::Secondary);
+    let State::Awake(flow_id) = seat.state else {
         panic!("the simplified seat is awake; {}", world.calls())
     };
-    let session = world.session();
-    let transcript = fixture
-        .directory
-        .path()
-        .join("native-transcripts/claude/-home-li-primary")
-        .join(format!("{session}.jsonl"));
-    let held = || -> serde_json::Value {
-        serde_json::from_str(&fs::read_to_string(world.state.join("held-row")).unwrap()).unwrap()
-    };
-    let row = held();
-    let typed = row
-        .pointer("/message/content")
-        .and_then(serde_json::Value::as_str)
-        .unwrap()
-        .to_owned();
-    assert!(typed.contains("judge the first"), "{typed}");
-    assert!(
-        !typed.contains("judge the second"),
-        "one input at a time: {typed}"
-    );
-    let prompt_id = row["uuid"].as_str().unwrap().to_owned();
-    let report = |event: signal_flow::Event| {
-        assert_eq!(
-            fixture.nexus.report(signal_flow::Report_Data {
-                flow_id: flow_id.clone(),
-                event: event.clone(),
-            }),
-            signal_flow::Response::Reported
-        );
-        fixture.nexus.after_report(&flow_id, &event);
-    };
-
-    // The hook reports the prompt before Claude writes its row.
-    report(signal_flow::Event::PromptSubmitted(
-        signal_flow::NativePrompt {
-            native_session_id_option: Some(session.clone()),
-            prompt_id_option: Some(prompt_id.clone()),
-            prompt_sha256: typed.prompt_sha256(),
-        },
-    ));
-    // Then the row, and the turn's answer A1.
-    let answer = "A1: the first is sound.";
-    let answer_row = format!(
-        "{}\n",
-        serde_json::json!({"type":"assistant","sessionId":session,"uuid":"answer-1",
-            "message":{"stop_reason":"end_turn","content":[{"type":"text","text":answer}]}})
-    );
-    let (written, rest) = match at_stop {
-        AnswerAtStop::Written => (answer_row.as_str(), ""),
-        AnswerAtStop::HalfWritten => answer_row.split_at(answer_row.len() / 2),
-    };
-    let append = |text: &str| {
-        use std::io::Write;
-        fs::OpenOptions::new()
-            .append(true)
-            .open(&transcript)
-            .unwrap()
-            .write_all(text.as_bytes())
-            .unwrap();
-    };
-    append(&format!("{row}\n{written}"));
-    report(signal_flow::Event::Stopped(signal_flow::NativeStop {
-        native_session_id_option: Some(session.clone()),
-        transcript_path_option: Some(transcript.to_string_lossy().into_owned()),
-        last_assistant_message_option: Some(answer.into()),
-    }));
-    if at_stop == AnswerAtStop::HalfWritten {
-        assert!(
-            fixture
-                .nexus
-                .store
-                .metaflow(&sender)
-                .unwrap()
-                .unwrap()
-                .queue
-                .is_empty(),
-            "a half-written answer is not queued"
-        );
-        append(rest);
-        fixture.nexus.wake_due(at.clone());
-    }
-
-    let replied = fixture.nexus.store.metaflow(&sender).unwrap().unwrap();
     assert_eq!(
-        replied
-            .queue
+        seat.queue
             .iter()
-            .map(|entry| (&entry.sent_by, &entry.message))
+            .map(|entry| entry.logical_delivery_id.as_str())
             .collect::<Vec<_>>(),
-        vec![(
-            &SentBy::Sender(at.clone()),
-            &Message::Soft(Request::Result(answer.into()))
-        )],
-        "the sender holds the answer to its first request"
+        vec![second.logical_delivery_id.as_str()],
+        "only the request with the startup reply binding is submitted"
     );
-    assert!(
-        matches!(
-            fixture
-                .nexus
-                .store
-                .logical_delivery_snapshot(&first.logical_delivery_id)
-                .unwrap()
-                .map(|snapshot| snapshot.delivery_state),
-            Some(signal_flow::DeliveryState::Delivered(_))
-        ),
-        "the first request is Delivered"
-    );
-    // The binding completed: the seat was handed the second request, which
-    // a binding still incomplete refuses as WaitingForTurn.
-    let seat = stored(&fixture, Layer::Secondary);
-    assert_eq!(seat.state, State::Awake(flow_id.clone()));
-    assert!(
-        seat.queue.is_empty(),
-        "the second request was handed over: {seat:?}"
-    );
-    let next = held();
-    assert!(
-        next.pointer("/message/content")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|content| content.contains("judge the second")),
-        "the seat is handed the second request: {next}"
-    );
-    assert!(
-        !matches!(
-            fixture
-                .nexus
-                .store
-                .logical_delivery_snapshot(&second.logical_delivery_id)
-                .unwrap()
-                .map(|snapshot| snapshot.delivery_state),
-            Some(signal_flow::DeliveryState::Queued) | None
-        ),
-        "the second request left the queue"
-    );
+    let turns = world.user_turns(&fixture);
+    assert_eq!(turns.len(), 1, "one first turn: {turns:?}");
+    assert!(turns[0].contains("judge the first"), "{turns:?}");
+    assert!(!turns[0].contains("judge the second"), "{turns:?}");
+    let crate::store::logical_delivery::SimplifiedReplyStanding::Received(binding, _) = fixture
+        .nexus
+        .store
+        .simplified_reply_receipt(&flow_id)
+        .unwrap()
+    else {
+        panic!("the first input alone owns the reply binding")
+    };
+    assert_eq!(binding.input_delivery_id, first.logical_delivery_id);
 }
 
 #[test]
@@ -1775,7 +1641,10 @@ fn a_nexus_start_wakes_a_seat_whose_wake_did_not_finish() {
         panic!("the seat wakes: {woken:?}; Herdr calls: {}", world.calls());
     };
     assert_ne!(flow_id, "abc123");
-    assert_eq!(woken.queue, queue.clone().unsent());
+    assert!(
+        woken.queue.is_empty(),
+        "the recovered wake's batch was accepted"
+    );
     assert_eq!(world.claude_starts(), 1, "woken once: {}", world.calls());
     assert_eq!(stored(&fixture, Layer::Tertiary).state, State::Asleep);
     let primary = stored(&fixture, Layer::Primary);
@@ -2302,20 +2171,20 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         );
     };
     assert_ne!(flow_id, "abc123", "a fresh flow");
-    // The woken flow keeps the Order with the Sender its Lock named until
-    // native history records the exact prompt.
+    // The woken flow's accepted first prompt carries the Order with the
+    // Sender its Lock named.
     let sent = QueueEntry {
         logical_delivery_id: acceptance.logical_delivery_id,
         sent_by: SentBy::Sender(sender_address.clone()),
         delivery: Delivery::Wake,
         message: Message::Soft(order.clone()),
     };
-    assert_eq!(woken.queue, vec![sent.clone()]);
+    assert!(woken.queue.is_empty());
     let turns = world.user_turns(&fixture);
     assert!(
         turns
             .iter()
-            .all(|turn| !turn.contains(&[sent.clone()].prompt_text())),
+            .any(|turn| turn.contains(&[sent.clone()].prompt_text())),
         "{turns:?}"
     );
 }
@@ -3568,7 +3437,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
 
     let woken = stored(&fixture, Layer::Secondary);
     assert_eq!(woken.state, State::Awake(FRESH_CODEX_FLOW.into()));
-    assert_eq!(woken.queue, queue.clone().unsent());
+    assert!(woken.queue.is_empty());
     assert_eq!(woken.past, vec![old.flow_id.clone()]);
     let new_node = fixture
         .nexus
@@ -3627,7 +3496,7 @@ fn a_sleeping_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it() {
     assert_ne!(flow_id, "abc123");
     let woken = stored(&fixture, Layer::Secondary);
     assert_eq!(woken.state, State::Awake(flow_id.clone()));
-    assert_eq!(woken.queue, queue.unsent());
+    assert!(woken.queue.is_empty());
     let new_node = fixture.nexus.store.flow_node(&flow_id).unwrap().unwrap();
     let new_session = fs::read_to_string(world.state.join("session")).unwrap();
     assert_eq!(new_node.session_id, new_session);
@@ -3689,13 +3558,13 @@ fn a_fresh_wake_from_a_claude_alias_opens_nothing_and_keeps_its_work() {
     };
     let woken = stored(&fixture, Layer::Secondary);
     assert_eq!(woken.state, State::Awake(flow_id));
-    assert_eq!(woken.queue.len(), 1);
+    assert!(woken.queue.is_empty());
 }
 
 /// A wake whose start is refused keeps every request queued, never lost,
 /// and marks each one's delivery `Retryable.WakeRefused` with the refusal,
 /// which the sender's observation shows; the next wake retries the start and
-/// the woken flow takes the same queue.
+/// the woken flow takes the same queue in its accepted first prompt.
 #[test]
 fn a_refused_wake_keeps_its_queue_and_each_delivery_names_why() {
     let mut fixture = NexusFixture::new();
@@ -3792,7 +3661,10 @@ fn a_refused_wake_keeps_its_queue_and_each_delivery_names_why() {
     };
     let woken = stored(&fixture, Layer::Secondary);
     assert_eq!(woken.state, State::Awake(flow_id));
-    assert_eq!(woken.queue.len(), 2, "the woken flow takes the same queue");
+    assert!(
+        woken.queue.is_empty(),
+        "the first prompt takes the same queue"
+    );
 }
 
 /// A fresh wake takes the model configured for its seat's layer and
@@ -3863,7 +3735,7 @@ fn a_fresh_wake_takes_the_model_of_its_layer_and_aspect() {
     };
     let woken = stored(&fixture, Layer::Secondary);
     assert_eq!(woken.state, State::Awake(flow_id.clone()));
-    assert_eq!(woken.queue.len(), 1);
+    assert!(woken.queue.is_empty());
     let launched = fixture
         .nexus
         .store

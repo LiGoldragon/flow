@@ -74,6 +74,14 @@ pub(crate) trait SleepsMetaflows {
         flow_id: &str,
         delivered: usize,
     ) -> Result<bool, StoreError>;
+    /// The exact oldest-first batch a confirmed fresh wake carried in its
+    /// first prompt leaves the queue. Later arrivals remain behind it.
+    fn settle_wake_startup(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        delivered: &[flow_ethos::QueueEntry],
+    ) -> Result<bool, StoreError>;
     #[cfg(test)]
     fn remove_oldest_queued(
         &self,
@@ -330,6 +338,29 @@ impl SleepsMetaflows for FlowStore {
             taken.written(self, self.engine.begin_atomic_commit()),
         )?;
         self.engine.commit_atomic(commit)?;
+        Ok(true)
+    }
+
+    fn settle_wake_startup(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        delivered: &[flow_ethos::QueueEntry],
+    ) -> Result<bool, StoreError> {
+        let Some(mut stored) = self.stored_metaflow(address)? else {
+            return Ok(false);
+        };
+        if stored.metaflow.state != MetaflowState::Awake(flow_id.to_owned())
+            || !stored.metaflow.queue.starts_with(delivered)
+        {
+            return Ok(false);
+        }
+        stored.metaflow.queue.drain(..delivered.len());
+        self.engine.commit_atomic(
+            self.engine
+                .begin_atomic_commit()
+                .mutate(self.metaflows, stored),
+        )?;
         Ok(true)
     }
 

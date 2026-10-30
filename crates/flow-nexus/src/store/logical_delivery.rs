@@ -500,6 +500,21 @@ pub(crate) trait RecordsLogicalDeliveries {
         queue: &[QueueEntry],
         cause: signal_flow::RetryCause,
     ) -> Result<usize, StoreError>;
+    /// Records the launch receipt for every logical request carried by a
+    /// fresh wake's accepted first prompt. Seeded legacy queue entries with
+    /// no logical row remain only in their preserved queue evidence.
+    fn record_startup_receipts(
+        &self,
+        queue: &[QueueEntry],
+        receipt: &signal_flow::NativeReceipt,
+    ) -> Result<(), StoreError>;
+    /// Records the correlated first-prompt hook for the one input a
+    /// Simplified startup bound before its native row was observable.
+    fn record_simplified_startup_receipt(
+        &self,
+        flow_id: &str,
+        receipt: &signal_flow::NativeReceipt,
+    ) -> Result<bool, StoreError>;
     fn read_logical_delivery_snapshots(
         &self,
         sender: &Address,
@@ -523,6 +538,54 @@ pub(crate) trait RecordsLogicalDeliveries {
     ) -> Result<Option<Address>, StoreError>;
 }
 impl RecordsLogicalDeliveries for FlowStore {
+    fn record_simplified_startup_receipt(
+        &self,
+        flow_id: &str,
+        receipt: &signal_flow::NativeReceipt,
+    ) -> Result<bool, StoreError> {
+        let binding = self.engine.match_records(QueryPlan::key(
+            self.logical_deliveries.simplified_replies,
+            RecordKey::new(flow_id.to_owned()),
+        ))?;
+        let Some(binding) = binding.records().first() else {
+            return Ok(false);
+        };
+        let Some(snapshot) = self.logical_delivery_snapshot(&binding.input_delivery_id)? else {
+            return Ok(false);
+        };
+        if matches!(snapshot.delivery_state, DeliveryState::Delivered(_)) {
+            return Ok(true);
+        }
+        if !matches!(snapshot.delivery_state, DeliveryState::Queued) {
+            return Ok(false);
+        }
+        self.commit_logical_transition(
+            &binding.input_delivery_id,
+            DeliveryState::Delivered(receipt.clone()),
+            self.engine.begin_atomic_commit(),
+        )?;
+        Ok(true)
+    }
+
+    fn record_startup_receipts(
+        &self,
+        queue: &[QueueEntry],
+        receipt: &signal_flow::NativeReceipt,
+    ) -> Result<(), StoreError> {
+        for entry in queue {
+            if self
+                .logical_delivery_snapshot(&entry.logical_delivery_id)?
+                .is_some()
+            {
+                self.commit_logical_transition(
+                    &entry.logical_delivery_id,
+                    DeliveryState::Delivered(receipt.clone()),
+                    self.engine.begin_atomic_commit(),
+                )?;
+            }
+        }
+        Ok(())
+    }
     fn bind_simplified_reply(&self, binding: SimplifiedReplyBinding) -> Result<(), StoreError> {
         let _guard = self
             .logical_deliveries

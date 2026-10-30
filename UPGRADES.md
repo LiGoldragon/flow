@@ -1,3 +1,15 @@
+# Flow 0.41.1
+
+Pins meta-signal-flow 43.0.0 (2f6cb4) and signal-flow 35.0.0 (09ad7a), as
+0.41.0. No stored record or family changes shape.
+
+- A Wake that starts an asleep metaflow fixes the queue batch under its wake
+  lease and carries that oldest-first batch in the fresh flow's first prompt.
+  Work admitted during the launch stays behind the fixed batch. Once the
+  launch is accepted, exactly that prefix leaves the queue; a refusal leaves
+  it ordered for retry. A Simplified flow selects its oldest request because
+  its reply binding belongs to one input and one sender.
+
 # Flow 0.41.0
 
 Pins meta-signal-flow 43.0.0 (2f6cb4) and signal-flow 35.0.0 (09ad7a), as

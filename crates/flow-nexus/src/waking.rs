@@ -666,13 +666,14 @@ impl StartsSecondaryFirst for RunningNexus {
         let WakePlan::Fresh(fresh) = self.wake_plan(&metaflow) else {
             return Err(signal_flow::StartRejection::NoSecondary);
         };
-        let flow_id = self.start_fresh(&metaflow, fresh, "").map_err(|failure| {
+        let started = self.start_fresh(&metaflow, fresh, "").map_err(|failure| {
             eprintln!(
                 "flow-nexus: the Secondary of {:?} {} did not start: {failure:?}",
                 secondary.aspect, secondary.topic
             );
             signal_flow::StartRejection::NoSecondary
         })?;
+        let flow_id = started.flow_id;
         {
             let _turn = self
                 .dispatch_gate
@@ -681,7 +682,7 @@ impl StartsSecondaryFirst for RunningNexus {
             if self.perform(Operation::Record(Record_Data::Awoken(
                 Record_Data_Awoken_Data {
                     address: secondary.clone(),
-                    flow_id,
+                    flow_id: flow_id.clone(),
                     delivered: 0,
                 },
             ))) != Outcome::Recorded
@@ -703,6 +704,14 @@ impl StartsSecondaryFirst for RunningNexus {
 pub(crate) enum FreshRefusal {
     Rejected(signal_flow::StartRejection),
     Failed(Failed_Data),
+}
+
+/// A fresh run together with the exact launch that placed its first prompt.
+/// A wake keeps both so it never receipts another launch later bound to the
+/// same run.
+struct FreshStarted {
+    flow_id: FlowId,
+    launch_request_id: String,
 }
 
 /// A flow the Nexus starts itself, as a wake starts one: no calling flow is
@@ -749,7 +758,15 @@ trait WakesInParts {
         metaflow: &Metaflow,
         fresh: FreshContext,
         text: &str,
-    ) -> Result<FlowId, FreshRefusal>;
+    ) -> Result<FreshStarted, FreshRefusal>;
+    fn settle_startup(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        launch_request_id: &str,
+        startup: &[QueueEntry],
+        simplified: bool,
+    ) -> bool;
     /// Types text into a live flow's pane under its lease, as Flow's own
     /// write: no Priority head, since it is not a Message. A refusal is
     /// logged by its reason.
@@ -1229,7 +1246,7 @@ impl ReconcilesQueueDelivery for RunningNexus {
         let Ok(attempts) = self.store.unsettled_deliveries(&metaflow.address) else {
             return;
         };
-        let Some(attempt) = attempts.into_iter().find(|attempt| {
+        let attempt = attempts.into_iter().find(|attempt| {
             attempt.flow_id == flow_id
                 && attempt.harness_kind == HarnessKind::Claude
                 && prompt.native_session_id_option.as_deref() == Some(attempt.thread_id.as_str())
@@ -1241,7 +1258,40 @@ impl ReconcilesQueueDelivery for RunningNexus {
                     .cohort_runs(attempt)
                     .iter()
                     .any(|(_, text)| text.prompt_sha256() == prompt.prompt_sha256)
-        }) else {
+        });
+        let Some(attempt) = attempt else {
+            // A Simplified flow's first input was part of its launch rather
+            // than an ordinary queue-delivery attempt. Its exact launch
+            // intent and this correlated hook prove which prompt landed.
+            let startup_matches = self
+                .store
+                .launch_requests_bound_to(flow_id)
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(|launch| self.store.launch_attempt(&launch).ok().flatten())
+                .filter_map(|attempt| attempt.prompt_delivery_intent_option)
+                .any(|intent| {
+                    intent.harness_kind == HarnessKind::Claude
+                        && prompt.native_session_id_option.as_deref()
+                            == Some(intent.native_session_id.as_str())
+                        && prompt.prompt_sha256 == intent.prompt_sha256
+                });
+            if startup_matches
+                && let (Some(native_session_id), Some(native_prompt_id)) = (
+                    prompt.native_session_id_option.clone(),
+                    prompt.prompt_id_option.clone(),
+                )
+            {
+                let _ = self.store.record_simplified_startup_receipt(
+                    flow_id,
+                    &signal_flow::NativeReceipt {
+                        harness_kind: HarnessKind::Claude,
+                        native_session_id,
+                        native_prompt_id,
+                    },
+                );
+            }
             return;
         };
         // A native hook proves that a submission was observed, not that an
@@ -2498,6 +2548,116 @@ impl ParksCohort for RunningNexus {
 }
 
 impl WakesInParts for RunningNexus {
+    fn settle_startup(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        launch_request_id: &str,
+        startup: &[QueueEntry],
+        simplified: bool,
+    ) -> bool {
+        let harness_kind = self
+            .store
+            .flow_node(flow_id)
+            .ok()
+            .flatten()
+            .map(|node| node.harness_kind);
+        let harness_kind_for_attempt = harness_kind.clone();
+        let receipt = self
+            .store
+            .launch_attempt(launch_request_id)
+            .ok()
+            .flatten()
+            .and_then(|attempt| {
+                let signal_flow::PromptDeliveryResult::Observed(observed) =
+                    attempt.prompt_delivery_result_option?
+                else {
+                    return None;
+                };
+                Some(signal_flow::NativeReceipt {
+                    harness_kind: harness_kind_for_attempt.clone()?,
+                    native_session_id: observed.native_session_id,
+                    native_prompt_id: observed.native_turn_id,
+                })
+            })
+            .or_else(|| {
+                use crate::generated::starter::StartupProgress;
+                use crate::herdr::launch::ObservesNativeTargetReceipt;
+                let intent = self
+                    .store
+                    .launch_attempt(launch_request_id)
+                    .ok()
+                    .flatten()?
+                    .prompt_delivery_intent_option?;
+                let StartupProgress::Received(observed) =
+                    self.herdr.observe_native_target_receipt(&intent).ok()?
+                else {
+                    return None;
+                };
+                Some(signal_flow::NativeReceipt {
+                    harness_kind: harness_kind_for_attempt.clone()?,
+                    native_session_id: observed.native_session_id,
+                    native_prompt_id: observed.native_turn_id,
+                })
+            })
+            .or_else(|| {
+                self.store
+                    .events(flow_id)
+                    .ok()
+                    .flatten()?
+                    .into_iter()
+                    .rev()
+                    .find_map(|event| match event {
+                        Event::PromptSubmitted(prompt) => Some(signal_flow::NativeReceipt {
+                            harness_kind: harness_kind.clone()?,
+                            native_session_id: prompt.native_session_id_option?,
+                            native_prompt_id: prompt.prompt_id_option?,
+                        }),
+                        _ => None,
+                    })
+            });
+        let has_logical = startup.iter().any(|entry| {
+            self.store
+                .logical_delivery_snapshot(&entry.logical_delivery_id)
+                .ok()
+                .flatten()
+                .is_some()
+        });
+        // A Started response proves the run, while the transcript receipt
+        // proves the queued payload. If that second witness is unavailable,
+        // preserve the exact queue prefix rather than guessing it delivered.
+        if has_logical && receipt.is_none() {
+            return false;
+        }
+        if let Some(receipt) = receipt {
+            if self
+                .store
+                .record_startup_receipts(startup, &receipt)
+                .is_err()
+            {
+                return false;
+            }
+        }
+        if simplified
+            && let Some(oldest) = startup.first()
+            && let signal_flow::SentBy::Sender(recipient) = &oldest.sent_by
+        {
+            let binding = SimplifiedReplyBinding {
+                flow_id: flow_id.to_owned(),
+                input_delivery_id: oldest.logical_delivery_id.clone(),
+                source: address.clone(),
+                recipient: recipient.clone(),
+                completed: false,
+            };
+            if self.store.bind_simplified_reply(binding).is_err() {
+                return false;
+            }
+        }
+        self.store
+            .settle_wake_startup(address, flow_id, startup)
+            .unwrap_or(false)
+    }
+
     fn waken(&self, address: &Address) -> Result<FlowId, WakeRefusal> {
         let metaflow = {
             let _turn = self
@@ -2517,6 +2677,21 @@ impl WakesInParts for RunningNexus {
             return Err(WakeRefusal::NothingQueued);
         }
         let plan = self.wake_plan(&metaflow);
+        let simplified = matches!(
+            &plan,
+            WakePlan::Fresh(fresh) if fresh.flow_kind == signal_flow::FlowKind::Simplified
+        );
+        // The wake lease fixes this oldest-first batch. Work admitted while
+        // the native launch settles is appended behind it and cannot enter a
+        // prompt already composed. A Simplified run can owe one answer to
+        // one sender, so its whole selected batch is its oldest request;
+        // the rest remains ordered for the next turn.
+        let startup = if simplified {
+            metaflow.queue.first().cloned().into_iter().collect()
+        } else {
+            metaflow.queue.clone()
+        };
+        let startup_text = startup.prompt_text();
         // The last flow's session must not be running still: a seat that
         // flow's harness keeps, as one started by hand would, is never
         // joined by a second flow of the same metaflow.
@@ -2538,8 +2713,8 @@ impl WakesInParts for RunningNexus {
         let WakePlan::Fresh(fresh) = plan else {
             return Err(WakeRefusal::Unplaceable);
         };
-        let flow_id = match self.start_fresh(&metaflow, fresh, "") {
-            Ok(flow_id) => flow_id,
+        let started = match self.start_fresh(&metaflow, fresh, &startup_text) {
+            Ok(started) => started,
             Err(FreshRefusal::Failed(failure)) => {
                 return Err(WakeRefusal::FreshNotStarted(failure));
             }
@@ -2567,6 +2742,7 @@ impl WakesInParts for RunningNexus {
                 return Err(WakeRefusal::StartRejected(rejection));
             }
         };
+        let flow_id = started.flow_id;
         let _turn = self
             .dispatch_gate
             .lock()
@@ -2575,13 +2751,26 @@ impl WakesInParts for RunningNexus {
             Record_Data_Awoken_Data {
                 address: address.clone(),
                 flow_id: flow_id.clone(),
-                // Starting the seat delivers no queued request. The durable
-                // queue is handed over through the ordinary drain path once
-                // the seat is Awake.
+                // `Started` is the launch boundary that authoritatively
+                // accepted this first prompt. Remove exactly its fixed batch;
+                // anything admitted while it started remains queued behind.
+                // If a response is lost, recovery counts it delivered only
+                // when the seat is up and its transcript shows this batch;
+                // otherwise the queue and its uncertainty stay preserved.
                 delivered: 0,
             },
         ))) {
-            Outcome::Recorded => Ok(flow_id),
+            Outcome::Recorded
+                if self.settle_startup(
+                    address,
+                    &flow_id,
+                    &started.launch_request_id,
+                    &startup,
+                    simplified,
+                ) =>
+            {
+                Ok(flow_id)
+            }
             _ => {
                 eprintln!("flow-nexus: flow {flow_id} woke but is not recorded Awake");
                 Err(WakeRefusal::AwakeNotRecorded)
@@ -2594,7 +2783,7 @@ impl WakesInParts for RunningNexus {
         metaflow: &Metaflow,
         fresh: FreshContext,
         text: &str,
-    ) -> Result<FlowId, FreshRefusal> {
+    ) -> Result<FreshStarted, FreshRefusal> {
         let address = &metaflow.address;
         // The seat's model is the one configured for its layer and aspect.
         let model = match self.store.configured_model(address) {
@@ -2630,6 +2819,10 @@ impl WakesInParts for RunningNexus {
             prompt: text.with_purpose(&fresh.purpose),
         };
         self.start_unbound(seat.fresh_profile())
+            .map(|flow_id| FreshStarted {
+                flow_id,
+                launch_request_id,
+            })
     }
 
     fn hand_over(&self, flow_id: &str, text: &str) -> Result<(), HandOverRefusal> {

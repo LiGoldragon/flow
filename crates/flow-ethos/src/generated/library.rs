@@ -64,16 +64,52 @@ pub type Minutes = i64;
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct Task_Data {
+pub struct AnswerableTask {
     pub minutes: Minutes,
     pub string: String,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct Done_Data {
+pub enum Answerable {
+    Order(String),
+    Task(AnswerableTask),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ResultPayload_Answered_Data {
+    pub answerable: Answerable,
+    pub string: String,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum ResultPayload {
+    Answered(ResultPayload_Answered_Data),
+    Historical(String),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct DonePayload_Answered_Data {
+    pub logical_delivery_id: LogicalDeliveryId,
+    pub answerable: Answerable,
+    pub string: String,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Historical_Data {
     pub logical_delivery_id: LogicalDeliveryId,
     pub string: String,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum DonePayload {
+    Answered(DonePayload_Answered_Data),
+    Historical(Historical_Data),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -83,10 +119,10 @@ pub enum Request {
     Question(String),
     Psyche(Said),
     Psyches(std::vec::Vec<Said>),
-    Result(String),
+    Result(ResultPayload),
     Notice(String),
-    Task(Task_Data),
-    Done(Done_Data),
+    Task(AnswerableTask),
+    Done(DonePayload),
 }
 #[rustfmt::skip]
 pub type LogicalDeliveryId = String;

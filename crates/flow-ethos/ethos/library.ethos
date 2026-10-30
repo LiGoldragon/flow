@@ -20,19 +20,26 @@ Library
   Source.{ Repository Hash Path }
   Key.{ Subaspect Topic }
   Said.{ Context.String Verbatim.String }
-  ; A Task is an order with its Minutes, the sender's estimate of its
-  ; doing; the LogicalDeliveryId Flow answers the send with names it. A
-  ; Done is the result that names the task it closes. Both are appended
-  ; after the kinds a store already holds, so its archives read unchanged.
+  ; An answer names the complete typed request it answers. New Results
+  ; carry that Order. Historical preserves a pre-0.42 Result's words when
+  ; its archived row has no answerable request to name; it never resolves
+  ; or closes an Order.
   Minutes.Integer
+  AnswerableTask.{ Minutes String }
+  Answerable.[ Order.String
+               Task.AnswerableTask ]
+  ResultPayload.[ Answered.{ Answerable String }
+                  Historical.String ]
+  DonePayload.[ Answered.{ LogicalDeliveryId Answerable String }
+                Historical.{ LogicalDeliveryId String } ]
   Request.[ Order.String
             Question.String
             Psyche.Said
             Psyches.Vector<Said>
-            Result.String
+            Result.ResultPayload
             Notice.String
-            Task.{ Minutes String }
-            Done.{ LogicalDeliveryId String } ]
+            Task.AnswerableTask
+            Done.DonePayload ]
   ; A logical delivery keeps one identity across queue retries and native
   ; submission; the id names the living's request, not a delivery attempt.
   LogicalDeliveryId.String

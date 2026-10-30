@@ -5,8 +5,9 @@
 ;; A run keeps its raw Nexus log and every flow transcript past teardown,
 ;; copied before the state root is deleted into
 ;; <witness root>/capsule-<flow version>-<timestamp>/. The witness root is
-;; FLOW_CAPSULE_WITNESS_DIR, else the calling flow's FLOW_DIRECTORY's
-;; witnesses directory; with neither set the capsule starts nothing.
+;; FLOW_CAPSULE_WITNESS_DIR, else $HOME/witnesses/<flow id>, the flow id
+;; FLOW_ID or else the name of the calling flow's FLOW_DIRECTORY; without a
+;; home or a flow id the capsule starts nothing.
 ;;
 ;; The capsule owns: the runtime directory $XDG_RUNTIME_DIR/flow-testing/,
 ;; which is XDG_RUNTIME_DIR for every process it runs and holds the Flow and
@@ -502,11 +503,16 @@
 
 (defn witness-root
   "Where runs keep their witnesses, read from an environment:
-  FLOW_CAPSULE_WITNESS_DIR as given, else the calling flow's directory's
-  witnesses."
+  FLOW_CAPSULE_WITNESS_DIR as given, else $HOME/witnesses/<flow id>, the
+  flow id FLOW_ID or else the name of the calling flow's FLOW_DIRECTORY.
+  Nil without a home or a flow id."
   [env]
   (or (not-empty (get env "FLOW_CAPSULE_WITNESS_DIR"))
-      (some-> (not-empty (get env "FLOW_DIRECTORY")) (str "/witnesses"))))
+      (let [home (not-empty (get env "HOME"))
+            flow-id (or (not-empty (get env "FLOW_ID"))
+                        (some-> (not-empty (get env "FLOW_DIRECTORY")) fs/file-name not-empty))]
+        (when (and home flow-id)
+          (str (str/replace home #"/+$" "") "/witnesses/" flow-id)))))
 
 (defn witness-name
   "A run's witness directory: the flow version the Nexus reports, and the
@@ -1042,7 +1048,7 @@
           version (str/trim (:out (run {} (str @package "/bin/flow-nexus") "--version")))
           root (witness-root (System/getenv))]
       (when-not root
-        (refuse "no witness directory: set FLOW_CAPSULE_WITNESS_DIR, or run from a flow with FLOW_DIRECTORY; nothing started"))
+        (refuse "no witness directory: set FLOW_CAPSULE_WITNESS_DIR, or HOME and FLOW_ID (or FLOW_DIRECTORY); nothing started"))
       (reset! witness-dir (str root "/" (witness-name version (java.time.Instant/now))))
       (reset! run-log log)
       (println (str "flow-capsule " @package " | " version

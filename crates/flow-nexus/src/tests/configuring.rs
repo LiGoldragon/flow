@@ -421,6 +421,11 @@ fn each_family_is_its_last_declaration() {
             metaflows: Vec::new(),
             investigation: None,
             default_minutes: crate::store::SEEDED_DEFAULT_MINUTES,
+            counters: meta_signal_flow::ConfigureCounters {
+                logical_delivery: 1,
+                queue_attempt: 3,
+                send_outcome: 1,
+            },
         }
     );
     // An empty declaration empties the family.

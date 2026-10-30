@@ -409,6 +409,11 @@ mod tests {
             metaflows: rows.clone(),
             investigation: None,
             default_minutes: 30,
+            counters: meta_signal_flow::ConfigureCounters {
+                logical_delivery: 1,
+                queue_attempt: 3,
+                send_outcome: 1,
+            },
         };
         let printed = Response::Configuration(snapshot)
             .datomize(vec![])

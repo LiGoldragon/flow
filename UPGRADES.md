@@ -1,3 +1,33 @@
+# Flow 0.40.8
+
+Pins meta-signal-flow 42.0.0 (67deea, branch flow-ethos-76e6eb) and
+signal-flow 34.0.0 (fb13fa). No store migration: every stored record keeps
+its shape and no table is added.
+
+- `Configure.Counters.{ <logical delivery> <queue attempt> <send outcome> }`
+  on the meta socket declares the next id each family allocates, so a new
+  store continues the ids of the store it replaces:
+  `Configure.Counters.{ 120 45 300 }` makes the next logical delivery
+  `logical-delivery-00000000000000000120`, the next queue attempt
+  `queue-attempt-000000000000002d` and the next send outcome
+  `send-outcome-000000000000012c`.
+- It is taken only on an empty store: one whose logical-delivery events
+  and current tables, queue-delivery attempts table and send-outcome table
+  hold no row. Otherwise it answers `ConfigureRejected.CountersRefused.NotEmpty`.
+  A value below its family's counter answers
+  `ConfigureRejected.CountersRefused.Lowered.{ … }`, carrying the counters
+  as they stand. A Counters equal to the counters answers
+  `Configured.Unchanged`. A refused Counters changes nothing.
+- `Configuration` ends with the counters, `{ 1 3 1 }` on a store that has
+  allocated nothing: read them from the old store, then declare them, or
+  higher, on the new one before anything is sent to it.
+- The configuration-only Nexus (`flow-nexus` started to take one Configure)
+  holds no counters: it answers `ConfigureRejected.CountersRefused.NotRunning`.
+- The capsule's witness root defaults to `$HOME/witnesses/<flow id>`, the
+  flow id `FLOW_ID`, else the name of the calling flow's `FLOW_DIRECTORY`.
+  `FLOW_CAPSULE_WITNESS_DIR` still names it outright; without a home or a
+  flow id the capsule starts nothing.
+
 # Flow 0.40.7
 
 Pins signal-flow 34.0.0 (fb13fa, branch flow-ethos-76e6eb) and

@@ -369,6 +369,11 @@ impl Dispatches for RunningNexus {
                             meta_signal_flow::ConfigureRejection::MinutesRefused(refusal),
                         )
                     }
+                    Err(store::StoreError::CountersRefused(refusal)) => {
+                        meta_signal_flow::Response::ConfigureRejected(
+                            meta_signal_flow::ConfigureRejection::CountersRefused(refusal),
+                        )
+                    }
                     Err(error) => meta_signal_flow::Response::Refused(
                         meta_signal_flow::StoreRefusal::Store(error.to_string()),
                     ),

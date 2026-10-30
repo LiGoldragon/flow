@@ -8,6 +8,7 @@ use crate::store::delivery::RegistersDeliveryTables;
 pub(crate) mod address_hold;
 pub mod compaction;
 pub mod context;
+pub(crate) mod counters;
 mod created_pane;
 pub mod delivery;
 pub mod events;
@@ -54,8 +55,9 @@ use std::{
 };
 
 use meta_signal_flow::{
-    ConfigurationChange, ConfigurationSnapshot, ConfigureLeaveOut, ConfigureModel, ConfigureNexus,
-    ConfigureOutcome, ConfigureThreshold,
+    ConfigurationChange, ConfigurationSnapshot, ConfigureCounters, ConfigureLeaveOut,
+    ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureOutcome, ConfigureSendServer,
+    ConfigureThreshold, CountersRefusal,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -3221,6 +3223,8 @@ pub enum StoreError {
     TopicRefused(String),
     #[error("the default Minutes is refused: {0:?}")]
     MinutesRefused(signal_flow::MinutesRefusal),
+    #[error("the counters are refused: {0:?}")]
+    CountersRefused(CountersRefusal),
     #[error("the leave-out default of {entry} cannot be carried under one harness: {reason:?}")]
     LeaveOutUpgrade {
         entry: String,
@@ -3792,6 +3796,42 @@ impl SetsNativeOwnerEnvironmentForTests for FlowStore {
     }
 }
 
+/// Every configuration family a store opened for configuration only
+/// holds: the Configuration snapshot but for the counters, which only the
+/// running store holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfiguredFamilies {
+    pub nexus: ConfigureNexus,
+    pub models: Vec<ConfigureModel>,
+    pub thresholds: Vec<ConfigureThreshold>,
+    pub default_leave_outs: Vec<ConfigureLeaveOut>,
+    pub send_servers: Vec<ConfigureSendServer>,
+    pub metaflows: Vec<ConfigureMetaflow>,
+    pub investigation: Option<Address>,
+    pub default_minutes: i64,
+}
+
+pub trait CompletesSnapshot {
+    /// The Configuration snapshot these families make with the counters.
+    fn with_counters(self, counters: ConfigureCounters) -> ConfigurationSnapshot;
+}
+
+impl CompletesSnapshot for ConfiguredFamilies {
+    fn with_counters(self, counters: ConfigureCounters) -> ConfigurationSnapshot {
+        ConfigurationSnapshot {
+            nexus: self.nexus,
+            models: self.models,
+            thresholds: self.thresholds,
+            default_leave_outs: self.default_leave_outs,
+            send_servers: self.send_servers,
+            metaflows: self.metaflows,
+            investigation: self.investigation,
+            default_minutes: self.default_minutes,
+            counters,
+        }
+    }
+}
+
 /// The one-request configuration listener's view of the same Sema store.
 /// It registers only the rows Configure owns and never seeds the rest of
 /// Flow state or settles launches/deliveries; of the stored families it
@@ -3810,7 +3850,7 @@ pub trait ConfiguresOnlyStore: Sized {
     fn open(path: &Path) -> Result<Self, StoreError>;
     /// The open itself, on the store at `path` and in its place.
     fn open_in_place(path: &Path) -> Result<Self, StoreError>;
-    fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
+    fn configuration_snapshot(&self) -> Result<Option<ConfiguredFamilies>, StoreError>;
     fn configure_change(&self, change: ConfigurationChange)
     -> Result<ConfigureOutcome, StoreError>;
     fn configuration(&self, defaults: &DefaultConfiguration) -> Result<Configuration, StoreError>;
@@ -3914,7 +3954,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         })
     }
 
-    fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError> {
+    fn configuration_snapshot(&self) -> Result<Option<ConfiguredFamilies>, StoreError> {
         FlowStore::meta_configuration_snapshot(&self.engine, &self.meta_configuration_tables)
     }
 
@@ -4850,15 +4890,32 @@ pub(crate) trait ManagesMetaflowState: Sized {
 }
 
 impl ManagesMetaflowState for FlowStore {
+    /// The committed families with the counters as they stand.
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError> {
-        FlowStore::meta_configuration_snapshot(&self.engine, &self.meta_configuration_tables)
+        use counters::ConfiguresCounters;
+        let Some(families) =
+            FlowStore::meta_configuration_snapshot(&self.engine, &self.meta_configuration_tables)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(families.with_counters(self.counters()?)))
     }
 
+    /// The counters are the running store's; every other family is
+    /// declared as a configuration-only store declares it.
     fn configure_change(
         &self,
         change: ConfigurationChange,
     ) -> Result<ConfigureOutcome, StoreError> {
-        FlowStore::configure_meta_change(&self.engine, &self.meta_configuration_tables, change)
+        use counters::ConfiguresCounters;
+        match change {
+            ConfigurationChange::Counters(declared) => self.configure_counters(declared),
+            change => FlowStore::configure_meta_change(
+                &self.engine,
+                &self.meta_configuration_tables,
+                change,
+            ),
+        }
     }
 
     fn configured_threshold(
@@ -7903,7 +7960,7 @@ pub(crate) trait ReadsFlowMemory {
     fn meta_configuration_snapshot(
         engine: &Engine,
         tables: &MetaConfigurationTables,
-    ) -> Result<Option<ConfigurationSnapshot>, StoreError> {
+    ) -> Result<Option<ConfiguredFamilies>, StoreError> {
         let nexus_rows = engine.match_records(QueryPlan::all(tables.nexus))?;
         let marker = nexus_rows.database_marker();
         let nexus = match nexus_rows.records() {
@@ -7980,7 +8037,7 @@ pub(crate) trait ReadsFlowMemory {
             .map(|stored| stored.metaflow.clone())
             .collect::<Vec<_>>();
         metaflows.sort_by_key(|metaflow| FlowStore::address_record_key(&metaflow.address));
-        Ok(Some(ConfigurationSnapshot {
+        Ok(Some(ConfiguredFamilies {
             nexus,
             models,
             thresholds,
@@ -8185,6 +8242,11 @@ pub(crate) trait ReadsFlowMemory {
                     tables.default_minutes,
                     vec![StoredMetaDefaultMinutesConfiguration { default_minutes }],
                 )
+            }
+            // A store opened for configuration only holds no counters; the
+            // running store declares them (`counters::ConfiguresCounters`).
+            ConfigurationChange::Counters(_) => {
+                Err(StoreError::CountersRefused(CountersRefusal::NotRunning))
             }
         }
     }

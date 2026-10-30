@@ -1160,3 +1160,56 @@ impl AllocatesLogicalCursor for FlowStore {
         }
     }
 }
+
+/// The logical delivery ids: a store that has allocated none begins at 1.
+pub(crate) struct LogicalDeliveryIds<'store>(pub(crate) &'store FlowStore);
+
+impl super::counters::CountsIds for LogicalDeliveryIds<'_> {
+    fn hold_writes(&self) -> Option<std::sync::MutexGuard<'_, ()>> {
+        Some(
+            self.0
+                .logical_deliveries
+                .write_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+
+    fn id_counter(&self) -> Result<super::counters::IdCounter, StoreError> {
+        let allocation = self.0.allocate_logical_cursor()?;
+        Ok(super::counters::IdCounter {
+            next: allocation.cursor,
+            written: allocation.existing,
+        })
+    }
+
+    fn ids_recorded(&self) -> Result<bool, StoreError> {
+        let deliveries = &self.0.logical_deliveries;
+        Ok(!self
+            .0
+            .engine
+            .match_records(QueryPlan::all(deliveries.events))?
+            .records()
+            .is_empty()
+            || !self
+                .0
+                .engine
+                .match_records(QueryPlan::all(deliveries.current))?
+                .records()
+                .is_empty())
+    }
+
+    fn declare_next_id(
+        &self,
+        commit: AtomicCommit,
+        counter: &super::counters::IdCounter,
+        next: i64,
+    ) -> Result<AtomicCommit, StoreError> {
+        let row = LogicalDeliveryCounter { next_cursor: next };
+        Ok(if counter.written {
+            commit.mutate(self.0.logical_deliveries.counter, row)
+        } else {
+            commit.assert(self.0.logical_deliveries.counter, row)
+        })
+    }
+}

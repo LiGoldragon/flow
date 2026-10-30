@@ -427,6 +427,64 @@ impl RecordsSendOutcomes for FlowStore {
     }
 }
 
+/// The send outcome ids: a store that has allocated none begins at 1.
+pub(crate) struct SendOutcomeIds<'store>(pub(crate) &'store FlowStore);
+
+impl super::counters::CountsIds for SendOutcomeIds<'_> {
+    fn hold_writes(&self) -> Option<std::sync::MutexGuard<'_, ()>> {
+        Some(
+            self.0
+                .send_outcomes
+                .write_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+
+    fn id_counter(&self) -> Result<super::counters::IdCounter, StoreError> {
+        let counters = self.0.engine.match_records(QueryPlan::key(
+            self.0.send_outcomes.counter,
+            RecordKey::new(COUNTER_KEY),
+        ))?;
+        match counters.records() {
+            [] => Ok(super::counters::IdCounter {
+                next: 1,
+                written: false,
+            }),
+            [counter] => Ok(super::counters::IdCounter {
+                next: i64::try_from(counter.next_id).map_err(|_| StoreError::StateInvariant)?,
+                written: true,
+            }),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn ids_recorded(&self) -> Result<bool, StoreError> {
+        Ok(!self
+            .0
+            .engine
+            .match_records(QueryPlan::all(self.0.send_outcomes.outcomes))?
+            .records()
+            .is_empty())
+    }
+
+    fn declare_next_id(
+        &self,
+        commit: sema_engine::AtomicCommit,
+        counter: &super::counters::IdCounter,
+        next: i64,
+    ) -> Result<sema_engine::AtomicCommit, StoreError> {
+        let row = SendOutcomeCounter {
+            next_id: u64::try_from(next).map_err(|_| StoreError::StateInvariant)?,
+        };
+        Ok(if counter.written {
+            commit.mutate(self.0.send_outcomes.counter, row)
+        } else {
+            commit.assert(self.0.send_outcomes.counter, row)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

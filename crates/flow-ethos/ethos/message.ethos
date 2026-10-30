@@ -1,0 +1,61 @@
+; The shared message contract (bie3-1, ruled): who sent, what was said,
+; and the one vector a waking is. Signal, Meta-Signal and Memory import it
+; as flow_ethos::message. It is its own namespace because its names are the
+; ones library.ethos still gives the shapes the store holds at its current
+; memory versions; the store migration retires those and this file becomes
+; the only message vocabulary.
+Library
+[ crate:[ FlowId Address LogicalDeliveryId Said Delivery ] ] ; imports, old form: the installed ethos-zero refuses the colon form :flow:ethos:[ ... ]
+[ ; Minutes is a whole number of minutes; the wire carries a bare Integer.
+  ; The Nexus owns the rule at admission: above zero, and a deadline that
+  ; fits the clock, else it answers MinutesRefused. Ethos has no syntax for
+  ; a value rule; this comment carries the rule until it has one.
+  Minutes.Integer
+  ; Who sent. Flow is the flow that held the Address when the message was
+  ; admitted, its FlowId resolved by Flow from the calling process, never
+  ; supplied by a caller. Living is the living psyche. Nexus is Flow itself
+  ; speaking: a reminder, a landing's order, a compaction's investigation.
+  ; Captured at admission, never rewritten by refresh or delivery.
+  Sender.[ Flow.{ Address FlowId }
+           Living
+           Nexus ]
+  ; The closed set of request kinds. An Order carries the Minutes after
+  ; which an unanswered order is reminded; a Result names the logical
+  ; delivery of the order it answers; Psyche is the living's words, one or
+  ; more statements.
+  Request.[ Order.{ Minutes String }
+            Question.String
+            Psyche.Vector<Said>
+            Result.{ LogicalDeliveryId String }
+            Notice.String ]
+  ; A message is a request under a priority head: HardAbrupt interrupts,
+  ; MiddleAbrupt arrives at the next tool boundary, Soft waits.
+  Message.[ HardAbrupt.Request
+            MiddleAbrupt.Request
+            Soft.Request ]
+  ; What the recipient reads for one message: its identity, its sender and
+  ; the message. Policy and delivery-attempt data stay in the queue.
+  NativeInput.{ LogicalDeliveryId Sender Message }
+  ; One wake is one vector of NativeInput, oldest first, one top-level
+  ; vector; the pane text is its canonical datom and nothing else.
+  Waking.Vector<NativeInput>
+  ; The durable queue entry: the NativeInput's three parts plus the policy.
+  QueueEntry.{ LogicalDeliveryId Sender Delivery Message }
+  ; The identity of a held record: its family and the key the record had in
+  ; its own table, so an id is made for a family that carried none.
+  HeldId.String
+  ; The closed set of held families: the old record types a migration can
+  ; hold. The same names are the heads of HeldRecord in Memory.
+  HeldFamily.[ MetaflowV5
+               QueuedRequestBeforeLogicalId
+               QueuedRequestBeforeFlow
+               MetaflowBeforeSenders
+               StoredDeliveryRequestV2
+               QueueDeliveryAttemptV4
+               QueueEvidence
+               CurrentLogicalDelivery
+               LogicalDeliveryEvent
+               AddressHoldV3
+               SendOutcome ] ]
+[] ; no kinds
+[] ; no associations

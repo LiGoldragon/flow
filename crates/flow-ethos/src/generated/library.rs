@@ -60,6 +60,22 @@ pub struct Said {
     pub verbatim: Verbatim,
 }
 #[rustfmt::skip]
+pub type Minutes = i64;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Task_Data {
+    pub minutes: Minutes,
+    pub string: String,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Done_Data {
+    pub logical_delivery_id: LogicalDeliveryId,
+    pub string: String,
+}
+#[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Request {
@@ -69,6 +85,8 @@ pub enum Request {
     Psyches(std::vec::Vec<Said>),
     Result(String),
     Notice(String),
+    Task(Task_Data),
+    Done(Done_Data),
 }
 #[rustfmt::skip]
 pub type LogicalDeliveryId = String;

@@ -49,7 +49,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.40.11";
+            version = "0.40.12";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -251,6 +251,8 @@
             "store::tests::v2_launch_outcomes_upgrade_to_their_derived_origin";
           flow-0-34-launch-attempt-carried = context.exactTest "flow-nexus"
             "store::tests::a_0_34_launch_attempt_row_is_carried_with_what_it_named_kept";
+          flow-0-40-4-logical-deliveries-upgrade = context.exactTest "flow-nexus"
+            "store::tests::a_store_from_0_40_4_upgrades_its_v3_logical_deliveries";
           flow-codex-thread-opened-lean-before-attach = context.exactTest "flow-nexus"
             "codex::tests::a_codex_thread_is_opened_lean_and_named_with_no_turn_before_attach";
           flow-codex-opened-name-readback-refused = context.exactTest "flow-nexus"

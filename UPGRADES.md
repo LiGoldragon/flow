@@ -1,3 +1,20 @@
+# Flow 0.40.12
+
+Pins meta-signal-flow 43.0.0 (2f6cb4) and signal-flow 35.0.0 (09ad7a), as
+0.40.11. No new store shape: the store 0.40.11 writes is the store 0.40.12
+writes.
+
+- A store written by 0.40.4 to 0.40.10 opens. Its
+  `flow-nexus-logical-delivery-current` and
+  `flow-nexus-logical-delivery-event` families are v3; 0.40.11 declared v3
+  as their predecessor but tried only v2 and then v1, so such a store was
+  refused at admission with `FamilyIdentityMismatch` (stored
+  `flow-nexus-logical-delivery-current@42cf3d…`, the v3 identity). Each
+  family now upgrades from v3, then v2, then v1, the first whose identity
+  is the stored one; every row is carried to v4 as 0.40.11 describes.
+  Operators take the usual store backup first; a store opened by 0.40.12
+  is not opened by an earlier Flow.
+
 # Flow 0.40.11
 
 Pins meta-signal-flow 43.0.0 (2f6cb4) and signal-flow 35.0.0 (09ad7a). The

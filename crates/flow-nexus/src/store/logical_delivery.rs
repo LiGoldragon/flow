@@ -322,6 +322,81 @@ pub(crate) struct LogicalDeliveryDescriptors {
     pub(crate) events: TableDescriptor<LogicalDeliveryEvent>,
     pub(crate) simplified_replies: TableDescriptor<SimplifiedReplyBinding>,
 }
+/// Each family upgrades from the newest predecessor its stored identity
+/// names: v3 (0.40.4 to 0.40.10), then v2, then v1. A predecessor whose
+/// identity is not the stored one is refused at admission, and the next is
+/// tried.
+trait UpgradesLogicalDeliveryFamilies {
+    fn upgraded_current(
+        engine: &mut Engine,
+        descriptor: TableDescriptor<CurrentLogicalDelivery>,
+    ) -> Result<TableReference<CurrentLogicalDelivery>, StoreError> {
+        let refused = |failure: &dyn std::fmt::Debug| {
+            StoreError::LogicalDeliveryUpgrade(format!("current deliveries: {failure:?}"))
+        };
+        match engine
+            .upgrade_table::<CurrentLogicalDeliveryV3, CurrentLogicalDelivery>(descriptor.clone())
+        {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => return Err(refused(&failure)),
+        }
+        match engine
+            .upgrade_table::<CurrentLogicalDeliveryV2, CurrentLogicalDelivery>(descriptor.clone())
+        {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => return Err(refused(&failure)),
+        }
+        match engine.upgrade_table::<CurrentLogicalDeliveryV1, CurrentLogicalDelivery>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure) => Err(refused(&failure)),
+        }
+    }
+    fn upgraded_events(
+        engine: &mut Engine,
+        descriptor: TableDescriptor<LogicalDeliveryEvent>,
+    ) -> Result<TableReference<LogicalDeliveryEvent>, StoreError> {
+        let refused = |failure: &dyn std::fmt::Debug| {
+            StoreError::LogicalDeliveryUpgrade(format!("delivery events: {failure:?}"))
+        };
+        match engine
+            .upgrade_table::<LogicalDeliveryEventV3, LogicalDeliveryEvent>(descriptor.clone())
+        {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => return Err(refused(&failure)),
+        }
+        match engine
+            .upgrade_table::<LogicalDeliveryEventV2, LogicalDeliveryEvent>(descriptor.clone())
+        {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => return Err(refused(&failure)),
+        }
+        match engine.upgrade_table::<LogicalDeliveryEventV1, LogicalDeliveryEvent>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure) => Err(refused(&failure)),
+        }
+    }
+}
+impl UpgradesLogicalDeliveryFamilies for LogicalDeliveryTables {}
 pub(crate) trait DeclaresLogicalDeliveryTables {
     fn descriptors() -> LogicalDeliveryDescriptors;
     fn register(
@@ -366,64 +441,8 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
     ) -> Result<LogicalDeliveryTables, StoreError> {
         Ok(LogicalDeliveryTables {
             counter: engine.register_table(descriptors.counter)?,
-            // A v2 family upgrades from v2; one refused at admission is a v1
-            // family, which upgrades from v1.
-            current: match engine.upgrade_table::<CurrentLogicalDeliveryV2, CurrentLogicalDelivery>(
-                descriptors.current.clone(),
-            ) {
-                UpgradeOutcome::Upgraded(receipt) => receipt.table(),
-                UpgradeOutcome::AlreadyCurrent(table) => table,
-                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-                UpgradeOutcome::Failed(failure)
-                    if failure.phase() == sema_engine::StoragePhase::Admission =>
-                {
-                    match engine.upgrade_table::<CurrentLogicalDeliveryV1, CurrentLogicalDelivery>(
-                        descriptors.current,
-                    ) {
-                        UpgradeOutcome::Upgraded(receipt) => receipt.table(),
-                        UpgradeOutcome::AlreadyCurrent(table) => table,
-                        UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-                        UpgradeOutcome::Failed(failure) => {
-                            return Err(StoreError::LogicalDeliveryUpgrade(format!(
-                                "current deliveries: {failure:?}"
-                            )));
-                        }
-                    }
-                }
-                UpgradeOutcome::Failed(failure) => {
-                    return Err(StoreError::LogicalDeliveryUpgrade(format!(
-                        "current deliveries: {failure:?}"
-                    )));
-                }
-            },
-            events: match engine.upgrade_table::<LogicalDeliveryEventV2, LogicalDeliveryEvent>(
-                descriptors.events.clone(),
-            ) {
-                UpgradeOutcome::Upgraded(receipt) => receipt.table(),
-                UpgradeOutcome::AlreadyCurrent(table) => table,
-                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-                UpgradeOutcome::Failed(failure)
-                    if failure.phase() == sema_engine::StoragePhase::Admission =>
-                {
-                    match engine.upgrade_table::<LogicalDeliveryEventV1, LogicalDeliveryEvent>(
-                        descriptors.events,
-                    ) {
-                        UpgradeOutcome::Upgraded(receipt) => receipt.table(),
-                        UpgradeOutcome::AlreadyCurrent(table) => table,
-                        UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-                        UpgradeOutcome::Failed(failure) => {
-                            return Err(StoreError::LogicalDeliveryUpgrade(format!(
-                                "delivery events: {failure:?}"
-                            )));
-                        }
-                    }
-                }
-                UpgradeOutcome::Failed(failure) => {
-                    return Err(StoreError::LogicalDeliveryUpgrade(format!(
-                        "delivery events: {failure:?}"
-                    )));
-                }
-            },
+            current: Self::upgraded_current(engine, descriptors.current)?,
+            events: Self::upgraded_events(engine, descriptors.events)?,
             simplified_replies: engine.register_table(descriptors.simplified_replies)?,
             write_gate: Mutex::new(()),
         })

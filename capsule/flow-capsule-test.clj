@@ -13,13 +13,32 @@
   (println (str (if ok "pass" "FAIL") " | " what))
   (when-not ok (swap! failures conj what)))
 
-;; Where witnesses go: FLOW_CAPSULE_WITNESS_DIR as given, else the calling
-;; flow's directory's witnesses; nowhere is named when neither is set.
+;; Where witnesses go: FLOW_CAPSULE_WITNESS_DIR as given, else
+;; $HOME/witnesses/<flow id>, the flow id FLOW_ID or else the name of the
+;; calling flow's FLOW_DIRECTORY; nowhere is named without a home or a
+;; flow id.
 (check "FLOW_CAPSULE_WITNESS_DIR is taken as given"
        (= "/w/given" (flow-capsule/witness-root {"FLOW_CAPSULE_WITNESS_DIR" "/w/given"
-                                                 "FLOW_DIRECTORY" "/f/622382"})))
-(check "else the calling flow's directory names it"
-       (= "/f/622382/witnesses" (flow-capsule/witness-root {"FLOW_DIRECTORY" "/f/622382"})))
+                                                 "HOME" "/h/li"
+                                                 "FLOW_ID" "622382"})))
+(check "else the home's witnesses of the flow FLOW_ID names"
+       (= "/h/li/witnesses/622382" (flow-capsule/witness-root {"HOME" "/h/li"
+                                                               "FLOW_ID" "622382"
+                                                               "FLOW_DIRECTORY" "/p/flows/622382"})))
+(check "the home is read from HOME, not fixed"
+       (= "/h/other/witnesses/622382" (flow-capsule/witness-root {"HOME" "/h/other"
+                                                                  "FLOW_ID" "622382"})))
+(check "FLOW_ID names the flow before FLOW_DIRECTORY"
+       (= "/h/li/witnesses/622382" (flow-capsule/witness-root {"HOME" "/h/li"
+                                                               "FLOW_ID" "622382"
+                                                               "FLOW_DIRECTORY" "/p/flows/a68420"})))
+(check "without FLOW_ID, the calling flow's directory names the flow"
+       (= "/h/li/witnesses/622382" (flow-capsule/witness-root {"HOME" "/h/li"
+                                                               "FLOW_DIRECTORY" "/p/flows/622382/"})))
+(check "without a flow id, no witness root is named"
+       (nil? (flow-capsule/witness-root {"HOME" "/h/li"})))
+(check "without a home, no witness root is named"
+       (nil? (flow-capsule/witness-root {"FLOW_ID" "622382" "FLOW_DIRECTORY" "/p/flows/622382"})))
 (check "with neither, no witness root is named"
        (nil? (flow-capsule/witness-root {})))
 (check "a run's directory is named by the flow version and a timestamp"

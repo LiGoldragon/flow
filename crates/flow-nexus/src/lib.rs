@@ -1362,6 +1362,7 @@ mod tests {
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
     mod configuring;
+    mod counters;
     mod delivery;
     mod ending;
     mod launching_nexus;

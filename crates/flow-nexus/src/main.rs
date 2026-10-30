@@ -586,6 +586,53 @@ mod tests {
         })
     }
 
+    /// A Nexus opened for configuration only holds no counters: a Counters
+    /// sent to it is refused NotRunning and changes nothing.
+    #[test]
+    fn configuration_listener_refuses_counters_as_not_running() {
+        let directory = tempfile::tempdir().expect("temporary home");
+        let path = |name: &str| directory.path().join(name).to_string_lossy().into_owned();
+        let start = flow_ethos::Start {
+            ordinary_socket_path: path("flow.sock"),
+            meta_socket_path: path("runtime/flow-meta.sock"),
+            store_path: path("store/configured.flow.sema"),
+            landing_watch_option: None,
+        };
+        let (store, message_binary, listener) =
+            ConfigurationStartup::open_configuration_listener(&start)
+                .expect("configuration listener opens");
+        let socket = PathBuf::from(&start.meta_socket_path);
+        let server = std::thread::spawn(move || {
+            ConfigurationStartup::serve_one_configuration(
+                listener,
+                &store,
+                &message_binary,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+        });
+        let text = "Configure.Counters.{ 120 45 300 }";
+        let mut budget = Budget {
+            remaining: 65536,
+            reader: ReaderBudget { remaining: 65536 },
+            depth: 0,
+            maximum_depth: 1024,
+        };
+        let query = Potential::<MetaQuery>::from(text)
+            .actualize(&mut budget)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        let mut peer = UnixStream::connect(&socket).expect("connect to config-only listener");
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&query).expect("encode Configure");
+        peer.write_frame(&bytes).expect("send Configure");
+        let reply = peer.read_frame().expect("read Configure response");
+        let response = rkyv::from_bytes::<MetaResponse, rkyv::rancor::Error>(&reply)
+            .expect("decode Configure response");
+        assert_eq!(
+            response.datomize(vec![]).protosize().compact(),
+            "ConfigureRejected.CountersRefused.NotRunning"
+        );
+        assert!(server.join().expect("server thread joins").is_err());
+    }
+
     #[test]
     fn configuration_listener_commits_one_typed_change_and_exits() {
         let directory = tempfile::tempdir().expect("temporary home");

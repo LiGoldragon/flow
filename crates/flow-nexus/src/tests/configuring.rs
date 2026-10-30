@@ -721,7 +721,10 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     let fixture = ConfiguredStore::new();
     let nexus = fixture.open();
     let seeded = ask(&nexus, "Configuration");
-    assert!(seeded.ends_with(" None 30 }"), "seeded at 30: {seeded}");
+    assert!(
+        seeded.ends_with(" None 30 { 1 3 1 } }"),
+        "seeded at 30: {seeded}"
+    );
     assert_eq!(
         ask(&nexus, "Configure.DefaultMinutes.45"),
         "Configured.Replaced"
@@ -741,9 +744,53 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
         );
     }
     let declared = ask(&nexus, "Configuration");
-    assert!(declared.ends_with(" None 45 }"), "{declared}");
+    assert!(declared.ends_with(" None 45 { 1 3 1 } }"), "{declared}");
     drop(nexus);
     let reopened = fixture.open();
     let kept = ask(&reopened, "Configuration");
-    assert!(kept.ends_with(" None 45 }"), "kept across a reopen: {kept}");
+    assert!(
+        kept.ends_with(" None 45 { 1 3 1 } }"),
+        "kept across a reopen: {kept}"
+    );
+}
+
+/// The counters a Configure declared are kept in Memory: a reopen reads
+/// them back as the snapshot's last field and allocates from them.
+#[test]
+fn configured_counters_are_kept_across_a_reopen() {
+    use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+    use protos::{Compactable, Protosizable, ReaderBudget};
+    let ask = |nexus: &RunningNexus, text: &str| -> String {
+        let mut budget = Budget {
+            remaining: 65536,
+            reader: ReaderBudget { remaining: 65536 },
+            depth: 0,
+            maximum_depth: 1024,
+        };
+        let query = Potential::<meta_signal_flow::Query>::from(text)
+            .actualize(&mut budget)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        nexus
+            .dispatch_meta(query)
+            .datomize(vec![])
+            .protosize()
+            .compact()
+    };
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    assert_eq!(
+        ask(&nexus, "Configure.Counters.{ 120 45 300 }"),
+        "Configured.Replaced"
+    );
+    drop(nexus);
+    let reopened = fixture.open();
+    let kept = ask(&reopened, "Configuration");
+    assert!(
+        kept.ends_with(" None 30 { 120 45 300 } }"),
+        "kept across a reopen: {kept}"
+    );
+    assert_eq!(
+        ask(&reopened, "Configure.Counters.{ 119 45 300 }"),
+        "ConfigureRejected.CountersRefused.Lowered.{ 120 45 300 }"
+    );
 }

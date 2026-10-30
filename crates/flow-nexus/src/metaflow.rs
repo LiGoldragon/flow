@@ -16,11 +16,24 @@ use signal_flow::{IdentifyThread_Data, Process, Query, Refusal, Response};
 /// A metaflow dispatch's answer.
 pub(crate) struct MetaflowAnswer {
     pub response: Response,
+    pub private_response: signal_flow::PrivateSendResponse,
+}
+
+impl From<signal_flow::PrivateSendResponse> for MetaflowAnswer {
+    fn from(private_response: signal_flow::PrivateSendResponse) -> Self {
+        Self {
+            response: crate::message_projection::visible_send_response(&private_response),
+            private_response,
+        }
+    }
 }
 
 impl From<Response> for MetaflowAnswer {
     fn from(response: Response) -> Self {
-        Self { response }
+        Self {
+            response,
+            private_response: signal_flow::PrivateSendResponse::Refused(Refusal::NotMessage),
+        }
     }
 }
 
@@ -165,11 +178,13 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     self.rest_ended_awake(&request.lock.address);
                     let abrupt = !matches!(&request.message, signal_flow::Message::Soft(_));
                     if abrupt && request.delivery == signal_flow::Delivery::Queue {
-                        return Response::Failed(signal_flow::SendFailure {
-                            logical_delivery_id_option: None,
-                            send_failure_reason: signal_flow::SendFailureReason::QueueNotPermitted,
-                        })
-                        .into();
+                        let private =
+                            signal_flow::PrivateSendResponse::Failed(signal_flow::SendFailure {
+                                logical_delivery_id_option: None,
+                                send_failure_reason:
+                                    signal_flow::SendFailureReason::QueueNotPermitted,
+                            });
+                        return private.into();
                     }
                     let direct = abrupt && request.delivery == signal_flow::Delivery::Wake;
                     // A metaflow another holds takes the request into its
@@ -186,17 +201,20 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     let mut response: MetaflowAnswer = match self.store.queue_metaflow(request, now)
                     {
                         Ok(response) => response.into(),
-                        Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
+                        Err(error) => signal_flow::PrivateSendResponse::Refused(Refusal::Store(
+                            error.to_string(),
+                        ))
+                        .into(),
                     };
                     drop(_turn);
                     if direct {
-                        response.response = match response.response {
-                            Response::SendAccepted(accepted) => {
+                        let private = match response.private_response {
+                            signal_flow::PrivateSendResponse::SendAccepted(accepted) => {
                                 self.complete_direct_send(&recipient, accepted.logical_delivery_id)
-                                    .response
+                                    .private_response
                             }
-                            Response::Refused(refusal) => {
-                                Response::Failed(signal_flow::SendFailure {
+                            signal_flow::PrivateSendResponse::Refused(refusal) => {
+                                signal_flow::PrivateSendResponse::Failed(signal_flow::SendFailure {
                                     logical_delivery_id_option: None,
                                     send_failure_reason: signal_flow::SendFailureReason::Refused(
                                         refusal,
@@ -205,13 +223,16 @@ impl DispatchesMetaflowPeer for RunningNexus {
                             }
                             other => other,
                         };
+                        response.response =
+                            crate::message_projection::visible_send_response(&private);
+                        response.private_response = private;
                     }
                     return match self.store.record_send_outcome(
                         Some(peer.clone()),
                         Some(sender),
                         Some(recipient),
                         digest,
-                        response.response.clone(),
+                        response.private_response.clone(),
                     ) {
                         Ok(_) => response,
                         Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),

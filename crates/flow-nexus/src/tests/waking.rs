@@ -473,7 +473,7 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
         logical_delivery_id: "logical-delivery-00000000000000000001".into(),
         sent_by: from(Aspect::Psyche, Layer::Primary),
         delivery: Delivery::Wake,
-        message: Message::MiddleAbrupt(Request::Task(flow_ethos::Task_Data {
+        message: Message::MiddleAbrupt(Request::Task(flow_ethos::AnswerableTask {
             minutes: 30,
             string: "Draft the proposal.".into(),
         })),
@@ -491,10 +491,12 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
         logical_delivery_id: "logical-delivery-00000000000000000003".into(),
         sent_by: from(Aspect::Mind, Layer::Secondary),
         delivery: Delivery::Wake,
-        message: Message::Soft(Request::Done(flow_ethos::Done_Data {
-            logical_delivery_id: "logical-delivery-00000000000000000000".into(),
-            string: "Proposal drafted.".into(),
-        })),
+        message: Message::Soft(Request::Done(flow_ethos::DonePayload::Historical(
+            flow_ethos::Historical_Data {
+                logical_delivery_id: "logical-delivery-00000000000000000000".into(),
+                string: "Proposal drafted.".into(),
+            },
+        ))),
     };
     let cohort = vec![task, reminder, done];
     let mut idle = stored(&fixture, Layer::Secondary);
@@ -509,21 +511,18 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
         depth: 0,
         maximum_depth: 1024,
     };
-    let inputs = Potential::<Vec<signal_flow::NativeInput>>::from(typed.clone())
+    let inputs = Potential::<Vec<signal_flow::VisibleNativeInput>>::from(typed.clone())
         .actualize(&mut budget)
         .unwrap_or_else(|error| panic!("{typed}: {error:?}"));
+    use crate::message_projection::ProjectsQueueEntry;
     let expected = cohort
         .iter()
-        .map(|entry| signal_flow::NativeInput {
-            logical_delivery_id: entry.logical_delivery_id.clone(),
-            sent_by: entry.sent_by.clone(),
-            message: entry.message.clone(),
-        })
+        .map(|entry| entry.visible_input(&address(Layer::Secondary)))
         .collect::<Vec<_>>();
     assert_eq!(inputs, expected, "{typed}");
     assert_eq!(
         typed,
-        cohort.prompt_text(),
+        cohort.prompt_text(&address(Layer::Secondary)),
         "the receipt text is what was typed"
     );
 }
@@ -654,7 +653,7 @@ fn a_resting_seat_with_work_queued_is_handed_the_oldest_request_and_stays_awake(
         vec![],
         vec![
             Request::Notice("first".into()),
-            Request::Result("second".into()),
+            Request::Result(flow_ethos::ResultPayload::Historical("second".into())),
         ],
     ));
 
@@ -669,7 +668,7 @@ fn a_resting_seat_with_work_queued_is_handed_the_oldest_request_and_stays_awake(
         kept.queue,
         vec![
             Request::Notice("first".into()),
-            Request::Result("second".into())
+            Request::Result(flow_ethos::ResultPayload::Historical("second".into()))
         ]
         .unsent()
     );
@@ -688,7 +687,7 @@ fn explicit_delivery_hands_over_every_queued_request_in_order() {
     );
     claude_seat(&fixture, 40_000);
     let first = Request::Notice("first".into()).unsent();
-    let second = Request::Result("second".into()).unsent();
+    let second = Request::Result(flow_ethos::ResultPayload::Historical("second".into())).unsent();
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address(Layer::Secondary),
         state: State::Awake(CLAUDE_SEAT.into()),
@@ -916,7 +915,10 @@ fn a_fresh_wake_composes_modules_and_queued_work_in_the_first_prompt() {
         Request::Order("first".into()),
         Request::Question("second".into()),
     ];
-    let text = queue.to_vec().unsent().prompt_text();
+    let text = queue
+        .to_vec()
+        .unsent()
+        .prompt_text(&address(Layer::Secondary));
     let seat = FreshSeat {
         address: address(Layer::Secondary),
         launch_request_id: "wake-0-1".into(),
@@ -1454,7 +1456,7 @@ fn a_simplified_wake_sends_the_first_soft_request_without_an_empty_turn() {
         past: vec![],
         queue: vec![],
     });
-    let signal_flow::Response::SendAccepted(input) = fixture
+    let signal_flow::PrivateSendResponse::SendAccepted(input) = fixture
         .nexus
         .store
         .accept_logical_delivery(
@@ -1528,7 +1530,7 @@ fn a_simplified_startup_leaves_its_second_request_ordered() {
         queue: vec![],
     });
     let accept = |body: &str| {
-        let signal_flow::Response::SendAccepted(accepted) = fixture
+        let signal_flow::PrivateSendResponse::SendAccepted(accepted) = fixture
             .nexus
             .store
             .accept_logical_delivery(
@@ -1619,7 +1621,9 @@ fn a_nexus_start_wakes_a_seat_whose_wake_did_not_finish() {
         Layer::Tertiary,
         State::Asleep,
         vec![],
-        vec![Request::Result("r".into())],
+        vec![Request::Result(flow_ethos::ResultPayload::Historical(
+            "r".into(),
+        ))],
     ));
     // An Order queued for a Primary no launch names.
     let primary = metaflow(
@@ -2086,7 +2090,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     };
     let oversized = Request::Order("x".repeat(crate::sending::MAX_SEND_PAYLOAD_BYTES + 1));
     let expected_size = oversized.native_prompt_bytes(&sender_address);
-    let refusal = Response::Refused(signal_flow::Refusal::Oversized(
+    let refusal = Response::SendRefused(signal_flow::VisibleRefusal::Oversized(
         signal_flow::SendPayloadSize {
             actual_bytes: expected_size as i64,
             maximum_bytes: crate::sending::MAX_SEND_PAYLOAD_BYTES as i64,
@@ -2157,7 +2161,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         }),
         Some(&message),
     );
-    let Response::SendAccepted(acceptance) = answer.response else {
+    let signal_flow::PrivateSendResponse::SendAccepted(acceptance) = answer.private_response else {
         panic!("delivery is accepted with a logical identity")
     };
 
@@ -2184,7 +2188,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     assert!(
         turns
             .iter()
-            .any(|turn| turn.contains(&[sent.clone()].prompt_text())),
+            .any(|turn| turn.contains(&[sent.clone()].prompt_text(&address(Layer::Secondary)))),
         "{turns:?}"
     );
 }
@@ -2277,9 +2281,9 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
         fixture
             .nexus
             .deliver_all(empty.clone(), Some(&sender_process)),
-        Response::Drained(signal_flow::DrainOutcome {
+        Response::Drained(signal_flow::VisibleDrainOutcome {
             address: empty.clone(),
-            drain_state: signal_flow::DrainState::Delivered,
+            visible_drain_state: signal_flow::VisibleDrainState::Delivered,
         })
     );
 
@@ -2297,11 +2301,9 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
         fixture
             .nexus
             .deliver_all(queued.clone(), Some(&sender_process)),
-        Response::Drained(signal_flow::DrainOutcome {
+        Response::Drained(signal_flow::VisibleDrainOutcome {
             address: queued.clone(),
-            drain_state: signal_flow::DrainState::Held(vec![
-                request.clone().unsent().logical_delivery_id
-            ]),
+            visible_drain_state: signal_flow::VisibleDrainState::Held,
         })
     );
     assert_eq!(
@@ -2612,18 +2614,15 @@ fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
         panic!("the identified seat locks its recipient")
     };
     let order = Request::Order("Run the tier tests.".into());
-    let response = fixture
-        .nexus
-        .dispatch_metaflow_peer(
-            signal_flow::Query::Deliver(Deliver_Data {
-                lock,
-                delivery: Delivery::Wake,
-                message: Message::Soft(order.clone()),
-            }),
-            Some(&message),
-        )
-        .response;
-    let Response::SendAccepted(accepted) = response else {
+    let response = fixture.nexus.dispatch_metaflow_peer(
+        signal_flow::Query::Deliver(Deliver_Data {
+            lock,
+            delivery: Delivery::Wake,
+            message: Message::Soft(order.clone()),
+        }),
+        Some(&message),
+    );
+    let signal_flow::PrivateSendResponse::SendAccepted(accepted) = response.private_response else {
         panic!("the identified sender's message is admitted")
     };
     let metaflow = stored(&fixture, Layer::Secondary);
@@ -3383,7 +3382,10 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         leave_outs_option: None,
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
-        prompt: queue.clone().unsent().prompt_text(),
+        prompt: queue
+            .clone()
+            .unsent()
+            .prompt_text(&address(Layer::Secondary)),
     }
     .fresh_profile();
     let title = fresh.native_title(FRESH_CODEX_FLOW).unwrap();
@@ -3598,7 +3600,9 @@ fn a_refused_wake_keeps_its_queue_and_each_delivery_names_why() {
                 )
                 .unwrap()
             {
-                signal_flow::Response::SendAccepted(accepted) => accepted.logical_delivery_id,
+                signal_flow::PrivateSendResponse::SendAccepted(accepted) => {
+                    accepted.logical_delivery_id
+                }
                 other => panic!("the send is accepted: {other:?}"),
             }
         })

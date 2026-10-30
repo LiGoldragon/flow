@@ -9,9 +9,10 @@
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::Dispatches;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+use crate::message_projection::ProjectsQueueEntry;
 use meta_signal_flow::{
-    Content, Delivery, DeliveryGrade, DeliveryRejection, DeliveryRequest, InterruptWitness, Letter,
-    Message, Query as MetaQuery, Response as MetaResponse, Sender,
+    Content, DeliveryGrade, DeliveryRejection, DeliveryRequest, InterruptWitness, Letter, Message,
+    Query as MetaQuery, Response as MetaResponse,
 };
 use signal_flow::{FlowLifecycle, HarnessKind};
 use std::fs;
@@ -90,8 +91,12 @@ impl NexusFixture {
                 delivery_id: delivery_id.into(),
                 flow_id: "908786".into(),
                 message: Message::Soft(Letter {
-                    message_id: super::FIXTURE_MESSAGE_ID.into(),
-                    sender: Sender::Owner,
+                    visible_sender: signal_flow::VisibleSender::Nexus,
+                    address: signal_flow::Address {
+                        aspect: signal_flow::Aspect::Psyche,
+                        topic: "flow".into(),
+                        layer: signal_flow::Layer::Secondary,
+                    },
                     content: Content::Text(text.into()),
                 }),
             }))
@@ -242,10 +247,8 @@ impl NexusFixture {
     }
 }
 
-fn delivered(delivery_id: &str, delivery_grade: DeliveryGrade) -> MetaResponse {
-    MetaResponse::Delivered(Delivery {
-        delivery_id: delivery_id.into(),
-        flow_id: "908786".into(),
+fn delivered(_delivery_id: &str, delivery_grade: DeliveryGrade) -> MetaResponse {
+    MetaResponse::Delivered(meta_signal_flow::VisibleDelivery {
         interrupt_witness: InterruptWitness::NotRequested,
         delivery_grade,
     })
@@ -345,8 +348,12 @@ fn a_stalled_prompt_left_in_the_composer_is_submitted() {
 
 fn hard_abrupt(text: &str) -> Message {
     Message::HardAbrupt(Letter {
-        message_id: super::FIXTURE_MESSAGE_ID.into(),
-        sender: Sender::Owner,
+        visible_sender: signal_flow::VisibleSender::Nexus,
+        address: signal_flow::Address {
+            aspect: signal_flow::Aspect::Psyche,
+            topic: "flow".into(),
+            layer: signal_flow::Layer::Secondary,
+        },
         content: Content::Text(text.into()),
     })
 }
@@ -376,9 +383,7 @@ fn a_letter_an_interrupt_put_back_is_taken_out_and_the_hard_abrupt_lands() {
                 flow_id: "908786".into(),
                 message: hard_abrupt("stop"),
             })),
-        MetaResponse::Delivered(Delivery {
-            delivery_id: "hard-restored".into(),
-            flow_id: "908786".into(),
+        MetaResponse::Delivered(meta_signal_flow::VisibleDelivery {
             interrupt_witness: InterruptWitness::Observed,
             delivery_grade: DeliveryGrade::Transported,
         })
@@ -389,7 +394,7 @@ fn a_letter_an_interrupt_put_back_is_taken_out_and_the_hard_abrupt_lands() {
     assert_eq!(presses.len(), 2);
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("HardAbrupt.{ m-7f3a2c Owner Text.stop }")
+        Some("HardAbrupt.{ Nexus { Psyche flow Secondary } Text.stop }")
     );
 }
 
@@ -419,9 +424,7 @@ fn a_letter_claudes_interrupt_put_back_is_taken_out_by_one_ctrl_c() {
                 flow_id: "908786".into(),
                 message: hard_abrupt("stop"),
             })),
-        MetaResponse::Delivered(Delivery {
-            delivery_id: "claude-restored".into(),
-            flow_id: "908786".into(),
+        MetaResponse::Delivered(meta_signal_flow::VisibleDelivery {
             interrupt_witness: InterruptWitness::Observed,
             delivery_grade: DeliveryGrade::Transported,
         })
@@ -434,7 +437,7 @@ fn a_letter_claudes_interrupt_put_back_is_taken_out_by_one_ctrl_c() {
     assert_eq!(fixture.composer_holds(), None, "the pane is free again");
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("HardAbrupt.{ m-7f3a2c Owner Text.stop }")
+        Some("HardAbrupt.{ Nexus { Psyche flow Secondary } Text.stop }")
     );
 }
 
@@ -463,9 +466,7 @@ fn a_prompt_claudes_interrupt_put_back_is_submitted_again_and_the_hard_abrupt_fo
                 flow_id: "908786".into(),
                 message: hard_abrupt("stop"),
             })),
-        MetaResponse::Delivered(Delivery {
-            delivery_id: "claude-cancelled".into(),
-            flow_id: "908786".into(),
+        MetaResponse::Delivered(meta_signal_flow::VisibleDelivery {
             interrupt_witness: InterruptWitness::Observed,
             delivery_grade: DeliveryGrade::Transported,
         })
@@ -482,7 +483,7 @@ fn a_prompt_claudes_interrupt_put_back_is_submitted_again_and_the_hard_abrupt_fo
     assert_eq!(fixture.composer_holds(), None, "the pane is free again");
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("HardAbrupt.{ m-7f3a2c Owner Text.stop }")
+        Some("HardAbrupt.{ Nexus { Psyche flow Secondary } Text.stop }")
     );
 }
 
@@ -563,13 +564,25 @@ fn a_native_input_matching_a_letter_shaped_prompt_is_submitted_again_never_retra
     fixture.interrupt_restores(FixtureComposer::Claude, text);
     fixture.register_under(FixtureComposer::Claude);
     let message = Message::HardAbrupt(Letter {
-        message_id: "logical-delivery-00000000000000000002".into(),
-        sender: Sender::Owner,
-        content: Content::Waking(vec![signal_flow::NativeInput {
-            logical_delivery_id: "logical-delivery-00000000000000000002".into(),
-            sent_by: signal_flow::SentBy::Flow,
-            message: signal_flow::Message::HardAbrupt(signal_flow::Request::Order(text.into())),
-        }]),
+        visible_sender: signal_flow::VisibleSender::Nexus,
+        address: signal_flow::Address {
+            aspect: signal_flow::Aspect::Psyche,
+            topic: "flow".into(),
+            layer: signal_flow::Layer::Secondary,
+        },
+        content: Content::Waking(vec![
+            signal_flow::QueueEntry {
+                logical_delivery_id: "logical-delivery-00000000000000000002".into(),
+                sent_by: signal_flow::SentBy::Flow,
+                delivery: signal_flow::Delivery::Wake,
+                message: signal_flow::Message::HardAbrupt(signal_flow::Request::Order(text.into())),
+            }
+            .visible_input(&signal_flow::Address {
+                aspect: signal_flow::Aspect::Psyche,
+                topic: "flow".into(),
+                layer: signal_flow::Layer::Secondary,
+            }),
+        ]),
     });
 
     assert!(matches!(
@@ -613,6 +626,6 @@ fn a_prompt_codexs_interrupt_put_back_is_submitted_again() {
     );
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("HardAbrupt.{ m-7f3a2c Owner Text.stop }")
+        Some("HardAbrupt.{ Nexus { Psyche flow Secondary } Text.stop }")
     );
 }

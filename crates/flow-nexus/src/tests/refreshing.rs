@@ -326,7 +326,7 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
                 SendRequest {
                     recipient: Recipient::Address(seat_address()),
                     delivery: Delivery::Wake,
-                    message: Message::Soft(request.clone()),
+                    sendable_message: super::sendable_message(Message::Soft(request.clone())),
                 },
                 Some(peer),
             );
@@ -513,7 +513,9 @@ fn refreshable_with_staged_successor(
             logical_delivery_id: "refreshing-successor-0".into(),
             sent_by: SentBy::Unknown,
             delivery,
-            message: Message::Soft(Request::Order("For the successor.".into())),
+            message: signal_flow::Message::Soft(signal_flow::Request::Order(
+                "For the successor.".into(),
+            )),
         }],
     });
     owe_staged_successor(&fixture);
@@ -636,7 +638,7 @@ fn an_abrupt_send_to_a_held_metaflow_is_queued_never_refused_busy() {
         SendRequest {
             recipient: Recipient::Address(seat_address()),
             delivery: Delivery::Wake,
-            message: Message::HardAbrupt(request.clone()),
+            sendable_message: super::sendable_message(Message::HardAbrupt(request.clone())),
         },
         Some(&peer),
     );
@@ -668,7 +670,7 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
     use crate::store::queue_delivery::{
         AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery,
     };
-    use signal_flow::{DeliveryState, HarnessKind};
+    use signal_flow::HarnessKind;
     #[derive(Clone, Copy, Debug)]
     enum Busy {
         QueueNotEmpty,
@@ -744,14 +746,20 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
                 SendRequest {
                     recipient: Recipient::Address(seat_address()),
                     delivery: Delivery::Wake,
-                    message: abrupt(Request::Order("Arrived while busy.".into())),
+                    sendable_message: super::sendable_message(abrupt(Request::Order(
+                        "Arrived while busy.".into(),
+                    ))),
                 },
                 Some(&peer),
             );
             let Response::SendAccepted(acceptance) = &sent.response else {
                 panic!("{busy:?}: {:?}", sent.response)
             };
-            assert_eq!(acceptance.delivery_state, DeliveryState::Queued, "{busy:?}");
+            assert_eq!(
+                acceptance.visible_delivery_state,
+                signal_flow::VisibleDeliveryState::Queued,
+                "{busy:?}"
+            );
             assert_eq!(stored(&fixture).queue.len(), queued_before + 1, "{busy:?}");
         }
     }
@@ -778,7 +786,7 @@ fn a_send_to_a_primary_is_accepted_from_a_primary_and_from_a_secondary() {
     for sender in [primary("other"), seat_address()] {
         for request in [
             Request::Order("An order.".into()),
-            Request::Result("A result.".into()),
+            Request::Result(flow_ethos::ResultPayload::Historical("A result.".into())),
         ] {
             let response = fixture
                 .nexus
@@ -792,7 +800,7 @@ fn a_send_to_a_primary_is_accepted_from_a_primary_and_from_a_secondary() {
                 )
                 .expect("accepted");
             assert!(
-                matches!(response, Response::SendAccepted(_)),
+                matches!(response, signal_flow::PrivateSendResponse::SendAccepted(_)),
                 "{sender:?}: {response:?}"
             );
         }
@@ -923,7 +931,9 @@ fn a_successor_that_cannot_start_answers_refresh_s_own_rejection() {
         logical_delivery_id: "refreshing-wake-0".into(),
         sent_by: SentBy::Unknown,
         delivery: Delivery::Wake,
-        message: Message::Soft(Request::Order("Wake the successor.".into())),
+        message: signal_flow::Message::Soft(signal_flow::Request::Order(
+            "Wake the successor.".into(),
+        )),
     }];
     fixture.nexus.store.seed_metaflow(waking);
     // Declared, with no model configured for its layer and aspect.

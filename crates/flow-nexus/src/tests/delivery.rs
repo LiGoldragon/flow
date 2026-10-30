@@ -10,15 +10,19 @@ use crate::{Dispatches, peer::AdmitsMetaPeer};
 use meta_signal_flow::{
     BodyRefusal, CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Content, Delivery,
     DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommand, InterruptWitness, Letter,
-    Message, Query as MetaQuery, Response as MetaResponse, Sender,
+    Message, Query as MetaQuery, Response as MetaResponse,
 };
 use signal_flow::{AgentObservation, AgentState, FlowLifecycle, ObserveSelection, Query, Response};
 use std::fs;
 
 fn letter(text: &str) -> Letter {
     Letter {
-        message_id: super::FIXTURE_MESSAGE_ID.into(),
-        sender: Sender::Flow("e167d8".into()),
+        visible_sender: signal_flow::VisibleSender::Nexus,
+        address: signal_flow::Address {
+            aspect: signal_flow::Aspect::Psyche,
+            topic: "flow".into(),
+            layer: signal_flow::Layer::Secondary,
+        },
         content: Content::Text(text.into()),
     }
 }
@@ -145,16 +149,14 @@ fn soft_waits_for_a_resting_recipient_and_types_nothing_to_a_working_one() {
     fixture.register_with(FlowLifecycle::Active);
     assert_eq!(
         fixture.deliver("soft-2", Message::Soft(letter("when you rest"))),
-        MetaResponse::Delivered(Delivery {
-            delivery_id: "soft-2".into(),
-            flow_id: "908786".into(),
+        MetaResponse::Delivered(meta_signal_flow::VisibleDelivery {
             interrupt_witness: InterruptWitness::NotRequested,
             delivery_grade: DeliveryGrade::Presented,
         })
     );
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("Soft.{ m-7f3a2c Flow.e167d8 Text.«when you rest» }")
+        Some("Soft.{ Nexus { Psyche flow Secondary } Text.«when you rest» }")
     );
 }
 
@@ -234,9 +236,7 @@ fn hard_abrupt_interrupts_a_working_recipient_before_typing() {
     fixture.register_with(FlowLifecycle::Active);
     assert_eq!(
         fixture.deliver("hard-1", Message::HardAbrupt(letter("stop the build"))),
-        MetaResponse::Delivered(Delivery {
-            delivery_id: "hard-1".into(),
-            flow_id: "908786".into(),
+        MetaResponse::Delivered(meta_signal_flow::VisibleDelivery {
             interrupt_witness: InterruptWitness::Observed,
             delivery_grade: DeliveryGrade::Transported,
         })
@@ -249,7 +249,7 @@ fn hard_abrupt_interrupts_a_working_recipient_before_typing() {
         vec![
             "--session messaging-build pane send-keys w1:p3 esc".to_owned(),
             "--session messaging-build agent wait w1:p3 --until idle --until done --until blocked --timeout 3000".to_owned(),
-            "--session messaging-build agent prompt w1:p3 HardAbrupt.{ m-7f3a2c Flow.e167d8 Text.«stop the build» }".to_owned(),
+            "--session messaging-build agent prompt w1:p3 HardAbrupt.{ Nexus { Psyche flow Secondary } Text.«stop the build» }".to_owned(),
         ]
     );
 }
@@ -281,7 +281,7 @@ fn hard_abrupt_presses_the_interrupt_again_while_the_recipient_still_works() {
             wait,
             press,
             wait,
-            "--session messaging-build agent prompt w1:p3 HardAbrupt.{ m-7f3a2c Flow.e167d8 Text.«stop now» }",
+            "--session messaging-build agent prompt w1:p3 HardAbrupt.{ Nexus { Psyche flow Secondary } Text.«stop now» }",
         ]
     );
 }
@@ -330,11 +330,15 @@ fn bodies_carrying_commands_or_keys_are_refused_and_nothing_is_typed() {
         ("!ls -la", BodyRefusal::HarnessCommand("!ls -la".into())),
         (
             "end \u{1b}[201~ of paste",
-            BodyRefusal::ControlCharacter("MiddleAbrupt.{ m-7f3a2c Owner Text.«end ".len() as i64),
+            BodyRefusal::ControlCharacter(
+                "MiddleAbrupt.{ Nexus { Psyche flow Secondary } Text.«end ".len() as i64,
+            ),
         ),
         (
             "one\rtwo",
-            BodyRefusal::ControlCharacter("MiddleAbrupt.{ m-7f3a2c Owner Text.«one".len() as i64),
+            BodyRefusal::ControlCharacter(
+                "MiddleAbrupt.{ Nexus { Psyche flow Secondary } Text.«one".len() as i64,
+            ),
         ),
         ("   ", BodyRefusal::EmptyBody),
     ] {
@@ -377,7 +381,7 @@ fn a_path_and_a_later_command_line_are_ordinary_text() {
                 flow_id: "908786".into(),
                 message: middle_abrupt(text),
             })),
-            MetaResponse::Vetted("908786".into())
+            MetaResponse::Vetted
         );
         assert_eq!(
             fixture.send(text),

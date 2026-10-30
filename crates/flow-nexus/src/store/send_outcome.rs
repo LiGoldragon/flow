@@ -3,14 +3,15 @@
 use super::send_v31::{RefusalV31, SendAcceptanceV31, SendFailureV31};
 use super::send_v32::{RefusalV32, SendAcceptanceV32, SendFailureV32};
 use super::send_v34::{RefusalV34, SendAcceptanceV34, SendFailureV34};
+use super::send_v41::{RefusalV41, SendAcceptanceV41, SendFailureV41};
 use super::*;
 use meta_signal_flow::{OrdinarySendOutcome, SendOutcomeRecord};
-use signal_flow::{Address, Process, Response};
+use signal_flow::{Address, PrivateSendResponse, Process};
 
 pub(super) const COUNTER_FAMILY: &str = "flow-nexus-send-outcome-counter";
 pub(super) const COUNTER_SCHEMA: &str = "flow-nexus-send-outcome-counter-v1";
 pub(super) const OUTCOME_FAMILY: &str = "flow-nexus-send-outcome";
-pub(super) const OUTCOME_SCHEMA: &str = "flow-nexus-send-outcome-v5";
+pub(super) const OUTCOME_SCHEMA: &str = "flow-nexus-send-outcome-v6";
 
 const COUNTER_KEY: &str = "counter";
 const SEND_OUTCOME_COUNTER_TABLE_NAME: TableName =
@@ -51,11 +52,73 @@ impl EngineRecord for StoredSendOutcome {
 
 impl MemoryDefinition for StoredSendOutcome {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(5)
+        MemoryVersion::new(6)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(OUTCOME_SCHEMA)
+    }
+}
+
+/// The complete v0.41 send-outcome row. It is frozen because the private
+/// refusal vocabulary gained typed answer-correlation outcomes in v0.42.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OrdinarySendOutcomeV5 {
+    Accepted(SendAcceptanceV41),
+    Refused(RefusalV41),
+    PriorAdmission(meta_signal_flow::PriorSendOutcome),
+    Sent(signal_flow::SendReceipt),
+    Failed(SendFailureV41),
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SendOutcomeRecordV5 {
+    send_outcome_id: String,
+    process_option: Option<Process>,
+    first_address_option: Option<Address>,
+    second_address_option: Option<Address>,
+    request_digest: String,
+    ordinary_send_outcome: OrdinarySendOutcomeV5,
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredSendOutcomeV5 {
+    record: SendOutcomeRecordV5,
+}
+impl EngineRecord for StoredSendOutcomeV5 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.record.send_outcome_id.clone())
+    }
+}
+impl MemoryDefinition for StoredSendOutcomeV5 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(5)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-send-outcome-v5")
+    }
+}
+impl UpgradeFrom<StoredSendOutcomeV5> for StoredSendOutcome {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: StoredSendOutcomeV5) -> Decision<Self, Self::Refusal> {
+        let old = previous.record;
+        let ordinary_send_outcome = match old.ordinary_send_outcome {
+            OrdinarySendOutcomeV5::Accepted(value) => OrdinarySendOutcome::Accepted(value.into()),
+            OrdinarySendOutcomeV5::Refused(value) => OrdinarySendOutcome::Refused(value.into()),
+            OrdinarySendOutcomeV5::PriorAdmission(value) => {
+                OrdinarySendOutcome::PriorAdmission(value)
+            }
+            OrdinarySendOutcomeV5::Sent(value) => OrdinarySendOutcome::Sent(value),
+            OrdinarySendOutcomeV5::Failed(value) => OrdinarySendOutcome::Failed(value.into()),
+        };
+        Decision::Ready(Self {
+            record: SendOutcomeRecord {
+                send_outcome_id: old.send_outcome_id,
+                process_option: old.process_option,
+                first_address_option: old.first_address_option,
+                second_address_option: old.second_address_option,
+                request_digest: old.request_digest,
+                ordinary_send_outcome,
+            },
+        })
     }
 }
 
@@ -346,7 +409,8 @@ impl DeclaresSendOutcomeTables for SendOutcomeTables {
             .with_predecessor::<StoredSendOutcomeV1>()
             .with_predecessor::<StoredSendOutcomeV2>()
             .with_predecessor::<StoredSendOutcomeV3>()
-            .with_predecessor::<StoredSendOutcomeV4>(),
+            .with_predecessor::<StoredSendOutcomeV4>()
+            .with_predecessor::<StoredSendOutcomeV5>(),
         }
     }
 
@@ -379,6 +443,14 @@ impl UpgradesSendOutcomes for Engine {
         let refused = |failure: &dyn std::fmt::Debug| {
             StoreError::QueueDeliveryUpgrade(format!("sender outcome upgrade: {failure:?}"))
         };
+        match self.upgrade_table::<StoredSendOutcomeV5, StoredSendOutcome>(descriptor.clone()) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => return Err(refused(&failure)),
+        }
         match self.upgrade_table::<StoredSendOutcomeV4, StoredSendOutcome>(descriptor.clone()) {
             UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
@@ -419,7 +491,7 @@ pub(crate) trait RecordsSendOutcomes {
         sender: Option<Address>,
         recipient: Option<Address>,
         request_digest: String,
-        response: Response,
+        response: PrivateSendResponse,
     ) -> Result<SendOutcomeRecord, StoreError>;
     fn read_send_outcomes(&self) -> Result<Vec<SendOutcomeRecord>, StoreError>;
 }
@@ -431,7 +503,7 @@ impl RecordsSendOutcomes for FlowStore {
         sender: Option<Address>,
         recipient: Option<Address>,
         request_digest: String,
-        response: Response,
+        response: PrivateSendResponse,
     ) -> Result<SendOutcomeRecord, StoreError> {
         let _write = self
             .send_outcomes
@@ -447,11 +519,12 @@ impl RecordsSendOutcomes for FlowStore {
             .records()
             .to_vec();
         let ordinary_send_outcome = match response {
-            Response::SendAccepted(acceptance) => OrdinarySendOutcome::Accepted(acceptance),
-            Response::Refused(refusal) => OrdinarySendOutcome::Refused(refusal),
-            Response::Sent(receipt) => OrdinarySendOutcome::Sent(receipt),
-            Response::Failed(failure) => OrdinarySendOutcome::Failed(failure),
-            _ => return Err(StoreError::StateInvariant),
+            PrivateSendResponse::SendAccepted(acceptance) => {
+                OrdinarySendOutcome::Accepted(acceptance)
+            }
+            PrivateSendResponse::Refused(refusal) => OrdinarySendOutcome::Refused(refusal),
+            PrivateSendResponse::Sent(receipt) => OrdinarySendOutcome::Sent(receipt),
+            PrivateSendResponse::Failed(failure) => OrdinarySendOutcome::Failed(failure),
         };
         let existing_counter = match counters.as_slice() {
             [] => None,

@@ -23,9 +23,9 @@ use crate::waking::{PerformsWakeAndDrain, ReconcilesQueueDelivery, SettlesStopsA
 use flow_ethos::State;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{
-    ProcessIdentity, Query as MetaQuery, QueueDeliveryResolution, QueueDeliveryStanding,
-    QueueResolutionOutcome, ResolveQueueDeliveryRejected_Data, ResolverIdentity,
-    Response as MetaResponse, Undecided,
+    ProcessIdentity, Query as MetaQuery, QueueDeliveryResolution, QueueResolutionOutcome,
+    ResolverIdentity, Response as MetaResponse, Undecided, VisibleQueueDeliveryStanding,
+    VisibleResolveQueueDeliveryRejected,
 };
 use signal_flow::{
     Address, Aspect, Delivery, Event, Layer, Message, Metaflow, NativePrompt, NativeStop,
@@ -60,7 +60,7 @@ fn queue_payload(requests: &[TestRequest]) -> String {
         .iter()
         .map(queue_entry)
         .collect::<Vec<_>>()
-        .prompt_text()
+        .prompt_text(&address(Layer::Secondary))
 }
 
 fn queue_entry(request: &TestRequest) -> QueueEntry {
@@ -140,16 +140,16 @@ fn typed_count(fixture: &NexusFixture, body: &str) -> usize {
     fixture.typed().unwrap_or_default().matches(body).count()
 }
 
-fn standings(fixture: &NexusFixture) -> Vec<QueueDeliveryStanding> {
+fn standings(fixture: &NexusFixture) -> Vec<VisibleQueueDeliveryStanding> {
     match fixture
         .nexus
         .dispatch_meta(meta_signal_flow::Query::ReadQueueDeliveries(address(
             Layer::Secondary,
         ))) {
         meta_signal_flow::Response::QueueDeliveriesRead(read) => read
-            .queue_delivery_vector
+            .visible_queue_delivery_vector
             .into_iter()
-            .map(|delivery| delivery.queue_delivery_standing)
+            .map(|delivery| delivery.visible_queue_delivery_standing)
             .collect(),
         other => panic!("not read: {other:?}"),
     }
@@ -175,7 +175,7 @@ fn logical_delivery_snapshots_are_sender_filtered_replayable_and_idempotent() {
         topic: "core".into(),
         layer: Layer::Secondary,
     };
-    let Response::SendAccepted(accepted) = fixture
+    let signal_flow::PrivateSendResponse::SendAccepted(accepted) = fixture
         .nexus
         .store
         .accept_logical_delivery(
@@ -302,8 +302,8 @@ fn two_queued_claude_requests_go_in_one_payload_and_settle_on_its_receipt() {
     assert!(matches!(
         standings(&fixture).as_slice(),
         [
-            QueueDeliveryStanding::Uncertain(_),
-            QueueDeliveryStanding::Uncertain(_)
+            VisibleQueueDeliveryStanding::Uncertain(_),
+            VisibleQueueDeliveryStanding::Uncertain(_)
         ]
     ));
 
@@ -409,8 +409,8 @@ fn a_task_notification_that_takes_the_turn_first_settles_nothing() {
         matches!(
             standings(&fixture).as_slice(),
             [
-                QueueDeliveryStanding::Uncertain(_),
-                QueueDeliveryStanding::Uncertain(_)
+                VisibleQueueDeliveryStanding::Uncertain(_),
+                VisibleQueueDeliveryStanding::Uncertain(_)
             ]
         ),
         "held in Claude Code's input queue, nothing settles"
@@ -508,7 +508,7 @@ fn a_hand_over_refused_before_input_is_absent_and_handed_over_again() {
     assert_eq!(typed_count(&fixture, "first-request-body"), 0);
     assert_eq!(
         standings(&fixture),
-        vec![QueueDeliveryStanding::Absent(
+        vec![VisibleQueueDeliveryStanding::Absent(
             meta_signal_flow::AbsenceProof::HandOverRefused
         )]
     );
@@ -616,18 +616,10 @@ pub(super) fn resolver() -> ResolverIdentity {
 
 /// The attempt id of the seat's one unsettled hand-over.
 fn attempt_id(fixture: &NexusFixture) -> String {
-    match fixture
+    fixture
         .nexus
-        .dispatch_meta(MetaQuery::ReadQueueDeliveries(address(Layer::Secondary)))
-    {
-        MetaResponse::QueueDeliveriesRead(read) => {
-            let Some(delivery) = read.queue_delivery_vector.first() else {
-                panic!("at least one unsettled hand-over: {read:?}")
-            };
-            delivery.queue_attempt_id.clone()
-        }
-        other => panic!("not read: {other:?}"),
-    }
+        .store
+        .test_outstanding_queue_attempt_id(&address(Layer::Secondary))
 }
 
 fn resolve(
@@ -680,7 +672,7 @@ fn stuck_hand_over(fixture: &NexusFixture, queue: Vec<TestRequest>) -> String {
     assert_eq!(standings.len(), expected_attempts);
     assert!(matches!(
         standings.first(),
-        Some(QueueDeliveryStanding::Uncertain(Some(
+        Some(VisibleQueueDeliveryStanding::Uncertain(Some(
             Undecided::AbsenceUnprovable
         )))
     ));
@@ -688,7 +680,7 @@ fn stuck_hand_over(fixture: &NexusFixture, queue: Vec<TestRequest>) -> String {
         standings
             .iter()
             .skip(1)
-            .all(|standing| matches!(standing, QueueDeliveryStanding::Uncertain(_)))
+            .all(|standing| matches!(standing, VisibleQueueDeliveryStanding::Uncertain(_)))
     );
     attempt_id(fixture)
 }
@@ -709,14 +701,14 @@ fn an_uncertain_hand_over_cannot_be_resolved_delivered_without_a_native_receipt(
             QueueResolutionOutcome::Delivered,
             "the pane shows it taken"
         ),
-        MetaResponse::ResolveQueueDeliveryRejected(ResolveQueueDeliveryRejected_Data::NotOldest,)
+        MetaResponse::ResolveQueueDeliveryRejected(VisibleResolveQueueDeliveryRejected::NotOldest,)
     );
     assert_eq!(queue(&fixture), vec![]);
     assert!(matches!(
         standings(&fixture).as_slice(),
         [
-            QueueDeliveryStanding::Uncertain(Some(Undecided::AbsenceUnprovable)),
-            QueueDeliveryStanding::Uncertain(_),
+            VisibleQueueDeliveryStanding::Uncertain(Some(Undecided::AbsenceUnprovable)),
+            VisibleQueueDeliveryStanding::Uncertain(_),
         ]
     ));
 
@@ -741,7 +733,7 @@ fn a_parked_absence_unprovable_hand_over_is_never_replayed_by_owner_resolution()
             QueueResolutionOutcome::Absent,
             "composer was empty"
         ),
-        MetaResponse::ResolveQueueDeliveryRejected(ResolveQueueDeliveryRejected_Data::NotOldest)
+        MetaResponse::ResolveQueueDeliveryRejected(VisibleResolveQueueDeliveryRejected::NotOldest)
     ));
     assert!(matches!(
         resolve(
@@ -750,7 +742,7 @@ fn a_parked_absence_unprovable_hand_over_is_never_replayed_by_owner_resolution()
             QueueResolutionOutcome::Absent,
             "composer was empty"
         ),
-        MetaResponse::ResolveQueueDeliveryRejected(ResolveQueueDeliveryRejected_Data::NotOldest)
+        MetaResponse::ResolveQueueDeliveryRejected(VisibleResolveQueueDeliveryRejected::NotOldest)
     ));
     assert_eq!(
         typed_count(&fixture, "first-request-body"),
@@ -762,8 +754,8 @@ fn a_parked_absence_unprovable_hand_over_is_never_replayed_by_owner_resolution()
     assert!(matches!(
         standings(&fixture).as_slice(),
         [
-            QueueDeliveryStanding::Uncertain(Some(Undecided::AbsenceUnprovable)),
-            QueueDeliveryStanding::Uncertain(_),
+            VisibleQueueDeliveryStanding::Uncertain(Some(Undecided::AbsenceUnprovable)),
+            VisibleQueueDeliveryStanding::Uncertain(_),
         ]
     ));
 }
@@ -782,7 +774,7 @@ fn a_resolution_is_refused_without_a_peer_for_an_unknown_or_non_uncertain_attemp
             "x"
         ),
         MetaResponse::ResolveQueueDeliveryRejected(
-            ResolveQueueDeliveryRejected_Data::UnknownAttempt
+            VisibleResolveQueueDeliveryRejected::UnknownAttempt
         )
     );
     assert_eq!(
@@ -799,11 +791,11 @@ fn a_resolution_is_refused_without_a_peer_for_an_unknown_or_non_uncertain_attemp
 
     assert_eq!(
         resolve(&fixture, &attempt, QueueResolutionOutcome::Delivered, "x"),
-        MetaResponse::ResolveQueueDeliveryRejected(ResolveQueueDeliveryRejected_Data::NotOldest)
+        MetaResponse::ResolveQueueDeliveryRejected(VisibleResolveQueueDeliveryRejected::NotOldest)
     );
     assert!(matches!(
         resolve(&fixture, &attempt, QueueResolutionOutcome::Absent, "again"),
-        MetaResponse::ResolveQueueDeliveryRejected(ResolveQueueDeliveryRejected_Data::NotOldest)
+        MetaResponse::ResolveQueueDeliveryRejected(VisibleResolveQueueDeliveryRejected::NotOldest)
     ));
 }
 
@@ -818,7 +810,7 @@ fn a_resting_claude_seat_does_not_replay_a_parked_uncertain_request() {
 
     assert!(matches!(
         resolve_served(&fixture, &attempt, QueueResolutionOutcome::Absent),
-        MetaResponse::ResolveQueueDeliveryRejected(ResolveQueueDeliveryRejected_Data::NotOldest)
+        MetaResponse::ResolveQueueDeliveryRejected(VisibleResolveQueueDeliveryRejected::NotOldest)
     ));
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
     report(&fixture, claude_stop(&fixture));
@@ -843,7 +835,7 @@ fn a_working_claude_seat_resolved_absent_waits_for_its_turn_end() {
 
     assert_eq!(
         resolve_served(&fixture, &attempt, QueueResolutionOutcome::Absent),
-        MetaResponse::ResolveQueueDeliveryRejected(ResolveQueueDeliveryRejected_Data::NotOldest)
+        MetaResponse::ResolveQueueDeliveryRejected(VisibleResolveQueueDeliveryRejected::NotOldest)
     );
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
     assert!(queue(&fixture).is_empty());
@@ -864,7 +856,7 @@ fn a_resting_claude_seat_does_not_advance_after_unwitnessed_delivered_resolution
 
     assert_eq!(
         resolve_served(&fixture, &attempt, QueueResolutionOutcome::Delivered),
-        MetaResponse::ResolveQueueDeliveryRejected(ResolveQueueDeliveryRejected_Data::NotOldest)
+        MetaResponse::ResolveQueueDeliveryRejected(VisibleResolveQueueDeliveryRejected::NotOldest)
     );
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);

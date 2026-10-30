@@ -54,7 +54,11 @@ pub(crate) trait MutatesMetaflows {
         launched: Option<FlowId>,
     ) -> Result<Response, StoreError>;
     fn lock_metaflow(&self, request: Lock_Data, now: i64) -> Result<Response, StoreError>;
-    fn queue_metaflow(&self, request: Deliver_Data, now: i64) -> Result<Response, StoreError>;
+    fn queue_metaflow(
+        &self,
+        request: Deliver_Data,
+        now: i64,
+    ) -> Result<signal_flow::PrivateSendResponse, StoreError>;
 }
 
 /// The sleep and wake transitions of a metaflow. Each is one atomic write
@@ -261,31 +265,37 @@ impl MutatesMetaflows for FlowStore {
         Ok(Response::Locked(lock))
     }
 
-    fn queue_metaflow(&self, request: Deliver_Data, now: i64) -> Result<Response, StoreError> {
+    fn queue_metaflow(
+        &self,
+        request: Deliver_Data,
+        now: i64,
+    ) -> Result<signal_flow::PrivateSendResponse, StoreError> {
         let Some(held) = self.stored_metaflow_lock(&request.lock.address)? else {
-            return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Lock(
-                request.lock,
-            ))));
+            return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
+                Unknown_Data::Lock(request.lock),
+            )));
         };
         if held.lock != request.lock {
-            return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Lock(
-                request.lock,
-            ))));
+            return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
+                Unknown_Data::Lock(request.lock),
+            )));
         }
         if held.lock.until <= now {
-            return Ok(Response::Refused(Refusal::Lapsed));
+            return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Lapsed));
         }
         let Some(_) = self.stored_metaflow(&request.lock.address)? else {
-            return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
-                request.lock.address,
-            ))));
+            return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
+                Unknown_Data::Address(request.lock.address),
+            )));
         };
         if let Some(refusal) = request.message.oversized_refusal(&request.lock.sender) {
             let released = self.release_metaflow_lock(request.lock.clone(), now)?;
             if released != Response::Released {
-                return Ok(released);
+                return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Store(
+                    "a verified delivery lock could not be released".into(),
+                )));
             }
-            return Ok(Response::Refused(refusal));
+            return Ok(signal_flow::PrivateSendResponse::Refused(refusal));
         }
         self.accept_logical_delivery(
             &request.lock.address,
@@ -655,7 +665,10 @@ impl QueuesFlowRequest for FlowStore {
             request.message,
             None,
         )?;
-        Ok(matches!(response, Response::SendAccepted(_)))
+        Ok(matches!(
+            response,
+            signal_flow::PrivateSendResponse::SendAccepted(_)
+        ))
     }
 }
 
@@ -871,7 +884,7 @@ mod tests {
                     101
                 )
                 .unwrap(),
-            Response::Refused(Refusal::Unknown(_))
+            signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(_))
         ));
         assert!(
             fixture
@@ -894,7 +907,7 @@ mod tests {
                     101
                 )
                 .unwrap(),
-            Response::SendAccepted(_)
+            signal_flow::PrivateSendResponse::SendAccepted(_)
         ));
         // Queued with the Sender its Lock named.
         assert_eq!(
@@ -924,7 +937,7 @@ mod tests {
                     102
                 )
                 .unwrap(),
-            Response::Refused(Refusal::Unknown(_))
+            signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(_))
         ));
     }
 
@@ -970,7 +983,7 @@ mod tests {
                     40
                 )
                 .unwrap(),
-            Response::Refused(Refusal::Lapsed)
+            signal_flow::PrivateSendResponse::Refused(Refusal::Lapsed)
         );
         assert!(fixture.store.list_metaflows().unwrap()[0].queue.is_empty());
     }

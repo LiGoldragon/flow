@@ -9,7 +9,7 @@ use crate::RunningNexus;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::reminder::{AdvancesReminder, RecordsReminders};
 use crate::waking::SleepsAndWakesSeats;
-use signal_flow::{Address, Delivery, Message, Request, Response, SentBy};
+use signal_flow::{Address, Delivery, Message, Request, SentBy};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// How often Flow looks for reminders due.
@@ -64,15 +64,14 @@ impl RemindsCallers for RunningNexus {
                         Message::Soft(Request::Notice(notice)),
                         None,
                     ) {
-                        Ok(Response::SendAccepted(_)) => {
+                        Ok(signal_flow::PrivateSendResponse::SendAccepted(_)) => {
                             if !reminded.contains(&address) {
                                 reminded.push(address);
                             }
                         }
-                        answer => eprintln!(
-                            "flow-nexus: reminder {} not queued for {address:?}: {answer:?}",
-                            reminder.key
-                        ),
+                        _answer => {
+                            eprintln!("flow-nexus: a reminder was not queued for {address:?}")
+                        }
                     }
                 }
                 let kept = match next {
@@ -80,10 +79,7 @@ impl RemindsCallers for RunningNexus {
                     None => self.store.close_reminder(&reminder.key).map(|_| ()),
                 };
                 if let Err(error) = kept {
-                    eprintln!(
-                        "flow-nexus: reminder {} not advanced: {error}",
-                        reminder.key
-                    );
+                    eprintln!("flow-nexus: a reminder was not advanced: {error}");
                 }
             }
         }

@@ -608,20 +608,17 @@ impl ComposesLaunch for LaunchComposer {
 /// What a metaflow's queued requests become in a flow's prompt: one vector
 /// datom of their NativeInputs, oldest first.
 pub trait RendersQueuedWork {
-    fn prompt_text(&self) -> String;
+    fn prompt_text(&self, recipient: &signal_flow::Address) -> String;
 }
 
 impl RendersQueuedWork for [QueueEntry] {
     /// A cohort is one vector datom: each request as its NativeInput, its
     /// logical delivery id, who sent it, and its request under its
     /// priority, oldest first.
-    fn prompt_text(&self) -> String {
+    fn prompt_text(&self, recipient: &signal_flow::Address) -> String {
+        use crate::message_projection::ProjectsQueueEntry;
         self.iter()
-            .map(|entry| signal_flow::NativeInput {
-                logical_delivery_id: entry.logical_delivery_id.clone(),
-                sent_by: entry.sent_by.clone(),
-                message: entry.message.clone(),
-            })
+            .map(|entry| entry.visible_input(recipient))
             .collect::<Vec<_>>()
             .datomize(Vec::new())
             .protosize()
@@ -1410,8 +1407,12 @@ pub(crate) mod tests {
             message: signal_flow::Message::Soft(Request::Order("investigate".into())),
         };
         assert_eq!(
-            [order].prompt_text(),
-            "[ { logical-delivery-0000000000000001 Flow Soft.Order.investigate } ]"
+            [order].prompt_text(&signal_flow::Address {
+                aspect: signal_flow::Aspect::Psyche,
+                topic: "flow".into(),
+                layer: signal_flow::Layer::Secondary
+            }),
+            "[ { Nexus { Psyche flow Secondary } Soft.Order.investigate } ]"
         );
     }
 

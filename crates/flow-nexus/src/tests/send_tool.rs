@@ -6,6 +6,7 @@
 //! script, and run `2n - 1` is the probe.
 
 use super::{ControlsHerdrSnapshot, NexusFixture};
+use crate::Dispatches;
 use crate::codex::{CodexAdapter, ResponderSignal, SelectsCodexEndpoint};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::send_tool::{
@@ -1445,10 +1446,10 @@ fn a_queued_request_is_rendered_as_its_datom_in_one_vector() {
             message: Message::Soft(Request::Notice("kept".into())),
         },
     ];
-    let prompt = queue.prompt_text();
+    let prompt = queue.prompt_text(&seat_at());
     assert_eq!(
         prompt,
-        "[ { render-1 Sender.{ Mind alpha Tertiary } Soft.Order.«Carry on.» } { render-2 Unknown Soft.Notice.kept } ]"
+        "[ { Sender.{ Mind alpha Tertiary } { Mind flow Secondary } Soft.Order.«Carry on.» } { Unknown { Mind flow Secondary } Soft.Notice.kept } ]"
     );
 }
 
@@ -1850,16 +1851,15 @@ fn crashed_before_receipt(fixture: &NexusFixture) -> TestRequest {
     }
 }
 
-fn codex_standings(fixture: &NexusFixture) -> Vec<meta_signal_flow::QueueDeliveryStanding> {
-    use crate::Dispatches;
+fn codex_standings(fixture: &NexusFixture) -> Vec<meta_signal_flow::VisibleQueueDeliveryStanding> {
     match fixture
         .nexus
         .dispatch_meta(meta_signal_flow::Query::ReadQueueDeliveries(seat_at()))
     {
         meta_signal_flow::Response::QueueDeliveriesRead(read) => read
-            .queue_delivery_vector
+            .visible_queue_delivery_vector
             .into_iter()
-            .map(|delivery| delivery.queue_delivery_standing)
+            .map(|delivery| delivery.visible_queue_delivery_standing)
             .collect(),
         other => panic!("not read: {other:?}"),
     }
@@ -1880,7 +1880,7 @@ fn a_codex_turn_a_crash_left_unacknowledged_is_found_in_thread_history() {
     fixture.adapter("gpt-sol", &fake);
     let queued = crashed_before_receipt(&fixture);
     assert_eq!(queued, first);
-    let first_text = [queue_entry("seat-0", first.clone())].prompt_text();
+    let first_text = [queue_entry("seat-0", first.clone())].prompt_text(&seat_at());
     fake.serve_turn_history(
         1,
         SEAT_THREAD,
@@ -1926,9 +1926,9 @@ fn a_codex_turn_absent_from_an_idle_thread_remains_uncertain() {
     fixture.nexus.recover_deliveries();
     assert_eq!(
         codex_standings(&fixture),
-        vec![meta_signal_flow::QueueDeliveryStanding::Uncertain(Some(
-            meta_signal_flow::Undecided::AbsenceUnprovable
-        ))]
+        vec![meta_signal_flow::VisibleQueueDeliveryStanding::Uncertain(
+            Some(meta_signal_flow::Undecided::AbsenceUnprovable)
+        )]
     );
     assert_eq!(fixture.seat_queue(), vec![first.clone()], "still queued");
 
@@ -1945,7 +1945,7 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
     use crate::generated::operation::{Operation, Outcome};
     use crate::performing::Performs;
     use crate::waking::ReconcilesQueueDelivery;
-    use meta_signal_flow::{QueueDeliveryStanding, Undecided};
+    use meta_signal_flow::{Undecided, VisibleQueueDeliveryStanding};
     let mut fixture = NexusFixture::new();
     let first = from_core(Request::Order("First.".into()));
     fixture.awake_codex_seat(vec![first]);
@@ -1962,7 +1962,7 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
     fixture.nexus.recover_deliveries();
     assert_eq!(
         codex_standings(&fixture),
-        vec![QueueDeliveryStanding::Uncertain(Some(
+        vec![VisibleQueueDeliveryStanding::Uncertain(Some(
             Undecided::SeatNotResting
         ))]
     );
@@ -1981,7 +1981,7 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
     );
     assert_eq!(
         codex_standings(&fixture),
-        vec![QueueDeliveryStanding::Uncertain(Some(
+        vec![VisibleQueueDeliveryStanding::Uncertain(Some(
             Undecided::HistoryReplaced
         ))]
     );
@@ -2065,7 +2065,6 @@ fn a_completion_on_another_thread_drains_nothing() {
 fn codex_resolved_absent(
     first_event: crate::codex_turns::TurnEvent,
 ) -> (NexusFixture, FakeAppServer, TestRequest) {
-    use crate::Dispatches;
     use crate::DispatchesSerially;
     use crate::codex_turns::TracksCodexTurns;
     use meta_signal_flow::{QueueDeliveryResolution, QueueResolutionOutcome};
@@ -2075,15 +2074,10 @@ fn codex_resolved_absent(
     let fake = FakeAppServer::install(vec![]);
     fixture.adapter("gpt-sol", &fake);
     crashed_before_receipt(&fixture);
-    let attempt = match fixture
+    let attempt = fixture
         .nexus
-        .dispatch_meta(meta_signal_flow::Query::ReadQueueDeliveries(seat_at()))
-    {
-        meta_signal_flow::Response::QueueDeliveriesRead(read) => {
-            read.queue_delivery_vector[0].queue_attempt_id.clone()
-        }
-        other => panic!("not read: {other:?}"),
-    };
+        .store
+        .test_outstanding_queue_attempt_id(&seat_at());
     fixture.nexus.codex_turns.observe(SEAT_THREAD, first_event);
     fake.accept_queued_turns(SEAT_THREAD, 1..=2);
     let response = fixture.nexus.dispatch_meta_serially(

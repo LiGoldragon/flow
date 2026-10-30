@@ -33,7 +33,7 @@ use crate::waking::{
 use meta_signal_flow::{
     EventsRead_Data, QueueDeliveriesRead_Data, QueueDeliveryResolution, QueueDeliveryResolved_Data,
     QueueResolutionRecord, ReadEventsRejected_Data, ReadQueueDeliveriesRejected_Data,
-    ResolveQueueDeliveryRejected_Data, ResolverIdentity,
+    ResolveQueueDeliveryRejection, ResolverIdentity,
 };
 use signal_flow::{Address, Event, FlowId, Report_Data, Response};
 
@@ -138,18 +138,18 @@ impl RecordsReports for RunningNexus {
                     let later = "it is looked for again at the seat's next rest or drain";
                     match &answer {
                         SimplifiedAnswer::NoneOwed => {}
-                        SimplifiedAnswer::Queued { input, recipient } => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} to {input} queued to {:?} {} {:?}",
+                        SimplifiedAnswer::Queued { recipient, .. } => eprintln!(
+                            "flow-nexus: simplified answer of {flow_id} queued to {:?} {} {:?}",
                             recipient.aspect, recipient.topic, recipient.layer
                         ),
-                        SimplifiedAnswer::InputUnreceived { input } => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} not queued at its Stop: its input {input} is not yet Delivered; {later}"
+                        SimplifiedAnswer::InputUnreceived { .. } => eprintln!(
+                            "flow-nexus: simplified answer of {flow_id} not queued at its Stop: its input is not yet Delivered; {later}"
                         ),
-                        SimplifiedAnswer::TurnUnanswered { input } => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} not queued at its Stop: its transcript shows no ended answer to {input}; {later}"
+                        SimplifiedAnswer::TurnUnanswered { .. } => eprintln!(
+                            "flow-nexus: simplified answer of {flow_id} not queued at its Stop: its transcript shows no ended answer; {later}"
                         ),
-                        SimplifiedAnswer::Undelivered { input } => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} to {input} refused by the store: its recipient is unknown or its receipt changed; {later}"
+                        SimplifiedAnswer::Undelivered { .. } => eprintln!(
+                            "flow-nexus: simplified answer of {flow_id} refused by the store: its recipient is unknown or its receipt changed; {later}"
                         ),
                         SimplifiedAnswer::StoreRefused => eprintln!(
                             "flow-nexus: simplified answer of {flow_id} not queued at its Stop: the store refused; {later}"
@@ -194,14 +194,17 @@ impl RecordsReports for RunningNexus {
         resolution: QueueDeliveryResolution,
         resolver: ResolverIdentity,
     ) -> meta_signal_flow::Response {
-        let rejected =
-            |rejection| meta_signal_flow::Response::ResolveQueueDeliveryRejected(rejection);
+        let rejected = |rejection| {
+            meta_signal_flow::Response::ResolveQueueDeliveryRejected(
+                crate::message_projection::visible_queue_rejection(rejection),
+            )
+        };
         let Some(unix_seconds) = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()
             .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
         else {
-            return rejected(ResolveQueueDeliveryRejected_Data::StoreRefused);
+            return rejected(ResolveQueueDeliveryRejection::StoreRefused);
         };
         let record = QueueResolutionRecord {
             queue_resolution_outcome: resolution.queue_resolution_outcome.clone(),
@@ -215,16 +218,17 @@ impl RecordsReports for RunningNexus {
         {
             Ok(Ok(attempt)) => {
                 eprintln!(
-                    "flow-nexus: queued delivery {} resolved {:?} by the owner",
-                    attempt.attempt_id, resolution.queue_resolution_outcome
+                    "flow-nexus: a queued delivery was resolved {:?} by the owner",
+                    resolution.queue_resolution_outcome
                 );
                 meta_signal_flow::Response::QueueDeliveryResolved(QueueDeliveryResolved_Data {
                     address: attempt.address,
-                    queue_delivery_resolution: resolution,
+                    visible_queue_delivery_resolution:
+                        crate::message_projection::visible_queue_resolution(&resolution),
                 })
             }
             Ok(Err(refusal)) => rejected(refusal),
-            Err(_) => rejected(ResolveQueueDeliveryRejected_Data::StoreRefused),
+            Err(_) => rejected(ResolveQueueDeliveryRejection::StoreRefused),
         }
     }
 
@@ -239,13 +243,14 @@ impl RecordsReports for RunningNexus {
         let Ok(attempts) = self.store.unsettled_deliveries(&address) else {
             return rejected(ReadQueueDeliveriesRejected_Data::StoreRefused);
         };
-        let queue_delivery_vector = attempts
+        let visible_queue_delivery_vector = attempts
             .into_iter()
             .filter_map(ShowsQueueDelivery::queue_delivery)
+            .map(|attempt| crate::message_projection::visible_queue_delivery(&attempt, &address))
             .collect();
         meta_signal_flow::Response::QueueDeliveriesRead(QueueDeliveriesRead_Data {
             address,
-            queue_delivery_vector,
+            visible_queue_delivery_vector,
         })
     }
 }

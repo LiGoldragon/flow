@@ -62,9 +62,7 @@ fn direct_send_to_sleeping_or_unknown_recipient_fails_without_queueing() {
     use crate::sending::SendsRequests;
     use crate::store::FlowStore;
     use crate::store::metaflow::SeedsMetaflow;
-    use signal_flow::{
-        Delivery, Message, Metaflow, Recipient, Response, SendFailureReason, SendRequest,
-    };
+    use signal_flow::{Delivery, Message, Metaflow, Recipient, Response, SendRequest};
     let fixture = NexusFixture::new();
     bind_existing_caller(&fixture, "a001", "pane-1");
     fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
@@ -89,16 +87,16 @@ fn direct_send_to_sleeping_or_unknown_recipient_fails_without_queueing() {
             SendRequest {
                 recipient: Recipient::Address(target.clone()),
                 delivery: Delivery::Wake,
-                message,
+                sendable_message: super::sendable_message(message),
             },
             Some(&peer),
         );
         assert!(
             matches!(
                 answer.response,
-                Response::Failed(signal_flow::SendFailure {
-                    logical_delivery_id_option: None,
-                    send_failure_reason: SendFailureReason::RecipientUnavailable(_),
+                Response::Failed(signal_flow::VisibleSendFailure {
+                    visible_send_failure_reason:
+                        signal_flow::VisibleSendFailureReason::RecipientUnavailable(_),
                 })
             ),
             "{:?}",
@@ -124,7 +122,9 @@ fn direct_send_to_sleeping_or_unknown_recipient_fails_without_queueing() {
         SendRequest {
             recipient: Recipient::Address(unknown.clone()),
             delivery: Delivery::Wake,
-            message: Message::HardAbrupt(Request::Notice("no hidden queue".into())),
+            sendable_message: signal_flow::SendableMessage::HardAbrupt(
+                signal_flow::SendableRequest::Notice("no hidden queue".into()),
+            ),
         },
         Some(&peer),
     );
@@ -138,14 +138,15 @@ fn direct_send_to_sleeping_or_unknown_recipient_fails_without_queueing() {
             SendRequest {
                 recipient: Recipient::Address(target.clone()),
                 delivery: Delivery::Queue,
-                message,
+                sendable_message: super::sendable_message(message),
             },
             Some(&peer),
         );
         assert!(matches!(
             answer.response,
-            Response::Failed(signal_flow::SendFailure {
-                send_failure_reason: SendFailureReason::QueueNotPermitted,
+            Response::Failed(signal_flow::VisibleSendFailure {
+                visible_send_failure_reason:
+                    signal_flow::VisibleSendFailureReason::QueueNotPermitted,
                 ..
             })
         ));
@@ -155,7 +156,9 @@ fn direct_send_to_sleeping_or_unknown_recipient_fails_without_queueing() {
         SendRequest {
             recipient: Recipient::Address(target.clone()),
             delivery: Delivery::Queue,
-            message: Message::Soft(Request::Notice("explicit durable queue".into())),
+            sendable_message: signal_flow::SendableMessage::Soft(
+                signal_flow::SendableRequest::Notice("explicit durable queue".into()),
+            ),
         },
         Some(&peer),
     );
@@ -289,7 +292,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                 SendRequest {
                     recipient: Recipient::Address(target.clone()),
                     delivery: Delivery::Wake,
-                    message,
+                    sendable_message: super::sendable_message(message),
                 },
                 Some(&peer),
             );
@@ -301,8 +304,9 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
             assert!(
                 matches!(
                     answer,
-                    Response::Failed(signal_flow::SendFailure {
-                        send_failure_reason: signal_flow::SendFailureReason::ReceiptUncertain,
+                    Response::Failed(signal_flow::VisibleSendFailure {
+                        visible_send_failure_reason:
+                            signal_flow::VisibleSendFailureReason::ReceiptUncertain,
                         ..
                     })
                 ),
@@ -328,12 +332,8 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                 answer
             )
         };
-        assert_eq!(receipt.native_receipt.native_session_id, CLAUDE_SESSION);
-        assert_eq!(
-            receipt.native_receipt.native_prompt_id,
-            "direct-native-receipt"
-        );
-        assert!(!receipt.logical_delivery_id.is_empty());
+        assert_eq!(receipt.native_session_id, CLAUDE_SESSION);
+        assert_eq!(receipt.native_prompt_id, "direct-native-receipt");
         assert!(
             fixture
                 .nexus
@@ -408,7 +408,7 @@ fn a_task_is_admitted_only_with_minutes_above_zero_and_a_reachable_deadline() {
     use super::NexusFixture;
     use crate::store::logical_delivery::RecordsLogicalDeliveries;
     use crate::store::metaflow::SeedsMetaflow;
-    use signal_flow::{Delivery, Message, Metaflow, MinutesRefusal, Refusal, Response, SentBy};
+    use signal_flow::{Delivery, Message, Metaflow, MinutesRefusal, Refusal, SentBy};
     let fixture = NexusFixture::new();
     let target = Address {
         aspect: Aspect::Mind,
@@ -429,7 +429,7 @@ fn a_task_is_admitted_only_with_minutes_above_zero_and_a_reachable_deadline() {
                 &target,
                 SentBy::Sender(sender()),
                 Delivery::Queue,
-                Message::Soft(Request::Task(flow_ethos::Task_Data {
+                Message::Soft(Request::Task(flow_ethos::AnswerableTask {
                     minutes,
                     string: "Draft the proposal.".into(),
                 })),
@@ -446,7 +446,7 @@ fn a_task_is_admitted_only_with_minutes_above_zero_and_a_reachable_deadline() {
     ] {
         assert_eq!(
             admit(minutes),
-            Response::Refused(Refusal::MinutesRefused(refusal)),
+            signal_flow::PrivateSendResponse::Refused(Refusal::MinutesRefused(refusal)),
             "{minutes} minutes"
         );
     }
@@ -461,7 +461,10 @@ fn a_task_is_admitted_only_with_minutes_above_zero_and_a_reachable_deadline() {
             .is_empty(),
         "a refused Task is never queued"
     );
-    assert!(matches!(admit(30), Response::SendAccepted(_)));
+    assert!(matches!(
+        admit(30),
+        signal_flow::PrivateSendResponse::SendAccepted(_)
+    ));
 }
 
 /// A Task whose Minutes the Nexus refuses makes the whole trip: the flow
@@ -590,13 +593,13 @@ fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
     };
     assert_eq!(
         flow("Send.{ Address.{ Mind flow Secondary } Wake Soft.Task.{ 0 «Draft the proposal.» } }"),
-        "Refused.MinutesRefused.Zero"
+        "SendRefused.MinutesRefused.Zero"
     );
     assert_eq!(
         flow(
             "Send.{ Address.{ Mind flow Secondary } Queue Soft.Task.{ -5 «Draft the proposal.» } }"
         ),
-        "Refused.MinutesRefused.Negative"
+        "SendRefused.MinutesRefused.Negative"
     );
     assert!(
         fixture

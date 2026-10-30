@@ -83,11 +83,15 @@ impl ObservesLogicalSends for RunningNexus {
                 return Err("the observing peer disconnected".into());
             }
             if !opened {
-                send(&Response::SendsObserved(observation))?;
+                send(&Response::SendsObserved(
+                    crate::message_projection::visible_send_observation(&observation),
+                ))?;
                 opened = true;
             } else {
                 for snapshot in observation.delivery_snapshot_vector {
-                    send(&Response::SendChanged(snapshot))?;
+                    send(&Response::SendChanged(
+                        crate::message_projection::visible_delivery_snapshot(&snapshot),
+                    ))?;
                 }
             }
             // The same existing condition serves launch and delivery commits.

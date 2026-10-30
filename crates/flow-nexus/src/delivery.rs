@@ -198,7 +198,9 @@ pub trait DeliversMessages {
 impl DeliversMessages for RunningNexus {
     fn deliver(&self, request: DeliveryRequest) -> Response {
         match self.store.delivery(&request.delivery_id) {
-            Ok(Some(delivery)) => return Response::Delivered(delivery),
+            Ok(Some(delivery)) => {
+                return Response::Delivered(crate::message_projection::visible_delivery(&delivery));
+            }
             Ok(None) => {}
             Err(_) => {
                 return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused);
@@ -226,7 +228,9 @@ impl DeliversMessages for RunningNexus {
         }
         let _lease = self.pane_leases.hold(&target.route);
         match LeasedDelivery::new(self, &request, &target).run() {
-            Ok(delivery) => Response::Delivered(delivery),
+            Ok(delivery) => {
+                Response::Delivered(crate::message_projection::visible_delivery(&delivery))
+            }
             Err(rejection) => Response::DeliveryRejected(rejection),
         }
     }
@@ -238,7 +242,7 @@ impl DeliversMessages for RunningNexus {
         };
         match request.message.refusal(&target.profile) {
             Some(refusal) => Response::DeliveryRejected(DeliveryRejection::BodyRefused(refusal)),
-            None => Response::Vetted(target.node.flow_id),
+            None => Response::Vetted,
         }
     }
 
@@ -400,10 +404,7 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         // it into a rejection, and the lease row left behind settles it
         // Uncertain on the next open.
         if let Err(error) = self.nexus.store.settle_delivery(delivery.clone()) {
-            eprintln!(
-                "flow-nexus: delivery {} typed but not recorded: {error}",
-                delivery.delivery_id
-            );
+            eprintln!("flow-nexus: a delivery was typed but not recorded: {error}");
         }
         Ok(delivery)
     }

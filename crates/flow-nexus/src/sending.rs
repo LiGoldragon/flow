@@ -44,8 +44,8 @@ use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, Aspect, Caller, Delivery, HarnessKind, HerdrRoute, Launch_Data, LaunchProfile, Layer,
-    Message, Process, Recipient, Refusal, Request, Response, SendPayloadSize, SendRequest, SentBy,
-    StartRejection, Unknown_Data,
+    Message, PrivateSendResponse, Process, Recipient, Refusal, Request, Response, SendPayloadSize,
+    SendRequest, SendableMessage, SentBy, StartRejection, Unknown_Data,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -178,13 +178,15 @@ pub struct PendingSend {
 
 pub struct SendAnswer {
     pub response: Response,
+    pub private_response: PrivateSendResponse,
     pub pending: Option<PendingSend>,
 }
 
-impl From<Response> for SendAnswer {
-    fn from(response: Response) -> Self {
+impl From<PrivateSendResponse> for SendAnswer {
+    fn from(private_response: PrivateSendResponse) -> Self {
         Self {
-            response,
+            response: crate::message_projection::visible_send_response(&private_response),
+            private_response,
             pending: None,
         }
     }
@@ -203,7 +205,7 @@ impl SendsRequests for RunningNexus {
     fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer {
         use sha2::{Digest, Sha256};
 
-        let abrupt = !matches!(&send.message, Message::Soft(_));
+        let abrupt = !matches!(&send.sendable_message, SendableMessage::Soft(_));
         let direct = abrupt && send.delivery == Delivery::Wake;
         let digest_text = send.datomize(Vec::new()).protosize().compact();
         let request_digest = format!("{:x}", Sha256::digest(digest_text.as_bytes()));
@@ -230,26 +232,42 @@ impl SendsRequests for RunningNexus {
             if let Recipient::Address(address) = &send.recipient {
                 use crate::launching::NamesTopic;
                 if !address.topic.as_str().is_camel_case_topic() {
-                    return Response::Refused(Refusal::TopicRefused(address.topic.clone())).into();
+                    return PrivateSendResponse::Refused(Refusal::TopicRefused(
+                        address.topic.clone(),
+                    ))
+                    .into();
                 }
             }
             let Some(peer) = peer else {
-                return Response::Refused(Refusal::unidentified(Process { pid: 0, started: 0 }))
-                    .into();
+                return PrivateSendResponse::Refused(Refusal::unidentified(Process {
+                    pid: 0,
+                    started: 0,
+                }))
+                .into();
             };
             let Some(_now) = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .ok()
                 .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
             else {
-                return Response::Refused(Refusal::Store(
+                return PrivateSendResponse::Refused(Refusal::Store(
                     "clock is outside the lease range".into(),
                 ))
                 .into();
             };
             let sender = match self.sending_address(peer) {
                 Ok(sender) => sender,
-                Err(refusal) => return (*refusal).into(),
+                Err(refusal) => match *refusal {
+                    Response::Refused(reason) => {
+                        return PrivateSendResponse::Refused(reason).into();
+                    }
+                    response => {
+                        return PrivateSendResponse::Refused(Refusal::Store(format!(
+                            "sender identification returned {response:?}"
+                        )))
+                        .into();
+                    }
+                },
             };
             let delivery = send.delivery.clone();
             let recipient = match send.recipient {
@@ -260,11 +278,25 @@ impl SendsRequests for RunningNexus {
                         topic: sender.topic.clone(),
                         layer,
                     },
-                    None => return Response::Refused(Refusal::NoneAbove).into(),
+                    None => return PrivateSendResponse::Refused(Refusal::NoneAbove).into(),
                 },
             };
+            let message = match self.store.resolve_sendable_message(
+                &sender,
+                &recipient,
+                send.sendable_message.clone(),
+            ) {
+                Ok(Ok(message)) => message,
+                Ok(Err(refusal)) => return PrivateSendResponse::Refused(refusal).into(),
+                Err(error) => {
+                    return PrivateSendResponse::Refused(Refusal::Store(error.to_string())).into();
+                }
+            };
+            if let Some(refusal) = message.oversized_refusal(&sender) {
+                return PrivateSendResponse::Refused(refusal).into();
+            }
             if abrupt && delivery == Delivery::Queue {
-                return Response::Failed(signal_flow::SendFailure {
+                return PrivateSendResponse::Failed(signal_flow::SendFailure {
                     logical_delivery_id_option: None,
                     send_failure_reason: signal_flow::SendFailureReason::QueueNotPermitted,
                 })
@@ -284,18 +316,17 @@ impl SendsRequests for RunningNexus {
                 None
             };
             let direct = direct_lease.is_some();
-            let message = send.message.clone();
             let admitted_at = std::time::SystemTime::now();
             let admitted = self.store.accept_logical_delivery(
                 &recipient,
                 SentBy::Sender(sender),
                 delivery.clone(),
-                send.message,
+                message.clone(),
                 None,
             );
-            // Each admission is logged with its id and kind, and a Task's
+            // Each admission is logged with its kind, and a Task's
             // Minutes with the deadline its first reminder is due at.
-            if let Ok(Response::SendAccepted(acceptance)) = &admitted {
+            if let Ok(PrivateSendResponse::SendAccepted(acceptance)) = &admitted {
                 use crate::admission::{Admission, LogsAdmission};
                 use crate::store::reminder::RecordsReminders;
                 let (Message::HardAbrupt(request)
@@ -309,7 +340,6 @@ impl SendsRequests for RunningNexus {
                 eprintln!(
                     "{}",
                     Admission {
-                        logical_delivery_id: &acceptance.logical_delivery_id,
                         request,
                         deadline,
                         at: admitted_at,
@@ -319,34 +349,44 @@ impl SendsRequests for RunningNexus {
             }
             drop(_turn);
             match admitted {
-                Ok(Response::SendAccepted(acceptance)) if direct => {
+                Ok(PrivateSendResponse::SendAccepted(acceptance)) if direct => {
                     self.complete_direct_send(&recipient, acceptance.logical_delivery_id)
                 }
-                Ok(response) => {
-                    let pending =
-                        matches!(response, Response::SendAccepted(_)).then(|| PendingSend {
+                Ok(private_response) => {
+                    let pending = matches!(private_response, PrivateSendResponse::SendAccepted(_))
+                        .then(|| PendingSend {
                             address: recipient,
                             delivery,
                         });
-                    SendAnswer { response, pending }
+                    let response =
+                        crate::message_projection::visible_send_response(&private_response);
+                    SendAnswer {
+                        response,
+                        private_response,
+                        pending,
+                    }
                 }
-                Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
+                Err(error) => {
+                    PrivateSendResponse::Refused(Refusal::Store(error.to_string())).into()
+                }
             }
         })();
         if (direct || abrupt)
-            && let Response::Refused(refusal) = &answer.response
+            && let PrivateSendResponse::Refused(refusal) = &answer.private_response
         {
-            answer.response = Response::Failed(signal_flow::SendFailure {
+            answer.private_response = PrivateSendResponse::Failed(signal_flow::SendFailure {
                 logical_delivery_id_option: None,
                 send_failure_reason: signal_flow::SendFailureReason::Refused(refusal.clone()),
             });
+            answer.response =
+                crate::message_projection::visible_send_response(&answer.private_response);
         }
         match self.store.record_send_outcome(
             peer.cloned(),
             sender,
             recipient,
             request_digest,
-            answer.response.clone(),
+            answer.private_response.clone(),
         ) {
             Ok(_) => answer,
             Err(error) => {
@@ -385,9 +425,9 @@ impl SendsRequests for RunningNexus {
         let asleep = match self.store.metaflow(&address) {
             Ok(Some(metaflow)) => {
                 if metaflow.queue.is_empty() {
-                    return Response::Drained(signal_flow::DrainOutcome {
+                    return Response::Drained(signal_flow::VisibleDrainOutcome {
                         address: address.clone(),
-                        drain_state: signal_flow::DrainState::Delivered,
+                        visible_drain_state: signal_flow::VisibleDrainState::Delivered,
                     });
                 }
                 metaflow.state == flow_ethos::State::Asleep
@@ -409,20 +449,14 @@ impl SendsRequests for RunningNexus {
         }
         match self.store.metaflow(&address) {
             Ok(Some(metaflow)) if metaflow.queue.is_empty() => {
-                Response::Drained(signal_flow::DrainOutcome {
+                Response::Drained(signal_flow::VisibleDrainOutcome {
                     address: address.clone(),
-                    drain_state: signal_flow::DrainState::Delivered,
+                    visible_drain_state: signal_flow::VisibleDrainState::Delivered,
                 })
             }
-            Ok(Some(metaflow)) => Response::Drained(signal_flow::DrainOutcome {
+            Ok(Some(_metaflow)) => Response::Drained(signal_flow::VisibleDrainOutcome {
                 address: address.clone(),
-                drain_state: signal_flow::DrainState::Held(
-                    metaflow
-                        .queue
-                        .iter()
-                        .map(|entry| entry.logical_delivery_id.clone())
-                        .collect(),
-                ),
+                visible_drain_state: signal_flow::VisibleDrainState::Held,
             }),
             Ok(None) => Response::Refused(Refusal::Unknown(Unknown_Data::Address(address))),
             Err(error) => Response::Refused(Refusal::Store(error.to_string())),
@@ -1021,7 +1055,7 @@ pub(crate) trait CompletesDirectSends {
     fn direct_send_lease(
         &self,
         address: &Address,
-    ) -> Result<Option<crate::waking::WakingLease<'_>>, Box<Response>>;
+    ) -> Result<Option<crate::waking::WakingLease<'_>>, Box<PrivateSendResponse>>;
     fn complete_direct_send(&self, address: &Address, logical_id: String) -> SendAnswer;
     /// The attempt still to settle that carried `logical_id`: the one
     /// outstanding, else the latest parked once its payload was typed.
@@ -1068,10 +1102,10 @@ impl CompletesDirectSends for RunningNexus {
     fn direct_send_lease(
         &self,
         address: &Address,
-    ) -> Result<Option<crate::waking::WakingLease<'_>>, Box<Response>> {
+    ) -> Result<Option<crate::waking::WakingLease<'_>>, Box<PrivateSendResponse>> {
         use signal_flow::{SendFailure, SendFailureReason};
         let failed = |reason| {
-            Box::new(Response::Failed(SendFailure {
+            Box::new(PrivateSendResponse::Failed(SendFailure {
                 logical_delivery_id_option: None,
                 send_failure_reason: reason,
             }))
@@ -1172,7 +1206,7 @@ impl CompletesDirectSends for RunningNexus {
             if let Ok(Some(snapshot)) = state {
                 match snapshot.delivery_state {
                     DeliveryState::Delivered(native_receipt) => {
-                        return Response::Sent(SendReceipt {
+                        return PrivateSendResponse::Sent(SendReceipt {
                             logical_delivery_id: logical_id,
                             native_receipt,
                         })
@@ -1202,7 +1236,7 @@ impl CompletesDirectSends for RunningNexus {
         };
         let reason = match state {
             Ok(DeliveryState::Delivered(native_receipt)) => {
-                return Response::Sent(SendReceipt {
+                return PrivateSendResponse::Sent(SendReceipt {
                     logical_delivery_id: logical_id,
                     native_receipt,
                 })
@@ -1214,7 +1248,7 @@ impl CompletesDirectSends for RunningNexus {
             Ok(_) => SendFailureReason::NotSent(observed),
             Err(error) => SendFailureReason::Refused(Refusal::Store(error.to_string())),
         };
-        Response::Failed(SendFailure {
+        PrivateSendResponse::Failed(SendFailure {
             logical_delivery_id_option: Some(logical_id),
             send_failure_reason: reason,
         })

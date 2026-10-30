@@ -14,6 +14,7 @@ pub mod delivery;
 pub mod events;
 pub(crate) mod launch_cleanup;
 pub(crate) mod logical_delivery;
+pub(crate) mod message_v41;
 pub(crate) mod metaflow;
 pub(crate) mod metaflow_declaration;
 pub(crate) mod nexus_configuration;
@@ -27,6 +28,7 @@ pub(crate) mod send_server;
 pub(crate) mod send_v31;
 pub(crate) mod send_v32;
 pub(crate) mod send_v34;
+pub(crate) mod send_v41;
 pub(crate) mod sent;
 mod staged_upgrade;
 pub(crate) mod successor;
@@ -34,9 +36,8 @@ use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
 use flow_ethos::State as MetaflowState;
-use logical_delivery::{
-    DeclaresLogicalDeliveryTables, LogicalDeliveryTables, RecordsLogicalDeliveries,
-};
+pub(crate) use logical_delivery::RecordsLogicalDeliveries;
+use logical_delivery::{DeclaresLogicalDeliveryTables, LogicalDeliveryTables};
 use metaflow::{TakesLaunchAddress, WritesTakenAddress};
 use metaflow_declaration::UpgradesMetaflowDeclarations;
 use nexus_configuration::{
@@ -55,6 +56,7 @@ use std::{
     sync::{Arc, Condvar, Mutex},
 };
 
+use message_v41::{MetaflowV41, RequestV41};
 use meta_signal_flow::{
     ConfigurationChange, ConfigurationSnapshot, ConfigureCounters, ConfigureLeaveOut,
     ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureOutcome, ConfigureSendServer,
@@ -67,6 +69,8 @@ use sema_engine::{
     SchemaVersion, TableDescriptor, TableName, TableReference, TableRegistration, UpgradeFrom,
     UpgradeOutcome,
 };
+#[cfg(test)]
+use signal_flow::Request;
 use signal_flow::{
     Address, Aspect, Caller, CallerResolutionRejection, ComposedLaunch, EndpointSelection,
     FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding, HerdrRoute,
@@ -74,8 +78,8 @@ use signal_flow::{
     LaunchProfile, Launched, Layer, LeaveOut, Lock, Metaflow, NativeLaunchBinding,
     NativeLaunchIntent, NativeTranscriptBoundary, Origin, PowerLevel, Process,
     PromptDeliveryIntent, PromptDeliveryResult, Query, RecipientResolutionRejection,
-    RegistrationAcknowledgement, Remembering, ReplaceRejection, Replaced, Request, Response,
-    RouteReadiness, StartRejection,
+    RegistrationAcknowledgement, Remembering, ReplaceRejection, Replaced, Response, RouteReadiness,
+    StartRejection,
 };
 
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
@@ -634,6 +638,30 @@ impl EngineRecord for StoredMetaflow {
 
 impl MemoryDefinition for StoredMetaflow {
     fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(6)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-metaflow-v6")
+    }
+}
+
+/// The metaflow shape Flow 0.41 stored, before Result carried its typed
+/// answerable request. Historical Results are preserved by the upgrade as
+/// unresolved payloads; the upgrade never invents an Order for them.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredMetaflowV5 {
+    metaflow: MetaflowV41,
+}
+
+impl EngineRecord for StoredMetaflowV5 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+    }
+}
+
+impl MemoryDefinition for StoredMetaflowV5 {
+    fn memory_version() -> MemoryVersion {
         MemoryVersion::new(5)
     }
 
@@ -642,12 +670,22 @@ impl MemoryDefinition for StoredMetaflow {
     }
 }
 
+impl UpgradeFrom<StoredMetaflowV5> for StoredMetaflow {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: StoredMetaflowV5) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            metaflow: previous.metaflow.into(),
+        })
+    }
+}
+
 /// Queue shape from before logical-delivery identities. Keep this mirror
 /// distinct: the new QueueEntry has a different archived representation.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct QueuedRequestBeforeLogicalId {
     sent_by: flow_ethos::SentBy,
-    request: Request,
+    request: RequestV41,
 }
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 enum SentByBeforeFlow {
@@ -657,7 +695,7 @@ enum SentByBeforeFlow {
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct QueuedRequestBeforeFlow {
     sent_by: SentByBeforeFlow,
-    request: Request,
+    request: RequestV41,
 }
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct MetaflowBeforeFlow {
@@ -687,7 +725,7 @@ impl LogicalQueueConvertible for Vec<QueuedRequestBeforeLogicalId> {
                 ),
                 sent_by: old.sent_by,
                 delivery: flow_ethos::Delivery::Queue,
-                message: flow_ethos::Message::Soft(old.request),
+                message: flow_ethos::Message::Soft(old.request.into()),
             })
             .collect()
     }
@@ -839,7 +877,7 @@ pub(crate) struct MetaflowBeforeSenders {
     address: Address,
     state: StateBeforeIdle,
     past: Vec<String>,
-    queue: Vec<Request>,
+    queue: Vec<RequestV41>,
 }
 
 /// Each request queued before Flow kept senders is carried with its sender
@@ -3394,12 +3432,23 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<StoredMetaflow>,
     ) -> Result<TableReference<StoredMetaflow>, StoreError> {
+        let from_v4 = descriptor.clone();
+        match self.upgrade_table::<StoredMetaflowV5, StoredMetaflow>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
+            }
+        }
         // v4 predates stable queue identities; older families are tried only
         // after each newer archived shape declines admission.
-        let from_v3 = descriptor.clone();
-        let from_v2 = descriptor.clone();
-        let from_v1 = descriptor.clone();
-        match self.upgrade_table::<StoredMetaflowV4, StoredMetaflow>(descriptor) {
+        let from_v3 = from_v4.clone();
+        let from_v2 = from_v4.clone();
+        let from_v1 = from_v4.clone();
+        match self.upgrade_table::<StoredMetaflowV4, StoredMetaflow>(from_v4) {
             UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
@@ -3447,10 +3496,22 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<address_hold::AddressHold>,
     ) -> Result<TableReference<address_hold::AddressHold>, StoreError> {
-        let from_v2 = descriptor.clone();
-        let from_v1 = descriptor.clone();
+        let from_v3 = descriptor.clone();
         match self
-            .upgrade_table::<address_hold::AddressHoldV3, address_hold::AddressHold>(descriptor)
+            .upgrade_table::<address_hold::AddressHoldV4, address_hold::AddressHold>(descriptor)
+        {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
+            }
+        }
+        let from_v2 = from_v3.clone();
+        let from_v1 = from_v3.clone();
+        match self.upgrade_table::<address_hold::AddressHoldV3, address_hold::AddressHold>(from_v3)
         {
             UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
@@ -4355,6 +4416,7 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-metaflow"),
             StoredMetaflow::schema_hash(),
         )
+        .with_predecessor::<StoredMetaflowV5>()
         .with_predecessor::<StoredMetaflowV1>()
         .with_predecessor::<StoredMetaflowV2>()
         .with_predecessor::<StoredMetaflowV3>()
@@ -4624,6 +4686,7 @@ impl OpensFlowStore for FlowStore {
                 FamilyName::new("flow-nexus-metaflow"),
                 StoredMetaflow::schema_hash(),
             )
+            .with_predecessor::<StoredMetaflowV5>()
             .with_predecessor::<StoredMetaflowV1>()
             .with_predecessor::<StoredMetaflowV2>()
             .with_predecessor::<StoredMetaflowV3>()
@@ -4819,11 +4882,8 @@ impl OpensFlowStore for FlowStore {
         store.seed_delivery_configuration(defaults)?;
         // A delivery a crash left under the lease is settled Uncertain here
         // and never retried: what reached its pane is not known.
-        for delivery in store.settle_interrupted_deliveries()? {
-            eprintln!(
-                "flow-nexus: delivery {} to {} was interrupted under its lease; settled Uncertain",
-                delivery.delivery_id, delivery.flow_id
-            );
+        for _delivery in store.settle_interrupted_deliveries()? {
+            eprintln!("flow-nexus: a delivery was interrupted under its lease; settled Uncertain");
         }
         // Native queue delivery is not atomic with this store. A durable
         // native receipt is enough to finish the local settlement after a
@@ -4838,8 +4898,7 @@ impl OpensFlowStore for FlowStore {
                     }
                 }
                 QueueDeliveryPhase::Uncertain(_) => eprintln!(
-                    "flow-nexus: queued delivery {} is uncertain; it is reconciled from native history",
-                    attempt.attempt_id
+                    "flow-nexus: a queued delivery is uncertain; it is reconciled from native history"
                 ),
                 QueueDeliveryPhase::Prepared
                 | QueueDeliveryPhase::Settled(_)
@@ -7411,7 +7470,7 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-quarantined-launch-attempt",
                 "flow-nexus-quarantined-launch-attempt-v1",
             ),
-            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v5"),
+            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v6"),
             "flow_nexus_metaflow_processes" => (
                 "flow-nexus-metaflow-process",
                 "flow-nexus-metaflow-process-v1",
@@ -7521,11 +7580,11 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_queue_delivery_requests" => (
                 "flow-nexus-queue-delivery-request",
-                "flow-nexus-queue-delivery-request-v5",
+                "flow-nexus-queue-delivery-request-v6",
             ),
             "flow_nexus_queue_delivery_attempts" => (
                 "flow-nexus-queue-delivery-attempt",
-                "flow-nexus-queue-delivery-attempt-v6",
+                "flow-nexus-queue-delivery-attempt-v7",
             ),
             _ => return None,
         };
@@ -7559,6 +7618,10 @@ pub(crate) trait ReadsFlowMemory {
                 (
                     send_outcome::OUTCOME_FAMILY,
                     send_outcome::StoredSendOutcomeV4::schema_hash(),
+                ),
+                (
+                    send_outcome::OUTCOME_FAMILY,
+                    send_outcome::StoredSendOutcomeV5::schema_hash(),
                 ),
             ],
             "flow_nexus_flows" => &[("flow-nexus-flow", FlowRecordV5::schema_hash())],
@@ -7621,6 +7684,7 @@ pub(crate) trait ReadsFlowMemory {
                 ("flow-nexus-metaflow", StoredMetaflowV2::schema_hash()),
                 ("flow-nexus-metaflow", StoredMetaflowV3::schema_hash()),
                 ("flow-nexus-metaflow", StoredMetaflowV4::schema_hash()),
+                ("flow-nexus-metaflow", StoredMetaflowV5::schema_hash()),
             ],
             "flow_nexus_meta_model_configuration" => &[(
                 "flow-nexus-meta-model-configuration",
@@ -7643,6 +7707,10 @@ pub(crate) trait ReadsFlowMemory {
                     "flow-nexus-logical-delivery-current",
                     <logical_delivery::CurrentLogicalDeliveryV3 as MemoryDefinition>::schema_hash(),
                 ),
+                (
+                    "flow-nexus-logical-delivery-current",
+                    <logical_delivery::CurrentLogicalDeliveryV4 as MemoryDefinition>::schema_hash(),
+                ),
             ],
             "flow_nexus_logical_delivery_events" => &[
                 (
@@ -7656,6 +7724,10 @@ pub(crate) trait ReadsFlowMemory {
                 (
                     "flow-nexus-logical-delivery-event",
                     <logical_delivery::LogicalDeliveryEventV3 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    "flow-nexus-logical-delivery-event",
+                    <logical_delivery::LogicalDeliveryEventV4 as MemoryDefinition>::schema_hash(),
                 ),
             ],
             "flow_nexus_successor_intents" => &[(
@@ -7678,6 +7750,10 @@ pub(crate) trait ReadsFlowMemory {
                 (
                     address_hold::ADDRESS_HOLD_FAMILY,
                     <address_hold::AddressHoldV3 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    address_hold::ADDRESS_HOLD_FAMILY,
+                    <address_hold::AddressHoldV4 as MemoryDefinition>::schema_hash(),
                 ),
             ],
             "flow_nexus_send_calls" => &[
@@ -7715,6 +7791,10 @@ pub(crate) trait ReadsFlowMemory {
                     "flow-nexus-queue-delivery-request",
                     <queue_delivery::StoredDeliveryRequestV4 as MemoryDefinition>::schema_hash(),
                 ),
+                (
+                    "flow-nexus-queue-delivery-request",
+                    <queue_delivery::StoredDeliveryRequestV5 as MemoryDefinition>::schema_hash(),
+                ),
             ],
             "flow_nexus_queue_delivery_attempts" => &[
                 (
@@ -7724,6 +7804,10 @@ pub(crate) trait ReadsFlowMemory {
                 (
                     "flow-nexus-queue-delivery-attempt",
                     <queue_delivery::QueueDeliveryAttemptV5 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    "flow-nexus-queue-delivery-attempt",
+                    <queue_delivery::QueueDeliveryAttemptV6 as MemoryDefinition>::schema_hash(),
                 ),
             ],
             "flow_nexus_flow_events" => &[
@@ -8808,7 +8892,7 @@ mod tests {
     fn simplified_reply_requires_consumed_input_and_queues_once_to_its_sender() {
         use signal_flow::{
             Address, Aspect, DeliveryState, Layer, Message, Metaflow, NativeReceipt, Request,
-            Response, SentBy,
+            SentBy,
         };
         let fixture = StoreFixture::new();
         let store = fixture.store();
@@ -8830,7 +8914,7 @@ mod tests {
                 queue: Vec::new(),
             });
         }
-        let Response::SendAccepted(input) = store
+        let signal_flow::PrivateSendResponse::SendAccepted(input) = store
             .accept_logical_delivery(
                 &source,
                 SentBy::Sender(recipient.clone()),
@@ -8930,7 +9014,9 @@ mod tests {
         assert_eq!(queued[0].sent_by, SentBy::Sender(source));
         assert_eq!(
             queued[0].message,
-            Message::Soft(Request::Result("answer".into()))
+            Message::Soft(Request::Result(flow_ethos::ResultPayload::Historical(
+                "answer".into()
+            )))
         );
         assert_eq!(queued[0].delivery, flow_ethos::Delivery::Wake);
 
@@ -8948,7 +9034,7 @@ mod tests {
             past: Vec::new(),
             queue: Vec::new(),
         });
-        let Response::SendAccepted(second_input) = store
+        let signal_flow::PrivateSendResponse::SendAccepted(second_input) = store
             .accept_logical_delivery(
                 &second_sender,
                 SentBy::Sender(recipient.clone()),
@@ -9009,7 +9095,9 @@ mod tests {
         assert_eq!(queued[1].sent_by, SentBy::Sender(second_sender));
         assert_eq!(
             queued[1].message,
-            Message::Soft(Request::Result("second answer".into()))
+            Message::Soft(Request::Result(flow_ethos::ResultPayload::Historical(
+                "second answer".into()
+            )))
         );
     }
 
@@ -9017,7 +9105,7 @@ mod tests {
     fn core_presentation_is_queued_as_is_once_and_secondary_gets_only_a_notice() {
         use signal_flow::{
             Address, Aspect, DeliveryState, Layer, Message, Metaflow, NativeReceipt, Request,
-            Response, SentBy,
+            SentBy,
         };
         let fixture = StoreFixture::new();
         let store = fixture.store();
@@ -9044,7 +9132,7 @@ mod tests {
                 queue: Vec::new(),
             });
         }
-        let Response::SendAccepted(input) = store
+        let signal_flow::PrivateSendResponse::SendAccepted(input) = store
             .accept_logical_delivery(
                 &source,
                 SentBy::Sender(sender.clone()),
@@ -11962,8 +12050,8 @@ mod tests {
                             state: super::StateBeforeIdle::Asleep,
                             past: vec!["a1a1a1".into()],
                             queue: vec![
-                                Request::Order("first".into()),
-                                Request::Notice("second".into()),
+                                super::message_v41::RequestV41::Order("first".into()),
+                                super::message_v41::RequestV41::Notice("second".into()),
                             ],
                         },
                     },
@@ -12043,7 +12131,7 @@ mod tests {
         drop(database);
         let queued = vec![super::QueuedRequestBeforeFlow {
             sent_by: super::SentByBeforeFlow::Unknown,
-            request: Request::Order("kept".into()),
+            request: super::message_v41::RequestV41::Order("kept".into()),
         }];
         {
             let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))

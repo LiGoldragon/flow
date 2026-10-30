@@ -18,8 +18,9 @@ use crate::store::{ManagesMetaflowState, ReadsFlowRoles, ReadsFlowRows, Register
 use crate::{Dispatches, DispatchesSerially};
 use flow_ethos::State;
 use meta_signal_flow::{
-    Attempt, InspectRejected_Data, Query as MetaQuery, QueueDeliveryStanding, Rebind_Data,
-    RebindRejected_Data, Rebinding, Response as MetaResponse, Withdraw_Data, WithdrawRejected_Data,
+    InspectRejected_Data, Query as MetaQuery, Rebind_Data, RebindRejected_Data, Rebinding,
+    Response as MetaResponse, VisibleAttempt, VisibleQueueDeliveryStanding, Withdraw_Data,
+    WithdrawRejected_Data,
 };
 use signal_flow::{
     Address, Aspect, Delivery, DeliveryState, HarnessKind, HerdrRoute, HerdrRouteSelection, Layer,
@@ -162,13 +163,22 @@ fn inspect_answers_the_metaflow_whole() {
         Response::Locked(lock) => lock,
         other => panic!("the sender locks the seat: {other:?}"),
     };
-    let attempt_id = prepared(&fixture);
+    prepared(&fixture);
 
     let MetaResponse::Inspected(inspected) = inspect(&fixture, seat_address()) else {
         panic!("the metaflow is inspected")
     };
-    assert_eq!(inspected.metaflow, stored(&fixture));
-    assert_eq!(inspected.metaflow.state, State::Awake(CLAUDE_SEAT.into()));
+    let private = stored(&fixture);
+    assert_eq!(inspected.visible_metaflow.address, private.address);
+    assert_eq!(
+        inspected.visible_metaflow.state,
+        State::Awake(CLAUDE_SEAT.into())
+    );
+    assert_eq!(inspected.visible_metaflow.flow_id_vector, private.past);
+    assert_eq!(
+        inspected.visible_metaflow.visible_native_input_vector.len(),
+        private.queue.len()
+    );
     assert_eq!(
         inspected.binding.flow_node_option,
         fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap(),
@@ -179,13 +189,12 @@ fn inspect_answers_the_metaflow_whole() {
     assert_eq!(inspected.lock_vector, vec![lock]);
     assert!(
         matches!(
-            inspected.attempt_vector.as_slice(),
-            [Attempt::Queued(delivery)]
-                if delivery.queue_attempt_id == attempt_id
-                    && delivery.queue_delivery_standing == QueueDeliveryStanding::Prepared
+            inspected.visible_attempt_vector.as_slice(),
+            [VisibleAttempt::Queued(delivery)]
+                if delivery.visible_queue_delivery_standing == VisibleQueueDeliveryStanding::Prepared
         ),
         "{:?}",
-        inspected.attempt_vector
+        inspected.visible_attempt_vector
     );
 
     // A launch at the Address, not confirmed, holds the Address as its
@@ -195,7 +204,7 @@ fn inspect_answers_the_metaflow_whole() {
     let MetaResponse::Inspected(launching) = inspect(&fixture, seat_address()) else {
         panic!("the metaflow is inspected")
     };
-    let State::Awake(launched) = &launching.metaflow.state else {
+    let State::Awake(launched) = &launching.visible_metaflow.state else {
         panic!("the launch holds the Address")
     };
     assert_eq!(
@@ -204,13 +213,13 @@ fn inspect_answers_the_metaflow_whole() {
     );
     assert!(
         matches!(
-            launching.attempt_vector.as_slice(),
-            [Attempt::Queued(delivery), Attempt::Launch(launch)]
-                if delivery.queue_attempt_id == attempt_id
+            launching.visible_attempt_vector.as_slice(),
+            [VisibleAttempt::Queued(delivery), VisibleAttempt::Launch(launch)]
+                if delivery.visible_queue_delivery_standing == VisibleQueueDeliveryStanding::Prepared
                     && launch.launch_request_id == SUCCESSOR_REQUEST
         ),
         "{:?}",
-        launching.attempt_vector
+        launching.visible_attempt_vector
     );
 
     fixture.nexus.store.seed_metaflow(Metaflow {
@@ -387,7 +396,7 @@ fn rebind_flow_makes_another_flow_current() {
 fn withdraw_takes_one_request_out_and_closes_its_attempt() {
     let fixture = NexusFixture::new();
     awake_seat(&fixture, vec![entry("withdraw-1")]);
-    let Response::SendAccepted(accepted) = fixture
+    let signal_flow::PrivateSendResponse::SendAccepted(accepted) = fixture
         .nexus
         .store
         .accept_logical_delivery(
@@ -415,10 +424,7 @@ fn withdraw_takes_one_request_out_and_closes_its_attempt() {
     // The oldest is handed over and nothing is seen of it since.
     let attempt_id = prepared(&fixture);
 
-    assert_eq!(
-        withdraw(&never, seat_address()),
-        MetaResponse::Withdrawn(never.clone())
-    );
+    assert_eq!(withdraw(&never, seat_address()), MetaResponse::Withdrawn);
     assert_eq!(stored(&fixture).queue, vec![entry("withdraw-1")]);
     assert_eq!(
         fixture
@@ -433,7 +439,7 @@ fn withdraw_takes_one_request_out_and_closes_its_attempt() {
 
     assert_eq!(
         withdraw("withdraw-1", seat_address()),
-        MetaResponse::Withdrawn("withdraw-1".into())
+        MetaResponse::Withdrawn
     );
     assert_eq!(stored(&fixture).queue, vec![]);
     assert_eq!(
@@ -459,7 +465,7 @@ fn withdraw_takes_one_request_out_and_closes_its_attempt() {
     let MetaResponse::Inspected(inspected) = inspect(&fixture, seat_address()) else {
         panic!("the metaflow is inspected")
     };
-    assert_eq!(inspected.attempt_vector, vec![]);
+    assert_eq!(inspected.visible_attempt_vector, vec![]);
     assert!(fixture.typed().is_none(), "nothing is handed over again");
 
     assert_eq!(

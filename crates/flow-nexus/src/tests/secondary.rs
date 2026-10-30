@@ -180,7 +180,7 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
 fn a_send_to_a_bad_topic_is_topic_refused() {
     use crate::sending::SendsRequests;
     use crate::store::metaflow::SleepsMetaflows;
-    use signal_flow::{Address, Delivery, Message, Recipient, Refusal, Request, SendRequest};
+    use signal_flow::{Address, Delivery, Recipient, SendRequest};
     let fixture = NexusFixture::new();
     for topic in ["PrimaryCommitting", "primary-committing", "", "9lives"] {
         let recipient = Address {
@@ -192,13 +192,15 @@ fn a_send_to_a_bad_topic_is_topic_refused() {
             SendRequest {
                 recipient: Recipient::Address(recipient.clone()),
                 delivery: Delivery::Queue,
-                message: Message::Soft(Request::Order("Never queued.".into())),
+                sendable_message: signal_flow::SendableMessage::Soft(
+                    signal_flow::SendableRequest::Order("Never queued.".into()),
+                ),
             },
             None,
         );
         assert_eq!(
             sent.response,
-            Response::Refused(Refusal::TopicRefused(topic.into())),
+            Response::SendRefused(signal_flow::VisibleRefusal::TopicRefused(topic.into())),
             "{topic:?}"
         );
         assert!(sent.pending.is_none());
@@ -207,16 +209,17 @@ fn a_send_to_a_bad_topic_is_topic_refused() {
             SendRequest {
                 recipient: Recipient::Address(recipient),
                 delivery: Delivery::Wake,
-                message: Message::HardAbrupt(Request::Order("Never typed.".into())),
+                sendable_message: signal_flow::SendableMessage::HardAbrupt(
+                    signal_flow::SendableRequest::Order("Never typed.".into()),
+                ),
             },
             None,
         );
         assert_eq!(
             abrupt.response,
-            Response::Failed(signal_flow::SendFailure {
-                logical_delivery_id_option: None,
-                send_failure_reason: signal_flow::SendFailureReason::Refused(
-                    Refusal::TopicRefused(topic.into())
+            Response::Failed(signal_flow::VisibleSendFailure {
+                visible_send_failure_reason: signal_flow::VisibleSendFailureReason::Refused(
+                    signal_flow::VisibleRefusal::TopicRefused(topic.into())
                 ),
             }),
             "{topic:?}"

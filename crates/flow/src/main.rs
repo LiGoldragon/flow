@@ -1,7 +1,7 @@
 use datom_codec::{Budget, Composable, DatomForming, Datomizable, Form};
 use flow_defaults::{DefaultConfiguration, LaysOutDefaults, ReadsAnchors};
 use protos::{BoundedProtosizable, Compactable, Protosizable, ReaderBudget};
-use signal_flow::{Delivery, Message, Query, Recipient, Response, SendRequest};
+use signal_flow::{Delivery, Query, Recipient, Response, SendRequest, SendableMessage};
 use std::{
     env,
     io::{Read, Write},
@@ -56,13 +56,13 @@ impl ParsesFlowCommand for FlowClient {
             && head.0 == "Send"
             && matches!(&body.form, Form::Struct(fields) if fields.len() == 2)
         {
-            let (recipient, message): (Recipient, Message) = body
+            let (recipient, sendable_message): (Recipient, SendableMessage) = body
                 .compose(&mut budget)
                 .map_err(|error| format!("invalid Flow query: {error:?}"))?;
             return Ok(Query::Send(SendRequest {
                 recipient,
                 delivery: Delivery::Wake,
-                message,
+                sendable_message,
             }));
         }
         datom
@@ -164,7 +164,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{AnswersVersion, FlowClient, ParsesFlowCommand, TextualizesFlowReply};
-    use signal_flow::{Delivery, Message, Query, Recipient, Request, Response};
+    use signal_flow::{Delivery, Query, Recipient, Response, SendableMessage, SendableRequest};
 
     #[test]
     fn send_names_queue_or_wake_and_deliver_all_is_typed() {
@@ -183,8 +183,8 @@ mod tests {
         assert!(matches!(send.recipient, Recipient::Address(_)));
         assert_eq!(send.delivery, Delivery::Wake);
         assert_eq!(
-            send.message,
-            Message::Soft(Request::Order("Review.".into()))
+            send.sendable_message,
+            SendableMessage::Soft(SendableRequest::Order("Review.".into()))
         );
         assert_eq!(
             client
@@ -196,7 +196,9 @@ mod tests {
             Query::Send(send)
         );
         let Query::Send(queued) = client
-            .parse_command(["Send.{ Up Queue Soft.Result.«Ready.» }".into()].into_iter())
+            .parse_command(
+                ["Send.{ Up Queue Soft.Result.{ Order.«Review.» «Ready.» } }".into()].into_iter(),
+            )
             .expect("explicit Queue parses")
         else {
             panic!("fixture must remain a Send")
@@ -217,7 +219,7 @@ mod tests {
             socket: "unused".into(),
         };
         for message in [
-            "Soft.Result.«Wake Send.{ is content }»",
+            "Soft.Result.{ Order.«Review.» «Wake Send.{ is content }» }",
             "MiddleAbrupt.Notice.«Check the source.»",
             "HardAbrupt.Question.«Which revision?»",
             "Soft.Psyche.{ «context» «verbatim» }",
@@ -441,8 +443,8 @@ mod tests {
         else {
             panic!("a Task is sent")
         };
-        let Message::Soft(Request::Task(task)) = &send.message else {
-            panic!("a Soft Task: {:?}", send.message)
+        let SendableMessage::Soft(SendableRequest::Task(task)) = &send.sendable_message else {
+            panic!("a Soft Task: {:?}", send.sendable_message)
         };
         assert_eq!(task.minutes, 30);
         assert_eq!(task.string, "Check the capsule run.");

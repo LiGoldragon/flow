@@ -177,9 +177,13 @@ pub trait JournalsSendInvocations {
 
 impl JournalsSendInvocations for RunningNexus {
     fn journal_send_invocation(&self, call: &ToolCall, outcome: SendOutcome) -> SendOutcome {
-        let invocation = call.send_invocation(outcome.clone());
-        let datom = invocation.datomize(Vec::new()).protosize().compact();
-        eprintln!("flow-nexus: {datom}");
+        let _ = call;
+        let status = match &outcome {
+            SendOutcome::Accepted(_) => "Accepted",
+            SendOutcome::LegacyUnknown(_) => "LegacyUnknown",
+            SendOutcome::Refused(_) => "Refused",
+        };
+        eprintln!("flow-nexus: send tool invocation {status}");
         outcome
     }
 }
@@ -308,7 +312,7 @@ impl BecomesRequest for SendArguments {
         match &self.send_kind {
             SendKind::Order => Request::Order(body),
             SendKind::Question => Request::Question(body),
-            SendKind::Result => Request::Result(body),
+            SendKind::Result => Request::Result(flow_ethos::ResultPayload::Historical(body)),
             SendKind::Notice => Request::Notice(body),
         }
     }
@@ -448,9 +452,9 @@ impl HandlesSendCall for RunningNexus {
                     now,
                 )
                 .unwrap_or_else(store_refused);
-            // Each admission is logged with its id and kind; the send tool
+            // Each admission is logged with its kind; the send tool
             // holds no reminder, so a Task it admits names no deadline.
-            if let SendOutcome::Accepted(accepted) = &outcome {
+            if matches!(&outcome, SendOutcome::Accepted(_)) {
                 use crate::admission::{Admission, LogsAdmission};
                 let (signal_flow::Message::HardAbrupt(request)
                 | signal_flow::Message::MiddleAbrupt(request)
@@ -458,7 +462,6 @@ impl HandlesSendCall for RunningNexus {
                 eprintln!(
                     "{}",
                     Admission {
-                        logical_delivery_id: &accepted.send_acceptance.logical_delivery_id,
                         request,
                         deadline: None,
                         at: admitted_at,

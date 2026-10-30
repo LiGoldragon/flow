@@ -39,7 +39,9 @@ impl RefusesStore for RunningNexus {
 impl RepairsFromMeta for RunningNexus {
     fn inspect(&self, address: Address) -> Response {
         match self.store.inspection(&address) {
-            Ok(Some(inspected)) => Response::Inspected(inspected),
+            Ok(Some(inspected)) => {
+                Response::Inspected(crate::message_projection::visible_inspection(inspected))
+            }
             Ok(None) => Response::InspectRejected(InspectRejected_Data::UnknownAddress),
             Err(error) => Self::store_refused(error),
         }
@@ -104,7 +106,7 @@ impl RepairsFromMeta for RunningNexus {
                 eprintln!(
                     "flow-nexus: queued request {logical_delivery_id} withdrawn by the owner"
                 );
-                Response::Withdrawn(logical_delivery_id)
+                Response::Withdrawn
             }
             Ok(Err(rejection)) => Response::WithdrawRejected(rejection),
             Err(error) => Self::store_refused(error),

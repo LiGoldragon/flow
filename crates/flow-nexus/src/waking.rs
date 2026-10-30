@@ -1155,7 +1155,9 @@ pub(crate) trait RendersAttemptInput {
 impl RendersAttemptInput for QueueDeliveryAttempt {
     fn prompt_text(&self) -> String {
         match &self.queue_evidence {
-            meta_signal_flow::QueueEvidence::Logical(entry) => [entry.clone()].prompt_text(),
+            meta_signal_flow::QueueEvidence::Logical(entry) => {
+                [entry.clone()].prompt_text(&self.address)
+            }
             meta_signal_flow::QueueEvidence::Legacy(legacy) => legacy.request.native_content(),
         }
     }
@@ -1345,10 +1347,7 @@ impl ReconcilesQueueDelivery for RunningNexus {
                 Some(Err(undecided)) => self.undecided(&attempt, undecided),
                 None => self.reconcile_delivery(&attempt),
             };
-            eprintln!(
-                "flow-nexus: queued delivery {} reconciled at start: {reconciled:?}",
-                attempt.attempt_id
-            );
+            eprintln!("flow-nexus: a queued delivery was reconciled at start: {reconciled:?}");
         }
         self.recover_typed(&addresses);
         let seats = {
@@ -1523,8 +1522,8 @@ impl SleepsAndWakesSeats for RunningNexus {
                     return;
                 }
                 Outcome::Drained(_) => {}
-                outcome => {
-                    eprintln!("flow-nexus: work queued during a wake stays queued: {outcome:?}");
+                _outcome => {
+                    eprintln!("flow-nexus: work queued during a wake stays queued");
                     drop(lease);
                     return;
                 }
@@ -1956,8 +1955,7 @@ impl PerformsWakeAndDrain for RunningNexus {
                 // behind it moves on.
                 Reconciled::Undecided(undecided) => {
                     eprintln!(
-                        "flow-nexus: queued delivery {} remains uncertain ({undecided:?}); parking it without retry",
-                        attempt.attempt_id
+                        "flow-nexus: a queued delivery remains uncertain ({undecided:?}); parking it without retry"
                     );
                     if !self
                         .store
@@ -2113,7 +2111,7 @@ impl PerformsWakeAndDrain for RunningNexus {
                 return refused(drained, Failed_Data::StoreRefused);
             }
         };
-        let text = cohort.prompt_text();
+        let text = cohort.prompt_text(&address);
         let absent = |observation: String| {
             self.store
                 .mark_delivery_absent(
@@ -2129,17 +2127,15 @@ impl PerformsWakeAndDrain for RunningNexus {
             // One Waking carries the whole cohort, every input under its own
             // id, sender and priority; the strongest priority in it is how
             // the payload is typed.
+            use crate::message_projection::ProjectsQueueEntry;
             let waking = cohort
                 .iter()
-                .map(|entry| signal_flow::NativeInput {
-                    logical_delivery_id: entry.logical_delivery_id.clone(),
-                    sent_by: entry.sent_by.clone(),
-                    message: entry.message.clone(),
-                })
+                .map(|entry| entry.visible_input(&address))
                 .collect::<Vec<_>>();
+            let visible_sender = oldest.visible_input(&address).visible_sender;
             let letter = meta_signal_flow::Letter {
-                message_id: oldest.logical_delivery_id.clone(),
-                sender: meta_signal_flow::Sender::Owner,
+                visible_sender,
+                address: address.clone(),
                 content: meta_signal_flow::Content::Waking(waking),
             };
             let message = if cohort
@@ -2176,10 +2172,7 @@ impl PerformsWakeAndDrain for RunningNexus {
                 &text,
             );
             if let Err(error) = &submitted {
-                eprintln!(
-                    "flow-nexus: logical {} attempt {} Codex submission uncertain: {error:?}",
-                    oldest.logical_delivery_id, attempt.attempt_id
-                );
+                eprintln!("flow-nexus: Codex submission of queued work is uncertain: {error:?}");
             }
         } else if let Err(refusal) = self.hand_over(&flow_id, &text) {
             // Herdr refused before any of the text reached the pane.
@@ -2283,10 +2276,7 @@ impl ParksCohort for RunningNexus {
             .park_uncertain_delivery(&head.attempt_id)
             .unwrap_or(false)
         {
-            eprintln!(
-                "flow-nexus: typed attempt {} not parked; it stays outstanding",
-                head.attempt_id
-            );
+            eprintln!("flow-nexus: a typed attempt was not parked; it stays outstanding");
             return parked;
         }
         parked.push(first.clone());
@@ -2309,18 +2299,14 @@ impl ParksCohort for RunningNexus {
                         .unwrap_or(false)
                     {
                         eprintln!(
-                            "flow-nexus: typed attempt {} not parked; it stays outstanding",
-                            next.attempt_id
+                            "flow-nexus: a typed attempt was not parked; it stays outstanding"
                         );
                         break;
                     }
                     parked.push(entry.clone());
                 }
                 other => {
-                    eprintln!(
-                        "flow-nexus: typed request {} not given its attempt: {other:?}",
-                        entry.logical_delivery_id
-                    );
+                    eprintln!("flow-nexus: a typed request was not given its attempt: {other:?}");
                     break;
                 }
             }
@@ -2542,7 +2528,7 @@ impl ParksCohort for RunningNexus {
                 meta_signal_flow::QueueEvidence::Legacy(_) => None,
             })
             .collect::<Vec<_>>();
-        let text = entries.prompt_text();
+        let text = entries.prompt_text(&attempt.address);
         vec![(group, text), alone]
     }
 }
@@ -2691,7 +2677,7 @@ impl WakesInParts for RunningNexus {
         } else {
             metaflow.queue.clone()
         };
-        let startup_text = startup.prompt_text();
+        let startup_text = startup.prompt_text(&metaflow.address);
         // The last flow's session must not be running still: a seat that
         // flow's harness keeps, as one started by hand would, is never
         // joined by a second flow of the same metaflow.
@@ -3090,9 +3076,9 @@ impl WakesInParts for RunningNexus {
                 )
             };
             match told {
-                Ok(Response::SendAccepted(_)) => self.wake_due(up),
-                answer => eprintln!(
-                    "flow-nexus: the refused successor of flow {flow_id} was not told to {up:?}: {answer:?}"
+                Ok(signal_flow::PrivateSendResponse::SendAccepted(_)) => self.wake_due(up),
+                _answer => eprintln!(
+                    "flow-nexus: the refused successor of flow {flow_id} was not told to {up:?}"
                 ),
             }
         }

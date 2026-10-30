@@ -35,6 +35,7 @@ pub mod composition;
 pub mod context;
 pub mod delivery;
 pub mod lean;
+pub(crate) mod message_projection;
 mod metaflow;
 pub mod recovery;
 pub mod reminding;
@@ -96,6 +97,7 @@ use std::{
     },
     time::Duration,
 };
+use store::logical_delivery::RecordsLogicalDeliveries;
 use store::{
     AppliesFlowQuery, FlowStore, NamesLiveFlow, OpensFlowStore, ReadsFlowRows,
     RegistersExistingFlow, RegistersFlowIdentity,
@@ -556,16 +558,32 @@ impl Dispatches for RunningNexus {
             meta_signal_flow::Query::ObserveLegacyArchive => {
                 use store::queue_delivery::AccountsQueueDelivery;
                 match self.store.observe_legacy_archive() {
-                    Ok(archive) => meta_signal_flow::Response::LegacyArchiveObserved(archive),
+                    Ok(archive) => meta_signal_flow::Response::LegacyArchiveObserved(
+                        archive
+                            .iter()
+                            .map(crate::message_projection::visible_legacy_archive_entry)
+                            .collect(),
+                    ),
                     Err(error) => meta_signal_flow::Response::ObserveLegacyArchiveRejected(
                         meta_signal_flow::StoreRefusal::Store(error.to_string()),
                     ),
                 }
             }
             meta_signal_flow::Query::ReadSendOutcomes => match self.store.read_send_outcomes() {
-                Ok(records) => meta_signal_flow::Response::SendOutcomesRead(records),
+                Ok(records) => meta_signal_flow::Response::SendOutcomesRead(
+                    records
+                        .iter()
+                        .map(crate::message_projection::visible_send_outcome_record)
+                        .collect(),
+                ),
                 Err(_) => meta_signal_flow::Response::ReadSendOutcomesRejected(
                     meta_signal_flow::ReadSendOutcomesRejected_Data::StoreRefused,
+                ),
+            },
+            meta_signal_flow::Query::Debug(address) => match self.store.debug_snapshot(&address) {
+                Ok(snapshot) => meta_signal_flow::Response::Debugged(snapshot),
+                Err(error) => meta_signal_flow::Response::Refused(
+                    meta_signal_flow::StoreRefusal::Store(error.to_string()),
                 ),
             },
             meta_signal_flow::Query::ResolveQueueDelivery(resolution) => match resolver {
@@ -1273,7 +1291,7 @@ impl DispatchesSerially for RunningNexus {
             (meta_signal_flow::Response::QueueDeliveryResolved(resolved), _) => {
                 self.drain_awake(&resolved.address);
             }
-            (meta_signal_flow::Response::Withdrawn(_), Some(address)) => {
+            (meta_signal_flow::Response::Withdrawn, Some(address)) => {
                 self.drain_awake(&address);
             }
             _ => {}
@@ -1387,6 +1405,39 @@ mod tests {
     mod submission;
     mod waking;
 
+    pub(crate) fn sendable_message(message: signal_flow::Message) -> signal_flow::SendableMessage {
+        let request = |request| match request {
+            signal_flow::Request::Order(value) => signal_flow::SendableRequest::Order(value),
+            signal_flow::Request::Question(value) => signal_flow::SendableRequest::Question(value),
+            signal_flow::Request::Psyche(value) => signal_flow::SendableRequest::Psyche(value),
+            signal_flow::Request::Psyches(value) => signal_flow::SendableRequest::Psyches(value),
+            signal_flow::Request::Notice(value) => signal_flow::SendableRequest::Notice(value),
+            signal_flow::Request::Task(value) => signal_flow::SendableRequest::Task(value),
+            signal_flow::Request::Result(flow_ethos::ResultPayload::Answered(value)) => {
+                signal_flow::SendableRequest::Result(signal_flow::Result_Data {
+                    answerable: value.answerable,
+                    string: value.string,
+                })
+            }
+            signal_flow::Request::Done(flow_ethos::DonePayload::Answered(value)) => {
+                signal_flow::SendableRequest::Done(signal_flow::Done_Data {
+                    answerable: value.answerable,
+                    string: value.string,
+                })
+            }
+            _ => panic!("the test request is not externally sendable"),
+        };
+        match message {
+            signal_flow::Message::HardAbrupt(value) => {
+                signal_flow::SendableMessage::HardAbrupt(request(value))
+            }
+            signal_flow::Message::MiddleAbrupt(value) => {
+                signal_flow::SendableMessage::MiddleAbrupt(request(value))
+            }
+            signal_flow::Message::Soft(value) => signal_flow::SendableMessage::Soft(request(value)),
+        }
+    }
+
     /// The answer is `Unidentified` for exactly this process: the refusal
     /// carries the process beside the evidence read, never an identity.
     pub(crate) fn assert_unidentified(
@@ -1494,22 +1545,22 @@ mod tests {
                 layer: signal_flow::Layer::Secondary,
             }),
             delivery: signal_flow::Delivery::Queue,
-            message: signal_flow::Message::Soft(signal_flow::Request::Notice(
-                "ledger witness".into(),
-            )),
+            sendable_message: signal_flow::SendableMessage::Soft(
+                signal_flow::SendableRequest::Notice("ledger witness".into()),
+            ),
         };
         let response = fixture.nexus.dispatch(Query::Send(send));
         assert!(matches!(
             response,
-            Response::Refused(signal_flow::Refusal::Unidentified(_))
+            Response::SendRefused(signal_flow::VisibleRefusal::Unidentified(_))
         ));
         for response in [
-            Response::SendAccepted(signal_flow::SendAcceptance {
+            signal_flow::PrivateSendResponse::SendAccepted(signal_flow::SendAcceptance {
                 logical_delivery_id: "logical-delivery-1".into(),
                 delivery_cursor: 1,
                 delivery_state: signal_flow::DeliveryState::Queued,
             }),
-            Response::SendAccepted(signal_flow::SendAcceptance {
+            signal_flow::PrivateSendResponse::SendAccepted(signal_flow::SendAcceptance {
                 logical_delivery_id: "logical-delivery-2".into(),
                 delivery_cursor: 2,
                 delivery_state: signal_flow::DeliveryState::Attempting,
@@ -1558,7 +1609,12 @@ mod tests {
             fixture
                 .nexus
                 .dispatch_meta(meta_signal_flow::Query::ReadSendOutcomes),
-            meta_signal_flow::Response::SendOutcomesRead(records)
+            meta_signal_flow::Response::SendOutcomesRead(
+                records
+                    .iter()
+                    .map(crate::message_projection::visible_send_outcome_record)
+                    .collect()
+            )
         );
     }
 
@@ -2358,7 +2414,6 @@ mod tests {
                 },
             )) {
                 meta_signal_flow::Response::Delivered(delivery) => {
-                    assert_eq!(delivery.flow_id, flow_id);
                     assert_eq!(
                         delivery.interrupt_witness,
                         meta_signal_flow::InterruptWitness::NotRequested
@@ -2398,22 +2453,21 @@ mod tests {
         Refused(meta_signal_flow::DeliveryRejection),
     }
 
-    /// The MessageId every fixture letter names: what a recipient reading
-    /// the pane would Acknowledge.
-    const FIXTURE_MESSAGE_ID: &str = "m-7f3a2c";
-
     fn middle_abrupt(text: &str) -> meta_signal_flow::Message {
         meta_signal_flow::Message::MiddleAbrupt(meta_signal_flow::Letter {
-            message_id: FIXTURE_MESSAGE_ID.into(),
-            sender: meta_signal_flow::Sender::Owner,
+            visible_sender: signal_flow::VisibleSender::Nexus,
+            address: signal_flow::Address {
+                aspect: signal_flow::Aspect::Psyche,
+                topic: "flow".into(),
+                layer: signal_flow::Layer::Secondary,
+            },
             content: meta_signal_flow::Content::Text(text.into()),
         })
     }
 
-    /// The pane text of a MiddleAbrupt from the owner, written out by hand:
-    /// the head comes first, then the id, the sender and the text.
+    /// The pane text of a MiddleAbrupt from the Nexus, written out by hand.
     fn rendered(text: &str) -> String {
-        format!("MiddleAbrupt.{{ {FIXTURE_MESSAGE_ID} Owner Text.«{text}» }}")
+        format!("MiddleAbrupt.{{ Nexus {{ Psyche flow Secondary }} Text.«{text}» }}")
     }
 
     fn prompts(operation_log: &std::path::Path) -> Vec<String> {
@@ -2425,7 +2479,7 @@ mod tests {
             .collect()
     }
 
-    const OBSERVED_PROMPT: &str = "--session messaging-build agent prompt w1:p3 MiddleAbrupt.{ m-7f3a2c Owner Text.«bare prompt» } --wait --until working --until idle --until done --until blocked --timeout 10000";
+    const OBSERVED_PROMPT: &str = "--session messaging-build agent prompt w1:p3 MiddleAbrupt.{ Nexus { Psyche flow Secondary } Text.«bare prompt» } --wait --until working --until idle --until done --until blocked --timeout 10000";
 
     #[test]
     fn observed_send_promotes_a_pending_flow_and_types_only_the_bare_input() {
@@ -3718,12 +3772,12 @@ mod tests {
         else {
             panic!("subscription begins with its snapshot")
         };
-        assert!(initial.delivery_snapshot_vector.is_empty());
+        assert!(initial.visible_delivery_snapshot_vector.is_empty());
         drop(client);
         let result = observer.join().expect("quiet observer exits after close");
         assert!(result.is_err(), "a closed subscription is not kept alive");
 
-        let Response::SendAccepted(accepted) = nexus
+        let signal_flow::PrivateSendResponse::SendAccepted(accepted) = nexus
             .store
             .accept_logical_delivery(
                 &recipient,
@@ -5080,7 +5134,7 @@ mod tests {
         use crate::store::ReadsFlowMemory;
         use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
         use signal_flow::{
-            Address, Delivery, Layer, Message, Metaflow, QueueEntry, Recipient, Refusal, Request,
+            Address, Delivery, Layer, Message, Metaflow, QueueEntry, Recipient, Request,
             SendRequest, SentBy,
         };
         let fixture = NexusFixture::new();
@@ -5121,7 +5175,7 @@ mod tests {
                     SendRequest {
                         recipient,
                         delivery: Delivery::Queue,
-                        message: Message::Soft(request),
+                        sendable_message: sendable_message(Message::Soft(request)),
                     },
                     Some(peer),
                 )
@@ -5145,8 +5199,17 @@ mod tests {
             Response::SendAccepted(_)
         ));
         assert!(matches!(
-            send(Recipient::Up, Request::Result("done".into()), &peer),
-            Response::SendAccepted(_)
+            send(
+                Recipient::Up,
+                Request::Result(flow_ethos::ResultPayload::Answered(
+                    flow_ethos::ResultPayload_Answered_Data {
+                        answerable: flow_ethos::Answerable::Order("not an open order".into()),
+                        string: "done".into(),
+                    },
+                )),
+                &peer
+            ),
+            Response::SendRefused(signal_flow::VisibleRefusal::Unresolved)
         ));
         assert_eq!(
             fixture
@@ -5168,8 +5231,244 @@ mod tests {
             FlowStore::process_identity_for_pid(stranger.0.id()).expect("stranger identity");
         assert!(matches!(
             send(Recipient::Address(sibling), order, &stranger),
-            Response::Refused(Refusal::Unidentified(_))
+            Response::SendRefused(signal_flow::VisibleRefusal::Unidentified(_))
         ));
+    }
+
+    /// Result correlation uses only the authenticated reverse route and the
+    /// exact typed Order retained in the delivery ledger. Missing, foreign,
+    /// and duplicate matches leave every retained request untouched.
+    #[test]
+    fn a_result_resolves_one_exact_owned_order_and_refuses_missing_or_ambiguous_matches() {
+        use crate::store::RecordsLogicalDeliveries;
+        use crate::store::metaflow::SeedsMetaflow;
+        use flow_ethos::{Answerable, ResultPayload, State};
+        use signal_flow::{
+            Address, Delivery, DeliveryState, Layer, Message, NativeReceipt, PrivateSendResponse,
+            Refusal, SendableMessage, SendableRequest, SentBy,
+        };
+
+        let fixture = NexusFixture::new();
+        let at = |topic: &str| Address {
+            aspect: Aspect::Mind,
+            topic: topic.into(),
+            layer: Layer::Secondary,
+        };
+        let sender = at("sender");
+        let recipient = at("recipient");
+        let stranger = at("stranger");
+        for address in [&sender, &recipient, &stranger] {
+            fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+                address: address.clone(),
+                state: State::Asleep,
+                past: vec![],
+                queue: vec![],
+            });
+        }
+        let order = "Retain the exact typed order.".to_owned();
+        let admit_order = || {
+            let PrivateSendResponse::SendAccepted(accepted) = fixture
+                .nexus
+                .store
+                .accept_logical_delivery(
+                    &recipient,
+                    SentBy::Sender(sender.clone()),
+                    Delivery::Queue,
+                    Message::Soft(flow_ethos::Request::Order(order.clone())),
+                    None,
+                )
+                .expect("order admission")
+            else {
+                panic!("the seeded recipient accepts the order")
+            };
+            fixture
+                .nexus
+                .store
+                .transition_logical_delivery(
+                    &accepted.logical_delivery_id,
+                    DeliveryState::Delivered(NativeReceipt {
+                        harness_kind: flow_ethos::HarnessKind::Codex,
+                        native_session_id: "thread-result-test".into(),
+                        native_prompt_id: accepted.logical_delivery_id.clone(),
+                    }),
+                )
+                .expect("order delivery");
+        };
+        let result = |answerable| {
+            SendableMessage::Soft(SendableRequest::Result(signal_flow::Result_Data {
+                answerable,
+                string: "done".into(),
+            }))
+        };
+
+        admit_order();
+        assert!(matches!(
+            fixture.nexus.store.resolve_sendable_message(
+                &recipient,
+                &sender,
+                result(Answerable::Order(order.clone()))
+            ),
+            Ok(Ok(Message::Soft(flow_ethos::Request::Result(
+                ResultPayload::Answered(_)
+            ))))
+        ));
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .resolve_sendable_message(
+                    &stranger,
+                    &sender,
+                    result(Answerable::Order(order.clone()))
+                )
+                .expect("foreign result resolution"),
+            Err(Refusal::Unresolved)
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .resolve_sendable_message(
+                    &recipient,
+                    &sender,
+                    result(Answerable::Order("another order".into()))
+                )
+                .expect("missing result resolution"),
+            Err(Refusal::Unresolved)
+        );
+
+        admit_order();
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .resolve_sendable_message(&recipient, &sender, result(Answerable::Order(order)))
+                .expect("duplicate result resolution"),
+            Err(Refusal::Ambiguous)
+        );
+    }
+
+    /// Done resolution is the same exact typed operation for Tasks. The
+    /// resolved private task key and its new delivery enter one atomic
+    /// admission; repeating the public Done cannot close another task.
+    #[test]
+    fn a_done_closes_one_exact_owned_task_once_and_preserves_ambiguous_tasks() {
+        use crate::store::RecordsLogicalDeliveries;
+        use crate::store::metaflow::SeedsMetaflow;
+        use flow_ethos::{Answerable, AnswerableTask, DonePayload, State};
+        use signal_flow::{
+            Address, Delivery, DeliveryState, Layer, Message, NativeReceipt, PrivateSendResponse,
+            Refusal, SendableMessage, SendableRequest, SentBy,
+        };
+
+        let fixture = NexusFixture::new();
+        let at = |topic: &str| Address {
+            aspect: Aspect::Mind,
+            topic: topic.into(),
+            layer: Layer::Secondary,
+        };
+        let sender = at("taskSender");
+        let recipient = at("taskRecipient");
+        let stranger = at("taskStranger");
+        for address in [&sender, &recipient, &stranger] {
+            fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+                address: address.clone(),
+                state: State::Asleep,
+                past: vec![],
+                queue: vec![],
+            });
+        }
+        let task = AnswerableTask {
+            minutes: 30,
+            string: "Return the exact receipt.".into(),
+        };
+        let admit_task = || {
+            let PrivateSendResponse::SendAccepted(accepted) = fixture
+                .nexus
+                .store
+                .accept_logical_delivery(
+                    &recipient,
+                    SentBy::Sender(sender.clone()),
+                    Delivery::Queue,
+                    Message::Soft(flow_ethos::Request::Task(task.clone())),
+                    None,
+                )
+                .expect("task admission")
+            else {
+                panic!("the seeded recipient accepts the task")
+            };
+            fixture
+                .nexus
+                .store
+                .transition_logical_delivery(
+                    &accepted.logical_delivery_id,
+                    DeliveryState::Delivered(NativeReceipt {
+                        harness_kind: flow_ethos::HarnessKind::Codex,
+                        native_session_id: "thread-done-test".into(),
+                        native_prompt_id: accepted.logical_delivery_id.clone(),
+                    }),
+                )
+                .expect("task delivery");
+        };
+        let done = || {
+            SendableMessage::Soft(SendableRequest::Done(signal_flow::Done_Data {
+                answerable: Answerable::Task(task.clone()),
+                string: "done".into(),
+            }))
+        };
+
+        admit_task();
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .resolve_sendable_message(&stranger, &sender, done())
+                .expect("foreign done resolution"),
+            Err(Refusal::Unresolved)
+        );
+        let private_done = fixture
+            .nexus
+            .store
+            .resolve_sendable_message(&recipient, &sender, done())
+            .expect("done resolution")
+            .expect("one exact task resolves");
+        assert!(matches!(
+            &private_done,
+            Message::Soft(flow_ethos::Request::Done(DonePayload::Answered(_)))
+        ));
+        assert!(matches!(
+            fixture
+                .nexus
+                .store
+                .accept_logical_delivery(
+                    &sender,
+                    SentBy::Sender(recipient.clone()),
+                    Delivery::Queue,
+                    private_done,
+                    None,
+                )
+                .expect("done admission"),
+            PrivateSendResponse::SendAccepted(_)
+        ));
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .resolve_sendable_message(&recipient, &sender, done())
+                .expect("repeated done resolution"),
+            Err(Refusal::Unresolved)
+        );
+
+        admit_task();
+        admit_task();
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .resolve_sendable_message(&recipient, &sender, done())
+                .expect("duplicate done resolution"),
+            Err(Refusal::Ambiguous)
+        );
     }
 
     /// A Launch starts from the metaflow's declaration in Flow's

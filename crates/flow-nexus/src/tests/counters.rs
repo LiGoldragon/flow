@@ -19,7 +19,7 @@ use crate::store::queue_delivery::{
 };
 use crate::store::send_outcome::RecordsSendOutcomes;
 use flow_ethos::State;
-use signal_flow::{Delivery, Layer, Message, Metaflow, Request, Response, SendAcceptance, SentBy};
+use signal_flow::{Delivery, Layer, Message, Metaflow, Request, SendAcceptance, SentBy};
 
 fn ask(fixture: &NexusFixture, text: &str) -> String {
     use datom_codec::{Actualizing, Budget, Datomizable, Potential};
@@ -141,7 +141,7 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
             None,
             None,
             "digest".into(),
-            Response::Refused(signal_flow::Refusal::Lapsed),
+            signal_flow::PrivateSendResponse::Refused(signal_flow::Refusal::Lapsed),
         )
         .expect("send outcome recorded");
     assert_eq!(outcome.send_outcome_id, "send-outcome-0000000000000136");
@@ -158,7 +158,7 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
         past: vec![],
         queue: vec![],
     });
-    let Response::SendAccepted(SendAcceptance {
+    let signal_flow::PrivateSendResponse::SendAccepted(SendAcceptance {
         logical_delivery_id,
         ..
     }) = fixture

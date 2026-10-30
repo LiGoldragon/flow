@@ -48,14 +48,18 @@ impl RendersNativeContent for signal_flow::Request {
         match self {
             signal_flow::Request::Order(text)
             | signal_flow::Request::Question(text)
-            | signal_flow::Request::Result(text)
             | signal_flow::Request::Notice(text) => text.clone(),
+            signal_flow::Request::Result(result) => match result {
+                flow_ethos::ResultPayload::Answered(result) => result.string.clone(),
+                flow_ethos::ResultPayload::Historical(text) => text.clone(),
+            },
             signal_flow::Request::Task(task) => {
                 format!("Task, {} minutes:\n{}", task.minutes, task.string)
             }
-            signal_flow::Request::Done(done) => {
-                format!("Done {}:\n{}", done.logical_delivery_id, done.string)
-            }
+            signal_flow::Request::Done(done) => match done {
+                flow_ethos::DonePayload::Answered(done) => format!("Done:\n{}", done.string),
+                flow_ethos::DonePayload::Historical(done) => format!("Done:\n{}", done.string),
+            },
             signal_flow::Request::Psyche(said) if said.context.is_empty() => said.verbatim.clone(),
             signal_flow::Request::Psyche(said) if said.verbatim.is_empty() => said.context.clone(),
             signal_flow::Request::Psyche(said) => format!("{}\n{}", said.context, said.verbatim),
@@ -80,6 +84,59 @@ impl RendersNativeContent for signal_flow::Message {
             signal_flow::Message::HardAbrupt(request)
             | signal_flow::Message::MiddleAbrupt(request)
             | signal_flow::Message::Soft(request) => request.native_content(),
+        }
+    }
+}
+
+impl RendersNativeContent for signal_flow::VisibleRequest {
+    fn native_content(&self) -> String {
+        match self {
+            signal_flow::VisibleRequest::Order(text)
+            | signal_flow::VisibleRequest::Question(text)
+            | signal_flow::VisibleRequest::Notice(text) => text.clone(),
+            signal_flow::VisibleRequest::Result(result) => match result {
+                signal_flow::VisibleResultPayload::Answered(result) => result.string.clone(),
+                signal_flow::VisibleResultPayload::Historical(text) => text.clone(),
+            },
+            signal_flow::VisibleRequest::Task(task) => {
+                format!("Task, {} minutes:\n{}", task.minutes, task.string)
+            }
+            signal_flow::VisibleRequest::Done(done) => match done {
+                signal_flow::VisibleDonePayload::Answered(done) => {
+                    format!("Done:\n{}", done.string)
+                }
+                signal_flow::VisibleDonePayload::Historical(text) => format!("Done:\n{text}"),
+            },
+            signal_flow::VisibleRequest::Psyche(said) if said.context.is_empty() => {
+                said.verbatim.clone()
+            }
+            signal_flow::VisibleRequest::Psyche(said) if said.verbatim.is_empty() => {
+                said.context.clone()
+            }
+            signal_flow::VisibleRequest::Psyche(said) => {
+                format!("{}\n{}", said.context, said.verbatim)
+            }
+            signal_flow::VisibleRequest::Psyches(said) => said
+                .iter()
+                .map(
+                    |said| match (said.context.is_empty(), said.verbatim.is_empty()) {
+                        (true, _) => said.verbatim.clone(),
+                        (_, true) => said.context.clone(),
+                        (false, false) => format!("{}\n{}", said.context, said.verbatim),
+                    },
+                )
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+}
+
+impl RendersNativeContent for signal_flow::VisibleMessage {
+    fn native_content(&self) -> String {
+        match self {
+            signal_flow::VisibleMessage::HardAbrupt(request)
+            | signal_flow::VisibleMessage::MiddleAbrupt(request)
+            | signal_flow::VisibleMessage::Soft(request) => request.native_content(),
         }
     }
 }
@@ -168,7 +225,7 @@ impl ReadsContent for Content {
         match self {
             Content::Waking(inputs) => inputs
                 .iter()
-                .all(|input| input.message.native_content().trim().is_empty()),
+                .all(|input| input.visible_message.native_content().trim().is_empty()),
             Content::Text(text) => text.trim().is_empty(),
             Content::Psyche(psyche) => psyche.psyche_verbatim.trim().is_empty(),
         }
@@ -178,7 +235,7 @@ impl ReadsContent for Content {
         match self {
             Content::Waking(inputs) => inputs
                 .iter()
-                .map(|input| input.message.native_content())
+                .map(|input| input.visible_message.native_content())
                 .collect(),
             Content::Text(text) => vec![text.clone()],
             Content::Psyche(psyche) => {
@@ -255,14 +312,19 @@ mod tests {
     use super::{RecognizesLetter, RendersPaneText, VetsBody};
     use crate::composition::RendersQueuedWork;
     use crate::delivery::body::ShowsPaneText;
+    use crate::message_projection::ProjectsQueueEntry;
     use crate::store::delivery::DefaultsHarnessProfile;
-    use meta_signal_flow::{BodyRefusal, Content, Letter, Message, Psyche_Data, Sender};
+    use meta_signal_flow::{BodyRefusal, Content, Letter, Message, Psyche_Data};
     use signal_flow::HarnessKind;
 
     fn soft(text: &str) -> Message {
         Message::Soft(Letter {
-            message_id: "m-7f3a2c".into(),
-            sender: Sender::Flow("e167d8".into()),
+            visible_sender: signal_flow::VisibleSender::Nexus,
+            address: signal_flow::Address {
+                aspect: signal_flow::Aspect::Psyche,
+                topic: "flow".into(),
+                layer: signal_flow::Layer::Secondary,
+            },
             content: Content::Text(text.into()),
         })
     }
@@ -277,17 +339,21 @@ mod tests {
             soft("Stage 1 is deployed; run the tier tests.")
                 .pane_text()
                 .as_str(),
-            "Soft.{ m-7f3a2c Flow.e167d8 Text.«Stage 1 is deployed; run the tier tests.» }"
+            "Soft.{ Nexus { Psyche flow Secondary } Text.«Stage 1 is deployed; run the tier tests.» }"
         );
         let hard = Message::HardAbrupt(Letter {
-            message_id: "m-81b0e4".into(),
-            sender: Sender::Owner,
+            visible_sender: signal_flow::VisibleSender::Nexus,
+            address: signal_flow::Address {
+                aspect: signal_flow::Aspect::Psyche,
+                topic: "flow".into(),
+                layer: signal_flow::Layer::Secondary,
+            },
             content: Content::Text("/compact".into()),
         });
         assert!(
             hard.pane_text()
                 .as_str()
-                .starts_with("HardAbrupt.{ m-81b0e4 Owner ")
+                .starts_with("HardAbrupt.{ Nexus { Psyche flow Secondary } ")
         );
     }
 
@@ -337,28 +403,50 @@ mod tests {
                 layer: signal_flow::Layer::Secondary,
             }),
             message: signal_flow::Message::HardAbrupt(signal_flow::Request::Task(
-                flow_ethos::Task_Data {
+                flow_ethos::AnswerableTask {
                     minutes: 40,
                     string: text.into(),
                 },
             )),
         };
         let message = Message::HardAbrupt(Letter {
-            message_id: "logical-delivery-00000000000000000001".into(),
-            sender: Sender::Owner,
-            content: Content::Waking(vec![input.clone()]),
+            visible_sender: signal_flow::VisibleSender::Nexus,
+            address: signal_flow::Address {
+                aspect: signal_flow::Aspect::Psyche,
+                topic: "flow".into(),
+                layer: signal_flow::Layer::Secondary,
+            },
+            content: Content::Waking(vec![
+                signal_flow::QueueEntry {
+                    logical_delivery_id: input.logical_delivery_id.clone(),
+                    sent_by: input.sent_by.clone(),
+                    delivery: signal_flow::Delivery::Wake,
+                    message: input.message.clone(),
+                }
+                .visible_input(&signal_flow::Address {
+                    aspect: signal_flow::Aspect::Psyche,
+                    topic: "flow".into(),
+                    layer: signal_flow::Layer::Secondary,
+                }),
+            ]),
         });
         let typed = message.pane_text();
         assert!(
             typed
                 .as_str()
-                .starts_with("[ { logical-delivery-00000000000000000001 ")
+                .starts_with("[ { Sender.{ Psyche flow Secondary } { Psyche flow Secondary } ")
         );
         assert_eq!(
-            Potential::<Vec<signal_flow::NativeInput>>::from(typed.as_str().to_owned())
+            Potential::<Vec<signal_flow::VisibleNativeInput>>::from(typed.as_str().to_owned())
                 .actualize(&mut budget())
                 .unwrap(),
-            vec![input.clone()]
+            match &message {
+                Message::HardAbrupt(letter) => match &letter.content {
+                    Content::Waking(inputs) => inputs.clone(),
+                    _ => unreachable!(),
+                },
+                _ => unreachable!(),
+            }
         );
         assert_eq!(refusal(&message, HarnessKind::Codex), None);
         assert!(!typed.as_str().opens_a_letter());
@@ -373,13 +461,29 @@ mod tests {
             delivery: signal_flow::Delivery::Queue,
             message: input.message,
         });
-        let cohort = entries.prompt_text();
+        let cohort = entries.prompt_text(&signal_flow::Address {
+            aspect: signal_flow::Aspect::Psyche,
+            topic: "flow".into(),
+            layer: signal_flow::Layer::Secondary,
+        });
         assert!(cohort.starts_with("[ { "));
         assert_eq!(
-            Potential::<Vec<signal_flow::NativeInput>>::from(cohort)
+            Potential::<Vec<signal_flow::VisibleNativeInput>>::from(cohort)
                 .actualize(&mut budget())
                 .unwrap(),
-            vec![input, second]
+            entries
+                .iter()
+                .map(|entry| {
+                    crate::message_projection::ProjectsQueueEntry::visible_input(
+                        entry,
+                        &signal_flow::Address {
+                            aspect: signal_flow::Aspect::Psyche,
+                            topic: "flow".into(),
+                            layer: signal_flow::Layer::Secondary,
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
         );
     }
 
@@ -387,15 +491,27 @@ mod tests {
     fn native_content_commands_and_control_keys_are_still_refused() {
         let native = |text: &str| {
             Message::HardAbrupt(Letter {
-                message_id: "native-content".into(),
-                sender: Sender::Owner,
-                content: Content::Waking(vec![signal_flow::NativeInput {
-                    logical_delivery_id: "native-content".into(),
-                    sent_by: signal_flow::SentBy::Flow,
-                    message: signal_flow::Message::HardAbrupt(signal_flow::Request::Order(
-                        text.into(),
-                    )),
-                }]),
+                visible_sender: signal_flow::VisibleSender::Nexus,
+                address: signal_flow::Address {
+                    aspect: signal_flow::Aspect::Psyche,
+                    topic: "flow".into(),
+                    layer: signal_flow::Layer::Secondary,
+                },
+                content: Content::Waking(vec![
+                    signal_flow::QueueEntry {
+                        logical_delivery_id: "native-content".into(),
+                        sent_by: signal_flow::SentBy::Flow,
+                        delivery: signal_flow::Delivery::Wake,
+                        message: signal_flow::Message::HardAbrupt(signal_flow::Request::Order(
+                            text.into(),
+                        )),
+                    }
+                    .visible_input(&signal_flow::Address {
+                        aspect: signal_flow::Aspect::Psyche,
+                        topic: "flow".into(),
+                        layer: signal_flow::Layer::Secondary,
+                    }),
+                ]),
             })
         };
         assert_eq!(
@@ -451,7 +567,7 @@ mod tests {
 
     #[test]
     fn keys_are_refused_at_their_offset_in_the_pane_text() {
-        let head = "Soft.{ m-7f3a2c Flow.e167d8 Text.«".len() as i64;
+        let head = "Soft.{ Nexus { Psyche flow Secondary } Text.«".len() as i64;
         for (text, at) in [
             // Each text holds a space, so it is rendered in guillemets.
             ("a \u{1b}b", 2),
@@ -477,8 +593,12 @@ mod tests {
             Some(BodyRefusal::EmptyBody)
         );
         let relay = Message::MiddleAbrupt(Letter {
-            message_id: "m-90c1aa".into(),
-            sender: Sender::Owner,
+            visible_sender: signal_flow::VisibleSender::Nexus,
+            address: signal_flow::Address {
+                aspect: signal_flow::Aspect::Psyche,
+                topic: "flow".into(),
+                layer: signal_flow::Layer::Secondary,
+            },
             content: Content::Psyche(Psyche_Data {
                 psyche_context: "context".into(),
                 psyche_verbatim: " ".into(),

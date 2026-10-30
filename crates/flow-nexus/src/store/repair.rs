@@ -5,8 +5,15 @@
 use super::metaflow::SleepsMetaflows;
 use super::queue_delivery::{AccountsQueueDelivery, ShowsQueueDelivery};
 use super::*;
-use meta_signal_flow::{Attempt, Binding, Inspected_Data, RebindRejected_Data};
+use meta_signal_flow::{Attempt, Binding, RebindRejected_Data};
 use signal_flow::{Address, FlowId, HerdrRoute};
+
+pub(crate) struct Inspection {
+    pub(crate) metaflow: Metaflow,
+    pub(crate) binding: Binding,
+    pub(crate) lock_vector: Vec<Lock>,
+    pub(crate) attempt_vector: Vec<Attempt>,
+}
 
 pub(crate) trait RepairsMetaflows {
     /// The metaflow at `address` as Flow holds it: its state, Past and
@@ -15,7 +22,7 @@ pub(crate) trait RepairsMetaflows {
     /// outstanding for it, the hand-over that holds its oldest request back
     /// and each launch at its Address not settled. None when Flow holds no
     /// metaflow there.
-    fn inspection(&self, address: &Address) -> Result<Option<Inspected_Data>, StoreError>;
+    fn inspection(&self, address: &Address) -> Result<Option<Inspection>, StoreError>;
     /// The flow the metaflow at `address` is Awake as, or why there is
     /// none to rebind.
     fn current_flow(
@@ -36,7 +43,7 @@ pub(crate) trait RepairsMetaflows {
 }
 
 impl RepairsMetaflows for FlowStore {
-    fn inspection(&self, address: &Address) -> Result<Option<Inspected_Data>, StoreError> {
+    fn inspection(&self, address: &Address) -> Result<Option<Inspection>, StoreError> {
         let Some(stored) = self.stored_metaflow(address)? else {
             return Ok(None);
         };
@@ -67,7 +74,7 @@ impl RepairsMetaflows for FlowStore {
                 attempt_vector.push(Attempt::Launch(stored.attempt.clone()));
             }
         }
-        Ok(Some(Inspected_Data {
+        Ok(Some(Inspection {
             binding: Binding {
                 flow_node_option,
                 process_option: self.bound_process(address)?,

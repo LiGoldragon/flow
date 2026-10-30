@@ -225,6 +225,7 @@ impl RecordsReminders for FlowStore {
 #[cfg(test)]
 mod tests {
     use super::{AdvancesReminder, RecordsReminders, Reminder, TASK_REMINDERS};
+    use crate::store::message_v41::RequestV41;
     use crate::store::{FlowStore, OpensFlowStore};
     use signal_flow::{Address, Aspect, Layer};
 
@@ -270,14 +271,12 @@ mod tests {
             ),
         ] {
             let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&old).unwrap();
-            assert_eq!(
-                rkyv::from_bytes::<signal_flow::Request, rkyv::rancor::Error>(&bytes).unwrap(),
-                new
-            );
+            let old = rkyv::from_bytes::<RequestV41, rkyv::rancor::Error>(&bytes).unwrap();
+            assert_eq!(signal_flow::Request::from(old), new);
         }
         assert_eq!(
             std::mem::size_of::<rkyv::Archived<RequestBeforeTasks>>(),
-            std::mem::size_of::<rkyv::Archived<signal_flow::Request>>()
+            std::mem::size_of::<rkyv::Archived<RequestV41>>()
         );
     }
 

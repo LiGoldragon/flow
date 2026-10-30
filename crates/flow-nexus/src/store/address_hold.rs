@@ -18,6 +18,7 @@
 //! The row lives in its own table, so a store written before holds were
 //! kept opens with the table added and holds nothing.
 
+use super::message_v41::MetaflowV41;
 use super::metaflow::{AddressTaking, SleepsMetaflows, TakesLaunchAddress, WritesTakenAddress};
 use super::{
     FlowStore, ManagesMetaflowState, MetaflowState, ReadsFlowMemory, StoreError, StoredMetaflow,
@@ -31,7 +32,7 @@ use signal_flow::{Address, LaunchProfile, Metaflow, StartRejection};
 
 pub(super) const ADDRESS_HOLD_TABLE_NAME: TableName = TableName::new("flow_nexus_address_holds");
 pub(super) const ADDRESS_HOLD_FAMILY: &str = "flow-nexus-address-hold";
-pub(super) const ADDRESS_HOLD_SCHEMA: &str = "flow-nexus-address-hold-v4";
+pub(super) const ADDRESS_HOLD_SCHEMA: &str = "flow-nexus-address-hold-v5";
 
 /// The Address a launched flow holds, and the metaflow it found there.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -49,11 +50,48 @@ impl EngineRecord for AddressHold {
 
 impl MemoryDefinition for AddressHold {
     fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(5)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-address-hold-v5")
+    }
+}
+
+/// The current hold through Flow 0.41, whose found metaflow embeds the old
+/// Result(String) request shape.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AddressHoldV4 {
+    flow_id: String,
+    address: Address,
+    found: Option<MetaflowV41>,
+}
+
+impl EngineRecord for AddressHoldV4 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.flow_id.clone())
+    }
+}
+
+impl MemoryDefinition for AddressHoldV4 {
+    fn memory_version() -> MemoryVersion {
         MemoryVersion::new(4)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label(ADDRESS_HOLD_SCHEMA)
+        SchemaHash::for_label("flow-nexus-address-hold-v4")
+    }
+}
+
+impl UpgradeFrom<AddressHoldV4> for AddressHold {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: AddressHoldV4) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            flow_id: previous.flow_id,
+            address: previous.address,
+            found: previous.found.map(Into::into),
+        })
     }
 }
 
@@ -64,7 +102,7 @@ impl MemoryDefinition for AddressHold {
 pub struct AddressHoldV3 {
     flow_id: String,
     address: Address,
-    found: Option<Metaflow>,
+    found: Option<MetaflowV41>,
 }
 
 impl EngineRecord for AddressHoldV3 {
@@ -90,7 +128,7 @@ impl UpgradeFrom<AddressHoldV3> for AddressHold {
         Decision::Ready(Self {
             flow_id: previous.flow_id,
             address: previous.address,
-            found: previous.found,
+            found: previous.found.map(Into::into),
         })
     }
 }
@@ -179,8 +217,9 @@ impl DescribesAddressHoldTable for AddressHold {
         TableDescriptor::new(
             ADDRESS_HOLD_TABLE_NAME,
             FamilyName::new(ADDRESS_HOLD_FAMILY),
-            SchemaHash::for_label(ADDRESS_HOLD_SCHEMA),
+            AddressHold::schema_hash(),
         )
+        .with_predecessor::<AddressHoldV4>()
         .with_predecessor::<AddressHoldV1>()
         .with_predecessor::<AddressHoldV2>()
         .with_predecessor::<AddressHoldV3>()

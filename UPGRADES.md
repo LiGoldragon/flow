@@ -1,3 +1,17 @@
+# Flow 0.42.0
+
+Pins meta-signal-flow 45.0.0 (f5e1c9) and signal-flow 36.0.0 (a9ac37). Seven Memory families migrate in place on first open because their retained message values now distinguish an answered Result or Done from historical text and their failed-delivery state embeds the expanded typed refusal:
+
+- `flow-nexus-logical-delivery-current` v4 to v5;
+- `flow-nexus-logical-delivery-events` v4 to v5;
+- `flow-nexus-metaflow` v5 to v6;
+- `flow-nexus-address-hold` v4 to v5;
+- `flow-nexus-queue-delivery-request` v5 to v6;
+- `flow-nexus-queue-delivery-attempt` v6 to v7; and
+- `flow-nexus-send-outcome` v5 to v6.
+
+Each predecessor row is decoded by its frozen Flow 0.41 message shape. A historical `Result(String)` becomes `Result.Historical(String)` and a historical `Done.{ LogicalDeliveryId String }` becomes `Done.Historical.{ LogicalDeliveryId String }`; neither invents the typed Order or Task it answers. Every older registered predecessor continues through its existing upgrade chain. Internal delivery and run identifiers remain in Memory and routing. Ordinary Send, delivery, queue-observation and prompt projections omit them; the explicit meta `Debug` query is the sole output that exposes those private identifiers.
+
 # Flow 0.41.1
 
 Pins meta-signal-flow 43.0.0 (2f6cb4) and signal-flow 35.0.0 (09ad7a), as

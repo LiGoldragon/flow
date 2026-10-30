@@ -206,10 +206,13 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
         panic!("the oldest request is prepared")
     };
     assert_eq!(attempt.attempt_id, "queue-attempt-0000000000000032");
-    assert_eq!(counters(&fixture), "{ 131 51 311 }");
+    // The logical delivery counter is the delivery cursor every lifecycle
+    // event draws from: the admission took 130, the hand-over's Attempting
+    // took 131.
+    assert_eq!(counters(&fixture), "{ 132 51 311 }");
     assert_eq!(
         ask(&fixture, "Configure.Counters.{ 500 500 500 }"),
         "ConfigureRejected.CountersRefused.NotEmpty"
     );
-    assert_eq!(counters(&fixture), "{ 131 51 311 }");
+    assert_eq!(counters(&fixture), "{ 132 51 311 }");
 }

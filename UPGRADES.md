@@ -10,7 +10,9 @@ its shape and no table is added.
   `Configure.Counters.{ 120 45 300 }` makes the next logical delivery
   `logical-delivery-00000000000000000120`, the next queue attempt
   `queue-attempt-000000000000002d` and the next send outcome
-  `send-outcome-000000000000012c`.
+  `send-outcome-000000000000012c`. The logical delivery counter is the
+  delivery cursor every lifecycle event of a logical delivery draws from,
+  so logical delivery ids rise by more than one between admissions.
 - It is taken only on an empty store: one whose logical-delivery events
   and current tables, queue-delivery attempts table and send-outcome table
   hold no row. Otherwise it answers `ConfigureRejected.CountersRefused.NotEmpty`.

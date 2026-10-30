@@ -1,3 +1,27 @@
+# Flow 0.40.11
+
+Pins meta-signal-flow 43.0.0 (2f6cb4) and signal-flow 35.0.0 (09ad7a). The
+logical-delivery tables and the send-outcome table migrate in place on the
+first open.
+
+- An `Unidentified` refusal carries the raw evidence the Nexus read, typed,
+  never an identity: `Refused.Unidentified.{ <pane> <label> <session>
+  <observed at> <process> }`, with the Herdr session and pane the caller ran
+  in, the label Herdr shows for it, the native session read there (each
+  `None` when not read), when it was read, and the caller's process. A
+  caller that is in no pane, or none Flow reads, has `None None None` for
+  them. Every refusal site answers it; BindSeat fills the pane, label and
+  session, the others the time and the process.
+- Store migration. `flow-nexus-logical-delivery-current` and
+  `flow-nexus-logical-delivery-event` go from v3 to v4, and
+  `flow-nexus-send-outcome` from v4 to v5, because they archive a
+  `Refusal`. Every row of the earlier version upgrades on open; a stored
+  `Unidentified(process)` becomes the evidence with no pane, no label, no
+  session, observed at 0, and that process. Rows of v1 and v2 (and v3 of
+  the send outcomes) upgrade to the same current shape. Operators
+  deploying this over a 0.40.10 store take the usual store backup first;
+  a store written by 0.40.11 is not opened by an earlier Flow.
+
 # Flow 0.40.10
 
 Pins meta-signal-flow 42.0.0 (67deea) and signal-flow 34.0.0 (fb13fa), as

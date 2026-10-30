@@ -26,6 +26,7 @@ pub(crate) mod send_outcome;
 pub(crate) mod send_server;
 pub(crate) mod send_v31;
 pub(crate) mod send_v32;
+pub(crate) mod send_v34;
 pub(crate) mod sent;
 mod staged_upgrade;
 pub(crate) mod successor;
@@ -5038,9 +5039,11 @@ impl ManagesMetaflowState for FlowStore {
     fn identify_process(&self, process: Process) -> Result<Response, StoreError> {
         let lineage = FlowStore::process_lineage(&process);
         if lineage.is_empty() {
-            return Ok(Response::Refused(signal_flow::Refusal::Unidentified(
-                process,
-            )));
+            return Ok(Response::Refused(
+                <signal_flow::Refusal as crate::sending::RefusesUnidentified>::unidentified(
+                    process,
+                ),
+            ));
         }
         for ancestor in lineage {
             let rows = self
@@ -5053,9 +5056,9 @@ impl ManagesMetaflowState for FlowStore {
             };
             return Ok(Response::Identified(binding.address.clone()));
         }
-        Ok(Response::Refused(signal_flow::Refusal::Unidentified(
-            process,
-        )))
+        Ok(Response::Refused(
+            <signal_flow::Refusal as crate::sending::RefusesUnidentified>::unidentified(process),
+        ))
     }
 
     fn release_metaflow_lock(
@@ -5112,9 +5115,11 @@ impl AppliesFlowQuery for FlowStore {
             | Query::DeliverAll(_)
             | Query::BindSeat(_)
             | Query::ObserveSends(_)
-            | Query::ObserveSender(_) => Ok(Response::Refused(signal_flow::Refusal::Unidentified(
-                signal_flow::Process { pid: 0, started: 0 },
-            ))),
+            | Query::ObserveSender(_) => Ok(Response::Refused(
+                <signal_flow::Refusal as crate::sending::RefusesUnidentified>::unidentified(
+                    signal_flow::Process { pid: 0, started: 0 },
+                ),
+            )),
             Query::Launch(_) => Ok(Response::StartRejected(
                 StartRejection::LaunchPersistenceRefused,
             )),
@@ -7551,6 +7556,10 @@ pub(crate) trait ReadsFlowMemory {
                     send_outcome::OUTCOME_FAMILY,
                     send_outcome::StoredSendOutcomeV3::schema_hash(),
                 ),
+                (
+                    send_outcome::OUTCOME_FAMILY,
+                    send_outcome::StoredSendOutcomeV4::schema_hash(),
+                ),
             ],
             "flow_nexus_flows" => &[("flow-nexus-flow", FlowRecordV5::schema_hash())],
             "flow_nexus_launch_outcomes" => &[
@@ -7630,6 +7639,10 @@ pub(crate) trait ReadsFlowMemory {
                     "flow-nexus-logical-delivery-current",
                     <logical_delivery::CurrentLogicalDeliveryV2 as MemoryDefinition>::schema_hash(),
                 ),
+                (
+                    "flow-nexus-logical-delivery-current",
+                    <logical_delivery::CurrentLogicalDeliveryV3 as MemoryDefinition>::schema_hash(),
+                ),
             ],
             "flow_nexus_logical_delivery_events" => &[
                 (
@@ -7639,6 +7652,10 @@ pub(crate) trait ReadsFlowMemory {
                 (
                     "flow-nexus-logical-delivery-event",
                     <logical_delivery::LogicalDeliveryEventV2 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    "flow-nexus-logical-delivery-event",
+                    <logical_delivery::LogicalDeliveryEventV3 as MemoryDefinition>::schema_hash(),
                 ),
             ],
             "flow_nexus_successor_intents" => &[(

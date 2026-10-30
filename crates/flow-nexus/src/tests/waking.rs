@@ -2610,17 +2610,17 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
     );
     // A thread Flow recorded for no flow names no one.
     super::assert_unidentified(
-identify(
+        identify(
             &send_server_process,
             "01a0fdcc-0000-7000-8000-000000000000",
-            &message
+            &message,
         ),
-&send_server_process,
-);
+        &send_server_process,
+    );
     super::assert_unidentified(
-identify(&send_server_process, "", &message),
-&send_server_process,
-);
+        identify(&send_server_process, "", &message),
+        &send_server_process,
+    );
     // The right thread from another executable is refused.
     let shell = SpawnedProcess(
         std::process::Command::new("sh")
@@ -2646,15 +2646,15 @@ identify(&send_server_process, "", &message),
     );
     // The send server runs in no pane: pane identification names no one.
     super::assert_unidentified(
-fixture
+        fixture
             .nexus
             .dispatch_metaflow_peer(
                 signal_flow::Query::Identify(send_server_process.clone()),
-                Some(&message)
+                Some(&message),
             )
             .response,
-&send_server_process,
-);
+        &send_server_process,
+    );
 
     // Once its metaflow sleeps, the thread names no one.
     assert!(
@@ -2665,9 +2665,9 @@ fixture
             .unwrap()
     );
     super::assert_unidentified(
-identify(&send_server_process, thread, &message),
-&send_server_process,
-);
+        identify(&send_server_process, thread, &message),
+        &send_server_process,
+    );
 }
 
 /// A seat launched into the pane Message's marked processes name: its

@@ -102,7 +102,7 @@ pub trait IdentifiesSender {
 
 impl IdentifiesSender for RunningNexus {
     fn sending_address(&self, peer: &Process) -> Result<Address, Box<Response>> {
-        let unidentified = || Box::new(Response::Refused(Refusal::Unidentified(peer.clone())));
+        let unidentified = || Box::new(Response::Refused(Refusal::unidentified(peer.clone())));
         match self.identify_peer_process(peer.clone()) {
             Ok(Response::Identified(address)) => return Ok(address),
             Ok(_) => {}
@@ -234,7 +234,7 @@ impl SendsRequests for RunningNexus {
                 }
             }
             let Some(peer) = peer else {
-                return Response::Refused(Refusal::Unidentified(Process { pid: 0, started: 0 }))
+                return Response::Refused(Refusal::unidentified(Process { pid: 0, started: 0 }))
                     .into();
             };
             let Some(_now) = std::time::SystemTime::now()
@@ -376,7 +376,7 @@ impl SendsRequests for RunningNexus {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(peer) = peer else {
-            return Response::Refused(Refusal::Unidentified(Process { pid: 0, started: 0 }));
+            return Response::Refused(Refusal::unidentified(Process { pid: 0, started: 0 }));
         };
         if let Err(refusal) = self.sending_address(peer) {
             return *refusal;
@@ -544,6 +544,45 @@ pub(crate) struct SeatEvidence {
     pub(crate) native_session: Option<String>,
     /// When it was read, in seconds since the Unix epoch.
     pub(crate) observed_at: u64,
+}
+
+/// What a refusal of an unnamed caller holds: the evidence and the process,
+/// never an identity.
+pub(crate) trait RefusesUnidentified {
+    /// A caller no pane or seat was read for: its process, observed now.
+    fn unidentified(process: Process) -> Self;
+    /// A caller whose pane showed `evidence`.
+    fn unidentified_with(process: Process, evidence: SeatEvidence) -> Self;
+}
+
+impl RefusesUnidentified for Refusal {
+    fn unidentified(process: Process) -> Self {
+        Self::unidentified_with(
+            process,
+            SeatEvidence {
+                pane: None,
+                pane_label: None,
+                native_session: None,
+                observed_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_secs())
+                    .unwrap_or_default(),
+            },
+        )
+    }
+
+    fn unidentified_with(process: Process, evidence: SeatEvidence) -> Self {
+        Self::Unidentified(signal_flow::SeatEvidence {
+            seat_pane_option: evidence.pane.map(|pane| signal_flow::SeatPane {
+                herdr_session_name: pane.herdr_session_name,
+                herdr_pane_id: pane.herdr_pane_id,
+            }),
+            pane_label_option: evidence.pane_label,
+            native_session_id_option: evidence.native_session,
+            observed_at: i64::try_from(evidence.observed_at).unwrap_or(i64::MAX),
+            process,
+        })
+    }
 }
 
 pub(crate) trait FindsSeat {
@@ -811,9 +850,9 @@ impl BindsSeats for RunningNexus {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(peer) = peer else {
-            return Response::Refused(Refusal::Unidentified(Process { pid: 0, started: 0 }));
+            return Response::Refused(Refusal::unidentified(Process { pid: 0, started: 0 }));
         };
-        let unidentified = || Response::Refused(Refusal::Unidentified(peer.clone()));
+        let unidentified = || Response::Refused(Refusal::unidentified(peer.clone()));
         if !FlowStore::process_is_live(peer) {
             return unidentified();
         }
@@ -835,16 +874,11 @@ impl BindsSeats for RunningNexus {
         // A caller no seat is named for is refused, and what its pane
         // showed is logged as it was read, never made into an identity.
         let refused = |evidence: SeatEvidence| {
-            let SeatEvidence {
-                pane,
-                pane_label,
-                native_session,
-                observed_at,
-            } = evidence;
             eprintln!(
-                "flow-nexus: BindSeat {address:?} from {peer:?} names no seat: pane {pane:?}, label {pane_label:?}, session {native_session:?}, at {observed_at}"
+                "flow-nexus: BindSeat {address:?} from {peer:?} names no seat: pane {:?}, label {:?}, session {:?}, at {}",
+                evidence.pane, evidence.pane_label, evidence.native_session, evidence.observed_at
             );
-            unidentified()
+            Response::Refused(Refusal::unidentified_with(peer.clone(), evidence))
         };
         let caller = CallerProcess { process_id };
         let (seat, thread) = match self.seat_of(caller) {

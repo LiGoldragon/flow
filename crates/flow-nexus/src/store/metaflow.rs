@@ -3,6 +3,7 @@
 use super::logical_delivery::{RecordsLogicalDeliveries, VerifiedDeliveryLock};
 use super::*;
 use crate::sending::AdmitsSendPayload;
+use crate::sending::RefusesUnidentified;
 use signal_flow::{
     Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, Recipient, Refusal, SentBy,
     StartRejection, Unknown_Data,
@@ -105,7 +106,7 @@ impl MutatesMetaflows for FlowStore {
         launched: Option<FlowId>,
     ) -> Result<Response, StoreError> {
         if binding.process != *peer || !FlowStore::process_is_live(peer) {
-            return Ok(Response::Refused(Refusal::Unidentified(binding.process)));
+            return Ok(Response::Refused(Refusal::unidentified(binding.process)));
         }
         let address = binding.address;
         if address

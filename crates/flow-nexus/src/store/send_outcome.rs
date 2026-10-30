@@ -2,6 +2,7 @@
 
 use super::send_v31::{RefusalV31, SendAcceptanceV31, SendFailureV31};
 use super::send_v32::{RefusalV32, SendAcceptanceV32, SendFailureV32};
+use super::send_v34::{RefusalV34, SendAcceptanceV34, SendFailureV34};
 use super::*;
 use meta_signal_flow::{OrdinarySendOutcome, SendOutcomeRecord};
 use signal_flow::{Address, Process, Response};
@@ -9,7 +10,7 @@ use signal_flow::{Address, Process, Response};
 pub(super) const COUNTER_FAMILY: &str = "flow-nexus-send-outcome-counter";
 pub(super) const COUNTER_SCHEMA: &str = "flow-nexus-send-outcome-counter-v1";
 pub(super) const OUTCOME_FAMILY: &str = "flow-nexus-send-outcome";
-pub(super) const OUTCOME_SCHEMA: &str = "flow-nexus-send-outcome-v4";
+pub(super) const OUTCOME_SCHEMA: &str = "flow-nexus-send-outcome-v5";
 
 const COUNTER_KEY: &str = "counter";
 const SEND_OUTCOME_COUNTER_TABLE_NAME: TableName =
@@ -50,7 +51,7 @@ impl EngineRecord for StoredSendOutcome {
 
 impl MemoryDefinition for StoredSendOutcome {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
+        MemoryVersion::new(5)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -58,8 +59,72 @@ impl MemoryDefinition for StoredSendOutcome {
     }
 }
 
+/// An ordinary Send's typed answer as signal-flow 34 archived it, read
+/// only by the v4-to-v5 upgrade.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OrdinarySendOutcomeV4 {
+    Accepted(SendAcceptanceV34),
+    Refused(RefusalV34),
+    PriorAdmission(meta_signal_flow::PriorSendOutcome),
+    Sent(signal_flow::SendReceipt),
+    Failed(SendFailureV34),
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SendOutcomeRecordV4 {
+    send_outcome_id: String,
+    process_option: Option<Process>,
+    first_address_option: Option<Address>,
+    second_address_option: Option<Address>,
+    request_digest: String,
+    ordinary_send_outcome: OrdinarySendOutcomeV4,
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredSendOutcomeV4 {
+    record: SendOutcomeRecordV4,
+}
+impl EngineRecord for StoredSendOutcomeV4 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.record.send_outcome_id.clone())
+    }
+}
+impl MemoryDefinition for StoredSendOutcomeV4 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(4)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-send-outcome-v4")
+    }
+}
+impl UpgradeFrom<StoredSendOutcomeV4> for StoredSendOutcome {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: StoredSendOutcomeV4) -> Decision<Self, Self::Refusal> {
+        let old = previous.record;
+        let outcome = match old.ordinary_send_outcome {
+            OrdinarySendOutcomeV4::Accepted(acceptance) => {
+                OrdinarySendOutcome::Accepted(acceptance.into())
+            }
+            OrdinarySendOutcomeV4::Refused(refusal) => OrdinarySendOutcome::Refused(refusal.into()),
+            OrdinarySendOutcomeV4::PriorAdmission(prior) => {
+                OrdinarySendOutcome::PriorAdmission(prior)
+            }
+            OrdinarySendOutcomeV4::Sent(receipt) => OrdinarySendOutcome::Sent(receipt),
+            OrdinarySendOutcomeV4::Failed(failure) => OrdinarySendOutcome::Failed(failure.into()),
+        };
+        Decision::Ready(Self {
+            record: SendOutcomeRecord {
+                send_outcome_id: old.send_outcome_id,
+                process_option: old.process_option,
+                first_address_option: old.first_address_option,
+                second_address_option: old.second_address_option,
+                request_digest: old.request_digest,
+                ordinary_send_outcome: outcome,
+            },
+        })
+    }
+}
+
 /// An ordinary Send's typed answer as signal-flow 32 archived it, read
-/// only by the v3-to-v4 upgrade.
+/// only by the v3-to-v5 upgrade.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OrdinarySendOutcomeV3 {
     Accepted(SendAcceptanceV32),
@@ -123,7 +188,7 @@ impl UpgradeFrom<StoredSendOutcomeV3> for StoredSendOutcome {
 }
 
 /// An ordinary Send's typed answer as signal-flow 31 archived it, read
-/// only by the v2-to-v4 upgrade.
+/// only by the v2-to-v5 upgrade.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OrdinarySendOutcomeV2 {
     Accepted(SendAcceptanceV31),
@@ -280,7 +345,8 @@ impl DeclaresSendOutcomeTables for SendOutcomeTables {
             )
             .with_predecessor::<StoredSendOutcomeV1>()
             .with_predecessor::<StoredSendOutcomeV2>()
-            .with_predecessor::<StoredSendOutcomeV3>(),
+            .with_predecessor::<StoredSendOutcomeV3>()
+            .with_predecessor::<StoredSendOutcomeV4>(),
         }
     }
 
@@ -290,7 +356,7 @@ impl DeclaresSendOutcomeTables for SendOutcomeTables {
     ) -> Result<SendOutcomeTables, StoreError> {
         Ok(SendOutcomeTables {
             counter: engine.register_table(descriptors.counter)?,
-            // A v3 family upgrades from v3; one refused at admission is a v2
+            // A v4 family upgrades from v4, a v3 family from v3; one refused at admission is a v2
             // family, then a v1 family, each upgraded from its own shape.
             outcomes: engine.upgraded_outcomes(descriptors.outcomes)?,
             write_gate: Mutex::new(()),
@@ -313,6 +379,14 @@ impl UpgradesSendOutcomes for Engine {
         let refused = |failure: &dyn std::fmt::Debug| {
             StoreError::QueueDeliveryUpgrade(format!("sender outcome upgrade: {failure:?}"))
         };
+        match self.upgrade_table::<StoredSendOutcomeV4, StoredSendOutcome>(descriptor.clone()) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => return Err(refused(&failure)),
+        }
         match self.upgrade_table::<StoredSendOutcomeV3, StoredSendOutcome>(descriptor.clone()) {
             UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
@@ -772,6 +846,118 @@ mod tests {
                     "recipient busy { Psyche core Secondary }".into()
                 ),
             })
+        );
+        assert_eq!(
+            rows["failed"],
+            OrdinarySendOutcome::Failed(signal_flow::SendFailure {
+                logical_delivery_id_option: None,
+                send_failure_reason: signal_flow::SendFailureReason::Refused(
+                    signal_flow::Refusal::NoneAbove
+                ),
+            })
+        );
+    }
+
+    /// Outcomes kept under the v4 label, in signal-flow 34's shape, open as
+    /// the current outcomes; a stored `Unidentified` keeps its process and
+    /// gains no pane, no label and no session, observed at 0.
+    #[test]
+    fn v4_send_outcomes_upgrade_unidentified_to_its_evidence() {
+        use super::super::send_v34::{DeliveryStateV34, SendFailureReasonV34};
+        let fixture = tempfile::tempdir().expect("temporary store path");
+        let store_path = fixture.path().join("outcomes.sema");
+        let process = Process {
+            pid: 4242,
+            started: 987654,
+        };
+        let previous = |id: &str, ordinary_send_outcome| StoredSendOutcomeV4 {
+            record: SendOutcomeRecordV4 {
+                send_outcome_id: id.into(),
+                process_option: None,
+                first_address_option: None,
+                second_address_option: None,
+                request_digest: "abc".into(),
+                ordinary_send_outcome,
+            },
+        };
+        {
+            let mut engine = Engine::open(EngineOpen::new(&store_path, SchemaVersion::new(1)))
+                .expect("ledger store opens");
+            let outcomes = engine
+                .register_table(TableDescriptor::<StoredSendOutcomeV4>::new(
+                    SEND_OUTCOME_TABLE_NAME,
+                    FamilyName::new(OUTCOME_FAMILY),
+                    StoredSendOutcomeV4::schema_hash(),
+                ))
+                .expect("v4 family registers");
+            for row in [
+                previous(
+                    "accepted",
+                    OrdinarySendOutcomeV4::Accepted(SendAcceptanceV34 {
+                        logical_delivery_id: "logical-1".into(),
+                        delivery_cursor: 1,
+                        delivery_state: DeliveryStateV34::Failed(RefusalV34::Unidentified(
+                            process.clone(),
+                        )),
+                    }),
+                ),
+                previous(
+                    "refused",
+                    OrdinarySendOutcomeV4::Refused(RefusalV34::Unidentified(process.clone())),
+                ),
+                previous(
+                    "failed",
+                    OrdinarySendOutcomeV4::Failed(SendFailureV34 {
+                        logical_delivery_id_option: None,
+                        send_failure_reason: SendFailureReasonV34::Refused(RefusalV34::NoneAbove),
+                    }),
+                ),
+            ] {
+                engine
+                    .assert(sema_engine::Assertion::new(outcomes, row))
+                    .expect("outcome persists");
+            }
+        }
+        let descriptors = SendOutcomeTables::descriptors();
+        let mut engine = Engine::open(
+            EngineOpen::new(&store_path, SchemaVersion::new(1))
+                .with_family(&descriptors.counter)
+                .with_family(&descriptors.outcomes),
+        )
+        .expect("ledger store reopens");
+        let tables = open_tables(&mut engine).expect("ledger tables upgrade");
+        let rows = engine
+            .match_records(QueryPlan::all(tables.outcomes))
+            .expect("ledger reads")
+            .records()
+            .iter()
+            .map(|stored| {
+                (
+                    stored.record.send_outcome_id.clone(),
+                    stored.record.ordinary_send_outcome.clone(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let evidence = signal_flow::SeatEvidence {
+            seat_pane_option: None,
+            pane_label_option: None,
+            native_session_id_option: None,
+            observed_at: 0,
+            process,
+        };
+        assert_eq!(
+            rows["accepted"],
+            OrdinarySendOutcome::Accepted(signal_flow::SendAcceptance {
+                logical_delivery_id: "logical-1".into(),
+                delivery_cursor: 1,
+                delivery_state: signal_flow::DeliveryState::Failed(
+                    signal_flow::Refusal::Unidentified(evidence.clone())
+                ),
+            })
+        );
+        assert_eq!(
+            rows["refused"],
+            OrdinarySendOutcome::Refused(signal_flow::Refusal::Unidentified(evidence))
         );
         assert_eq!(
             rows["failed"],

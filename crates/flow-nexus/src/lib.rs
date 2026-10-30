@@ -206,12 +206,11 @@ impl Dispatches for RunningNexus {
             Query::DeliverAll(_)
             | Query::BindSeat(_)
             | Query::ObserveSends(_)
-            | Query::ObserveSender(_) => {
-                Response::Refused(signal_flow::Refusal::Unidentified(signal_flow::Process {
-                    pid: 0,
-                    started: 0,
-                }))
-            }
+            | Query::ObserveSender(_) => Response::Refused(
+                <signal_flow::Refusal as sending::RefusesUnidentified>::unidentified(
+                    signal_flow::Process { pid: 0, started: 0 },
+                ),
+            ),
             Query::Send(send) => self.send_request(send, None).response,
             Query::Launch(launch) => match self.declared_launch(launch, None) {
                 Ok(query) => self.dispatch_from(query, origin),
@@ -767,7 +766,9 @@ impl ServesConnection for Connection {
             Query::ObserveSends(cursor) => {
                 let Some(process) = self.process.as_ref() else {
                     return self.peer.write_response(&Response::Refused(
-                        signal_flow::Refusal::Unidentified(Process { pid: 0, started: 0 }),
+                        <signal_flow::Refusal as sending::RefusesUnidentified>::unidentified(
+                            Process { pid: 0, started: 0 },
+                        ),
                     ));
                 };
                 let sender = match nexus.observation_sender(process, None) {
@@ -1385,6 +1386,19 @@ mod tests {
     mod send_tool;
     mod submission;
     mod waking;
+
+    /// The answer is `Unidentified` for exactly this process: the refusal
+    /// carries the process beside the evidence read, never an identity.
+    pub(crate) fn assert_unidentified(
+        response: signal_flow::Response,
+        process: &signal_flow::Process,
+    ) {
+        let signal_flow::Response::Refused(signal_flow::Refusal::Unidentified(evidence)) = response
+        else {
+            panic!("expected Refused.Unidentified, found {response:?}");
+        };
+        assert_eq!(&evidence.process, process);
+    }
 
     use super::{
         Arc, CarriesSignalFrames, Connection, Dispatches, ReconcilesListedFlows, RunningNexus,

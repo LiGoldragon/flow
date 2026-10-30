@@ -5,6 +5,7 @@
 use super::reminder::RecordsReminders;
 use super::send_v31::DeliverySnapshotV31;
 use super::send_v32::DeliverySnapshotV32;
+use super::send_v34::DeliverySnapshotV34;
 use super::*;
 use crate::generated::send_tool::{
     Accepted_Data, SendCall, SendOutcome as ToolSendOutcome, SendRefusal as ToolSendRefusal,
@@ -21,8 +22,8 @@ const COUNTER_KEY: &str = "counter";
 const COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_counter");
 const CURRENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_current");
 const EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_events");
-pub(super) const CURRENT_SCHEMA: &str = "flow-nexus-logical-delivery-current-v3";
-pub(super) const EVENT_SCHEMA: &str = "flow-nexus-logical-delivery-event-v3";
+pub(super) const CURRENT_SCHEMA: &str = "flow-nexus-logical-delivery-current-v4";
+pub(super) const EVENT_SCHEMA: &str = "flow-nexus-logical-delivery-event-v4";
 const SIMPLIFIED_REPLY_TABLE_NAME: TableName =
     TableName::new("flow_nexus_simplified_reply_bindings");
 
@@ -79,15 +80,43 @@ impl EngineRecord for CurrentLogicalDelivery {
 }
 impl MemoryDefinition for CurrentLogicalDelivery {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
+        MemoryVersion::new(4)
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(CURRENT_SCHEMA)
     }
 }
 
+/// A delivery's current snapshot as signal-flow 34 archived it, read only by the
+/// v3-to-v4 upgrade.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CurrentLogicalDeliveryV3 {
+    pub snapshot: DeliverySnapshotV34,
+}
+impl EngineRecord for CurrentLogicalDeliveryV3 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.snapshot.logical_delivery_id.clone())
+    }
+}
+impl MemoryDefinition for CurrentLogicalDeliveryV3 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(3)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-logical-delivery-current-v3")
+    }
+}
+impl UpgradeFrom<CurrentLogicalDeliveryV3> for CurrentLogicalDelivery {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: CurrentLogicalDeliveryV3) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            snapshot: previous.snapshot.into(),
+        })
+    }
+}
+
 /// A delivery's current snapshot as signal-flow 32 archived it, read only
-/// by the v2-to-v3 upgrade.
+/// by the v2-to-v4 upgrade.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CurrentLogicalDeliveryV2 {
     pub snapshot: DeliverySnapshotV32,
@@ -115,7 +144,7 @@ impl UpgradeFrom<CurrentLogicalDeliveryV2> for CurrentLogicalDelivery {
 }
 
 /// A delivery's current snapshot as signal-flow 31 archived it, read only
-/// by the v1-to-v3 upgrade.
+/// by the v1-to-v4 upgrade.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CurrentLogicalDeliveryV1 {
     pub snapshot: DeliverySnapshotV31,
@@ -153,15 +182,43 @@ impl EngineRecord for LogicalDeliveryEvent {
 }
 impl MemoryDefinition for LogicalDeliveryEvent {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
+        MemoryVersion::new(4)
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(EVENT_SCHEMA)
     }
 }
 
+/// A delivery's lifecycle event as signal-flow 34 archived it, read only by the
+/// v3-to-v4 upgrade.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LogicalDeliveryEventV3 {
+    pub snapshot: DeliverySnapshotV34,
+}
+impl EngineRecord for LogicalDeliveryEventV3 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(format!("{:020}", self.snapshot.delivery_cursor))
+    }
+}
+impl MemoryDefinition for LogicalDeliveryEventV3 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(3)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-logical-delivery-event-v3")
+    }
+}
+impl UpgradeFrom<LogicalDeliveryEventV3> for LogicalDeliveryEvent {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: LogicalDeliveryEventV3) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            snapshot: previous.snapshot.into(),
+        })
+    }
+}
+
 /// A delivery's lifecycle event as signal-flow 32 archived it, read only by
-/// the v2-to-v3 upgrade.
+/// the v2-to-v4 upgrade.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LogicalDeliveryEventV2 {
     pub snapshot: DeliverySnapshotV32,
@@ -189,7 +246,7 @@ impl UpgradeFrom<LogicalDeliveryEventV2> for LogicalDeliveryEvent {
 }
 
 /// A delivery's lifecycle event as signal-flow 31 archived it, read only by
-/// the v1-to-v3 upgrade.
+/// the v1-to-v4 upgrade.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LogicalDeliveryEventV1 {
     pub snapshot: DeliverySnapshotV31,
@@ -286,14 +343,16 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
                 CurrentLogicalDelivery::schema_hash(),
             )
             .with_predecessor::<CurrentLogicalDeliveryV1>()
-            .with_predecessor::<CurrentLogicalDeliveryV2>(),
+            .with_predecessor::<CurrentLogicalDeliveryV2>()
+            .with_predecessor::<CurrentLogicalDeliveryV3>(),
             events: TableDescriptor::new(
                 EVENT_TABLE_NAME,
                 FamilyName::new("flow-nexus-logical-delivery-event"),
                 LogicalDeliveryEvent::schema_hash(),
             )
             .with_predecessor::<LogicalDeliveryEventV1>()
-            .with_predecessor::<LogicalDeliveryEventV2>(),
+            .with_predecessor::<LogicalDeliveryEventV2>()
+            .with_predecessor::<LogicalDeliveryEventV3>(),
             simplified_replies: TableDescriptor::new(
                 SIMPLIFIED_REPLY_TABLE_NAME,
                 FamilyName::new("flow-nexus-simplified-reply-binding"),

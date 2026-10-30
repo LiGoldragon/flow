@@ -140,16 +140,16 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
         tui.0.id(),
     );
     super::assert_unidentified(
-fixture.nexus.bind_seat(address.clone(), Some(&subagent)),
-&subagent,
-);
+        fixture.nexus.bind_seat(address.clone(), Some(&subagent)),
+        &subagent,
+    );
 
     super::herdr_world(&fixture, vec![unreported_codex("w12:p1")], tui.0.id());
     // A thread whose session no pane runs names no seat.
     super::assert_unidentified(
-fixture.nexus.bind_seat(address.clone(), Some(&orphan)),
-&orphan,
-);
+        fixture.nexus.bind_seat(address.clone(), Some(&orphan)),
+        &orphan,
+    );
     // The subagent's command binds its flow's seat, under the root's claim.
     // Adoption announces the new live Codex thread so the Nexus's responder
     // subscribes to it and its first rest can drain already queued work.
@@ -178,12 +178,12 @@ fixture.nexus.bind_seat(address.clone(), Some(&orphan)),
         Response::Identified(address.clone())
     );
     super::assert_unidentified(
-fixture
+        fixture
             .nexus
             .dispatch_metaflow_peer(signal_flow::Query::Identify(orphan.clone()), Some(&message))
             .response,
-&orphan,
-);
+        &orphan,
+    );
     let awake = fixture.nexus.store.metaflow_awake_as("877549").unwrap();
     assert_eq!(awake.map(|metaflow| metaflow.address), Some(address));
 }

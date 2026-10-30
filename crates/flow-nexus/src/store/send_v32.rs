@@ -7,6 +7,7 @@
 //! `RecipientBusy` to `NotSent.«recipient busy { <address> }»`; every other
 //! value is carried unchanged.
 
+use super::send_v34::UpgradesUnidentified;
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -77,7 +78,7 @@ impl From<RefusalV32> for Refusal {
             RefusalV32::NoneAbove => Self::NoneAbove,
             RefusalV32::NotMessage => Self::NotMessage,
             RefusalV32::Taken(address) => Self::Taken(address),
-            RefusalV32::Unidentified(process) => Self::Unidentified(process),
+            RefusalV32::Unidentified(process) => Self::from_unidentified(process),
             RefusalV32::Store(reason) => Self::Store(reason),
             RefusalV32::NotSendServer(process) => Self::NotSendServer(process),
             RefusalV32::OffRoute => Self::from_off_route(),

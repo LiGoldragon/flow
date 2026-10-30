@@ -5666,6 +5666,11 @@ impl RegistersExistingFlow for FlowStore {
             None => commit.assert(self.metaflows, StoredMetaflow { metaflow }),
         };
         self.engine.commit_atomic(commit)?;
+        // The Nexus's Codex responder set follows this signal. An adopted
+        // seat was committed without announcing it, so no connection ever
+        // subscribed to that thread until an unrelated store change. With
+        // no thread events, its first rest could not drain durable work.
+        self.launch_changes.announce();
         Ok(ExistingSeatAdoption::Bound(Box::new(flow_node)))
     }
 }

@@ -1,6 +1,11 @@
 ;; flow-capsule: the real-world test of a Flow package in a capsule of its own.
 ;;
 ;; Usage: flow-capsule <flow-package> [--keep-going] [--log <path>]
+;;        flow-capsule --takeover <old flow package> <new flow package> [--log <path>]
+;;
+;; --takeover runs the bie3.6 takeover and rollback instead of the
+;; scenarios (see the takeover section); FLOW_CAPSULE_SKIP_CODEX=1 skips its
+;; Codex seats as it skips the Codex scenarios.
 ;;
 ;; A run keeps its raw Nexus log and every flow transcript past teardown,
 ;; copied before the state root is deleted into
@@ -588,6 +593,11 @@
 ;; ---------------------------------------------------------------- capsule life
 
 (def nexus (atom nil))
+;; The takeover's Nexus processes, old and new, every one it started; and
+;; its sender loop, standing in for the trackers' cron.
+(def takeover-nexuses (atom []))
+(def sender (atom nil))
+(def poller (atom nil))
 (def natives-seen (atom #{}))
 (def herdr-server (atom nil))
 
@@ -741,8 +751,9 @@
     (throw (ex-info "the capsule's Codex app-server opened no socket" {})))
   (println (str "codex | " codex-binary " | " codex-model " | " codex-socket)))
 
-(defn start-text []
-  (str "{ «" ordinary-socket "» «" meta-socket "» «" store-path "» None }"))
+(defn start-text
+  ([] (start-text ordinary-socket meta-socket store-path))
+  ([ordinary meta store] (str "{ «" ordinary "» «" meta "» «" store "» None }")))
 
 (defn start-nexus! [log]
   (reset! nexus (p/process [(str @package "/bin/flow-nexus") (start-text)]
@@ -776,17 +787,24 @@
       (when (= exit "still running") (p/destroy child))
       [reply exit])))
 
-(defn configure! [log]
-  (let [file (fs/file libexec "configure.datom")]
-    (doseq [line (str/split-lines (slurp file))
-            :when (and (not (str/blank? line)) (not (str/starts-with? line ";")))]
-      (let [datom (fill line)
-            [reply exit] (configure-one! datom log)
-            family (second (re-find #"^Configure\.([A-Za-z]+)" datom))
-            ok (str/starts-with? reply "Configured.")]
-        (println (str "configure " family " | " reply " | " (if ok "pass" "fail") " | configuration-only Nexus exit " exit))
-        (flush)
-        (when-not ok (throw (ex-info (str "Configure." family " refused") {:reply reply})))))))
+(defn configure-lines
+  "The configure.datom lines that are datoms, their placeholders filled."
+  []
+  (vec (for [line (str/split-lines (slurp (fs/file libexec "configure.datom")))
+             :when (and (not (str/blank? line)) (not (str/starts-with? line ";")))]
+         (fill line))))
+
+(defn configure!
+  "Each datom through a configuration-only Nexus of the package in charge:
+  configure.datom's, or the lines given."
+  [log & [lines]]
+  (doseq [datom (or lines (configure-lines))]
+    (let [[reply exit] (configure-one! datom log)
+          family (second (re-find #"^Configure\.([A-Za-z]+)" datom))
+          ok (str/starts-with? reply "Configured.")]
+      (println (str "configure " family " | " reply " | " (if ok "pass" "fail") " | configuration-only Nexus exit " exit))
+      (flush)
+      (when-not ok (throw (ex-info (str "Configure." family " refused") {:reply reply}))))))
 
 (defn turns
   "The Haiku turns the capsule's flows took: the prompts each flow's harness
@@ -831,6 +849,17 @@
               (swap! steps conj (str "Retire." (body state) " -> " (flow-meta (str "Retire." (body state))))))))))
     (doseq [w (get-in (herdr-json "workspace" "list") [:result :workspaces])]
       (swap! steps conj (str "close workspace " (:workspace_id w) " (" (:label w) ") -> " (str/trim (:out (herdr "workspace" "close" (:workspace_id w)))))))
+    (when-let [{:keys [running future]} @sender]
+      (reset! running false)
+      (deref future 30000 nil)
+      (swap! steps conj "takeover sender loop stopped"))
+    (when-let [{:keys [running future]} @poller]
+      (reset! running false)
+      (deref future 5000 nil))
+    (doseq [n @takeover-nexuses :when (p/alive? n)]
+      (p/destroy n)
+      (swap! steps conj (str "takeover Nexus " (.pid (:proc n)) " stopped, exit "
+                             (:exit (deref n 20000 {:exit "still running"})))))
     (when-let [n @nexus]
       (p/destroy n)
       (swap! steps conj (str "Nexus stopped, exit " (:exit (deref n 20000 {:exit "still running"})))))
@@ -1123,7 +1152,672 @@
                             (if skip-codex skipped-codex-scenarios codex-scenarios)
                             (subvec base-scenarios 11))))
 
+;; ---------------------------------------------------------------- takeover
+;; flow-capsule --takeover <old flow package> <new flow package>: the bie3.6
+;; transition (procedure §6) inside the capsule's own Herdr session, sockets
+;; and store. The old Nexus serves Awake seats and queued work; a new store
+;; is seeded on a private socket past the old ids; a guard holds the new
+;; Nexus off while the old one answers; the old one is stopped by hand and
+;; the new one started; the seats are re-bound by BindSeat typed into their
+;; panes. The old Nexus is restored by its recorded command after a success
+;; and after the new store is refused. Arm A keeps the sender silent through
+;; the window (the gate); Arm B, the control, keeps it sending.
+
+(def codex-secondary "{ Mind test Secondary }")
+(def asleep-primary "{ Psyche test Primary }")
+;; The margin ruled for the counters: the old maximum plus this.
+(def counter-margin 10000)
+;; The night's seat count the window is extrapolated to.
+(def night-seats 21)
+(def seed-socket (str capsule-runtime "/seed/flow.sock"))
+(def seed-meta-socket (str capsule-runtime "/seed/flow-meta.sock"))
+
+(defn split-replay
+  "Datoms split as the production replay splits them: at a newline outside
+  guillemets, blank pieces dropped."
+  [text]
+  (let [close (fn [out current] (if (str/blank? (str current)) out (conj out (str current))))]
+    (loop [[c & more :as cs] (seq text) depth 0 current (StringBuilder.) out []]
+      (cond
+        (empty? cs) (close out current)
+        (and (= c \newline) (zero? depth)) (recur more depth (StringBuilder.) (close out current))
+        :else (recur more (case c \« (inc depth) \» (dec depth) depth) (.append current c) out)))))
+
+(defn- append-entries
+  "A vector-bodied Configure line with entries added before its closing bracket."
+  [line entries]
+  (str/replace line #"\s*\]\s*$" (java.util.regex.Matcher/quoteReplacement (str " " (str/join " " entries) " ]"))))
+
+(defn takeover-configuration
+  "The takeover's declarations from the capsule's Configure lines: every
+  seat it keeps Awake is Maintained, a Codex Secondary on the Codex
+  Quaternary's model and an OnDemand Primary that stays asleep are added.
+  :old omits DefaultMinutes, which the old Nexus does not know; :replay is
+  every line, in the file's order."
+  [lines]
+  (let [codex-model (some #(second (re-find #"\{ Quaternary Mind (\S+) \}" %)) lines)
+        line-of (fn [line]
+                  (cond
+                    (str/starts-with? line "Configure.Metaflows.")
+                    (append-entries (str/replace line " OnDemand «" " Maintained «")
+                                    [(str "{ " codex-secondary " [ spirit:core intent:models ] [] Simplified Explicit.[] Maintained «» [] }")
+                                     (str "{ " asleep-primary " [ spirit:core intent:models ] [] Regular Default OnDemand «» [] }")])
+                    (and codex-model (str/starts-with? line "Configure.Models."))
+                    (append-entries line [(str "{ Secondary Mind " codex-model " }")])
+                    (str/starts-with? line "Configure.LeaveOuts.")
+                    (if-let [entry (re-find #"\{ \{ Mind test Quaternary \} Codex \[[^\]]*\] \}" line)]
+                      (append-entries line [(str/replace entry "Quaternary" "Secondary")])
+                      line)
+                    :else line))
+        replay (mapv line-of lines)]
+    {:old (vec (remove #(str/starts-with? % "Configure.DefaultMinutes.") replay))
+     :replay replay}))
+
+(def id-pattern #"logical-delivery-\d{20}|queue-attempt-[0-9a-f]{16}|send-outcome-[0-9a-f]{16}")
+
+(defn issued-ids
+  "Every logical-delivery, queue-attempt and send-outcome id in text."
+  [text] (set (re-seq id-pattern (or text ""))))
+
+(defn id-number
+  "An id's family and number: a logical delivery in decimal, the others in hex."
+  [id]
+  (let [[_ family digits] (re-matches #"(logical-delivery|queue-attempt|send-outcome)-([0-9a-f]+)" id)]
+    [(keyword family) (if (= family "logical-delivery") (parse-long digits) (Long/parseLong digits 16))]))
+
+(defn old-maxima [ids]
+  (reduce (fn [m id] (let [[family n] (id-number id)] (update m family max n)))
+          {:logical-delivery 0 :queue-attempt 0 :send-outcome 0} ids))
+
+(defn counters-datom
+  "Configure.Counters at each old maximum plus the margin, in the ruled order."
+  [{:keys [logical-delivery queue-attempt send-outcome]} margin]
+  (str "Configure.Counters.{ " (+ logical-delivery margin) " " (+ queue-attempt margin) " "
+       (+ send-outcome margin) " }"))
+
+(defn configuration-counters
+  "The three counters a Configuration reply ends with; nil for any other reply."
+  [reply]
+  (let [d (read-datom reply)
+        container (loop [x d] (if (and (map? x) (:head x)) (recur (:body x)) x))
+        tail (when (map? container) (last (items container)))
+        values (when (and (map? tail) (= \{ (:enclosure tail))) (map str (items tail)))]
+    (when (and (= 3 (count values)) (every? #(re-matches #"\d+" %) values))
+      (mapv parse-long values))))
+
+(defn reissued
+  "The ids both Nexuses issued."
+  [old-ids new-ids] (vec (sort (filter (set old-ids) new-ids))))
+
+(defn below-counters
+  "The ids below their family's seeded counter."
+  [ids [logical queue outcome]]
+  (let [floor {:logical-delivery logical :queue-attempt queue :send-outcome outcome}]
+    (vec (sort (filter #(let [[family n] (id-number %)] (< n (floor family))) ids)))))
+
+(defn owner-answers?
+  "The guard's rule: a Nexus owns a socket unless its client found no
+  socket there or was refused the connection; a reply the client cannot
+  read is an owner still."
+  [reply]
+  (not (and (str/starts-with? reply "exit ")
+            (or (str/includes? reply "(os error 2)") (str/includes? reply "(os error 111)")))))
+
+(defn rebind-lines
+  "One line per seat pane, as the procedure's C7 makes them from the pane
+  list: the trackers (tracker? of `Aspect topic Layer`) first, then the rest
+  in pane order; a pane with no seat label is not typed to."
+  [pane-list pkg tracker?]
+  (let [rows (keep (fn [{:keys [pane_id label]}]
+                     (when-let [[_ aspect topic layer flow-id]
+                                (re-matches #"\{ (\w+) (\S+) (\w+) ([0-9a-f]{6}) \}" (str label))]
+                       (let [words (str aspect " " topic " " layer)]
+                         {:pane pane_id :flow-id flow-id :address (str "{ " words " }")
+                          :line (str "! " pkg "/bin/flow 'BindSeat.{ " words " }'")
+                          :tracker (boolean (tracker? words))})))
+                   pane-list)]
+    (mapv #(dissoc % :tracker) (concat (filter :tracker rows) (remove :tracker rows)))))
+
+(defn address-text [a] (str "{ " (str/join " " (map str (items a))) " }"))
+
+(defn awake-seats
+  "Each Awake metaflow's FlowId by Address, from a Listed reply."
+  [listed]
+  (into {} (for [m (items (body listed))
+                 :let [[a state] (items m)]
+                 :when (= (head state) "Awake")]
+             [(address-text a) (str (body state))])))
+
+(defn changed-seats
+  "The Addresses of before whose seat is not Awake under the same FlowId after."
+  [before after]
+  (vec (sort (for [[a flow-id] before :when (not= flow-id (get after a))] a))))
+
+(defn window-measure
+  "The window from the hand stop, in seconds: ready, end, each pane's mean
+  type-to-Bound, the readback, and the extrapolation to the night's seats."
+  [{:keys [start ready end pane-ms readback-ms seats]}]
+  (let [span #(when (and %1 %2) (/ (- %2 %1) 1000.0))
+        mean (when (seq pane-ms) (/ (reduce + pane-ms) (count pane-ms) 1000.0))
+        readback (when readback-ms (/ readback-ms 1000.0))]
+    {:ready-s (span start ready) :end-s (span start end) :mean-pane-s mean :readback-s readback
+     :extrapolated-s (when (and mean readback) (+ (* mean seats) readback))}))
+
+;; The takeover's processes and readings.
+
+(def old-package (atom nil))
+(def new-package (atom nil))
+;; What the takeover's steps hand one another.
+(def takeover (atom {}))
+
+(defn now [] (System/currentTimeMillis))
+(defn iso [ms] (str (java.time.Instant/ofEpochMilli ms)))
+
+(defn package-env [pkg extra]
+  (clean-env (merge {"PATH" (str pkg "/bin:" (System/getenv "PATH"))} extra)))
+
+(defn meta-at
+  "One meta call by pkg's client on socket, from no pane: the owner."
+  [pkg socket datom]
+  (reply-text (run {:env (package-env pkg {"FLOW_META_SOCKET" socket})} (str pkg "/bin/flow-meta") datom)))
+
+(defn guard-probe
+  "The guard's reading, as the declared unit's ExecStartPre would take it:
+  each of the capsule's Flow sockets asked by pkg's client."
+  [pkg]
+  {:ordinary (reply-text (run {:env (package-env pkg (merge (marks @driver-pane) {"FLOW_SOCKET" ordinary-socket}))}
+                              (str pkg "/bin/flow") "Metaflows"))
+   :meta (meta-at pkg meta-socket "Configuration")})
+
+(defn guard-refuses? [probe] (boolean (some owner-answers? (vals probe))))
+
+(defn nexus-command
+  "The command a Nexus of pkg is started by on the capsule's sockets."
+  [pkg store]
+  {:argv [(str pkg "/bin/flow-nexus") (start-text ordinary-socket meta-socket store)] :env (package-env pkg {})})
+
+(defn start-command! [{:keys [argv env]} log]
+  (let [proc (p/process argv {:env env :out :append :out-file (fs/file log)
+                              :err :append :err-file (fs/file log) :in ""})]
+    (swap! takeover-nexuses conj proc)
+    proc))
+
+(defn stop-process! [proc]
+  (if (p/alive? proc)
+    (do (p/destroy proc) (:exit (deref proc 20000 {:exit "still running"})))
+    (:exit @proc)))
+
+(defn serves?
+  "Whether the Nexus process comes to answer Metaflows on the capsule's
+  socket: :serving, :exited, or nil after 30 s."
+  [proc]
+  (watch 30 #(cond (not (p/alive? proc)) :exited
+                   (owner-answers? (flow "Metaflows")) :serving)))
+
+(defn digest [path]
+  (when (fs/exists? path)
+    (let [md (java.security.MessageDigest/getInstance "SHA-256")]
+      (apply str (map #(format "%02x" (bit-and % 0xff))
+                      (.digest md (java.nio.file.Files/readAllBytes (fs/path path))))))))
+
+(defn state-reads
+  "What the package in charge answers: Metaflows, Configuration,
+  ReadSendOutcomes and each Address's ReadQueueDeliveries, and every id in them."
+  []
+  (let [reply (flow "Metaflows")
+        listed (read-datom reply)
+        addresses (mapv #(address-text (first (items %))) (items (body listed)))
+        queues (into (sorted-map) (for [a addresses] [a (flow-meta (str "ReadQueueDeliveries." a))]))
+        outcomes (flow-meta "ReadSendOutcomes")]
+    {:metaflows reply :awake (awake-seats listed) :queues queues :outcomes outcomes
+     :configuration (flow-meta "Configuration")
+     :ids (issued-ids (str/join " " (cons outcomes (vals queues))))}))
+
+(defn old-reads!
+  "The old Nexus's reads; every id in them is kept as one the old Nexus issued."
+  []
+  (let [reads (state-reads)]
+    (swap! takeover update :old-ids (fnil into #{}) (:ids reads))
+    reads))
+
+(defn keep-reads! [prefix reads]
+  (keep-text! (str prefix ".metaflows") (:metaflows reads))
+  (keep-text! (str prefix ".configuration") (:configuration reads))
+  (keep-text! (str prefix ".sendoutcomes") (:outcomes reads))
+  (keep-text! (str prefix ".queue") (str/join "\n" (for [[a q] (:queues reads)] (str a " " q))))
+  (keep-text! (str prefix ".ids") (str/join "\n" (sort (:ids reads)))))
+
+(defn pane-of-flow [flow-id]
+  (some #(when (str/ends-with? (str (:label %)) (str " " flow-id " }")) (:pane_id %)) (panes)))
+
+(defn start-sender!
+  "The trackers' cron, stood in for: every 15 s a Wake Notice to the
+  Quaternary and the Tertiary, sent from pane by the client in charge."
+  [pane]
+  (let [running (atom true)
+        sent (atom [])]
+    (reset! sender {:running running :sent sent
+                    :future (future
+                              (while @running
+                                (doseq [addr [quaternary tertiary-address]]
+                                  (swap! sent conj {:at (now) :to addr
+                                                    :reply (send-to addr "Wake" "Soft.Notice.«beat. Answer with one word and stop.»" pane)}))
+                                (let [until (+ (now) 15000)]
+                                  (while (and @running (< (now) until)) (Thread/sleep 100)))))})))
+
+(defn stop-sender!
+  "Stops the sender loop; every send it made."
+  []
+  (when-let [{:keys [running sent] :as loop-state} @sender]
+    (reset! running false)
+    (deref (:future loop-state) 30000 nil)
+    (reset! sender nil)
+    @sent))
+
+(defn start-poller!
+  "Counts the session's panes every second."
+  []
+  (let [running (atom true)
+        counts (atom [])]
+    (reset! poller {:running running :counts counts
+                    :future (future (while @running
+                                      (swap! counts conj [(now) (count (panes))])
+                                      (Thread/sleep 1000)))})))
+
+(defn stop-poller!
+  "Stops the pane poll; every count it took."
+  []
+  (when-let [{:keys [running counts] :as poll} @poller]
+    (reset! running false)
+    (deref (:future poll) 5000 nil)
+    (reset! poller nil)
+    @counts))
+
+(defn seed!
+  "A new store seeded on a private socket by a new Nexus of its own:
+  Counters first, at the old maxima plus the margin, a lower Counters
+  refused, then the replay, then the Nexus stopped and flow-store-check."
+  [label maxima log]
+  (let [pkg @new-package
+        store (str state-root "/" label "/flow.sema")
+        _ (fs/create-dirs (fs/parent store))
+        proc (start-command! {:argv [(str pkg "/bin/flow-nexus") (start-text seed-socket seed-meta-socket store)]
+                              :env (package-env pkg {})} log)
+        up (watch 30 #(cond (not (p/alive? proc)) :exited
+                            (owner-answers? (meta-at pkg seed-meta-socket "Configuration")) :serving))
+        counters (counters-datom maxima counter-margin)
+        counters-reply (meta-at pkg seed-meta-socket counters)
+        lowered (meta-at pkg seed-meta-socket (counters-datom maxima (dec counter-margin)))
+        replay (split-replay (str/join "\n" (:replay (:configuration @takeover))))
+        replies (mapv (fn [datom] [(second (re-find #"^Configure\.([A-Za-z]+)" datom))
+                                   (meta-at pkg seed-meta-socket datom)])
+                      replay)
+        configuration (meta-at pkg seed-meta-socket "Configuration")
+        exit (stop-process! proc)
+        check (reply-text (run {:env (package-env pkg {})} (str pkg "/bin/flow-store-check") (str "{ «" store "» }")))
+        expected (mapv #(+ (get maxima %) counter-margin) [:logical-delivery :queue-attempt :send-outcome])
+        seed {:store store :counters counters :expected expected :digest (digest store)
+              :ok (boolean (and (= up :serving) (str/starts-with? counters-reply "Configured.")
+                                (str/includes? lowered "Lowered")
+                                (seq replies) (every? #(str/starts-with? (second %) "Configured.") replies)
+                                (= expected (configuration-counters configuration))
+                                (str/starts-with? check "Opens.")))
+              :text (str "seed Nexus " (name (or up :silent)) ", exit " exit
+                         " / " counters " -> " counters-reply " / one lower -> " lowered
+                         " / replay " (pr-str (mapv (fn [[family reply]] (str family " -> " reply)) replies))
+                         " / Configuration counters " (configuration-counters configuration)
+                         " / flow-store-check -> " check)}]
+    (keep-text! (str "takeover-" label "-seed.txt") (:text seed))
+    (keep-text! (str "takeover-" label "-seed.configuration") configuration)
+    seed))
+
+(defn seed-step
+  "The old maxima read again now, then a new store seeded past them."
+  [label]
+  (fn []
+    (let [reads (old-reads!)
+          maxima (old-maxima (:ids reads))
+          seed (seed! label maxima @nexus-log)]
+      (keep-reads! (str "takeover-" label "-before-seed") reads)
+      (swap! takeover assoc :seed seed)
+      {:reply (:text seed)
+       :pass (:ok seed)
+       :watched (str "old maxima " maxima " from " (count (:ids reads)) " ids; store " (:store seed)
+                     " seeded on " seed-meta-socket ", sha256 " (:digest seed))})))
+
+(defn guard-step
+  "Activate first: the guarded start is tried as Restart=on-failure would,
+  three times two seconds apart, and refused each time while the old Nexus
+  answers; the seeded store is not touched."
+  []
+  (fn []
+    (let [{:keys [seed old-proc]} @takeover
+          probes (vec (for [_ (range 3)] (let [probe (guard-probe @new-package)] (Thread/sleep 2000) probe)))
+          refused (every? guard-refuses? probes)
+          untouched (= (:digest seed) (digest (:store seed)))
+          answering (owner-answers? (flow "Metaflows"))]
+      {:reply (str "guard readings " (pr-str probes))
+       :pass (boolean (and refused untouched answering (p/alive? old-proc)))
+       :watched (str "three guarded starts " (if refused "all refused" "not all refused")
+                     "; new store " (if untouched "unchanged" "changed") "; old Nexus PID " (.pid (:proc old-proc))
+                     (if answering " answers" " does not answer") " Metaflows")})))
+
+(defn hand-switch!
+  "The old Nexus's last reads, its hand stop (the window opens), the guard
+  read again, and the new Nexus started on the seeded store; with silent,
+  the sender is stopped just before the stop."
+  [label silent]
+  (let [{:keys [seed old-proc]} @takeover
+        sent (when silent (stop-sender!))
+        last-reads (old-reads!)
+        pane-count (count (panes))
+        pane-set (pane-ids)
+        last-logical (:logical-delivery (old-maxima (:ids last-reads)))
+        void (not (< last-logical (first (:expected seed))))
+        stop-exit (stop-process! old-proc)
+        start (now)
+        _ (start-poller!)
+        old-digest (digest store-path)
+        guard (guard-probe @new-package)
+        _ (reset! package @new-package)
+        proc (start-command! (nexus-command @new-package (:store seed)) @nexus-log)
+        serving (serves? proc)
+        ready (now)]
+    (reset! nexus proc)
+    (keep-reads! (str "takeover-" label "-last") last-reads)
+    (keep-text! (str "takeover-" label "-window.start") (iso start))
+    (keep-text! (str "takeover-" label "-window.ready") (iso ready))
+    (swap! takeover assoc :last last-reads :old-digest old-digest :new-proc proc :pane-count pane-count
+           :pane-set pane-set :window {:start start :ready ready})
+    {:sent sent :void void :stop-exit stop-exit :guard guard :serving serving :start start :ready ready
+     :last-logical last-logical :old-digest old-digest}))
+
+(defn switch-step [label silent expect-serving]
+  (fn []
+    (let [{:keys [sent void stop-exit guard serving start ready last-logical old-digest]} (hand-switch! label silent)
+          last-send (some->> sent (map :at) seq (reduce max))]
+      {:reply (str "old stopped, exit " stop-exit "; guard after the stop " (pr-str guard) "; new Nexus " (name (or serving :silent)))
+       :pass (boolean (and (not void) (not (guard-refuses? guard))
+                           (if expect-serving (= serving :serving) (not= serving :serving))))
+       :watched (str (when silent (str "sender stopped before the stop, last send " (some-> last-send iso)
+                                       ", " (count sent) " sends; "))
+                     "last old logical delivery " last-logical (if void ", not below the seed: the seed is void" ", below the seed")
+                     "; window.start " (iso start) ", window.ready " (iso ready)
+                     "; old store sha256 at the stop " old-digest)})))
+
+(defn rebind!
+  "Each line typed into its pane by Herdr, then Bound.<FlowId> awaited there;
+  each pane's time from typing to Bound."
+  [lines]
+  (vec (for [{:keys [pane flow-id address line]} lines]
+         (let [started (now)
+               typed (herdr "pane" "run" pane line)
+               timeout (if (= address codex-secondary) 300000 120000)
+               waited (run {:timeout (+ timeout 20000)} "herdr" "--session" session "pane" "wait-output" pane
+                           "--match" (str "Bound." flow-id) "--timeout" (str timeout))
+               bound (zero? (:exit waited))]
+           (when-not bound (keep-text! (str "takeover-rebind-" (str/replace pane ":" "-") ".txt") (pane-text pane)))
+           {:pane pane :address address :flow-id flow-id :typed (:exit typed) :bound bound
+            :ms (- (now) started) :harness (if (str/starts-with? address "{ Mind") "Codex" "Claude")}))))
+
+(defn rebind-step []
+  (fn []
+    (let [{:keys [window last pane-count]} @takeover
+          lines (rebind-lines (panes) @new-package #(str/ends-with? % "Quaternary"))
+          _ (keep-text! "takeover-arm-a-rebind.lines" (str/join "\n" (map #(str (:pane %) " " (:flow-id %) " " (:line %)) lines)))
+          bound (rebind! lines)
+          readback-start (now)
+          readback (flow "Metaflows")
+          end (now)
+          counts (stop-poller!)
+          after (awake-seats (read-datom readback))
+          expected (select-keys (:awake last) (map :address lines))
+          unbound (changed-seats expected after)
+          strangers (vec (sort (for [[a f] after :when (not= f (get (:awake last) a))] a)))
+          most-panes (reduce max 0 (map second counts))
+          measure (window-measure {:start (:start window) :ready (:ready window) :end end
+                                   :pane-ms (map :ms bound) :readback-ms (- end readback-start) :seats night-seats})
+          claude (some #(and (:bound %) (= "Claude" (:harness %))) bound)
+          codex (some #(and (:bound %) (= "Codex" (:harness %))) bound)
+          no-duplicate (and (<= most-panes pane-count) (empty? strangers))]
+      (keep-text! "takeover-arm-a-after.rebind.metaflows" readback)
+      (keep-text! "takeover-arm-a-window.end" (iso end))
+      (keep-text! "takeover-arm-a-window.txt"
+                  (str (pr-str measure) "\nper pane " (pr-str bound) "\npane counts " (pr-str counts) "\n"))
+      (swap! takeover assoc :rebound bound)
+      {:reply (str "readback " readback)
+       :pass (boolean (and (seq expected) no-duplicate (empty? unbound) claude (or skip-codex codex)
+                           (:extrapolated-s measure)))
+       :watched (str "no duplicate seat " (boolean no-duplicate) " (most panes " most-panes " of " pane-count
+                     " before; Awake under another FlowId or newly " strangers ")"
+                     "; re-bound " (- (count expected) (count unbound)) " of " (count expected) ", not " unbound
+                     "; Bound in a Claude pane " (boolean claude) ", in a Codex pane "
+                     (if skip-codex "SKIPPED (FLOW_CAPSULE_SKIP_CODEX=1)" (boolean codex))
+                     "; window " (pr-str measure) " against the night's 20-minute beat")})))
+
+(defn losses-step []
+  (fn []
+    (let [{:keys [queued-id]} @takeover
+          reads (state-reads)
+          primary-queue (get (:queues reads) asleep-primary "")
+          listed (read-datom (:metaflows reads))
+          pasts (into {} (for [m (items (body listed))] [(address-text (first (items m))) (vec (items (nth (items m) 2)))]))]
+      {:reply (str "new Primary queue " primary-queue)
+       :pass (boolean (and queued-id (not (str/includes? primary-queue queued-id)) (every? empty? (vals pasts))))
+       :watched (str "the old Nexus's queued Notice " queued-id
+                     (if (str/includes? primary-queue (str queued-id)) " carried" " not carried")
+                     "; Past by Address under the new Nexus " (pr-str pasts))})))
+
+(defn ids-step []
+  (fn []
+    (let [{:keys [seed old-ids sender-pane]} @takeover
+          sent (send-to quaternary "Queue" "Soft.Notice.«After the switch. Answer with one word and stop. Tag tk2.»" sender-pane)
+          reads (state-reads)
+          new-ids (into (issued-ids sent) (:ids reads))
+          again (reissued old-ids new-ids)
+          low (below-counters new-ids (:expected seed))
+          first-logical (some->> new-ids (filter #(str/starts-with? % "logical-delivery-")) sort first)
+          not-empty (flow-meta (:counters seed))]
+      (keep-reads! "takeover-arm-a-new" reads)
+      {:reply (str "Send after the switch: " sent " / Counters on the used store: " not-empty)
+       :pass (boolean (and (seq new-ids) (empty? again) (empty? low) (str/includes? not-empty "NotEmpty")))
+       :watched (str (count new-ids) " ids the new Nexus issued, the first logical delivery " first-logical
+                     " (seeded " (first (:expected seed)) "); reissued " again "; below the seed " low
+                     "; " (count old-ids) " ids the old Nexus issued")})))
+
+(defn rollback!
+  "The new Nexus stopped, the old one started by its recorded command on its
+  untouched store, its readings compared with its last before the stop; then
+  the switch back modelled: the kept generation's guard refuses, and a
+  declared-like start with no guard is refused at the socket."
+  [label]
+  (let [{:keys [new-proc old-command old-digest last queued-id]} @takeover
+        _ (stop-poller!)
+        new-exit (stop-process! new-proc)
+        free (guard-probe @old-package)
+        untouched (= old-digest (digest store-path))
+        _ (reset! package @old-package)
+        proc (start-command! old-command @nexus-log)
+        serving (serves? proc)
+        _ (reset! nexus proc)
+        _ (swap! takeover assoc :old-proc proc)
+        reads (old-reads!)
+        same-metaflows (= (:metaflows reads) (:metaflows last))
+        same-queues (= (:queues reads) (:queues last))
+        held (str/includes? (get (:queues reads) asleep-primary "") (str queued-id))
+        guard (guard-probe @new-package)
+        throwaway (str state-root "/switch-back-" label "/flow.sema")
+        _ (fs/create-dirs (fs/parent throwaway))
+        refusals-before (occurrences (log-text) "already accepting connections")
+        back (start-command! (nexus-command @new-package throwaway) @nexus-log)
+        back-exit (:exit (deref back 20000 {:exit "still running"}))
+        _ (stop-process! back)
+        at-socket (> (occurrences (log-text) "already accepting connections") refusals-before)
+        still (owner-answers? (flow "Metaflows"))]
+    (keep-reads! (str "takeover-" label "-rolled-back") reads)
+    {:reply (str "new Nexus exit " new-exit "; old restarted " (name (or serving :silent))
+                 "; switch-back start exit " back-exit)
+     :pass (boolean (and (not (guard-refuses? free)) untouched (= serving :serving) same-metaflows same-queues held
+                         (guard-refuses? guard) (not (contains? #{0 "still running"} back-exit)) at-socket
+                         still (p/alive? proc)))
+     :watched (str "sockets free after the stop " (not (guard-refuses? free))
+                   "; old store " (if untouched "untouched" "changed") " since the stop"
+                   "; Metaflows " (if same-metaflows "equal" "unequal") " and ReadQueueDeliveries "
+                   (if same-queues "equal" "unequal") " to the last reads before the stop; queued Notice " queued-id
+                   (if held " held" " missing") "; switch back: guard " (if (guard-refuses? guard) "refuses" "passes")
+                   ", unguarded start " (if at-socket "refused at the socket" "not refused at the socket")
+                   "; old Nexus PID " (.pid (:proc proc)) (if still " answers" " does not answer") " Metaflows")}))
+
+(defn rollback-step [label] (fn [] (rollback! label)))
+
+(defn refused-store-step []
+  (fn []
+    (let [{:keys [seed]} @takeover
+          _ (spit (:store seed) "not a Flow store\n")
+          check (reply-text (run {:env (package-env @new-package {})} (str @new-package "/bin/flow-store-check")
+                                 (str "{ «" (:store seed) "» }")))]
+      (swap! takeover assoc-in [:seed :digest] (digest (:store seed)))
+      {:reply (str "flow-store-check -> " check)
+       :pass (not (str/starts-with? check "Opens."))
+       :watched (str "the seeded store " (:store seed) " overwritten, so the new Nexus must refuse it")})))
+
+(defn duplicate-step []
+  (fn []
+    (let [{:keys [last pane-count pane-set]} @takeover
+          watched-for (select-keys (:awake last) [quaternary tertiary-address])
+          seen (watch 90 #(let [after (awake-seats (read-datom (flow "Metaflows")))
+                                fresh (vec (remove pane-set (pane-ids)))
+                                moved (vec (for [[a f] watched-for :when (and (get after a) (not= f (get after a)))] a))]
+                            (when (or (> (count (panes)) pane-count) (seq moved))
+                              {:fresh fresh :moved moved :after after})))
+          sent (stop-sender!)
+          counts (stop-poller!)
+          first-panes (into {} (for [[a f] watched-for] [a (pane-of-flow f)]))
+          live (every? some? (vals first-panes))]
+      (keep-text! "takeover-arm-b-sends.txt" (str/join "\n" (map pr-str sent)))
+      (keep-text! "takeover-arm-b-pane-counts.txt" (pr-str counts))
+      {:reply (str "sends in the window " (pr-str (vec (filter #(> (:at %) (:start (:window @takeover))) sent))))
+       :pass (boolean (and seen (seq (:fresh seen)) live))
+       :watched (str (if seen (str "a second seat: new panes " (:fresh seen) ", Awake under a new FlowId " (:moved seen))
+                         "no second seat in 90 s")
+                     "; the first panes " first-panes (if live " still live" " not all live")
+                     "; no Stop exists to remove it: teardown closes it")})))
+
+(def takeover-steps
+  [["T0 old Nexus on the capsule's sockets and store, started by a recorded command"
+    (fn []
+      (reset! package @old-package)
+      (configure! @nexus-log (:old (:configuration @takeover)))
+      (let [command (nexus-command @old-package store-path)
+            proc (start-command! command @nexus-log)
+            serving (serves? proc)]
+        (reset! nexus proc)
+        (swap! takeover assoc :old-command command :old-proc proc)
+        (keep-text! "takeover-old-nexus.command" (pr-str command))
+        {:reply (str (name (or serving :silent)) ", PID " (.pid (:proc proc)))
+         :pass (= serving :serving)
+         :watched (str (str/join " " (:argv command)) "; its command kept as takeover-old-nexus.command")}))]
+
+   ["T1 seats Awake, a Codex seat in a long turn, a Notice queued at an asleep Primary, the sender sending"
+    (fn []
+      (let [seats (concat [secondary quaternary tertiary-address] (when-not skip-codex [codex-quaternary]))
+            launched (into {} (for [addr seats]
+                                [addr (let [reply (launch addr)] [reply (watch 90 #(awake-flow addr))])]))
+            sender-pane (or (some-> (get-in launched [secondary 1]) str pane-of-flow) (sender-pane))
+            _ (swap! takeover assoc :sender-pane sender-pane)
+            queued (send-to asleep-primary "Queue" "Soft.Notice.«Held across the switch. Answer with one word and stop. Tag tk1.»" sender-pane)
+            queued-id (some-> (read-datom queued) body items first str)
+            _ (swap! takeover assoc :queued-id queued-id)
+            _ (start-sender! sender-pane)
+            busy (when-not skip-codex
+                   (let [reply (flow (str "Launch.{ " codex-secondary " Predecessors.0 «Run the shell command sleep 240, then answer with one word and stop.» }"))]
+                     [reply (watch 90 #(awake-flow codex-secondary))]))
+            sends (watch 45 #(let [s @(:sent @sender)] (when (>= (count s) 4) s)))
+            primary (current asleep-primary)]
+        {:reply (str (pr-str launched) " / Codex Secondary " (if skip-codex "SKIPPED" (pr-str busy)) " / queued " queued)
+         :pass (boolean (and (every? (comp second val) launched) (or skip-codex (second busy))
+                             sender-pane (str/starts-with? queued "SendAccepted.")
+                             (= :asleep (:state primary))
+                             (seq sends) (every? #(str/starts-with? (:reply %) "SendAccepted.") sends)))
+         :watched (str "Awake " (pr-str (into {} (for [[a [_ f]] launched] [a f])))
+                       (if skip-codex "; Codex seats SKIPPED (FLOW_CAPSULE_SKIP_CODEX=1)" "")
+                       "; sender pane " sender-pane "; Primary " (some-> (:state primary) name)
+                       " with queue " (:queue primary) "; " (count sends) " sends by the loop")}))]
+
+   ["T2 snapshot through the old clients"
+    (fn []
+      (let [reads (old-reads!)]
+        (keep-reads! "takeover-T2" reads)
+        (swap! takeover assoc :t2 reads)
+        {:reply (str "Awake " (pr-str (:awake reads)) " / " (count (:ids reads)) " ids")
+         :pass (boolean (and (seq (:awake reads))
+                             (str/includes? (get (:queues reads) asleep-primary "") (str (:queued-id @takeover)))))
+         :watched "Metaflows, Configuration, ReadSendOutcomes and every ReadQueueDeliveries kept as takeover-T2.*"}))]
+
+   ["A-T3 seed: Counters at the old maxima plus 10000, a lower one refused, the replay, flow-store-check" (seed-step "arm-a")]
+   ["A-T4 activate first: the guard refuses while the old Nexus answers" (guard-step)]
+   ["A-T5 sender silent; hand stop of the old, start of the new; the window opens" (switch-step "arm-a" true true)]
+   ["A-T7 re-bind through Herdr, trackers first; no duplicate seat; the window measured" (rebind-step)]
+   ["A-T9 losses: the queued Notice and Past are not carried" (losses-step)]
+   ["A-T8 ids: none the old Nexus issued is reissued; Counters refused on a used store" (ids-step)]
+   ["A-T10 rollback after success: the old Nexus by its recorded command; switch back refused" (rollback-step "arm-a")]
+
+   ["R-T3 seed a second store" (seed-step "refusal")]
+   ["R-T3b the second store overwritten, so the new Nexus must refuse it" (refused-store-step)]
+   ["R-T4 the guard refuses while the old Nexus answers" (guard-step)]
+   ["R-T5 hand stop of the old; the new Nexus refuses its store" (switch-step "refusal" false false)]
+   ["R-T10 rollback after the refusal: the old Nexus by its recorded command; switch back refused" (rollback-step "refusal")]
+
+   ["B-T3 seed a third store" (seed-step "arm-b")]
+   ["B-T4 the sender sending; the guard refuses while the old Nexus answers"
+    (let [guard (guard-step)]
+      (fn [] (start-sender! (:sender-pane @takeover)) (guard)))]
+   ["B-T5 hand stop of the old, start of the new, the sender still sending" (switch-step "arm-b" false true)]
+   ["B control: a Wake in the window launches a second seat beside the live one" (duplicate-step)]])
+
+(defn takeover-main [& args]
+  (let [[old new & options] args]
+    (when-not (and old new (not-any? #(str/starts-with? % "--") [old new]))
+      (refuse "usage: flow-capsule --takeover <old flow package> <new flow package> [--log <path>]"))
+    (reset! old-package (str (fs/canonicalize old)))
+    (reset! new-package (str (fs/canonicalize new)))
+    (reset! package @old-package)
+    (let [log (or (second (drop-while #(not= % "--log") options)) (str state-root "/nexus.log"))
+          wall (now)
+          version-of #(str/trim (:out (run {} (str % "/bin/flow-nexus") "--version")))
+          old-version (version-of @old-package)
+          new-version (version-of @new-package)
+          root (witness-root (System/getenv))]
+      (when-not root
+        (refuse "no witness directory: set FLOW_CAPSULE_WITNESS_DIR, or HOME and FLOW_ID (or FLOW_DIRECTORY); nothing started"))
+      (reset! witness-dir (str root "/" (witness-name (str "takeover " (last (str/split old-version #"\s+"))
+                                                           "-to-" (last (str/split new-version #"\s+")))
+                                                      (java.time.Instant/now))))
+      (reset! run-log log)
+      (println (str "flow-capsule --takeover | old " @old-package " | " old-version " | new " @new-package " | "
+                    new-version " | curriculum " curriculum-package))
+      (println (str "witnesses | " @witness-dir))
+      (try
+        (start-capsule! log)
+        (start-curriculum! log)
+        (if skip-codex
+          (println "codex | FLOW_CAPSULE_SKIP_CODEX=1: app-server not started, Codex seats skipped")
+          (start-codex! log))
+        (reset! nexus-log log)
+        (swap! takeover assoc :configuration (takeover-configuration (configure-lines)))
+        ;; Every step runs: a rollback is owed whatever came before it.
+        (doseq [[name f] takeover-steps] (scenario name f))
+        (catch Exception e
+          (println (str "stopped: " (.getMessage e) " " (pr-str (ex-data e))))))
+      (let [clean (teardown!)
+            passed (and (seq @results) (every? #(or (:pass %) (:skipped %)) @results))]
+        (println (str "wall " (- (now) wall) " ms | " (count (filter :pass @results)) " of " (count @results)
+                      " steps passed | witnesses " @witness-dir))
+        (System/exit (if (and passed clean) 0 1))))))
+
 (defn -main [& args]
+  (when (= "--takeover" (first args))
+    (apply takeover-main (rest args)))
   (let [[pkg & options] args]
     (when-not (and pkg (not (str/starts-with? pkg "--")))
       (refuse "usage: flow-capsule <flow-package> [--keep-going] [--log <path>]"))

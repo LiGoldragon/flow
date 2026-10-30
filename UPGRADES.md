@@ -1,3 +1,28 @@
+# Flow 0.40.9
+
+Pins meta-signal-flow 42.0.0 (67deea) and signal-flow 34.0.0 (fb13fa), as
+0.40.8. No store migration: every stored record keeps its shape and no
+table is added.
+
+- A Simplified seat's answer no longer depends on the order its prompt
+  hook, its transcript's user row and its Stop arrive in. The answer is
+  read from the seat's own transcript: the text of the `end_turn`
+  assistant row that ended the turn its bound input opened. It is queued
+  to the sender, and the binding completed, at the seat's Stop once the
+  payloads typed into it have settled, and again at every rest and every
+  drain of the seat, so a Stop that found the user row or the answer not
+  yet written is made good at the next drain. Before, a prompt hook that
+  reported before Claude wrote the user row left the input not yet
+  Delivered at the Stop; the answer was dropped without a log, the binding
+  stayed incomplete, and every later Order, Question, Psyche, Psyches or
+  Task to the seat stayed queued as `DrainRefused(WaitingForTurn(...))`,
+  with an OnDemand seat never sleeping.
+- The Stop's `last_assistant_message` no longer decides the answer.
+- A tool's result in the turn continues it; a later prompt closes it and
+  keeps its answer.
+- A Stop that queues no answer the seat owes logs why (`not yet
+  Delivered`, `no ended answer`, the store refusing).
+
 # Flow 0.40.8
 
 Pins meta-signal-flow 42.0.0 (67deea, branch flow-ethos-76e6eb) and

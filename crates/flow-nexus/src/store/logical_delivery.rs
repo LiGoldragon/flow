@@ -227,6 +227,17 @@ pub(crate) struct SimplifiedReplyBinding {
     pub recipient: Address,
     pub completed: bool,
 }
+/// What a simplified flow's reply binding owes now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SimplifiedReplyStanding {
+    /// No binding, or its answer already queued to its recipient.
+    NoneOwed,
+    /// The bound input is not yet Delivered: no native receipt anchors an
+    /// answer.
+    Unreceived(SimplifiedReplyBinding),
+    /// The bound input is Delivered under this receipt; its answer is owed.
+    Received(SimplifiedReplyBinding, NativeReceipt),
+}
 impl EngineRecord for SimplifiedReplyBinding {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.flow_id.clone())
@@ -417,10 +428,13 @@ pub(crate) trait RecordsLogicalDeliveries {
         after_cursor: Option<i64>,
     ) -> Result<SendObservation, StoreError>;
     fn bind_simplified_reply(&self, binding: SimplifiedReplyBinding) -> Result<(), StoreError>;
+    /// What the flow's reply binding owes: nothing, or an answer to an
+    /// input not yet received, or one to an input received under its
+    /// native receipt.
     fn simplified_reply_receipt(
         &self,
         flow_id: &str,
-    ) -> Result<Option<(SimplifiedReplyBinding, NativeReceipt)>, StoreError>;
+    ) -> Result<SimplifiedReplyStanding, StoreError>;
     fn deliver_simplified_reply(
         &self,
         flow_id: &str,
@@ -466,16 +480,16 @@ impl RecordsLogicalDeliveries for FlowStore {
     fn simplified_reply_receipt(
         &self,
         flow_id: &str,
-    ) -> Result<Option<(SimplifiedReplyBinding, NativeReceipt)>, StoreError> {
+    ) -> Result<SimplifiedReplyStanding, StoreError> {
         let binding = self.engine.match_records(QueryPlan::key(
             self.logical_deliveries.simplified_replies,
             RecordKey::new(flow_id.to_owned()),
         ))?;
         let Some(binding) = binding.records().first().cloned() else {
-            return Ok(None);
+            return Ok(SimplifiedReplyStanding::NoneOwed);
         };
         if binding.completed {
-            return Ok(None);
+            return Ok(SimplifiedReplyStanding::NoneOwed);
         }
         let input = self.engine.match_records(QueryPlan::key(
             self.logical_deliveries.current,
@@ -489,7 +503,10 @@ impl RecordsLogicalDeliveries for FlowStore {
                     DeliveryState::Delivered(receipt) => Some(receipt.clone()),
                     _ => None,
                 });
-        Ok(receipt.map(|receipt| (binding, receipt)))
+        Ok(match receipt {
+            Some(receipt) => SimplifiedReplyStanding::Received(binding, receipt),
+            None => SimplifiedReplyStanding::Unreceived(binding),
+        })
     }
 
     fn deliver_simplified_reply(

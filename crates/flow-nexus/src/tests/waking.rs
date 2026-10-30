@@ -1486,12 +1486,15 @@ fn a_simplified_wake_sends_the_first_soft_request_without_an_empty_turn() {
         turns[0].contains("judge this"),
         "actual request is the first turn: {turns:?}"
     );
-    let (binding, receipt) = fixture
-        .nexus
-        .store
-        .simplified_reply_receipt(&flow_id)
-        .unwrap()
-        .expect("the exact first input receipt binds its sender");
+    let crate::store::logical_delivery::SimplifiedReplyStanding::Received(binding, receipt) =
+        fixture
+            .nexus
+            .store
+            .simplified_reply_receipt(&flow_id)
+            .unwrap()
+    else {
+        panic!("the exact first input receipt binds its sender")
+    };
     assert_eq!(binding.input_delivery_id, input.logical_delivery_id);
     assert_eq!(binding.recipient, sender);
     assert_eq!(receipt.native_session_id, world.session());
@@ -1504,6 +1507,26 @@ fn a_simplified_wake_sends_the_first_soft_request_without_an_empty_turn() {
 /// transcript, the binding completes, and the next request is handed over.
 #[test]
 fn a_simplified_answer_reaches_its_sender_when_the_prompt_hook_precedes_its_row() {
+    simplified_seat_answers_two_orders(AnswerAtStop::Written);
+}
+
+/// A Stop that finds the answer's row still being written queues nothing;
+/// the seat's next drain, here a wake of its metaflow as a new Send makes,
+/// reads the finished row, queues the answer and hands the next request
+/// over.
+#[test]
+fn a_simplified_answer_half_written_at_its_stop_is_queued_at_the_next_drain() {
+    simplified_seat_answers_two_orders(AnswerAtStop::HalfWritten);
+}
+
+/// How much of the answer's row the transcript holds when the Stop reports.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AnswerAtStop {
+    Written,
+    HalfWritten,
+}
+
+fn simplified_seat_answers_two_orders(at_stop: AnswerAtStop) {
     use flow_native::DigestsPrompt;
     let mut fixture = NexusFixture::new();
     ended_simplified_claude(&fixture);
@@ -1594,26 +1617,45 @@ fn a_simplified_answer_reaches_its_sender_when_the_prompt_hook_precedes_its_row(
     ));
     // Then the row, and the turn's answer A1.
     let answer = "A1: the first is sound.";
-    {
+    let answer_row = format!(
+        "{}\n",
+        serde_json::json!({"type":"assistant","sessionId":session,"uuid":"answer-1",
+            "message":{"stop_reason":"end_turn","content":[{"type":"text","text":answer}]}})
+    );
+    let (written, rest) = match at_stop {
+        AnswerAtStop::Written => (answer_row.as_str(), ""),
+        AnswerAtStop::HalfWritten => answer_row.split_at(answer_row.len() / 2),
+    };
+    let append = |text: &str| {
         use std::io::Write;
-        let mut file = fs::OpenOptions::new()
+        fs::OpenOptions::new()
             .append(true)
             .open(&transcript)
+            .unwrap()
+            .write_all(text.as_bytes())
             .unwrap();
-        writeln!(file, "{row}").unwrap();
-        writeln!(
-            file,
-            "{}",
-            serde_json::json!({"type":"assistant","sessionId":session,"uuid":"answer-1",
-                "message":{"stop_reason":"end_turn","content":[{"type":"text","text":answer}]}})
-        )
-        .unwrap();
-    }
+    };
+    append(&format!("{row}\n{written}"));
     report(signal_flow::Event::Stopped(signal_flow::NativeStop {
         native_session_id_option: Some(session.clone()),
         transcript_path_option: Some(transcript.to_string_lossy().into_owned()),
         last_assistant_message_option: Some(answer.into()),
     }));
+    if at_stop == AnswerAtStop::HalfWritten {
+        assert!(
+            fixture
+                .nexus
+                .store
+                .metaflow(&sender)
+                .unwrap()
+                .unwrap()
+                .queue
+                .is_empty(),
+            "a half-written answer is not queued"
+        );
+        append(rest);
+        fixture.nexus.wake_due(at.clone());
+    }
 
     let replied = fixture.nexus.store.metaflow(&sender).unwrap().unwrap();
     assert_eq!(

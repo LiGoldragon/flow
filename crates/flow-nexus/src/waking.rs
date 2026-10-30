@@ -94,7 +94,10 @@ use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
 use crate::store::events::RecordsHarnessEvents;
-use crate::store::logical_delivery::{RecordsLogicalDeliveries, SimplifiedReplyBinding};
+use crate::store::logical_delivery::{
+    CorePresentationRoute, RecordsLogicalDeliveries, SimplifiedReplyBinding,
+    SimplifiedReplyStanding,
+};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::queue_delivery::{
     AbsenceRecord, AccountsQueueDelivery, NativeDeliveryReceipt, NativeHistoryAnchor,
@@ -919,6 +922,89 @@ impl ReadsClaudeDelivery for RunningNexus {
     }
 }
 
+/// What looking for a simplified seat's owed answer came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SimplifiedAnswer {
+    /// The seat owes no answer.
+    NoneOwed,
+    /// The answer to `input` was queued to `recipient`, its binding complete.
+    Queued { input: String, recipient: Address },
+    /// The bound input is not yet Delivered.
+    InputUnreceived { input: String },
+    /// The bound input is Delivered, and the turn it opened shows no ended
+    /// answer in the seat's transcript yet.
+    TurnUnanswered { input: String },
+    /// The store took no answer: its recipient is unknown or the receipt
+    /// no longer matches.
+    Undelivered { input: String },
+    /// The store could not be read or written.
+    StoreRefused,
+}
+
+/// A simplified seat answers the one input it was bound to: the answer is
+/// read from its own transcript, whatever order its prompt hook, its user
+/// row and its Stop came in.
+pub(crate) trait QueuesSimplifiedAnswers {
+    /// Under the dispatch gate the caller holds: when the flow's bound input
+    /// is Delivered and the turn that input opened ended with an answer in
+    /// the flow's transcript, queues that answer to the binding's recipient
+    /// and completes the binding. Each recipient is woken once the gate is
+    /// given back (`wake_deferred`).
+    fn queue_simplified_answer(&self, flow_id: &str) -> SimplifiedAnswer;
+}
+
+impl QueuesSimplifiedAnswers for RunningNexus {
+    fn queue_simplified_answer(&self, flow_id: &str) -> SimplifiedAnswer {
+        let (binding, receipt) = match self.store.simplified_reply_receipt(flow_id) {
+            Ok(SimplifiedReplyStanding::NoneOwed) => return SimplifiedAnswer::NoneOwed,
+            Ok(SimplifiedReplyStanding::Unreceived(binding)) => {
+                return SimplifiedAnswer::InputUnreceived {
+                    input: binding.input_delivery_id,
+                };
+            }
+            Ok(SimplifiedReplyStanding::Received(binding, receipt)) => (binding, receipt),
+            Err(_) => return SimplifiedAnswer::StoreRefused,
+        };
+        let input = binding.input_delivery_id.clone();
+        let answer = self
+            .store
+            .flow_node(flow_id)
+            .ok()
+            .flatten()
+            .filter(|node| {
+                node.harness_kind == HarnessKind::Claude
+                    && node.session_id == receipt.native_session_id
+            })
+            .and_then(|node| self.claude_transcript(&node))
+            .and_then(|transcript| {
+                transcript
+                    .assistant_answer_after(&receipt.native_session_id, &receipt.native_prompt_id)
+            });
+        let Some(answer) = answer else {
+            return SimplifiedAnswer::TurnUnanswered { input };
+        };
+        match self.store.deliver_simplified_reply(
+            flow_id,
+            &input,
+            &receipt.native_session_id,
+            &receipt.native_prompt_id,
+            &answer,
+        ) {
+            Ok(Some(recipient)) => {
+                self.defer_wake(recipient.clone());
+                // A core presentation's answer goes to the book Tertiary; its
+                // sender is told by a Notice.
+                if binding.source.is_core_presentation() && binding.recipient != recipient {
+                    self.defer_wake(binding.recipient.clone());
+                }
+                SimplifiedAnswer::Queued { input, recipient }
+            }
+            Ok(None) => SimplifiedAnswer::Undelivered { input },
+            Err(_) => SimplifiedAnswer::StoreRefused,
+        }
+    }
+}
+
 /// Whether a harness event is the flow's own. A hook runs in every process
 /// its harness starts, a nested one included, under the same FLOW_ID; only
 /// an event that names the flow's registered native session, and for a Stop
@@ -1285,6 +1371,9 @@ impl SleepsAndWakesSeats for RunningNexus {
             }
             AtStop::Idle | AtStop::Drained(_) => {}
         }
+        // The recipient of an answer queued at this rest is woken off the
+        // gate.
+        self.wake_deferred();
         at_stop
     }
 
@@ -1327,14 +1416,17 @@ impl SleepsAndWakesSeats for RunningNexus {
                 .any(|entry| !matches!(entry.message, signal_flow::Message::Soft(_)))
             {
                 let _ = self.drain_all(address.clone());
-                return;
+                None
+            } else {
+                let known_resting = match node.harness_kind {
+                    HarnessKind::Codex => self.codex_resting(&flow_id),
+                    HarnessKind::Claude => self.claude_main_turn_ended(&node),
+                };
+                known_resting.then_some(flow_id)
             }
-            let known_resting = match node.harness_kind {
-                HarnessKind::Codex => self.codex_resting(&flow_id),
-                HarnessKind::Claude => self.claude_main_turn_ended(&node),
-            };
-            known_resting.then_some(flow_id)
         };
+        // The recipient of an answer the drain queued is woken off the gate.
+        self.wake_deferred();
         if let Some(flow_id) = resting {
             self.settle_stopped(&flow_id);
         }
@@ -1847,8 +1939,11 @@ impl PerformsWakeAndDrain for RunningNexus {
             Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
         }
         // Payloads typed earlier settle on the receipts native history
-        // now shows.
+        // now shows, and a simplified seat's answer to the input it was
+        // bound to is queued once its transcript shows it, so the binding
+        // is free for the request now oldest.
         self.reconcile_typed(&address);
+        self.queue_simplified_answer(&flow_id);
         // A flow past its model's refresh threshold is given no new
         // message: what is queued stays for the metaflow's next flow. One
         // whose successor was refused stays the metaflow's flow, and is
@@ -3036,6 +3131,9 @@ impl WakesInParts for RunningNexus {
             };
         }
         self.reconcile_typed(&address);
+        // A simplified seat's answer is queued before the seat is handed
+        // more or sleeps.
+        self.queue_simplified_answer(flow_id);
         if !metaflow.queue.is_empty() {
             return match self.perform(Operation::Drain(address)) {
                 Outcome::Drained(mut typed) if !typed.is_empty() => {

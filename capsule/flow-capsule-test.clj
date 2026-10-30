@@ -310,13 +310,23 @@
          (= [] (flow-capsule/queued-ids listed "{ Psyche test Tertiary }"))))
 
 ;; Scenario 20 needs a seat that takes its whole queue on a wake: a Regular
-;; OnDemand seat, declared so in configure.datom (a Simplified seat takes
-;; its oldest alone).
-(let [metaflows (first (filter #(str/starts-with? % "Configure.Metaflows.") (flow-capsule/configure-lines)))]
-  (check "scenario 20's seat is declared Regular OnDemand"
-         (= ["Regular" "OnDemand"] (flow-capsule/seat-declaration metaflows flow-capsule/waking-seat)))
+;; OnDemand seat (a Simplified seat takes its oldest alone).
+(let [metaflows (str "Configure.Metaflows.[ { { Psyche test Tertiary } [ spirit:core ] [] Regular Default OnDemand «» [] }"
+                     " { { Psyche test Quaternary } [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] } ]")]
+  (check "a seat's declaration reads its FlowKind and wake policy"
+         (= ["Regular" "OnDemand"] (flow-capsule/seat-declaration metaflows "{ Psyche test Tertiary }")))
   (check "a Simplified seat reads as Simplified"
          (= ["Simplified" "OnDemand"] (flow-capsule/seat-declaration metaflows "{ Psyche test Quaternary }"))))
+;; and configure.datom declares scenario 20's seat so, where the file is
+;; beside this one (the Nix check holds each file alone, so there it is not).
+(let [datoms (fs/file (fs/parent (fs/canonicalize *file*)) "configure.datom")]
+  (if (fs/exists? datoms)
+    (check "scenario 20's seat is declared Regular OnDemand in configure.datom"
+           (= ["Regular" "OnDemand"]
+              (flow-capsule/seat-declaration (first (filter #(str/starts-with? % "Configure.Metaflows.")
+                                                            (str/split-lines (slurp datoms))))
+                                             flow-capsule/waking-seat)))
+    (println "skip | scenario 20's seat in configure.datom: no configure.datom beside this file")))
 
 (if (seq @failures)
   (do (println (str (count @failures) " failed")) (System/exit 1))

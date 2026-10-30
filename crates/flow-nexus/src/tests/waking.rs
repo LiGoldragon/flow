@@ -321,6 +321,12 @@ fn an_idle_on_demand_claude_flow_closes_its_harness_and_keeps_its_address() {
     );
     claude_seat(&fixture, 40_000);
     append_main_rows(&fixture, &[end_turn("last-turn")]);
+    // Its successor composes, so it may close.
+    super::refresh_and_compaction::declare_seat(
+        &fixture,
+        meta_signal_flow::Continuity::OnDemand,
+        vec!["spirit-core".into(), "intent-flow".into()],
+    );
     fixture.nexus.store.seed_metaflow(metaflow(
         Layer::Secondary,
         State::Awake(CLAUDE_SEAT.into()),
@@ -362,6 +368,12 @@ fn an_idle_on_demand_codex_flow_closes_its_harness() {
         PromptFixture::Prompted("w1:p3"),
     );
     fixture.register_with(FlowLifecycle::Active);
+    // Its successor composes, so it may close.
+    super::refresh_and_compaction::declare_seat(
+        &fixture,
+        meta_signal_flow::Continuity::OnDemand,
+        vec!["spirit-core".into(), "intent-flow".into()],
+    );
     fixture.nexus.store.seed_metaflow(metaflow(
         Layer::Secondary,
         State::Awake("908786".into()),
@@ -423,6 +435,96 @@ fn a_request_to_an_idle_awake_claude_flow_is_delivered_into_its_pane() {
         stored(&fixture, Layer::Secondary).state,
         State::Awake(CLAUDE_SEAT.into()),
         "the same flow, still Awake"
+    );
+}
+
+/// A hand-over types every queued message as its own NativeInput under
+/// its own sender: a Task from one flow, the reminder Flow raised for it
+/// and a Done from another flow reach the pane as one top-level vector,
+/// oldest first, each naming who sent it, none folded into another's
+/// Notice. What is typed is exactly the text whose receipt settles them.
+#[test]
+fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
+    use datom_codec::{Actualizing, Potential};
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 40_000);
+    append_main_rows(&fixture, &[end_turn("idle-turn")]);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake(CLAUDE_SEAT.into()),
+        vec![],
+        vec![],
+    ));
+    maintain(&fixture, address(Layer::Secondary));
+    assert_eq!(fixture.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
+
+    let from = |aspect: Aspect, layer: Layer| {
+        SentBy::Sender(Address {
+            aspect,
+            topic: "flow".into(),
+            layer,
+        })
+    };
+    let task = QueueEntry {
+        logical_delivery_id: "logical-delivery-00000000000000000001".into(),
+        sent_by: from(Aspect::Psyche, Layer::Primary),
+        delivery: Delivery::Wake,
+        message: Message::MiddleAbrupt(Request::Task(flow_ethos::Task_Data {
+            minutes: 30,
+            string: "Draft the proposal.".into(),
+        })),
+    };
+    let reminder = QueueEntry {
+        logical_delivery_id: "logical-delivery-00000000000000000002".into(),
+        sent_by: SentBy::Flow,
+        delivery: Delivery::Wake,
+        message: Message::Soft(Request::Notice(
+            "Reminder 1 of 4: task logical-delivery-00000000000000000001 has no Done after 30 minutes."
+                .into(),
+        )),
+    };
+    let done = QueueEntry {
+        logical_delivery_id: "logical-delivery-00000000000000000003".into(),
+        sent_by: from(Aspect::Mind, Layer::Secondary),
+        delivery: Delivery::Wake,
+        message: Message::Soft(Request::Done(flow_ethos::Done_Data {
+            logical_delivery_id: "logical-delivery-00000000000000000000".into(),
+            string: "Proposal drafted.".into(),
+        })),
+    };
+    let cohort = vec![task, reminder, done];
+    let mut idle = stored(&fixture, Layer::Secondary);
+    idle.queue = cohort.clone();
+    fixture.nexus.store.seed_metaflow(idle);
+    fixture.nexus.wake_due(address(Layer::Secondary));
+
+    let typed = fixture.typed().expect("typed into the live pane");
+    let mut budget = datom_codec::Budget {
+        remaining: 65536,
+        reader: protos::ReaderBudget { remaining: 65536 },
+        depth: 0,
+        maximum_depth: 1024,
+    };
+    let inputs = Potential::<Vec<signal_flow::NativeInput>>::from(typed.clone())
+        .actualize(&mut budget)
+        .unwrap_or_else(|error| panic!("{typed}: {error:?}"));
+    let expected = cohort
+        .iter()
+        .map(|entry| signal_flow::NativeInput {
+            logical_delivery_id: entry.logical_delivery_id.clone(),
+            sent_by: entry.sent_by.clone(),
+            message: entry.message.clone(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(inputs, expected, "{typed}");
+    assert_eq!(
+        typed,
+        cohort.prompt_text(),
+        "the receipt text is what was typed"
     );
 }
 
@@ -1384,15 +1486,229 @@ fn a_simplified_wake_sends_the_first_soft_request_without_an_empty_turn() {
         turns[0].contains("judge this"),
         "actual request is the first turn: {turns:?}"
     );
-    let (binding, receipt) = fixture
-        .nexus
-        .store
-        .simplified_reply_receipt(&flow_id)
-        .unwrap()
-        .expect("the exact first input receipt binds its sender");
+    let crate::store::logical_delivery::SimplifiedReplyStanding::Received(binding, receipt) =
+        fixture
+            .nexus
+            .store
+            .simplified_reply_receipt(&flow_id)
+            .unwrap()
+    else {
+        panic!("the exact first input receipt binds its sender")
+    };
     assert_eq!(binding.input_delivery_id, input.logical_delivery_id);
     assert_eq!(binding.recipient, sender);
     assert_eq!(receipt.native_session_id, world.session());
+}
+
+/// A Simplified seat's answer reaches its sender whatever order its prompt
+/// hook and its transcript's user row come in: the prompt's hook reports
+/// before Claude writes the row, so the input is not yet Delivered when
+/// the hook reports; at the turn's Stop the answer is taken from the
+/// transcript, the binding completes, and the next request is handed over.
+#[test]
+fn a_simplified_answer_reaches_its_sender_when_the_prompt_hook_precedes_its_row() {
+    simplified_seat_answers_two_orders(AnswerAtStop::Written);
+}
+
+/// A Stop that finds the answer's row still being written queues nothing;
+/// the seat's next drain, here a wake of its metaflow as a new Send makes,
+/// reads the finished row, queues the answer and hands the next request
+/// over.
+#[test]
+fn a_simplified_answer_half_written_at_its_stop_is_queued_at_the_next_drain() {
+    simplified_seat_answers_two_orders(AnswerAtStop::HalfWritten);
+}
+
+/// How much of the answer's row the transcript holds when the Stop reports.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AnswerAtStop {
+    Written,
+    HalfWritten,
+}
+
+fn simplified_seat_answers_two_orders(at_stop: AnswerAtStop) {
+    use flow_native::DigestsPrompt;
+    let mut fixture = NexusFixture::new();
+    ended_simplified_claude(&fixture);
+    let at = address(Layer::Secondary);
+    let sender = Address {
+        aspect: Aspect::Psyche,
+        topic: "core".into(),
+        layer: Layer::Secondary,
+    };
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        vec![],
+    ));
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: sender.clone(),
+        state: State::Asleep,
+        past: vec![],
+        queue: vec![],
+    });
+    let accept = |body: &str| {
+        let signal_flow::Response::SendAccepted(accepted) = fixture
+            .nexus
+            .store
+            .accept_logical_delivery(
+                &at,
+                SentBy::Sender(sender.clone()),
+                Delivery::Wake,
+                Message::Soft(Request::Order(body.into())),
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("the request is accepted")
+        };
+        accepted
+    };
+    let first = accept("judge the first");
+    let second = accept("judge the second");
+    let world = fixture.fresh_claude_world();
+    fs::write(world.state.join("rows-later"), "").unwrap();
+
+    fixture.nexus.wake_due(at.clone());
+
+    let State::Awake(flow_id) = stored(&fixture, Layer::Secondary).state else {
+        panic!("the simplified seat is awake; {}", world.calls())
+    };
+    let session = world.session();
+    let transcript = fixture
+        .directory
+        .path()
+        .join("native-transcripts/claude/-home-li-primary")
+        .join(format!("{session}.jsonl"));
+    let held = || -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(world.state.join("held-row")).unwrap()).unwrap()
+    };
+    let row = held();
+    let typed = row
+        .pointer("/message/content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap()
+        .to_owned();
+    assert!(typed.contains("judge the first"), "{typed}");
+    assert!(
+        !typed.contains("judge the second"),
+        "one input at a time: {typed}"
+    );
+    let prompt_id = row["uuid"].as_str().unwrap().to_owned();
+    let report = |event: signal_flow::Event| {
+        assert_eq!(
+            fixture.nexus.report(signal_flow::Report_Data {
+                flow_id: flow_id.clone(),
+                event: event.clone(),
+            }),
+            signal_flow::Response::Reported
+        );
+        fixture.nexus.after_report(&flow_id, &event);
+    };
+
+    // The hook reports the prompt before Claude writes its row.
+    report(signal_flow::Event::PromptSubmitted(
+        signal_flow::NativePrompt {
+            native_session_id_option: Some(session.clone()),
+            prompt_id_option: Some(prompt_id.clone()),
+            prompt_sha256: typed.prompt_sha256(),
+        },
+    ));
+    // Then the row, and the turn's answer A1.
+    let answer = "A1: the first is sound.";
+    let answer_row = format!(
+        "{}\n",
+        serde_json::json!({"type":"assistant","sessionId":session,"uuid":"answer-1",
+            "message":{"stop_reason":"end_turn","content":[{"type":"text","text":answer}]}})
+    );
+    let (written, rest) = match at_stop {
+        AnswerAtStop::Written => (answer_row.as_str(), ""),
+        AnswerAtStop::HalfWritten => answer_row.split_at(answer_row.len() / 2),
+    };
+    let append = |text: &str| {
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+    };
+    append(&format!("{row}\n{written}"));
+    report(signal_flow::Event::Stopped(signal_flow::NativeStop {
+        native_session_id_option: Some(session.clone()),
+        transcript_path_option: Some(transcript.to_string_lossy().into_owned()),
+        last_assistant_message_option: Some(answer.into()),
+    }));
+    if at_stop == AnswerAtStop::HalfWritten {
+        assert!(
+            fixture
+                .nexus
+                .store
+                .metaflow(&sender)
+                .unwrap()
+                .unwrap()
+                .queue
+                .is_empty(),
+            "a half-written answer is not queued"
+        );
+        append(rest);
+        fixture.nexus.wake_due(at.clone());
+    }
+
+    let replied = fixture.nexus.store.metaflow(&sender).unwrap().unwrap();
+    assert_eq!(
+        replied
+            .queue
+            .iter()
+            .map(|entry| (&entry.sent_by, &entry.message))
+            .collect::<Vec<_>>(),
+        vec![(
+            &SentBy::Sender(at.clone()),
+            &Message::Soft(Request::Result(answer.into()))
+        )],
+        "the sender holds the answer to its first request"
+    );
+    assert!(
+        matches!(
+            fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(&first.logical_delivery_id)
+                .unwrap()
+                .map(|snapshot| snapshot.delivery_state),
+            Some(signal_flow::DeliveryState::Delivered(_))
+        ),
+        "the first request is Delivered"
+    );
+    // The binding completed: the seat was handed the second request, which
+    // a binding still incomplete refuses as WaitingForTurn.
+    let seat = stored(&fixture, Layer::Secondary);
+    assert_eq!(seat.state, State::Awake(flow_id.clone()));
+    assert!(
+        seat.queue.is_empty(),
+        "the second request was handed over: {seat:?}"
+    );
+    let next = held();
+    assert!(
+        next.pointer("/message/content")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|content| content.contains("judge the second")),
+        "the seat is handed the second request: {next}"
+    );
+    assert!(
+        !matches!(
+            fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(&second.logical_delivery_id)
+                .unwrap()
+                .map(|snapshot| snapshot.delivery_state),
+            Some(signal_flow::DeliveryState::Queued) | None
+        ),
+        "the second request left the queue"
+    );
 }
 
 #[test]
@@ -2293,17 +2609,17 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
         Response::Identified(sender_address.clone())
     );
     // A thread Flow recorded for no flow names no one.
-    assert_eq!(
+    super::assert_unidentified(
         identify(
             &send_server_process,
             "01a0fdcc-0000-7000-8000-000000000000",
-            &message
+            &message,
         ),
-        Response::Refused(Refusal::Unidentified(send_server_process.clone()))
+        &send_server_process,
     );
-    assert_eq!(
+    super::assert_unidentified(
         identify(&send_server_process, "", &message),
-        Response::Refused(Refusal::Unidentified(send_server_process.clone()))
+        &send_server_process,
     );
     // The right thread from another executable is refused.
     let shell = SpawnedProcess(
@@ -2329,15 +2645,15 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
         Response::Refused(Refusal::NotMessage)
     );
     // The send server runs in no pane: pane identification names no one.
-    assert_eq!(
+    super::assert_unidentified(
         fixture
             .nexus
             .dispatch_metaflow_peer(
                 signal_flow::Query::Identify(send_server_process.clone()),
-                Some(&message)
+                Some(&message),
             )
             .response,
-        Response::Refused(Refusal::Unidentified(send_server_process.clone()))
+        &send_server_process,
     );
 
     // Once its metaflow sleeps, the thread names no one.
@@ -2348,9 +2664,9 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
             .sleep_metaflow(&sender_address, "41fa34")
             .unwrap()
     );
-    assert_eq!(
+    super::assert_unidentified(
         identify(&send_server_process, thread, &message),
-        Response::Refused(Refusal::Unidentified(send_server_process.clone()))
+        &send_server_process,
     );
 }
 
@@ -2889,7 +3205,10 @@ case "$*" in
   *"agent prompt"*)
     s=$(cat "$S/session"); t='{claude_root}/'"$s"'.jsonl'
     escaped=$(printf '%s' "$6" | sed ':a;N;$!ba;s/\\/\\\\/g;s/"/\\"/g;s/\n/\\n/g')
-    printf '{{"type":"user","sessionId":"%s","uuid":"typed-%s","message":{{"content":"%s"}}}}\n' "$s" "$(wc -l < "$t")" "$escaped" >> "$t"
+    # With rows-later, Claude has not yet written the user row: it is held
+    # for the test to append once the prompt's hook has reported.
+    row=$(printf '{{"type":"user","sessionId":"%s","uuid":"typed-%s","message":{{"content":"%s"}}}}' "$s" "$(wc -l < "$t")" "$escaped")
+    if [ -f "$S/rows-later" ]; then printf '%s\n' "$row" > "$S/held-row"; else printf '%s\n' "$row" >> "$t"; fi
     printf '{{"id":"cli:agent:prompt","result":{{"type":"agent_prompted","agent":%s}}}}\n' "$(agent)" ;;
   *) exit 64 ;;
 esac

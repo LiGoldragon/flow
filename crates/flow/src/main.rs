@@ -413,4 +413,47 @@ mod tests {
             "RecipientResolved.{ da1e3f da1e3f9d-full Claude Unavailable Available.{ messaging-build recipient w1:p2 term-current } Unbound Active }"
         );
     }
+
+    /// Remind is gone: a reminder is a Task with its Minutes, which the CLI
+    /// reads as a Send. Minutes that is no integer, or an integer beyond
+    /// i64, is the CLI's compose error and never reaches Flow.
+    #[test]
+    fn remind_is_no_query_and_a_task_carries_its_minutes() {
+        let client = FlowClient {
+            socket: "unused".into(),
+        };
+        assert!(
+            client
+                .parse_command(
+                    ["Remind.{ 2026-10-29T23:30:00-06:00 «Check the capsule run.» }".into()]
+                        .into_iter()
+                )
+                .is_err(),
+            "Remind still reads"
+        );
+        let Query::Send(send) = client
+            .parse_command(
+                ["Send.{ Address.{ Mind core Secondary } Soft.Task.{ 30 «Check the capsule run.» } }"
+                    .into()]
+                .into_iter(),
+            )
+            .expect("a Task reads")
+        else {
+            panic!("a Task is sent")
+        };
+        let Message::Soft(Request::Task(task)) = &send.message else {
+            panic!("a Soft Task: {:?}", send.message)
+        };
+        assert_eq!(task.minutes, 30);
+        assert_eq!(task.string, "Check the capsule run.");
+        for text in [
+            "Send.{ Up Soft.Task.{ soon «Check the capsule run.» } }",
+            "Send.{ Up Soft.Task.{ 9223372036854775808 «Check the capsule run.» } }",
+        ] {
+            assert!(
+                client.parse_command([text.into()].into_iter()).is_err(),
+                "{text} reads"
+            );
+        }
+    }
 }

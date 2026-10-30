@@ -1,5 +1,6 @@
 //! The ordinary Message bridge uses the accepted socket's kernel identity.
 use crate::caller::{BindsCallerPane, CallerProcess, LocatesCallerPane, NamesRootThread};
+use crate::sending::RefusesUnidentified;
 use crate::sending::{CompletesDirectSends, IdentifiesSender};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::send_outcome::RecordsSendOutcomes;
@@ -44,7 +45,7 @@ impl IdentifiesPeerProcess for RunningNexus {
             Response::Refused(Refusal::Unidentified(_)) => {}
             identified => return Ok(identified),
         }
-        let unidentified = || Ok(Response::Refused(Refusal::Unidentified(process.clone())));
+        let unidentified = || Ok(Response::Refused(Refusal::unidentified(process.clone())));
         if !FlowStore::process_is_live(&process) {
             return unidentified();
         }
@@ -100,7 +101,7 @@ impl IdentifiesThread for RunningNexus {
             Some(metaflow) if !self.rest_ended_awake(&metaflow.address) => {
                 Ok(Response::Identified(metaflow.address))
             }
-            _ => Ok(Response::Refused(Refusal::Unidentified(process))),
+            _ => Ok(Response::Refused(Refusal::unidentified(process))),
         }
     }
 }

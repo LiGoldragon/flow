@@ -1,6 +1,6 @@
 //! Herdr roster validation for durable Flow routes.
 
-use crate::claude::ProjectsClaudeReadiness;
+use crate::claude::{ProjectsClaudeReadiness, ReadsClaudeSessions};
 use crate::codex::SelectsCodexEndpoint;
 pub(crate) mod claude_paste;
 pub mod launch;
@@ -125,6 +125,8 @@ pub struct HerdrCli {
     /// The Claude daemon's records, read for a daemon-owned session's
     /// readiness.
     pub(crate) claude_daemon: crate::claude::ClaudeDaemon,
+    /// Claude's own records of the sessions its processes run.
+    pub(crate) claude_sessions: crate::claude::ClaudeSessions,
     /// The `flow-hook` Claude Code runs on SessionStart, PostToolUse and
     /// Stop in every Claude flow Flow launches: the one installed beside
     /// this Nexus's own executable.
@@ -188,6 +190,7 @@ impl Default for HerdrCli {
             },
             claude_transcript_root: claude_home.join("projects"),
             claude_daemon: crate::claude::ClaudeDaemon::under(&claude_home),
+            claude_sessions: crate::claude::ClaudeSessions::under(&claude_home),
             harness_hook: std::env::current_exe()
                 .ok()
                 .and_then(|path| path.parent().map(|directory| directory.join("flow-hook")))
@@ -388,6 +391,9 @@ impl ConfiguresHerdrCli for HerdrCli {
             },
             claude_transcript_root: fixture_root.join("claude"),
             claude_daemon: crate::claude::ClaudeDaemon::under(&fixture_root.join("claude-home")),
+            claude_sessions: crate::claude::ClaudeSessions::under(
+                &fixture_root.join("claude-home"),
+            ),
             harness_hook: PathBuf::from("/fixture/bin/flow-hook"),
             ordinary_socket: PathBuf::from("/fixture/run/flow-next/flow/flow.sock"),
             held_system_prompts: Default::default(),
@@ -416,6 +422,11 @@ pub trait ReadsHerdrPanes {
     /// Foreground processes and their kernel-read command lines for the exact pane.
     fn foreground_processes(&self, route: &HerdrRoute) -> Option<Vec<ForegroundProcess>> {
         let _ = route;
+        None
+    }
+    /// The label Herdr shows for a pane of this Herdr session.
+    fn pane_label(&self, herdr_session_name: &str, herdr_pane_id: &str) -> Option<String> {
+        let _ = (herdr_session_name, herdr_pane_id);
         None
     }
     fn refresh_route(&self, node: FlowNode) -> FlowNode;
@@ -575,6 +586,21 @@ impl ReadsHerdrPanes for HerdrCli {
                 })
                 .collect()
         })
+    }
+
+    fn pane_label(&self, herdr_session_name: &str, herdr_pane_id: &str) -> Option<String> {
+        use crate::herdr::launch::RunsHerdr;
+        self.run_json(&[
+            "--session".into(),
+            herdr_session_name.into(),
+            "pane".into(),
+            "get".into(),
+            herdr_pane_id.into(),
+        ])
+        .ok()?
+        .pointer("/result/pane/label")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
     }
 
     fn foreground_processes(&self, route: &HerdrRoute) -> Option<Vec<ForegroundProcess>> {

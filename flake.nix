@@ -49,7 +49,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.40.0";
+            version = "0.40.11";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -219,6 +219,17 @@
             }
           );
           fmt = context.craneLib.cargoFmt context.commonArgs;
+          # The capsule runner's own logic that runs no capsule: where a run
+          # keeps its witnesses and what it copies there before teardown.
+          capsule-witnesses =
+            context.pkgs.runCommand "flow-capsule-witnesses"
+              { nativeBuildInputs = [ context.pkgs.babashka ]; }
+              ''
+                bb ${./capsule/flow-capsule-test.clj} ${./capsule/flow-capsule.clj} > result.txt \
+                  || { cat result.txt; exit 1; }
+                cat result.txt
+                cp result.txt "$out"
+              '';
           # `fn main()` is the only production free function, and every
           # production method lives in a trait.
           no-free-functions =
@@ -288,6 +299,10 @@
             "store_check::tests::a_store_a_later_flow_wrote_is_refused";
           flow-codex-subagent-binds-its-seat = context.exactTest "flow-nexus"
             "tests::seat_binding::a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for";
+          flow-claude-seat-binds-on-an-empty-store = context.exactTest "flow-nexus"
+            "tests::seat_binding::a_claude_seat_binds_on_an_empty_store_under_its_sessions_flow_id";
+          flow-pane-without-agent-refuses-with-evidence = context.exactTest "flow-nexus"
+            "tests::seat_binding::a_pane_with_no_agent_record_refuses_with_its_evidence";
           flow-store-check-opens-untouched = context.exactTest "flow-nexus"
             "store_check::tests::a_store_this_flow_opens_is_checked_open_and_left_untouched";
           flow-refresh-past-model-threshold = context.exactTest "flow-nexus"
@@ -431,7 +446,7 @@
           flow-claude-end-turn-with-sidechain-drains = context.exactTest "flow-nexus"
             "tests::queue_drain::a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop";
           flow-claude-two-requests-drain-on-receipts = context.exactTest "flow-nexus"
-            "tests::queue_drain::two_queued_claude_requests_drain_in_order_once_each_on_their_receipts";
+            "tests::queue_drain::two_queued_claude_requests_go_in_one_payload_and_settle_on_its_receipt";
           flow-claude-notification-settles-nothing = context.exactTest "flow-nexus"
             "tests::queue_drain::a_task_notification_that_takes_the_turn_first_settles_nothing";
           flow-claude-crash-reconciled-at-start = context.exactTest "flow-nexus"

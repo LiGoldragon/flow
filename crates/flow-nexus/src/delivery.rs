@@ -212,9 +212,15 @@ impl DeliversMessages for RunningNexus {
             return Response::DeliveryRejected(DeliveryRejection::BodyRefused(refusal));
         }
         // A flow past its model's refresh threshold is given no new
-        // message.
+        // message, unless its successor was refused: it stays the
+        // metaflow's flow and is handed what comes for it.
         match self.store.past_threshold(&target.node.flow_id) {
             Ok(false) => {}
+            Ok(true)
+                if crate::waking::NotesRefreshRefusals::holds(
+                    &self.refresh_refusals,
+                    &target.node.flow_id,
+                ) => {}
             Ok(true) => return Response::DeliveryRejected(DeliveryRejection::PastThreshold),
             Err(_) => return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused),
         }
@@ -428,12 +434,9 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
     }
 
     fn retracted_restored_letter(&self) -> bool {
-        // NativeInput is rendered as bare user content. It has no stable
-        // text marker, so matching it could retract an identical human draft.
-        if matches!(
-            &self.request.message.letter().content,
-            Content::NativeInput(_)
-        ) {
+        // A Waking is rendered as bare user content. It has no stable text
+        // marker, so matching it could retract an identical human draft.
+        if matches!(&self.request.message.letter().content, Content::Waking(_)) {
             return false;
         }
         let herdr = &self.nexus.herdr;

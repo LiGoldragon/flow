@@ -1,3 +1,204 @@
+# Flow 0.40.11
+
+Pins meta-signal-flow 43.0.0 (2f6cb4) and signal-flow 35.0.0 (09ad7a). The
+logical-delivery tables and the send-outcome table migrate in place on the
+first open.
+
+- An `Unidentified` refusal carries the raw evidence the Nexus read, typed,
+  never an identity: `Refused.Unidentified.{ <pane> <label> <session>
+  <observed at> <process> }`, with the Herdr session and pane the caller ran
+  in, the label Herdr shows for it, the native session read there (each
+  `None` when not read), when it was read, and the caller's process. A
+  caller that is in no pane, or none Flow reads, has `None None None` for
+  them. Every refusal site answers it; BindSeat fills the pane, label and
+  session, the others the time and the process.
+- Store migration. `flow-nexus-logical-delivery-current` and
+  `flow-nexus-logical-delivery-event` go from v3 to v4, and
+  `flow-nexus-send-outcome` from v4 to v5, because they archive a
+  `Refusal`. Every row of the earlier version upgrades on open; a stored
+  `Unidentified(process)` becomes the evidence with no pane, no label, no
+  session, observed at 0, and that process. Rows of v1 and v2 (and v3 of
+  the send outcomes) upgrade to the same current shape. Operators
+  deploying this over a 0.40.10 store take the usual store backup first;
+  a store written by 0.40.11 is not opened by an earlier Flow.
+
+# Flow 0.40.10
+
+Pins meta-signal-flow 42.0.0 (67deea) and signal-flow 34.0.0 (fb13fa), as
+0.40.9. No store migration: every stored record keeps its shape and no
+table is added.
+
+- BindSeat adopts a Claude seat on an empty store. The caller's pane, the
+  Claude agent Herdr records in it, and the pane's foreground Claude
+  process the caller is or was started under make the seat; its session is
+  the one Herdr's agent record reports and Claude's session file for that
+  process (`sessions/<pid>.json` under Claude's home, read at the process's
+  current start) names, either alone when the other is silent. Where the
+  harness assigned the session id, Flow learns it here. The seat is bound
+  to the given address under the Flow ID the `flow-id` helper claims for
+  the session. Before, a Claude pane was found only when the store already
+  knew it, and answered `Unidentified` on an empty store.
+- MetaBindExisting and BindSeat accept a Claude pane that reports no
+  session when Claude's session file for the bound process names it.
+- A BindSeat that names no seat still answers `Refused.Unidentified` with
+  the caller's process, and logs what the pane showed: the pane, the label
+  Herdr shows for it, the native session read there, and the time.
+
+# Flow 0.40.9
+
+Pins meta-signal-flow 42.0.0 (67deea) and signal-flow 34.0.0 (fb13fa), as
+0.40.8. No store migration: every stored record keeps its shape and no
+table is added.
+
+- A Simplified seat's answer no longer depends on the order its prompt
+  hook, its transcript's user row and its Stop arrive in. The answer is
+  read from the seat's own transcript: the text of the `end_turn`
+  assistant row that ended the turn its bound input opened. It is queued
+  to the sender, and the binding completed, at the seat's Stop once the
+  payloads typed into it have settled, and again at every rest and every
+  drain of the seat, so a Stop that found the user row or the answer not
+  yet written is made good at the next drain. Before, a prompt hook that
+  reported before Claude wrote the user row left the input not yet
+  Delivered at the Stop; the answer was dropped without a log, the binding
+  stayed incomplete, and every later Order, Question, Psyche, Psyches or
+  Task to the seat stayed queued as `DrainRefused(WaitingForTurn(...))`,
+  with an OnDemand seat never sleeping.
+- The Stop's `last_assistant_message` no longer decides the answer.
+- A tool's result in the turn continues it; a later prompt closes it and
+  keeps its answer.
+- A Stop that queues no answer the seat owes logs why (`not yet
+  Delivered`, `no ended answer`, the store refusing).
+
+# Flow 0.40.8
+
+Pins meta-signal-flow 42.0.0 (67deea, branch flow-ethos-76e6eb) and
+signal-flow 34.0.0 (fb13fa). No store migration: every stored record keeps
+its shape and no table is added.
+
+- `Configure.Counters.{ <logical delivery> <queue attempt> <send outcome> }`
+  on the meta socket declares the next id each family allocates, so a new
+  store continues the ids of the store it replaces:
+  `Configure.Counters.{ 120 45 300 }` makes the next logical delivery
+  `logical-delivery-00000000000000000120`, the next queue attempt
+  `queue-attempt-000000000000002d` and the next send outcome
+  `send-outcome-000000000000012c`. The logical delivery counter is the
+  delivery cursor every lifecycle event of a logical delivery draws from,
+  so logical delivery ids rise by more than one between admissions.
+- It is taken only on an empty store: one whose logical-delivery events
+  and current tables, queue-delivery attempts table and send-outcome table
+  hold no row. Otherwise it answers `ConfigureRejected.CountersRefused.NotEmpty`.
+  A value below its family's counter answers
+  `ConfigureRejected.CountersRefused.Lowered.{ … }`, carrying the counters
+  as they stand. A Counters equal to the counters answers
+  `Configured.Unchanged`. A refused Counters changes nothing.
+- `Configuration` ends with the counters, `{ 1 3 1 }` on a store that has
+  allocated nothing: read them from the old store, then declare them, or
+  higher, on the new one before anything is sent to it.
+- The configuration-only Nexus (`flow-nexus` started to take one Configure)
+  holds no counters: it answers `ConfigureRejected.CountersRefused.NotRunning`.
+- The capsule's witness root defaults to `$HOME/witnesses/<flow id>`, the
+  flow id `FLOW_ID`, else the name of the calling flow's `FLOW_DIRECTORY`.
+  `FLOW_CAPSULE_WITNESS_DIR` still names it outright; without a home or a
+  flow id the capsule starts nothing.
+- The Nexus logs each Send it admits, on the ordinary socket and through
+  the send tool: `flow-nexus: admitted <id> <kind> at <unix seconds.ms>`,
+  and for a Task `flow-nexus: admitted <id> Task minutes <m> deadline
+  <unix seconds> at <unix seconds.ms>`, the deadline its first reminder is
+  due at (`None` when Flow holds no reminder for it: a Task whose sender
+  it does not know, or one the send tool admits).
+- Capsule scenario 17 reads the Task's logged deadline and asserts its
+  first reminder's transcript stamp lies 0 to 30 s after it. Scenario 20
+  queues two requests to the asleep Quaternary, the second waking it, and
+  asserts its first turn holds one vector of both, oldest first, each with
+  its own id, sender and priority, and its pane shows both ids in that
+  order; the pane text is kept as `scenario-20-pane.txt`.
+
+# Flow 0.40.7
+
+Pins signal-flow 34.0.0 (fb13fa, branch flow-ethos-76e6eb) and
+meta-signal-flow 41.0.0 (34adbb, branch flow-ethos-76e6eb). DefaultMinutes
+is seeded (30) and idle; the Order-to-Task store migration will read it. The store
+gains the `flow_nexus_meta_default_minutes_configuration` table, added
+empty; the `flow_nexus_reminders` family moves to
+`flow-nexus-reminder-v2`. Flow 0.40.4 holds no reminders table, so its
+store upgrades unchanged; a store written by 0.40.5 or 0.40.6 holds a v1
+reminders family and is not carried.
+
+- `Remind.{ Instant Body }`, `Reminded` and `Refused.InstantUnreadable` are
+  gone from the ordinary socket and the CLI. A reminder is a Task with its
+  Minutes: `Send.{ <recipient> Soft.Task.{ 30 «…» } }` reminds its sender
+  when the Minutes lapse with no Done, four reminders in all. A stored
+  reminder holds its task's recipient and Minutes directly.
+- `Configure.DefaultMinutes.<Minutes>` on the meta socket sets the default
+  Minutes, kept in Memory; a new Memory holds 30 until one is declared.
+  `Configuration` ends with it. The rule a Task's Minutes meets at
+  admission refuses a zero, negative or unreachable default as
+  `ConfigureRejected.MinutesRefused.[ Zero Negative Unreachable ]`,
+  changing nothing. Nothing reads the default yet: it is the Minutes the
+  store migration gives an Order that carries none.
+- A hand-over holding a HardAbrupt or MiddleAbrupt message types every
+  queued message as its own `NativeInput` in one top-level vector, oldest
+  first, each naming its own sender: a Task, the reminder Flow raised for
+  it and a Done each read as from who sent them. Before, the cohort was
+  folded into one Notice credited to the oldest message's sender, and its
+  Claude receipt could never match. The meta Letter carries a
+  `Content.Waking.Vector<NativeInput>`.
+- The capsule keeps its raw Nexus log and every flow transcript past
+  teardown, in `<root>/capsule-<flow version>-<timestamp>/`, the root
+  `FLOW_CAPSULE_WITNESS_DIR`, else `$FLOW_DIRECTORY/witnesses`; with
+  neither it starts nothing. Scenarios 15 and 16 exercise a Task's Minutes
+  at admission and a Task reminder held across a Nexus restart; the
+  capsule configures `DefaultMinutes.30`.
+
+# Flow 0.40.6
+
+Pins signal-flow 33.2.0 (5c301a, branch flow-ethos-76e6eb) and
+meta-signal-flow 72c414 (branch flow-ethos-76e6eb). No store migration:
+every stored record keeps its shape.
+
+- flow-ethos carries the ruled message contract (bie3-1) as
+  `flow_ethos::message`: `Minutes`, `Sender.[ Flow.{ Address FlowId }
+  Living Nexus ]`, `Request` with `Order.{ Minutes String }` and
+  `Result.{ LogicalDeliveryId String }`, `Message`, `NativeInput`,
+  `Waking`, `QueueEntry`, `HeldId`, `HeldFamily`. The Nexus does not use
+  it yet; the store migration moves the queue onto it.
+- A Task's Minutes is ruled at admission: zero is refused
+  `MinutesRefused.Zero`, below zero `MinutesRefused.Negative`, and Minutes
+  whose last reminder's deadline overflows the clock
+  `MinutesRefused.Unreachable`. A refused Task is never queued. Minutes 0
+  no longer means "no reminder".
+
+# Flow 0.40.5
+
+Pins signal-flow 33.1.0 (7fcb86, branch remind-2a9116) and meta-signal-flow
+44f75f (branch signal-flow-33.1-2a9116). The store gains the
+`flow_nexus_reminders` table, added empty to a store that lacks it.
+
+- A seat owed a successor is closed only once its successor composes: an
+  OnDemand seat, at its sleep or its threshold refresh, composes its
+  successor first and stays Awake when that is refused
+  (`SuccessorUncomposable`). A seat kept because its successor was refused
+  (`RefreshUnplaceable`, `RefreshLaunchRefused`, `SuccessorUncomposable`) is
+  handed its queue, soft requests included, though past its threshold, and
+  the refusal is told once as `Soft.Notice` with `Wake` to the metaflow's Up
+  (Psyche core Secondary for a Primary). Its successor is tried again at its
+  next rest.
+- An adopted seat (BindSeat, meta BindExisting) resting at its adoption is
+  handed its queue at once.
+- `Remind.{ Instant Body }` on the ordinary socket holds a reminder in the
+  store for the caller's metaflow; at its RFC 3339 instant Flow queues
+  `Soft.Notice.Body` with `Wake`. It answers `Reminded`, or
+  `Refused.InstantUnreadable`.
+- flow-ethos `Request` appends `Task.{ Minutes String }` and
+  `Done.{ LogicalDeliveryId String }`; archived requests read unchanged. A
+  Task is held under its logical delivery id; when its minutes lapse with no
+  Done its sender is reminded, then every Minutes, four reminders in all,
+  the last copied to the sender's Secondary as a failure. A Done naming no
+  open task is refused `NoOpenTask`. Minutes 0 sets no reminder.
+- A delivered message is typed as its `NativeInput` datom (logical delivery
+  id, sender, request under its priority), and a cohort as one vector of
+  them, for Claude panes and Codex turns alike.
+
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
 Pins signal-flow 32.0.0 (e5e9d5) and meta-signal-flow 40.0.0 (f0f214), both

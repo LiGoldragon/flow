@@ -24,6 +24,7 @@ pub use generated::memory::{LaunchOutcome, Replacement};
 pub use generated::operation::Outcome as OperationOutcome;
 pub use generated::starter::{LaunchedRecord, ReplacedRecord};
 pub use store::StoreError;
+pub(crate) mod admission;
 pub mod binding;
 pub mod caller;
 pub mod claude;
@@ -36,6 +37,7 @@ pub mod delivery;
 pub mod lean;
 mod metaflow;
 pub mod recovery;
+pub mod reminding;
 pub mod repairing;
 use metaflow::DispatchesMetaflowPeer;
 #[cfg(test)]
@@ -115,6 +117,8 @@ pub struct RunningNexus {
     pub waking: waking::WakingMetaflows,
     /// Flows confirmed after their Stop, awaiting settlement; see `waking`.
     pub stopped_at_confirmation: waking::StoppedAtConfirmation,
+    /// Flows kept because their successor was refused; see `waking`.
+    pub refresh_refusals: waking::RefreshRefusals,
     /// Set once the Nexus is told to stop; see [`StopsNexus`].
     pub stopping: Stopping,
     /// The send-tool responder of the Codex launch running now; see
@@ -202,12 +206,11 @@ impl Dispatches for RunningNexus {
             Query::DeliverAll(_)
             | Query::BindSeat(_)
             | Query::ObserveSends(_)
-            | Query::ObserveSender(_) => {
-                Response::Refused(signal_flow::Refusal::Unidentified(signal_flow::Process {
-                    pid: 0,
-                    started: 0,
-                }))
-            }
+            | Query::ObserveSender(_) => Response::Refused(
+                <signal_flow::Refusal as sending::RefusesUnidentified>::unidentified(
+                    signal_flow::Process { pid: 0, started: 0 },
+                ),
+            ),
             Query::Send(send) => self.send_request(send, None).response,
             Query::Launch(launch) => match self.declared_launch(launch, None) {
                 Ok(query) => self.dispatch_from(query, origin),
@@ -359,6 +362,16 @@ impl Dispatches for RunningNexus {
                     Err(store::StoreError::TopicRefused(topic)) => {
                         meta_signal_flow::Response::ConfigureRejected(
                             meta_signal_flow::ConfigureRejection::TopicRefused(topic),
+                        )
+                    }
+                    Err(store::StoreError::MinutesRefused(refusal)) => {
+                        meta_signal_flow::Response::ConfigureRejected(
+                            meta_signal_flow::ConfigureRejection::MinutesRefused(refusal),
+                        )
+                    }
+                    Err(store::StoreError::CountersRefused(refusal)) => {
+                        meta_signal_flow::Response::ConfigureRejected(
+                            meta_signal_flow::ConfigureRejection::CountersRefused(refusal),
                         )
                     }
                     Err(error) => meta_signal_flow::Response::Refused(
@@ -651,6 +664,7 @@ impl OpensRunningNexus for RunningNexus {
             pane_leases: delivery::lease::PaneLeases::default(),
             waking: waking::WakingMetaflows::default(),
             stopped_at_confirmation: waking::StoppedAtConfirmation::default(),
+            refresh_refusals: waking::RefreshRefusals::default(),
             stopping: Stopping::default(),
             launch_calls: send_tool::LaunchCalls::default(),
             codex_turns: codex_turns::CodexTurns::default(),
@@ -752,7 +766,9 @@ impl ServesConnection for Connection {
             Query::ObserveSends(cursor) => {
                 let Some(process) = self.process.as_ref() else {
                     return self.peer.write_response(&Response::Refused(
-                        signal_flow::Refusal::Unidentified(Process { pid: 0, started: 0 }),
+                        <signal_flow::Refusal as sending::RefusesUnidentified>::unidentified(
+                            Process { pid: 0, started: 0 },
+                        ),
                     ));
                 };
                 let sender = match nexus.observation_sender(process, None) {
@@ -842,9 +858,17 @@ impl ServesConnection for Connection {
                 let response = nexus.deliver_all(address, self.process.as_ref());
                 return self.peer.write_response(&response);
             }
+            // An adopted seat resting at its adoption is handed what is
+            // queued for it now, as its turn's end would; Flow sees no Stop
+            // from a seat it did not start until its next turn ends.
             Query::BindSeat(address) => {
                 let response = nexus.bind_seat(address.clone(), self.process.as_ref());
-                return self.peer.write_response(&response);
+                let written = self.peer.write_response(&response);
+                drop(self);
+                if matches!(response, Response::Bound(_)) {
+                    nexus.drain_awake(&address);
+                }
+                return written;
             }
             // A Launch is the Start its declaration names, from the calling
             // process, or, for a metaflow Awake as a live flow, the Replace
@@ -903,6 +927,16 @@ impl ServesConnection for Connection {
         self.peer.write_meta_response(&response)?;
         drop(self);
         nexus.settle_stops_at_confirmation();
+        // An adopted seat resting at its adoption is handed its queue now.
+        if let meta_signal_flow::Response::BoundExisting(bound) = &response
+            && let meta_signal_flow::FlowBindingResult::Bound(binding) = &bound.flow_binding_result
+            && let Ok(Some(metaflow)) = crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(
+                &nexus.store,
+                &binding.flow_id,
+            )
+        {
+            nexus.drain_awake(&metaflow.address);
+        }
         Ok(())
     }
 }
@@ -1334,7 +1368,9 @@ impl CarriesSignalFrames for UnixStream {
 mod tests {
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
+    mod admission;
     mod configuring;
+    mod counters;
     mod delivery;
     mod ending;
     mod launching_nexus;
@@ -1350,6 +1386,19 @@ mod tests {
     mod send_tool;
     mod submission;
     mod waking;
+
+    /// The answer is `Unidentified` for exactly this process: the refusal
+    /// carries the process beside the evidence read, never an identity.
+    pub(crate) fn assert_unidentified(
+        response: signal_flow::Response,
+        process: &signal_flow::Process,
+    ) {
+        let signal_flow::Response::Refused(signal_flow::Refusal::Unidentified(evidence)) = response
+        else {
+            panic!("expected Refused.Unidentified, found {response:?}");
+        };
+        assert_eq!(&evidence.process, process);
+    }
 
     use super::{
         Arc, CarriesSignalFrames, Connection, Dispatches, ReconcilesListedFlows, RunningNexus,
@@ -1940,7 +1989,8 @@ mod tests {
         .unwrap();
         assert_eq!(refused_for(&bound_once(&fixture, unproven)), None);
 
-        // A Claude pane must report its session, and that session.
+        // A Claude pane with no session file for the process must report
+        // its session, and that session.
         // The successful b005 adoption owns its cell; use a separate fixture
         // to verify Claude session evidence without colliding with that owner.
         let claude_fixture = NexusFixture::new();
@@ -2053,6 +2103,7 @@ mod tests {
                 pane_leases: crate::delivery::lease::PaneLeases::default(),
                 waking: crate::waking::WakingMetaflows::default(),
                 stopped_at_confirmation: crate::waking::StoppedAtConfirmation::default(),
+                refresh_refusals: crate::waking::RefreshRefusals::default(),
                 stopping: crate::Stopping::default(),
                 launch_calls: crate::send_tool::LaunchCalls::default(),
                 codex_turns: crate::codex_turns::CodexTurns::default(),

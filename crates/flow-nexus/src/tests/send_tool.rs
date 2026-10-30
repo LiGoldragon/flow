@@ -1431,9 +1431,10 @@ fn walk(root: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// A woken or drained flow receives only recipient-facing message content.
+/// A woken or drained flow receives its queue as one vector datom: each
+/// request with its logical delivery id, its sender and its priority.
 #[test]
-fn a_queued_request_is_rendered_as_recipient_content_only() {
+fn a_queued_request_is_rendered_as_its_datom_in_one_vector() {
     use crate::composition::RendersQueuedWork;
     let queue = [
         queue_entry("render-1", sent(sender_a(), "Carry on.")),
@@ -1445,7 +1446,10 @@ fn a_queued_request_is_rendered_as_recipient_content_only() {
         },
     ];
     let prompt = queue.prompt_text();
-    assert_eq!(prompt, "Carry on.\nkept");
+    assert_eq!(
+        prompt,
+        "[ { render-1 Sender.{ Mind alpha Tertiary } Soft.Order.«Carry on.» } { render-2 Unknown Soft.Notice.kept } ]"
+    );
 }
 
 /// The fixture's Codex seat 908786: its thread, and the Address its
@@ -1659,8 +1663,8 @@ fn seat_responding(
     fake
 }
 
-/// The seat's first turn completion offers the first request to native
-/// history. Until that history receipts it, both requests remain queued.
+/// The seat's first turn completion offers both queued requests to its
+/// thread as one payload, in order; both leave the queue, typed once.
 #[test]
 fn a_codex_first_turn_completion_keeps_requests_until_native_receipts() {
     let mut fixture = NexusFixture::new();
@@ -1682,16 +1686,17 @@ fn a_codex_first_turn_completion_keeps_requests_until_native_receipts() {
         40,
     );
 
-    assert_eq!(fixture.typed_count(&psyche), 0, "not yet history-received");
-    assert_eq!(fixture.typed_count(&brief), 0, "the second remains queued");
-    let typed = fake.queued_turn_texts().join("\n");
-    assert!(typed.contains("Make it so."), "oldest offered: {typed}");
+    assert_eq!(fixture.typed_count(&psyche), 1);
+    assert_eq!(fixture.typed_count(&brief), 1);
+    let texts = fake.queued_turn_texts();
+    assert_eq!(texts.len(), 1, "one payload: {texts:?}");
+    let typed = &texts[0];
     assert!(
-        !typed.contains("Your brief."),
-        "second not offered before receipt: {typed}"
+        typed.find("Make it so.") < typed.find("Your brief."),
+        "both, in order: {typed}"
     );
-    assert!(!typed.contains("Psyche core Secondary"));
-    assert_eq!(fixture.seat_queue(), vec![psyche, brief]);
+    assert!(typed.contains("Sender.{ Psyche core Secondary }"));
+    assert_eq!(fixture.seat_queue(), vec![]);
 }
 
 /// A completion read twice cannot settle a request without native history.
@@ -1715,15 +1720,15 @@ fn a_duplicated_turn_completed_delivers_nothing_twice() {
         41,
     );
 
-    assert_eq!(fixture.typed_count(&first), 0);
-    assert_eq!(fixture.typed_count(&second), 0, "the second waits");
-    assert_eq!(fixture.seat_queue(), vec![first, second]);
+    assert_eq!(fixture.typed_count(&first), 1);
+    assert_eq!(fixture.typed_count(&second), 1, "in the same payload");
+    assert_eq!(fixture.seat_queue(), vec![]);
     assert_eq!(fake.queued_turn_texts().len(), 1, "no duplicate handover");
 }
 
 /// Work queued while the seat is in a turn (here by a send call its own
 /// thread makes to it) is held, not typed mid-turn; its turn completion
-/// leaves it queued until native history receipts it.
+/// hands it over once.
 #[test]
 fn work_queued_while_a_codex_turn_runs_is_held_until_its_completion() {
     let mut fixture = NexusFixture::new();
@@ -1750,8 +1755,8 @@ fn work_queued_while_a_codex_turn_runs_is_held_until_its_completion() {
         vec![turn_notice("turn/completed", SEAT_THREAD, "turn-running")],
         44,
     );
-    assert_eq!(fixture.typed_count(&queued), 0, "awaiting native receipt");
-    assert_eq!(fixture.seat_queue(), vec![queued]);
+    assert_eq!(fixture.typed_count(&queued), 1, "handed over at completion");
+    assert_eq!(fixture.seat_queue(), vec![]);
     let texts = second.queued_turn_texts();
     assert_eq!(texts.len(), 1, "completion offers the request once");
     assert!(texts[0].contains("later"), "{texts:?}");
@@ -1932,8 +1937,9 @@ fn a_codex_turn_absent_from_an_idle_thread_remains_uncertain() {
 }
 
 /// History that cannot decide keeps the request Uncertain, names why, and
-/// starts no turn: a thread still active, a history without the anchor,
-/// and an app-server that cannot be read.
+/// starts no turn: a thread still active keeps it outstanding until the
+/// next drain; a history without the anchor parks it, so it no longer
+/// holds the queue.
 #[test]
 fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
     use crate::generated::operation::{Operation, Outcome};
@@ -1942,7 +1948,7 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
     use meta_signal_flow::{QueueDeliveryStanding, Undecided};
     let mut fixture = NexusFixture::new();
     let first = from_core(Request::Order("First.".into()));
-    fixture.awake_codex_seat(vec![first.clone()]);
+    fixture.awake_codex_seat(vec![first]);
     let fake = FakeAppServer::install(vec![]);
     fixture.adapter("gpt-sol", &fake);
     crashed_before_receipt(&fixture);
@@ -1967,9 +1973,11 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
         true,
         vec![history_turn("turn-unrelated", "completed", None)],
     );
+    // The undecidable attempt is parked: it names why, is never resent,
+    // and no longer holds the queue.
     assert_eq!(
         fixture.nexus.perform(Operation::Drain(seat_at())),
-        Outcome::Failed(crate::generated::operation::Failed_Data::HerdrRefused)
+        Outcome::Drained(vec![])
     );
     assert_eq!(
         codex_standings(&fixture),
@@ -1977,20 +1985,56 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
             Undecided::HistoryReplaced
         ))]
     );
-
-    // Run 3 has no answer: the app-server is unreadable.
-    assert!(!matches!(
-        fixture.nexus.perform(Operation::Drain(seat_at())),
-        Outcome::Drained(_)
-    ));
-    assert_eq!(
-        codex_standings(&fixture),
-        vec![QueueDeliveryStanding::Uncertain(Some(
-            Undecided::HistoryUnreadable
-        ))]
-    );
     assert!(fake.queued_turn_texts().is_empty(), "never resent");
-    assert_eq!(fixture.seat_queue(), vec![first]);
+    assert_eq!(fixture.seat_queue(), vec![]);
+}
+
+/// A Nexus start whose reconciliation reads the history of a Codex seat
+/// whose app-server takes the connection and never answers still serves
+/// Metaflows meanwhile: native history is read off the dispatch gate.
+#[test]
+fn a_start_reading_an_unanswering_codex_history_still_serves_metaflows() {
+    use crate::DispatchesSerially;
+    use crate::store::queue_delivery::AccountsQueueDelivery;
+    use crate::waking::ReconcilesQueueDelivery;
+    let mut fixture = NexusFixture::new();
+    fixture.awake_codex_seat(vec![from_core(Request::Order("First.".into()))]);
+    let fake = FakeAppServer::install(vec![]);
+    // Run 1 takes the connection and never answers it.
+    std::fs::write(fake.directory.path().join("frames-1"), "").unwrap();
+    fixture.adapter("gpt-sol", &fake);
+    crashed_before_receipt(&fixture);
+    // The typed payload is parked, as a drain leaves it once typed.
+    let attempt = fixture
+        .nexus
+        .store
+        .unsettled_deliveries(&seat_at())
+        .unwrap()
+        .remove(0);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .park_uncertain_delivery(&attempt.attempt_id)
+            .unwrap()
+    );
+    std::thread::scope(|scope| {
+        let recovery = scope.spawn(|| fixture.nexus.recover_deliveries());
+        while fake.runs() == 0 {
+            std::thread::yield_now();
+        }
+        let listed = fixture
+            .nexus
+            .dispatch_serially(signal_flow::Query::Metaflows, signal_flow::Origin::Unbound);
+        assert!(
+            matches!(listed, signal_flow::Response::Listed(_)),
+            "{listed:?}"
+        );
+        assert!(
+            !recovery.is_finished(),
+            "Metaflows answered while the native read still waits"
+        );
+    });
 }
 
 /// A turn completion on another thread is not the seat's: nothing drains.
@@ -2058,7 +2102,7 @@ fn codex_resolved_absent(
 }
 
 /// A resting Codex seat may retry an owner-resolved-absent request once,
-/// but it remains queued until native thread history receipts it.
+/// and never twice.
 #[test]
 fn a_resting_codex_seat_resolved_absent_is_handed_the_request_at_once_exactly_once() {
     use crate::codex_turns::{ThreadStatus, TurnEvent};
@@ -2067,14 +2111,11 @@ fn a_resting_codex_seat_resolved_absent_is_handed_the_request_at_once_exactly_on
     assert_eq!(fake.queued_turn_texts().len(), 1, "handed over at once");
     fixture.nexus.drain_awake(&seat_at());
     assert_eq!(fake.queued_turn_texts().len(), 1, "never twice");
-    assert_eq!(
-        fixture.seat_queue(),
-        vec![from_core(Request::Order("First.".into()))]
-    );
+    assert_eq!(fixture.seat_queue(), vec![]);
 }
 
 /// An idle Awake Codex seat keeps its pane: an Order is handed to its live
-/// thread once but remains queued until native thread history receipts it.
+/// thread once.
 #[test]
 fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
     use crate::codex_turns::{ThreadStatus, TracksCodexTurns, TurnEvent};
@@ -2112,10 +2153,7 @@ fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
     let texts = fake.queued_turn_texts();
     assert_eq!(texts.len(), 1, "handed over once: {texts:?}");
     assert!(texts[0].contains("Read the new ruling."), "{texts:?}");
-    assert_eq!(
-        fixture.seat_queue(),
-        vec![from_core(Request::Order("Read the new ruling.".into()))]
-    );
+    assert_eq!(fixture.seat_queue(), vec![]);
     let seat = fixture.nexus.store.metaflow(&seat_at()).unwrap().unwrap();
     assert_eq!(seat.state, State::Awake("908786".into()));
 }

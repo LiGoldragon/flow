@@ -8,6 +8,7 @@ use crate::store::delivery::RegistersDeliveryTables;
 pub(crate) mod address_hold;
 pub mod compaction;
 pub mod context;
+pub(crate) mod counters;
 mod created_pane;
 pub mod delivery;
 pub mod events;
@@ -18,12 +19,14 @@ pub(crate) mod metaflow_declaration;
 pub(crate) mod nexus_configuration;
 pub(crate) mod opened_thread;
 pub(crate) mod queue_delivery;
+pub mod reminder;
 pub(crate) mod repair;
 pub(crate) mod send_call;
 pub(crate) mod send_outcome;
 pub(crate) mod send_server;
 pub(crate) mod send_v31;
 pub(crate) mod send_v32;
+pub(crate) mod send_v34;
 pub(crate) mod sent;
 mod staged_upgrade;
 pub(crate) mod successor;
@@ -53,8 +56,9 @@ use std::{
 };
 
 use meta_signal_flow::{
-    ConfigurationChange, ConfigurationSnapshot, ConfigureLeaveOut, ConfigureModel, ConfigureNexus,
-    ConfigureOutcome, ConfigureThreshold,
+    ConfigurationChange, ConfigurationSnapshot, ConfigureCounters, ConfigureLeaveOut,
+    ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureOutcome, ConfigureSendServer,
+    ConfigureThreshold, CountersRefusal,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -106,6 +110,15 @@ const META_INVESTIGATION_CONFIGURATION_TABLE_NAME: TableName =
 const META_INVESTIGATION_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-investigation-configuration";
 const META_INVESTIGATION_CONFIGURATION_SCHEMA: &str =
     "flow-nexus-meta-investigation-configuration-v1";
+const META_DEFAULT_MINUTES_CONFIGURATION_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_meta_default_minutes_configuration");
+const META_DEFAULT_MINUTES_CONFIGURATION_FAMILY: &str =
+    "flow-nexus-meta-default-minutes-configuration";
+const META_DEFAULT_MINUTES_CONFIGURATION_SCHEMA: &str =
+    "flow-nexus-meta-default-minutes-configuration-v1";
+/// The default Minutes a new Memory holds until Configure declares one:
+/// the Minutes Flow gives a request that carries none of its own.
+pub(crate) const SEEDED_DEFAULT_MINUTES: i64 = 30;
 const META_LEAVE_OUT_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_leave_out_configuration");
 /// The tables an older store kept and an open drops: the meta
@@ -207,7 +220,9 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_meta_metaflow_configuration",
     "flow_nexus_meta_model_threshold_configuration",
     "flow_nexus_meta_investigation_configuration",
+    "flow_nexus_meta_default_minutes_configuration",
     "flow_nexus_compactions",
+    "flow_nexus_reminders",
     "flow_nexus_successor_intents",
     "flow_nexus_send_outcome_counter",
     "flow_nexus_send_outcomes",
@@ -223,6 +238,7 @@ const CONFIGURATION_ONLY_ADDED_TABLES: &[&str] = &[
     "flow_nexus_meta_send_server_configuration",
     "flow_nexus_meta_model_threshold_configuration",
     "flow_nexus_meta_investigation_configuration",
+    "flow_nexus_meta_default_minutes_configuration",
     "flow_nexus_meta_metaflow_configuration",
 ];
 // These are this Flow source's authored Memory version candidates. They are
@@ -1073,6 +1089,32 @@ impl DescribesInvestigationTable for StoredMetaInvestigationConfiguration {
             META_INVESTIGATION_CONFIGURATION_TABLE_NAME,
             FamilyName::new(META_INVESTIGATION_CONFIGURATION_FAMILY),
             SchemaHash::for_label(META_INVESTIGATION_CONFIGURATION_SCHEMA),
+        )
+    }
+}
+
+/// The default Minutes, one row; absent until Configure declares one.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredMetaDefaultMinutesConfiguration {
+    default_minutes: i64,
+}
+
+impl EngineRecord for StoredMetaDefaultMinutesConfiguration {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new("default-minutes")
+    }
+}
+
+trait DescribesDefaultMinutesTable {
+    fn descriptor() -> TableDescriptor<StoredMetaDefaultMinutesConfiguration>;
+}
+
+impl DescribesDefaultMinutesTable for StoredMetaDefaultMinutesConfiguration {
+    fn descriptor() -> TableDescriptor<StoredMetaDefaultMinutesConfiguration> {
+        TableDescriptor::new(
+            META_DEFAULT_MINUTES_CONFIGURATION_TABLE_NAME,
+            FamilyName::new(META_DEFAULT_MINUTES_CONFIGURATION_FAMILY),
+            SchemaHash::for_label(META_DEFAULT_MINUTES_CONFIGURATION_SCHEMA),
         )
     }
 }
@@ -3180,6 +3222,10 @@ pub enum StoreError {
     LeaveOutNotForHarness,
     #[error("the topic {0} is not an uncapitalized camelCase identifier")]
     TopicRefused(String),
+    #[error("the default Minutes is refused: {0:?}")]
+    MinutesRefused(signal_flow::MinutesRefusal),
+    #[error("the counters are refused: {0:?}")]
+    CountersRefused(CountersRefusal),
     #[error("the leave-out default of {entry} cannot be carried under one harness: {reason:?}")]
     LeaveOutUpgrade {
         entry: String,
@@ -3671,6 +3717,7 @@ pub(crate) struct MetaConfigurationTables {
     pub(crate) send_servers: TableReference<send_server::StoredMetaSendServerConfiguration>,
     pub(crate) metaflows: TableReference<metaflow_declaration::StoredMetaMetaflowConfiguration>,
     investigation: TableReference<StoredMetaInvestigationConfiguration>,
+    default_minutes: TableReference<StoredMetaDefaultMinutesConfiguration>,
 }
 
 trait RegistersMetaConfigurationTables: Sized {
@@ -3691,6 +3738,8 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             )?,
             investigation: engine
                 .register_table(StoredMetaInvestigationConfiguration::descriptor())?,
+            default_minutes: engine
+                .register_table(StoredMetaDefaultMinutesConfiguration::descriptor())?,
             metaflows: engine.upgraded_metaflow_declarations(
                 <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor(),
             )?,
@@ -3725,6 +3774,7 @@ pub struct FlowStore {
     send_calls: TableReference<crate::generated::send_tool::SendCall>,
     launch_cleanups: TableReference<launch_cleanup::LaunchCleanup>,
     compactions: TableReference<compaction::Compaction>,
+    reminders: TableReference<reminder::Reminder>,
     successor_intents: TableReference<successor::SuccessorIntent>,
     queue_delivery: QueueDeliveryTables,
     send_outcomes: SendOutcomeTables,
@@ -3747,6 +3797,42 @@ impl SetsNativeOwnerEnvironmentForTests for FlowStore {
     }
 }
 
+/// Every configuration family a store opened for configuration only
+/// holds: the Configuration snapshot but for the counters, which only the
+/// running store holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfiguredFamilies {
+    pub nexus: ConfigureNexus,
+    pub models: Vec<ConfigureModel>,
+    pub thresholds: Vec<ConfigureThreshold>,
+    pub default_leave_outs: Vec<ConfigureLeaveOut>,
+    pub send_servers: Vec<ConfigureSendServer>,
+    pub metaflows: Vec<ConfigureMetaflow>,
+    pub investigation: Option<Address>,
+    pub default_minutes: i64,
+}
+
+pub trait CompletesSnapshot {
+    /// The Configuration snapshot these families make with the counters.
+    fn with_counters(self, counters: ConfigureCounters) -> ConfigurationSnapshot;
+}
+
+impl CompletesSnapshot for ConfiguredFamilies {
+    fn with_counters(self, counters: ConfigureCounters) -> ConfigurationSnapshot {
+        ConfigurationSnapshot {
+            nexus: self.nexus,
+            models: self.models,
+            thresholds: self.thresholds,
+            default_leave_outs: self.default_leave_outs,
+            send_servers: self.send_servers,
+            metaflows: self.metaflows,
+            investigation: self.investigation,
+            default_minutes: self.default_minutes,
+            counters,
+        }
+    }
+}
+
 /// The one-request configuration listener's view of the same Sema store.
 /// It registers only the rows Configure owns and never seeds the rest of
 /// Flow state or settles launches/deliveries; of the stored families it
@@ -3765,7 +3851,7 @@ pub trait ConfiguresOnlyStore: Sized {
     fn open(path: &Path) -> Result<Self, StoreError>;
     /// The open itself, on the store at `path` and in its place.
     fn open_in_place(path: &Path) -> Result<Self, StoreError>;
-    fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
+    fn configuration_snapshot(&self) -> Result<Option<ConfiguredFamilies>, StoreError>;
     fn configure_change(&self, change: ConfigurationChange)
     -> Result<ConfigureOutcome, StoreError>;
     fn configuration(&self, defaults: &DefaultConfiguration) -> Result<Configuration, StoreError>;
@@ -3813,6 +3899,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
         let meta_thresholds_descriptor = StoredMetaThresholdConfiguration::descriptor();
         let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
+        let meta_default_minutes_descriptor = StoredMetaDefaultMinutesConfiguration::descriptor();
         let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         let meta_metaflows_descriptor = <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor();
@@ -3834,6 +3921,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_leave_outs_descriptor)
                 .with_family(&meta_send_servers_descriptor)
                 .with_family(&meta_investigation_descriptor)
+                .with_family(&meta_default_minutes_descriptor)
                 .with_family(&meta_metaflows_descriptor),
         )?;
         let state = engine.register_table(state_descriptor)?;
@@ -3847,6 +3935,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             leave_outs: engine.upgraded_leave_out_defaults(meta_leave_outs_descriptor)?,
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
             investigation: engine.register_table(meta_investigation_descriptor)?,
+            default_minutes: engine.register_table(meta_default_minutes_descriptor)?,
             metaflows: engine.upgraded_metaflow_declarations(meta_metaflows_descriptor)?,
         };
         if !recognized {
@@ -3866,7 +3955,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         })
     }
 
-    fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError> {
+    fn configuration_snapshot(&self) -> Result<Option<ConfiguredFamilies>, StoreError> {
         FlowStore::meta_configuration_snapshot(&self.engine, &self.meta_configuration_tables)
     }
 
@@ -4356,6 +4445,8 @@ impl OpensFlowStore for FlowStore {
         let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
         let compactions_descriptor =
             <compaction::Compaction as compaction::DescribesCompactionTable>::descriptor();
+        let reminders_descriptor =
+            <reminder::Reminder as reminder::DescribesReminderTable>::descriptor();
         let successor_intents_descriptor =
             <successor::SuccessorIntent as successor::DescribesSuccessorIntentTable>::descriptor();
         let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
@@ -4399,7 +4490,9 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&meta_leave_outs_descriptor)
                 .with_family(&<send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor())
                 .with_family(&meta_investigation_descriptor)
+                .with_family(&StoredMetaDefaultMinutesConfiguration::descriptor())
                 .with_family(&compactions_descriptor)
+                .with_family(&reminders_descriptor)
                 .with_family(&successor_intents_descriptor)
                 .with_family(&<metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor())
                 .with_family(&events_descriptor)
@@ -4445,6 +4538,7 @@ impl OpensFlowStore for FlowStore {
         let send_calls = engine.upgraded_send_calls(send_calls_descriptor)?;
         let launch_cleanups = engine.register_table(launch_cleanups_descriptor)?;
         let compactions = engine.register_table(compactions_descriptor)?;
+        let reminders = engine.register_table(reminders_descriptor)?;
         let successor_intents = successor::UpgradesSuccessorIntents::upgraded_successor_intents(
             &mut engine,
             successor_intents_descriptor,
@@ -4481,6 +4575,7 @@ impl OpensFlowStore for FlowStore {
             send_calls,
             launch_cleanups,
             compactions,
+            reminders,
             successor_intents,
             queue_delivery,
             send_outcomes,
@@ -4626,6 +4721,9 @@ impl OpensFlowStore for FlowStore {
         let compactions = engine.register_table(
             <compaction::Compaction as compaction::DescribesCompactionTable>::descriptor(),
         )?;
+        let reminders = engine.register_table(
+            <reminder::Reminder as reminder::DescribesReminderTable>::descriptor(),
+        )?;
         let successor_intents = successor::UpgradesSuccessorIntents::upgraded_successor_intents(
             &mut engine,
             <successor::SuccessorIntent as successor::DescribesSuccessorIntentTable>::descriptor(),
@@ -4663,6 +4761,7 @@ impl OpensFlowStore for FlowStore {
             send_calls,
             launch_cleanups,
             compactions,
+            reminders,
             successor_intents,
             queue_delivery,
             send_outcomes,
@@ -4792,15 +4891,32 @@ pub(crate) trait ManagesMetaflowState: Sized {
 }
 
 impl ManagesMetaflowState for FlowStore {
+    /// The committed families with the counters as they stand.
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError> {
-        FlowStore::meta_configuration_snapshot(&self.engine, &self.meta_configuration_tables)
+        use counters::ConfiguresCounters;
+        let Some(families) =
+            FlowStore::meta_configuration_snapshot(&self.engine, &self.meta_configuration_tables)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(families.with_counters(self.counters()?)))
     }
 
+    /// The counters are the running store's; every other family is
+    /// declared as a configuration-only store declares it.
     fn configure_change(
         &self,
         change: ConfigurationChange,
     ) -> Result<ConfigureOutcome, StoreError> {
-        FlowStore::configure_meta_change(&self.engine, &self.meta_configuration_tables, change)
+        use counters::ConfiguresCounters;
+        match change {
+            ConfigurationChange::Counters(declared) => self.configure_counters(declared),
+            change => FlowStore::configure_meta_change(
+                &self.engine,
+                &self.meta_configuration_tables,
+                change,
+            ),
+        }
     }
 
     fn configured_threshold(
@@ -4923,9 +5039,11 @@ impl ManagesMetaflowState for FlowStore {
     fn identify_process(&self, process: Process) -> Result<Response, StoreError> {
         let lineage = FlowStore::process_lineage(&process);
         if lineage.is_empty() {
-            return Ok(Response::Refused(signal_flow::Refusal::Unidentified(
-                process,
-            )));
+            return Ok(Response::Refused(
+                <signal_flow::Refusal as crate::sending::RefusesUnidentified>::unidentified(
+                    process,
+                ),
+            ));
         }
         for ancestor in lineage {
             let rows = self
@@ -4938,9 +5056,9 @@ impl ManagesMetaflowState for FlowStore {
             };
             return Ok(Response::Identified(binding.address.clone()));
         }
-        Ok(Response::Refused(signal_flow::Refusal::Unidentified(
-            process,
-        )))
+        Ok(Response::Refused(
+            <signal_flow::Refusal as crate::sending::RefusesUnidentified>::unidentified(process),
+        ))
     }
 
     fn release_metaflow_lock(
@@ -4997,9 +5115,11 @@ impl AppliesFlowQuery for FlowStore {
             | Query::DeliverAll(_)
             | Query::BindSeat(_)
             | Query::ObserveSends(_)
-            | Query::ObserveSender(_) => Ok(Response::Refused(signal_flow::Refusal::Unidentified(
-                signal_flow::Process { pid: 0, started: 0 },
-            ))),
+            | Query::ObserveSender(_) => Ok(Response::Refused(
+                <signal_flow::Refusal as crate::sending::RefusesUnidentified>::unidentified(
+                    signal_flow::Process { pid: 0, started: 0 },
+                ),
+            )),
             Query::Launch(_) => Ok(Response::StartRejected(
                 StartRejection::LaunchPersistenceRefused,
             )),
@@ -5666,6 +5786,11 @@ impl RegistersExistingFlow for FlowStore {
             None => commit.assert(self.metaflows, StoredMetaflow { metaflow }),
         };
         self.engine.commit_atomic(commit)?;
+        // The Nexus's Codex responder set follows this signal. An adopted
+        // seat was committed without announcing it, so no connection ever
+        // subscribed to that thread until an unrelated store change. With
+        // no thread events, its first rest could not drain durable work.
+        self.launch_changes.announce();
         Ok(ExistingSeatAdoption::Bound(Box::new(flow_node)))
     }
 }
@@ -7320,6 +7445,10 @@ pub(crate) trait ReadsFlowMemory {
                 META_INVESTIGATION_CONFIGURATION_FAMILY,
                 META_INVESTIGATION_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_meta_default_minutes_configuration" => (
+                META_DEFAULT_MINUTES_CONFIGURATION_FAMILY,
+                META_DEFAULT_MINUTES_CONFIGURATION_SCHEMA,
+            ),
             "flow_nexus_send_outcome_counter" => {
                 (send_outcome::COUNTER_FAMILY, send_outcome::COUNTER_SCHEMA)
             }
@@ -7345,6 +7474,7 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_compactions" => {
                 (compaction::COMPACTION_FAMILY, compaction::COMPACTION_SCHEMA)
             }
+            "flow_nexus_reminders" => (reminder::REMINDER_FAMILY, reminder::REMINDER_SCHEMA),
             "flow_nexus_successor_intents" => (
                 successor::SUCCESSOR_INTENT_FAMILY,
                 successor::SUCCESSOR_INTENT_SCHEMA,
@@ -7426,6 +7556,10 @@ pub(crate) trait ReadsFlowMemory {
                     send_outcome::OUTCOME_FAMILY,
                     send_outcome::StoredSendOutcomeV3::schema_hash(),
                 ),
+                (
+                    send_outcome::OUTCOME_FAMILY,
+                    send_outcome::StoredSendOutcomeV4::schema_hash(),
+                ),
             ],
             "flow_nexus_flows" => &[("flow-nexus-flow", FlowRecordV5::schema_hash())],
             "flow_nexus_launch_outcomes" => &[
@@ -7505,6 +7639,10 @@ pub(crate) trait ReadsFlowMemory {
                     "flow-nexus-logical-delivery-current",
                     <logical_delivery::CurrentLogicalDeliveryV2 as MemoryDefinition>::schema_hash(),
                 ),
+                (
+                    "flow-nexus-logical-delivery-current",
+                    <logical_delivery::CurrentLogicalDeliveryV3 as MemoryDefinition>::schema_hash(),
+                ),
             ],
             "flow_nexus_logical_delivery_events" => &[
                 (
@@ -7514,6 +7652,10 @@ pub(crate) trait ReadsFlowMemory {
                 (
                     "flow-nexus-logical-delivery-event",
                     <logical_delivery::LogicalDeliveryEventV2 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    "flow-nexus-logical-delivery-event",
+                    <logical_delivery::LogicalDeliveryEventV3 as MemoryDefinition>::schema_hash(),
                 ),
             ],
             "flow_nexus_successor_intents" => &[(
@@ -7835,7 +7977,7 @@ pub(crate) trait ReadsFlowMemory {
     fn meta_configuration_snapshot(
         engine: &Engine,
         tables: &MetaConfigurationTables,
-    ) -> Result<Option<ConfigurationSnapshot>, StoreError> {
+    ) -> Result<Option<ConfiguredFamilies>, StoreError> {
         let nexus_rows = engine.match_records(QueryPlan::all(tables.nexus))?;
         let marker = nexus_rows.database_marker();
         let nexus = match nexus_rows.records() {
@@ -7850,6 +7992,7 @@ pub(crate) trait ReadsFlowMemory {
         let leave_out_rows = engine.match_records(QueryPlan::all(tables.leave_outs))?;
         let send_server_rows = engine.match_records(QueryPlan::all(tables.send_servers))?;
         let investigation_rows = engine.match_records(QueryPlan::all(tables.investigation))?;
+        let default_minutes_rows = engine.match_records(QueryPlan::all(tables.default_minutes))?;
         let metaflow_rows = engine.match_records(QueryPlan::all(tables.metaflows))?;
         if models_rows.database_marker() != marker
             || metaflow_rows.database_marker() != marker
@@ -7857,6 +8000,7 @@ pub(crate) trait ReadsFlowMemory {
             || leave_out_rows.database_marker() != marker
             || send_server_rows.database_marker() != marker
             || investigation_rows.database_marker() != marker
+            || default_minutes_rows.database_marker() != marker
             || engine.current_database_marker()? != marker
         {
             return Err(StoreError::ConfigurationReadViewChanged);
@@ -7879,6 +8023,12 @@ pub(crate) trait ReadsFlowMemory {
         let investigation = match investigation_rows.records() {
             [] => None,
             [stored] => Some(stored.investigation.clone()),
+            _ => return Err(StoreError::StateInvariant),
+        };
+        // A Memory no DefaultMinutes was declared in holds the seed.
+        let default_minutes = match default_minutes_rows.records() {
+            [] => SEEDED_DEFAULT_MINUTES,
+            [stored] => stored.default_minutes,
             _ => return Err(StoreError::StateInvariant),
         };
         let mut default_leave_outs = leave_out_rows
@@ -7904,7 +8054,7 @@ pub(crate) trait ReadsFlowMemory {
             .map(|stored| stored.metaflow.clone())
             .collect::<Vec<_>>();
         metaflows.sort_by_key(|metaflow| FlowStore::address_record_key(&metaflow.address));
-        Ok(Some(ConfigurationSnapshot {
+        Ok(Some(ConfiguredFamilies {
             nexus,
             models,
             thresholds,
@@ -7912,6 +8062,7 @@ pub(crate) trait ReadsFlowMemory {
             send_servers,
             investigation,
             metaflows,
+            default_minutes,
         }))
     }
 
@@ -8094,6 +8245,25 @@ pub(crate) trait ReadsFlowMemory {
                     tables.investigation,
                     vec![StoredMetaInvestigationConfiguration { investigation }],
                 )
+            }
+            // The default Minutes meets the rule a Task's Minutes meets at
+            // admission, from now, before anything is written.
+            ConfigurationChange::DefaultMinutes(default_minutes) => {
+                use crate::reminding::CountsUnixSeconds;
+                use crate::store::reminder::RulesMinutes;
+                default_minutes
+                    .ruled_interval(std::time::SystemTime::now().seconds_since_epoch())
+                    .map_err(StoreError::MinutesRefused)?;
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.default_minutes,
+                    vec![StoredMetaDefaultMinutesConfiguration { default_minutes }],
+                )
+            }
+            // A store opened for configuration only holds no counters; the
+            // running store declares them (`counters::ConfiguresCounters`).
+            ConfigurationChange::Counters(_) => {
+                Err(StoreError::CountersRefused(CountersRefusal::NotRunning))
             }
         }
     }
@@ -11114,6 +11284,14 @@ mod tests {
                         .len(),
                 ),
                 read(
+                    "flow_nexus_meta_default_minutes_configuration",
+                    engine
+                        .match_records(QueryPlan::all(meta.default_minutes))
+                        .expect("meta default minutes configuration reads")
+                        .records()
+                        .len(),
+                ),
+                read(
                     "flow_nexus_meta_leave_out_configuration",
                     engine
                         .match_records(QueryPlan::all(meta.leave_outs))
@@ -11174,6 +11352,14 @@ mod tests {
                     engine
                         .match_records(QueryPlan::all(self.compactions))
                         .expect("compactions read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_reminders",
+                    engine
+                        .match_records(QueryPlan::all(self.reminders))
+                        .expect("reminders read")
                         .records()
                         .len(),
                 ),

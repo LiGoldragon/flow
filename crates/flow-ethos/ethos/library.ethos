@@ -20,12 +20,19 @@ Library
   Source.{ Repository Hash Path }
   Key.{ Subaspect Topic }
   Said.{ Context.String Verbatim.String }
+  ; A Task is an order with its Minutes, the sender's estimate of its
+  ; doing; the LogicalDeliveryId Flow answers the send with names it. A
+  ; Done is the result that names the task it closes. Both are appended
+  ; after the kinds a store already holds, so its archives read unchanged.
+  Minutes.Integer
   Request.[ Order.String
             Question.String
             Psyche.Said
             Psyches.Vector<Said>
             Result.String
-            Notice.String ]
+            Notice.String
+            Task.{ Minutes String }
+            Done.{ LogicalDeliveryId String } ]
   ; A logical delivery keeps one identity across queue retries and native
   ; submission; the id names the living's request, not a delivery attempt.
   LogicalDeliveryId.String

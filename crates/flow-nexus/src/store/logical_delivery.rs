@@ -2,8 +2,10 @@
 //! hand-over attempts. The event table is append-only; the current table is
 //! a materialized view used for sender-filtered reconnect snapshots.
 
+use super::reminder::RecordsReminders;
 use super::send_v31::DeliverySnapshotV31;
 use super::send_v32::DeliverySnapshotV32;
+use super::send_v34::DeliverySnapshotV34;
 use super::*;
 use crate::generated::send_tool::{
     Accepted_Data, SendCall, SendOutcome as ToolSendOutcome, SendRefusal as ToolSendRefusal,
@@ -20,8 +22,8 @@ const COUNTER_KEY: &str = "counter";
 const COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_counter");
 const CURRENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_current");
 const EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_events");
-pub(super) const CURRENT_SCHEMA: &str = "flow-nexus-logical-delivery-current-v3";
-pub(super) const EVENT_SCHEMA: &str = "flow-nexus-logical-delivery-event-v3";
+pub(super) const CURRENT_SCHEMA: &str = "flow-nexus-logical-delivery-current-v4";
+pub(super) const EVENT_SCHEMA: &str = "flow-nexus-logical-delivery-event-v4";
 const SIMPLIFIED_REPLY_TABLE_NAME: TableName =
     TableName::new("flow_nexus_simplified_reply_bindings");
 
@@ -78,15 +80,43 @@ impl EngineRecord for CurrentLogicalDelivery {
 }
 impl MemoryDefinition for CurrentLogicalDelivery {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
+        MemoryVersion::new(4)
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(CURRENT_SCHEMA)
     }
 }
 
+/// A delivery's current snapshot as signal-flow 34 archived it, read only by the
+/// v3-to-v4 upgrade.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CurrentLogicalDeliveryV3 {
+    pub snapshot: DeliverySnapshotV34,
+}
+impl EngineRecord for CurrentLogicalDeliveryV3 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.snapshot.logical_delivery_id.clone())
+    }
+}
+impl MemoryDefinition for CurrentLogicalDeliveryV3 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(3)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-logical-delivery-current-v3")
+    }
+}
+impl UpgradeFrom<CurrentLogicalDeliveryV3> for CurrentLogicalDelivery {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: CurrentLogicalDeliveryV3) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            snapshot: previous.snapshot.into(),
+        })
+    }
+}
+
 /// A delivery's current snapshot as signal-flow 32 archived it, read only
-/// by the v2-to-v3 upgrade.
+/// by the v2-to-v4 upgrade.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CurrentLogicalDeliveryV2 {
     pub snapshot: DeliverySnapshotV32,
@@ -114,7 +144,7 @@ impl UpgradeFrom<CurrentLogicalDeliveryV2> for CurrentLogicalDelivery {
 }
 
 /// A delivery's current snapshot as signal-flow 31 archived it, read only
-/// by the v1-to-v3 upgrade.
+/// by the v1-to-v4 upgrade.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CurrentLogicalDeliveryV1 {
     pub snapshot: DeliverySnapshotV31,
@@ -152,15 +182,43 @@ impl EngineRecord for LogicalDeliveryEvent {
 }
 impl MemoryDefinition for LogicalDeliveryEvent {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
+        MemoryVersion::new(4)
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(EVENT_SCHEMA)
     }
 }
 
+/// A delivery's lifecycle event as signal-flow 34 archived it, read only by the
+/// v3-to-v4 upgrade.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LogicalDeliveryEventV3 {
+    pub snapshot: DeliverySnapshotV34,
+}
+impl EngineRecord for LogicalDeliveryEventV3 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(format!("{:020}", self.snapshot.delivery_cursor))
+    }
+}
+impl MemoryDefinition for LogicalDeliveryEventV3 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(3)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-logical-delivery-event-v3")
+    }
+}
+impl UpgradeFrom<LogicalDeliveryEventV3> for LogicalDeliveryEvent {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: LogicalDeliveryEventV3) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            snapshot: previous.snapshot.into(),
+        })
+    }
+}
+
 /// A delivery's lifecycle event as signal-flow 32 archived it, read only by
-/// the v2-to-v3 upgrade.
+/// the v2-to-v4 upgrade.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LogicalDeliveryEventV2 {
     pub snapshot: DeliverySnapshotV32,
@@ -188,7 +246,7 @@ impl UpgradeFrom<LogicalDeliveryEventV2> for LogicalDeliveryEvent {
 }
 
 /// A delivery's lifecycle event as signal-flow 31 archived it, read only by
-/// the v1-to-v3 upgrade.
+/// the v1-to-v4 upgrade.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LogicalDeliveryEventV1 {
     pub snapshot: DeliverySnapshotV31,
@@ -225,6 +283,17 @@ pub(crate) struct SimplifiedReplyBinding {
     pub source: Address,
     pub recipient: Address,
     pub completed: bool,
+}
+/// What a simplified flow's reply binding owes now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SimplifiedReplyStanding {
+    /// No binding, or its answer already queued to its recipient.
+    NoneOwed,
+    /// The bound input is not yet Delivered: no native receipt anchors an
+    /// answer.
+    Unreceived(SimplifiedReplyBinding),
+    /// The bound input is Delivered under this receipt; its answer is owed.
+    Received(SimplifiedReplyBinding, NativeReceipt),
 }
 impl EngineRecord for SimplifiedReplyBinding {
     fn record_key(&self) -> RecordKey {
@@ -274,14 +343,16 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
                 CurrentLogicalDelivery::schema_hash(),
             )
             .with_predecessor::<CurrentLogicalDeliveryV1>()
-            .with_predecessor::<CurrentLogicalDeliveryV2>(),
+            .with_predecessor::<CurrentLogicalDeliveryV2>()
+            .with_predecessor::<CurrentLogicalDeliveryV3>(),
             events: TableDescriptor::new(
                 EVENT_TABLE_NAME,
                 FamilyName::new("flow-nexus-logical-delivery-event"),
                 LogicalDeliveryEvent::schema_hash(),
             )
             .with_predecessor::<LogicalDeliveryEventV1>()
-            .with_predecessor::<LogicalDeliveryEventV2>(),
+            .with_predecessor::<LogicalDeliveryEventV2>()
+            .with_predecessor::<LogicalDeliveryEventV3>(),
             simplified_replies: TableDescriptor::new(
                 SIMPLIFIED_REPLY_TABLE_NAME,
                 FamilyName::new("flow-nexus-simplified-reply-binding"),
@@ -416,10 +487,13 @@ pub(crate) trait RecordsLogicalDeliveries {
         after_cursor: Option<i64>,
     ) -> Result<SendObservation, StoreError>;
     fn bind_simplified_reply(&self, binding: SimplifiedReplyBinding) -> Result<(), StoreError>;
+    /// What the flow's reply binding owes: nothing, or an answer to an
+    /// input not yet received, or one to an input received under its
+    /// native receipt.
     fn simplified_reply_receipt(
         &self,
         flow_id: &str,
-    ) -> Result<Option<(SimplifiedReplyBinding, NativeReceipt)>, StoreError>;
+    ) -> Result<SimplifiedReplyStanding, StoreError>;
     fn deliver_simplified_reply(
         &self,
         flow_id: &str,
@@ -465,16 +539,16 @@ impl RecordsLogicalDeliveries for FlowStore {
     fn simplified_reply_receipt(
         &self,
         flow_id: &str,
-    ) -> Result<Option<(SimplifiedReplyBinding, NativeReceipt)>, StoreError> {
+    ) -> Result<SimplifiedReplyStanding, StoreError> {
         let binding = self.engine.match_records(QueryPlan::key(
             self.logical_deliveries.simplified_replies,
             RecordKey::new(flow_id.to_owned()),
         ))?;
         let Some(binding) = binding.records().first().cloned() else {
-            return Ok(None);
+            return Ok(SimplifiedReplyStanding::NoneOwed);
         };
         if binding.completed {
-            return Ok(None);
+            return Ok(SimplifiedReplyStanding::NoneOwed);
         }
         let input = self.engine.match_records(QueryPlan::key(
             self.logical_deliveries.current,
@@ -488,7 +562,10 @@ impl RecordsLogicalDeliveries for FlowStore {
                     DeliveryState::Delivered(receipt) => Some(receipt.clone()),
                     _ => None,
                 });
-        Ok(receipt.map(|receipt| (binding, receipt)))
+        Ok(match receipt {
+            Some(receipt) => SimplifiedReplyStanding::Received(binding, receipt),
+            None => SimplifiedReplyStanding::Unreceived(binding),
+        })
     }
 
     fn deliver_simplified_reply(
@@ -846,6 +923,39 @@ impl RecordsLogicalDeliveries for FlowStore {
                 address.clone(),
             ))));
         };
+        // A Done names the open task it closes.
+        let request = match &message {
+            Message::HardAbrupt(request)
+            | Message::MiddleAbrupt(request)
+            | Message::Soft(request) => request.clone(),
+        };
+        if let Request::Done(done) = &request
+            && self.reminder(&done.logical_delivery_id)?.is_none()
+        {
+            return Ok(Response::Refused(Refusal::NoOpenTask(
+                done.logical_delivery_id.clone(),
+            )));
+        }
+        // Flow owns the Minutes rule at admission: above zero, and every
+        // deadline its reminders reach, computed with checked arithmetic,
+        // inside the clock. No policy maximum exists.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs() as i64)
+            .unwrap_or(0);
+        let task_due = match &request {
+            Request::Task(task) => {
+                use super::reminder::RulesMinutes;
+                match task.minutes.ruled_interval(now) {
+                    Ok(interval) => Some(now + interval),
+                    Err(refusal) => {
+                        return Ok(Response::Refused(Refusal::MinutesRefused(refusal)));
+                    }
+                }
+            }
+            _ => None,
+        };
+        let task_sender = sent_by.clone();
         let lock = if let Some(held) = held_lock {
             let Some(existing) = self.stored_metaflow_lock(address)? else {
                 return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Lock(
@@ -916,6 +1026,28 @@ impl RecordsLogicalDeliveries for FlowStore {
         };
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
+        // A Task is held under its id, its sender reminded when its
+        // minutes lapse with no Done; a Done closes the task it names.
+        match &request {
+            Request::Task(task) => {
+                let (reminded, due) = match &task_sender {
+                    SentBy::Sender(sender) => (sender.clone(), task_due),
+                    _ => (address.clone(), None),
+                };
+                self.hold_reminder(super::reminder::Reminder {
+                    key: id.clone(),
+                    address: reminded,
+                    recipient: address.clone(),
+                    minutes: task.minutes,
+                    due,
+                    sent: 0,
+                })?;
+            }
+            Request::Done(done) => {
+                self.close_reminder(&done.logical_delivery_id)?;
+            }
+            _ => {}
+        }
         Ok(Response::SendAccepted(SendAcceptance {
             logical_delivery_id: id,
             delivery_cursor: next,
@@ -1102,5 +1234,58 @@ impl AllocatesLogicalCursor for FlowStore {
             }),
             _ => Err(StoreError::StateInvariant),
         }
+    }
+}
+
+/// The logical delivery ids: a store that has allocated none begins at 1.
+pub(crate) struct LogicalDeliveryIds<'store>(pub(crate) &'store FlowStore);
+
+impl super::counters::CountsIds for LogicalDeliveryIds<'_> {
+    fn hold_writes(&self) -> Option<std::sync::MutexGuard<'_, ()>> {
+        Some(
+            self.0
+                .logical_deliveries
+                .write_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+
+    fn id_counter(&self) -> Result<super::counters::IdCounter, StoreError> {
+        let allocation = self.0.allocate_logical_cursor()?;
+        Ok(super::counters::IdCounter {
+            next: allocation.cursor,
+            written: allocation.existing,
+        })
+    }
+
+    fn ids_recorded(&self) -> Result<bool, StoreError> {
+        let deliveries = &self.0.logical_deliveries;
+        Ok(!self
+            .0
+            .engine
+            .match_records(QueryPlan::all(deliveries.events))?
+            .records()
+            .is_empty()
+            || !self
+                .0
+                .engine
+                .match_records(QueryPlan::all(deliveries.current))?
+                .records()
+                .is_empty())
+    }
+
+    fn declare_next_id(
+        &self,
+        commit: AtomicCommit,
+        counter: &super::counters::IdCounter,
+        next: i64,
+    ) -> Result<AtomicCommit, StoreError> {
+        let row = LogicalDeliveryCounter { next_cursor: next };
+        Ok(if counter.written {
+            commit.mutate(self.0.logical_deliveries.counter, row)
+        } else {
+            commit.assert(self.0.logical_deliveries.counter, row)
+        })
     }
 }

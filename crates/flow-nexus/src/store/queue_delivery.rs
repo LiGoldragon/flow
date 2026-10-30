@@ -63,6 +63,12 @@ const DELIVERY_COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_queue_
 const DELIVERY_REQUEST_TABLE_NAME: TableName = TableName::new("flow_nexus_queue_delivery_requests");
 const DELIVERY_ATTEMPT_TABLE_NAME: TableName = TableName::new("flow_nexus_queue_delivery_attempts");
 const COUNTER_KEY: &str = "counter";
+/// The first attempt of a store that has made none: an attempt's number is
+/// also its Codex app-server request id, and a connection reserves the
+/// first two while opening and resuming.
+const FIRST_ATTEMPT: u64 = 3;
+/// The next request number a store that has made no attempt writes.
+const FIRST_NEXT_REQUEST: u64 = 2;
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeliveryCounter {
@@ -939,10 +945,8 @@ impl AccountsQueueDelivery for FlowStore {
             [] => (
                 None,
                 DeliveryCounter {
-                    next_request: 2,
-                    // Codex reserves the first two app-server request ids
-                    // while opening and resuming a connection.
-                    next_attempt: 4,
+                    next_request: FIRST_NEXT_REQUEST,
+                    next_attempt: FIRST_ATTEMPT + 1,
                 },
             ),
             [counter] => (
@@ -960,7 +964,9 @@ impl AccountsQueueDelivery for FlowStore {
             ),
             _ => return Err(StoreError::StateInvariant),
         };
-        let attempt_number = current.as_ref().map_or(3, |value| value.next_attempt);
+        let attempt_number = current
+            .as_ref()
+            .map_or(FIRST_ATTEMPT, |value| value.next_attempt);
         let request_id = queued.logical_delivery_id.clone();
         let attempt_id = format!("queue-attempt-{attempt_number:016x}");
         let native_request_id = attempt_number;
@@ -1553,6 +1559,75 @@ impl AccountsQueueDelivery for FlowStore {
             [attempt] => Ok(Some(attempt.clone())),
             _ => Err(StoreError::StateInvariant),
         }
+    }
+}
+
+/// The queue attempt ids: a store that has made no attempt begins at
+/// `FIRST_ATTEMPT`.
+pub(crate) struct QueueAttemptIds<'store>(pub(crate) &'store FlowStore);
+
+impl super::counters::CountsIds for QueueAttemptIds<'_> {
+    /// Attempts are prepared under the Nexus's dispatch, with no gate of
+    /// their own.
+    fn hold_writes(&self) -> Option<std::sync::MutexGuard<'_, ()>> {
+        None
+    }
+
+    fn id_counter(&self) -> Result<super::counters::IdCounter, StoreError> {
+        let counters = self.0.engine.match_records(QueryPlan::key(
+            self.0.queue_delivery.counter,
+            RecordKey::new(COUNTER_KEY),
+        ))?;
+        let next = match counters.records() {
+            [] => FIRST_ATTEMPT,
+            [counter] => counter.next_attempt,
+            _ => return Err(StoreError::StateInvariant),
+        };
+        Ok(super::counters::IdCounter {
+            next: i64::try_from(next).map_err(|_| StoreError::StateInvariant)?,
+            written: !counters.records().is_empty(),
+        })
+    }
+
+    fn ids_recorded(&self) -> Result<bool, StoreError> {
+        Ok(!self
+            .0
+            .engine
+            .match_records(QueryPlan::all(self.0.queue_delivery.attempts))?
+            .records()
+            .is_empty())
+    }
+
+    fn declare_next_id(
+        &self,
+        commit: AtomicCommit,
+        counter: &super::counters::IdCounter,
+        next: i64,
+    ) -> Result<AtomicCommit, StoreError> {
+        let next_attempt = u64::try_from(next).map_err(|_| StoreError::StateInvariant)?;
+        if !counter.written {
+            return Ok(commit.assert(
+                self.0.queue_delivery.counter,
+                DeliveryCounter {
+                    next_request: FIRST_NEXT_REQUEST,
+                    next_attempt,
+                },
+            ));
+        }
+        let counters = self.0.engine.match_records(QueryPlan::key(
+            self.0.queue_delivery.counter,
+            RecordKey::new(COUNTER_KEY),
+        ))?;
+        let [standing] = counters.records() else {
+            return Err(StoreError::StateInvariant);
+        };
+        Ok(commit.mutate(
+            self.0.queue_delivery.counter,
+            DeliveryCounter {
+                next_request: standing.next_request,
+                next_attempt,
+            },
+        ))
     }
 }
 

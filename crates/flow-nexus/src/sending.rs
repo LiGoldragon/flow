@@ -17,6 +17,7 @@ use crate::RunningNexus;
 use crate::binding::{ReadsProcessIdentity, VerifiesAdoptedSeat};
 use crate::caller::{
     CallerProcess, KnowsHerdrServers, LocatesCallerPane, LocatesCodexThread, NamesRootThread,
+    ReadsProcess,
 };
 use crate::composition::JoinsPurpose;
 use crate::delivery::body::RendersNativeContent;
@@ -101,7 +102,7 @@ pub trait IdentifiesSender {
 
 impl IdentifiesSender for RunningNexus {
     fn sending_address(&self, peer: &Process) -> Result<Address, Box<Response>> {
-        let unidentified = || Box::new(Response::Refused(Refusal::Unidentified(peer.clone())));
+        let unidentified = || Box::new(Response::Refused(Refusal::unidentified(peer.clone())));
         match self.identify_peer_process(peer.clone()) {
             Ok(Response::Identified(address)) => return Ok(address),
             Ok(_) => {}
@@ -233,7 +234,7 @@ impl SendsRequests for RunningNexus {
                 }
             }
             let Some(peer) = peer else {
-                return Response::Refused(Refusal::Unidentified(Process { pid: 0, started: 0 }))
+                return Response::Refused(Refusal::unidentified(Process { pid: 0, started: 0 }))
                     .into();
             };
             let Some(_now) = std::time::SystemTime::now()
@@ -283,6 +284,8 @@ impl SendsRequests for RunningNexus {
                 None
             };
             let direct = direct_lease.is_some();
+            let message = send.message.clone();
+            let admitted_at = std::time::SystemTime::now();
             let admitted = self.store.accept_logical_delivery(
                 &recipient,
                 SentBy::Sender(sender),
@@ -290,6 +293,30 @@ impl SendsRequests for RunningNexus {
                 send.message,
                 None,
             );
+            // Each admission is logged with its id and kind, and a Task's
+            // Minutes with the deadline its first reminder is due at.
+            if let Ok(Response::SendAccepted(acceptance)) = &admitted {
+                use crate::admission::{Admission, LogsAdmission};
+                use crate::store::reminder::RecordsReminders;
+                let (Message::HardAbrupt(request)
+                | Message::MiddleAbrupt(request)
+                | Message::Soft(request)) = &message;
+                let deadline = matches!(request, Request::Task(_))
+                    .then(|| self.store.reminder(&acceptance.logical_delivery_id))
+                    .and_then(Result::ok)
+                    .flatten()
+                    .and_then(|reminder| reminder.due);
+                eprintln!(
+                    "{}",
+                    Admission {
+                        logical_delivery_id: &acceptance.logical_delivery_id,
+                        request,
+                        deadline,
+                        at: admitted_at,
+                    }
+                    .log_line()
+                );
+            }
             drop(_turn);
             match admitted {
                 Ok(Response::SendAccepted(acceptance)) if direct => {
@@ -349,7 +376,7 @@ impl SendsRequests for RunningNexus {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(peer) = peer else {
-            return Response::Refused(Refusal::Unidentified(Process { pid: 0, started: 0 }));
+            return Response::Refused(Refusal::unidentified(Process { pid: 0, started: 0 }));
         };
         if let Err(refusal) = self.sending_address(peer) {
             return *refusal;
@@ -500,18 +527,71 @@ impl LaunchesDeclared for RunningNexus {
 }
 
 /// One Herdr agent, as a session snapshot shows it.
-struct SeenSeat {
+pub(crate) struct SeenSeat {
     herdr_session_name: String,
     agent: serde_json::Value,
 }
 
-trait FindsSeat {
+/// What the caller's pane showed when no seat could be named in it: raw
+/// evidence, never an identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SeatEvidence {
+    /// The caller's pane; None when the caller is in no pane Flow reads.
+    pub(crate) pane: Option<crate::caller::CallerPane>,
+    /// The label Herdr shows for that pane.
+    pub(crate) pane_label: Option<String>,
+    /// The native session the pane's agent runs, as far as it was read.
+    pub(crate) native_session: Option<String>,
+    /// When it was read, in seconds since the Unix epoch.
+    pub(crate) observed_at: u64,
+}
+
+/// What a refusal of an unnamed caller holds: the evidence and the process,
+/// never an identity.
+pub(crate) trait RefusesUnidentified {
+    /// A caller no pane or seat was read for: its process, observed now.
+    fn unidentified(process: Process) -> Self;
+    /// A caller whose pane showed `evidence`.
+    fn unidentified_with(process: Process, evidence: SeatEvidence) -> Self;
+}
+
+impl RefusesUnidentified for Refusal {
+    fn unidentified(process: Process) -> Self {
+        Self::unidentified_with(
+            process,
+            SeatEvidence {
+                pane: None,
+                pane_label: None,
+                native_session: None,
+                observed_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_secs())
+                    .unwrap_or_default(),
+            },
+        )
+    }
+
+    fn unidentified_with(process: Process, evidence: SeatEvidence) -> Self {
+        Self::Unidentified(signal_flow::SeatEvidence {
+            seat_pane_option: evidence.pane.map(|pane| signal_flow::SeatPane {
+                herdr_session_name: pane.herdr_session_name,
+                herdr_pane_id: pane.herdr_pane_id,
+            }),
+            pane_label_option: evidence.pane_label,
+            native_session_id_option: evidence.native_session,
+            observed_at: i64::try_from(evidence.observed_at).unwrap_or(i64::MAX),
+            process,
+        })
+    }
+}
+
+pub(crate) trait FindsSeat {
     /// The agent in the caller's pane, or, for a command a Codex
     /// app-server started, the one agent running the root thread of the
     /// caller's thread, with the Codex thread the seat runs. A Codex agent
     /// Herdr reports no session for runs the thread its pane's foreground
     /// resumes.
-    fn seat_of(&self, caller: CallerProcess) -> Option<(SeenSeat, Option<String>)>;
+    fn seat_of(&self, caller: CallerProcess) -> Result<(SeenSeat, Option<String>), SeatEvidence>;
 }
 
 /// A Codex agent's thread, when Herdr reports no session for it.
@@ -550,8 +630,115 @@ impl ReadsUnreportedThread for RunningNexus {
     }
 }
 
+/// Raw evidence of what a pane showed, read now.
+pub(crate) trait GathersSeatEvidence {
+    /// The pane, the label Herdr shows for it, the native session read
+    /// there, and the time.
+    fn seat_evidence(
+        &self,
+        pane: Option<crate::caller::CallerPane>,
+        native_session: Option<String>,
+    ) -> SeatEvidence;
+}
+
+impl GathersSeatEvidence for RunningNexus {
+    fn seat_evidence(
+        &self,
+        pane: Option<crate::caller::CallerPane>,
+        native_session: Option<String>,
+    ) -> SeatEvidence {
+        SeatEvidence {
+            pane_label: pane.as_ref().and_then(|pane| {
+                self.herdr
+                    .pane_label(&pane.herdr_session_name, &pane.herdr_pane_id)
+            }),
+            pane,
+            native_session,
+            observed_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// A process seen from one of its descendants.
+trait DescendsFrom {
+    /// Whether this process is `ancestor` or was started under it.
+    fn descends_from(&self, ancestor: u32) -> bool;
+}
+
+impl DescendsFrom for CallerProcess {
+    fn descends_from(&self, ancestor: u32) -> bool {
+        let mut process = Some(*self);
+        for _ in 0..Self::ANCESTRY_LIMIT {
+            match process {
+                Some(current) if current.process_id == ancestor => return true,
+                Some(current) => process = current.parent(),
+                None => return false,
+            }
+        }
+        false
+    }
+}
+
+/// The Claude session a pane's agent runs, read for one caller.
+trait ReadsClaudeSeat {
+    /// The pane's foreground Claude process the caller is, or was started
+    /// under, and the session it runs: the one Herdr's agent record reports
+    /// and Claude's session file for that process names, either alone when
+    /// the other is silent. Err with the session read, if any, when there is
+    /// no such process or the two disagree.
+    fn claude_session(
+        &self,
+        caller: CallerProcess,
+        herdr_session_name: &str,
+        agent: &serde_json::Value,
+    ) -> Result<(u32, String), Option<String>>;
+}
+
+impl ReadsClaudeSeat for RunningNexus {
+    fn claude_session(
+        &self,
+        caller: CallerProcess,
+        herdr_session_name: &str,
+        agent: &serde_json::Value,
+    ) -> Result<(u32, String), Option<String>> {
+        use crate::claude::ReadsClaudeSessions;
+        let text = |key: &str| agent.get(key).and_then(serde_json::Value::as_str);
+        let reported = agent
+            .pointer("/agent_session/value")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let route = HerdrRoute {
+            herdr_session_name: herdr_session_name.to_owned(),
+            herdr_agent_name: text("name").unwrap_or_default().to_owned(),
+            herdr_pane_id: text("pane_id").unwrap_or_default().to_owned(),
+            herdr_terminal_id: text("terminal_id").unwrap_or_default().to_owned(),
+        };
+        let mut claude = self
+            .herdr
+            .foreground_processes(&route)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|process| caller.descends_from(process.process_id));
+        let (Some(claude), None) = (claude.next(), claude.next()) else {
+            return Err(reported);
+        };
+        let recorded = self.herdr.claude_sessions.session_of(claude.process_id);
+        match (reported, recorded) {
+            (Some(reported), Some(recorded)) if reported == recorded => {
+                Ok((claude.process_id, reported))
+            }
+            (Some(reported), None) => Ok((claude.process_id, reported)),
+            (None, Some(recorded)) => Ok((claude.process_id, recorded)),
+            (reported, _) => Err(reported),
+        }
+    }
+}
+
 impl FindsSeat for RunningNexus {
-    fn seat_of(&self, caller: CallerProcess) -> Option<(SeenSeat, Option<String>)> {
+    fn seat_of(&self, caller: CallerProcess) -> Result<(SeenSeat, Option<String>), SeatEvidence> {
         let agents_of = |session: &str| -> Vec<serde_json::Value> {
             self.herdr
                 .session_snapshot(session)
@@ -564,42 +751,66 @@ impl FindsSeat for RunningNexus {
                 .unwrap_or_default()
         };
         if let Some(pane) = caller.caller_pane(&self.herdr) {
-            let agent = agents_of(&pane.herdr_session_name)
+            let Some(agent) = agents_of(&pane.herdr_session_name)
                 .into_iter()
                 .find(|agent| {
                     agent.get("pane_id").and_then(serde_json::Value::as_str)
                         == Some(pane.herdr_pane_id.as_str())
-                })?;
-            if agent.get("agent").and_then(serde_json::Value::as_str) != Some("codex") {
-                return None;
-            }
-            let app_servers = self.store.codex_app_servers().ok()?;
-            let caller_thread = self
-                .codex_endpoints
-                .root_thread(&caller.codex_thread(&app_servers)?);
-            let seat_thread = agent
+                })
+            else {
+                return Err(self.seat_evidence(Some(pane), None));
+            };
+            let reported = agent
                 .pointer("/agent_session/value")
                 .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .or_else(|| self.unreported_thread(&pane.herdr_session_name, &agent))?;
-            if seat_thread != caller_thread {
-                return None;
+                .map(str::to_owned);
+            match agent.get("agent").and_then(serde_json::Value::as_str) {
+                Some("claude") => {
+                    return match self.claude_session(caller, &pane.herdr_session_name, &agent) {
+                        Ok((_, session)) => Ok((
+                            SeenSeat {
+                                herdr_session_name: pane.herdr_session_name,
+                                agent,
+                            },
+                            Some(session),
+                        )),
+                        Err(session) => Err(self.seat_evidence(Some(pane), session)),
+                    };
+                }
+                Some("codex") => {}
+                _ => return Err(self.seat_evidence(Some(pane), reported)),
             }
-            let thread = Some(caller_thread);
-            return Some((
-                SeenSeat {
-                    herdr_session_name: pane.herdr_session_name,
-                    agent,
-                },
-                thread,
-            ));
+            let caller_thread = self
+                .store
+                .codex_app_servers()
+                .ok()
+                .and_then(|app_servers| caller.codex_thread(&app_servers))
+                .map(|thread| self.codex_endpoints.root_thread(&thread));
+            let seat_thread = reported
+                .clone()
+                .or_else(|| self.unreported_thread(&pane.herdr_session_name, &agent));
+            return match (caller_thread, seat_thread) {
+                (Some(caller_thread), Some(seat_thread)) if seat_thread == caller_thread => Ok((
+                    SeenSeat {
+                        herdr_session_name: pane.herdr_session_name,
+                        agent,
+                    },
+                    Some(caller_thread),
+                )),
+                (_, seat_thread) => Err(self.seat_evidence(Some(pane), seat_thread)),
+            };
         }
-        let app_servers = self.store.codex_app_servers().ok()?;
-        let thread = self
-            .codex_endpoints
-            .root_thread(&caller.codex_thread(&app_servers)?);
+        let Some(thread) = self
+            .store
+            .codex_app_servers()
+            .ok()
+            .and_then(|app_servers| caller.codex_thread(&app_servers))
+            .map(|thread| self.codex_endpoints.root_thread(&thread))
+        else {
+            return Err(self.seat_evidence(None, None));
+        };
         let mut seats = Vec::new();
-        for session in self.herdr.herdr_sessions()? {
+        for session in self.herdr.herdr_sessions().unwrap_or_default() {
             for agent in agents_of(&session.name) {
                 let runs_thread = match agent
                     .pointer("/agent_session/value")
@@ -621,8 +832,8 @@ impl FindsSeat for RunningNexus {
         }
         let mut seats = seats.into_iter();
         match (seats.next(), seats.next()) {
-            (Some(seat), None) => Some((seat, Some(thread))),
-            _ => None,
+            (Some(seat), None) => Ok((seat, Some(thread))),
+            _ => Err(self.seat_evidence(None, Some(thread))),
         }
     }
 }
@@ -639,9 +850,9 @@ impl BindsSeats for RunningNexus {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(peer) = peer else {
-            return Response::Refused(Refusal::Unidentified(Process { pid: 0, started: 0 }));
+            return Response::Refused(Refusal::unidentified(Process { pid: 0, started: 0 }));
         };
-        let unidentified = || Response::Refused(Refusal::Unidentified(peer.clone()));
+        let unidentified = || Response::Refused(Refusal::unidentified(peer.clone()));
         if !FlowStore::process_is_live(peer) {
             return unidentified();
         }
@@ -660,14 +871,34 @@ impl BindsSeats for RunningNexus {
         let Some(process_id) = u32::try_from(peer.pid).ok() else {
             return unidentified();
         };
-        let Some((seat, thread)) = self.seat_of(CallerProcess { process_id }) else {
-            return unidentified();
+        // A caller no seat is named for is refused, and what its pane
+        // showed is logged as it was read, never made into an identity.
+        let refused = |evidence: SeatEvidence| {
+            eprintln!(
+                "flow-nexus: BindSeat {address:?} from {peer:?} names no seat: pane {:?}, label {:?}, session {:?}, at {}",
+                evidence.pane, evidence.pane_label, evidence.native_session, evidence.observed_at
+            );
+            Response::Refused(Refusal::unidentified_with(peer.clone(), evidence))
+        };
+        let caller = CallerProcess { process_id };
+        let (seat, thread) = match self.seat_of(caller) {
+            Ok(found) => found,
+            Err(evidence) => return refused(evidence),
         };
         let text = |pointer: &str| {
             seat.agent
                 .pointer(pointer)
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
+        };
+        let unidentified = || {
+            refused(self.seat_evidence(
+                Some(crate::caller::CallerPane {
+                    herdr_session_name: seat.herdr_session_name.clone(),
+                    herdr_pane_id: text("/pane_id").unwrap_or_default(),
+                }),
+                thread.clone(),
+            ))
         };
         let harness_kind = match text("/agent").as_deref() {
             Some("claude") => HarnessKind::Claude,
@@ -710,11 +941,15 @@ impl BindsSeats for RunningNexus {
         let Some(mut foreground) = self.herdr.foreground_processes(&route) else {
             return unidentified();
         };
-        foreground.retain(|process| {
-            process
+        // A Codex seat's process resumes its thread; a Claude seat's is the
+        // Claude process the caller is, or was started under, whose session
+        // `seat_of` read.
+        foreground.retain(|process| match harness_kind {
+            HarnessKind::Codex => process
                 .arguments
                 .windows(2)
-                .any(|pair| pair[0] == "resume" && pair[1] == native_session_id)
+                .any(|pair| pair[0] == "resume" && pair[1] == native_session_id),
+            HarnessKind::Claude => caller.descends_from(process.process_id),
         });
         let [foreground] = foreground.as_slice() else {
             return unidentified();
@@ -756,7 +991,12 @@ impl BindsSeats for RunningNexus {
             model_name,
         };
         match self.verified_seat_node(&seat.herdr_session_name, &address, &binding) {
-            Err(_) => unidentified(),
+            Err(reason) => {
+                eprintln!(
+                    "flow-nexus: BindSeat {address:?}: the seat's binding is refused: {reason:?}"
+                );
+                unidentified()
+            }
             Ok(node) => match self
                 .store
                 .adopt_existing_flow(node, role, address.clone(), &binding)
@@ -783,6 +1023,13 @@ pub(crate) trait CompletesDirectSends {
         address: &Address,
     ) -> Result<Option<crate::waking::WakingLease<'_>>, Box<Response>>;
     fn complete_direct_send(&self, address: &Address, logical_id: String) -> SendAnswer;
+    /// The attempt still to settle that carried `logical_id`: the one
+    /// outstanding, else the latest parked once its payload was typed.
+    fn carrying_attempt(
+        &self,
+        address: &Address,
+        logical_id: &str,
+    ) -> Option<crate::store::queue_delivery::QueueDeliveryAttempt>;
 }
 
 impl CompletesDirectSends for RunningNexus {
@@ -866,12 +1113,31 @@ impl CompletesDirectSends for RunningNexus {
         if !matches!(self.store.outstanding_delivery(address), Ok(None))
             || flow_id.as_ref().is_some_and(|flow_id| {
                 !matches!(self.store.address_hold(flow_id), Ok(None))
-                    || !matches!(self.store.past_threshold(flow_id), Ok(false))
+                    || (!matches!(self.store.past_threshold(flow_id), Ok(false))
+                        && !crate::waking::NotesRefreshRefusals::holds(
+                            &self.refresh_refusals,
+                            flow_id,
+                        ))
             })
         {
             return Ok(None);
         }
         Ok(Some(lease))
+    }
+    fn carrying_attempt(
+        &self,
+        address: &Address,
+        logical_id: &str,
+    ) -> Option<crate::store::queue_delivery::QueueDeliveryAttempt> {
+        if let Ok(Some(attempt)) = self.store.outstanding_delivery(address) {
+            return Some(attempt);
+        }
+        self.store
+            .unsettled_deliveries(address)
+            .ok()?
+            .into_iter()
+            .rev()
+            .find(|attempt| attempt.request_id == logical_id)
     }
     fn complete_direct_send(&self, address: &Address, logical_id: String) -> SendAnswer {
         use crate::store::AnnouncesLaunchChanges;
@@ -898,7 +1164,7 @@ impl CompletesDirectSends for RunningNexus {
             let seen = changes.current();
             let state = {
                 let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
-                if let Ok(Some(attempt)) = self.store.outstanding_delivery(address) {
+                if let Some(attempt) = self.carrying_attempt(address, &logical_id) {
                     let _ = self.reconcile_delivery(&attempt);
                 }
                 self.store.logical_delivery_snapshot(&logical_id)
@@ -928,7 +1194,7 @@ impl CompletesDirectSends for RunningNexus {
             // A native transcript can land without a harness hook. One
             // final correlated reconciliation follows the bounded event
             // wait; timeout alone is never evidence of absence.
-            if let Ok(Some(attempt)) = self.store.outstanding_delivery(address) {
+            if let Some(attempt) = self.carrying_attempt(address, &logical_id) {
                 let _ = self.reconcile_delivery(&attempt);
             }
             self.store

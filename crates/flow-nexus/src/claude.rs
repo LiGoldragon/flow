@@ -110,6 +110,54 @@ impl ProjectsClaudeReadiness for ClaudeDaemon {
     }
 }
 
+/// Claude's own record of each interactive session it runs:
+/// `sessions/<pid>.json` under Claude's home, naming the process, its start
+/// and its session. Where the harness assigns the session id, this is where
+/// Flow learns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeSessions {
+    pub directory: PathBuf,
+}
+
+/// Reads the session a live Claude process runs.
+pub trait ReadsClaudeSessions: Sized {
+    /// The session records under this Claude home.
+    fn under(claude_home: &Path) -> Self;
+
+    /// The session process `process_id` runs, when Claude's record of it
+    /// names that process at the start it runs with now; None otherwise.
+    fn session_of(&self, process_id: u32) -> Option<String>;
+}
+
+impl ReadsClaudeSessions for ClaudeSessions {
+    fn under(claude_home: &Path) -> Self {
+        Self {
+            directory: claude_home.join("sessions"),
+        }
+    }
+
+    fn session_of(&self, process_id: u32) -> Option<String> {
+        let record = self
+            .directory
+            .join(format!("{process_id}.json"))
+            .read_json()?;
+        let stat = fs::read_to_string(format!("/proc/{process_id}/stat")).ok()?;
+        let (_, fields) = stat.rsplit_once(") ")?;
+        let started = fields.split_whitespace().nth(19)?;
+        let recorded_start = match record.get("procStart")? {
+            Value::String(start) => start.clone(),
+            Value::Number(start) => start.to_string(),
+            _ => return None,
+        };
+        let names_process =
+            record.get("pid").and_then(Value::as_u64) == Some(u64::from(process_id));
+        (names_process && recorded_start == started)
+            .then(|| record.string_at("sessionId").map(str::to_owned))
+            .flatten()
+            .filter(|session| !session.is_empty())
+    }
+}
+
 /// Where a Claude session's native transcript is.
 pub trait LocatesClaudeTranscript {
     /// Under a Claude transcript root (`projects/`): the one transcript of
@@ -158,15 +206,17 @@ pub enum ClaudeQueuedHistory {
 /// own transcript.  Background-agent rows are not main-thread activity.
 pub trait ReadsClaudeTurns {
     /// True only when the last main user/assistant activity is an assistant
-    /// completion with `end_turn`.
+    /// row that ends its turn: any stop reason but `tool_use` (`end_turn`,
+    /// `stop_sequence` as a synthetic API-error or login reply carries,
+    /// `max_tokens`). A row with no stop reason is still streaming.
     fn main_turn_ended(&self, session_id: &str) -> bool;
     fn main_turn_unstarted(&self, session_id: &str) -> bool;
-    fn assistant_answer_after(
-        &self,
-        session_id: &str,
-        native_prompt_id: &str,
-        answer: &str,
-    ) -> bool;
+    /// The answer that ended the main turn the input row `native_prompt_id`
+    /// opened: the text of that turn's last assistant row, when that row
+    /// ends the turn (`end_turn`) and carries text. A tool result continues
+    /// the turn; a later prompt closes it, its answer kept. None while the
+    /// turn runs, and when the file is unreadable or ends in a partial row.
+    fn assistant_answer_after(&self, session_id: &str, native_prompt_id: &str) -> Option<String>;
     /// The exact file and byte boundary before native submission.
     fn claude_cursor(&self) -> Option<ClaudeTranscriptCursor>;
     /// What the transcript after `cursor` shows of `text` in `session_id`'s
@@ -196,35 +246,36 @@ impl ReadsClaudeTurns for Path {
         })
     }
 
-    fn assistant_answer_after(
-        &self,
-        session_id: &str,
-        native_prompt_id: &str,
-        answer: &str,
-    ) -> bool {
-        let Ok(text) = fs::read_to_string(self) else {
-            return false;
-        };
+    fn assistant_answer_after(&self, session_id: &str, native_prompt_id: &str) -> Option<String> {
+        let text = fs::read_to_string(self).ok()?;
         if !text.ends_with('\n') {
-            return false;
+            return None;
         }
-        let mut active = false;
-        let mut matched = false;
+        let mut turn: Option<Option<String>> = None;
+        let mut closed = false;
         for line in text.lines() {
-            let Ok(row) = serde_json::from_str::<Value>(line) else {
-                return false;
-            };
+            let row = serde_json::from_str::<Value>(line).ok()?;
             if row.get("sessionId").and_then(Value::as_str) != Some(session_id)
                 || row.get("isSidechain").and_then(Value::as_bool) == Some(true)
             {
                 continue;
             }
+            if row.get("uuid").and_then(Value::as_str) == Some(native_prompt_id) {
+                turn = Some(None);
+                closed = false;
+                continue;
+            }
+            if closed {
+                continue;
+            }
+            let Some(answer) = turn.as_mut() else {
+                continue;
+            };
             match row.get("type").and_then(Value::as_str) {
-                Some("user") => {
-                    active = row.get("uuid").and_then(Value::as_str) == Some(native_prompt_id);
-                    matched = false;
-                }
-                Some("assistant") if active => {
+                Some("user") if row.get("isMeta").and_then(Value::as_bool) == Some(true) => {}
+                Some("user") if row.carries_tool_result() => *answer = None,
+                Some("user") => closed = true,
+                Some("assistant") => {
                     let content = row
                         .pointer("/message/content")
                         .and_then(Value::as_array)
@@ -238,15 +289,17 @@ impl ReadsClaudeTurns for Path {
                                 })
                                 .collect::<Vec<_>>()
                                 .join("\n")
-                        });
-                    matched = row.pointer("/message/stop_reason").and_then(Value::as_str)
-                        == Some("end_turn")
-                        && content.as_deref() == Some(answer);
+                        })
+                        .filter(|content| !content.is_empty());
+                    *answer = content.filter(|_| {
+                        row.pointer("/message/stop_reason").and_then(Value::as_str)
+                            == Some("end_turn")
+                    });
                 }
                 _ => {}
             }
         }
-        active && matched
+        turn.flatten()
     }
 
     fn main_turn_ended(&self, session_id: &str) -> bool {
@@ -263,8 +316,9 @@ impl ReadsClaudeTurns for Path {
                 match row.get("type").and_then(Value::as_str) {
                     Some("user") => Some(false),
                     Some("assistant") => Some(
-                        row.pointer("/message/stop_reason").and_then(Value::as_str)
-                            == Some("end_turn"),
+                        row.pointer("/message/stop_reason")
+                            .and_then(Value::as_str)
+                            .is_some_and(|reason| reason != "tool_use"),
                     ),
                     _ => state,
                 }
@@ -430,6 +484,24 @@ impl ReadsUsageLines for str {
     }
 }
 
+/// A transcript row read for what it carries.
+trait ReadsTranscriptRow {
+    /// A user row that hands a tool's result back: it continues its turn.
+    fn carries_tool_result(&self) -> bool;
+}
+
+impl ReadsTranscriptRow for Value {
+    fn carries_tool_result(&self) -> bool {
+        self.pointer("/message/content")
+            .and_then(Value::as_array)
+            .is_some_and(|parts| {
+                parts
+                    .iter()
+                    .any(|part| part.get("type").and_then(Value::as_str) == Some("tool_result"))
+            })
+    }
+}
+
 /// An endpoint path offered but not ready for a prompt.
 trait ParksEndpoint {
     fn parked(self) -> EndpointSelection;
@@ -535,6 +607,48 @@ mod tests {
             )
             .unwrap();
         assert!(!transcript.main_turn_ended("s"));
+    }
+
+    /// A synthetic reply (an API error, an expired login) ends its turn
+    /// with `stop_sequence`, and a reply cut at its token limit with
+    /// `max_tokens`: the seat rests. A `tool_use` row is mid-turn.
+    #[test]
+    fn any_stop_reason_but_tool_use_ends_the_main_turn() {
+        let directory = tempdir().unwrap();
+        for (reason, ended) in [
+            ("stop_sequence", true),
+            ("max_tokens", true),
+            ("end_turn", true),
+            ("tool_use", false),
+        ] {
+            let transcript = directory.path().join(format!("{reason}.jsonl"));
+            fs::write(
+                &transcript,
+                [
+                    row(serde_json::json!({"type":"user","sessionId":"s","uuid":"u",
+                        "message":{"content":"work"}})),
+                    row(
+                        serde_json::json!({"type":"assistant","sessionId":"s","uuid":"a",
+                        "isApiErrorMessage":reason == "stop_sequence",
+                        "message":{"stop_reason":reason,
+                            "content":[{"type":"text","text":"Login expired"}]}}),
+                    ),
+                ]
+                .concat(),
+            )
+            .unwrap();
+            assert_eq!(transcript.main_turn_ended("s"), ended, "{reason}");
+        }
+        let streaming = directory.path().join("streaming.jsonl");
+        fs::write(
+            &streaming,
+            row(
+                serde_json::json!({"type":"assistant","sessionId":"s","uuid":"a",
+                "message":{"stop_reason":null}}),
+            ),
+        )
+        .unwrap();
+        assert!(!streaming.main_turn_ended("s"));
     }
 
     #[test]
@@ -790,10 +904,12 @@ mod simplified_answer_tests {
             "message":{"stop_reason":"end_turn", "content":[{"type":"text","text":"answer"}]}})
             .to_string()
         };
+        let answered = Some("answer".to_owned());
         std::fs::write(&path, format!("{}\n{}\n", user("prompt-1"), answer(false))).unwrap();
-        assert!(path.assistant_answer_after("session", "prompt-1", "answer"));
-        assert!(!path.assistant_answer_after("session", "wrong", "answer"));
-        assert!(!path.assistant_answer_after("session", "prompt-1", "different"));
+        assert_eq!(path.assistant_answer_after("session", "prompt-1"), answered);
+        assert_eq!(path.assistant_answer_after("session", "wrong"), None);
+        // A later prompt closes the turn and keeps its answer; the later
+        // prompt's own turn has none yet.
         std::fs::write(
             &path,
             format!(
@@ -804,14 +920,51 @@ mod simplified_answer_tests {
             ),
         )
         .unwrap();
-        assert!(!path.assistant_answer_after("session", "prompt-2", "answer"));
-        assert!(!path.assistant_answer_after("session", "prompt-1", "answer"));
+        assert_eq!(path.assistant_answer_after("session", "prompt-2"), None);
+        assert_eq!(path.assistant_answer_after("session", "prompt-1"), answered);
         std::fs::write(&path, format!("{}\n{}\n", user("prompt-2"), answer(true))).unwrap();
-        assert!(!path.assistant_answer_after("session", "prompt-2", "answer"));
+        assert_eq!(path.assistant_answer_after("session", "prompt-2"), None);
         std::fs::write(&path, format!("{}\n{{partial", user("prompt-2"))).unwrap();
-        assert!(!path.assistant_answer_after("session", "prompt-2", "answer"));
+        assert_eq!(path.assistant_answer_after("session", "prompt-2"), None);
         std::fs::remove_file(&path).unwrap();
-        assert!(!path.assistant_answer_after("session", "prompt-2", "answer"));
+        assert_eq!(path.assistant_answer_after("session", "prompt-2"), None);
+    }
+    /// A turn that used a tool is answered by its last row: the tool's
+    /// result, a user row, continues the turn rather than closing it.
+    #[test]
+    fn an_answer_after_a_tool_result_ends_the_same_turn() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let rows = [
+            serde_json::json!({"type":"user", "sessionId":"session", "uuid":"prompt-1",
+                "message":{"content":"question"}}),
+            serde_json::json!({"type":"assistant", "sessionId":"session", "uuid":"a1",
+                "message":{"stop_reason":"tool_use", "content":[{"type":"text","text":"looking"},
+                    {"type":"tool_use","id":"t1","name":"Read","input":{}}]}}),
+            serde_json::json!({"type":"user", "sessionId":"session", "uuid":"r1",
+                "message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"x"}]}}),
+        ];
+        let text = |rows: &[serde_json::Value]| {
+            rows.iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>()
+        };
+        std::fs::write(&path, text(&rows)).unwrap();
+        assert_eq!(
+            path.assistant_answer_after("session", "prompt-1"),
+            None,
+            "a turn waiting on its tool has no answer"
+        );
+        let mut ended = rows.to_vec();
+        ended.push(
+            serde_json::json!({"type":"assistant", "sessionId":"session", "uuid":"a2",
+            "message":{"stop_reason":"end_turn", "content":[{"type":"text","text":"answer"}]}}),
+        );
+        std::fs::write(&path, text(&ended)).unwrap();
+        assert_eq!(
+            path.assistant_answer_after("session", "prompt-1"),
+            Some("answer".to_owned())
+        );
     }
     #[test]
     fn first_input_can_be_witnessed_from_a_new_transcript() {

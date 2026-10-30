@@ -6,6 +6,7 @@
 //! only by its family's upgrade, which carries every value unchanged.
 
 use super::send_v32::{UpgradesOffRoute, UpgradesRecipientBusy};
+use super::send_v34::UpgradesUnidentified;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use signal_flow::{
     DeliverySnapshot, DeliveryState, NativeReceipt, Refusal, RetryCause, SendAcceptance,
@@ -91,7 +92,7 @@ impl From<RefusalV31> for Refusal {
             RefusalV31::NoneAbove => Self::NoneAbove,
             RefusalV31::NotMessage => Self::NotMessage,
             RefusalV31::Taken(address) => Self::Taken(address),
-            RefusalV31::Unidentified(process) => Self::Unidentified(process),
+            RefusalV31::Unidentified(process) => Self::from_unidentified(process),
             RefusalV31::Store(reason) => Self::Store(reason),
             RefusalV31::NotSendServer(process) => Self::NotSendServer(process),
             RefusalV31::OffRoute => Self::from_off_route(),

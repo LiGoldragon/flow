@@ -607,6 +607,41 @@
   [listed addr]
   (mapv #(str (first (items %))) (:queue (metaflow listed addr))))
 
+(defn notice-queued?
+  "Whether the Notice id is queued at the Address in a Metaflows (Listed)
+  reply: the Notice lives in the metaflow's queue, which ReadQueueDeliveries
+  does not list. Never for a blank or missing id."
+  [metaflows addr id]
+  (boolean (and (not (str/blank? id))
+                (some #{id} (queued-ids (read-datom metaflows) addr)))))
+
+(defn delivery-states
+  "Each logical delivery's state by id, from an ObserveSends first frame,
+  SendsObserved.{ cursor [ { cursor id sent-by address state } ... ] }; the
+  state is its head (Delivered.Receipt reads Delivered). Empty for any other
+  reply, a refusal among them."
+  [frame]
+  (let [d (read-datom frame)]
+    (if (= "SendsObserved" (head d))
+      (into (sorted-map)
+            (for [snapshot (items (second (items (body d))))
+                  :let [[_ id _ _ state] (items snapshot)]
+                  :when (string? id)]
+              [id (if (map? state) (or (:head state) (str state)) (str state))]))
+      {})))
+
+(defn deliveries-preserved?
+  "Whether, after the restart, every logical delivery read before the stop is
+  held in the same state or advanced to Delivered (a Prepared or Uncertain
+  attempt whose transcript shows the receipt settles at restart), none lost.
+  Nothing read before the stop is no witness."
+  [before after]
+  (boolean (and (seq before)
+                (every? (fn [[id state]]
+                          (let [now (get after id)]
+                            (and now (or (= now state) (= now "Delivered")))))
+                        before))))
+
 (defn seat-declaration
   "The FlowKind and wake policy a Configure.Metaflows line declares for the
   Address, e.g. [\"Regular\" \"OnDemand\"]."
@@ -1446,10 +1481,28 @@
      :configuration (flow-meta "Configuration")
      :ids (issued-ids (str/join " " (cons outcomes (vals queues))))}))
 
+(defn observe-deliveries
+  "The first frame of the sender's ObserveSends, read from pane and then
+  closed: the state of every logical delivery the sender sent. Nil when no
+  frame comes in 20 s."
+  [pane]
+  (let [proc (p/process [(str @package "/bin/flow") "ObserveSends.None"]
+                        {:env (clean-env (merge (marks pane) {"FLOW_SOCKET" ordinary-socket}))
+                         :out :stream :err :string :in ""})
+        line (deref (future (try (.readLine (java.io.BufferedReader. (java.io.InputStreamReader. (:out proc))))
+                                 (catch Exception _ nil)))
+                    20000 nil)]
+    (p/destroy-tree proc)
+    line))
+
 (defn old-reads!
-  "The old Nexus's reads; every id in them is kept as one the old Nexus issued."
+  "The old Nexus's reads; every id in them is kept as one the old Nexus
+  issued. The logical deliveries' states are read through the sender's
+  ObserveSends: ReadQueueDeliveries lists only unsettled attempts."
   []
-  (let [reads (state-reads)]
+  (let [reads (state-reads)
+        frame (observe-deliveries (sender-pane))
+        reads (assoc reads :deliveries-frame frame :deliveries (delivery-states frame))]
     (swap! takeover update :old-ids (fnil into #{}) (:ids reads))
     reads))
 
@@ -1458,6 +1511,7 @@
   (keep-text! (str prefix ".configuration") (:configuration reads))
   (keep-text! (str prefix ".sendoutcomes") (:outcomes reads))
   (keep-text! (str prefix ".queue") (str/join "\n" (for [[a q] (:queues reads)] (str a " " q))))
+  (when (contains? reads :deliveries-frame) (keep-text! (str prefix ".deliveries") (str (:deliveries-frame reads))))
   (keep-text! (str prefix ".ids") (str/join "\n" (sort (:ids reads)))))
 
 (defn pane-of-flow [flow-id]
@@ -1696,13 +1750,14 @@
     (let [{:keys [queued-id]} @takeover
           reads (state-reads)
           primary-queue (get (:queues reads) asleep-primary "")
+          carried (notice-queued? (:metaflows reads) asleep-primary queued-id)
           listed (read-datom (:metaflows reads))
           pasts (into {} (for [m (items (body listed))] [(address-text (first (items m))) (vec (items (nth (items m) 2)))]))]
       {:reply (str "new Primary queue " primary-queue)
-       :pass (boolean (and (not (str/blank? queued-id)) (not (holds-id? primary-queue queued-id))
+       :pass (boolean (and (not (str/blank? queued-id)) (not carried)
                            (every? empty? (vals pasts))))
        :watched (str "the old Nexus's queued Notice " (if (str/blank? queued-id) "(none was queued)" queued-id)
-                     (if (holds-id? primary-queue queued-id) " carried" " not carried")
+                     (if carried " carried" " not carried")
                      "; Past by Address under the new Nexus " (pr-str pasts))})))
 
 (defn ids-step []
@@ -1741,8 +1796,9 @@
         _ (swap! takeover assoc :old-proc proc)
         reads (old-reads!)
         same-metaflows (= (:metaflows reads) (:metaflows last))
-        same-queues (= (:queues reads) (:queues last))
-        held (holds-id? (get (:queues reads) asleep-primary) queued-id)
+        kept (deliveries-preserved? (:deliveries last) (:deliveries reads))
+        held-before (notice-queued? (:metaflows last) asleep-primary queued-id)
+        held (notice-queued? (:metaflows reads) asleep-primary queued-id)
         guard (guard-probe @new-package)
         started (atom nil)
         back (declared-start guard #(reset! started (start-command! (nexus-command @new-package (:store (:seed @takeover)))
@@ -1752,14 +1808,19 @@
     (keep-reads! (str "takeover-" label "-rolled-back") reads)
     {:reply (str "new Nexus exit " new-exit "; old restarted " (name (or serving :silent))
                  "; switch-back declared start " (if (= back :refused) "refused by its guard" "started the new Nexus"))
-     :pass (boolean (and (not (guard-refuses? free)) untouched (= serving :serving) same-metaflows same-queues held
+     :pass (boolean (and (not (guard-refuses? free)) untouched (= serving :serving) same-metaflows kept held-before held
                          (= back :refused) (nil? @started) still (p/alive? proc)))
      :watched (str "sockets free after the stop " (not (guard-refuses? free))
                    "; old store " (if untouched "untouched" "changed") " since the stop"
-                   "; Metaflows " (if same-metaflows "equal" "unequal") " and ReadQueueDeliveries "
-                   (if same-queues "equal" "unequal") " to the last reads before the stop; queued Notice "
+                   "; Metaflows " (if same-metaflows "equal" "unequal") " to the last read before the stop"
+                   "; logical deliveries " (count (:deliveries last)) " before the stop, " (count (:deliveries reads))
+                   " after, " (if kept "each the same or Delivered, none lost" "NOT all the same or Delivered, or one lost")
+                   " (before " (pr-str (:deliveries last)) ", after " (pr-str (:deliveries reads)) ")"
+                   "; queued Notice "
                    (if (str/blank? queued-id) "(none was queued)" queued-id)
-                   (if held " held at " " missing from ") asleep-primary
+                   (if held-before " held in the Metaflows queue of " " not in the Metaflows queue of ") asleep-primary
+                   " before the stop,"
+                   (if held " held there " " missing there ") "after the rollback"
                    "; switch back: the guard reads " (pr-str guard) ", the declared start "
                    (if (= back :refused) "refused, the new Nexus never started" "passed and started the new Nexus")
                    "; old Nexus PID " (.pid (:proc proc)) (if still " answers" " does not answer") " Metaflows")}))
@@ -1856,10 +1917,11 @@
         (swap! takeover assoc :t2 reads)
         {:reply (str "Awake " (pr-str (:awake reads)) " / " (count (:ids reads)) " ids")
          :pass (boolean (and (seq (:awake reads))
-                             (holds-id? (get (:queues reads) asleep-primary) (:queued-id @takeover))))
+                             (notice-queued? (:metaflows reads) asleep-primary (:queued-id @takeover))))
          :watched (str "the queued Notice " (:queued-id @takeover)
-                       (if (holds-id? (get (:queues reads) asleep-primary) (:queued-id @takeover)) " held" " not held")
-                       " at " asleep-primary "; Metaflows, Configuration, ReadSendOutcomes and every"
+                       (if (notice-queued? (:metaflows reads) asleep-primary (:queued-id @takeover)) " held" " not held")
+                       " in the Metaflows queue of " asleep-primary "; " (count (:deliveries reads))
+                       " logical delivery states read by ObserveSends; Metaflows, Configuration, ReadSendOutcomes and every"
                        " ReadQueueDeliveries kept as takeover-T2.*")}))]
 
    ["A-T3 seed: Counters at the old maxima plus 10000, a lower one refused, the replay, flow-store-check" (seed-step "arm-a")]

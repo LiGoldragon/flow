@@ -309,6 +309,55 @@
   (check "an empty queue reads no ids"
          (= [] (flow-capsule/queued-ids listed "{ Psyche test Tertiary }"))))
 
+;; The queued Notice lives in the Metaflows queue (Listed), not in the delivery
+;; queue (ReadQueueDeliveries lists only attempts). It is witnessed there by
+;; its id, before the stop and after each rollback.
+(defn check-try [what f] (check what (try (boolean (f)) (catch Throwable _ false))))
+
+(let [listed (str "Listed.[ { { Psyche test Primary } Asleep [ 5912d9 ] [ { logical-delivery-00000000000000000001 Sender.{ Psyche test Secondary } Queue Soft.Notice.«Held» } ] }"
+                  " { { Psyche test Tertiary } Awake.429d70 [] [] } ]")
+      id "logical-delivery-00000000000000000001"
+      primary "{ Psyche test Primary }"]
+  (check-try "the Notice is found in the Metaflows queue of its Address"
+             #(flow-capsule/notice-queued? listed primary id))
+  (check-try "the Notice is not found at another Address"
+             #(not (flow-capsule/notice-queued? listed "{ Psyche test Tertiary }" id)))
+  (check-try "a blank or missing id is never found"
+             #(not (or (flow-capsule/notice-queued? listed primary "") (flow-capsule/notice-queued? listed primary nil))))
+  (check-try "an empty Metaflows holds no Notice"
+             #(not (flow-capsule/notice-queued? "Listed.[]" primary id))))
+
+;; A logical delivery's state is read from the sender's own ObserveSends first
+;; frame (SendsObserved, one DeliverySnapshot per delivery), not from
+;; ReadQueueDeliveries, which lists only unsettled attempts.
+(let [observed (str "SendsObserved.{ 9 [ { 1 logical-delivery-00000000000000000001 Sender.{ Psyche test Secondary } { Psyche test Primary } Queued }"
+                    " { 8 logical-delivery-00000000000000000022 Sender.{ Psyche test Secondary } { Psyche test Tertiary } Uncertain }"
+                    " { 9 logical-delivery-00000000000000000023 Sender.{ Psyche test Secondary } { Psyche test Tertiary } Delivered.«receipt» } ] }")]
+  (check-try "each logical delivery's state is read from SendsObserved"
+             #(= {"logical-delivery-00000000000000000001" "Queued"
+                  "logical-delivery-00000000000000000022" "Uncertain"
+                  "logical-delivery-00000000000000000023" "Delivered"}
+                 (flow-capsule/delivery-states observed)))
+  (check-try "a refusal or silence reads no states"
+             #(and (= {} (flow-capsule/delivery-states "Refused.Unidentified.{ 1 2 }"))
+                   (= {} (flow-capsule/delivery-states nil)))))
+
+(let [before {"a" "Queued" "b" "Uncertain" "c" "Delivered"}]
+  (check-try "unchanged states pass"
+             #(flow-capsule/deliveries-preserved? before before))
+  (check-try "an attempt settled at restart (Uncertain to Delivered) passes"
+             #(flow-capsule/deliveries-preserved? before (assoc before "b" "Delivered")))
+  (check-try "a delivery added after the stop does not matter"
+             #(flow-capsule/deliveries-preserved? before (assoc before "d" "Queued")))
+  (check-try "a lost delivery fails"
+             #(not (flow-capsule/deliveries-preserved? before (dissoc before "a"))))
+  (check-try "a delivery that went back (Delivered to Queued) fails"
+             #(not (flow-capsule/deliveries-preserved? before (assoc before "c" "Queued"))))
+  (check-try "a delivery that changed otherwise (Queued to Uncertain) fails"
+             #(not (flow-capsule/deliveries-preserved? before (assoc before "a" "Uncertain"))))
+  (check-try "no delivery read before the stop is no witness, so it fails"
+             #(not (flow-capsule/deliveries-preserved? {} {"a" "Queued"}))))
+
 ;; Scenario 20 needs a seat that takes its whole queue on a wake: a Regular
 ;; OnDemand seat (a Simplified seat takes its oldest alone).
 (let [metaflows (str "Configure.Metaflows.[ { { Psyche test Tertiary } [ spirit:core ] [] Regular Default OnDemand «» [] }"

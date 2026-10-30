@@ -442,7 +442,7 @@
           flow-claude-end-turn-with-sidechain-drains = context.exactTest "flow-nexus"
             "tests::queue_drain::a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop";
           flow-claude-two-requests-drain-on-receipts = context.exactTest "flow-nexus"
-            "tests::queue_drain::two_queued_claude_requests_drain_in_order_once_each_on_their_receipts";
+            "tests::queue_drain::two_queued_claude_requests_go_in_one_payload_and_settle_on_its_receipt";
           flow-claude-notification-settles-nothing = context.exactTest "flow-nexus"
             "tests::queue_drain::a_task_notification_that_takes_the_turn_first_settles_nothing";
           flow-claude-crash-reconciled-at-start = context.exactTest "flow-nexus"

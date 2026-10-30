@@ -1,7 +1,8 @@
 # Flow 0.40.7
 
-Pins signal-flow 33.3.0 (c73ac8, branch flow-ethos-76e6eb) and
-meta-signal-flow 40.1.0 (db8cf9, branch flow-ethos-76e6eb). The store
+Pins signal-flow 34.0.0 (fb13fa, branch flow-ethos-76e6eb) and
+meta-signal-flow 41.0.0 (34adbb, branch flow-ethos-76e6eb). DefaultMinutes
+is seeded (30) and idle; the Order-to-Task store migration will read it. The store
 gains the `flow_nexus_meta_default_minutes_configuration` table, added
 empty; the `flow_nexus_reminders` family moves to
 `flow-nexus-reminder-v2`. Flow 0.40.4 holds no reminders table, so its

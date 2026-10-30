@@ -1366,6 +1366,7 @@ impl CarriesSignalFrames for UnixStream {
 mod tests {
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
+    mod admission;
     mod configuring;
     mod counters;
     mod delivery;

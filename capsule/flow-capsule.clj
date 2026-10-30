@@ -714,7 +714,6 @@
           :let [cmd (try (str/replace (slurp (str dir "/cmdline")) "\u0000" " ") (catch Exception _ ""))
                 env (try (slurp (str dir "/environ")) (catch Exception _ ""))]
           :when (or (str/includes? cmd capsule-runtime) (str/includes? cmd store-path)
-                    (str/includes? cmd curriculum-package)
                     (str/includes? env (str "XDG_RUNTIME_DIR=" capsule-runtime "\u0000"))
                     (str/includes? cmd (str "--session " session))
                     (str/includes? env (str "FLOW_SOCKET=" ordinary-socket))
@@ -819,6 +818,14 @@
 
 (defn instant-in [seconds] (str (.plusSeconds (java.time.Instant/now) seconds)))
 
+(defn transcript-holds
+  "Whether the transcript of the metaflow's current Claude session holds
+  needle within seconds: a pane wraps long lines, a transcript does not."
+  [addr needle seconds]
+  (watch seconds #(when-let [native (native-session (inspect addr))]
+                    (when-let [file (first (fs/glob (str home "/.claude/projects") (str "*/" native ".jsonl")))]
+                      (str/includes? (slurp (str file)) needle)))))
+
 (defn pane-holds [pane needle seconds]
   (watch seconds #(some-> (pane-text pane) (str/includes? needle))))
 
@@ -894,15 +901,15 @@
       (let [pane (sender-pane)
             sent (flow (str "Send.{ Address." quaternary " Wake Soft.Task.{ 1 «Answer with one word and stop. Tag re1.» } }") pane)
             id (some-> (read-datom sent) body items first str)
-            reminded (pane-holds pane (str "Reminder 1 of 4: task " id) 150)
+            reminded (transcript-holds secondary (str "Reminder 1 of 4: task " id) 150)
             done (flow (str "Send.{ Address." secondary " Queue Soft.Done.{ " id " «closed» } }") pane)
             again (flow (str "Send.{ Address." secondary " Queue Soft.Done.{ " id " «again» } }") pane)
             _ (Thread/sleep 75000)
-            second-reminder (some-> (pane-text pane) (str/includes? (str "Reminder 2 of 4: task " id)))]
+            second-reminder (transcript-holds secondary (str "Reminder 2 of 4: task " id) 1)]
         {:reply (str "Task: " sent " / Done: " done " / Done again: " again)
          :pass (boolean (and id reminded (str/starts-with? done "SendAccepted.")
                              (str/includes? again "NoOpenTask") (not second-reminder)))
-         :watched (str "Secondary pane shows Reminder 1 of 4 for " id " " (boolean reminded)
+         :watched (str "Secondary transcript shows Reminder 1 of 4 for " id " " (boolean reminded)
                        "; no Reminder 2 in the 75 s after Done " (not second-reminder))}))]])
 
 (def codex-quaternary "{ Mind test Quaternary }")

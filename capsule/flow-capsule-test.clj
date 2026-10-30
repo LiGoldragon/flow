@@ -3,8 +3,7 @@
 ;; before the state root is deleted.
 ;;
 ;; Usage: bb flow-capsule-test.clj <path to flow-capsule.clj>
-(require '[babashka.fs :as fs]
-         '[clojure.string :as str])
+(require '[babashka.fs :as fs])
 
 (load-file (first *command-line-args*))
 

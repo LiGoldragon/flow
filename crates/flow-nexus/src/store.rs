@@ -107,6 +107,15 @@ const META_INVESTIGATION_CONFIGURATION_TABLE_NAME: TableName =
 const META_INVESTIGATION_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-investigation-configuration";
 const META_INVESTIGATION_CONFIGURATION_SCHEMA: &str =
     "flow-nexus-meta-investigation-configuration-v1";
+const META_DEFAULT_MINUTES_CONFIGURATION_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_meta_default_minutes_configuration");
+const META_DEFAULT_MINUTES_CONFIGURATION_FAMILY: &str =
+    "flow-nexus-meta-default-minutes-configuration";
+const META_DEFAULT_MINUTES_CONFIGURATION_SCHEMA: &str =
+    "flow-nexus-meta-default-minutes-configuration-v1";
+/// The default Minutes a new Memory holds until Configure declares one:
+/// the Minutes Flow gives a request that carries none of its own.
+pub(crate) const SEEDED_DEFAULT_MINUTES: i64 = 30;
 const META_LEAVE_OUT_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_leave_out_configuration");
 /// The tables an older store kept and an open drops: the meta
@@ -208,6 +217,7 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_meta_metaflow_configuration",
     "flow_nexus_meta_model_threshold_configuration",
     "flow_nexus_meta_investigation_configuration",
+    "flow_nexus_meta_default_minutes_configuration",
     "flow_nexus_compactions",
     "flow_nexus_reminders",
     "flow_nexus_successor_intents",
@@ -225,6 +235,7 @@ const CONFIGURATION_ONLY_ADDED_TABLES: &[&str] = &[
     "flow_nexus_meta_send_server_configuration",
     "flow_nexus_meta_model_threshold_configuration",
     "flow_nexus_meta_investigation_configuration",
+    "flow_nexus_meta_default_minutes_configuration",
     "flow_nexus_meta_metaflow_configuration",
 ];
 // These are this Flow source's authored Memory version candidates. They are
@@ -1075,6 +1086,32 @@ impl DescribesInvestigationTable for StoredMetaInvestigationConfiguration {
             META_INVESTIGATION_CONFIGURATION_TABLE_NAME,
             FamilyName::new(META_INVESTIGATION_CONFIGURATION_FAMILY),
             SchemaHash::for_label(META_INVESTIGATION_CONFIGURATION_SCHEMA),
+        )
+    }
+}
+
+/// The default Minutes, one row; absent until Configure declares one.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredMetaDefaultMinutesConfiguration {
+    default_minutes: i64,
+}
+
+impl EngineRecord for StoredMetaDefaultMinutesConfiguration {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new("default-minutes")
+    }
+}
+
+trait DescribesDefaultMinutesTable {
+    fn descriptor() -> TableDescriptor<StoredMetaDefaultMinutesConfiguration>;
+}
+
+impl DescribesDefaultMinutesTable for StoredMetaDefaultMinutesConfiguration {
+    fn descriptor() -> TableDescriptor<StoredMetaDefaultMinutesConfiguration> {
+        TableDescriptor::new(
+            META_DEFAULT_MINUTES_CONFIGURATION_TABLE_NAME,
+            FamilyName::new(META_DEFAULT_MINUTES_CONFIGURATION_FAMILY),
+            SchemaHash::for_label(META_DEFAULT_MINUTES_CONFIGURATION_SCHEMA),
         )
     }
 }
@@ -3182,6 +3219,8 @@ pub enum StoreError {
     LeaveOutNotForHarness,
     #[error("the topic {0} is not an uncapitalized camelCase identifier")]
     TopicRefused(String),
+    #[error("the default Minutes is refused: {0:?}")]
+    MinutesRefused(signal_flow::MinutesRefusal),
     #[error("the leave-out default of {entry} cannot be carried under one harness: {reason:?}")]
     LeaveOutUpgrade {
         entry: String,
@@ -3673,6 +3712,7 @@ pub(crate) struct MetaConfigurationTables {
     pub(crate) send_servers: TableReference<send_server::StoredMetaSendServerConfiguration>,
     pub(crate) metaflows: TableReference<metaflow_declaration::StoredMetaMetaflowConfiguration>,
     investigation: TableReference<StoredMetaInvestigationConfiguration>,
+    default_minutes: TableReference<StoredMetaDefaultMinutesConfiguration>,
 }
 
 trait RegistersMetaConfigurationTables: Sized {
@@ -3693,6 +3733,8 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             )?,
             investigation: engine
                 .register_table(StoredMetaInvestigationConfiguration::descriptor())?,
+            default_minutes: engine
+                .register_table(StoredMetaDefaultMinutesConfiguration::descriptor())?,
             metaflows: engine.upgraded_metaflow_declarations(
                 <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor(),
             )?,
@@ -3816,6 +3858,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
         let meta_thresholds_descriptor = StoredMetaThresholdConfiguration::descriptor();
         let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
+        let meta_default_minutes_descriptor = StoredMetaDefaultMinutesConfiguration::descriptor();
         let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         let meta_metaflows_descriptor = <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor();
@@ -3837,6 +3880,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_leave_outs_descriptor)
                 .with_family(&meta_send_servers_descriptor)
                 .with_family(&meta_investigation_descriptor)
+                .with_family(&meta_default_minutes_descriptor)
                 .with_family(&meta_metaflows_descriptor),
         )?;
         let state = engine.register_table(state_descriptor)?;
@@ -3850,6 +3894,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             leave_outs: engine.upgraded_leave_out_defaults(meta_leave_outs_descriptor)?,
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
             investigation: engine.register_table(meta_investigation_descriptor)?,
+            default_minutes: engine.register_table(meta_default_minutes_descriptor)?,
             metaflows: engine.upgraded_metaflow_declarations(meta_metaflows_descriptor)?,
         };
         if !recognized {
@@ -4404,6 +4449,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&meta_leave_outs_descriptor)
                 .with_family(&<send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor())
                 .with_family(&meta_investigation_descriptor)
+                .with_family(&StoredMetaDefaultMinutesConfiguration::descriptor())
                 .with_family(&compactions_descriptor)
                 .with_family(&reminders_descriptor)
                 .with_family(&successor_intents_descriptor)
@@ -5008,7 +5054,6 @@ impl AppliesFlowQuery for FlowStore {
             Query::Send(_)
             | Query::DeliverAll(_)
             | Query::BindSeat(_)
-            | Query::Remind(_)
             | Query::ObserveSends(_)
             | Query::ObserveSender(_) => Ok(Response::Refused(signal_flow::Refusal::Unidentified(
                 signal_flow::Process { pid: 0, started: 0 },
@@ -5070,8 +5115,7 @@ impl ReservesPendingStart for FlowStore {
             | Query::Send(_)
             | Query::DeliverAll(_)
             | Query::Launch(_)
-            | Query::BindSeat(_)
-            | Query::Remind(_) => Ok(None),
+            | Query::BindSeat(_) => Ok(None),
         }
     }
 }
@@ -7339,6 +7383,10 @@ pub(crate) trait ReadsFlowMemory {
                 META_INVESTIGATION_CONFIGURATION_FAMILY,
                 META_INVESTIGATION_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_meta_default_minutes_configuration" => (
+                META_DEFAULT_MINUTES_CONFIGURATION_FAMILY,
+                META_DEFAULT_MINUTES_CONFIGURATION_SCHEMA,
+            ),
             "flow_nexus_send_outcome_counter" => {
                 (send_outcome::COUNTER_FAMILY, send_outcome::COUNTER_SCHEMA)
             }
@@ -7870,6 +7918,7 @@ pub(crate) trait ReadsFlowMemory {
         let leave_out_rows = engine.match_records(QueryPlan::all(tables.leave_outs))?;
         let send_server_rows = engine.match_records(QueryPlan::all(tables.send_servers))?;
         let investigation_rows = engine.match_records(QueryPlan::all(tables.investigation))?;
+        let default_minutes_rows = engine.match_records(QueryPlan::all(tables.default_minutes))?;
         let metaflow_rows = engine.match_records(QueryPlan::all(tables.metaflows))?;
         if models_rows.database_marker() != marker
             || metaflow_rows.database_marker() != marker
@@ -7877,6 +7926,7 @@ pub(crate) trait ReadsFlowMemory {
             || leave_out_rows.database_marker() != marker
             || send_server_rows.database_marker() != marker
             || investigation_rows.database_marker() != marker
+            || default_minutes_rows.database_marker() != marker
             || engine.current_database_marker()? != marker
         {
             return Err(StoreError::ConfigurationReadViewChanged);
@@ -7899,6 +7949,12 @@ pub(crate) trait ReadsFlowMemory {
         let investigation = match investigation_rows.records() {
             [] => None,
             [stored] => Some(stored.investigation.clone()),
+            _ => return Err(StoreError::StateInvariant),
+        };
+        // A Memory no DefaultMinutes was declared in holds the seed.
+        let default_minutes = match default_minutes_rows.records() {
+            [] => SEEDED_DEFAULT_MINUTES,
+            [stored] => stored.default_minutes,
             _ => return Err(StoreError::StateInvariant),
         };
         let mut default_leave_outs = leave_out_rows
@@ -7932,6 +7988,7 @@ pub(crate) trait ReadsFlowMemory {
             send_servers,
             investigation,
             metaflows,
+            default_minutes,
         }))
     }
 
@@ -8113,6 +8170,20 @@ pub(crate) trait ReadsFlowMemory {
                     engine,
                     tables.investigation,
                     vec![StoredMetaInvestigationConfiguration { investigation }],
+                )
+            }
+            // The default Minutes meets the rule a Task's Minutes meets at
+            // admission, from now, before anything is written.
+            ConfigurationChange::DefaultMinutes(default_minutes) => {
+                use crate::reminding::CountsUnixSeconds;
+                use crate::store::reminder::RulesMinutes;
+                default_minutes
+                    .ruled_interval(std::time::SystemTime::now().seconds_since_epoch())
+                    .map_err(StoreError::MinutesRefused)?;
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.default_minutes,
+                    vec![StoredMetaDefaultMinutesConfiguration { default_minutes }],
                 )
             }
         }
@@ -11130,6 +11201,14 @@ mod tests {
                     engine
                         .match_records(QueryPlan::all(meta.investigation))
                         .expect("meta investigation configuration reads")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_meta_default_minutes_configuration",
+                    engine
+                        .match_records(QueryPlan::all(meta.default_minutes))
+                        .expect("meta default minutes configuration reads")
                         .records()
                         .len(),
                 ),

@@ -204,7 +204,6 @@ impl Dispatches for RunningNexus {
             // binds from it, and its Launch starts as an Unbound one would.
             Query::DeliverAll(_)
             | Query::BindSeat(_)
-            | Query::Remind(_)
             | Query::ObserveSends(_)
             | Query::ObserveSender(_) => {
                 Response::Refused(signal_flow::Refusal::Unidentified(signal_flow::Process {
@@ -363,6 +362,11 @@ impl Dispatches for RunningNexus {
                     Err(store::StoreError::TopicRefused(topic)) => {
                         meta_signal_flow::Response::ConfigureRejected(
                             meta_signal_flow::ConfigureRejection::TopicRefused(topic),
+                        )
+                    }
+                    Err(store::StoreError::MinutesRefused(refusal)) => {
+                        meta_signal_flow::Response::ConfigureRejected(
+                            meta_signal_flow::ConfigureRejection::MinutesRefused(refusal),
                         )
                     }
                     Err(error) => meta_signal_flow::Response::Refused(
@@ -846,18 +850,6 @@ impl ServesConnection for Connection {
             Query::DeliverAll(address) => {
                 let response = nexus.deliver_all(address, self.process.as_ref());
                 return self.peer.write_response(&response);
-            }
-            // A Remind is held for the caller's metaflow, read from the
-            // socket as a Send's sender is.
-            Query::Remind(remind) => {
-                use crate::reminding::RemindsCallers;
-                let response = nexus.remind(remind, self.process.as_ref());
-                let written = self.peer.write_response(&response);
-                drop(self);
-                if response == Response::Reminded {
-                    nexus.send_due_reminders();
-                }
-                return written;
             }
             // An adopted seat resting at its adoption is handed what is
             // queued for it now, as its turn's end would; Flow sees no Stop

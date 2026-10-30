@@ -420,6 +420,7 @@ fn each_family_is_its_last_declaration() {
             send_servers,
             metaflows: Vec::new(),
             investigation: None,
+            default_minutes: crate::store::SEEDED_DEFAULT_MINUTES,
         }
     );
     // An empty declaration empties the family.

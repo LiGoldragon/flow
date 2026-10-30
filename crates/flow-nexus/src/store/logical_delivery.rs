@@ -868,27 +868,12 @@ impl RecordsLogicalDeliveries for FlowStore {
             .map(|elapsed| elapsed.as_secs() as i64)
             .unwrap_or(0);
         let task_due = match &request {
-            Request::Task(task) if task.minutes == 0 => {
-                return Ok(Response::Refused(Refusal::MinutesRefused(
-                    signal_flow::MinutesRefusal::Zero,
-                )));
-            }
-            Request::Task(task) if task.minutes < 0 => {
-                return Ok(Response::Refused(Refusal::MinutesRefused(
-                    signal_flow::MinutesRefusal::Negative,
-                )));
-            }
             Request::Task(task) => {
-                let interval = task.minutes.checked_mul(60);
-                let furthest = interval
-                    .and_then(|seconds| seconds.checked_mul(super::reminder::TASK_REMINDERS))
-                    .and_then(|seconds| now.checked_add(seconds));
-                match (interval, furthest) {
-                    (Some(seconds), Some(_)) => Some(now + seconds),
-                    _ => {
-                        return Ok(Response::Refused(Refusal::MinutesRefused(
-                            signal_flow::MinutesRefusal::Unreachable,
-                        )));
+                use super::reminder::RulesMinutes;
+                match task.minutes.ruled_interval(now) {
+                    Ok(interval) => Some(now + interval),
+                    Err(refusal) => {
+                        return Ok(Response::Refused(Refusal::MinutesRefused(refusal)));
                     }
                 }
             }
@@ -976,10 +961,8 @@ impl RecordsLogicalDeliveries for FlowStore {
                 self.hold_reminder(super::reminder::Reminder {
                     key: id.clone(),
                     address: reminded,
-                    reminding: super::reminder::Reminding::Task {
-                        recipient: address.clone(),
-                        minutes: task.minutes,
-                    },
+                    recipient: address.clone(),
+                    minutes: task.minutes,
                     due,
                     sent: 0,
                 })?;

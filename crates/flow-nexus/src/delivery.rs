@@ -434,12 +434,9 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
     }
 
     fn retracted_restored_letter(&self) -> bool {
-        // NativeInput is rendered as bare user content. It has no stable
-        // text marker, so matching it could retract an identical human draft.
-        if matches!(
-            &self.request.message.letter().content,
-            Content::NativeInput(_)
-        ) {
+        // A Waking is rendered as bare user content. It has no stable text
+        // marker, so matching it could retract an identical human draft.
+        if matches!(&self.request.message.letter().content, Content::Waking(_)) {
             return false;
         }
         let herdr = &self.nexus.herdr;

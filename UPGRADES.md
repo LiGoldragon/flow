@@ -1,3 +1,39 @@
+# Flow 0.40.7
+
+Pins signal-flow 33.3.0 (c73ac8, branch flow-ethos-76e6eb) and
+meta-signal-flow 40.1.0 (db8cf9, branch flow-ethos-76e6eb). The store
+gains the `flow_nexus_meta_default_minutes_configuration` table, added
+empty; the `flow_nexus_reminders` family moves to
+`flow-nexus-reminder-v2`. Flow 0.40.4 holds no reminders table, so its
+store upgrades unchanged; a store written by 0.40.5 or 0.40.6 holds a v1
+reminders family and is not carried.
+
+- `Remind.{ Instant Body }`, `Reminded` and `Refused.InstantUnreadable` are
+  gone from the ordinary socket and the CLI. A reminder is a Task with its
+  Minutes: `Send.{ <recipient> Soft.Task.{ 30 «…» } }` reminds its sender
+  when the Minutes lapse with no Done, four reminders in all. A stored
+  reminder holds its task's recipient and Minutes directly.
+- `Configure.DefaultMinutes.<Minutes>` on the meta socket sets the default
+  Minutes, kept in Memory; a new Memory holds 30 until one is declared.
+  `Configuration` ends with it. The rule a Task's Minutes meets at
+  admission refuses a zero, negative or unreachable default as
+  `ConfigureRejected.MinutesRefused.[ Zero Negative Unreachable ]`,
+  changing nothing. Nothing reads the default yet: it is the Minutes the
+  store migration gives an Order that carries none.
+- A hand-over holding a HardAbrupt or MiddleAbrupt message types every
+  queued message as its own `NativeInput` in one top-level vector, oldest
+  first, each naming its own sender: a Task, the reminder Flow raised for
+  it and a Done each read as from who sent them. Before, the cohort was
+  folded into one Notice credited to the oldest message's sender, and its
+  Claude receipt could never match. The meta Letter carries a
+  `Content.Waking.Vector<NativeInput>`.
+- The capsule keeps its raw Nexus log and every flow transcript past
+  teardown, in `<root>/capsule-<flow version>-<timestamp>/`, the root
+  `FLOW_CAPSULE_WITNESS_DIR`, else `$FLOW_DIRECTORY/witnesses`; with
+  neither it starts nothing. Scenarios 15 and 16 exercise a Task's Minutes
+  at admission and a Task reminder held across a Nexus restart; the
+  capsule configures `DefaultMinutes.30`.
+
 # Flow 0.40.6
 
 Pins signal-flow 33.2.0 (5c301a, branch flow-ethos-76e6eb) and

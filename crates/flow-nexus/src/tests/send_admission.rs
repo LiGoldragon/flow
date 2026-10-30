@@ -482,14 +482,21 @@ fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
         HerdrRouteSelection, Origin, PowerLevel,
     };
 
-    // The flow CLI is built beside this test executable.
-    let cli = std::env::current_exe()
-        .expect("test executable")
-        .parent()
-        .and_then(std::path::Path::parent)
+    // The flow CLI is built in the profile directory this test executable
+    // lies under: `target/<profile>/flow`, whatever depth cargo gives the
+    // test itself.
+    let executable = std::env::current_exe().expect("test executable");
+    let cli = executable
+        .ancestors()
+        .skip(1)
         .map(|directory| directory.join("flow"))
-        .filter(|path| path.is_file())
-        .expect("the flow CLI is built beside this test: cargo test --workspace");
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| {
+            panic!(
+                "no flow CLI above {}: cargo test --workspace builds it",
+                executable.display()
+            )
+        });
 
     let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
     ended_claude(fixture);

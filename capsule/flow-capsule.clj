@@ -2,6 +2,12 @@
 ;;
 ;; Usage: flow-capsule <flow-package> [--keep-going] [--log <path>]
 ;;
+;; A run keeps its raw Nexus log and every flow transcript past teardown,
+;; copied before the state root is deleted into
+;; <witness root>/capsule-<flow version>-<timestamp>/. The witness root is
+;; FLOW_CAPSULE_WITNESS_DIR, else the calling flow's FLOW_DIRECTORY's
+;; witnesses directory; with neither set the capsule starts nothing.
+;;
 ;; The capsule owns: the runtime directory $XDG_RUNTIME_DIR/flow-testing/,
 ;; which is XDG_RUNTIME_DIR for every process it runs and holds the Flow and
 ;; Curriculum sockets; the state directory ~/.local/state/flow-testing/,
@@ -492,6 +498,39 @@
 
 
 
+;; ---------------------------------------------------------------- witnesses
+
+(defn witness-root
+  "Where runs keep their witnesses, read from an environment:
+  FLOW_CAPSULE_WITNESS_DIR as given, else the calling flow's directory's
+  witnesses."
+  [env]
+  (or (not-empty (get env "FLOW_CAPSULE_WITNESS_DIR"))
+      (some-> (not-empty (get env "FLOW_DIRECTORY")) (str "/witnesses"))))
+
+(defn witness-name
+  "A run's witness directory: the flow version the Nexus reports, and the
+  UTC time the run started."
+  [version-line instant]
+  (str "capsule-" (last (str/split (str/trim version-line) #"\s+")) "-"
+       (.format (java.time.format.DateTimeFormatter/ofPattern "yyyyMMdd'T'HHmmss'Z'")
+                (java.time.ZonedDateTime/ofInstant instant java.time.ZoneOffset/UTC))))
+
+(defn keep-witnesses!
+  "Copies each witness that exists, a file or a whole tree, under its name
+  in dir; the originals stay for teardown to delete. Answers dir."
+  [dir witnesses]
+  (fs/create-dirs dir)
+  (doseq [[name source] witnesses
+          :when (and source (fs/exists? source))]
+    (if (fs/directory? source)
+      (fs/copy-tree source (str dir "/" name))
+      (fs/copy source (str dir "/" name))))
+  dir)
+
+(def witness-dir (atom nil))
+(def run-log (atom nil))
+
 ;; ---------------------------------------------------------------- capsule life
 
 (def nexus (atom nil))
@@ -752,6 +791,15 @@
       (when (= ::running (deref h 10000 ::running)) (p/destroy-tree h))
       (swap! steps conj (str "Herdr session " session " stopped")))
     (run {} "herdr" "session" "delete" session)
+    ;; Every process that writes them has stopped: the Nexus log and each
+    ;; flow transcript are kept before the state root and traces go.
+    (when-let [dir @witness-dir]
+      (swap! steps conj
+             (try (keep-witnesses! dir {"nexus.log" @run-log
+                                        "claude-transcripts" capsule-transcripts
+                                        "codex-sessions" (str codex-home "/sessions")})
+                  (str "witnesses kept in " dir)
+                  (catch Exception e (str "witnesses not kept in " dir ": " (.getMessage e))))))
     ;; The capsule's Herdr keeps its sessions in the capsule's own config
     ;; home: its session is gone when its directory is, read before that
     ;; home is deleted with the state root, and no Herdr runs after it.
@@ -787,7 +835,8 @@
 
 ;; ---------------------------------------------------------------- night scenarios
 ;; A refused successor keeps its flow, is told and is handed its queue; a
-;; Remind is held across a restart; a Task is reminded until its Done.
+;; Task's Minutes is ruled at admission, its reminder is held across a
+;; restart, and it is reminded until its Done.
 
 (def nexus-log (atom nil))
 
@@ -815,8 +864,6 @@
   (count (heads-named "Stopped" (read-datom (flow-meta (str "ReadEvents." flow-id))))))
 
 (defn log-text [] (try (slurp @nexus-log) (catch Exception _ "")))
-
-(defn instant-in [seconds] (str (.plusSeconds (java.time.Instant/now) seconds)))
 
 (defn transcript-holds
   "Whether the transcript of the metaflow's current Claude session holds
@@ -871,30 +918,40 @@
          :watched (str "flow " flow-id " rested " rested "; still Awake " kept "; log: " kept-line
                        "; Tag rb2 typed into the kept seat " (boolean handed))}))]
 
-   ["15 Remind: refused unreadable, delivered at its instant"
+   ["15 Task: Minutes zero and below refused at admission, never queued"
     (fn []
       (let [pane (sender-pane)
-            bad (flow "Remind.{ tomorrow «x» }" pane)
-            reply (flow (str "Remind.{ " (instant-in 15) " «Tag rc1.» }") pane)
-            seen (pane-holds pane "Tag rc1" 75)]
-        {:reply (str "unreadable: " bad " / Remind: " reply)
-         :pass (boolean (and (= bad "Refused.InstantUnreadable.tomorrow") (= reply "Reminded") seen))
-         :watched (str "Secondary pane " pane (if seen " shows" " lacks") " Tag rc1 within 75 s")}))]
+            before (count (:queue (current quaternary)))
+            zero (send-to quaternary "Wake" "Soft.Task.{ 0 «Answer with one word and stop. Tag rc1.» }" pane)
+            negative (send-to quaternary "Queue" "Soft.Task.{ -1 «Answer with one word and stop. Tag rc1.» }" pane)
+            unreadable (send-to quaternary "Queue" "Soft.Task.{ soon «Answer with one word and stop. Tag rc1.» }" pane)
+            after (count (:queue (current quaternary)))]
+        {:reply (str "zero: " zero " / negative: " negative " / unreadable: " unreadable)
+         :pass (boolean (and (= zero "Refused.MinutesRefused.Zero")
+                             (= negative "Refused.MinutesRefused.Negative")
+                             (str/starts-with? unreadable "exit 2")
+                             (= before after)))
+         :watched (str "Psyche test Quaternary's queue held " before " before and " after
+                       " after; the unreadable Minutes never left the CLI")}))]
 
-   ["16 Remind held across a Nexus restart"
+   ["16 Task reminder held across a Nexus restart"
     (fn []
       (let [pane (sender-pane)
-            reply (flow (str "Remind.{ " (instant-in 45) " «Tag rd1.» }") pane)
+            sent (send-to quaternary "Queue" "Soft.Task.{ 1 «Answer with one word and stop. Tag rd1.» }" pane)
+            id (some-> (read-datom sent) body items first str)
             n @nexus
             _ (p/destroy n)
             stopped (:exit (deref n 20000 {:exit "still running"}))
             _ (fs/delete-if-exists ordinary-socket)
             _ (fs/delete-if-exists meta-socket)
             _ (start-nexus! @nexus-log)
-            seen (pane-holds pane "Tag rd1" 120)]
-        {:reply (str "Remind: " reply " / Nexus stopped, exit " stopped " / restarted")
-         :pass (boolean (and (= reply "Reminded") seen))
-         :watched (str "Secondary pane " pane (if seen " shows" " lacks") " Tag rd1 after the restart")}))]
+            reminded (transcript-holds secondary (str "Reminder 1 of 4: task " id) 150)
+            done (flow (str "Send.{ Address." secondary " Queue Soft.Done.{ " id " «closed» } }") pane)]
+        {:reply (str "Task: " sent " / Nexus stopped, exit " stopped " / restarted / Done: " done)
+         :pass (boolean (and id (str/starts-with? sent "SendAccepted.") reminded
+                             (str/starts-with? done "SendAccepted.")))
+         :watched (str "Secondary transcript shows Reminder 1 of 4 for " id " after the restart "
+                       (boolean reminded) "; the Done closes it")}))]
 
    ["17 Task reminded at its minutes; Done closes it; Done again refused"
     (fn []
@@ -981,9 +1038,16 @@
     (reset! keep-going (boolean (some #{"--keep-going"} options)))
     (let [log (or (second (drop-while #(not= % "--log") options)) (str state-root "/nexus.log"))
           wall (System/currentTimeMillis)
-          passed (atom true)]
-      (println (str "flow-capsule " @package " | " (str/trim (:out (run {} (str @package "/bin/flow-nexus") "--version")))
+          passed (atom true)
+          version (str/trim (:out (run {} (str @package "/bin/flow-nexus") "--version")))
+          root (witness-root (System/getenv))]
+      (when-not root
+        (refuse "no witness directory: set FLOW_CAPSULE_WITNESS_DIR, or run from a flow with FLOW_DIRECTORY; nothing started"))
+      (reset! witness-dir (str root "/" (witness-name version (java.time.Instant/now))))
+      (reset! run-log log)
+      (println (str "flow-capsule " @package " | " version
                     " | curriculum " curriculum-package))
+      (println (str "witnesses | " @witness-dir))
       (try
         (start-capsule! log)
         (start-curriculum! log)
@@ -1005,7 +1069,7 @@
       (let [clean (teardown!)]
         (println (str "wall " (- (System/currentTimeMillis) wall) " ms | "
                       (count (filter :pass @results)) " of " (count @results) " scenarios passed, "
-                      (count (filter :skipped @results)) " skipped"))
+                      (count (filter :skipped @results)) " skipped | witnesses " @witness-dir))
         (System/exit (if (and @passed clean) 0 1))))))
 
 (when (= *file* (System/getProperty "babashka.file"))

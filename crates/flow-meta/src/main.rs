@@ -408,6 +408,7 @@ mod tests {
             send_servers: vec![],
             metaflows: rows.clone(),
             investigation: None,
+            default_minutes: 30,
         };
         let printed = Response::Configuration(snapshot)
             .datomize(vec![])

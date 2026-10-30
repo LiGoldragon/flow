@@ -273,6 +273,9 @@ trait RunsConfigurationStartup {
                 Err(StoreError::TopicRefused(topic)) => {
                     MetaResponse::ConfigureRejected(ConfigureRejection::TopicRefused(topic))
                 }
+                Err(StoreError::MinutesRefused(refusal)) => {
+                    MetaResponse::ConfigureRejected(ConfigureRejection::MinutesRefused(refusal))
+                }
                 Err(error) => {
                     MetaResponse::Refused(meta_signal_flow::StoreRefusal::Store(error.to_string()))
                 }

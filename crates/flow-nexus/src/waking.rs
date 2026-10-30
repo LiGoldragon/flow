@@ -1981,34 +1981,29 @@ impl PerformsWakeAndDrain for RunningNexus {
                 .unwrap_or(false)
         };
         if !cohort.iter().all(soft) {
-            // The strongest priority in the queue carries the one payload.
-            let message = if cohort.len() == 1 {
-                oldest.message.clone()
-            } else if cohort
+            // One Waking carries the whole cohort, every input under its own
+            // id, sender and priority; the strongest priority in it is how
+            // the payload is typed.
+            let waking = cohort
                 .iter()
-                .any(|entry| matches!(entry.message, signal_flow::Message::HardAbrupt(_)))
-            {
-                signal_flow::Message::HardAbrupt(signal_flow::Request::Notice(text.clone()))
-            } else {
-                signal_flow::Message::MiddleAbrupt(signal_flow::Request::Notice(text.clone()))
-            };
-            let input = signal_flow::NativeInput {
-                logical_delivery_id: oldest.logical_delivery_id.clone(),
-                sent_by: oldest.sent_by.clone(),
-                message: message.clone(),
-            };
+                .map(|entry| signal_flow::NativeInput {
+                    logical_delivery_id: entry.logical_delivery_id.clone(),
+                    sent_by: entry.sent_by.clone(),
+                    message: entry.message.clone(),
+                })
+                .collect::<Vec<_>>();
             let letter = meta_signal_flow::Letter {
                 message_id: oldest.logical_delivery_id.clone(),
                 sender: meta_signal_flow::Sender::Owner,
-                content: meta_signal_flow::Content::NativeInput(input),
+                content: meta_signal_flow::Content::Waking(waking),
             };
-            let message = match &message {
-                signal_flow::Message::HardAbrupt(_) => {
-                    meta_signal_flow::Message::HardAbrupt(letter)
-                }
-                signal_flow::Message::MiddleAbrupt(_) | signal_flow::Message::Soft(_) => {
-                    meta_signal_flow::Message::MiddleAbrupt(letter)
-                }
+            let message = if cohort
+                .iter()
+                .any(|entry| matches!(entry.message, signal_flow::Message::HardAbrupt(_)))
+            {
+                meta_signal_flow::Message::HardAbrupt(letter)
+            } else {
+                meta_signal_flow::Message::MiddleAbrupt(letter)
             };
             let result = self.deliver(meta_signal_flow::DeliveryRequest {
                 delivery_id: attempt.attempt_id.clone(),

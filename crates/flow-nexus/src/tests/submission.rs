@@ -565,11 +565,11 @@ fn a_native_input_matching_a_letter_shaped_prompt_is_submitted_again_never_retra
     let message = Message::HardAbrupt(Letter {
         message_id: "logical-delivery-00000000000000000002".into(),
         sender: Sender::Owner,
-        content: Content::NativeInput(signal_flow::NativeInput {
+        content: Content::Waking(vec![signal_flow::NativeInput {
             logical_delivery_id: "logical-delivery-00000000000000000002".into(),
             sent_by: signal_flow::SentBy::Flow,
             message: signal_flow::Message::HardAbrupt(signal_flow::Request::Order(text.into())),
-        }),
+        }]),
     });
 
     assert!(matches!(

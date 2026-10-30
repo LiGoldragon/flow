@@ -3,9 +3,10 @@
 //!
 //! Three layers. Two make a harness command impossible by construction; the
 //! third reports intent.
-//! 1. Delivered NativeInputs are rendered as one vector of their datoms:
-//!    logical delivery id, sender and request under its priority, so the
-//!    recipient can name each.
+//! 1. A Waking is rendered as one vector of its NativeInput datoms, oldest
+//!    first: each its logical delivery id, its own sender and its request
+//!    under its own priority, so the recipient can name each and tell who
+//!    sent it.
 //! 2. No keys in the text: no C0 control but LF and TAB, no DEL, no C1. That
 //!    excludes CR (a submit), ESC (an interrupt, or the `ESC[201~` that ends
 //!    a bracketed paste), Ctrl-C and Ctrl-D. Herdr 0.8.2 `agent prompt` was
@@ -93,14 +94,11 @@ impl RendersPaneText for Message {
     fn pane_text(&self) -> PaneText {
         PaneText {
             text: match &self.letter().content {
-                // A delivered message is typed as a cohort of one: a vector
-                // holding its datom, its logical delivery id, who sent it,
-                // and its request under its priority, as a queue's hand-over
-                // types it, so its receipt reads the same.
-                Content::NativeInput(input) => vec![input.clone()]
-                    .datomize(Vec::new())
-                    .protosize()
-                    .compact(),
+                // A Waking is typed as itself alone: one vector of its
+                // inputs' datoms, each its logical delivery id, who sent it
+                // and its request under its own priority, as a queue's
+                // hand-over types it, so its receipt reads the same.
+                Content::Waking(inputs) => inputs.datomize(Vec::new()).protosize().compact(),
                 _ => self.datomize(Vec::new()).protosize().compact(),
             },
         }
@@ -168,7 +166,9 @@ impl ReadsContent for Content {
     /// when the psyche's own words are.
     fn is_empty(&self) -> bool {
         match self {
-            Content::NativeInput(input) => input.message.native_content().trim().is_empty(),
+            Content::Waking(inputs) => inputs
+                .iter()
+                .all(|input| input.message.native_content().trim().is_empty()),
             Content::Text(text) => text.trim().is_empty(),
             Content::Psyche(psyche) => psyche.psyche_verbatim.trim().is_empty(),
         }
@@ -176,7 +176,10 @@ impl ReadsContent for Content {
 
     fn strings(&self) -> Vec<String> {
         match self {
-            Content::NativeInput(input) => vec![input.message.native_content()],
+            Content::Waking(inputs) => inputs
+                .iter()
+                .map(|input| input.message.native_content())
+                .collect(),
             Content::Text(text) => vec![text.clone()],
             Content::Psyche(psyche) => {
                 vec![
@@ -343,7 +346,7 @@ mod tests {
         let message = Message::HardAbrupt(Letter {
             message_id: "logical-delivery-00000000000000000001".into(),
             sender: Sender::Owner,
-            content: Content::NativeInput(input.clone()),
+            content: Content::Waking(vec![input.clone()]),
         });
         let typed = message.pane_text();
         assert!(
@@ -386,13 +389,13 @@ mod tests {
             Message::HardAbrupt(Letter {
                 message_id: "native-content".into(),
                 sender: Sender::Owner,
-                content: Content::NativeInput(signal_flow::NativeInput {
+                content: Content::Waking(vec![signal_flow::NativeInput {
                     logical_delivery_id: "native-content".into(),
                     sent_by: signal_flow::SentBy::Flow,
                     message: signal_flow::Message::HardAbrupt(signal_flow::Request::Order(
                         text.into(),
                     )),
-                }),
+                }]),
             })
         };
         assert_eq!(

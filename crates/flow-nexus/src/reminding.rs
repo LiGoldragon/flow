@@ -1,20 +1,15 @@
-//! Reminders: a caller's Remind, and the reminders of a Task left with no
-//! Done. Each is held in Flow's Memory (`store::reminder`), so a refresh of
-//! the reminded metaflow or a restart of the Nexus keeps it. A reminder due
-//! is queued for its metaflow as Soft.Notice with Wake, as from Flow, and
-//! woken or handed over as any waking request is.
+//! Reminders: the reminders of a Task left with no Done. Each is held in
+//! Flow's Memory (`store::reminder`), so a refresh of the reminded metaflow
+//! or a restart of the Nexus keeps it. A reminder due is queued for its
+//! metaflow as Soft.Notice with Wake, as from Flow, and woken or handed
+//! over as any waking request is.
 
 use crate::HoldsStopRequest;
 use crate::RunningNexus;
-use crate::sending::{IdentifiesSender, MintsId};
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
-use crate::store::reminder::{
-    AdvancesReminder, ReadsInstant, RecordsReminders, Reminder, Reminding,
-};
+use crate::store::reminder::{AdvancesReminder, RecordsReminders};
 use crate::waking::SleepsAndWakesSeats;
-use signal_flow::{
-    Address, Delivery, Message, Process, Refusal, Remind_Data, Request, Response, SentBy,
-};
+use signal_flow::{Address, Delivery, Message, Request, Response, SentBy};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// How often Flow looks for reminders due.
@@ -34,8 +29,6 @@ impl CountsUnixSeconds for SystemTime {
 }
 
 pub trait RemindsCallers {
-    /// Holds a Remind for the calling process's metaflow.
-    fn remind(&self, remind: Remind_Data, peer: Option<&Process>) -> Response;
     /// Queues every reminder due now, and wakes or hands over to each
     /// metaflow reminded. Takes the dispatch gate; the caller holds none.
     fn send_due_reminders(&self);
@@ -44,33 +37,6 @@ pub trait RemindsCallers {
 }
 
 impl RemindsCallers for RunningNexus {
-    fn remind(&self, remind: Remind_Data, peer: Option<&Process>) -> Response {
-        let Some(due) = remind.instant.as_str().unix_seconds() else {
-            return Response::Refused(Refusal::InstantUnreadable(remind.instant));
-        };
-        let Some(peer) = peer else {
-            return Response::Refused(Refusal::Unidentified(Process { pid: 0, started: 0 }));
-        };
-        let _turn = self
-            .dispatch_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let address = match self.sending_address(peer) {
-            Ok(address) => address,
-            Err(refusal) => return *refusal,
-        };
-        match self.store.hold_reminder(Reminder {
-            key: MintsId::minted_id("remind"),
-            address,
-            reminding: Reminding::Remind(remind.body),
-            due: Some(due),
-            sent: 0,
-        }) {
-            Ok(()) => Response::Reminded,
-            Err(error) => Response::Refused(Refusal::Store(error.to_string())),
-        }
-    }
-
     fn send_due_reminders(&self) {
         let now = SystemTime::now().seconds_since_epoch();
         let mut reminded: Vec<Address> = Vec::new();

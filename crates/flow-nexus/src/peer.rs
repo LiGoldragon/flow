@@ -60,17 +60,18 @@ impl AdmitsMetaPeer for RunningNexus {
         };
         let (message_binary, meta_aspects) = match self.store.configuration_snapshot() {
             Ok(Some(snapshot)) => (
-                snapshot.nexus.message_nexus_binary,
+                snapshot.nexus.message_nexus_binary_option,
                 snapshot.nexus.meta_aspects,
             ),
             Ok(None) => match self.store.delivery_configuration() {
-                Ok(legacy) => (legacy.message_nexus_path, legacy.meta_aspects),
+                Ok(legacy) => (legacy.message_nexus_path_option, legacy.meta_aspects),
                 Err(_) => return Some(MetaRefusal::PeerUnknown),
             },
             Err(_) => return Some(MetaRefusal::PeerUnknown),
         };
-        if !message_binary.is_empty() && peer.executable() == fs::canonicalize(&message_binary).ok()
-        {
+        if message_binary.as_ref().is_some_and(|binary| {
+            !binary.is_empty() && peer.executable() == fs::canonicalize(binary).ok()
+        }) {
             return None;
         }
         let pane = peer.caller_pane(&self.herdr);

@@ -22,16 +22,20 @@ fn a_launch_receives_the_socket_from_each_typed_start() {
             next_codex: endpoint(directory.path(), "next"),
             harness_profiles: vec![],
             meta_aspects: vec![meta_signal_flow::Aspect::Psyche],
-            message_nexus_path: directory
-                .path()
-                .join("message.sock")
-                .to_string_lossy()
-                .into_owned(),
-            message_nexus_binary: directory
-                .path()
-                .join("message-nexus")
-                .to_string_lossy()
-                .into_owned(),
+            message_nexus_path_option: Some(
+                directory
+                    .path()
+                    .join("message.sock")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            message_nexus_binary_option: Some(
+                directory
+                    .path()
+                    .join("message-nexus")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             curriculum_nexus_path: directory
                 .path()
                 .join("run/curriculum/curriculum.sock")

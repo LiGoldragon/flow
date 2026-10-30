@@ -60,8 +60,9 @@ fn configured() -> NexusFixture {
                 next_codex: settings.next_codex,
                 harness_profiles: settings.harness_profile_vector,
                 meta_aspects: settings.meta_aspects,
-                message_nexus_path: settings.message_nexus_path,
-                message_nexus_binary: "/fixture/message-nexus".into(),
+                message_nexus_path_option: Some(settings.message_nexus_path.clone()),
+                message_nexus_binary_option: Some("/fixture/message-nexus".into()),
+
                 curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                 lease: 30,
             },

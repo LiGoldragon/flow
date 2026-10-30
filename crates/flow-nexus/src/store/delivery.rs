@@ -16,8 +16,9 @@ use meta_signal_flow::{
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey, Retraction,
-    SchemaHash, TableDescriptor, TableName, TableReference,
+    Assertion, Decision, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryUpgrades,
+    MemoryVersion, QueryPlan, RecordKey, Retraction, SchemaHash, TableDescriptor, TableName,
+    TableReference, UpgradeFrom, UpgradeOutcome,
 };
 use signal_flow::HarnessKind;
 
@@ -94,7 +95,50 @@ impl SettlesInterruptedLease for PaneLease {
 pub struct DeliveryConfiguration {
     pub harness_profile_vector: Vec<HarnessProfile>,
     pub meta_aspects: MetaAspects,
-    pub message_nexus_path: MessageNexusPath,
+    pub message_nexus_path_option: Option<MessageNexusPath>,
+}
+
+impl MemoryDefinition for DeliveryConfiguration {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-delivery-configuration-v2")
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) struct DeliveryConfigurationV1 {
+    pub(super) harness_profile_vector: Vec<HarnessProfile>,
+    pub(super) meta_aspects: MetaAspects,
+    pub(super) message_nexus_path: MessageNexusPath,
+}
+
+impl EngineRecord for DeliveryConfigurationV1 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(DELIVERY_CONFIGURATION_KEY)
+    }
+}
+
+impl MemoryDefinition for DeliveryConfigurationV1 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-delivery-configuration-v1")
+    }
+}
+
+impl UpgradeFrom<DeliveryConfigurationV1> for DeliveryConfiguration {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: DeliveryConfigurationV1) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            harness_profile_vector: previous.harness_profile_vector,
+            meta_aspects: previous.meta_aspects,
+            message_nexus_path_option: (!previous.message_nexus_path.is_empty())
+                .then_some(previous.message_nexus_path),
+        })
+    }
 }
 
 impl EngineRecord for DeliveryConfiguration {
@@ -108,7 +152,8 @@ impl From<&crate::store::Configuration> for DeliveryConfiguration {
         Self {
             harness_profile_vector: configuration.harness_profile_vector.clone(),
             meta_aspects: configuration.meta_aspects.clone(),
-            message_nexus_path: configuration.message_nexus_path.clone(),
+            message_nexus_path_option: (!configuration.message_nexus_path.is_empty())
+                .then_some(configuration.message_nexus_path.clone()),
         }
     }
 }
@@ -182,11 +227,24 @@ impl RegistersDeliveryTables for DeliveryTables {
                 FamilyName::new("flow-nexus-pane-lease"),
                 SchemaHash::for_label("flow-nexus-pane-lease-v1"),
             ))?,
-            configuration: engine.register_table(TableDescriptor::new(
-                DELIVERY_CONFIGURATION_TABLE_NAME,
-                FamilyName::new("flow-nexus-delivery-configuration"),
-                SchemaHash::for_label("flow-nexus-delivery-configuration-v1"),
-            ))?,
+            configuration: match engine
+                .upgrade_table::<DeliveryConfigurationV1, DeliveryConfiguration>(
+                    TableDescriptor::new(
+                        DELIVERY_CONFIGURATION_TABLE_NAME,
+                        FamilyName::new("flow-nexus-delivery-configuration"),
+                        DeliveryConfiguration::schema_hash(),
+                    )
+                    .with_predecessor::<DeliveryConfigurationV1>(),
+                ) {
+                UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+                UpgradeOutcome::AlreadyCurrent(table) => table,
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure) => {
+                    return Err(StoreError::DeliveryConfigurationUpgrade(format!(
+                        "{failure:?}"
+                    )));
+                }
+            },
         })
     }
 }
@@ -309,7 +367,7 @@ impl RecordsDeliveries for FlowStore {
             return Ok(DeliveryConfiguration {
                 harness_profile_vector: snapshot.nexus.harness_profiles,
                 meta_aspects: snapshot.nexus.meta_aspects,
-                message_nexus_path: snapshot.nexus.message_nexus_path,
+                message_nexus_path_option: snapshot.nexus.message_nexus_path_option,
             });
         }
         let records = self
@@ -354,5 +412,37 @@ impl RecordsDeliveries for FlowStore {
             ))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::{DeliveryConfiguration, DeliveryConfigurationV1};
+    use sema_engine::{Decision, UpgradeFrom};
+
+    #[test]
+    fn v1_named_message_endpoint_is_preserved() {
+        let Decision::Ready(upgraded) =
+            DeliveryConfiguration::upgrade_from(DeliveryConfigurationV1 {
+                harness_profile_vector: Vec::new(),
+                meta_aspects: vec![signal_flow::Aspect::Psyche],
+                message_nexus_path: "/run/message.sock".into(),
+            });
+        assert_eq!(
+            upgraded.message_nexus_path_option.as_deref(),
+            Some("/run/message.sock")
+        );
+        assert_eq!(upgraded.meta_aspects, [signal_flow::Aspect::Psyche]);
+    }
+
+    #[test]
+    fn v1_empty_message_endpoint_becomes_absent() {
+        let Decision::Ready(upgraded) =
+            DeliveryConfiguration::upgrade_from(DeliveryConfigurationV1 {
+                harness_profile_vector: Vec::new(),
+                meta_aspects: Vec::new(),
+                message_nexus_path: String::new(),
+            });
+        assert!(upgraded.message_nexus_path_option.is_none());
     }
 }

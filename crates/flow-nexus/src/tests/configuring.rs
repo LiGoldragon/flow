@@ -133,11 +133,13 @@ impl ConfiguredStore {
             next_codex: settings.next_codex,
             harness_profiles: settings.harness_profile_vector,
             meta_aspects: settings.meta_aspects,
-            message_nexus_path: settings.message_nexus_path,
-            message_nexus_binary: std::env::current_exe()
-                .expect("test executable")
-                .to_string_lossy()
-                .into_owned(),
+            message_nexus_path_option: Some(settings.message_nexus_path.clone()),
+            message_nexus_binary_option: Some(
+                std::env::current_exe()
+                    .expect("test executable")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             curriculum_nexus_path: "/fixture/curriculum.sock".into(),
             lease,
         }

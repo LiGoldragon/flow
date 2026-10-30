@@ -141,8 +141,10 @@ fn inspect_answers_the_metaflow_whole() {
                 next_codex: endpoint("next"),
                 harness_profiles: vec![],
                 meta_aspects: vec![Aspect::Psyche],
-                message_nexus_path: format!("{root}/message.sock"),
-                message_nexus_binary: format!("{root}/message-nexus"),
+                message_nexus_path_option: Some(format!("{root}/message.sock")),
+
+                message_nexus_binary_option: Some(format!("{root}/message-nexus")),
+
                 curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                 lease: 60,
             },

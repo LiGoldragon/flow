@@ -211,8 +211,10 @@ mod tests {
             next_codex: endpoint(),
             harness_profiles: vec![],
             meta_aspects: vec![meta_signal_flow::Aspect::Psyche],
-            message_nexus_path: "/run/message.sock".into(),
-            message_nexus_binary: "/opt/message-nexus".into(),
+            message_nexus_path_option: Some("/run/message.sock".into()),
+
+            message_nexus_binary_option: Some("/opt/message-nexus".into()),
+
             curriculum_nexus_path: "/fixture/curriculum.sock".into(),
             lease: 60,
         };
@@ -397,8 +399,10 @@ mod tests {
                 next_codex: endpoint(),
                 harness_profiles: vec![],
                 meta_aspects: vec![Aspect::Psyche],
-                message_nexus_path: "/run/message.sock".into(),
-                message_nexus_binary: "/opt/message-nexus".into(),
+                message_nexus_path_option: Some("/run/message.sock".into()),
+
+                message_nexus_binary_option: Some("/opt/message-nexus".into()),
+
                 curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                 lease: 60,
             },

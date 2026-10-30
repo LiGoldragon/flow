@@ -210,13 +210,13 @@ trait RunsConfigurationStartup {
 
     fn peer_is_authorized_for_configuration(
         peer: Option<flow_nexus::caller::CallerProcess>,
-        message_nexus_binary: &str,
+        message_nexus_binary_option: &str,
     ) -> Option<MetaRefusal> {
         let Some(peer) = peer else {
             return ConfigurationStartup::configuration_peer_refusal(false, false, false);
         };
-        if !message_nexus_binary.is_empty() {
-            let configured = fs::canonicalize(message_nexus_binary).ok();
+        if !message_nexus_binary_option.is_empty() {
+            let configured = fs::canonicalize(message_nexus_binary_option).ok();
             let executable = fs::canonicalize(format!("/proc/{}/exe", peer.process_id)).ok();
             if configured.is_some() && executable == configured {
                 return ConfigurationStartup::configuration_peer_refusal(true, true, false);
@@ -239,7 +239,7 @@ trait RunsConfigurationStartup {
     fn serve_one_configuration(
         listener: UnixListener,
         store: &ConfigurationOnlyStore,
-        message_nexus_binary: &str,
+        message_nexus_binary_option: &str,
         stopping: &AtomicBool,
     ) -> Result<(), String> {
         let (mut peer, _) = listener.accept().map_err(|error| error.to_string())?;
@@ -253,7 +253,7 @@ trait RunsConfigurationStartup {
         let query = peer.read_meta_query()?;
         if let Some(refusal) = ConfigurationStartup::peer_is_authorized_for_configuration(
             peer.peer_process(),
-            message_nexus_binary,
+            message_nexus_binary_option,
         ) {
             peer.write_meta_response(&MetaResponse::MetaRefused(refusal))?;
             return Err("meta configuration peer was not provably authorized".into());
@@ -301,10 +301,10 @@ trait RunsConfigurationStartup {
     ) -> Result<(ConfigurationOnlyStore, String, UnixListener), ConfigureOnlyError> {
         let store_path = Path::new(&start.store_path);
         let store = ConfigurationOnlyStore::open(store_path).map_err(ConfigureOnlyError::Store)?;
-        let message_nexus_binary = store
+        let message_nexus_binary_option = store
             .configuration_snapshot()
             .map_err(ConfigureOnlyError::Store)?
-            .map(|snapshot| snapshot.nexus.message_nexus_binary)
+            .and_then(|snapshot| snapshot.nexus.message_nexus_binary_option)
             .unwrap_or_default();
         // Configure cannot retarget the socket while this one-request process is
         // serving. The store's same-file writer is held before stale-socket
@@ -312,14 +312,14 @@ trait RunsConfigurationStartup {
         let listener =
             ConfigurationStartup::configuration_listener(Path::new(&start.meta_socket_path))
                 .map_err(ConfigureOnlyError::Other)?;
-        Ok((store, message_nexus_binary, listener))
+        Ok((store, message_nexus_binary_option, listener))
     }
 
     fn run_configuration_only(
         start: &flow_ethos::Start,
         signals: &TerminationSignals,
     ) -> Result<(), ConfigureOnlyError> {
-        let (store, message_nexus_binary, listener) =
+        let (store, message_nexus_binary_option, listener) =
             ConfigurationStartup::open_configuration_listener(start)?;
         let socket = Path::new(&start.meta_socket_path);
         let stopping = AtomicBool::new(false);
@@ -334,7 +334,7 @@ trait RunsConfigurationStartup {
             let served = ConfigurationStartup::serve_one_configuration(
                 listener,
                 &store,
-                &message_nexus_binary,
+                &message_nexus_binary_option,
                 &stopping,
             );
             finished.store(true, Ordering::SeqCst);
@@ -582,8 +582,8 @@ mod tests {
             next_codex: codex("gpt-next-test"),
             harness_profiles: vec![],
             meta_aspects: vec![meta_signal_flow::Aspect::Psyche],
-            message_nexus_path: message_socket.into(),
-            message_nexus_binary: binary.into(),
+            message_nexus_path_option: Some(message_socket.into()),
+            message_nexus_binary_option: Some(binary.into()),
             curriculum_nexus_path: "/fixture/curriculum.sock".into(),
             lease: 60,
         })
@@ -732,7 +732,8 @@ mod tests {
         });
         let mut peer = UnixStream::connect(&socket).expect("reconnect to same typed Start");
         let mut changed_nexus = expected_nexus.clone();
-        changed_nexus.message_nexus_binary = "/nix/store/other-message/bin/message".into();
+        changed_nexus.message_nexus_binary_option =
+            Some("/nix/store/other-message/bin/message".into());
         let changed = ConfigurationChange::Nexus(changed_nexus.clone());
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&MetaQuery::Configure(changed))
             .expect("encode changed Nexus configuration");

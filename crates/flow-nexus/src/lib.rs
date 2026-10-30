@@ -47,6 +47,10 @@ mod fixture_executable;
 /// both outputs fresh. The `datom` feature enables their textual CLI surface.
 #[allow(unexpected_cfgs, clippy::large_enum_variant)]
 pub mod generated;
+#[cfg(feature = "executable-default-configuration")]
+mod executable_default_configuration {
+    include!(env!("FLOW_NEXUS_DEFAULT_CONFIGURATION_RS"));
+}
 pub mod herdr;
 pub mod launching;
 pub mod observe_agent;
@@ -97,6 +101,8 @@ use std::{
     },
     time::Duration,
 };
+#[cfg(feature = "executable-default-configuration")]
+use store::ConfiguresOnlyStore;
 use store::logical_delivery::RecordsLogicalDeliveries;
 use store::{
     AppliesFlowQuery, FlowStore, NamesLiveFlow, OpensFlowStore, ReadsFlowRows,
@@ -628,6 +634,33 @@ impl Dispatches for RunningNexus {
     }
 }
 
+#[cfg(feature = "executable-default-configuration")]
+fn validate_executable_default_configuration(
+    configuration: &meta_signal_flow::ConfigureNexus,
+) -> Result<(), store::StoreError> {
+    let required_paths = [
+        configuration.source_root.as_str(),
+        configuration.stable_codex.client_path.as_str(),
+        configuration.stable_codex.home.as_str(),
+        configuration.stable_codex.control_socket_path.as_str(),
+        configuration.next_codex.client_path.as_str(),
+        configuration.next_codex.home.as_str(),
+        configuration.next_codex.control_socket_path.as_str(),
+        configuration.curriculum_nexus_path.as_str(),
+    ];
+    if required_paths
+        .iter()
+        .any(|path| !Path::new(path).is_absolute())
+        || configuration.stable_codex.model_name_vector.is_empty()
+        || configuration.harness_profiles.is_empty()
+        || configuration.meta_aspects.is_empty()
+        || configuration.lease <= 0
+    {
+        return Err(store::StoreError::MissingDefaultConfiguration);
+    }
+    Ok(())
+}
+
 pub trait OpensRunningNexus {
     /// Opens the configured Nexus from one typed Start payload. Durable
     /// runner values come from the committed Meta configuration snapshot;
@@ -646,6 +679,17 @@ impl OpensRunningNexus for RunningNexus {
         start: &flow_ethos::Start,
     ) -> Result<Self, store::StoreError> {
         let store_path = Path::new(&start.store_path);
+        #[cfg(feature = "executable-default-configuration")]
+        if !store_path.exists() {
+            let default = executable_default_configuration::executable_default_configuration();
+            validate_executable_default_configuration(&default)?;
+            let configuration_store = store::ConfigurationOnlyStore::open(store_path)?;
+            if configuration_store.configuration_snapshot()?.is_none() {
+                configuration_store
+                    .configure_change(meta_signal_flow::ConfigurationChange::Nexus(default))?;
+            }
+            drop(configuration_store);
+        }
         // The configured opener checks the typed store path read-only first,
         // reads the committed snapshot, and only then registers runtime tables.
         // It never seeds defaults or settles work; it drops the retired

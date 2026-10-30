@@ -117,8 +117,10 @@ fn configuration(_start: &Start, home: &Path) -> meta_signal_flow::ConfigureNexu
             submit_keys: Vec::new(),
         }],
         meta_aspects: vec![flow_ethos::Aspect::Psyche, flow_ethos::Aspect::Mind],
-        message_nexus_path: "/run/message.sock".into(),
-        message_nexus_binary: "/opt/message-nexus".into(),
+        message_nexus_path_option: Some("/run/message.sock".into()),
+
+        message_nexus_binary_option: Some("/opt/message-nexus".into()),
+
         curriculum_nexus_path: "/fixture/curriculum.sock".into(),
         lease: 60,
     }
@@ -367,4 +369,35 @@ fn a_live_nexus_socket_is_never_taken_over() {
             .expect("the live Nexus still answers"),
         signal_flow::Response::Listed(_)
     ));
+}
+
+#[cfg(feature = "executable-default-configuration")]
+#[test]
+fn configured_executable_seeds_only_its_fresh_typed_nexus_row() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let runtime = tempfile::tempdir().expect("temporary runtime directory");
+    let state = tempfile::tempdir().expect("dedicated state directory");
+    let start = start(runtime.path(), state.path());
+
+    let mut nexus = spawn(home.path(), runtime.path(), &start, false);
+    let mut ordinary = connect(Path::new(&start.ordinary_socket_path), &mut nexus);
+    ordinary
+        .write_query(&signal_flow::Query::Metaflows)
+        .expect("List written");
+    assert!(matches!(
+        ordinary.read_response().expect("List answered"),
+        signal_flow::Response::Listed(rows) if rows.is_empty()
+    ));
+    drop(ordinary);
+    drop(nexus);
+
+    let store = flow_nexus::store::ConfigurationOnlyStore::open(Path::new(&start.store_path))
+        .expect("configured store reopens");
+    let snapshot = store
+        .configuration_snapshot()
+        .expect("snapshot reads")
+        .expect("fresh executable seeded Nexus");
+    assert_eq!(snapshot.nexus.lease, 60);
+    assert!(snapshot.nexus.message_nexus_path_option.is_none());
+    assert!(snapshot.nexus.message_nexus_binary_option.is_none());
 }

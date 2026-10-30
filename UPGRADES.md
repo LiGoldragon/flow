@@ -1,3 +1,9 @@
+# Flow 0.43.0
+
+Pins meta-signal-flow 48.0.0 (3e3696a). The Nexus configuration Memory family upgrades from v2 to v3 and the delivery configuration family from v1 to v2: the abandoned Message Nexus endpoint and executable identity become optional. Each empty historical value becomes absent; every named value and every other field is preserved exactly.
+
+A Flow package built through `mkFlowPackage` carries one typed executable default Nexus configuration. A genuinely new Memory applies that value through canonical `Configure.Nexus`; an existing Memory is never seeded or overwritten. The public default package remains the immutable unconfigured 0.42.1 artifact until a production caller supplies its explicit instance data.
+
 # Flow 0.42.1
 
 Pins signal-flow 38.0.0 (7b737d9) and meta-signal-flow 47.0.0

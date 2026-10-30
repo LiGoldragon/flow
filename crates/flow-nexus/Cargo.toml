@@ -9,6 +9,7 @@ path = "src/main.rs"
 [features]
 default = ["datom"]
 datom = []
+executable-default-configuration = []
 [dependencies]
 flow-defaults = { path = "../flow-defaults" }
 flow-native = { path = "../flow-native" }

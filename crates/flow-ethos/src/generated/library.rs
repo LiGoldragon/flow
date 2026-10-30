@@ -322,7 +322,7 @@ pub struct Nexus {
     pub next_codex: NextCodex,
     pub harness_profiles: HarnessProfiles,
     pub meta_aspects: MetaAspects,
-    pub message_nexus_path: MessageNexusPath,
-    pub message_nexus_binary: MessageNexusBinary,
+    pub message_nexus_path_option: std::option::Option<MessageNexusPath>,
+    pub message_nexus_binary_option: std::option::Option<MessageNexusBinary>,
     pub lease: Lease,
 }

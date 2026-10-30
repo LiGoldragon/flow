@@ -12,6 +12,9 @@
       url = "github:LiGoldragon/Curriculum/91acf293a0d0cce1793b458d5377fe78f841e0c1";
       flake = false;
     };
+    # The public default remains the last unconfigured Flow artifact while
+    # callers move explicitly to lib.<system>.mkFlowPackage.
+    unconfigured-flow.url = "github:LiGoldragon/flow/d3ab87ee18b1dd30947d5f0089f5abb4bafa80d5";
   };
 
   outputs =
@@ -21,6 +24,7 @@
       fenix,
       crane,
       curriculum,
+      unconfigured-flow,
     }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
@@ -49,7 +53,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.42.1";
+            version = "0.43.0";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -132,23 +136,29 @@
         };
     in
     {
+      lib = forSystems (
+        system:
+        let
+          context = mkContext system;
+        in
+        {
+          mkFlowPackage = import ./nix/mk-flow-package.nix {
+            inherit (nixpkgs) lib;
+            inherit (context) pkgs craneLib commonArgs cargoArtifacts;
+          };
+        }
+      );
+
       packages = forSystems (
         system:
         let
           context = mkContext system;
         in
         {
-          default = context.craneLib.buildPackage (
-            context.commonArgs
-            // {
-              inherit (context) cargoArtifacts;
-              pname = "flow";
-              cargoExtraArgs = "--workspace";
-              # The package's tests include the approval pipeline's, which
-              # read a real git repository.
-              nativeCheckInputs = [ context.pkgs.git ];
-            }
-          );
+          # Intentionally the last unconfigured artifact. A 0.43 package
+          # is built only through lib.<system>.mkFlowPackage with an explicit
+          # defaultConfiguration; production has supplied none yet.
+          default = unconfigured-flow.packages.${system}.default;
           # The flow-nexus library test executable, built so a test kept
           # out of every check (one that needs a store no repository holds,
           # named at run time) can be run by name where a build runs.

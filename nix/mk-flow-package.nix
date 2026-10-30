@@ -1,0 +1,189 @@
+# Build a Flow package whose executable carries the configuration used only
+# when it opens a new, unconfigured Memory.  The generated Rust is compiled
+# with Flow; a malformed value therefore fails before a package exists.
+{
+  lib,
+  pkgs,
+  craneLib,
+  commonArgs,
+  cargoArtifacts,
+}:
+{
+  defaultConfiguration,
+  extraBuildArgs ? { },
+}:
+let
+  exactAttrs =
+    name: wanted: value:
+    let
+      actual = builtins.attrNames value;
+      missing = builtins.filter (field: !(builtins.hasAttr field value)) wanted;
+      extra = builtins.filter (field: !(builtins.elem field wanted)) actual;
+    in
+    if !builtins.isAttrs value then
+      throw "${name} must be an attribute set"
+    else if missing != [ ] then
+      throw "${name} is missing required fields: ${lib.concatStringsSep ", " missing}"
+    else if extra != [ ] then
+      throw "${name} has unsupported fields: ${lib.concatStringsSep ", " extra}"
+    else
+      value;
+
+  requireString =
+    name: value:
+    if builtins.isString value && value != "" then
+      value
+    else
+      throw "${name} must be a non-empty string";
+
+  requireAbsolute =
+    name: value:
+    let
+      checked = requireString name value;
+    in
+    if lib.hasPrefix "/" checked then checked else throw "${name} must be an absolute path";
+
+  requireStringList =
+    name: value:
+    if !(builtins.isList value) then
+      throw "${name} must be a list"
+    else if builtins.any (item: !(builtins.isString item) || item == "") value then
+      throw "${name} must contain only non-empty strings"
+    else
+      value;
+
+  endpoint =
+    name: value:
+    let
+      fields = exactAttrs name [ "clientPath" "home" "controlSocketPath" "roster" ] value;
+    in
+    {
+      clientPath = requireAbsolute "${name}.clientPath" fields.clientPath;
+      home = requireAbsolute "${name}.home" fields.home;
+      controlSocketPath = requireAbsolute "${name}.controlSocketPath" fields.controlSocketPath;
+      roster = requireStringList "${name}.roster" fields.roster;
+    };
+
+  harnessProfile =
+    index: value:
+    let
+      name = "defaultConfiguration.harnessProfiles[${toString index}]";
+      fields = exactAttrs name [ "harnessKind" "commandSigils" "interruptKeys" "submitKeys" ] value;
+      kind = requireString "${name}.harnessKind" fields.harnessKind;
+    in
+    if
+      !(builtins.elem kind [
+        "Codex"
+        "Claude"
+      ])
+    then
+      throw "${name}.harnessKind must be Codex or Claude"
+    else
+      {
+        harnessKind = kind;
+        commandSigils = requireStringList "${name}.commandSigils" fields.commandSigils;
+        interruptKeys = requireStringList "${name}.interruptKeys" fields.interruptKeys;
+        submitKeys = requireStringList "${name}.submitKeys" fields.submitKeys;
+      };
+
+  configurationFields = exactAttrs "defaultConfiguration" [
+    "sourceRoot"
+    "runtimeDirectory"
+    "stableCodex"
+    "nextCodex"
+    "harnessProfiles"
+    "metaAspects"
+  ] defaultConfiguration;
+
+  stableCodex = endpoint "defaultConfiguration.stableCodex" configurationFields.stableCodex;
+  nextCodex = endpoint "defaultConfiguration.nextCodex" configurationFields.nextCodex;
+  sourceRoot = requireAbsolute "defaultConfiguration.sourceRoot" configurationFields.sourceRoot;
+  runtimeDirectory = requireAbsolute "defaultConfiguration.runtimeDirectory" configurationFields.runtimeDirectory;
+  harnessProfiles =
+    if
+      !(builtins.isList configurationFields.harnessProfiles) || configurationFields.harnessProfiles == [ ]
+    then
+      throw "defaultConfiguration.harnessProfiles must be a non-empty list"
+    else
+      lib.imap0 harnessProfile configurationFields.harnessProfiles;
+  metaAspects = requireStringList "defaultConfiguration.metaAspects" configurationFields.metaAspects;
+  unsupportedAspects = builtins.filter (
+    aspect:
+    !(builtins.elem aspect [
+      "Psyche"
+      "Mind"
+      "Field"
+    ])
+  ) metaAspects;
+  overlappingModels = builtins.filter (
+    model: builtins.elem model nextCodex.roster
+  ) stableCodex.roster;
+
+  quote = builtins.toJSON;
+  rustStrings =
+    values: "vec![${lib.concatMapStringsSep ", " (value: "${quote value}.to_owned()") values}]";
+  rustEndpoint = value: ''
+    flow_ethos::CodexEndpoint {
+        client_path: ${quote value.clientPath}.to_owned(),
+        home: ${quote value.home}.to_owned(),
+        control_socket_path: ${quote value.controlSocketPath}.to_owned(),
+        model_name_vector: ${rustStrings value.roster},
+    }'';
+  rustProfile = value: ''
+    flow_ethos::HarnessProfile {
+        harness_kind: flow_ethos::HarnessKind::${value.harnessKind},
+        command_sigil_vector: ${rustStrings value.commandSigils},
+        interrupt_keys: ${rustStrings value.interruptKeys},
+        submit_keys: ${rustStrings value.submitKeys},
+    }'';
+  rustAspect = aspect: "flow_ethos::Aspect::${aspect}";
+
+  curriculumNexusPath = "${runtimeDirectory}/curriculum/curriculum.sock";
+  generatedModule = pkgs.writeText "flow-default-configuration.rs" ''
+    // Generated by nix/mk-flow-package.nix.  It is Rust, rather than an
+    // untyped runtime file, so contract drift is a build failure.
+    pub(crate) fn executable_default_configuration() -> meta_signal_flow::ConfigureNexus {
+        meta_signal_flow::ConfigureNexus {
+            source_root: ${quote sourceRoot}.to_owned(),
+            stable_codex: ${rustEndpoint stableCodex},
+            next_codex: ${rustEndpoint nextCodex},
+            harness_profiles: vec![
+                ${lib.concatMapStringsSep ",\n        " rustProfile harnessProfiles}
+            ],
+            meta_aspects: vec![${lib.concatMapStringsSep ", " rustAspect metaAspects}],
+            message_nexus_path_option: None,
+            message_nexus_binary_option: None,
+            curriculum_nexus_path: ${quote curriculumNexusPath}.to_owned(),
+            lease: 60,
+        }
+    }
+  '';
+
+  validated =
+    if stableCodex.roster == [ ] then
+      throw "defaultConfiguration.stableCodex.roster must not be empty"
+    else if nextCodex.roster == [ ] then
+      throw "defaultConfiguration.nextCodex.roster must not be empty"
+    else if overlappingModels != [ ] then
+      throw "stableCodex and nextCodex rosters overlap: ${lib.concatStringsSep ", " overlappingModels}"
+    else if unsupportedAspects != [ ] then
+      throw "defaultConfiguration.metaAspects contains unknown aspects: ${lib.concatStringsSep ", " unsupportedAspects}"
+    else
+      true;
+in
+assert validated;
+craneLib.buildPackage (
+  commonArgs
+  // extraBuildArgs
+  // {
+    inherit cargoArtifacts;
+    pname = "flow-configured";
+    cargoExtraArgs = "--workspace --features flow-nexus/executable-default-configuration";
+    FLOW_NEXUS_DEFAULT_CONFIGURATION_RS = generatedModule;
+    nativeCheckInputs = [ pkgs.git ];
+    passthru = {
+      inherit generatedModule;
+      configured = true;
+    };
+  }
+)

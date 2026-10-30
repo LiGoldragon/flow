@@ -131,7 +131,11 @@ impl MutatesMetaflows for FlowStore {
             let Some(configuration) = self.configuration_snapshot()? else {
                 return Ok(Response::Refused(Refusal::NotConfigured));
             };
-            let expected = fs::canonicalize(&configuration.nexus.message_nexus_binary).ok();
+            let expected = configuration
+                .nexus
+                .message_nexus_binary_option
+                .as_ref()
+                .and_then(|binary| fs::canonicalize(binary).ok());
             if expected.is_none() || FlowStore::process_executable(peer) != expected {
                 return Ok(Response::Refused(Refusal::NotMessage));
             }
@@ -769,8 +773,8 @@ mod tests {
                     next_codex: settings.next_codex,
                     harness_profiles: settings.harness_profile_vector,
                     meta_aspects: settings.meta_aspects,
-                    message_nexus_path: settings.message_nexus_path,
-                    message_nexus_binary: binary,
+                    message_nexus_path_option: Some(settings.message_nexus_path.clone()),
+                    message_nexus_binary_option: Some(binary),
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 30,
                 }))

@@ -103,8 +103,8 @@ Library
           NextCodex
           HarnessProfiles
           MetaAspects
-          MessageNexusPath
-          MessageNexusBinary
+          Option<MessageNexusPath>
+          Option<MessageNexusBinary>
           Lease.Integer } ] ; Lease seconds; 60 before any Nexus payload.
 []
 []

@@ -328,7 +328,7 @@ impl SeedsConfiguration for DefaultConfiguration {
                 HarnessKind::Codex.default_profile(),
             ],
             meta_aspects: vec![Aspect::Psyche],
-            message_nexus_path: String::new(),
+            message_nexus_path_option: None,
         }
     }
 }
@@ -1507,7 +1507,10 @@ impl CompletesConfiguration for FlowStoreConfiguration {
             next_codex: meta_signal_flow::CodexEndpoint::from(&runtime.next_codex),
             harness_profile_vector: delivery.harness_profile_vector.clone(),
             meta_aspects: delivery.meta_aspects.clone(),
-            message_nexus_path: delivery.message_nexus_path.clone(),
+            message_nexus_path: delivery
+                .message_nexus_path_option
+                .clone()
+                .unwrap_or_default(),
         }
     }
 }
@@ -3232,6 +3235,8 @@ pub enum StoreError {
     ModelUpgrade(String),
     #[error("the Nexus configuration family could not be upgraded: {0}")]
     NexusUpgrade(String),
+    #[error("the delivery configuration family could not be upgraded: {0}")]
+    DeliveryConfigurationUpgrade(String),
     #[error("flow events upgrade failed: {0}")]
     EventUpgrade(String),
     #[error("successor intent family upgrade failed: {0}")]
@@ -3254,6 +3259,8 @@ pub enum StoreError {
     InvalidStorePath,
     #[error("meta configuration is not configured")]
     NotConfigured,
+    #[error("the executable default configuration is missing or invalid")]
+    MissingDefaultConfiguration,
     #[error("a Codex model names both the stable and the next endpoint")]
     CodexModelsOverlap,
     #[error("a leave-out default names a leave-out of another harness than its own")]
@@ -3951,11 +3958,12 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             FamilyName::new("flow-nexus-runtime-configuration"),
             SchemaHash::for_label("flow-nexus-runtime-configuration-v1"),
         );
-        let delivery_configuration_descriptor = TableDescriptor::new(
+        let delivery_configuration_descriptor = TableDescriptor::<DeliveryConfiguration>::new(
             delivery::DELIVERY_CONFIGURATION_TABLE_NAME,
             FamilyName::new("flow-nexus-delivery-configuration"),
-            SchemaHash::for_label("flow-nexus-delivery-configuration-v1"),
-        );
+            DeliveryConfiguration::schema_hash(),
+        )
+        .with_predecessor::<delivery::DeliveryConfigurationV1>();
         let meta_nexus_descriptor = StoredMetaNexusConfiguration::descriptor();
         let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
         let meta_thresholds_descriptor = StoredMetaThresholdConfiguration::descriptor();
@@ -3988,7 +3996,19 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let state = engine.register_table(state_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
         let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
-        let delivery_configuration = engine.register_table(delivery_configuration_descriptor)?;
+        let delivery_configuration = match engine
+            .upgrade_table::<delivery::DeliveryConfigurationV1, DeliveryConfiguration>(
+                delivery_configuration_descriptor,
+            ) {
+            UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+            UpgradeOutcome::AlreadyCurrent(table) => table,
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::DeliveryConfigurationUpgrade(format!(
+                    "{failure:?}"
+                )));
+            }
+        };
         let meta_configuration_tables = MetaConfigurationTables {
             nexus: engine.upgraded_nexus_configuration(meta_nexus_descriptor)?,
             models: engine.upgraded_models(meta_models_descriptor)?,
@@ -4499,8 +4519,9 @@ impl OpensFlowStore for FlowStore {
         let delivery_configuration_descriptor = TableDescriptor::<DeliveryConfiguration>::new(
             delivery::DELIVERY_CONFIGURATION_TABLE_NAME,
             FamilyName::new("flow-nexus-delivery-configuration"),
-            SchemaHash::for_label("flow-nexus-delivery-configuration-v1"),
-        );
+            DeliveryConfiguration::schema_hash(),
+        )
+        .with_predecessor::<delivery::DeliveryConfigurationV1>();
         let meta_nexus_descriptor = StoredMetaNexusConfiguration::descriptor();
         let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
         let meta_thresholds_descriptor = StoredMetaThresholdConfiguration::descriptor();
@@ -7482,7 +7503,7 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_pane_leases" => ("flow-nexus-pane-lease", "flow-nexus-pane-lease-v1"),
             "flow_nexus_delivery_configuration" => (
                 "flow-nexus-delivery-configuration",
-                "flow-nexus-delivery-configuration-v1",
+                "flow-nexus-delivery-configuration-v2",
             ),
             "flow_nexus_meta_nexus_configuration" => {
                 return Some((
@@ -7690,10 +7711,16 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-meta-model-configuration",
                 StoredMetaModelConfigurationV1::schema_hash(),
             )],
-            "flow_nexus_meta_nexus_configuration" => &[(
-                nexus_configuration::META_NEXUS_CONFIGURATION_FAMILY,
-                <nexus_configuration::StoredMetaNexusConfigurationV1 as MemoryDefinition>::schema_hash(),
-            )],
+            "flow_nexus_meta_nexus_configuration" => &[
+                (
+                    nexus_configuration::META_NEXUS_CONFIGURATION_FAMILY,
+                    <nexus_configuration::StoredMetaNexusConfigurationV1 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    nexus_configuration::META_NEXUS_CONFIGURATION_FAMILY,
+                    <nexus_configuration::StoredMetaNexusConfigurationV2 as MemoryDefinition>::schema_hash(),
+                ),
+            ],
             "flow_nexus_logical_delivery_current" => &[
                 (
                     "flow-nexus-logical-delivery-current",
@@ -9597,8 +9624,9 @@ mod tests {
                         next_codex: settings.next_codex,
                         harness_profiles: settings.harness_profile_vector,
                         meta_aspects: settings.meta_aspects,
-                        message_nexus_path: settings.message_nexus_path,
-                        message_nexus_binary: "/fixture/message-nexus".into(),
+                        message_nexus_path_option: Some(settings.message_nexus_path.clone()),
+                        message_nexus_binary_option: Some("/fixture/message-nexus".into()),
+
                         curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                         lease: 60,
                     },
@@ -10497,8 +10525,9 @@ mod tests {
                     next_codex: settings.next_codex,
                     harness_profiles: settings.harness_profile_vector,
                     meta_aspects: settings.meta_aspects,
-                    message_nexus_path: settings.message_nexus_path,
-                    message_nexus_binary: "/fixture/message-nexus".into(),
+                    message_nexus_path_option: Some(settings.message_nexus_path.clone()),
+                    message_nexus_binary_option: Some("/fixture/message-nexus".into()),
+
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
                 },
@@ -10560,8 +10589,9 @@ mod tests {
                     next_codex: settings.next_codex,
                     harness_profiles: settings.harness_profile_vector,
                     meta_aspects: settings.meta_aspects,
-                    message_nexus_path: settings.message_nexus_path,
-                    message_nexus_binary: "/fixture/message-nexus".into(),
+                    message_nexus_path_option: Some(settings.message_nexus_path.clone()),
+                    message_nexus_binary_option: Some("/fixture/message-nexus".into()),
+
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
                 },
@@ -10633,8 +10663,9 @@ mod tests {
                     next_codex: settings.next_codex,
                     harness_profiles: settings.harness_profile_vector,
                     meta_aspects: settings.meta_aspects,
-                    message_nexus_path: settings.message_nexus_path,
-                    message_nexus_binary: "/fixture/message-nexus".into(),
+                    message_nexus_path_option: Some(settings.message_nexus_path.clone()),
+                    message_nexus_binary_option: Some("/fixture/message-nexus".into()),
+
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
                 },
@@ -10732,8 +10763,9 @@ mod tests {
                     next_codex: settings.next_codex,
                     harness_profiles: settings.harness_profile_vector,
                     meta_aspects: settings.meta_aspects,
-                    message_nexus_path: settings.message_nexus_path,
-                    message_nexus_binary: "/fixture/message-nexus".into(),
+                    message_nexus_path_option: Some(settings.message_nexus_path.clone()),
+                    message_nexus_binary_option: Some("/fixture/message-nexus".into()),
+
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
                 },
@@ -13106,7 +13138,9 @@ mod tests {
                             harness_profiles: vec![],
                             meta_aspects: vec![Aspect::Psyche],
                             message_nexus_path: "/fixture/message.sock".into(),
+
                             message_nexus_binary: "/fixture/message-nexus".into(),
+
                             lease: 45,
                         },
                     },
@@ -13121,8 +13155,14 @@ mod tests {
             .nexus;
         drop(configuration);
         assert_eq!(nexus.source_root, "/fixture/source");
-        assert_eq!(nexus.message_nexus_path, "/fixture/message.sock");
-        assert_eq!(nexus.message_nexus_binary, "/fixture/message-nexus");
+        assert_eq!(
+            nexus.message_nexus_path_option.as_deref(),
+            Some("/fixture/message.sock")
+        );
+        assert_eq!(
+            nexus.message_nexus_binary_option.as_deref(),
+            Some("/fixture/message-nexus")
+        );
         assert_eq!(nexus.lease, 45);
         assert_eq!(nexus.next_codex.model_name_vector, ["gpt-next"]);
         assert!(
@@ -13162,8 +13202,9 @@ mod tests {
                     next_codex: settings.next_codex,
                     harness_profiles: settings.harness_profile_vector,
                     meta_aspects: settings.meta_aspects,
-                    message_nexus_path: settings.message_nexus_path,
-                    message_nexus_binary: "/fixture/message-nexus".into(),
+                    message_nexus_path_option: Some(settings.message_nexus_path.clone()),
+                    message_nexus_binary_option: Some("/fixture/message-nexus".into()),
+
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
                 },

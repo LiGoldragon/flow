@@ -537,6 +537,54 @@
 (def witness-dir (atom nil))
 (def run-log (atom nil))
 
+(defn keep-text!
+  "Writes text under name in this run's witness directory."
+  [name text]
+  (when-let [dir @witness-dir]
+    (fs/create-dirs dir)
+    (spit (str dir "/" name) (or text ""))))
+
+;; ---------------------------------------------------------------- readings
+
+(defn waking-entries
+  "The entries of the first vector of NativeInputs in text, as a wake types
+  a queue: each {:id :sender :priority}, in the order typed. Nil when text
+  holds none."
+  [text]
+  (when-let [m (some->> text (re-matcher #"\[\s*\{\s*logical-delivery-"))]
+    (when (.find m)
+      (let [d (read-datom (subs text (.start m)))]
+        (when (= \[ (:enclosure d))
+          (vec (for [entry (items d)
+                     :let [[id sender message] (items entry)]]
+                 {:id (str id)
+                  :sender (if (map? sender)
+                            (str/join " " (cons (head sender) (map str (items (body sender)))))
+                            (str sender))
+                  :priority (when (map? message) (head message))})))))))
+
+(defn admitted-deadline
+  "The deadline, in Unix seconds, the Nexus logged when it admitted the Task
+  id; nil when it logged none."
+  [log id]
+  (some->> (re-find (re-pattern (str "flow-nexus: admitted " (java.util.regex.Pattern/quote id)
+                                     " Task minutes \\S+ deadline (\\d+) at "))
+                    (or log ""))
+           second
+           parse-long))
+
+(defn reminder-lag
+  "Seconds from a logged deadline to an ISO-8601 transcript stamp."
+  [deadline stamp]
+  (- (.getEpochSecond (java.time.Instant/parse stamp)) deadline))
+
+;; A reminder is due at its deadline and sent at the Nexus's next reminder
+;; tick (5 s), then woken or handed over to its sender's seat; 30 s holds
+;; both. It is never early.
+(def reminder-tolerance-seconds 30)
+
+(defn on-time? [lag] (<= 0 lag reminder-tolerance-seconds))
+
 ;; ---------------------------------------------------------------- capsule life
 
 (def nexus (atom nil))
@@ -879,6 +927,15 @@
                     (when-let [file (first (fs/glob (str home "/.claude/projects") (str "*/" native ".jsonl")))]
                       (str/includes? (slurp (str file)) needle)))))
 
+(defn reminder-stamps
+  "The transcript stamps of every line of the metaflow's current Claude
+  session that holds needle."
+  [addr needle]
+  (let [native (native-session (inspect addr))
+        file (when native (first (fs/glob (str home "/.claude/projects") (str "*/" native ".jsonl"))))]
+    (keep #(when (str/includes? % needle) (second (re-find #"\"timestamp\":\"([^\"]+)\"" %)))
+          (when file (str/split-lines (slurp (str file)))))))
+
 (defn pane-holds [pane needle seconds]
   (watch seconds #(some-> (pane-text pane) (str/includes? needle))))
 
@@ -967,13 +1024,43 @@
             reminded (transcript-holds secondary (str "Reminder 1 of 4: task " id) 150)
             done (flow (str "Send.{ Address." secondary " Queue Soft.Done.{ " id " «closed» } }") pane)
             again (flow (str "Send.{ Address." secondary " Queue Soft.Done.{ " id " «again» } }") pane)
+            deadline (when id (admitted-deadline (log-text) id))
+            stamp (when id (first (reminder-stamps secondary (str "Reminder 1 of 4: task " id))))
+            lag (when (and deadline stamp) (reminder-lag deadline stamp))
             _ (Thread/sleep 75000)
             second-reminder (transcript-holds secondary (str "Reminder 2 of 4: task " id) 1)]
         {:reply (str "Task: " sent " / Done: " done " / Done again: " again)
          :pass (boolean (and id reminded (str/starts-with? done "SendAccepted.")
-                             (str/includes? again "NoOpenTask") (not second-reminder)))
+                             (str/includes? again "NoOpenTask") (not second-reminder)
+                             lag (on-time? lag)))
          :watched (str "Secondary transcript shows Reminder 1 of 4 for " id " " (boolean reminded)
-                       "; no Reminder 2 in the 75 s after Done " (not second-reminder))}))]])
+                       "; Nexus log deadline " deadline ", Reminder 1 stamped " stamp ", " lag
+                       " s after it (on time: 0 to " reminder-tolerance-seconds " s)"
+                       "; no Reminder 2 in the 75 s after Done " (not second-reminder))}))]
+
+   ["20 two requests queued to an asleep seat reach it on its wake as one vector, oldest first"
+    (fn []
+      (let [asleep (watch 150 #(let [m (current quaternary)] (when (= :asleep (:state m)) m)))
+            pane (sender-pane)
+            first-sent (send "Queue" "Soft.Notice.«First of two. Tag w1.»" pane)
+            second-sent (send "Wake" (str "Soft.Order.«Second of two. " brief " Tag w2.»") pane)
+            ids (vec (keep #(some-> (read-datom %) body items first str) [first-sent second-sent]))
+            woke (watch 60 #(awake-flow quaternary))
+            turn (watch 60 #(transcript-first-user (native-session (inspect quaternary))))
+            entries (waking-entries turn)
+            woken-pane (bound-pane (inspect quaternary))
+            shown (watch 60 #(let [t (some-> woken-pane pane-text)]
+                               (when (and t (every? (fn [id] (str/includes? t id)) ids)) t)))
+            _ (keep-text! "scenario-20-pane.txt" (or shown (some-> woken-pane pane-text)))
+            ordered (boolean (and shown (= 2 (count ids))
+                                  (< (str/index-of shown (first ids)) (str/index-of shown (second ids)))))]
+        {:reply (str "Queue: " first-sent " / Wake: " second-sent)
+         :pass (boolean (and asleep woke (= 2 (count ids)) (= ids (mapv :id entries))
+                             (every? #(and (:sender %) (:priority %)) entries) ordered))
+         :watched (str "Quaternary Asleep before " (boolean asleep) ", woken as " woke
+                       "; first turn's vector " (pr-str entries) "; pane " woken-pane
+                       " shows both ids oldest first " ordered
+                       ", its text kept as scenario-20-pane.txt")}))]])
 
 (def codex-quaternary "{ Mind test Quaternary }")
 

@@ -434,6 +434,8 @@ impl HandlesSendCall for RunningNexus {
             {
                 return refused_kept(SendRefusal::Oversized(size), content_sha256);
             }
+            let logged = message.clone();
+            let admitted_at = std::time::SystemTime::now();
             let outcome = self
                 .store
                 .accept_tool_send(
@@ -446,7 +448,23 @@ impl HandlesSendCall for RunningNexus {
                     now,
                 )
                 .unwrap_or_else(store_refused);
-            if matches!(outcome, SendOutcome::Accepted(_)) {
+            // Each admission is logged with its id and kind; the send tool
+            // holds no reminder, so a Task it admits names no deadline.
+            if let SendOutcome::Accepted(accepted) = &outcome {
+                use crate::admission::{Admission, LogsAdmission};
+                let (signal_flow::Message::HardAbrupt(request)
+                | signal_flow::Message::MiddleAbrupt(request)
+                | signal_flow::Message::Soft(request)) = &logged;
+                eprintln!(
+                    "{}",
+                    Admission {
+                        logical_delivery_id: &accepted.send_acceptance.logical_delivery_id,
+                        request,
+                        deadline: None,
+                        at: admitted_at,
+                    }
+                    .log_line()
+                );
                 // Restore a formerly-awake target only after its logical
                 // delivery and exact tool-call result are durable.
                 self.rest_ended_awake(&arguments.target);

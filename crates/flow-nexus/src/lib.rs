@@ -24,6 +24,7 @@ pub use generated::memory::{LaunchOutcome, Replacement};
 pub use generated::operation::Outcome as OperationOutcome;
 pub use generated::starter::{LaunchedRecord, ReplacedRecord};
 pub use store::StoreError;
+pub(crate) mod admission;
 pub mod binding;
 pub mod caller;
 pub mod claude;

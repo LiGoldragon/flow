@@ -29,6 +29,18 @@ its shape and no table is added.
   flow id `FLOW_ID`, else the name of the calling flow's `FLOW_DIRECTORY`.
   `FLOW_CAPSULE_WITNESS_DIR` still names it outright; without a home or a
   flow id the capsule starts nothing.
+- The Nexus logs each Send it admits, on the ordinary socket and through
+  the send tool: `flow-nexus: admitted <id> <kind> at <unix seconds.ms>`,
+  and for a Task `flow-nexus: admitted <id> Task minutes <m> deadline
+  <unix seconds> at <unix seconds.ms>`, the deadline its first reminder is
+  due at (`None` when Flow holds no reminder for it: a Task whose sender
+  it does not know, or one the send tool admits).
+- Capsule scenario 17 reads the Task's logged deadline and asserts its
+  first reminder's transcript stamp lies 0 to 30 s after it. Scenario 20
+  queues two requests to the asleep Quaternary, the second waking it, and
+  asserts its first turn holds one vector of both, oldest first, each with
+  its own id, sender and priority, and its pane shows both ids in that
+  order; the pane text is kept as `scenario-20-pane.txt`.
 
 # Flow 0.40.7
 

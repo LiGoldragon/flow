@@ -283,6 +283,8 @@ impl SendsRequests for RunningNexus {
                 None
             };
             let direct = direct_lease.is_some();
+            let message = send.message.clone();
+            let admitted_at = std::time::SystemTime::now();
             let admitted = self.store.accept_logical_delivery(
                 &recipient,
                 SentBy::Sender(sender),
@@ -290,6 +292,30 @@ impl SendsRequests for RunningNexus {
                 send.message,
                 None,
             );
+            // Each admission is logged with its id and kind, and a Task's
+            // Minutes with the deadline its first reminder is due at.
+            if let Ok(Response::SendAccepted(acceptance)) = &admitted {
+                use crate::admission::{Admission, LogsAdmission};
+                use crate::store::reminder::RecordsReminders;
+                let (Message::HardAbrupt(request)
+                | Message::MiddleAbrupt(request)
+                | Message::Soft(request)) = &message;
+                let deadline = matches!(request, Request::Task(_))
+                    .then(|| self.store.reminder(&acceptance.logical_delivery_id))
+                    .and_then(Result::ok)
+                    .flatten()
+                    .and_then(|reminder| reminder.due);
+                eprintln!(
+                    "{}",
+                    Admission {
+                        logical_delivery_id: &acceptance.logical_delivery_id,
+                        request,
+                        deadline,
+                        at: admitted_at,
+                    }
+                    .log_line()
+                );
+            }
             drop(_turn);
             match admitted {
                 Ok(Response::SendAccepted(acceptance)) if direct => {

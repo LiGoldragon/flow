@@ -552,6 +552,9 @@
   (fs/delete-tree state-root)
   (fs/create-dirs state-root)
   (fs/create-dirs (str config-home "/herdr"))
+  ;; Herdr starts a Codex agent only from an executable its config allows.
+  (spit (str config-home "/herdr/config.toml")
+        (str "[agents]\ncodex_executables = [\"" codex-client "\"]\n"))
   (fs/create-dirs capsule-runtime)
   (fs/create-dirs capsule-flows)
   (reset! herdr-server (p/process ["herdr" "--session" session "server"]
@@ -718,6 +721,8 @@
                     (str/includes? env (str "HERDR_SESSION=" session)))]
       (str pid " " (str/trim cmd)))))
 
+(def herdr-session-left (atom nil))
+
 (defn teardown! []
   (println "teardown")
   (let [started (System/currentTimeMillis)
@@ -748,6 +753,10 @@
       (when (= ::running (deref h 10000 ::running)) (p/destroy-tree h))
       (swap! steps conj (str "Herdr session " session " stopped")))
     (run {} "herdr" "session" "delete" session)
+    ;; The capsule's Herdr keeps its sessions in the capsule's own config
+    ;; home: its session is gone when its directory is, read before that
+    ;; home is deleted with the state root, and no Herdr runs after it.
+    (reset! herdr-session-left (fs/exists? herdr-session-dir))
     (let [natives (reset! natives-seen (capsule-natives))
           found (traces natives)]
       (doseq [t found] (fs/delete-tree t))
@@ -757,8 +766,7 @@
     (fs/delete-tree source-parent)
     (fs/delete-tree capsule-runtime)
     (doseq [s @steps] (println (str "  " s)))
-    (let [sessions (:out (run {} "herdr" "session" "list"))
-          remaining {:herdr-session (str/includes? sessions session)
+    (let [remaining {:herdr-session @herdr-session-left
                      :processes (vec (or (watch 20 #(let [left (capsule-processes)] (when (empty? left) []))) (capsule-processes)))
                      :store (fs/exists? state-root)
                      :source-root (fs/exists? source-parent)

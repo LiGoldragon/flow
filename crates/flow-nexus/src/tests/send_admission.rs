@@ -463,3 +463,150 @@ fn a_task_is_admitted_only_with_minutes_above_zero_and_a_reachable_deadline() {
     );
     assert!(matches!(admit(30), Response::SendAccepted(_)));
 }
+
+/// A Task whose Minutes the Nexus refuses makes the whole trip: the flow
+/// CLI, standing in a flow's pane, reads the datom text and sends it over
+/// the ordinary socket; the Nexus names the sender by its pane, refuses
+/// the Minutes at admission, and the CLI prints the refusal as datom text.
+/// The refused Task is never queued.
+#[test]
+fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
+    use super::NexusFixture;
+    use super::waking::{address, ended_claude, metaflow};
+    use crate::ServesOrdinary;
+    use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+    use crate::store::RegistersFlowIdentity;
+    use crate::store::metaflow::{SeedsMetaflow, TakesLaunchAddress};
+    use signal_flow::{
+        EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
+        HerdrRouteSelection, Origin, PowerLevel,
+    };
+
+    // The flow CLI is built beside this test executable.
+    let cli = std::env::current_exe()
+        .expect("test executable")
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(|directory| directory.join("flow"))
+        .filter(|path| path.is_file())
+        .expect("the flow CLI is built beside this test: cargo test --workspace");
+
+    let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
+    ended_claude(fixture);
+    // The sending seat: a flow Flow launched into pane w5:p1, Awake as
+    // Field flow Quaternary.
+    let sender_address = Address {
+        aspect: Aspect::Field,
+        topic: "flow".into(),
+        layer: Layer::Quaternary,
+    };
+    fixture
+        .nexus
+        .store
+        .register_flow_in_role(
+            FlowNode {
+                flow_id: "5e4de7".into(),
+                session_id: "5e4de700-0000-4000-8000-000000000001".into(),
+                harness_kind: HarnessKind::Claude,
+                endpoint_selection: EndpointSelection::Unavailable,
+                herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
+                    herdr_session_name: "messaging-build".into(),
+                    herdr_agent_name: "sender-agent".into(),
+                    herdr_pane_id: "w5:p1".into(),
+                    herdr_terminal_id: "term-sender".into(),
+                }),
+                origin: Origin::Flow(FlowOrigin {
+                    flow_id: "da2038".into(),
+                    session_id: "field-session".into(),
+                }),
+                flow_lifecycle: FlowLifecycle::Active,
+            },
+            signal_flow::Caller {
+                flow_id: "5e4de7".into(),
+                aspect: Aspect::Field,
+                power_level: PowerLevel::UltraLow,
+                model_name: "haiku".into(),
+            },
+        )
+        .expect("sender registered");
+    assert!(matches!(
+        fixture
+            .nexus
+            .store
+            .address_taking(&sender_address, "5e4de7", None, 0)
+            .unwrap(),
+        crate::store::metaflow::AddressTaking::Takes(_)
+    ));
+    assert!(
+        fixture
+            .nexus
+            .store
+            .awaken_metaflow(&sender_address, "5e4de7", 0)
+            .unwrap()
+    );
+    // Herdr shows the sender's pane.
+    let script = std::fs::read_to_string(&fixture.snapshot_program).unwrap();
+    let sender_agent = r#"{"agent":"claude","agent_status":"working","name":"sender-agent","pane_id":"w5:p1","terminal_id":"term-sender","workspace_id":"w5"}"#;
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&script.replace(r#""agents":[]"#, &format!(r#""agents":[{sender_agent}]"#)));
+    // The recipient: Mind flow Secondary, Asleep.
+    let recipient = address(Layer::Secondary);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        flow_ethos::State::Asleep,
+        vec!["abc123"],
+        vec![],
+    ));
+
+    let socket = fixture.directory.path().join("ordinary.sock");
+    let served = socket.clone();
+    std::thread::spawn(move || fixture.nexus.serve_ordinary(&served));
+    for _ in 0..200 {
+        if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // The CLI runs in the sender's pane, its pane ID alone marked.
+    let flow = |text: &str| -> String {
+        let output = std::process::Command::new(&cli)
+            .env_clear()
+            .env("FLOW_SOCKET", &socket)
+            .env("HERDR_PANE_ID", "w5:p1")
+            .arg(text)
+            .output()
+            .expect("flow runs");
+        assert!(output.status.success(), "{text}: {output:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    assert_eq!(
+        flow("Send.{ Address.{ Mind flow Secondary } Wake Soft.Task.{ 0 «Draft the proposal.» } }"),
+        "Refused.MinutesRefused.Zero"
+    );
+    assert_eq!(
+        flow(
+            "Send.{ Address.{ Mind flow Secondary } Queue Soft.Task.{ -5 «Draft the proposal.» } }"
+        ),
+        "Refused.MinutesRefused.Negative"
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .metaflow(&recipient)
+            .unwrap()
+            .unwrap()
+            .queue
+            .is_empty(),
+        "a refused Task is never queued"
+    );
+    // The same CLI and Nexus admit a Task whose Minutes stand.
+    assert!(
+        flow(
+            "Send.{ Address.{ Mind flow Secondary } Queue Soft.Task.{ 30 «Draft the proposal.» } }"
+        )
+        .starts_with("SendAccepted."),
+    );
+}

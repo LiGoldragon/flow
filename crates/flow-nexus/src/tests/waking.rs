@@ -438,6 +438,96 @@ fn a_request_to_an_idle_awake_claude_flow_is_delivered_into_its_pane() {
     );
 }
 
+/// A hand-over types every queued message as its own NativeInput under
+/// its own sender: a Task from one flow, the reminder Flow raised for it
+/// and a Done from another flow reach the pane as one top-level vector,
+/// oldest first, each naming who sent it, none folded into another's
+/// Notice. What is typed is exactly the text whose receipt settles them.
+#[test]
+fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
+    use datom_codec::{Actualizing, Potential};
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 40_000);
+    append_main_rows(&fixture, &[end_turn("idle-turn")]);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake(CLAUDE_SEAT.into()),
+        vec![],
+        vec![],
+    ));
+    maintain(&fixture, address(Layer::Secondary));
+    assert_eq!(fixture.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
+
+    let from = |aspect: Aspect, layer: Layer| {
+        SentBy::Sender(Address {
+            aspect,
+            topic: "flow".into(),
+            layer,
+        })
+    };
+    let task = QueueEntry {
+        logical_delivery_id: "logical-delivery-00000000000000000001".into(),
+        sent_by: from(Aspect::Psyche, Layer::Primary),
+        delivery: Delivery::Wake,
+        message: Message::MiddleAbrupt(Request::Task(flow_ethos::Task_Data {
+            minutes: 30,
+            string: "Draft the proposal.".into(),
+        })),
+    };
+    let reminder = QueueEntry {
+        logical_delivery_id: "logical-delivery-00000000000000000002".into(),
+        sent_by: SentBy::Flow,
+        delivery: Delivery::Wake,
+        message: Message::Soft(Request::Notice(
+            "Reminder 1 of 4: task logical-delivery-00000000000000000001 has no Done after 30 minutes."
+                .into(),
+        )),
+    };
+    let done = QueueEntry {
+        logical_delivery_id: "logical-delivery-00000000000000000003".into(),
+        sent_by: from(Aspect::Mind, Layer::Secondary),
+        delivery: Delivery::Wake,
+        message: Message::Soft(Request::Done(flow_ethos::Done_Data {
+            logical_delivery_id: "logical-delivery-00000000000000000000".into(),
+            string: "Proposal drafted.".into(),
+        })),
+    };
+    let cohort = vec![task, reminder, done];
+    let mut idle = stored(&fixture, Layer::Secondary);
+    idle.queue = cohort.clone();
+    fixture.nexus.store.seed_metaflow(idle);
+    fixture.nexus.wake_due(address(Layer::Secondary));
+
+    let typed = fixture.typed().expect("typed into the live pane");
+    let mut budget = datom_codec::Budget {
+        remaining: 65536,
+        reader: protos::ReaderBudget { remaining: 65536 },
+        depth: 0,
+        maximum_depth: 1024,
+    };
+    let inputs = Potential::<Vec<signal_flow::NativeInput>>::from(typed.clone())
+        .actualize(&mut budget)
+        .unwrap_or_else(|error| panic!("{typed}: {error:?}"));
+    let expected = cohort
+        .iter()
+        .map(|entry| signal_flow::NativeInput {
+            logical_delivery_id: entry.logical_delivery_id.clone(),
+            sent_by: entry.sent_by.clone(),
+            message: entry.message.clone(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(inputs, expected, "{typed}");
+    assert_eq!(
+        typed,
+        cohort.prompt_text(),
+        "the receipt text is what was typed"
+    );
+}
+
 /// A flow whose pane is gone, closed by the living or crashed, is Asleep
 /// once work for it finds the pane gone: its flow is recorded Exited and
 /// joins Past, and the Order wakes a fresh flow on a new native session.

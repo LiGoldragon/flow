@@ -219,6 +219,17 @@
             }
           );
           fmt = context.craneLib.cargoFmt context.commonArgs;
+          # The capsule runner's own logic that runs no capsule: where a run
+          # keeps its witnesses and what it copies there before teardown.
+          capsule-witnesses =
+            context.pkgs.runCommand "flow-capsule-witnesses"
+              { nativeBuildInputs = [ context.pkgs.babashka ]; }
+              ''
+                bb ${./capsule/flow-capsule-test.clj} ${./capsule/flow-capsule.clj} > result.txt \
+                  || { cat result.txt; exit 1; }
+                cat result.txt
+                cp result.txt "$out"
+              '';
           # `fn main()` is the only production free function, and every
           # production method lives in a trait.
           no-free-functions =

@@ -691,3 +691,58 @@ fn a_store_configured_while_stopped_opens_with_the_replaced_value() {
     assert_eq!(other_rows(&nexus), rows);
     assert!(!stable_models(&nexus).contains(TERRA));
 }
+
+/// The default Minutes is a configuration family of its own, kept in
+/// Memory: a new Memory holds the constant Flow seeds it with, Configure
+/// replaces it whole and a reopen keeps it, and the Minutes rule a Task
+/// meets at admission refuses a zero, a negative or an unreachable default
+/// without changing it. Read and written as datom text, as flow-meta does.
+#[test]
+fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
+    use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+    use protos::{Compactable, Protosizable, ReaderBudget};
+    let ask = |nexus: &RunningNexus, text: &str| -> String {
+        let mut budget = Budget {
+            remaining: 65536,
+            reader: ReaderBudget { remaining: 65536 },
+            depth: 0,
+            maximum_depth: 1024,
+        };
+        let query = Potential::<meta_signal_flow::Query>::from(text)
+            .actualize(&mut budget)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        nexus
+            .dispatch_meta(query)
+            .datomize(vec![])
+            .protosize()
+            .compact()
+    };
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let seeded = ask(&nexus, "Configuration");
+    assert!(seeded.ends_with(" None 30 }"), "seeded at 30: {seeded}");
+    assert_eq!(
+        ask(&nexus, "Configure.DefaultMinutes.45"),
+        "Configured.Replaced"
+    );
+    assert_eq!(
+        ask(&nexus, "Configure.DefaultMinutes.45"),
+        "Configured.Unchanged"
+    );
+    for (declared, refused) in [
+        ("0", "Zero"),
+        ("-5", "Negative"),
+        ("9223372036854775807", "Unreachable"),
+    ] {
+        assert_eq!(
+            ask(&nexus, &format!("Configure.DefaultMinutes.{declared}")),
+            format!("ConfigureRejected.MinutesRefused.{refused}")
+        );
+    }
+    let declared = ask(&nexus, "Configuration");
+    assert!(declared.ends_with(" None 45 }"), "{declared}");
+    drop(nexus);
+    let reopened = fixture.open();
+    let kept = ask(&reopened, "Configuration");
+    assert!(kept.ends_with(" None 45 }"), "kept across a reopen: {kept}");
+}

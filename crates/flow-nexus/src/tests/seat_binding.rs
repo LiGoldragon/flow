@@ -10,6 +10,7 @@ use super::NexusFixture;
 use super::waking::SpawnedProcess;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::sending::{BindsSeats, IdentifiesSender};
+use crate::store::AnnouncesLaunchChanges;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory};
 use signal_flow::{Address, Aspect, Layer, Refusal, Response};
@@ -150,9 +151,16 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
         Response::Refused(Refusal::Unidentified(orphan.clone()))
     );
     // The subagent's command binds its flow's seat, under the root's claim.
+    // Adoption announces the new live Codex thread so the Nexus's responder
+    // subscribes to it and its first rest can drain already queued work.
+    let before_adoption = fixture.nexus.store.launch_changes.current();
     assert_eq!(
         fixture.nexus.bind_seat(address.clone(), Some(&subagent)),
         Response::Bound("877549".into())
+    );
+    assert!(
+        fixture.nexus.store.launch_changes.current() > before_adoption,
+        "adoption wakes the Codex responder supervisor"
     );
     assert_eq!(fixture.nexus.sending_address(&subagent).unwrap(), address);
     // Message's authenticated Identify bridge uses the same root-aware

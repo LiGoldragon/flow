@@ -299,6 +299,10 @@
             "store_check::tests::a_store_a_later_flow_wrote_is_refused";
           flow-codex-subagent-binds-its-seat = context.exactTest "flow-nexus"
             "tests::seat_binding::a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for";
+          flow-claude-seat-binds-on-an-empty-store = context.exactTest "flow-nexus"
+            "tests::seat_binding::a_claude_seat_binds_on_an_empty_store_under_its_sessions_flow_id";
+          flow-pane-without-agent-refuses-with-evidence = context.exactTest "flow-nexus"
+            "tests::seat_binding::a_pane_with_no_agent_record_refuses_with_its_evidence";
           flow-store-check-opens-untouched = context.exactTest "flow-nexus"
             "store_check::tests::a_store_this_flow_opens_is_checked_open_and_left_untouched";
           flow-refresh-past-model-threshold = context.exactTest "flow-nexus"

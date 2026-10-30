@@ -526,18 +526,32 @@ impl LaunchesDeclared for RunningNexus {
 }
 
 /// One Herdr agent, as a session snapshot shows it.
-struct SeenSeat {
+pub(crate) struct SeenSeat {
     herdr_session_name: String,
     agent: serde_json::Value,
 }
 
-trait FindsSeat {
+/// What the caller's pane showed when no seat could be named in it: raw
+/// evidence, never an identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SeatEvidence {
+    /// The caller's pane; None when the caller is in no pane Flow reads.
+    pub(crate) pane: Option<crate::caller::CallerPane>,
+    /// The label Herdr shows for that pane.
+    pub(crate) pane_label: Option<String>,
+    /// The native session the pane's agent runs, as far as it was read.
+    pub(crate) native_session: Option<String>,
+    /// When it was read, in seconds since the Unix epoch.
+    pub(crate) observed_at: u64,
+}
+
+pub(crate) trait FindsSeat {
     /// The agent in the caller's pane, or, for a command a Codex
     /// app-server started, the one agent running the root thread of the
     /// caller's thread, with the Codex thread the seat runs. A Codex agent
     /// Herdr reports no session for runs the thread its pane's foreground
     /// resumes.
-    fn seat_of(&self, caller: CallerProcess) -> Option<(SeenSeat, Option<String>)>;
+    fn seat_of(&self, caller: CallerProcess) -> Result<(SeenSeat, Option<String>), SeatEvidence>;
 }
 
 /// A Codex agent's thread, when Herdr reports no session for it.
@@ -577,7 +591,8 @@ impl ReadsUnreportedThread for RunningNexus {
 }
 
 impl FindsSeat for RunningNexus {
-    fn seat_of(&self, caller: CallerProcess) -> Option<(SeenSeat, Option<String>)> {
+    fn seat_of(&self, caller: CallerProcess) -> Result<(SeenSeat, Option<String>), SeatEvidence> {
+        let found = (|| -> Option<(SeenSeat, Option<String>)> {
         let agents_of = |session: &str| -> Vec<serde_json::Value> {
             self.herdr
                 .session_snapshot(session)
@@ -650,6 +665,13 @@ impl FindsSeat for RunningNexus {
             (Some(seat), None) => Some((seat, Some(thread))),
             _ => None,
         }
+        })();
+        found.ok_or(SeatEvidence {
+            pane: None,
+            pane_label: None,
+            native_session: None,
+            observed_at: 0,
+        })
     }
 }
 
@@ -686,7 +708,7 @@ impl BindsSeats for RunningNexus {
         let Some(process_id) = u32::try_from(peer.pid).ok() else {
             return unidentified();
         };
-        let Some((seat, thread)) = self.seat_of(CallerProcess { process_id }) else {
+        let Ok((seat, thread)) = self.seat_of(CallerProcess { process_id }) else {
             return unidentified();
         };
         let text = |pointer: &str| {

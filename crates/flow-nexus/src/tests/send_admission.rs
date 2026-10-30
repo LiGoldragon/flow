@@ -402,3 +402,64 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
     );
     drop(lease);
 }
+
+#[test]
+fn a_task_is_admitted_only_with_minutes_above_zero_and_a_reachable_deadline() {
+    use super::NexusFixture;
+    use crate::store::logical_delivery::RecordsLogicalDeliveries;
+    use crate::store::metaflow::SeedsMetaflow;
+    use signal_flow::{Delivery, Message, Metaflow, MinutesRefusal, Refusal, Response, SentBy};
+    let fixture = NexusFixture::new();
+    let target = Address {
+        aspect: Aspect::Mind,
+        topic: "minutesTarget".into(),
+        layer: Layer::Secondary,
+    };
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: target.clone(),
+        state: flow_ethos::State::Asleep,
+        past: vec![],
+        queue: vec![],
+    });
+    let admit = |minutes: i64| {
+        fixture
+            .nexus
+            .store
+            .accept_logical_delivery(
+                &target,
+                SentBy::Sender(sender()),
+                Delivery::Queue,
+                Message::Soft(Request::Task(flow_ethos::Task_Data {
+                    minutes,
+                    string: "Draft the proposal.".into(),
+                })),
+                None,
+            )
+            .unwrap()
+    };
+    for (minutes, refusal) in [
+        (0, MinutesRefusal::Zero),
+        (-1, MinutesRefusal::Negative),
+        (i64::MIN, MinutesRefusal::Negative),
+        (i64::MAX, MinutesRefusal::Unreachable),
+        (i64::MAX / 60, MinutesRefusal::Unreachable),
+    ] {
+        assert_eq!(
+            admit(minutes),
+            Response::Refused(Refusal::MinutesRefused(refusal)),
+            "{minutes} minutes"
+        );
+    }
+    assert!(
+        fixture
+            .nexus
+            .store
+            .metaflow(&target)
+            .unwrap()
+            .unwrap()
+            .queue
+            .is_empty(),
+        "a refused Task is never queued"
+    );
+    assert!(matches!(admit(30), Response::SendAccepted(_)));
+}

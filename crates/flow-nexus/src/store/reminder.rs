@@ -45,8 +45,8 @@ pub struct Reminder {
     pub address: Address,
     pub reminding: Reminding,
     /// When the next reminder is due, in Unix seconds; None once a task has
-    /// had all its reminders, or set none (Minutes 0), and stays open for
-    /// its Done.
+    /// had all its reminders, or set none (its sender unknown), and stays
+    /// open for its Done.
     pub due: Option<i64>,
     /// The reminders sent so far.
     pub sent: i64,

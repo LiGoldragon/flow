@@ -860,6 +860,40 @@ impl RecordsLogicalDeliveries for FlowStore {
                 done.logical_delivery_id.clone(),
             )));
         }
+        // Flow owns the Minutes rule at admission: above zero, and every
+        // deadline its reminders reach, computed with checked arithmetic,
+        // inside the clock. No policy maximum exists.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs() as i64)
+            .unwrap_or(0);
+        let task_due = match &request {
+            Request::Task(task) if task.minutes == 0 => {
+                return Ok(Response::Refused(Refusal::MinutesRefused(
+                    signal_flow::MinutesRefusal::Zero,
+                )));
+            }
+            Request::Task(task) if task.minutes < 0 => {
+                return Ok(Response::Refused(Refusal::MinutesRefused(
+                    signal_flow::MinutesRefusal::Negative,
+                )));
+            }
+            Request::Task(task) => {
+                let interval = task.minutes.checked_mul(60);
+                let furthest = interval
+                    .and_then(|seconds| seconds.checked_mul(super::reminder::TASK_REMINDERS))
+                    .and_then(|seconds| now.checked_add(seconds));
+                match (interval, furthest) {
+                    (Some(seconds), Some(_)) => Some(now + seconds),
+                    _ => {
+                        return Ok(Response::Refused(Refusal::MinutesRefused(
+                            signal_flow::MinutesRefusal::Unreachable,
+                        )));
+                    }
+                }
+            }
+            _ => None,
+        };
         let task_sender = sent_by.clone();
         let lock = if let Some(held) = held_lock {
             let Some(existing) = self.stored_metaflow_lock(address)? else {
@@ -936,14 +970,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         match &request {
             Request::Task(task) => {
                 let (reminded, due) = match &task_sender {
-                    SentBy::Sender(sender) if task.minutes > 0 => (
-                        sender.clone(),
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .ok()
-                            .map(|elapsed| elapsed.as_secs() as i64 + task.minutes * 60),
-                    ),
-                    SentBy::Sender(sender) => (sender.clone(), None),
+                    SentBy::Sender(sender) => (sender.clone(), task_due),
                     _ => (address.clone(), None),
                 };
                 self.hold_reminder(super::reminder::Reminder {

@@ -1,3 +1,21 @@
+# Flow 0.40.6
+
+Pins signal-flow 33.2.0 (5c301a, branch flow-ethos-76e6eb) and
+meta-signal-flow 72c414 (branch flow-ethos-76e6eb). No store migration:
+every stored record keeps its shape.
+
+- flow-ethos carries the ruled message contract (bie3-1) as
+  `flow_ethos::message`: `Minutes`, `Sender.[ Flow.{ Address FlowId }
+  Living Nexus ]`, `Request` with `Order.{ Minutes String }` and
+  `Result.{ LogicalDeliveryId String }`, `Message`, `NativeInput`,
+  `Waking`, `QueueEntry`, `HeldId`, `HeldFamily`. The Nexus does not use
+  it yet; the store migration moves the queue onto it.
+- A Task's Minutes is ruled at admission: zero is refused
+  `MinutesRefused.Zero`, below zero `MinutesRefused.Negative`, and Minutes
+  whose last reminder's deadline overflows the clock
+  `MinutesRefused.Unreachable`. A refused Task is never queued. Minutes 0
+  no longer means "no reminder".
+
 # Flow 0.40.5
 
 Pins signal-flow 33.1.0 (7fcb86, branch remind-2a9116) and meta-signal-flow

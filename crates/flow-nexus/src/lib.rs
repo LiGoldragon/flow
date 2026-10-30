@@ -1975,7 +1975,8 @@ mod tests {
         .unwrap();
         assert_eq!(refused_for(&bound_once(&fixture, unproven)), None);
 
-        // A Claude pane must report its session, and that session.
+        // A Claude pane with no session file for the process must report
+        // its session, and that session.
         // The successful b005 adoption owns its cell; use a separate fixture
         // to verify Claude session evidence without colliding with that owner.
         let claude_fixture = NexusFixture::new();

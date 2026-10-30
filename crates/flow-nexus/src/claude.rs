@@ -110,6 +110,54 @@ impl ProjectsClaudeReadiness for ClaudeDaemon {
     }
 }
 
+/// Claude's own record of each interactive session it runs:
+/// `sessions/<pid>.json` under Claude's home, naming the process, its start
+/// and its session. Where the harness assigns the session id, this is where
+/// Flow learns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeSessions {
+    pub directory: PathBuf,
+}
+
+/// Reads the session a live Claude process runs.
+pub trait ReadsClaudeSessions: Sized {
+    /// The session records under this Claude home.
+    fn under(claude_home: &Path) -> Self;
+
+    /// The session process `process_id` runs, when Claude's record of it
+    /// names that process at the start it runs with now; None otherwise.
+    fn session_of(&self, process_id: u32) -> Option<String>;
+}
+
+impl ReadsClaudeSessions for ClaudeSessions {
+    fn under(claude_home: &Path) -> Self {
+        Self {
+            directory: claude_home.join("sessions"),
+        }
+    }
+
+    fn session_of(&self, process_id: u32) -> Option<String> {
+        let record = self
+            .directory
+            .join(format!("{process_id}.json"))
+            .read_json()?;
+        let stat = fs::read_to_string(format!("/proc/{process_id}/stat")).ok()?;
+        let (_, fields) = stat.rsplit_once(") ")?;
+        let started = fields.split_whitespace().nth(19)?;
+        let recorded_start = match record.get("procStart")? {
+            Value::String(start) => start.clone(),
+            Value::Number(start) => start.to_string(),
+            _ => return None,
+        };
+        let names_process =
+            record.get("pid").and_then(Value::as_u64) == Some(u64::from(process_id));
+        (names_process && recorded_start == started)
+            .then(|| record.string_at("sessionId").map(str::to_owned))
+            .flatten()
+            .filter(|session| !session.is_empty())
+    }
+}
+
 /// Where a Claude session's native transcript is.
 pub trait LocatesClaudeTranscript {
     /// Under a Claude transcript root (`projects/`): the one transcript of

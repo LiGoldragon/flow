@@ -17,6 +17,7 @@ use crate::RunningNexus;
 use crate::binding::{ReadsProcessIdentity, VerifiesAdoptedSeat};
 use crate::caller::{
     CallerProcess, KnowsHerdrServers, LocatesCallerPane, LocatesCodexThread, NamesRootThread,
+    ReadsProcess,
 };
 use crate::composition::JoinsPurpose;
 use crate::delivery::body::RendersNativeContent;
@@ -590,9 +591,115 @@ impl ReadsUnreportedThread for RunningNexus {
     }
 }
 
+/// Raw evidence of what a pane showed, read now.
+pub(crate) trait GathersSeatEvidence {
+    /// The pane, the label Herdr shows for it, the native session read
+    /// there, and the time.
+    fn seat_evidence(
+        &self,
+        pane: Option<crate::caller::CallerPane>,
+        native_session: Option<String>,
+    ) -> SeatEvidence;
+}
+
+impl GathersSeatEvidence for RunningNexus {
+    fn seat_evidence(
+        &self,
+        pane: Option<crate::caller::CallerPane>,
+        native_session: Option<String>,
+    ) -> SeatEvidence {
+        SeatEvidence {
+            pane_label: pane.as_ref().and_then(|pane| {
+                self.herdr
+                    .pane_label(&pane.herdr_session_name, &pane.herdr_pane_id)
+            }),
+            pane,
+            native_session,
+            observed_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// A process seen from one of its descendants.
+trait DescendsFrom {
+    /// Whether this process is `ancestor` or was started under it.
+    fn descends_from(&self, ancestor: u32) -> bool;
+}
+
+impl DescendsFrom for CallerProcess {
+    fn descends_from(&self, ancestor: u32) -> bool {
+        let mut process = Some(*self);
+        for _ in 0..Self::ANCESTRY_LIMIT {
+            match process {
+                Some(current) if current.process_id == ancestor => return true,
+                Some(current) => process = current.parent(),
+                None => return false,
+            }
+        }
+        false
+    }
+}
+
+/// The Claude session a pane's agent runs, read for one caller.
+trait ReadsClaudeSeat {
+    /// The pane's foreground Claude process the caller is, or was started
+    /// under, and the session it runs: the one Herdr's agent record reports
+    /// and Claude's session file for that process names, either alone when
+    /// the other is silent. Err with the session read, if any, when there is
+    /// no such process or the two disagree.
+    fn claude_session(
+        &self,
+        caller: CallerProcess,
+        herdr_session_name: &str,
+        agent: &serde_json::Value,
+    ) -> Result<(u32, String), Option<String>>;
+}
+
+impl ReadsClaudeSeat for RunningNexus {
+    fn claude_session(
+        &self,
+        caller: CallerProcess,
+        herdr_session_name: &str,
+        agent: &serde_json::Value,
+    ) -> Result<(u32, String), Option<String>> {
+        use crate::claude::ReadsClaudeSessions;
+        let text = |key: &str| agent.get(key).and_then(serde_json::Value::as_str);
+        let reported = agent
+            .pointer("/agent_session/value")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let route = HerdrRoute {
+            herdr_session_name: herdr_session_name.to_owned(),
+            herdr_agent_name: text("name").unwrap_or_default().to_owned(),
+            herdr_pane_id: text("pane_id").unwrap_or_default().to_owned(),
+            herdr_terminal_id: text("terminal_id").unwrap_or_default().to_owned(),
+        };
+        let mut claude = self
+            .herdr
+            .foreground_processes(&route)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|process| caller.descends_from(process.process_id));
+        let (Some(claude), None) = (claude.next(), claude.next()) else {
+            return Err(reported);
+        };
+        let recorded = self.herdr.claude_sessions.session_of(claude.process_id);
+        match (reported, recorded) {
+            (Some(reported), Some(recorded)) if reported == recorded => {
+                Ok((claude.process_id, reported))
+            }
+            (Some(reported), None) => Ok((claude.process_id, reported)),
+            (None, Some(recorded)) => Ok((claude.process_id, recorded)),
+            (reported, _) => Err(reported),
+        }
+    }
+}
+
 impl FindsSeat for RunningNexus {
     fn seat_of(&self, caller: CallerProcess) -> Result<(SeenSeat, Option<String>), SeatEvidence> {
-        let found = (|| -> Option<(SeenSeat, Option<String>)> {
         let agents_of = |session: &str| -> Vec<serde_json::Value> {
             self.herdr
                 .session_snapshot(session)
@@ -605,42 +712,66 @@ impl FindsSeat for RunningNexus {
                 .unwrap_or_default()
         };
         if let Some(pane) = caller.caller_pane(&self.herdr) {
-            let agent = agents_of(&pane.herdr_session_name)
+            let Some(agent) = agents_of(&pane.herdr_session_name)
                 .into_iter()
                 .find(|agent| {
                     agent.get("pane_id").and_then(serde_json::Value::as_str)
                         == Some(pane.herdr_pane_id.as_str())
-                })?;
-            if agent.get("agent").and_then(serde_json::Value::as_str) != Some("codex") {
-                return None;
-            }
-            let app_servers = self.store.codex_app_servers().ok()?;
-            let caller_thread = self
-                .codex_endpoints
-                .root_thread(&caller.codex_thread(&app_servers)?);
-            let seat_thread = agent
+                })
+            else {
+                return Err(self.seat_evidence(Some(pane), None));
+            };
+            let reported = agent
                 .pointer("/agent_session/value")
                 .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .or_else(|| self.unreported_thread(&pane.herdr_session_name, &agent))?;
-            if seat_thread != caller_thread {
-                return None;
+                .map(str::to_owned);
+            match agent.get("agent").and_then(serde_json::Value::as_str) {
+                Some("claude") => {
+                    return match self.claude_session(caller, &pane.herdr_session_name, &agent) {
+                        Ok((_, session)) => Ok((
+                            SeenSeat {
+                                herdr_session_name: pane.herdr_session_name,
+                                agent,
+                            },
+                            Some(session),
+                        )),
+                        Err(session) => Err(self.seat_evidence(Some(pane), session)),
+                    };
+                }
+                Some("codex") => {}
+                _ => return Err(self.seat_evidence(Some(pane), reported)),
             }
-            let thread = Some(caller_thread);
-            return Some((
-                SeenSeat {
-                    herdr_session_name: pane.herdr_session_name,
-                    agent,
-                },
-                thread,
-            ));
+            let caller_thread = self
+                .store
+                .codex_app_servers()
+                .ok()
+                .and_then(|app_servers| caller.codex_thread(&app_servers))
+                .map(|thread| self.codex_endpoints.root_thread(&thread));
+            let seat_thread = reported
+                .clone()
+                .or_else(|| self.unreported_thread(&pane.herdr_session_name, &agent));
+            return match (caller_thread, seat_thread) {
+                (Some(caller_thread), Some(seat_thread)) if seat_thread == caller_thread => Ok((
+                    SeenSeat {
+                        herdr_session_name: pane.herdr_session_name,
+                        agent,
+                    },
+                    Some(caller_thread),
+                )),
+                (_, seat_thread) => Err(self.seat_evidence(Some(pane), seat_thread)),
+            };
         }
-        let app_servers = self.store.codex_app_servers().ok()?;
-        let thread = self
-            .codex_endpoints
-            .root_thread(&caller.codex_thread(&app_servers)?);
+        let Some(thread) = self
+            .store
+            .codex_app_servers()
+            .ok()
+            .and_then(|app_servers| caller.codex_thread(&app_servers))
+            .map(|thread| self.codex_endpoints.root_thread(&thread))
+        else {
+            return Err(self.seat_evidence(None, None));
+        };
         let mut seats = Vec::new();
-        for session in self.herdr.herdr_sessions()? {
+        for session in self.herdr.herdr_sessions().unwrap_or_default() {
             for agent in agents_of(&session.name) {
                 let runs_thread = match agent
                     .pointer("/agent_session/value")
@@ -662,16 +793,9 @@ impl FindsSeat for RunningNexus {
         }
         let mut seats = seats.into_iter();
         match (seats.next(), seats.next()) {
-            (Some(seat), None) => Some((seat, Some(thread))),
-            _ => None,
+            (Some(seat), None) => Ok((seat, Some(thread))),
+            _ => Err(self.seat_evidence(None, Some(thread))),
         }
-        })();
-        found.ok_or(SeatEvidence {
-            pane: None,
-            pane_label: None,
-            native_session: None,
-            observed_at: 0,
-        })
     }
 }
 
@@ -708,14 +832,39 @@ impl BindsSeats for RunningNexus {
         let Some(process_id) = u32::try_from(peer.pid).ok() else {
             return unidentified();
         };
-        let Ok((seat, thread)) = self.seat_of(CallerProcess { process_id }) else {
-            return unidentified();
+        // A caller no seat is named for is refused, and what its pane
+        // showed is logged as it was read, never made into an identity.
+        let refused = |evidence: SeatEvidence| {
+            let SeatEvidence {
+                pane,
+                pane_label,
+                native_session,
+                observed_at,
+            } = evidence;
+            eprintln!(
+                "flow-nexus: BindSeat {address:?} from {peer:?} names no seat: pane {pane:?}, label {pane_label:?}, session {native_session:?}, at {observed_at}"
+            );
+            unidentified()
+        };
+        let caller = CallerProcess { process_id };
+        let (seat, thread) = match self.seat_of(caller) {
+            Ok(found) => found,
+            Err(evidence) => return refused(evidence),
         };
         let text = |pointer: &str| {
             seat.agent
                 .pointer(pointer)
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
+        };
+        let unidentified = || {
+            refused(self.seat_evidence(
+                Some(crate::caller::CallerPane {
+                    herdr_session_name: seat.herdr_session_name.clone(),
+                    herdr_pane_id: text("/pane_id").unwrap_or_default(),
+                }),
+                thread.clone(),
+            ))
         };
         let harness_kind = match text("/agent").as_deref() {
             Some("claude") => HarnessKind::Claude,
@@ -758,11 +907,15 @@ impl BindsSeats for RunningNexus {
         let Some(mut foreground) = self.herdr.foreground_processes(&route) else {
             return unidentified();
         };
-        foreground.retain(|process| {
-            process
+        // A Codex seat's process resumes its thread; a Claude seat's is the
+        // Claude process the caller is, or was started under, whose session
+        // `seat_of` read.
+        foreground.retain(|process| match harness_kind {
+            HarnessKind::Codex => process
                 .arguments
                 .windows(2)
-                .any(|pair| pair[0] == "resume" && pair[1] == native_session_id)
+                .any(|pair| pair[0] == "resume" && pair[1] == native_session_id),
+            HarnessKind::Claude => caller.descends_from(process.process_id),
         });
         let [foreground] = foreground.as_slice() else {
             return unidentified();
@@ -804,7 +957,12 @@ impl BindsSeats for RunningNexus {
             model_name,
         };
         match self.verified_seat_node(&seat.herdr_session_name, &address, &binding) {
-            Err(_) => unidentified(),
+            Err(reason) => {
+                eprintln!(
+                    "flow-nexus: BindSeat {address:?}: the seat's binding is refused: {reason:?}"
+                );
+                unidentified()
+            }
             Ok(node) => match self
                 .store
                 .adopt_existing_flow(node, role, address.clone(), &binding)

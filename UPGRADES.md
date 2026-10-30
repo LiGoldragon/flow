@@ -1,3 +1,25 @@
+# Flow 0.40.10
+
+Pins meta-signal-flow 42.0.0 (67deea) and signal-flow 34.0.0 (fb13fa), as
+0.40.9. No store migration: every stored record keeps its shape and no
+table is added.
+
+- BindSeat adopts a Claude seat on an empty store. The caller's pane, the
+  Claude agent Herdr records in it, and the pane's foreground Claude
+  process the caller is or was started under make the seat; its session is
+  the one Herdr's agent record reports and Claude's session file for that
+  process (`sessions/<pid>.json` under Claude's home, read at the process's
+  current start) names, either alone when the other is silent. Where the
+  harness assigned the session id, Flow learns it here. The seat is bound
+  to the given address under the Flow ID the `flow-id` helper claims for
+  the session. Before, a Claude pane was found only when the store already
+  knew it, and answered `Unidentified` on an empty store.
+- MetaBindExisting and BindSeat accept a Claude pane that reports no
+  session when Claude's session file for the bound process names it.
+- A BindSeat that names no seat still answers `Refused.Unidentified` with
+  the caller's process, and logs what the pane showed: the pane, the label
+  Herdr shows for it, the native session read there, and the time.
+
 # Flow 0.40.9
 
 Pins meta-signal-flow 42.0.0 (67deea) and signal-flow 34.0.0 (fb13fa), as

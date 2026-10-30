@@ -218,9 +218,10 @@ impl RefusesBinding for FlowBindingRefusalReason {
 /// the pane is in the container's Herdr session with an agent of the
 /// binding's harness at its workspace, pane and terminal; the pane's
 /// foreground processes include the binding's process; and its native
-/// session is the binding's. A Claude pane must report its session; a Codex
-/// pane that reports none is proven by a rollout whose `session_meta` names
-/// the session.
+/// session is the binding's. A Claude pane that reports no session is proven
+/// by Claude's session file for the binding's process; a Codex pane that
+/// reports none is proven by a rollout whose `session_meta` names the
+/// session.
 pub trait VerifiesExistingBinding {
     fn verify_existing_binding(
         &self,
@@ -309,7 +310,19 @@ impl VerifiesExistingBinding for crate::herdr::HerdrCli {
         ) {
             (Some(session), _) if session == binding.native_session_id => Ok(()),
             (Some(_), _) => Err(FlowBindingRefusalReason::SessionMismatch),
-            (None, HarnessKind::Claude) => Err(FlowBindingRefusalReason::SessionUnreported),
+            // Where the harness assigned the session, Claude's own record of
+            // the bound process names it.
+            (None, HarnessKind::Claude) => {
+                use crate::claude::ReadsClaudeSessions;
+                match u32::try_from(binding.process_identity.process_id)
+                    .ok()
+                    .and_then(|process_id| self.claude_sessions.session_of(process_id))
+                {
+                    Some(session) if session == binding.native_session_id => Ok(()),
+                    Some(_) => Err(FlowBindingRefusalReason::SessionMismatch),
+                    None => Err(FlowBindingRefusalReason::SessionUnreported),
+                }
+            }
             (None, HarnessKind::Codex) => {
                 let proven = self
                     .native_transcript_root(&HarnessKind::Codex, &binding.model_name)

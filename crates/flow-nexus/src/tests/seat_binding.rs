@@ -139,17 +139,17 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
         vec![unreported_codex("w12:p1"), unreported_codex("w12:p2")],
         tui.0.id(),
     );
-    assert_eq!(
-        fixture.nexus.bind_seat(address.clone(), Some(&subagent)),
-        Response::Refused(Refusal::Unidentified(subagent.clone()))
-    );
+    super::assert_unidentified(
+fixture.nexus.bind_seat(address.clone(), Some(&subagent)),
+&subagent,
+);
 
     super::herdr_world(&fixture, vec![unreported_codex("w12:p1")], tui.0.id());
     // A thread whose session no pane runs names no seat.
-    assert_eq!(
-        fixture.nexus.bind_seat(address.clone(), Some(&orphan)),
-        Response::Refused(Refusal::Unidentified(orphan.clone()))
-    );
+    super::assert_unidentified(
+fixture.nexus.bind_seat(address.clone(), Some(&orphan)),
+&orphan,
+);
     // The subagent's command binds its flow's seat, under the root's claim.
     // Adoption announces the new live Codex thread so the Nexus's responder
     // subscribes to it and its first rest can drain already queued work.
@@ -177,13 +177,13 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
             .response,
         Response::Identified(address.clone())
     );
-    assert_eq!(
-        fixture
+    super::assert_unidentified(
+fixture
             .nexus
             .dispatch_metaflow_peer(signal_flow::Query::Identify(orphan.clone()), Some(&message))
             .response,
-        Response::Refused(Refusal::Unidentified(orphan.clone()))
-    );
+&orphan,
+);
     let awake = fixture.nexus.store.metaflow_awake_as("877549").unwrap();
     assert_eq!(awake.map(|metaflow| metaflow.address), Some(address));
 }
@@ -432,12 +432,13 @@ fn a_pane_with_no_agent_record_refuses_with_its_evidence() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    assert_eq!(
-        fixture
-            .nexus
-            .bind_seat(psyche_flow_secondary(), Some(&peer)),
-        Response::Refused(Refusal::Unidentified(peer.clone()))
-    );
+    let reply = fixture
+        .nexus
+        .bind_seat(psyche_flow_secondary(), Some(&peer));
+    let Response::Refused(Refusal::Unidentified(refused)) = reply else {
+        panic!("a pane with no agent record names no seat: {reply:?}");
+    };
+    assert_eq!(refused.process, peer);
     let Err(evidence) = fixture.nexus.seat_of(CallerProcess {
         process_id: shell.0.id(),
     }) else {
@@ -459,6 +460,24 @@ fn a_pane_with_no_agent_record_refuses_with_its_evidence() {
             native_session: None,
             observed_at: evidence.observed_at,
         }
+    );
+    // The reply carries that evidence, typed, with the process.
+    assert_eq!(
+        refused,
+        signal_flow::SeatEvidence {
+            seat_pane_option: Some(signal_flow::SeatPane {
+                herdr_session_name: "messaging-build".into(),
+                herdr_pane_id: "w1:p9".into(),
+            }),
+            pane_label_option: Some("zsh".into()),
+            native_session_id_option: None,
+            observed_at: refused.observed_at,
+            process: peer.clone(),
+        }
+    );
+    assert!(
+        (i64::try_from(before).unwrap()..=i64::try_from(after).unwrap())
+            .contains(&refused.observed_at)
     );
     use crate::store::ReadsFlowRows;
     assert_eq!(

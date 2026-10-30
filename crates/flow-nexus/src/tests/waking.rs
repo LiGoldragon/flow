@@ -1497,6 +1497,178 @@ fn a_simplified_wake_sends_the_first_soft_request_without_an_empty_turn() {
     assert_eq!(receipt.native_session_id, world.session());
 }
 
+/// A Simplified seat's answer reaches its sender whatever order its prompt
+/// hook and its transcript's user row come in: the prompt's hook reports
+/// before Claude writes the row, so the input is not yet Delivered when
+/// the hook reports; at the turn's Stop the answer is taken from the
+/// transcript, the binding completes, and the next request is handed over.
+#[test]
+fn a_simplified_answer_reaches_its_sender_when_the_prompt_hook_precedes_its_row() {
+    use flow_native::DigestsPrompt;
+    let mut fixture = NexusFixture::new();
+    ended_simplified_claude(&fixture);
+    let at = address(Layer::Secondary);
+    let sender = Address {
+        aspect: Aspect::Psyche,
+        topic: "core".into(),
+        layer: Layer::Secondary,
+    };
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        vec![],
+    ));
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: sender.clone(),
+        state: State::Asleep,
+        past: vec![],
+        queue: vec![],
+    });
+    let accept = |body: &str| {
+        let signal_flow::Response::SendAccepted(accepted) = fixture
+            .nexus
+            .store
+            .accept_logical_delivery(
+                &at,
+                SentBy::Sender(sender.clone()),
+                Delivery::Wake,
+                Message::Soft(Request::Order(body.into())),
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("the request is accepted")
+        };
+        accepted
+    };
+    let first = accept("judge the first");
+    let second = accept("judge the second");
+    let world = fixture.fresh_claude_world();
+    fs::write(world.state.join("rows-later"), "").unwrap();
+
+    fixture.nexus.wake_due(at.clone());
+
+    let State::Awake(flow_id) = stored(&fixture, Layer::Secondary).state else {
+        panic!("the simplified seat is awake; {}", world.calls())
+    };
+    let session = world.session();
+    let transcript = fixture
+        .directory
+        .path()
+        .join("native-transcripts/claude/-home-li-primary")
+        .join(format!("{session}.jsonl"));
+    let held = || -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(world.state.join("held-row")).unwrap()).unwrap()
+    };
+    let row = held();
+    let typed = row
+        .pointer("/message/content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap()
+        .to_owned();
+    assert!(typed.contains("judge the first"), "{typed}");
+    assert!(
+        !typed.contains("judge the second"),
+        "one input at a time: {typed}"
+    );
+    let prompt_id = row["uuid"].as_str().unwrap().to_owned();
+    let report = |event: signal_flow::Event| {
+        assert_eq!(
+            fixture.nexus.report(signal_flow::Report_Data {
+                flow_id: flow_id.clone(),
+                event: event.clone(),
+            }),
+            signal_flow::Response::Reported
+        );
+        fixture.nexus.after_report(&flow_id, &event);
+    };
+
+    // The hook reports the prompt before Claude writes its row.
+    report(signal_flow::Event::PromptSubmitted(
+        signal_flow::NativePrompt {
+            native_session_id_option: Some(session.clone()),
+            prompt_id_option: Some(prompt_id.clone()),
+            prompt_sha256: typed.prompt_sha256(),
+        },
+    ));
+    // Then the row, and the turn's answer A1.
+    let answer = "A1: the first is sound.";
+    {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        writeln!(file, "{row}").unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"type":"assistant","sessionId":session,"uuid":"answer-1",
+                "message":{"stop_reason":"end_turn","content":[{"type":"text","text":answer}]}})
+        )
+        .unwrap();
+    }
+    report(signal_flow::Event::Stopped(signal_flow::NativeStop {
+        native_session_id_option: Some(session.clone()),
+        transcript_path_option: Some(transcript.to_string_lossy().into_owned()),
+        last_assistant_message_option: Some(answer.into()),
+    }));
+
+    let replied = fixture.nexus.store.metaflow(&sender).unwrap().unwrap();
+    assert_eq!(
+        replied
+            .queue
+            .iter()
+            .map(|entry| (&entry.sent_by, &entry.message))
+            .collect::<Vec<_>>(),
+        vec![(
+            &SentBy::Sender(at.clone()),
+            &Message::Soft(Request::Result(answer.into()))
+        )],
+        "the sender holds the answer to its first request"
+    );
+    assert!(
+        matches!(
+            fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(&first.logical_delivery_id)
+                .unwrap()
+                .map(|snapshot| snapshot.delivery_state),
+            Some(signal_flow::DeliveryState::Delivered(_))
+        ),
+        "the first request is Delivered"
+    );
+    // The binding completed: the seat was handed the second request, which
+    // a binding still incomplete refuses as WaitingForTurn.
+    let seat = stored(&fixture, Layer::Secondary);
+    assert_eq!(seat.state, State::Awake(flow_id.clone()));
+    assert!(
+        seat.queue.is_empty(),
+        "the second request was handed over: {seat:?}"
+    );
+    let next = held();
+    assert!(
+        next.pointer("/message/content")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|content| content.contains("judge the second")),
+        "the seat is handed the second request: {next}"
+    );
+    assert!(
+        !matches!(
+            fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(&second.logical_delivery_id)
+                .unwrap()
+                .map(|snapshot| snapshot.delivery_state),
+            Some(signal_flow::DeliveryState::Queued) | None
+        ),
+        "the second request left the queue"
+    );
+}
+
 #[test]
 fn a_wake_that_cannot_start_puts_the_work_back_and_stays_asleep() {
     let fixture = NexusFixture::new();
@@ -2991,7 +3163,10 @@ case "$*" in
   *"agent prompt"*)
     s=$(cat "$S/session"); t='{claude_root}/'"$s"'.jsonl'
     escaped=$(printf '%s' "$6" | sed ':a;N;$!ba;s/\\/\\\\/g;s/"/\\"/g;s/\n/\\n/g')
-    printf '{{"type":"user","sessionId":"%s","uuid":"typed-%s","message":{{"content":"%s"}}}}\n' "$s" "$(wc -l < "$t")" "$escaped" >> "$t"
+    # With rows-later, Claude has not yet written the user row: it is held
+    # for the test to append once the prompt's hook has reported.
+    row=$(printf '{{"type":"user","sessionId":"%s","uuid":"typed-%s","message":{{"content":"%s"}}}}' "$s" "$(wc -l < "$t")" "$escaped")
+    if [ -f "$S/rows-later" ]; then printf '%s\n' "$row" > "$S/held-row"; else printf '%s\n' "$row" >> "$t"; fi
     printf '{{"id":"cli:agent:prompt","result":{{"type":"agent_prompted","agent":%s}}}}\n' "$(agent)" ;;
   *) exit 64 ;;
 esac

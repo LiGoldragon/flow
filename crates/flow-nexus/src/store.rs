@@ -8679,6 +8679,131 @@ mod tests {
         }
     }
 
+    /// A store written by 0.40.4 to 0.40.10 keeps its logical deliveries at
+    /// v3. It opens with every current delivery and every event upgraded,
+    /// and opens again unchanged.
+    #[test]
+    fn a_store_from_0_40_4_upgrades_its_v3_logical_deliveries() {
+        use super::MemoryDefinition;
+        use super::logical_delivery::{CurrentLogicalDeliveryV3, LogicalDeliveryEventV3};
+        use super::send_v34::{DeliverySnapshotV34, DeliveryStateV34, RefusalV34};
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        drop(fixture.configured_store());
+        let tables = [
+            "flow_nexus_logical_delivery_current",
+            "flow_nexus_logical_delivery_events",
+        ];
+        let database = redb::Database::open(fixture.path()).unwrap();
+        let write = database.begin_write().unwrap();
+        {
+            let mut catalog = write.open_table(super::SEMA_CATALOG_TABLE).unwrap();
+            for name in tables {
+                catalog.remove(name).unwrap();
+            }
+        }
+        for name in tables {
+            write
+                .delete_table(redb::TableDefinition::<&str, &[u8]>::new(name))
+                .unwrap();
+        }
+        write.commit().unwrap();
+        drop(database);
+        let core = Address {
+            aspect: Aspect::Mind,
+            topic: "core".into(),
+            layer: Layer::Secondary,
+        };
+        let elsewhere = Address {
+            aspect: Aspect::Mind,
+            topic: "flow".into(),
+            layer: Layer::Primary,
+        };
+        let snapshots = [
+            DeliverySnapshotV34 {
+                delivery_cursor: 7,
+                logical_delivery_id: "logical-queued".into(),
+                sent_by: signal_flow::SentBy::Sender(elsewhere.clone()),
+                address: core.clone(),
+                delivery_state: DeliveryStateV34::Queued,
+            },
+            DeliverySnapshotV34 {
+                delivery_cursor: 8,
+                logical_delivery_id: "logical-failed".into(),
+                sent_by: signal_flow::SentBy::Sender(elsewhere.clone()),
+                address: core.clone(),
+                delivery_state: DeliveryStateV34::Failed(RefusalV34::Direct("gone".into())),
+            },
+        ];
+        let mut engine = Engine::open(EngineOpen::new(
+            fixture.path(),
+            SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
+        ))
+        .unwrap();
+        let current = engine
+            .register_table::<CurrentLogicalDeliveryV3>(TableDescriptor::new(
+                TableName::new(tables[0]),
+                FamilyName::new("flow-nexus-logical-delivery-current"),
+                CurrentLogicalDeliveryV3::schema_hash(),
+            ))
+            .unwrap();
+        let events = engine
+            .register_table::<LogicalDeliveryEventV3>(TableDescriptor::new(
+                TableName::new(tables[1]),
+                FamilyName::new("flow-nexus-logical-delivery-event"),
+                LogicalDeliveryEventV3::schema_hash(),
+            ))
+            .unwrap();
+        for snapshot in &snapshots {
+            engine
+                .assert(Assertion::new(
+                    current,
+                    CurrentLogicalDeliveryV3 {
+                        snapshot: snapshot.clone(),
+                    },
+                ))
+                .unwrap();
+            engine
+                .assert(Assertion::new(
+                    events,
+                    LogicalDeliveryEventV3 {
+                        snapshot: snapshot.clone(),
+                    },
+                ))
+                .unwrap();
+        }
+        drop(engine);
+        let upgraded: Vec<signal_flow::DeliverySnapshot> =
+            snapshots.iter().cloned().map(Into::into).collect();
+        assert_eq!(
+            upgraded[1].delivery_state,
+            signal_flow::DeliveryState::Failed(signal_flow::Refusal::Direct("gone".into()))
+        );
+        for _ in 0..2 {
+            let store = fixture.configured_store();
+            for snapshot in &upgraded {
+                assert_eq!(
+                    store
+                        .logical_delivery_snapshot(&snapshot.logical_delivery_id)
+                        .unwrap(),
+                    Some(snapshot.clone())
+                );
+            }
+            assert_eq!(
+                store
+                    .engine
+                    .match_records(QueryPlan::all(store.logical_deliveries.events))
+                    .unwrap()
+                    .records()
+                    .iter()
+                    .map(|event| event.snapshot.clone())
+                    .collect::<Vec<_>>(),
+                upgraded
+            );
+        }
+    }
+
     #[test]
     fn simplified_reply_requires_consumed_input_and_queues_once_to_its_sender() {
         use signal_flow::{

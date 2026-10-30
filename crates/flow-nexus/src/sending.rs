@@ -873,7 +873,11 @@ impl CompletesDirectSends for RunningNexus {
         if !matches!(self.store.outstanding_delivery(address), Ok(None))
             || flow_id.as_ref().is_some_and(|flow_id| {
                 !matches!(self.store.address_hold(flow_id), Ok(None))
-                    || !matches!(self.store.past_threshold(flow_id), Ok(false))
+                    || (!matches!(self.store.past_threshold(flow_id), Ok(false))
+                        && !crate::waking::NotesRefreshRefusals::holds(
+                            &self.refresh_refusals,
+                            flow_id,
+                        ))
             })
         {
             return Ok(None);

@@ -817,7 +817,7 @@
 (def night-scenarios
   [["13 OnDemand seat whose successor cannot compose is kept, told and handed its queue"
     (fn []
-      (let [_ (send-to tertiary-address "Wake" "Soft.Order.«Run the shell command sleep 30, then answer with one word and stop. Tag ra1.»" (sender-pane))
+      (let [_ (flow (str "Launch.{ " tertiary-address " Predecessors.0 «Run the shell command sleep 30, then answer with one word and stop. Tag ra1.» }"))
             flow-id (str (watch 90 #(awake-flow tertiary-address)))
             pane (bound-pane (inspect tertiary-address))
             broken (flow-meta (broken-metaflows tertiary-address))
@@ -827,7 +827,7 @@
             open (contains? (pane-ids) pane)
             kept-line (some #(when (and (str/includes? % flow-id) (str/includes? % "kept at its Stop")) %) (str/split-lines (log-text)))
             told (pane-holds (sender-pane) (str "(flow " flow-id ") was refused") 60)
-            queued (send-to tertiary-address "Queue" "Soft.Order.«Answer with one word and stop. Tag ra2.»" (sender-pane))
+            queued (send-to tertiary-address "Queue" "Soft.Notice.«Answer with one word and stop. Tag ra2.»" (sender-pane))
             handed (pane-holds pane "Tag ra2" 90)
             restored (restore-configuration!)]
         {:reply (str "Configure broken: " broken " / Send Tag ra2: " queued " / restore: " restored)
@@ -843,12 +843,12 @@
             before (stops-of flow-id)
             broken (flow-meta (broken-metaflows secondary))
             low (flow-meta "Configure.Thresholds.[ { claude-haiku-5-5 1000 } ]")
-            sent (flow (str "Send.{ Address." secondary " Wake Soft.Order.«Answer with one word and stop. Tag rb1.» }") pane)
+            sent (flow (str "Send.{ Address." secondary " Wake Soft.Notice.«Answer with one word and stop. Tag rb1.» }") pane)
             rested (watch 120 #(> (stops-of flow-id) before))
             _ (Thread/sleep 8000)
             kept (= (str (awake-flow secondary)) flow-id)
             kept-line (some #(when (and (str/includes? % flow-id) (str/includes? % "RefreshLaunchRefused")) %) (str/split-lines (log-text)))
-            queued (flow (str "Send.{ Address." secondary " Queue Soft.Order.«Answer with one word and stop. Tag rb2.» }") pane)
+            queued (flow (str "Send.{ Address." secondary " Queue Soft.Notice.«Answer with one word and stop. Tag rb2.» }") pane)
             handed (pane-holds pane "Tag rb2" 90)
             restored (restore-configuration!)]
         {:reply (str "Send Tag rb1: " sent " / Send Tag rb2: " queued " / restore: " restored)

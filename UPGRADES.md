@@ -1,3 +1,34 @@
+# Flow 0.40.5
+
+Pins signal-flow 33.1.0 (7fcb86, branch remind-2a9116) and meta-signal-flow
+44f75f (branch signal-flow-33.1-2a9116). The store gains the
+`flow_nexus_reminders` table, added empty to a store that lacks it.
+
+- A seat owed a successor is closed only once its successor composes: an
+  OnDemand seat, at its sleep or its threshold refresh, composes its
+  successor first and stays Awake when that is refused
+  (`SuccessorUncomposable`). A seat kept because its successor was refused
+  (`RefreshUnplaceable`, `RefreshLaunchRefused`, `SuccessorUncomposable`) is
+  handed its queue, soft requests included, though past its threshold, and
+  the refusal is told once as `Soft.Notice` with `Wake` to the metaflow's Up
+  (Psyche core Secondary for a Primary). Its successor is tried again at its
+  next rest.
+- An adopted seat (BindSeat, meta BindExisting) resting at its adoption is
+  handed its queue at once.
+- `Remind.{ Instant Body }` on the ordinary socket holds a reminder in the
+  store for the caller's metaflow; at its RFC 3339 instant Flow queues
+  `Soft.Notice.Body` with `Wake`. It answers `Reminded`, or
+  `Refused.InstantUnreadable`.
+- flow-ethos `Request` appends `Task.{ Minutes String }` and
+  `Done.{ LogicalDeliveryId String }`; archived requests read unchanged. A
+  Task is held under its logical delivery id; when its minutes lapse with no
+  Done its sender is reminded, then every Minutes, four reminders in all,
+  the last copied to the sender's Secondary as a failure. A Done naming no
+  open task is refused `NoOpenTask`. Minutes 0 sets no reminder.
+- A delivered message is typed as its `NativeInput` datom (logical delivery
+  id, sender, request under its priority), and a cohort as one vector of
+  them, for Claude panes and Codex turns alike.
+
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
 Pins signal-flow 32.0.0 (e5e9d5) and meta-signal-flow 40.0.0 (f0f214), both

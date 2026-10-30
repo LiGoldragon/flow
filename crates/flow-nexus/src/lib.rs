@@ -36,6 +36,7 @@ pub mod delivery;
 pub mod lean;
 mod metaflow;
 pub mod recovery;
+pub mod reminding;
 pub mod repairing;
 use metaflow::DispatchesMetaflowPeer;
 #[cfg(test)]
@@ -115,6 +116,8 @@ pub struct RunningNexus {
     pub waking: waking::WakingMetaflows,
     /// Flows confirmed after their Stop, awaiting settlement; see `waking`.
     pub stopped_at_confirmation: waking::StoppedAtConfirmation,
+    /// Flows kept because their successor was refused; see `waking`.
+    pub refresh_refusals: waking::RefreshRefusals,
     /// Set once the Nexus is told to stop; see [`StopsNexus`].
     pub stopping: Stopping,
     /// The send-tool responder of the Codex launch running now; see
@@ -201,6 +204,7 @@ impl Dispatches for RunningNexus {
             // binds from it, and its Launch starts as an Unbound one would.
             Query::DeliverAll(_)
             | Query::BindSeat(_)
+            | Query::Remind(_)
             | Query::ObserveSends(_)
             | Query::ObserveSender(_) => {
                 Response::Refused(signal_flow::Refusal::Unidentified(signal_flow::Process {
@@ -651,6 +655,7 @@ impl OpensRunningNexus for RunningNexus {
             pane_leases: delivery::lease::PaneLeases::default(),
             waking: waking::WakingMetaflows::default(),
             stopped_at_confirmation: waking::StoppedAtConfirmation::default(),
+            refresh_refusals: waking::RefreshRefusals::default(),
             stopping: Stopping::default(),
             launch_calls: send_tool::LaunchCalls::default(),
             codex_turns: codex_turns::CodexTurns::default(),
@@ -842,9 +847,29 @@ impl ServesConnection for Connection {
                 let response = nexus.deliver_all(address, self.process.as_ref());
                 return self.peer.write_response(&response);
             }
+            // A Remind is held for the caller's metaflow, read from the
+            // socket as a Send's sender is.
+            Query::Remind(remind) => {
+                use crate::reminding::RemindsCallers;
+                let response = nexus.remind(remind, self.process.as_ref());
+                let written = self.peer.write_response(&response);
+                drop(self);
+                if response == Response::Reminded {
+                    nexus.send_due_reminders();
+                }
+                return written;
+            }
+            // An adopted seat resting at its adoption is handed what is
+            // queued for it now, as its turn's end would; Flow sees no Stop
+            // from a seat it did not start until its next turn ends.
             Query::BindSeat(address) => {
                 let response = nexus.bind_seat(address.clone(), self.process.as_ref());
-                return self.peer.write_response(&response);
+                let written = self.peer.write_response(&response);
+                drop(self);
+                if matches!(response, Response::Bound(_)) {
+                    nexus.drain_awake(&address);
+                }
+                return written;
             }
             // A Launch is the Start its declaration names, from the calling
             // process, or, for a metaflow Awake as a live flow, the Replace
@@ -903,6 +928,16 @@ impl ServesConnection for Connection {
         self.peer.write_meta_response(&response)?;
         drop(self);
         nexus.settle_stops_at_confirmation();
+        // An adopted seat resting at its adoption is handed its queue now.
+        if let meta_signal_flow::Response::BoundExisting(bound) = &response
+            && let meta_signal_flow::FlowBindingResult::Bound(binding) = &bound.flow_binding_result
+            && let Ok(Some(metaflow)) = crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(
+                &nexus.store,
+                &binding.flow_id,
+            )
+        {
+            nexus.drain_awake(&metaflow.address);
+        }
         Ok(())
     }
 }
@@ -2053,6 +2088,7 @@ mod tests {
                 pane_leases: crate::delivery::lease::PaneLeases::default(),
                 waking: crate::waking::WakingMetaflows::default(),
                 stopped_at_confirmation: crate::waking::StoppedAtConfirmation::default(),
+                refresh_refusals: crate::waking::RefreshRefusals::default(),
                 stopping: crate::Stopping::default(),
                 launch_calls: crate::send_tool::LaunchCalls::default(),
                 codex_turns: crate::codex_turns::CodexTurns::default(),

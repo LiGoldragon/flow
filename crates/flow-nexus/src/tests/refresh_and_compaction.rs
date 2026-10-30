@@ -240,6 +240,11 @@ fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_fl
     claude_seat(&fixture, 230_000);
     append_main_rows(&fixture, &[end_turn("last-turn")]);
     seat_refreshing_at(&fixture, 200_000);
+    declare_seat(
+        &fixture,
+        Continuity::OnDemand,
+        vec!["spirit-core".into(), "intent-flow".into()],
+    );
     seat_metaflow(
         &fixture,
         vec![Request::Order("Held for the next flow.".into())],
@@ -283,6 +288,61 @@ fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_fl
     );
 }
 
+/// An OnDemand seat resting past its threshold whose successor cannot be
+/// composed is not closed: its Address keeps its flow, which is handed what
+/// is queued for it, and the refusal is told once to the metaflow's Up.
+#[test]
+fn a_seat_whose_successor_cannot_compose_stays_and_is_handed_its_queue() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 230_000);
+    append_main_rows(&fixture, &[end_turn("last-turn")]);
+    seat_refreshing_at(&fixture, 200_000);
+    // No declaration and no launch of the seat's names a successor.
+    seat_metaflow(&fixture, vec![Request::Order("Still yours.".into())]);
+    let up = signal_flow::Address {
+        layer: Layer::Primary,
+        ..seat_address()
+    };
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: up.clone(),
+        state: State::Asleep,
+        past: vec![],
+        queue: vec![],
+    });
+
+    fixture
+        .nexus
+        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+
+    assert!(!closed(&fixture), "the seat's pane stays open");
+    assert!(
+        fixture
+            .typed()
+            .is_some_and(|typed| typed.contains("Still yours.")),
+        "the kept seat is handed its queue"
+    );
+    assert_eq!(
+        seat_metaflow_now(&fixture).state,
+        State::Awake(CLAUDE_SEAT.into())
+    );
+    let told = fixture
+        .nexus
+        .store
+        .metaflow(&up)
+        .unwrap()
+        .expect("the Up metaflow")
+        .queue;
+    assert_eq!(told.len(), 1, "the refusal is told once");
+    assert!(matches!(
+        &told[0].message,
+        Message::Soft(Request::Notice(notice)) if notice.contains(CLAUDE_SEAT)
+    ));
+}
+
 /// An idle OnDemand seat with nothing queued closes its harness either way:
 /// past its threshold it is refreshed, below it it sleeps, its metaflow
 /// Asleep until work wakes its next flow.
@@ -297,6 +357,11 @@ fn an_idle_on_demand_seat_is_refreshed_only_past_its_threshold() {
         claude_seat(&fixture, tokens);
         append_main_rows(&fixture, &[end_turn("last-turn")]);
         seat_refreshing_at(&fixture, 200_000);
+        declare_seat(
+            &fixture,
+            Continuity::OnDemand,
+            vec!["spirit-core".into(), "intent-flow".into()],
+        );
         seat_metaflow(&fixture, vec![]);
         fixture
             .nexus

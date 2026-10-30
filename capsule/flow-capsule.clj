@@ -41,7 +41,20 @@
 (def meta-socket (str capsule-runtime "/flow-meta.sock"))
 (def state-root (str home "/.local/state/flow-testing"))
 (def store-path (str state-root "/flow.sema"))
-(def herdr-session-dir (str home "/.config/herdr/sessions/" session))
+(def config-home (str state-root "/config"))
+;; The capsule's own XDG_CONFIG_HOME: Herdr reads its config and keeps its
+;; sessions there, so the capsule's Herdr shares nothing with the user's.
+(def herdr-session-dir (str config-home "/herdr/sessions/" session))
+;; The capsule's own Codex app-server: a private CODEX_HOME holding only a
+;; copy of the user's Codex login, a private control socket, and a client
+;; that runs Codex in that home. The Codex executable, its model and the
+;; login it copies are taken from the environment where given.
+(def codex-home (str state-root "/codex-home"))
+(def codex-socket (str capsule-runtime "/codex/app-server-control.sock"))
+(def codex-client (str state-root "/codex-client"))
+(def codex-binary (or (System/getenv "FLOW_CAPSULE_CODEX") (some-> (fs/which "codex") str)))
+(def codex-model (or (System/getenv "FLOW_CAPSULE_CODEX_MODEL") "gpt-5.6-luna"))
+(def codex-login (or (System/getenv "FLOW_CAPSULE_CODEX_LOGIN") (str home "/.codex-next/auth.json")))
 (def curriculum-socket (str capsule-runtime "/curriculum/curriculum.sock"))
 (def curriculum-contexts (str state-root "/curriculum-context"))
 (def source-parent (str (fs/path (System/getProperty "java.io.tmpdir") "flow-testing")))
@@ -61,6 +74,7 @@
 (def brief "Answer with one word and stop.")
 (def quaternary "{ Psyche test Quaternary }")
 (def secondary "{ Psyche test Secondary }")
+(def tertiary-address "{ Psyche test Tertiary }")
 
 ;; ---------------------------------------------------------------- datom reading
 
@@ -154,6 +168,7 @@
            "SHELL" (or (System/getenv "SHELL") "/bin/sh")
            "PATH" (str @package "/bin:" (System/getenv "PATH"))
            "XDG_RUNTIME_DIR" capsule-runtime
+           "XDG_CONFIG_HOME" config-home
            "LANG" (or (System/getenv "LANG") "C.UTF-8")
            "TERM" "xterm-256color"}
           extra)))
@@ -312,7 +327,10 @@
 (defn send [delivery message pane]
   (flow (str "Send.{ Address." quaternary " " delivery " " message " }") pane))
 
-(def scenarios
+(defn send-to [addr delivery message pane]
+  (flow (str "Send.{ Address." addr " " delivery " " message " }") pane))
+
+(def base-scenarios
   [["0 sender seat: Launch { Psyche test Secondary } (Maintained)"
     (fn []
       (let [reply (launch secondary)
@@ -472,6 +490,8 @@
                        flow-id "; after the second, pane " (if gone "closed" "still open") "; Secondary afterwards "
                        (if m (str (name (:state m)) " " (:flow m)) "unchanged after 20 s"))}))]])
 
+
+
 ;; ---------------------------------------------------------------- capsule life
 
 (def nexus (atom nil))
@@ -531,6 +551,7 @@
   (when (fs/exists? source-parent) (refuse (str source-parent " already exists; nothing started")))
   (fs/delete-tree state-root)
   (fs/create-dirs state-root)
+  (fs/create-dirs (str config-home "/herdr"))
   (fs/create-dirs capsule-runtime)
   (fs/create-dirs capsule-flows)
   (reset! herdr-server (p/process ["herdr" "--session" session "server"]
@@ -597,6 +618,33 @@
       (println (str "curriculum | " curriculum-package " | layout " layout ", refresh " no-refresh
                     ", records " capsule-flows " | socket " curriculum-socket " | ResolveSkills -> " probe)))))
 
+(defn fill
+  "A configure.datom line with the capsule's places filled in."
+  [line]
+  (-> line (str/replace "@SOURCE_ROOT@" source-root) (str/replace "@CAPSULE_RUNTIME@" capsule-runtime)
+      (str/replace "@CURRICULUM_SOCKET@" curriculum-socket) (str/replace "@CODEX_CLIENT@" codex-client)
+      (str/replace "@CODEX_HOME@" codex-home) (str/replace "@CODEX_SOCKET@" codex-socket)
+      (str/replace "@CODEX_MODEL@" codex-model)))
+
+(def codex-server (atom nil))
+
+(defn start-codex! [log]
+  (when-not codex-binary (throw (ex-info "no Codex executable: set FLOW_CAPSULE_CODEX" {})))
+  (fs/create-dirs codex-home)
+  (fs/create-dirs (fs/parent codex-socket))
+  (fs/copy codex-login (str codex-home "/auth.json") {:replace-existing true})
+  (fs/set-posix-file-permissions (str codex-home "/auth.json") "rw-------")
+  (spit (str codex-home "/config.toml")
+        (str "approval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"\nmodel = \"" codex-model "\"\n"))
+  (spit codex-client (str "#!/bin/sh\nexport CODEX_HOME=" codex-home "\nexec " codex-binary " \"$@\"\n"))
+  (fs/set-posix-file-permissions codex-client "rwx------")
+  (reset! codex-server (p/process [codex-binary "app-server" "--remote-control" "--listen" (str "unix://" codex-socket)]
+                                  {:env (clean-env {"CODEX_HOME" codex-home}) :dir source-root
+                                   :out :append :out-file (fs/file log) :err :append :err-file (fs/file log) :in ""}))
+  (when-not (watch 30 #(fs/exists? codex-socket))
+    (throw (ex-info "the capsule's Codex app-server opened no socket" {})))
+  (println (str "codex | " codex-binary " | " codex-model " | " codex-socket)))
+
 (defn start-text []
   (str "{ «" ordinary-socket "» «" meta-socket "» «" store-path "» None }"))
 
@@ -636,8 +684,7 @@
   (let [file (fs/file libexec "configure.datom")]
     (doseq [line (str/split-lines (slurp file))
             :when (and (not (str/blank? line)) (not (str/starts-with? line ";")))]
-      (let [datom (-> line (str/replace "@SOURCE_ROOT@" source-root) (str/replace "@CAPSULE_RUNTIME@" capsule-runtime)
-                      (str/replace "@CURRICULUM_SOCKET@" curriculum-socket))
+      (let [datom (fill line)
             [reply exit] (configure-one! datom log)
             family (second (re-find #"^Configure\.([A-Za-z]+)" datom))
             ok (str/starts-with? reply "Configured.")]
@@ -690,6 +737,9 @@
     (when-let [n @nexus]
       (p/destroy n)
       (swap! steps conj (str "Nexus stopped, exit " (:exit (deref n 20000 {:exit "still running"})))))
+    (when-let [c @codex-server]
+      (p/destroy-tree c)
+      (swap! steps conj (str "Codex app-server stopped, exit " (:exit (deref c 20000 {:exit "still running"})))))
     (when-let [c @curriculum]
       (p/destroy c)
       (swap! steps conj (str "Curriculum Nexus stopped, exit " (:exit (deref c 20000 {:exit "still running"})))))
@@ -728,6 +778,147 @@
                    :watched (str "Herdr session list; /proc cmdline and environ, waiting up to 20 s for capsule processes to end; store, source root, sockets; the Curriculum Nexus process, its context checkouts and socket; traces of the capsule's flows in " default-flows " and " claude-root "; history.jsonl lines naming a capsule session and ~/.claude.json's entry for the source root are reported and left")})
       clean)))
 
+;; ---------------------------------------------------------------- night scenarios
+;; A refused successor keeps its flow, is told and is handed its queue; a
+;; Remind is held across a restart; a Task is reminded until its Done.
+
+(def nexus-log (atom nil))
+
+(defn configure-line
+  "The configure.datom line of a family, its placeholders filled."
+  [family]
+  (fill (first (filter #(str/starts-with? % (str "Configure." family "."))
+                       (str/split-lines (slurp (fs/file libexec "configure.datom")))))))
+
+(def missing-module "vision:no-such-module-2a9116")
+
+(defn broken-metaflows
+  "The capsule's Metaflows with the seat at addr declaring a module no
+  context repository holds, so its successor cannot compose."
+  [addr]
+  (let [line (configure-line "Metaflows")
+        [_ aspect topic layer] (re-find #"\{ (\w+) (\w+) (\w+) \}" addr)
+        seat (re-pattern (str "\\{ \\{ " aspect " " topic " " layer " \\} \\[ spirit:core intent:models \\]"))]
+    (str/replace-first line seat (str "{ { " aspect " " topic " " layer " } [ spirit:core " missing-module " ]"))))
+
+(defn restore-configuration! []
+  [(flow-meta (configure-line "Metaflows")) (flow-meta (configure-line "Thresholds"))])
+
+(defn stops-of [flow-id]
+  (count (heads-named "Stopped" (read-datom (flow-meta (str "ReadEvents." flow-id))))))
+
+(defn log-text [] (try (slurp @nexus-log) (catch Exception _ "")))
+
+(defn instant-in [seconds] (str (.plusSeconds (java.time.Instant/now) seconds)))
+
+(defn pane-holds [pane needle seconds]
+  (watch seconds #(some-> (pane-text pane) (str/includes? needle))))
+
+(def night-scenarios
+  [["13 OnDemand seat whose successor cannot compose is kept, told and handed its queue"
+    (fn []
+      (let [_ (send-to tertiary-address "Wake" "Soft.Order.«Run the shell command sleep 30, then answer with one word and stop. Tag ra1.»" (sender-pane))
+            flow-id (str (watch 90 #(awake-flow tertiary-address)))
+            pane (bound-pane (inspect tertiary-address))
+            broken (flow-meta (broken-metaflows tertiary-address))
+            rested (watch 150 #(pos? (stops-of flow-id)))
+            _ (Thread/sleep 8000)
+            kept (= (str (awake-flow tertiary-address)) flow-id)
+            open (contains? (pane-ids) pane)
+            kept-line (some #(when (and (str/includes? % flow-id) (str/includes? % "kept at its Stop")) %) (str/split-lines (log-text)))
+            told (pane-holds (sender-pane) (str "(flow " flow-id ") was refused") 60)
+            queued (send-to tertiary-address "Queue" "Soft.Order.«Answer with one word and stop. Tag ra2.»" (sender-pane))
+            handed (pane-holds pane "Tag ra2" 90)
+            restored (restore-configuration!)]
+        {:reply (str "Configure broken: " broken " / Send Tag ra2: " queued " / restore: " restored)
+         :pass (boolean (and (str/starts-with? broken "Configured.") rested kept open kept-line told handed))
+         :watched (str "Tertiary flow " flow-id " rested " rested "; still Awake " kept ", pane " pane (if open " open" " closed")
+                       "; log: " kept-line "; its Up, the Secondary, shows the refusal " (boolean told)
+                       "; Tag ra2 typed into the kept seat " (boolean handed))}))]
+
+   ["14 Maintained seat whose successor cannot compose is kept and handed its queue"
+    (fn []
+      (let [flow-id (str (awake-flow secondary))
+            pane (sender-pane)
+            before (stops-of flow-id)
+            broken (flow-meta (broken-metaflows secondary))
+            low (flow-meta "Configure.Thresholds.[ { claude-haiku-5-5 1000 } ]")
+            sent (flow (str "Send.{ Address." secondary " Wake Soft.Order.«Answer with one word and stop. Tag rb1.» }") pane)
+            rested (watch 120 #(> (stops-of flow-id) before))
+            _ (Thread/sleep 8000)
+            kept (= (str (awake-flow secondary)) flow-id)
+            kept-line (some #(when (and (str/includes? % flow-id) (str/includes? % "RefreshLaunchRefused")) %) (str/split-lines (log-text)))
+            queued (flow (str "Send.{ Address." secondary " Queue Soft.Order.«Answer with one word and stop. Tag rb2.» }") pane)
+            handed (pane-holds pane "Tag rb2" 90)
+            restored (restore-configuration!)]
+        {:reply (str "Send Tag rb1: " sent " / Send Tag rb2: " queued " / restore: " restored)
+         :pass (boolean (and (str/starts-with? broken "Configured.") rested kept kept-line handed))
+         :watched (str "flow " flow-id " rested " rested "; still Awake " kept "; log: " kept-line
+                       "; Tag rb2 typed into the kept seat " (boolean handed))}))]
+
+   ["15 Remind: refused unreadable, delivered at its instant"
+    (fn []
+      (let [pane (sender-pane)
+            bad (flow "Remind.{ tomorrow «x» }" pane)
+            reply (flow (str "Remind.{ " (instant-in 15) " «Tag rc1.» }") pane)
+            seen (pane-holds pane "Tag rc1" 75)]
+        {:reply (str "unreadable: " bad " / Remind: " reply)
+         :pass (boolean (and (= bad "Refused.InstantUnreadable.tomorrow") (= reply "Reminded") seen))
+         :watched (str "Secondary pane " pane (if seen " shows" " lacks") " Tag rc1 within 75 s")}))]
+
+   ["16 Remind held across a Nexus restart"
+    (fn []
+      (let [pane (sender-pane)
+            reply (flow (str "Remind.{ " (instant-in 45) " «Tag rd1.» }") pane)
+            n @nexus
+            _ (p/destroy n)
+            stopped (:exit (deref n 20000 {:exit "still running"}))
+            _ (fs/delete-if-exists ordinary-socket)
+            _ (fs/delete-if-exists meta-socket)
+            _ (start-nexus! @nexus-log)
+            seen (pane-holds pane "Tag rd1" 120)]
+        {:reply (str "Remind: " reply " / Nexus stopped, exit " stopped " / restarted")
+         :pass (boolean (and (= reply "Reminded") seen))
+         :watched (str "Secondary pane " pane (if seen " shows" " lacks") " Tag rd1 after the restart")}))]
+
+   ["17 Task reminded at its minutes; Done closes it; Done again refused"
+    (fn []
+      (let [pane (sender-pane)
+            sent (flow (str "Send.{ Address." quaternary " Wake Soft.Task.{ 1 «Answer with one word and stop. Tag re1.» } }") pane)
+            id (some-> (read-datom sent) body items first str)
+            reminded (pane-holds pane (str "Reminder 1 of 4: task " id) 150)
+            done (flow (str "Send.{ Address." secondary " Queue Soft.Done.{ " id " «closed» } }") pane)
+            again (flow (str "Send.{ Address." secondary " Queue Soft.Done.{ " id " «again» } }") pane)
+            _ (Thread/sleep 75000)
+            second-reminder (some-> (pane-text pane) (str/includes? (str "Reminder 2 of 4: task " id)))]
+        {:reply (str "Task: " sent " / Done: " done " / Done again: " again)
+         :pass (boolean (and id reminded (str/starts-with? done "SendAccepted.")
+                             (str/includes? again "NoOpenTask") (not second-reminder)))
+         :watched (str "Secondary pane shows Reminder 1 of 4 for " id " " (boolean reminded)
+                       "; no Reminder 2 in the 75 s after Done " (not second-reminder))}))]])
+
+(def codex-quaternary "{ Mind test Quaternary }")
+
+(defn codex-sessions-hold
+  "Whether any Codex session the capsule's app-server wrote holds needle."
+  [needle]
+  (some #(str/includes? (slurp (str %)) needle)
+        (when (fs/exists? (str codex-home "/sessions")) (fs/glob (str codex-home "/sessions") "**.jsonl"))))
+
+(def codex-scenarios
+  [["18 Codex seat: launched on the capsule's own app-server, handed a queued order at rest"
+    (fn []
+      (let [reply (launch codex-quaternary)
+            awake (when (str/starts-with? reply "Started.") (watch 60 #(awake-flow codex-quaternary)))
+            queued (send-to codex-quaternary "Queue" "Soft.Order.«Answer with one word and stop. Tag c1.»" (sender-pane))
+            handed (watch 120 #(codex-sessions-hold "Tag c1"))]
+        {:reply (str "Launch: " reply " / Send: " queued)
+         :pass (boolean (and awake (str/starts-with? queued "SendAccepted.") handed))
+         :watched (str "Mind test Quaternary Awake as " awake "; a session under " codex-home
+                       (if handed " holds" " lacks") " Tag c1 within 120 s")}))]])
+
+(def scenarios (vec (concat (subvec base-scenarios 0 11) night-scenarios codex-scenarios (subvec base-scenarios 11))))
+
 (defn -main [& args]
   (let [[pkg & options] args]
     (when-not (and pkg (not (str/starts-with? pkg "--")))
@@ -742,7 +933,9 @@
       (try
         (start-capsule! log)
         (start-curriculum! log)
+        (start-codex! log)
         (configure! log)
+        (reset! nexus-log log)
         (start-nexus! log)
         (println (str "configuration | " (flow-meta "Configuration")))
         (loop [[[name f] & more] scenarios]

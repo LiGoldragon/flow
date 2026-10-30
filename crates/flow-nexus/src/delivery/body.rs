@@ -3,8 +3,9 @@
 //!
 //! Three layers. Two make a harness command impossible by construction; the
 //! third reports intent.
-//! 1. Content only: NativeInput is rendered as its recipient-facing content,
-//!    never as a priority, sender, or identity envelope.
+//! 1. Delivered NativeInputs are rendered as one vector of their datoms:
+//!    logical delivery id, sender and request under its priority, so the
+//!    recipient can name each.
 //! 2. No keys in the text: no C0 control but LF and TAB, no DEL, no C1. That
 //!    excludes CR (a submit), ESC (an interrupt, or the `ESC[201~` that ends
 //!    a bracketed paste), Ctrl-C and Ctrl-D. Herdr 0.8.2 `agent prompt` was
@@ -48,6 +49,12 @@ impl RendersNativeContent for signal_flow::Request {
             | signal_flow::Request::Question(text)
             | signal_flow::Request::Result(text)
             | signal_flow::Request::Notice(text) => text.clone(),
+            signal_flow::Request::Task(task) => {
+                format!("Task, {} minutes:\n{}", task.minutes, task.string)
+            }
+            signal_flow::Request::Done(done) => {
+                format!("Done {}:\n{}", done.logical_delivery_id, done.string)
+            }
             signal_flow::Request::Psyche(said) if said.context.is_empty() => said.verbatim.clone(),
             signal_flow::Request::Psyche(said) if said.verbatim.is_empty() => said.context.clone(),
             signal_flow::Request::Psyche(said) => format!("{}\n{}", said.context, said.verbatim),
@@ -86,7 +93,14 @@ impl RendersPaneText for Message {
     fn pane_text(&self) -> PaneText {
         PaneText {
             text: match &self.letter().content {
-                Content::NativeInput(input) => input.message.native_content(),
+                // A delivered message is typed as a cohort of one: a vector
+                // holding its datom, its logical delivery id, who sent it,
+                // and its request under its priority, as a queue's hand-over
+                // types it, so its receipt reads the same.
+                Content::NativeInput(input) => vec![input.clone()]
+                    .datomize(Vec::new())
+                    .protosize()
+                    .compact(),
                 _ => self.datomize(Vec::new()).protosize().compact(),
             },
         }
@@ -235,7 +249,7 @@ impl ReadsCommandLine for HarnessProfile {
 
 #[cfg(test)]
 mod tests {
-    use super::{RecognizesLetter, RendersNativeContent, RendersPaneText, VetsBody};
+    use super::{RecognizesLetter, RendersPaneText, VetsBody};
     use crate::composition::RendersQueuedWork;
     use crate::delivery::body::ShowsPaneText;
     use crate::store::delivery::DefaultsHarnessProfile;
@@ -295,31 +309,75 @@ mod tests {
         );
     }
 
+    fn budget() -> datom_codec::Budget {
+        datom_codec::Budget {
+            remaining: 65536,
+            reader: protos::ReaderBudget { remaining: 65536 },
+            depth: 0,
+            maximum_depth: 1024,
+        }
+    }
+
+    /// A delivered message is typed as its datom, and a cohort as one
+    /// vector of them: each reads back as the very NativeInput delivered,
+    /// its id, sender, priority and request with the body's quotes, braces
+    /// and line kept.
     #[test]
-    fn native_input_renders_only_exact_recipient_content() {
+    fn native_input_renders_as_its_datom_and_a_cohort_as_one_vector() {
+        use datom_codec::{Actualizing, Potential};
         let text = "keep «quotes» and { braces }\nand preserve the second line";
-        let request = signal_flow::Request::Order(text.into());
+        let input = signal_flow::NativeInput {
+            logical_delivery_id: "logical-delivery-00000000000000000001".into(),
+            sent_by: signal_flow::SentBy::Sender(signal_flow::Address {
+                aspect: signal_flow::Aspect::Psyche,
+                topic: "flow".into(),
+                layer: signal_flow::Layer::Secondary,
+            }),
+            message: signal_flow::Message::HardAbrupt(signal_flow::Request::Task(
+                flow_ethos::Task_Data {
+                    minutes: 40,
+                    string: text.into(),
+                },
+            )),
+        };
         let message = Message::HardAbrupt(Letter {
             message_id: "logical-delivery-00000000000000000001".into(),
             sender: Sender::Owner,
-            content: Content::NativeInput(signal_flow::NativeInput {
-                logical_delivery_id: "logical-delivery-00000000000000000001".into(),
-                sent_by: signal_flow::SentBy::Flow,
-                message: signal_flow::Message::HardAbrupt(request.clone()),
-            }),
+            content: Content::NativeInput(input.clone()),
         });
-        assert_eq!(request.native_content(), text);
-        assert_eq!(message.pane_text().as_str(), text);
+        let typed = message.pane_text();
+        assert!(
+            typed
+                .as_str()
+                .starts_with("[ { logical-delivery-00000000000000000001 ")
+        );
+        assert_eq!(
+            Potential::<Vec<signal_flow::NativeInput>>::from(typed.as_str().to_owned())
+                .actualize(&mut budget())
+                .unwrap(),
+            vec![input.clone()]
+        );
         assert_eq!(refusal(&message, HarnessKind::Codex), None);
-        assert_eq!(request.native_content().len(), text.len());
-        assert!(!text.opens_a_letter());
-        let entry = signal_flow::QueueEntry {
-            logical_delivery_id: "logical-delivery-00000000000000000001".into(),
+        assert!(!typed.as_str().opens_a_letter());
+        let second = signal_flow::NativeInput {
+            logical_delivery_id: "logical-delivery-00000000000000000002".into(),
             sent_by: signal_flow::SentBy::Flow,
-            delivery: signal_flow::Delivery::Queue,
-            message: signal_flow::Message::HardAbrupt(request),
+            message: signal_flow::Message::Soft(signal_flow::Request::Notice("n".into())),
         };
-        assert_eq!([entry].prompt_text(), text);
+        let entries = [input.clone(), second.clone()].map(|input| signal_flow::QueueEntry {
+            logical_delivery_id: input.logical_delivery_id,
+            sent_by: input.sent_by,
+            delivery: signal_flow::Delivery::Queue,
+            message: input.message,
+        });
+        let cohort = entries.prompt_text();
+        assert!(cohort.starts_with("[ { "));
+        assert_eq!(
+            Potential::<Vec<signal_flow::NativeInput>>::from(cohort)
+                .actualize(&mut budget())
+                .unwrap(),
+            vec![input, second]
+        );
     }
 
     #[test]
@@ -341,9 +399,15 @@ mod tests {
             refusal(&native("/compact now"), HarnessKind::Claude),
             Some(BodyRefusal::HarnessCommand("/compact now".into()))
         );
+        let escaped = native("a\u{1b}b");
+        let offset = escaped
+            .pane_text()
+            .as_str()
+            .find('\u{1b}')
+            .expect("the key is typed") as i64;
         assert_eq!(
-            refusal(&native("a\u{1b}b"), HarnessKind::Claude),
-            Some(BodyRefusal::ControlCharacter(1))
+            refusal(&escaped, HarnessKind::Claude),
+            Some(BodyRefusal::ControlCharacter(offset))
         );
     }
 

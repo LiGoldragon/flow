@@ -54,11 +54,6 @@ fn from_core(body: &str) -> TestRequest {
     }
 }
 
-/// The text a hand-over types for one queued request.
-fn typed_text(request: &TestRequest) -> String {
-    [queue_entry(request)].prompt_text()
-}
-
 /// The one payload a hand-over types for every queued request, in order.
 fn queue_payload(requests: &[TestRequest]) -> String {
     requests
@@ -271,10 +266,10 @@ fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
     assert!(
-        !fixture
+        fixture
             .typed()
             .unwrap_or_default()
-            .contains("Psyche core Secondary")
+            .contains("Sender.{ Psyche core Secondary }")
     );
     assert_eq!(queue(&fixture), vec![], "both in one payload");
     assert_eq!(

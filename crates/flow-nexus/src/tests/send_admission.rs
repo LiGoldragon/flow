@@ -235,7 +235,9 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                 assert!(Instant::now() < deadline, "direct message never submitted");
                 std::thread::sleep(Duration::from_millis(10));
             }
-            let row = serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"direct-native-receipt", "message":{"content":"real direct receipt"}});
+            // The seat records the very text typed: the message's datom.
+            let typed_text = std::fs::read_to_string(&typed).unwrap();
+            let row = serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"direct-native-receipt", "message":{"content":typed_text}});
             writeln!(
                 std::fs::OpenOptions::new()
                     .append(true)

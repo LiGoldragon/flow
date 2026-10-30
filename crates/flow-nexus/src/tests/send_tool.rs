@@ -1431,9 +1431,10 @@ fn walk(root: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// A woken or drained flow receives only recipient-facing message content.
+/// A woken or drained flow receives its queue as one vector datom: each
+/// request with its logical delivery id, its sender and its priority.
 #[test]
-fn a_queued_request_is_rendered_as_recipient_content_only() {
+fn a_queued_request_is_rendered_as_its_datom_in_one_vector() {
     use crate::composition::RendersQueuedWork;
     let queue = [
         queue_entry("render-1", sent(sender_a(), "Carry on.")),
@@ -1445,7 +1446,10 @@ fn a_queued_request_is_rendered_as_recipient_content_only() {
         },
     ];
     let prompt = queue.prompt_text();
-    assert_eq!(prompt, "Carry on.\nkept");
+    assert_eq!(
+        prompt,
+        "[ { render-1 Sender.{ Mind alpha Tertiary } Soft.Order.«Carry on.» } { render-2 Unknown Soft.Notice.kept } ]"
+    );
 }
 
 /// The fixture's Codex seat 908786: its thread, and the Address its
@@ -1691,7 +1695,7 @@ fn a_codex_first_turn_completion_keeps_requests_until_native_receipts() {
         typed.find("Make it so.") < typed.find("Your brief."),
         "both, in order: {typed}"
     );
-    assert!(!typed.contains("Psyche core Secondary"));
+    assert!(typed.contains("Sender.{ Psyche core Secondary }"));
     assert_eq!(fixture.seat_queue(), vec![]);
 }
 

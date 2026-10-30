@@ -163,6 +163,11 @@ fn main() -> ExitCode {
         // queued deliveries are reconciled, every successor owed is started
         // or resumed, and every metaflow due a wake is woken.
         scope.spawn(|| nexus.recover_wakes());
+        // Reminders held in Memory are sent as they fall due.
+        scope.spawn(|| {
+            use flow_nexus::reminding::RemindsCallers;
+            nexus.keep_reminding()
+        });
         scope.spawn(|| {
             if signals.watch(&|| nexus.stopping.requested()) {
                 nexus.stop(&sockets);

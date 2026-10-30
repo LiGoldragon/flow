@@ -2,6 +2,7 @@
 //! hand-over attempts. The event table is append-only; the current table is
 //! a materialized view used for sender-filtered reconnect snapshots.
 
+use super::reminder::RecordsReminders;
 use super::send_v31::DeliverySnapshotV31;
 use super::send_v32::DeliverySnapshotV32;
 use super::*;
@@ -846,6 +847,20 @@ impl RecordsLogicalDeliveries for FlowStore {
                 address.clone(),
             ))));
         };
+        // A Done names the open task it closes.
+        let request = match &message {
+            Message::HardAbrupt(request)
+            | Message::MiddleAbrupt(request)
+            | Message::Soft(request) => request.clone(),
+        };
+        if let Request::Done(done) = &request
+            && self.reminder(&done.logical_delivery_id)?.is_none()
+        {
+            return Ok(Response::Refused(Refusal::NoOpenTask(
+                done.logical_delivery_id.clone(),
+            )));
+        }
+        let task_sender = sent_by.clone();
         let lock = if let Some(held) = held_lock {
             let Some(existing) = self.stored_metaflow_lock(address)? else {
                 return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Lock(
@@ -916,6 +931,37 @@ impl RecordsLogicalDeliveries for FlowStore {
         };
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
+        // A Task is held under its id, its sender reminded when its
+        // minutes lapse with no Done; a Done closes the task it names.
+        match &request {
+            Request::Task(task) => {
+                let (reminded, due) = match &task_sender {
+                    SentBy::Sender(sender) if task.minutes > 0 => (
+                        sender.clone(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .map(|elapsed| elapsed.as_secs() as i64 + task.minutes * 60),
+                    ),
+                    SentBy::Sender(sender) => (sender.clone(), None),
+                    _ => (address.clone(), None),
+                };
+                self.hold_reminder(super::reminder::Reminder {
+                    key: id.clone(),
+                    address: reminded,
+                    reminding: super::reminder::Reminding::Task {
+                        recipient: address.clone(),
+                        minutes: task.minutes,
+                    },
+                    due,
+                    sent: 0,
+                })?;
+            }
+            Request::Done(done) => {
+                self.close_reminder(&done.logical_delivery_id)?;
+            }
+            _ => {}
+        }
         Ok(Response::SendAccepted(SendAcceptance {
             logical_delivery_id: id,
             delivery_cursor: next,

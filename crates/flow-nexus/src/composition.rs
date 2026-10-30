@@ -14,7 +14,6 @@
 //! system prompt.
 
 use crate::context::{ComposesFlowContext, ContextComposer, VerifiedContext, VerifiesContext};
-use crate::delivery::body::RendersNativeContent;
 pub use crate::generated::starter::{
     AssemblesComposedLaunch, CarriesFlowId, ComposesLaunch, ComposesVerifiedContext,
     ContextRequest, FitsOneMessage, HarnessedProfile, JoinsContextAndBrief, LeanStart,
@@ -606,23 +605,27 @@ impl ComposesLaunch for LaunchComposer {
     }
 }
 
-/// The recipient-facing content a metaflow's queued requests become in a
-/// flow's prompt, oldest first. Priority and sender accounting stay in the
-/// durable queue and never enter native user text.
+/// What a metaflow's queued requests become in a flow's prompt: one vector
+/// datom of their NativeInputs, oldest first.
 pub trait RendersQueuedWork {
     fn prompt_text(&self) -> String;
 }
 
 impl RendersQueuedWork for [QueueEntry] {
+    /// A cohort is one vector datom: each request as its NativeInput, its
+    /// logical delivery id, who sent it, and its request under its
+    /// priority, oldest first.
     fn prompt_text(&self) -> String {
-        let mut text = String::new();
-        for (index, request) in self.iter().enumerate() {
-            if index > 0 {
-                text.push('\n');
-            }
-            text.push_str(&request.message.native_content());
-        }
-        text
+        self.iter()
+            .map(|entry| signal_flow::NativeInput {
+                logical_delivery_id: entry.logical_delivery_id.clone(),
+                sent_by: entry.sent_by.clone(),
+                message: entry.message.clone(),
+            })
+            .collect::<Vec<_>>()
+            .datomize(Vec::new())
+            .protosize()
+            .compact()
     }
 }
 
@@ -1397,7 +1400,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn native_queue_text_contains_only_the_recipient_facing_content() {
+    fn native_queue_text_is_one_vector_of_native_input_datoms() {
         use super::RendersQueuedWork;
         use signal_flow::{QueueEntry, Request, SentBy};
         let order = QueueEntry {
@@ -1406,7 +1409,10 @@ pub(crate) mod tests {
             delivery: signal_flow::Delivery::Queue,
             message: signal_flow::Message::Soft(Request::Order("investigate".into())),
         };
-        assert_eq!([order].prompt_text(), "investigate");
+        assert_eq!(
+            [order].prompt_text(),
+            "[ { logical-delivery-0000000000000001 Flow Soft.Order.investigate } ]"
+        );
     }
 
     #[test]

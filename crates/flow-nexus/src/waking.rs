@@ -400,6 +400,68 @@ pub enum KeptAtStop {
     /// An OnDemand seat with nothing queued could not be closed: the close
     /// or its Stopped record was refused; it stays Awake.
     SleepRefused(Box<Outcome>),
+    /// An OnDemand seat's successor did not compose, so the seat is not
+    /// closed: a closed seat whose successor cannot compose would leave its
+    /// Address with no flow. It stays Awake and is handed its queue.
+    SuccessorUncomposable(Box<Outcome>),
+}
+
+/// Whether the seat was kept because its successor could not be placed,
+/// composed or launched: it stays Awake, is handed its queue though past
+/// its threshold, and the refusal is told.
+pub trait JudgesSuccessorRefusal {
+    fn successor_refused(&self) -> bool;
+}
+
+impl JudgesSuccessorRefusal for KeptAtStop {
+    fn successor_refused(&self) -> bool {
+        matches!(
+            self,
+            Self::RefreshUnplaceable
+                | Self::RefreshLaunchRefused(_)
+                | Self::SuccessorUncomposable(_)
+        )
+    }
+}
+
+/// The flows owed a successor whose successor was refused. Each is handed
+/// its queue meanwhile, though past its threshold, and its refusal is told
+/// once, until a successor stands.
+#[derive(Debug, Default)]
+pub struct RefreshRefusals {
+    flows: Mutex<HashSet<FlowId>>,
+}
+
+pub trait NotesRefreshRefusals {
+    /// Notes the flow's successor refused; true the first time.
+    fn note(&self, flow_id: &str) -> bool;
+    /// Whether the flow's successor stands refused.
+    fn holds(&self, flow_id: &str) -> bool;
+    /// Forgets the flow: its successor stands, or it has ended.
+    fn clear(&self, flow_id: &str);
+}
+
+impl NotesRefreshRefusals for RefreshRefusals {
+    fn note(&self, flow_id: &str) -> bool {
+        self.flows
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(flow_id.to_owned())
+    }
+
+    fn holds(&self, flow_id: &str) -> bool {
+        self.flows
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(flow_id)
+    }
+
+    fn clear(&self, flow_id: &str) {
+        self.flows
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(flow_id);
+    }
 }
 
 /// Why work was not typed into a live flow's pane. Each is logged by name;
@@ -730,6 +792,25 @@ trait WakesInParts {
     fn settle_owed(&self, address: &Address, response: &Response);
     /// Whether the launch request has settled refused.
     fn launch_refused(&self, launch_request_id: &str) -> bool;
+    /// The launch profile of the successor the metaflow's flow is owed: its
+    /// declaration, else what the flow's own launch named. None when
+    /// nothing names one or no model is configured for it.
+    fn successor_profile(
+        &self,
+        flow_id: &str,
+        metaflow: &Metaflow,
+        launch_request_id: String,
+    ) -> Option<LaunchProfile>;
+    /// Composes the successor the seat would get, launching nothing, under
+    /// the dispatch gate the caller holds: an OnDemand seat is closed only
+    /// once its successor composes.
+    fn successor_composes(&self, flow_id: &str, metaflow: &Metaflow) -> Result<(), KeptAtStop>;
+    /// A seat kept because its successor was refused: notes it, so it is
+    /// handed its queue though past its threshold; tells the refusal once,
+    /// as a Notice to the metaflow's Up (Psyche core Secondary for a
+    /// Primary); and hands it what is queued now, as its rest's drain
+    /// would. Takes the dispatch gate; the caller holds none.
+    fn successor_refused(&self, flow_id: &str, reason: &KeptAtStop);
 }
 
 pub(crate) trait ReadsClaudeDelivery {
@@ -1182,6 +1263,10 @@ impl SleepsAndWakesSeats for RunningNexus {
     fn settle_stopped(&self, flow_id: &str) -> AtStop {
         let at_stop = self.settle_rested(flow_id);
         match &at_stop {
+            AtStop::Kept(reason) if reason.successor_refused() => {
+                eprintln!("flow-nexus: flow {flow_id} kept at its Stop: {reason:?}");
+                self.successor_refused(flow_id, reason);
+            }
             AtStop::Kept(reason) => {
                 eprintln!("flow-nexus: flow {flow_id} kept at its Stop: {reason:?}");
             }
@@ -1191,10 +1276,12 @@ impl SleepsAndWakesSeats for RunningNexus {
             // sleeps until an Order, a Question or the living's words.
             AtStop::Refreshed(address) => {
                 eprintln!("flow-nexus: flow {flow_id} refreshed at its rest");
+                self.refresh_refusals.clear(flow_id);
                 self.wake_due(address.clone());
             }
             AtStop::Slept(_) => {
                 eprintln!("flow-nexus: flow {flow_id} slept at its rest");
+                self.refresh_refusals.clear(flow_id);
             }
             AtStop::Idle | AtStop::Drained(_) => {}
         }
@@ -1763,8 +1850,12 @@ impl PerformsWakeAndDrain for RunningNexus {
         // now shows.
         self.reconcile_typed(&address);
         // A flow past its model's refresh threshold is given no new
-        // message: what is queued stays for the metaflow's next flow.
-        if matches!(self.store.past_threshold(&flow_id), Ok(true)) {
+        // message: what is queued stays for the metaflow's next flow. One
+        // whose successor was refused stays the metaflow's flow, and is
+        // handed its queue until a successor stands.
+        if matches!(self.store.past_threshold(&flow_id), Ok(true))
+            && !self.refresh_refusals.holds(&flow_id)
+        {
             return Outcome::Drained(drained);
         }
         let queue = match self.store.metaflow(&address) {
@@ -1781,16 +1872,19 @@ impl PerformsWakeAndDrain for RunningNexus {
                     | signal_flow::Request::Question(_)
                     | signal_flow::Request::Psyche(_)
                     | signal_flow::Request::Psyches(_)
+                    | signal_flow::Request::Task(_)
             ) | signal_flow::Message::MiddleAbrupt(
                 signal_flow::Request::Order(_)
                     | signal_flow::Request::Question(_)
                     | signal_flow::Request::Psyche(_)
                     | signal_flow::Request::Psyches(_)
+                    | signal_flow::Request::Task(_)
             ) | signal_flow::Message::Soft(
                 signal_flow::Request::Order(_)
                     | signal_flow::Request::Question(_)
                     | signal_flow::Request::Psyche(_)
                     | signal_flow::Request::Psyches(_)
+                    | signal_flow::Request::Task(_)
             )
         );
         if response_request
@@ -2559,17 +2653,12 @@ impl WakesInParts for RunningNexus {
         cause: SuccessionCause,
     ) -> AtStop {
         let address = metaflow.address.clone();
-        // The successor's context is the metaflow's declaration, else what
-        // the predecessor's own launch named.
-        let mut lineage = metaflow.clone();
-        lineage.past.retain(|past| past != flow_id);
-        lineage.past.push(flow_id.to_owned());
-        let WakePlan::Fresh(fresh) = self.wake_plan(&lineage) else {
+        let Some(mut profile) = self.successor_profile(
+            flow_id,
+            metaflow,
+            crate::sending::MintsId::minted_id("refresh"),
+        ) else {
             return AtStop::Kept(KeptAtStop::RefreshUnplaceable);
-        };
-        let model = match self.store.configured_model(&address) {
-            Ok(Some(model)) => model,
-            Ok(None) | Err(_) => return AtStop::Kept(KeptAtStop::RefreshUnplaceable),
         };
         // The intent names the replacement's launch request, so a Nexus
         // that takes it up again resumes that launch; a launch already
@@ -2612,9 +2701,40 @@ impl WakesInParts for RunningNexus {
             }
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
+        profile.launch_request_id = launch_request_id;
+        let response = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.replace(profile, Origin::Unbound)
+        };
+        self.settle_owed(&address, &response);
+        match response {
+            Response::Replaced(_) => AtStop::Refreshed(address),
+            response => AtStop::Kept(KeptAtStop::RefreshLaunchRefused(Box::new(response))),
+        }
+    }
+
+    fn successor_profile(
+        &self,
+        flow_id: &str,
+        metaflow: &Metaflow,
+        launch_request_id: String,
+    ) -> Option<LaunchProfile> {
+        let address = metaflow.address.clone();
+        // The successor's context is the metaflow's declaration, else what
+        // the predecessor's own launch named.
+        let mut lineage = metaflow.clone();
+        lineage.past.retain(|past| past != flow_id);
+        lineage.past.push(flow_id.to_owned());
+        let WakePlan::Fresh(fresh) = self.wake_plan(&lineage) else {
+            return None;
+        };
+        let model = self.store.configured_model(&address).ok().flatten()?;
         let seat = FreshSeat {
             address: address.clone(),
-            launch_request_id: launch_request_id.clone(),
+            launch_request_id,
             model_name: model,
             effort: <Self as crate::sending::ChoosesEffort>::effort_of(&address).into(),
             herdr_session_name: fresh.herdr_session_name,
@@ -2627,17 +2747,84 @@ impl WakesInParts for RunningNexus {
         };
         let mut profile = seat.fresh_profile();
         profile.flow_id_option = Some(flow_id.to_owned());
-        let response = {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.replace(profile, Origin::Unbound)
+        Some(profile)
+    }
+
+    fn successor_composes(&self, flow_id: &str, metaflow: &Metaflow) -> Result<(), KeptAtStop> {
+        let Some(profile) = self.successor_profile(
+            flow_id,
+            metaflow,
+            crate::sending::MintsId::minted_id("compose"),
+        ) else {
+            return Err(KeptAtStop::RefreshUnplaceable);
         };
-        self.settle_owed(&address, &response);
-        match response {
-            Response::Replaced(_) => AtStop::Refreshed(address),
-            response => AtStop::Kept(KeptAtStop::RefreshLaunchRefused(Box::new(response))),
+        match self.perform(Operation::Compose(profile)) {
+            Outcome::Composed(_) => Ok(()),
+            refused => Err(KeptAtStop::SuccessorUncomposable(Box::new(refused))),
+        }
+    }
+
+    fn successor_refused(&self, flow_id: &str, reason: &KeptAtStop) {
+        let address = match self.store.metaflow_awake_as(flow_id) {
+            Ok(Some(metaflow)) => metaflow.address,
+            _ => return,
+        };
+        if self.refresh_refusals.note(flow_id) {
+            let up = match address.layer {
+                Layer::Primary => Address {
+                    aspect: signal_flow::Aspect::Psyche,
+                    topic: "core".into(),
+                    layer: Layer::Secondary,
+                },
+                Layer::Secondary => Address {
+                    layer: Layer::Primary,
+                    ..address.clone()
+                },
+                Layer::Tertiary => Address {
+                    layer: Layer::Secondary,
+                    ..address.clone()
+                },
+                Layer::Quaternary => Address {
+                    layer: Layer::Tertiary,
+                    ..address.clone()
+                },
+            };
+            let notice = format!(
+                "Flow: the successor of {:?} {} {:?} (flow {flow_id}) was refused: {reason:?}. Flow {flow_id} stays its flow and is handed its queue; its successor is tried again at its next rest.",
+                address.aspect, address.topic, address.layer
+            );
+            let told = {
+                let _turn = self
+                    .dispatch_gate
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                self.store.accept_logical_delivery(
+                    &up,
+                    signal_flow::SentBy::Flow,
+                    signal_flow::Delivery::Wake,
+                    signal_flow::Message::Soft(signal_flow::Request::Notice(notice)),
+                    None,
+                )
+            };
+            match told {
+                Ok(Response::SendAccepted(_)) => self.wake_due(up),
+                answer => eprintln!(
+                    "flow-nexus: the refused successor of flow {flow_id} was not told to {up:?}: {answer:?}"
+                ),
+            }
+        }
+        // The seat rests now: what is queued is handed to it here, as its
+        // turn's end would, under the gate.
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.reconcile_typed(&address);
+        if matches!(
+            self.store.metaflow(&address),
+            Ok(Some(metaflow)) if !metaflow.queue.is_empty()
+        ) {
+            let _ = self.perform(Operation::Drain(address));
         }
     }
 
@@ -2843,6 +3030,11 @@ impl WakesInParts for RunningNexus {
             if let HerdrRouteSelection::Unavailable = &node.herdr_route_selection {
                 return AtStop::Kept(KeptAtStop::RefreshUnrouted);
             }
+            // Its successor is composed at its next wake: the seat is
+            // closed only once that successor composes now.
+            if let Err(kept) = self.successor_composes(flow_id, &metaflow) {
+                return AtStop::Kept(kept);
+            }
             return match self.close_at_rest(flow_id, &node) {
                 Ok(()) => AtStop::Refreshed(address),
                 Err(outcome) => AtStop::Kept(KeptAtStop::RefreshRefused(outcome)),
@@ -2864,9 +3056,14 @@ impl WakesInParts for RunningNexus {
         match continuity {
             Continuity::Maintained => AtStop::Idle,
             Continuity::OnDemand if !closable => AtStop::Idle,
-            Continuity::OnDemand => match self.close_at_rest(flow_id, &node) {
-                Ok(()) => AtStop::Slept(address),
-                Err(outcome) => AtStop::Kept(KeptAtStop::SleepRefused(outcome)),
+            // Its successor is composed at its next wake: the seat is
+            // closed only once that successor composes now.
+            Continuity::OnDemand => match self.successor_composes(flow_id, &metaflow) {
+                Err(kept) => AtStop::Kept(kept),
+                Ok(()) => match self.close_at_rest(flow_id, &node) {
+                    Ok(()) => AtStop::Slept(address),
+                    Err(outcome) => AtStop::Kept(KeptAtStop::SleepRefused(outcome)),
+                },
             },
         }
     }

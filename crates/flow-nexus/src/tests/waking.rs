@@ -321,6 +321,12 @@ fn an_idle_on_demand_claude_flow_closes_its_harness_and_keeps_its_address() {
     );
     claude_seat(&fixture, 40_000);
     append_main_rows(&fixture, &[end_turn("last-turn")]);
+    // Its successor composes, so it may close.
+    super::refresh_and_compaction::declare_seat(
+        &fixture,
+        meta_signal_flow::Continuity::OnDemand,
+        vec!["spirit-core".into(), "intent-flow".into()],
+    );
     fixture.nexus.store.seed_metaflow(metaflow(
         Layer::Secondary,
         State::Awake(CLAUDE_SEAT.into()),
@@ -362,6 +368,12 @@ fn an_idle_on_demand_codex_flow_closes_its_harness() {
         PromptFixture::Prompted("w1:p3"),
     );
     fixture.register_with(FlowLifecycle::Active);
+    // Its successor composes, so it may close.
+    super::refresh_and_compaction::declare_seat(
+        &fixture,
+        meta_signal_flow::Continuity::OnDemand,
+        vec!["spirit-core".into(), "intent-flow".into()],
+    );
     fixture.nexus.store.seed_metaflow(metaflow(
         Layer::Secondary,
         State::Awake("908786".into()),

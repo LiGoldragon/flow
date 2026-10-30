@@ -18,6 +18,7 @@ pub(crate) mod metaflow_declaration;
 pub(crate) mod nexus_configuration;
 pub(crate) mod opened_thread;
 pub(crate) mod queue_delivery;
+pub mod reminder;
 pub(crate) mod repair;
 pub(crate) mod send_call;
 pub(crate) mod send_outcome;
@@ -208,6 +209,7 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_meta_model_threshold_configuration",
     "flow_nexus_meta_investigation_configuration",
     "flow_nexus_compactions",
+    "flow_nexus_reminders",
     "flow_nexus_successor_intents",
     "flow_nexus_send_outcome_counter",
     "flow_nexus_send_outcomes",
@@ -3725,6 +3727,7 @@ pub struct FlowStore {
     send_calls: TableReference<crate::generated::send_tool::SendCall>,
     launch_cleanups: TableReference<launch_cleanup::LaunchCleanup>,
     compactions: TableReference<compaction::Compaction>,
+    reminders: TableReference<reminder::Reminder>,
     successor_intents: TableReference<successor::SuccessorIntent>,
     queue_delivery: QueueDeliveryTables,
     send_outcomes: SendOutcomeTables,
@@ -4356,6 +4359,8 @@ impl OpensFlowStore for FlowStore {
         let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
         let compactions_descriptor =
             <compaction::Compaction as compaction::DescribesCompactionTable>::descriptor();
+        let reminders_descriptor =
+            <reminder::Reminder as reminder::DescribesReminderTable>::descriptor();
         let successor_intents_descriptor =
             <successor::SuccessorIntent as successor::DescribesSuccessorIntentTable>::descriptor();
         let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
@@ -4400,6 +4405,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&<send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor())
                 .with_family(&meta_investigation_descriptor)
                 .with_family(&compactions_descriptor)
+                .with_family(&reminders_descriptor)
                 .with_family(&successor_intents_descriptor)
                 .with_family(&<metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor())
                 .with_family(&events_descriptor)
@@ -4445,6 +4451,7 @@ impl OpensFlowStore for FlowStore {
         let send_calls = engine.upgraded_send_calls(send_calls_descriptor)?;
         let launch_cleanups = engine.register_table(launch_cleanups_descriptor)?;
         let compactions = engine.register_table(compactions_descriptor)?;
+        let reminders = engine.register_table(reminders_descriptor)?;
         let successor_intents = successor::UpgradesSuccessorIntents::upgraded_successor_intents(
             &mut engine,
             successor_intents_descriptor,
@@ -4481,6 +4488,7 @@ impl OpensFlowStore for FlowStore {
             send_calls,
             launch_cleanups,
             compactions,
+            reminders,
             successor_intents,
             queue_delivery,
             send_outcomes,
@@ -4626,6 +4634,9 @@ impl OpensFlowStore for FlowStore {
         let compactions = engine.register_table(
             <compaction::Compaction as compaction::DescribesCompactionTable>::descriptor(),
         )?;
+        let reminders = engine.register_table(
+            <reminder::Reminder as reminder::DescribesReminderTable>::descriptor(),
+        )?;
         let successor_intents = successor::UpgradesSuccessorIntents::upgraded_successor_intents(
             &mut engine,
             <successor::SuccessorIntent as successor::DescribesSuccessorIntentTable>::descriptor(),
@@ -4663,6 +4674,7 @@ impl OpensFlowStore for FlowStore {
             send_calls,
             launch_cleanups,
             compactions,
+            reminders,
             successor_intents,
             queue_delivery,
             send_outcomes,
@@ -4996,6 +5008,7 @@ impl AppliesFlowQuery for FlowStore {
             Query::Send(_)
             | Query::DeliverAll(_)
             | Query::BindSeat(_)
+            | Query::Remind(_)
             | Query::ObserveSends(_)
             | Query::ObserveSender(_) => Ok(Response::Refused(signal_flow::Refusal::Unidentified(
                 signal_flow::Process { pid: 0, started: 0 },
@@ -5057,7 +5070,8 @@ impl ReservesPendingStart for FlowStore {
             | Query::Send(_)
             | Query::DeliverAll(_)
             | Query::Launch(_)
-            | Query::BindSeat(_) => Ok(None),
+            | Query::BindSeat(_)
+            | Query::Remind(_) => Ok(None),
         }
     }
 }
@@ -7345,6 +7359,7 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_compactions" => {
                 (compaction::COMPACTION_FAMILY, compaction::COMPACTION_SCHEMA)
             }
+            "flow_nexus_reminders" => (reminder::REMINDER_FAMILY, reminder::REMINDER_SCHEMA),
             "flow_nexus_successor_intents" => (
                 successor::SUCCESSOR_INTENT_FAMILY,
                 successor::SUCCESSOR_INTENT_SCHEMA,
@@ -11174,6 +11189,14 @@ mod tests {
                     engine
                         .match_records(QueryPlan::all(self.compactions))
                         .expect("compactions read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_reminders",
+                    engine
+                        .match_records(QueryPlan::all(self.reminders))
+                        .expect("reminders read")
                         .records()
                         .len(),
                 ),

@@ -322,7 +322,7 @@ datom gains a position.
   with `LandingWatch.{ ContextRepository DeployBinary }`. Every caller writes
   the fourth position: `None` runs no approval pipeline (the configure-only
   start writes `None`), and
-  `Some.{ /git/github.com/LiGoldragon/psyche-context /nix/store/…/bin/context-deploy }`
+  `Some.{ /git/github.com/LiGoldragon/psyche-belief /nix/store/…/bin/context-deploy }`
   watches that checkout's `main`. A three-position Start is refused
   `Arity { expected: 4, found: 3 }`.
 - **The approval pipeline.** Every commit on the context repository's main

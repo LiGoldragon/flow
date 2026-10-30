@@ -401,7 +401,7 @@ mod tests {
             meta_socket_path: "/run/user/test/flow-meta.sock".into(),
             store_path: "/home/test/.local/state/flow-next/flow.sema".into(),
             landing_watch_option: Some(flow_ethos::LandingWatch {
-                context_repository: "/git/psyche-context".into(),
+                context_repository: "/git/psyche-belief".into(),
                 deploy_binary: "/nix/store/x-context-deploy/bin/context-deploy".into(),
             }),
         };
@@ -440,13 +440,13 @@ mod tests {
                 .is_err(),
             "every position is written, the landing watch included"
         );
-        let watched = ["{ /run/flow.sock /run/flow-meta.sock /state/flow.sema Some.{ /git/psyche-context /nix/store/x/bin/context-deploy } }".to_owned()]
+        let watched = ["{ /run/flow.sock /run/flow-meta.sock /state/flow.sema Some.{ /git/psyche-belief /nix/store/x/bin/context-deploy } }".to_owned()]
             .parse_start()
             .expect("a landing watch parses");
         assert_eq!(
             watched.landing_watch_option,
             Some(flow_ethos::LandingWatch {
-                context_repository: "/git/psyche-context".into(),
+                context_repository: "/git/psyche-belief".into(),
                 deploy_binary: "/nix/store/x/bin/context-deploy".into(),
             })
         );

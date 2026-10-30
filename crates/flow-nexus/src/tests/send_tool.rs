@@ -380,6 +380,10 @@ fn accepted_text(text: &str) {
         text.starts_with("Accepted."),
         "unexpected tool response: {text}"
     );
+    assert!(
+        !text.contains("logical-delivery-"),
+        "a tool answer exposed its private delivery id: {text}"
+    );
 }
 
 trait SeatsCodexFlows {
@@ -1433,7 +1437,8 @@ fn walk(root: &Path) -> Vec<PathBuf> {
 }
 
 /// A woken or drained flow receives its queue as one vector datom: each
-/// request with its logical delivery id, its sender and its priority.
+/// request with its sender and priority, while private delivery identity and
+/// the recipient are absent.
 #[test]
 fn a_queued_request_is_rendered_as_its_datom_in_one_vector() {
     use crate::composition::RendersQueuedWork;
@@ -1449,8 +1454,11 @@ fn a_queued_request_is_rendered_as_its_datom_in_one_vector() {
     let prompt = queue.prompt_text(&seat_at());
     assert_eq!(
         prompt,
-        "[ { Sender.{ Mind alpha Tertiary } { Mind flow Secondary } Soft.Order.«Carry on.» } { Unknown { Mind flow Secondary } Soft.Notice.kept } ]"
+        "[ { Sender.{ Mind alpha Tertiary } Soft.Order.«Carry on.» } { Unknown Soft.Notice.kept } ]"
     );
+    assert_eq!(prompt.matches("Sender.").count(), 1);
+    assert!(!prompt.contains("{ Mind flow Secondary }"));
+    assert!(!prompt.contains("logical-delivery-"));
 }
 
 /// The fixture's Codex seat 908786: its thread, and the Address its

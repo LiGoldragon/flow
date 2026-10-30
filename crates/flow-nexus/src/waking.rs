@@ -2135,7 +2135,6 @@ impl PerformsWakeAndDrain for RunningNexus {
             let visible_sender = oldest.visible_input(&address).visible_sender;
             let letter = meta_signal_flow::Letter {
                 visible_sender,
-                address: address.clone(),
                 content: meta_signal_flow::Content::Waking(waking),
             };
             let message = if cohort

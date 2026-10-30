@@ -142,7 +142,7 @@ pub(crate) trait ProjectsQueueEntry {
 }
 
 impl ProjectsQueueEntry for flow_ethos::QueueEntry {
-    fn visible_input(&self, recipient: &flow_ethos::Address) -> VisibleNativeInput {
+    fn visible_input(&self, _recipient: &flow_ethos::Address) -> VisibleNativeInput {
         let visible_sender = match &self.sent_by {
             SentBy::Sender(address) => VisibleSender::Sender(address.clone()),
             SentBy::Unknown => VisibleSender::Unknown,
@@ -150,7 +150,6 @@ impl ProjectsQueueEntry for flow_ethos::QueueEntry {
         };
         VisibleNativeInput {
             visible_sender,
-            address: recipient.clone(),
             visible_message: self.message.visible_message(),
         }
     }

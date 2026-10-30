@@ -1,3 +1,14 @@
+# Flow 0.42.1
+
+Pins signal-flow 38.0.0 (7b737d9) and meta-signal-flow 47.0.0
+(dba1e40). Lifecycle replies retain useful Flow identities; delivery and
+request ledger identities stay private. Recipient-visible letters and native
+inputs carry sender, priority and request without repeating the recipient.
+The native send tool projects its durable acceptance without the logical
+delivery id or sender Flow id.
+
+Memory schemas are unchanged from 0.42.0; no store upgrade runs.
+
 # Flow 0.42.0
 
 Pins meta-signal-flow 45.0.0 (f5e1c9) and signal-flow 36.0.0 (a9ac37). Seven Memory families migrate in place on first open because their retained message values now distinguish an answered Result or Done from historical text and their failed-delivery state embeds the expanded typed refusal:

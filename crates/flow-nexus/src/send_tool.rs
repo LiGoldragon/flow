@@ -333,13 +333,58 @@ impl BecomesMessage for SendArguments {
     }
 }
 
+/// The typed tool answer a flow sees. The complete `SendOutcome` remains in
+/// Memory; this projection carries the metaflows and state without the
+/// private logical-delivery identity or the sender's run identity.
+#[derive(datom_codec::Datomizable)]
+struct VisibleToolAccepted {
+    sender: Address,
+    target: Address,
+    visible_send_acceptance: signal_flow::VisibleSendAcceptance,
+}
+
+#[derive(datom_codec::Datomizable)]
+struct VisibleToolLegacyUnknown {
+    sender: Address,
+    target: Address,
+}
+
+#[derive(datom_codec::Datomizable)]
+enum VisibleToolOutcome {
+    Accepted(VisibleToolAccepted),
+    LegacyUnknown(VisibleToolLegacyUnknown),
+    Refused(SendRefusal),
+}
+
+fn visible_tool_outcome(outcome: &SendOutcome) -> VisibleToolOutcome {
+    match outcome {
+        SendOutcome::Accepted(value) => VisibleToolOutcome::Accepted(VisibleToolAccepted {
+            sender: value.sender.clone(),
+            target: value.target.clone(),
+            visible_send_acceptance: signal_flow::VisibleSendAcceptance {
+                delivery_cursor: value.send_acceptance.delivery_cursor,
+                visible_delivery_state: crate::message_projection::visible_delivery_state(
+                    &value.send_acceptance.delivery_state,
+                ),
+            },
+        }),
+        SendOutcome::LegacyUnknown(value) => {
+            VisibleToolOutcome::LegacyUnknown(VisibleToolLegacyUnknown {
+                sender: value.sender.clone(),
+                target: value.target.clone(),
+            })
+        }
+        SendOutcome::Refused(value) => VisibleToolOutcome::Refused(value.clone()),
+    }
+}
+
 impl AnswersToolCall for SendOutcome {
     fn tool_response(&self) -> serde_json::Value {
         serde_json::json!({
             "success": matches!(self, SendOutcome::Accepted(_)),
             "contentItems": [{
                 "type": "inputText",
-                "text": self.datomize(Vec::new()).protosize().compact()
+                "text": visible_tool_outcome(self).datomize(Vec::new()).protosize().compact()
             }]
         })
     }

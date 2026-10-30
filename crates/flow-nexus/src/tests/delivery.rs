@@ -18,11 +18,6 @@ use std::fs;
 fn letter(text: &str) -> Letter {
     Letter {
         visible_sender: signal_flow::VisibleSender::Nexus,
-        address: signal_flow::Address {
-            aspect: signal_flow::Aspect::Psyche,
-            topic: "flow".into(),
-            layer: signal_flow::Layer::Secondary,
-        },
         content: Content::Text(text.into()),
     }
 }
@@ -156,7 +151,7 @@ fn soft_waits_for_a_resting_recipient_and_types_nothing_to_a_working_one() {
     );
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("Soft.{ Nexus { Psyche flow Secondary } Text.«when you rest» }")
+        Some("Soft.{ Nexus Text.«when you rest» }")
     );
 }
 
@@ -249,7 +244,7 @@ fn hard_abrupt_interrupts_a_working_recipient_before_typing() {
         vec![
             "--session messaging-build pane send-keys w1:p3 esc".to_owned(),
             "--session messaging-build agent wait w1:p3 --until idle --until done --until blocked --timeout 3000".to_owned(),
-            "--session messaging-build agent prompt w1:p3 HardAbrupt.{ Nexus { Psyche flow Secondary } Text.«stop the build» }".to_owned(),
+            "--session messaging-build agent prompt w1:p3 HardAbrupt.{ Nexus Text.«stop the build» }".to_owned(),
         ]
     );
 }
@@ -281,7 +276,7 @@ fn hard_abrupt_presses_the_interrupt_again_while_the_recipient_still_works() {
             wait,
             press,
             wait,
-            "--session messaging-build agent prompt w1:p3 HardAbrupt.{ Nexus { Psyche flow Secondary } Text.«stop now» }",
+            "--session messaging-build agent prompt w1:p3 HardAbrupt.{ Nexus Text.«stop now» }",
         ]
     );
 }
@@ -331,13 +326,13 @@ fn bodies_carrying_commands_or_keys_are_refused_and_nothing_is_typed() {
         (
             "end \u{1b}[201~ of paste",
             BodyRefusal::ControlCharacter(
-                "MiddleAbrupt.{ Nexus { Psyche flow Secondary } Text.«end ".len() as i64,
+                "MiddleAbrupt.{ Nexus Text.«end ".len() as i64,
             ),
         ),
         (
             "one\rtwo",
             BodyRefusal::ControlCharacter(
-                "MiddleAbrupt.{ Nexus { Psyche flow Secondary } Text.«one".len() as i64,
+                "MiddleAbrupt.{ Nexus Text.«one".len() as i64,
             ),
         ),
         ("   ", BodyRefusal::EmptyBody),

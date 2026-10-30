@@ -1412,7 +1412,7 @@ pub(crate) mod tests {
                 topic: "flow".into(),
                 layer: signal_flow::Layer::Secondary
             }),
-            "[ { Nexus { Psyche flow Secondary } Soft.Order.investigate } ]"
+            "[ { Nexus Soft.Order.investigate } ]"
         );
     }
 

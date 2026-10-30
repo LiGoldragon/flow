@@ -3,10 +3,10 @@
 //!
 //! Three layers. Two make a harness command impossible by construction; the
 //! third reports intent.
-//! 1. A Waking is rendered as one vector of its NativeInput datoms, oldest
-//!    first: each its logical delivery id, its own sender and its request
-//!    under its own priority, so the recipient can name each and tell who
-//!    sent it.
+//! 1. A Waking is rendered as one vector of its visible input datoms, oldest
+//!    first: each carries its sender and request under its own priority. The
+//!    private delivery identity and the recipient already holding the prompt
+//!    are not repeated in that text.
 //! 2. No keys in the text: no C0 control but LF and TAB, no DEL, no C1. That
 //!    excludes CR (a submit), ESC (an interrupt, or the `ESC[201~` that ends
 //!    a bracketed paste), Ctrl-C and Ctrl-D. Herdr 0.8.2 `agent prompt` was
@@ -320,11 +320,6 @@ mod tests {
     fn soft(text: &str) -> Message {
         Message::Soft(Letter {
             visible_sender: signal_flow::VisibleSender::Nexus,
-            address: signal_flow::Address {
-                aspect: signal_flow::Aspect::Psyche,
-                topic: "flow".into(),
-                layer: signal_flow::Layer::Secondary,
-            },
             content: Content::Text(text.into()),
         })
     }
@@ -339,21 +334,16 @@ mod tests {
             soft("Stage 1 is deployed; run the tier tests.")
                 .pane_text()
                 .as_str(),
-            "Soft.{ Nexus { Psyche flow Secondary } Text.«Stage 1 is deployed; run the tier tests.» }"
+            "Soft.{ Nexus Text.«Stage 1 is deployed; run the tier tests.» }"
         );
         let hard = Message::HardAbrupt(Letter {
             visible_sender: signal_flow::VisibleSender::Nexus,
-            address: signal_flow::Address {
-                aspect: signal_flow::Aspect::Psyche,
-                topic: "flow".into(),
-                layer: signal_flow::Layer::Secondary,
-            },
             content: Content::Text("/compact".into()),
         });
         assert!(
             hard.pane_text()
                 .as_str()
-                .starts_with("HardAbrupt.{ Nexus { Psyche flow Secondary } ")
+                .starts_with("HardAbrupt.{ Nexus ")
         );
     }
 
@@ -411,11 +401,6 @@ mod tests {
         };
         let message = Message::HardAbrupt(Letter {
             visible_sender: signal_flow::VisibleSender::Nexus,
-            address: signal_flow::Address {
-                aspect: signal_flow::Aspect::Psyche,
-                topic: "flow".into(),
-                layer: signal_flow::Layer::Secondary,
-            },
             content: Content::Waking(vec![
                 signal_flow::QueueEntry {
                     logical_delivery_id: input.logical_delivery_id.clone(),
@@ -434,7 +419,7 @@ mod tests {
         assert!(
             typed
                 .as_str()
-                .starts_with("[ { Sender.{ Psyche flow Secondary } { Psyche flow Secondary } ")
+                .starts_with("[ { Sender.{ Psyche flow Secondary } ")
         );
         assert_eq!(
             Potential::<Vec<signal_flow::VisibleNativeInput>>::from(typed.as_str().to_owned())
@@ -492,11 +477,6 @@ mod tests {
         let native = |text: &str| {
             Message::HardAbrupt(Letter {
                 visible_sender: signal_flow::VisibleSender::Nexus,
-                address: signal_flow::Address {
-                    aspect: signal_flow::Aspect::Psyche,
-                    topic: "flow".into(),
-                    layer: signal_flow::Layer::Secondary,
-                },
                 content: Content::Waking(vec![
                     signal_flow::QueueEntry {
                         logical_delivery_id: "native-content".into(),
@@ -567,7 +547,7 @@ mod tests {
 
     #[test]
     fn keys_are_refused_at_their_offset_in_the_pane_text() {
-        let head = "Soft.{ Nexus { Psyche flow Secondary } Text.«".len() as i64;
+        let head = "Soft.{ Nexus Text.«".len() as i64;
         for (text, at) in [
             // Each text holds a space, so it is rendered in guillemets.
             ("a \u{1b}b", 2),
@@ -594,11 +574,6 @@ mod tests {
         );
         let relay = Message::MiddleAbrupt(Letter {
             visible_sender: signal_flow::VisibleSender::Nexus,
-            address: signal_flow::Address {
-                aspect: signal_flow::Aspect::Psyche,
-                topic: "flow".into(),
-                layer: signal_flow::Layer::Secondary,
-            },
             content: Content::Psyche(Psyche_Data {
                 psyche_context: "context".into(),
                 psyche_verbatim: " ".into(),

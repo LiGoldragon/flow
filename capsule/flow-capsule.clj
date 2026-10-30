@@ -590,6 +590,34 @@
 
 (defn on-time? [lag] (<= 0 lag reminder-tolerance-seconds))
 
+(defn accepted-id
+  "The logical delivery id a SendAccepted reply carries; nil for any other reply."
+  [reply]
+  (let [d (read-datom reply)]
+    (when (= "SendAccepted" (head d))
+      (some-> d body items first str not-empty))))
+
+(defn holds-id?
+  "Whether text holds the id, written out; never for a missing or blank id."
+  [text id]
+  (and (not (str/blank? id)) (str/includes? (str text) id)))
+
+(defn queued-ids
+  "The logical delivery ids queued at the Address, from a Listed datom."
+  [listed addr]
+  (mapv #(str (first (items %))) (:queue (metaflow listed addr))))
+
+(defn seat-declaration
+  "The FlowKind and wake policy a Configure.Metaflows line declares for the
+  Address, e.g. [\"Regular\" \"OnDemand\"]."
+  [metaflows-line addr]
+  (let [want (map str (address-items addr))]
+    (some (fn [entry]
+            (let [[a _ _ kind _ wake] (items entry)]
+              (when (= (map str (items a)) want)
+                [(str kind) (str wake)])))
+          (items (loop [d (read-datom metaflows-line)] (if (head d) (recur (body d)) d))))))
+
 ;; ---------------------------------------------------------------- capsule life
 
 (def nexus (atom nil))
@@ -762,30 +790,38 @@
     (throw (ex-info "the Nexus opened no sockets" {:log (str/trim (slurp log))}))))
 
 (defn listens?
-  "Whether this exact process listens on the meta socket."
-  [pid]
+  "Whether this exact process listens on the meta socket, the capsule's or
+  the one given."
+  ([pid] (listens? pid meta-socket))
+  ([pid meta-socket]
   (let [inodes (set (keep #(some->> (try (str (fs/read-link %)) (catch Exception _ nil)) (re-find #"socket:\[(\d+)\]") second)
                           (try (fs/list-dir (str "/proc/" pid "/fd")) (catch Exception _ []))))]
     (some (fn [row]
             (let [cols (str/split (str/trim row) #"\s+")]
               (and (= (get cols 7) meta-socket) (= (get cols 3) "00010000") (inodes (get cols 6)))))
-          (rest (str/split-lines (try (String. (java.nio.file.Files/readAllBytes (fs/path (str "/proc/" pid "/net/unix")))) (catch Exception _ "")))))))
+          (rest (str/split-lines (try (String. (java.nio.file.Files/readAllBytes (fs/path (str "/proc/" pid "/net/unix")))) (catch Exception _ ""))))))))
 
 (defn configure-one!
   "One Configure through a configuration-only Nexus, which serves one request
-  and exits. Its caller carries no pane marks: such a peer is refused there."
-  [datom log]
-  (let [child (p/process [(str @package "/bin/flow-nexus") "--configure-only" (start-text)]
-                         {:env (clean-env) :out :append :out-file (fs/file log) :err :append :err-file (fs/file log) :in ""})
-        pid (.pid (:proc child))]
-    (when-not (watch 10 #(or (listens? pid) (not (p/alive? child))))
-      (p/destroy child))
-    (let [reply (if (p/alive? child)
-                  (reply-text (run {:env (clean-env {"FLOW_META_SOCKET" meta-socket})} (str @package "/bin/flow-meta") datom))
-                  (str "configuration-only Nexus exited before listening: " (str/trim (slurp log))))
-          exit (:exit (deref child 15000 {:exit "still running"}))]
-      (when (= exit "still running") (p/destroy child))
-      [reply exit])))
+  and exits: of the package in charge on the capsule's sockets and store, or
+  of pkg on the sockets and store start names. Its caller carries no pane
+  marks: such a peer is refused there."
+  ([datom log] (configure-one! datom log @package (start-text) meta-socket))
+  ([datom log pkg start meta-socket]
+    (let [child (p/process [(str pkg "/bin/flow-nexus") "--configure-only" start]
+                           {:env (clean-env {"PATH" (str pkg "/bin:" (System/getenv "PATH"))})
+                            :out :append :out-file (fs/file log) :err :append :err-file (fs/file log) :in ""})
+          pid (.pid (:proc child))]
+      (when-not (watch 10 #(or (listens? pid meta-socket) (not (p/alive? child))))
+        (p/destroy child))
+      (let [reply (if (p/alive? child)
+                    (reply-text (run {:env (clean-env {"PATH" (str pkg "/bin:" (System/getenv "PATH"))
+                                                       "FLOW_META_SOCKET" meta-socket})}
+                                     (str pkg "/bin/flow-meta") datom))
+                    (str "configuration-only Nexus exited before listening: " (str/trim (slurp log))))
+            exit (:exit (deref child 15000 {:exit "still running"}))]
+        (when (= exit "still running") (p/destroy child))
+        [reply exit]))))
 
 (defn configure-lines
   "The configure.datom lines that are datoms, their placeholders filled."
@@ -968,6 +1004,10 @@
 (defn pane-holds [pane needle seconds]
   (watch seconds #(some-> (pane-text pane) (str/includes? needle))))
 
+;; The seat scenario 20 wakes: a Regular OnDemand seat, which takes its whole
+;; queue on a wake (a Simplified seat takes its oldest alone).
+(def waking-seat tertiary-address)
+
 (def night-scenarios
   [["13 OnDemand seat whose successor cannot compose is kept, told and handed its queue"
     (fn []
@@ -1026,11 +1066,11 @@
          :watched (str "Psyche test Quaternary's queue held " before " before and " after
                        " after; the unreadable Minutes never left the CLI")}))]
 
-   ["16 Task reminder held across a Nexus restart"
+   ["16 Task reminder held across a Nexus restart; the Task leaves no queued entry"
     (fn []
       (let [pane (sender-pane)
             sent (send-to quaternary "Queue" "Soft.Task.{ 1 «Answer with one word and stop. Tag rd1.» }" pane)
-            id (some-> (read-datom sent) body items first str)
+            id (accepted-id sent)
             n @nexus
             _ (p/destroy n)
             stopped (:exit (deref n 20000 {:exit "still running"}))
@@ -1038,12 +1078,21 @@
             _ (fs/delete-if-exists meta-socket)
             _ (start-nexus! @nexus-log)
             reminded (transcript-holds secondary (str "Reminder 1 of 4: task " id) 150)
-            done (flow (str "Send.{ Address." secondary " Queue Soft.Done.{ " id " «closed» } }") pane)]
-        {:reply (str "Task: " sent " / Nexus stopped, exit " stopped " / restarted / Done: " done)
+            done (flow (str "Send.{ Address." secondary " Queue Soft.Done.{ " id " «closed» } }") pane)
+            ;; The Task was queued at an asleep seat that nothing wakes here:
+            ;; its entry is withdrawn, so no later scenario finds it queued.
+            queued (some #{id} (queued-ids (:datom (metaflows)) quaternary))
+            withdrawn (when queued (flow-meta (str "Withdraw.{ " quaternary " «" id "» }")))
+            left (queued-ids (:datom (metaflows)) quaternary)]
+        {:reply (str "Task: " sent " / Nexus stopped, exit " stopped " / restarted / Done: " done
+                     " / Withdraw: " (or withdrawn "not queued"))
          :pass (boolean (and id (str/starts-with? sent "SendAccepted.") reminded
-                             (str/starts-with? done "SendAccepted.")))
+                             (str/starts-with? done "SendAccepted.")
+                             (or (not queued) (str/starts-with? withdrawn "Withdrawn."))
+                             (not (some #{id} left))))
          :watched (str "Secondary transcript shows Reminder 1 of 4 for " id " after the restart "
-                       (boolean reminded) "; the Done closes it")}))]
+                       (boolean reminded) "; the Done closes it; the Task " (if queued "withdrawn" "not queued")
+                       ", Quaternary queue after " left)}))]
 
    ["17 Task reminded at its minutes; Done closes it; Done again refused"
     (fn []
@@ -1067,17 +1116,18 @@
                        " s after it (on time: 0 to " reminder-tolerance-seconds " s)"
                        "; no Reminder 2 in the 75 s after Done " (not second-reminder))}))]
 
-   ["20 two requests queued to an asleep seat reach it on its wake as one vector, oldest first"
+   ["20 two requests queued to an asleep Regular seat reach it on its wake as one vector, oldest first"
     (fn []
-      (let [asleep (watch 150 #(let [m (current quaternary)] (when (= :asleep (:state m)) m)))
+      (let [asleep (watch 150 #(let [m (current waking-seat)]
+                                 (when (and (= :asleep (:state m)) (empty? (:queue m))) m)))
             pane (sender-pane)
-            first-sent (send "Queue" "Soft.Notice.«First of two. Tag w1.»" pane)
-            second-sent (send "Wake" (str "Soft.Order.«Second of two. " brief " Tag w2.»") pane)
-            ids (vec (keep #(some-> (read-datom %) body items first str) [first-sent second-sent]))
-            woke (watch 60 #(awake-flow quaternary))
-            turn (watch 60 #(transcript-first-user (native-session (inspect quaternary))))
+            first-sent (send-to waking-seat "Queue" "Soft.Notice.«First of two. Tag w1.»" pane)
+            second-sent (send-to waking-seat "Wake" (str "Soft.Order.«Second of two. " brief " Tag w2.»") pane)
+            ids (vec (keep accepted-id [first-sent second-sent]))
+            woke (watch 60 #(awake-flow waking-seat))
+            turn (watch 60 #(transcript-first-user (native-session (inspect waking-seat))))
             entries (waking-entries turn)
-            woken-pane (bound-pane (inspect quaternary))
+            woken-pane (bound-pane (inspect waking-seat))
             shown (watch 60 #(let [t (some-> woken-pane pane-text)]
                                (when (and t (every? (fn [id] (str/includes? t id)) ids)) t)))
             _ (keep-text! "scenario-20-pane.txt" (or shown (some-> woken-pane pane-text)))
@@ -1086,7 +1136,7 @@
         {:reply (str "Queue: " first-sent " / Wake: " second-sent)
          :pass (boolean (and asleep woke (= 2 (count ids)) (= ids (mapv :id entries))
                              (every? #(and (:sender %) (:priority %)) entries) ordered))
-         :watched (str "Quaternary Asleep before " (boolean asleep) ", woken as " woke
+         :watched (str waking-seat " Asleep with an empty queue before " (boolean asleep) ", woken as " woke
                        "; first turn's vector " (pr-str entries) "; pane " woken-pane
                        " shows both ids oldest first " ordered
                        ", its text kept as scenario-20-pane.txt")}))]])
@@ -1263,6 +1313,29 @@
   (not (and (str/starts-with? reply "exit ")
             (or (str/includes? reply "(os error 2)") (str/includes? reply "(os error 111)")))))
 
+;; The seed's order, as the Nexus allows it. A full Nexus opens only a store
+;; that holds the Nexus declaration (FlowStore::open_configured), and a
+;; configuration-only Nexus refuses Counters NotRunning; Counters is taken
+;; only while no logical delivery, queue attempt or send outcome is
+;; recorded, which a full Nexus on a store declaring no metaflow leaves so.
+(defn seed-plan
+  "The seed's steps, each {:via :configure-only|:running :datom}: the Nexus
+  declared configuration-only; then a full Nexus given Counters, the lower
+  one and the Configuration read; then the rest of the replay
+  configuration-only, in the file's order. Nil without a Nexus declaration."
+  [replay counters lowered]
+  (let [nexus? #(str/starts-with? % "Configure.Nexus.")]
+    (when-let [nexus (first (filter nexus? replay))]
+      (vec (concat [{:via :configure-only :datom nexus}]
+                   (for [datom [counters lowered "Configuration"]] {:via :running :datom datom})
+                   (for [datom (remove nexus? replay)] {:via :configure-only :datom datom}))))))
+
+(defn declared-start
+  "The declared unit's start: its guard, as ExecStartPre, reads the probe;
+  while any socket has an owner it refuses and start! is never called."
+  [probe start!]
+  (if (some owner-answers? (vals probe)) :refused (start!)))
+
 (defn rebind-lines
   "One line per seat pane, as the procedure's C7 makes them from the pane
   list: the trackers (tracker? of `Aspect topic Layer`) first, then the rest
@@ -1434,37 +1507,60 @@
     @counts))
 
 (defn seed!
-  "A new store seeded on a private socket by a new Nexus of its own:
-  Counters first, at the old maxima plus the margin, a lower Counters
-  refused, then the replay, then the Nexus stopped and flow-store-check."
+  "A new store seeded on a private socket, in the seed plan's order: the
+  Nexus declared through a configuration-only Nexus; a full Nexus of its own
+  given Counters at the old maxima plus the margin, a lower Counters
+  (refused), and the Configuration read, then stopped; the rest of the
+  replay through configuration-only Nexuses; then flow-store-check."
   [label maxima log]
   (let [pkg @new-package
         store (str state-root "/" label "/flow.sema")
         _ (fs/create-dirs (fs/parent store))
-        proc (start-command! {:argv [(str pkg "/bin/flow-nexus") (start-text seed-socket seed-meta-socket store)]
-                              :env (package-env pkg {})} log)
-        up (watch 30 #(cond (not (p/alive? proc)) :exited
-                            (owner-answers? (meta-at pkg seed-meta-socket "Configuration")) :serving))
+        _ (fs/create-dirs (fs/parent seed-meta-socket))
+        start (start-text seed-socket seed-meta-socket store)
         counters (counters-datom maxima counter-margin)
-        counters-reply (meta-at pkg seed-meta-socket counters)
-        lowered (meta-at pkg seed-meta-socket (counters-datom maxima (dec counter-margin)))
+        lowered (counters-datom maxima (dec counter-margin))
         replay (split-replay (str/join "\n" (:replay (:configuration @takeover))))
-        replies (mapv (fn [datom] [(second (re-find #"^Configure\.([A-Za-z]+)" datom))
-                                   (meta-at pkg seed-meta-socket datom)])
-                      replay)
-        configuration (meta-at pkg seed-meta-socket "Configuration")
-        exit (stop-process! proc)
+        plan (seed-plan replay counters lowered)
+        configure-only! (fn [datom] (let [[reply exit] (configure-one! datom log pkg start seed-meta-socket)]
+                                      {:via :configure-only :datom datom :reply reply :exit exit}))
+        running! (fn [steps]
+                   (let [proc (start-command! {:argv [(str pkg "/bin/flow-nexus") start] :env (package-env pkg {})} log)
+                         up (watch 30 #(cond (not (p/alive? proc)) :exited
+                                             (owner-answers? (meta-at pkg seed-meta-socket "Configuration")) :serving))
+                         replies (mapv (fn [{:keys [datom]}]
+                                         {:via :running :datom datom :up up
+                                          :reply (if (= up :serving) (meta-at pkg seed-meta-socket datom) "not serving")})
+                                       steps)]
+                     (conj replies {:via :stop :up up :exit (stop-process! proc)})))
+        done (loop [[step & more :as steps] plan out []]
+               (cond
+                 (empty? steps) out
+                 (= :running (:via step)) (let [batch (vec (take-while #(= :running (:via %)) steps))]
+                                            (recur (drop (count batch) steps) (into out (running! batch))))
+                 :else (recur more (conj out (configure-only! (:datom step))))))
+        reply-of (fn [datom] (some #(when (and (= :running (:via %)) (= datom (:datom %))) (:reply %)) done))
+        counters-reply (str (reply-of counters))
+        lowered-reply (str (reply-of lowered))
+        configuration (str (reply-of "Configuration"))
+        declared (filter #(= :configure-only (:via %)) done)
+        stop (some #(when (= :stop (:via %)) %) done)
         check (reply-text (run {:env (package-env pkg {})} (str pkg "/bin/flow-store-check") (str "{ «" store "» }")))
         expected (mapv #(+ (get maxima %) counter-margin) [:logical-delivery :queue-attempt :send-outcome])
+        family #(or (second (re-find #"^Configure\.([A-Za-z]+)" %)) %)
         seed {:store store :counters counters :expected expected :digest (digest store)
-              :ok (boolean (and (= up :serving) (str/starts-with? counters-reply "Configured.")
-                                (str/includes? lowered "Lowered")
-                                (seq replies) (every? #(str/starts-with? (second %) "Configured.") replies)
+              :ok (boolean (and plan (= :serving (:up stop))
+                                (str/starts-with? counters-reply "Configured.")
+                                (str/includes? lowered-reply "Lowered")
+                                (= (count replay) (count declared))
+                                (every? #(str/starts-with? (:reply %) "Configured.") declared)
                                 (= expected (configuration-counters configuration))
                                 (str/starts-with? check "Opens.")))
-              :text (str "seed Nexus " (name (or up :silent)) ", exit " exit
-                         " / " counters " -> " counters-reply " / one lower -> " lowered
-                         " / replay " (pr-str (mapv (fn [[family reply]] (str family " -> " reply)) replies))
+              :text (str "seed plan " (if plan (pr-str (mapv #(str (name (:via %)) " " (family (:datom %))) plan)) "none: no Nexus declaration")
+                         " / " (str/join " / " (for [{:keys [via datom reply up exit]} done]
+                                                 (case via
+                                                   :stop (str "full seed Nexus " (name (or up :silent)) ", stopped, exit " exit)
+                                                   (str (family datom) " (" (name via) ") -> " reply))))
                          " / Configuration counters " (configuration-counters configuration)
                          " / flow-store-check -> " check)}]
     (keep-text! (str "takeover-" label "-seed.txt") (:text seed))
@@ -1603,9 +1699,10 @@
           listed (read-datom (:metaflows reads))
           pasts (into {} (for [m (items (body listed))] [(address-text (first (items m))) (vec (items (nth (items m) 2)))]))]
       {:reply (str "new Primary queue " primary-queue)
-       :pass (boolean (and queued-id (not (str/includes? primary-queue queued-id)) (every? empty? (vals pasts))))
-       :watched (str "the old Nexus's queued Notice " queued-id
-                     (if (str/includes? primary-queue (str queued-id)) " carried" " not carried")
+       :pass (boolean (and (not (str/blank? queued-id)) (not (holds-id? primary-queue queued-id))
+                           (every? empty? (vals pasts))))
+       :watched (str "the old Nexus's queued Notice " (if (str/blank? queued-id) "(none was queued)" queued-id)
+                     (if (holds-id? primary-queue queued-id) " carried" " not carried")
                      "; Past by Address under the new Nexus " (pr-str pasts))})))
 
 (defn ids-step []
@@ -1627,9 +1724,10 @@
 
 (defn rollback!
   "The new Nexus stopped, the old one started by its recorded command on its
-  untouched store, its readings compared with its last before the stop; then
-  the switch back modelled: the kept generation's guard refuses, and a
-  declared-like start with no guard is refused at the socket."
+  untouched store, its readings compared with its last before the stop, the
+  queued Notice found by its own id; then the switch back modelled as the
+  procedure means it: the declared start of the new Nexus, its guard first,
+  refuses while the old Nexus owns the socket, and starts nothing."
   [label]
   (let [{:keys [new-proc old-command old-digest last queued-id]} @takeover
         _ (stop-poller!)
@@ -1644,28 +1742,26 @@
         reads (old-reads!)
         same-metaflows (= (:metaflows reads) (:metaflows last))
         same-queues (= (:queues reads) (:queues last))
-        held (str/includes? (get (:queues reads) asleep-primary "") (str queued-id))
+        held (holds-id? (get (:queues reads) asleep-primary) queued-id)
         guard (guard-probe @new-package)
-        throwaway (str state-root "/switch-back-" label "/flow.sema")
-        _ (fs/create-dirs (fs/parent throwaway))
-        refusals-before (occurrences (log-text) "already accepting connections")
-        back (start-command! (nexus-command @new-package throwaway) @nexus-log)
-        back-exit (:exit (deref back 20000 {:exit "still running"}))
-        _ (stop-process! back)
-        at-socket (> (occurrences (log-text) "already accepting connections") refusals-before)
+        started (atom nil)
+        back (declared-start guard #(reset! started (start-command! (nexus-command @new-package (:store (:seed @takeover)))
+                                                                    @nexus-log)))
+        _ (some-> @started stop-process!)
         still (owner-answers? (flow "Metaflows"))]
     (keep-reads! (str "takeover-" label "-rolled-back") reads)
     {:reply (str "new Nexus exit " new-exit "; old restarted " (name (or serving :silent))
-                 "; switch-back start exit " back-exit)
+                 "; switch-back declared start " (if (= back :refused) "refused by its guard" "started the new Nexus"))
      :pass (boolean (and (not (guard-refuses? free)) untouched (= serving :serving) same-metaflows same-queues held
-                         (guard-refuses? guard) (not (contains? #{0 "still running"} back-exit)) at-socket
-                         still (p/alive? proc)))
+                         (= back :refused) (nil? @started) still (p/alive? proc)))
      :watched (str "sockets free after the stop " (not (guard-refuses? free))
                    "; old store " (if untouched "untouched" "changed") " since the stop"
                    "; Metaflows " (if same-metaflows "equal" "unequal") " and ReadQueueDeliveries "
-                   (if same-queues "equal" "unequal") " to the last reads before the stop; queued Notice " queued-id
-                   (if held " held" " missing") "; switch back: guard " (if (guard-refuses? guard) "refuses" "passes")
-                   ", unguarded start " (if at-socket "refused at the socket" "not refused at the socket")
+                   (if same-queues "equal" "unequal") " to the last reads before the stop; queued Notice "
+                   (if (str/blank? queued-id) "(none was queued)" queued-id)
+                   (if held " held at " " missing from ") asleep-primary
+                   "; switch back: the guard reads " (pr-str guard) ", the declared start "
+                   (if (= back :refused) "refused, the new Nexus never started" "passed and started the new Nexus")
                    "; old Nexus PID " (.pid (:proc proc)) (if still " answers" " does not answer") " Metaflows")}))
 
 (defn rollback-step [label] (fn [] (rollback! label)))
@@ -1725,8 +1821,14 @@
                                 [addr (let [reply (launch addr)] [reply (watch 90 #(awake-flow addr))])]))
             sender-pane (or (some-> (get-in launched [secondary 1]) str pane-of-flow) (sender-pane))
             _ (swap! takeover assoc :sender-pane sender-pane)
+            ;; A Send reaches only an Address that has a metaflow, which its
+            ;; first launch makes: the Primary takes one turn and, OnDemand,
+            ;; falls asleep before the Notice is queued to it.
+            primary-launch (launch asleep-primary)
+            primary-woke (watch 90 #(awake-flow asleep-primary))
+            primary-slept (watch 180 #(= :asleep (:state (current asleep-primary))))
             queued (send-to asleep-primary "Queue" "Soft.Notice.«Held across the switch. Answer with one word and stop. Tag tk1.»" sender-pane)
-            queued-id (some-> (read-datom queued) body items first str)
+            queued-id (accepted-id queued)
             _ (swap! takeover assoc :queued-id queued-id)
             _ (start-sender! sender-pane)
             busy (when-not skip-codex
@@ -1734,15 +1836,18 @@
                      [reply (watch 90 #(awake-flow codex-secondary))]))
             sends (watch 45 #(let [s @(:sent @sender)] (when (>= (count s) 4) s)))
             primary (current asleep-primary)]
-        {:reply (str (pr-str launched) " / Codex Secondary " (if skip-codex "SKIPPED" (pr-str busy)) " / queued " queued)
+        {:reply (str (pr-str launched) " / Primary " primary-launch " / Codex Secondary " (if skip-codex "SKIPPED" (pr-str busy))
+                     " / queued " queued)
          :pass (boolean (and (every? (comp second val) launched) (or skip-codex (second busy))
-                             sender-pane (str/starts-with? queued "SendAccepted.")
-                             (= :asleep (:state primary))
+                             sender-pane primary-woke primary-slept queued-id
+                             (= :asleep (:state primary)) (holds-id? (pr-str (:queue primary)) queued-id)
                              (seq sends) (every? #(str/starts-with? (:reply %) "SendAccepted.") sends)))
          :watched (str "Awake " (pr-str (into {} (for [[a [_ f]] launched] [a f])))
                        (if skip-codex "; Codex seats SKIPPED (FLOW_CAPSULE_SKIP_CODEX=1)" "")
-                       "; sender pane " sender-pane "; Primary " (some-> (:state primary) name)
-                       " with queue " (:queue primary) "; " (count sends) " sends by the loop")}))]
+                       "; sender pane " sender-pane "; Primary awake as " primary-woke ", then "
+                       (some-> (:state primary) name) " with the Notice " queued-id
+                       (if (holds-id? (pr-str (:queue primary)) queued-id) " queued" " not queued")
+                       "; " (count sends) " sends by the loop")}))]
 
    ["T2 snapshot through the old clients"
     (fn []
@@ -1751,8 +1856,11 @@
         (swap! takeover assoc :t2 reads)
         {:reply (str "Awake " (pr-str (:awake reads)) " / " (count (:ids reads)) " ids")
          :pass (boolean (and (seq (:awake reads))
-                             (str/includes? (get (:queues reads) asleep-primary "") (str (:queued-id @takeover)))))
-         :watched "Metaflows, Configuration, ReadSendOutcomes and every ReadQueueDeliveries kept as takeover-T2.*"}))]
+                             (holds-id? (get (:queues reads) asleep-primary) (:queued-id @takeover))))
+         :watched (str "the queued Notice " (:queued-id @takeover)
+                       (if (holds-id? (get (:queues reads) asleep-primary) (:queued-id @takeover)) " held" " not held")
+                       " at " asleep-primary "; Metaflows, Configuration, ReadSendOutcomes and every"
+                       " ReadQueueDeliveries kept as takeover-T2.*")}))]
 
    ["A-T3 seed: Counters at the old maxima plus 10000, a lower one refused, the replay, flow-store-check" (seed-step "arm-a")]
    ["A-T4 activate first: the guard refuses while the old Nexus answers" (guard-step)]

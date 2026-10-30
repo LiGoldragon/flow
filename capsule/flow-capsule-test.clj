@@ -5,7 +5,7 @@
 ;; seats read back and the window.
 ;;
 ;; Usage: bb flow-capsule-test.clj <path to flow-capsule.clj>
-(require '[babashka.fs :as fs])
+(require '[babashka.fs :as fs] '[clojure.string :as str])
 
 (load-file (first *command-line-args*))
 
@@ -242,6 +242,81 @@
        (= {:ready-s 2.5 :end-s 30.0 :mean-pane-s 4.0 :readback-s 1.0 :extrapolated-s 85.0}
           (flow-capsule/window-measure {:start 1000 :ready 3500 :end 31000 :pane-ms [3000 5000]
                                         :readback-ms 1000 :seats 21})))
+
+;; The seed, in the order the Nexus allows it: a full Nexus opens only a
+;; store holding the Nexus declaration, and a configuration-only Nexus
+;; refuses Counters NotRunning. So the Nexus is declared configuration-only
+;; first; a full Nexus on the private socket then takes Counters, the lower
+;; one and the Configuration read while no delivery row exists; the rest of
+;; the replay follows configuration-only, in the file's order.
+(let [replay ["Configure.Models.[ { Secondary Psyche haiku } ]"
+              "Configure.Nexus.{ /src 60 }"
+              "Configure.DefaultMinutes.30"
+              "Configure.Metaflows.[ { { Psyche test Secondary } [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] } ]"]
+      plan (flow-capsule/seed-plan replay "Configure.Counters.{ 3 2 1 }" "Configure.Counters.{ 2 1 0 }")
+      steps (map (juxt :via :datom) plan)]
+  (check "the seed declares the Nexus first, through a configuration-only Nexus"
+         (= [:configure-only "Configure.Nexus.{ /src 60 }"] (first steps)))
+  (check "then a full Nexus takes Counters, the lower one and the Configuration read, before any other declaration"
+         (= [[:running "Configure.Counters.{ 3 2 1 }"] [:running "Configure.Counters.{ 2 1 0 }"] [:running "Configuration"]]
+            (take 3 (rest steps))))
+  (check "the rest of the replay follows configuration-only, in the file's order"
+         (= [[:configure-only "Configure.Models.[ { Secondary Psyche haiku } ]"]
+             [:configure-only "Configure.DefaultMinutes.30"]
+             [:configure-only "Configure.Metaflows.[ { { Psyche test Secondary } [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] } ]"]]
+            (drop 4 steps)))
+  (check "no Counters goes to a configuration-only Nexus"
+         (not-any? (fn [[via datom]] (and (= via :configure-only) (str/starts-with? datom "Configure.Counters."))) steps))
+  (check "a replay without a Nexus declaration plans no seed"
+         (nil? (flow-capsule/seed-plan (remove #(str/starts-with? % "Configure.Nexus.") replay)
+                                       "Configure.Counters.{ 3 2 1 }" "Configure.Counters.{ 2 1 0 }"))))
+
+;; The switch back, as the procedure means it: the declared start runs its
+;; guard first and, while the old Nexus owns a socket, refuses without
+;; starting the Nexus.
+(let [started (atom 0)
+      start! (fn [] (swap! started inc) :started)]
+  (check "the declared start refuses while the old Nexus answers, and starts nothing"
+         (and (= :refused (flow-capsule/declared-start {:ordinary "Listed.[]"
+                                                        :meta "exit 2: No such file or directory (os error 2)"}
+                                                       start!))
+              (zero? @started)))
+  (check "with no owner on either socket the declared start starts the Nexus"
+         (= :started (flow-capsule/declared-start {:ordinary "exit 2: No such file or directory (os error 2)"
+                                                   :meta "exit 2: Connection refused (os error 111)"}
+                                                  start!))))
+
+;; A queued request is witnessed by its own id: read from its SendAccepted,
+;; none from a refusal, and no id is held by a text that lacks it.
+(check "a queued Notice's id is read from its SendAccepted"
+       (= "logical-delivery-00000000000000000009"
+          (flow-capsule/accepted-id "SendAccepted.{ logical-delivery-00000000000000000009 9 Queued }")))
+(check "a refused Send has no id"
+       (nil? (flow-capsule/accepted-id "Refused.Unknown.Address.{ Psyche test Primary }")))
+(check "a queue holds an id only where the id is written"
+       (and (flow-capsule/holds-id? "Deliveries.[ { logical-delivery-00000000000000000009 } ]"
+                                    "logical-delivery-00000000000000000009")
+            (not (flow-capsule/holds-id? "Deliveries.[ ]" "logical-delivery-00000000000000000009"))))
+(check "no id is held where there is no id"
+       (not (or (flow-capsule/holds-id? "Deliveries.[ ]" nil) (flow-capsule/holds-id? "Deliveries.[ ]" ""))))
+
+;; A seat's queue, read by id from a Listed reply.
+(let [listed (flow-capsule/read-datom
+              (str "Listed.[ { { Psyche test Quaternary } Asleep [] [ { logical-delivery-00000000000000000030 Sender.{ Psyche test Secondary } Queue Soft.Task.{ 1 «a» } } ] }"
+                   " { { Psyche test Tertiary } Asleep [] [] } ]"))]
+  (check "a seat's queued ids read from Listed"
+         (= ["logical-delivery-00000000000000000030"] (flow-capsule/queued-ids listed "{ Psyche test Quaternary }")))
+  (check "an empty queue reads no ids"
+         (= [] (flow-capsule/queued-ids listed "{ Psyche test Tertiary }"))))
+
+;; Scenario 20 needs a seat that takes its whole queue on a wake: a Regular
+;; OnDemand seat, declared so in configure.datom (a Simplified seat takes
+;; its oldest alone).
+(let [metaflows (first (filter #(str/starts-with? % "Configure.Metaflows.") (flow-capsule/configure-lines)))]
+  (check "scenario 20's seat is declared Regular OnDemand"
+         (= ["Regular" "OnDemand"] (flow-capsule/seat-declaration metaflows flow-capsule/waking-seat)))
+  (check "a Simplified seat reads as Simplified"
+         (= ["Simplified" "OnDemand"] (flow-capsule/seat-declaration metaflows "{ Psyche test Quaternary }"))))
 
 (if (seq @failures)
   (do (println (str (count @failures) " failed")) (System/exit 1))

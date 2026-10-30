@@ -293,8 +293,8 @@
         (when (= (head state) "Awake") (swap! seen-flows conj (str (body state))))
         (doseq [f (items past)] (swap! seen-flows conj (str f)))))))
 
-(defn print-line [{:keys [name reply pass ms watched]}]
-  (println (str name " | " reply " | " (if pass "pass" "fail") " | " ms " ms | " watched))
+(defn print-line [{:keys [name reply pass skipped ms watched]}]
+  (println (str name " | " reply " | " (cond skipped "SKIPPED" pass "pass" :else "fail") " | " ms " ms | " watched))
   (flush))
 
 (defn scenario
@@ -306,7 +306,7 @@
     (swap! results conj line)
     (print-line line)
     (try (note-flows!) (catch Exception _ nil))
-    (:pass outcome)))
+    (boolean (or (:pass outcome) (:skipped outcome)))))
 
 (defn on-demand-secondary
   "The capsule's Configure.Metaflows with the Secondary declared OnDemand."
@@ -930,9 +930,48 @@
         {:reply (str "Launch: " reply " / Send: " queued)
          :pass (boolean (and awake (str/starts-with? queued "SendAccepted.") handed))
          :watched (str "Mind test Quaternary Awake as " awake "; a session under " codex-home
-                       (if handed " holds" " lacks") " Tag c1 within 120 s")}))]])
+                       (if handed " holds" " lacks") " Tag c1 within 120 s")}))]
 
-(def scenarios (vec (concat (subvec base-scenarios 0 11) night-scenarios codex-scenarios (subvec base-scenarios 11))))
+   ["19 Codex and Claude exchange one Task and one Done; one reminder at the deadline"
+    (fn []
+      (let [codex (or (awake-flow codex-quaternary)
+                      (do (launch codex-quaternary) (watch 60 #(awake-flow codex-quaternary))))
+            codex-pane (bound-pane (inspect codex-quaternary))
+            admitted (java.time.Instant/now)
+            sent (send-to codex-quaternary "Wake" "Soft.Task.{ 1 «Answer with one word and stop. Tag g1.» }" (sender-pane))
+            id (some-> (read-datom sent) body items first str)
+            handed (watch 120 #(codex-sessions-hold "Tag g1"))
+            reminded (transcript-holds secondary (str "Reminder 1 of 4: task " id) 150)
+            done (send-to secondary "Queue" (str "Soft.Done.{ " id " «finished» }") codex-pane)
+            _ (Thread/sleep 75000)
+            second-reminder (transcript-holds secondary (str "Reminder 2 of 4: task " id) 1)
+            native (native-session (inspect secondary))
+            file (when native (first (fs/glob (str home "/.claude/projects") (str "*/" native ".jsonl"))))
+            lines (filter #(str/includes? % (str "Reminder 1 of 4: task " id))
+                          (when file (str/split-lines (slurp (str file)))))
+            stamps (keep #(second (re-find #"\"timestamp\":\"([^\"]+)\"" %)) lines)
+            log-lines (filter #(and id (str/includes? % id)) (str/split-lines (log-text)))]
+        {:reply (str "Task: " sent " / Done: " done)
+         :pass (boolean (and codex id handed reminded (str/starts-with? sent "SendAccepted.")
+                             (str/starts-with? done "SendAccepted.") (= 1 (count lines)) (not second-reminder)))
+         :watched (str "Task admitted " admitted ", deadline 60 s later; Codex flow " codex
+                       " session holds Tag g1 " (boolean handed) "; Reminder 1 transcript stamps " (pr-str stamps)
+                       " (" (count lines) " line); no Reminder 2 in the 75 s after Done " (not second-reminder)
+                       "; Nexus log lines naming " id ": " (pr-str (vec log-lines)))}))]])
+
+;; FLOW_CAPSULE_SKIP_CODEX=1: no Codex app-server is started, so every scenario
+;; that needs a Codex seat (the codex-scenarios) is recorded SKIPPED, never pass.
+(def skip-codex (= "1" (System/getenv "FLOW_CAPSULE_SKIP_CODEX")))
+
+(def skipped-codex-scenarios
+  (mapv (fn [[name _]]
+          [name (fn [] {:reply "skipped" :pass false :skipped true
+                        :watched "FLOW_CAPSULE_SKIP_CODEX=1: needs the Codex app-server, which was not started"})])
+        codex-scenarios))
+
+(def scenarios (vec (concat (subvec base-scenarios 0 11) night-scenarios
+                            (if skip-codex skipped-codex-scenarios codex-scenarios)
+                            (subvec base-scenarios 11))))
 
 (defn -main [& args]
   (let [[pkg & options] args]
@@ -948,7 +987,9 @@
       (try
         (start-capsule! log)
         (start-curriculum! log)
-        (start-codex! log)
+        (if skip-codex
+          (println "codex | FLOW_CAPSULE_SKIP_CODEX=1: app-server not started, Codex scenarios skipped")
+          (start-codex! log))
         (configure! log)
         (reset! nexus-log log)
         (start-nexus! log)
@@ -963,7 +1004,8 @@
           (println (str "stopped: " (.getMessage e) " " (pr-str (ex-data e))))))
       (let [clean (teardown!)]
         (println (str "wall " (- (System/currentTimeMillis) wall) " ms | "
-                      (count (filter :pass @results)) " of " (count @results) " scenarios passed"))
+                      (count (filter :pass @results)) " of " (count @results) " scenarios passed, "
+                      (count (filter :skipped @results)) " skipped"))
         (System/exit (if (and @passed clean) 0 1))))))
 
 (when (= *file* (System/getProperty "babashka.file"))

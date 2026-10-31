@@ -82,8 +82,10 @@ impl RendersHeartbeat for HeartbeatState {
         shared_baseline: &SharedEvidence,
         shared_latest: &SharedEvidence,
     ) -> String {
+        let queue_growth =
+            latest.ordinary_queue_length as i128 - baseline.ordinary_queue_length as i128;
         format!(
-            "Heartbeat: since the prior admitted sample, awake metaflows {}→{}, working panes {:?}→{:?}, your accepted ordinary messages {}→{}, and your ordinary queue length {}→{}. Judge your own sanity: look for an echo chamber, increasing jargon or nonsense, and ACK answering ACK.",
+            "Heartbeat: since the prior admitted sample, awake metaflows {}→{}, working panes {:?}→{:?}, your messages sent (accepted, since purpose-family deployment/start) {}→{}, and your ordinary queue length {}→{} (growth {:+}). Judge your own sanity: look for an echo chamber, increasing jargon or nonsense, and ACK answering ACK.",
             shared_baseline.awake_metaflows,
             shared_latest.awake_metaflows,
             shared_baseline.working_panes,
@@ -92,6 +94,7 @@ impl RendersHeartbeat for HeartbeatState {
             latest.ordinary_messages_sent,
             baseline.ordinary_queue_length,
             latest.ordinary_queue_length,
+            queue_growth,
         )
     }
 }
@@ -242,33 +245,32 @@ impl RunsHeartbeat for crate::RunningNexus {
                 coverage_complete = false;
                 continue;
             };
-            working += usize::from(
-                agent
-                    .get("agent_status")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("working"),
-            );
+            match agent
+                .get("agent_status")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("working") => working += 1,
+                Some("idle" | "done") => {}
+                _ => coverage_complete = false,
+            }
         }
         let recipients = recipients
             .iter()
-            .map(|address| {
-                let ordinary_queue_length = metaflows
+            .filter_map(|address| {
+                let metaflow = metaflows
                     .iter()
-                    .find(|metaflow| metaflow.address == *address)
-                    .map(|metaflow| {
-                        metaflow
-                            .queue
-                            .iter()
-                            .filter(|entry| {
-                                !purposes.iter().any(|row| {
-                                    row.logical_delivery_id == entry.logical_delivery_id
-                                        && row.purpose == DeliveryPurpose::Heartbeat
-                                })
-                            })
-                            .count()
+                    .find(|metaflow| metaflow.address == *address)?;
+                let ordinary_queue_length = metaflow
+                    .queue
+                    .iter()
+                    .filter(|entry| {
+                        !purposes.iter().any(|row| {
+                            row.logical_delivery_id == entry.logical_delivery_id
+                                && row.purpose == DeliveryPurpose::Heartbeat
+                        })
                     })
-                    .unwrap_or_default();
-                (
+                    .count();
+                Some((
                     address.clone(),
                     RecipientEvidence {
                         ordinary_messages_sent: purposes
@@ -279,7 +281,7 @@ impl RunsHeartbeat for crate::RunningNexus {
                             .count() as u64,
                         ordinary_queue_length,
                     },
-                )
+                ))
             })
             .collect();
         Ok(Evidence {
@@ -461,6 +463,7 @@ impl RunsHeartbeat for crate::RunningNexus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::{JudgesHeartbeatStanding, StoredHeartbeatStanding};
     use signal_flow::{Aspect, Layer};
 
     trait Fixtures {
@@ -528,6 +531,28 @@ mod tests {
         state.sample_startup(&Fixture::evidence(4, 8));
         let delivery = state.tick(&Fixture::evidence(4, 7)).pop().unwrap();
         assert!(delivery.body.contains("8→7"));
+        assert!(delivery.body.contains("growth -1"));
         assert!(delivery.body.contains("Unknown"));
+    }
+
+    #[test]
+    fn durable_standing_ignores_pane_only_changes_and_compares_raw_queue_length() {
+        let mut standing = StoredHeartbeatStanding {
+            address: Fixture::address(),
+            baseline_awake: 3,
+            baseline_working: Some(1),
+            baseline_working_complete: true,
+            baseline_sent: 4,
+            baseline_queue: 8,
+            latest_awake: 3,
+            latest_working: Some(2),
+            latest_working_complete: true,
+            latest_sent: 4,
+            latest_queue: 8,
+            outstanding: None,
+        };
+        assert!(!standing.changed());
+        standing.latest_queue = 7;
+        assert!(standing.changed());
     }
 }

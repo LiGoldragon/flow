@@ -157,16 +157,6 @@ impl ComposesPresentationRole for LaunchComposer {
     }
 }
 
-pub(crate) trait AllowsArtifactTools {
-    fn artifact_tools_allowed(&self) -> bool;
-}
-
-impl AllowsArtifactTools for Address {
-    fn artifact_tools_allowed(&self) -> bool {
-        self.aspect == Aspect::Psyche && self.topic == "book" && self.layer == Layer::Tertiary
-    }
-}
-
 pub trait OpensLaunchComposer {
     fn with_context(context: ContextComposer) -> Self;
 }
@@ -429,7 +419,6 @@ impl ResolvesLeaveOuts for HarnessedProfile {
             leave_outs: leave_outs.clone(),
             flow_kind: self.launch_profile.flow_kind.clone(),
             tool_set: self.launch_profile.tool_set.clone(),
-            artifact_tools_allowed: self.launch_profile.address.artifact_tools_allowed(),
         };
         match lean.refusal() {
             Some(refusal) => Err(CompositionError::LeaveOut(refusal)),
@@ -729,8 +718,8 @@ impl ProfilesFreshSeat for FreshSeat {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        AllowsArtifactTools, ComposesLaunch, ComposesPresentationRole, ComposesVerifiedContext,
-        CompositionError, FitsOneMessage, HarnessedProfile, LaunchComposer, OpensLaunchComposer,
+        ComposesLaunch, ComposesPresentationRole, ComposesVerifiedContext, CompositionError,
+        FitsOneMessage, HarnessedProfile, LaunchComposer, OpensLaunchComposer,
         ReadsVerifiedContext, SplitsStartupMessage,
     };
     use crate::context::FixtureComposer;
@@ -760,26 +749,6 @@ pub(crate) mod tests {
             tool_set: signal_flow::ToolSet::Default,
             instruction_prompt: "Carry the bounded task.".into(),
         }
-    }
-
-    #[test]
-    fn artifact_tools_are_enabled_only_for_psyche_book_tertiary() {
-        assert!(
-            Address {
-                aspect: Aspect::Psyche,
-                topic: "book".into(),
-                layer: Layer::Tertiary,
-            }
-            .artifact_tools_allowed()
-        );
-        assert!(
-            !Address {
-                aspect: Aspect::Psyche,
-                topic: "book".into(),
-                layer: Layer::Secondary,
-            }
-            .artifact_tools_allowed()
-        );
     }
 
     pub(crate) fn fixture_composer() -> LaunchComposer {

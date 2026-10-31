@@ -14,6 +14,7 @@
 //! what it said.
 
 use super::send_v31::SendAcceptanceV31;
+use super::send_v32::SendAcceptanceV32;
 use super::{
     FlowStore, NamesLiveFlow, ReadsFlowRows, ReadsLaunchAttempt, StoreError,
     metaflow::{SleepsMetaflows, TakesLaunchAddress},
@@ -31,7 +32,7 @@ use signal_flow::{Address, HarnessKind, SendPayloadSize};
 
 pub(super) const SEND_CALL_TABLE_NAME: TableName = TableName::new("flow_nexus_send_calls");
 pub(super) const SEND_CALL_FAMILY: &str = "flow-nexus-send-call";
-pub(super) const SEND_CALL_SCHEMA: &str = "flow-nexus-send-call-v5";
+pub(super) const SEND_CALL_SCHEMA: &str = "flow-nexus-send-call-v6";
 
 /// The record key of a call: each part prefixed by its length, so no two
 /// keys of different parts read alike.
@@ -61,11 +62,108 @@ impl EngineRecord for SendCall {
 
 impl MemoryDefinition for SendCall {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(5)
+        MemoryVersion::new(6)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(SEND_CALL_SCHEMA)
+    }
+}
+
+/// A call as Flow kept it while its answers were signal-flow 32's: a
+/// refusal with `OffRoute`, an accepted answer's delivery state with its
+/// refusal. It is read only by the v5-to-v6 upgrade; a stored `OffRoute`
+/// becomes `Malformed`, the send tool's refusal for a call it cannot admit
+/// as asked, and every other value is carried unchanged.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SendCallV5 {
+    pub(super) tool_call_key: ToolCallKey,
+    pub(super) content_sha256: String,
+    pub(super) send_outcome: SendOutcomeV5,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) enum SendOutcomeV5 {
+    Accepted(AcceptedV5),
+    LegacyUnknown(LegacyUnknown_Data),
+    Refused(SendRefusalV5),
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) enum SendRefusalV5 {
+    UnknownTool,
+    Malformed,
+    ThreadUnowned,
+    FlowEnded,
+    NotAwake,
+    KeyReused,
+    UnknownRecipient(Target),
+    Held,
+    Oversized(SendPayloadSize),
+    Store,
+    OffRoute,
+    TopicRefused(signal_flow::Topic),
+}
+
+impl From<SendRefusalV5> for SendRefusal {
+    fn from(refusal: SendRefusalV5) -> Self {
+        match refusal {
+            SendRefusalV5::UnknownTool => Self::UnknownTool,
+            SendRefusalV5::Malformed => Self::Malformed,
+            SendRefusalV5::ThreadUnowned => Self::ThreadUnowned,
+            SendRefusalV5::FlowEnded => Self::FlowEnded,
+            SendRefusalV5::NotAwake => Self::NotAwake,
+            SendRefusalV5::KeyReused => Self::KeyReused,
+            SendRefusalV5::UnknownRecipient(target) => Self::UnknownRecipient(target),
+            SendRefusalV5::Held => Self::Held,
+            SendRefusalV5::Oversized(size) => Self::Oversized(size),
+            SendRefusalV5::Store => Self::Store,
+            SendRefusalV5::OffRoute => Self::Malformed,
+            SendRefusalV5::TopicRefused(topic) => Self::TopicRefused(topic),
+        }
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) struct AcceptedV5 {
+    pub(super) sender: signal_flow::Sender,
+    pub(super) target: Target,
+    pub(super) send_acceptance: SendAcceptanceV32,
+}
+
+impl EngineRecord for SendCallV5 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.tool_call_key.record_key_text())
+    }
+}
+
+impl MemoryDefinition for SendCallV5 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(5)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-send-call-v5")
+    }
+}
+
+impl UpgradeFrom<SendCallV5> for SendCall {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: SendCallV5) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            tool_call_key: previous.tool_call_key,
+            content_sha256: previous.content_sha256,
+            send_outcome: match previous.send_outcome {
+                SendOutcomeV5::Accepted(accepted) => SendOutcome::Accepted(Accepted_Data {
+                    sender: accepted.sender,
+                    target: accepted.target,
+                    send_acceptance: accepted.send_acceptance.into(),
+                }),
+                SendOutcomeV5::LegacyUnknown(unknown) => SendOutcome::LegacyUnknown(unknown),
+                SendOutcomeV5::Refused(refusal) => SendOutcome::Refused(refusal.into()),
+            },
+        })
     }
 }
 
@@ -116,7 +214,7 @@ impl From<SendRefusalV4> for SendRefusal {
             SendRefusalV4::Held => Self::Held,
             SendRefusalV4::Oversized(size) => Self::Oversized(size),
             SendRefusalV4::Store => Self::Store,
-            SendRefusalV4::OffRoute => Self::OffRoute,
+            SendRefusalV4::OffRoute => Self::Malformed,
         }
     }
 }
@@ -413,6 +511,7 @@ impl DescribesSendCallTable for SendCall {
         .with_predecessor::<SendCallV1>()
         .with_predecessor::<SendCallV2>()
         .with_predecessor::<SendCallV4>()
+        .with_predecessor::<SendCallV5>()
     }
 }
 

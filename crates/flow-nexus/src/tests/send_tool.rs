@@ -1516,7 +1516,7 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
             0,
         )
         .unwrap();
-    assert_eq!(unauthorized, SendOutcome::Refused(SendRefusal::OffRoute));
+    assert!(matches!(unauthorized, SendOutcome::Accepted(_)));
     let queued = fixture
         .nexus
         .store
@@ -1524,11 +1524,15 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
         .unwrap()
         .unwrap()
         .queue;
-    assert_eq!(queued.len(), 1);
+    assert_eq!(queued.len(), 2);
     assert_eq!(queued[0].sent_by, SentBy::Sender(core()));
     assert_eq!(
         queued[0].message,
         Message::Soft(Request::Question("source".into()))
+    );
+    assert_eq!(
+        queued[1].message,
+        Message::Soft(Request::Question("must not enter".into()))
     );
 }
 

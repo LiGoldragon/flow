@@ -10,7 +10,7 @@
 use super::{DecodesFlowClaim, FlowClaim, HerdrCli, claude_paste};
 use crate::codex::NamesBoundCodexThread;
 use crate::codex::SelectsCodexEndpoint;
-use crate::composition::{AllowsArtifactTools, HERDR_REQUEST_LINE_LIMIT};
+use crate::composition::HERDR_REQUEST_LINE_LIMIT;
 pub use crate::generated::starter::StartupProgress;
 use crate::generated::starter::{
     DeliveryIntended, JsonRow, LeanStart, PaneBound, PromptsThroughHerdrSocket, ReadsStartupRecord,
@@ -1061,7 +1061,6 @@ impl ChecksComposedLaunch for ComposedLaunch {
             leave_outs: self.leave_outs.clone(),
             flow_kind: self.launch_profile.flow_kind.clone(),
             tool_set: self.launch_profile.tool_set.clone(),
-            artifact_tools_allowed: self.launch_profile.address.artifact_tools_allowed(),
         }
     }
 
@@ -2540,7 +2539,6 @@ impl ReadsStartupRecord for StartupReading {
                     leave_outs: intent.leave_outs.clone(),
                     flow_kind: signal_flow::FlowKind::Regular,
                     tool_set: signal_flow::ToolSet::Default,
-                    artifact_tools_allowed: false,
                 };
                 let removed = lean.disallowed_tools();
                 let used_removed = row
@@ -3430,7 +3428,7 @@ printf '%s\n' "$alias"
         assert!(prepared.contains("export FLOW_SOCKET='/fixture/run/flow-next/flow/flow.sock'"));
         assert!(prepared.contains("export FLOW_ID=123456"));
         assert!(prepared.contains("FLOW_CLAUDE_ENV_READY_"));
-        assert!(prepared.contains("export 'CLAUDE_CODE_ARTIFACT=0'"));
+        assert!(!prepared.contains("CLAUDE_CODE_ARTIFACT"));
         let start = calls
             .lines()
             .find(|line| line.contains("agent start"))
@@ -3571,7 +3569,7 @@ printf '%s\n' "$alias"
             "the harness read the composed system prompt whole from the held file"
         );
         assert!(start_call.ends_with(&format!(
-            "-- --settings {} --remote-control {title} --name {title} --system-prompt-file {system_prompt_file} --session-id {session} --model model-current --effort high --disallowedTools Artifact,ArtifactComments,ArtifactData",
+            "-- --settings {} --remote-control {title} --name {title} --system-prompt-file {system_prompt_file} --session-id {session} --model model-current --effort high",
             concat!(
                 r#"{"hooks":{"#,
                 r#""PostToolUse":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}],"matcher":"*"}],"#,

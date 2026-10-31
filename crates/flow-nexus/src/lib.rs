@@ -5049,6 +5049,10 @@ mod tests {
             (sibling.clone(), flow_ethos::State::Asleep),
             (field.clone(), flow_ethos::State::Asleep),
             (elsewhere.clone(), flow_ethos::State::Asleep),
+            (
+                address(Aspect::Mind, "core", Layer::Primary),
+                flow_ethos::State::Asleep,
+            ),
         ] {
             fixture.nexus.store.seed_metaflow(Metaflow {
                 address: held,
@@ -5089,10 +5093,10 @@ mod tests {
             send(Recipient::Address(elsewhere), order.clone(), &peer),
             Response::SendAccepted(_)
         ));
-        assert_eq!(
+        assert!(matches!(
             send(Recipient::Up, Request::Result("done".into()), &peer),
-            Response::Refused(Refusal::OffRoute)
-        );
+            Response::SendAccepted(_)
+        ));
         assert_eq!(
             fixture
                 .nexus

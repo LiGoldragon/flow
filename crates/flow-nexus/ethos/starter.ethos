@@ -22,7 +22,7 @@ Library
                  PromptDeliveryIntent NativeTargetReceipt FlowId
                  SessionId Origin SystemModules UserModules
                  HerdrSessionName LeaveOuts FlowKind ToolSet
-                 ArtifactToolsAllowed LeaveOutRefusal ComposedLaunch
+                 LeaveOutRefusal ComposedLaunch
                  ContextRefusal SystemPrompt HerdrPaneBinding
                  PromptDeliveryResult Response Launched
                  NativeLaunchFailure ]
@@ -74,7 +74,7 @@ Library
   PartTurn.String
   StartupReading.{ SeenParts LastPartAnswered Option<NativeTurn> Option<PartTurn> }
   ; A harness start and the parts it leaves out.
-  LeanStart.{ HarnessKind LeaveOuts FlowKind ToolSet ArtifactToolsAllowed } ]
+  LeanStart.{ HarnessKind LeaveOuts FlowKind ToolSet } ]
 [ ; The values capabilities read, each through the trait that yields it.
   Textual.[ text.[ String ] ]
   Profiled.[ profile.[ LaunchProfile ]

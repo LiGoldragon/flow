@@ -72,7 +72,6 @@ pub enum SendRefusal {
     Held,
     Oversized(signal_flow::SendPayloadSize),
     Store,
-    OffRoute,
     TopicRefused(signal_flow::Topic),
 }
 #[rustfmt::skip]

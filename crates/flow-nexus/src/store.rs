@@ -1213,7 +1213,7 @@ pub(crate) trait JudgesHeartbeatStanding {
     fn changed(&self) -> bool;
 }
 impl JudgesHeartbeatStanding for StoredHeartbeatStanding {
-    pub(crate) fn changed(&self) -> bool {
+    fn changed(&self) -> bool {
         self.baseline_awake != self.latest_awake
             || self.baseline_sent != self.latest_sent
             || self.baseline_queue != self.latest_queue

@@ -5041,7 +5041,7 @@ impl OpensFlowStore for FlowStore {
             match attempt.phase {
                 QueueDeliveryPhase::ReceiptRecorded(_) => {
                     if !store.settle_recorded_delivery(&attempt.attempt_id)? {
-                        return Err(StoreError::InvalidHeartbeatPeriod);
+                        return Err(StoreError::StateInvariant);
                     }
                 }
                 QueueDeliveryPhase::Uncertain(_) => eprintln!(
@@ -8516,7 +8516,7 @@ pub(crate) trait ReadsFlowMemory {
             ConfigurationChange::Heartbeat(heartbeat) => {
                 if let Some(configured) = heartbeat.as_ref() {
                     if configured.heartbeat_period_seconds <= 0 {
-                        return Err(StoreError::StateInvariant);
+                        return Err(StoreError::InvalidHeartbeatPeriod);
                     }
                     if configured
                         .heartbeat_recipients

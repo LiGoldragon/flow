@@ -409,6 +409,7 @@ mod tests {
             metaflows: rows.clone(),
             investigation: None,
             default_minutes: 30,
+            heartbeat: None,
             counters: meta_signal_flow::ConfigureCounters {
                 logical_delivery: 1,
                 queue_attempt: 3,

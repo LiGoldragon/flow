@@ -1,8 +1,8 @@
 //! Configured sampling heartbeat.  Its evidence deliberately excludes the
 //! deliveries it generates, so an otherwise idle system becomes quiet.
 
+use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use signal_flow::Address;
-use std::collections::BTreeMap;
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeliveryPurpose {
@@ -31,7 +31,7 @@ pub struct RecipientEvidence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Evidence {
     pub shared: SharedEvidence,
-    pub recipients: BTreeMap<Address, RecipientEvidence>,
+    pub recipients: Vec<(Address, RecipientEvidence)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,7 +51,7 @@ struct RecipientStanding {
 
 #[derive(Default)]
 pub struct HeartbeatState {
-    recipients: BTreeMap<Address, RecipientStanding>,
+    recipients: Vec<(Address, RecipientStanding)>,
 }
 
 pub trait SamplesHeartbeat {
@@ -117,16 +117,24 @@ impl SamplesHeartbeat for HeartbeatState {
     fn tick(&mut self, evidence: &Evidence) -> Vec<HeartbeatDelivery> {
         let mut deliveries = Vec::new();
         for (address, own) in &evidence.recipients {
-            let standing =
-                self.recipients
-                    .entry(address.clone())
-                    .or_insert_with(|| RecipientStanding {
+            if !self.recipients.iter().any(|(held, _)| held == address) {
+                self.recipients.push((
+                    address.clone(),
+                    RecipientStanding {
                         baseline_shared: evidence.shared.clone(),
                         baseline: own.clone(),
                         latest_shared: evidence.shared.clone(),
                         latest: own.clone(),
                         outstanding: None,
-                    });
+                    },
+                ));
+            }
+            let standing = &mut self
+                .recipients
+                .iter_mut()
+                .find(|(held, _)| held == address)
+                .expect("inserted")
+                .1;
             standing.latest_shared = evidence.shared.clone();
             standing.latest = own.clone();
             let changed = standing.latest_shared != standing.baseline_shared
@@ -148,7 +156,12 @@ impl SamplesHeartbeat for HeartbeatState {
     }
 
     fn admitted(&mut self, recipient: &Address, logical_delivery_id: String) {
-        if let Some(standing) = self.recipients.get_mut(recipient) {
+        if let Some(standing) = self
+            .recipients
+            .iter_mut()
+            .find(|(address, _)| address == recipient)
+            .map(|(_, standing)| standing)
+        {
             standing.baseline_shared = standing.latest_shared.clone();
             standing.baseline = standing.latest.clone();
             standing.outstanding = Some(logical_delivery_id);
@@ -156,7 +169,7 @@ impl SamplesHeartbeat for HeartbeatState {
     }
 
     fn settled(&mut self, logical_delivery_id: &str) {
-        for standing in self.recipients.values_mut() {
+        for (_, standing) in &mut self.recipients {
             if standing.outstanding.as_deref() == Some(logical_delivery_id) {
                 standing.outstanding = None;
             }
@@ -164,7 +177,8 @@ impl SamplesHeartbeat for HeartbeatState {
     }
     fn outstanding(&self) -> Vec<String> {
         self.recipients
-            .values()
+            .iter()
+            .map(|(_, standing)| standing)
             .filter_map(|standing| standing.outstanding.clone())
             .collect()
     }
@@ -231,8 +245,6 @@ impl RunsHeartbeat for crate::RunningNexus {
     }
 
     fn heartbeat_tick(&self, recipients: &[Address]) {
-        use crate::store::ManagesMetaflowState;
-        use crate::store::logical_delivery::RecordsLogicalDeliveries;
         use crate::waking::SleepsAndWakesSeats;
         let Ok(evidence) = self.heartbeat_evidence(recipients) else {
             return;
@@ -340,13 +352,13 @@ mod tests {
                     awake_metaflows: 1,
                     working_panes: Observed::Unknown,
                 },
-                recipients: BTreeMap::from([(
+                recipients: vec![(
                     Self::address(),
                     RecipientEvidence {
                         ordinary_messages_sent: sent,
                         ordinary_queue_length: queued,
                     },
-                )]),
+                )],
             }
         }
     }

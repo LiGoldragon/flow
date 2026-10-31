@@ -2167,6 +2167,7 @@ mod tests {
                 launch_calls: crate::send_tool::LaunchCalls::default(),
                 codex_turns: crate::codex_turns::CodexTurns::default(),
                 compactions: crate::compacting::CompactionWatch::default(),
+                heartbeat: std::sync::Mutex::new(crate::heartbeat::HeartbeatState::default()),
             };
             let herdr_config = directory.path().join("herdr-config");
             let session_socket = herdr_config.join("sessions/messaging-build/herdr.sock");

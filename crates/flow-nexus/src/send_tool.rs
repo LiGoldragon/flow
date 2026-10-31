@@ -46,7 +46,7 @@ use crate::generated::send_tool::{
 };
 use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::launching::NamesTopic;
-use crate::sending::{AdmitsSendPayload, MintsId};
+use crate::sending::{AdmitsSendPayload, MintsId, primary_route_refusal};
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::opened_thread::RecordsOpenedThreads;
 use crate::store::send_call::KeepsSendCalls;
@@ -468,6 +468,9 @@ impl HandlesSendCall for RunningNexus {
                 return Self::refused(SendRefusal::Store);
             };
             let message = arguments.message();
+            if let Some(refusal) = primary_route_refusal(&sender.address, &arguments.target) {
+                return refused_kept(SendRefusal::PrimaryRouteRefused(refusal), content_sha256);
+            }
             if let Some(signal_flow::Refusal::Oversized(size)) =
                 message.oversized_refusal(&sender.address)
             {

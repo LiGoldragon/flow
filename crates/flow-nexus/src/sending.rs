@@ -159,6 +159,54 @@ pub trait NamesLayerAbove {
     fn above(&self) -> Option<Layer>;
 }
 
+/// A Primary receives flow messages only from the Secondary of its exact
+/// aspect and topic. The authenticated sender and requested target are both
+/// carried by the typed refusal.
+pub(crate) fn primary_route_refusal(
+    sender: &Address,
+    target: &Address,
+) -> Option<signal_flow::PrimaryRouteRefusal> {
+    (target.layer == Layer::Primary
+        && !(sender.layer == Layer::Secondary
+            && sender.aspect == target.aspect
+            && sender.topic == target.topic))
+        .then(|| signal_flow::PrimaryRouteRefusal {
+            first_address: sender.clone(),
+            second_address: target.clone(),
+        })
+}
+
+#[cfg(test)]
+mod primary_route_tests {
+    use super::*;
+
+    fn address(aspect: Aspect, topic: &str, layer: Layer) -> Address {
+        Address { aspect, topic: topic.into(), layer }
+    }
+
+    #[test]
+    fn only_the_exact_own_secondary_may_target_a_primary() {
+        let target = address(Aspect::Psyche, "core", Layer::Primary);
+        assert!(primary_route_refusal(
+            &address(Aspect::Psyche, "core", Layer::Secondary), &target
+        ).is_none());
+        for sender in [
+            address(Aspect::Mind, "core", Layer::Secondary),
+            address(Aspect::Psyche, "other", Layer::Secondary),
+            address(Aspect::Psyche, "core", Layer::Tertiary),
+            address(Aspect::Psyche, "core", Layer::Primary),
+        ] {
+            let refusal = primary_route_refusal(&sender, &target).expect("foreign Primary route refuses");
+            assert_eq!(refusal.first_address, sender);
+            assert_eq!(refusal.second_address, target);
+        }
+        assert!(primary_route_refusal(
+            &address(Aspect::Field, "other", Layer::Quaternary),
+            &address(Aspect::Psyche, "core", Layer::Secondary)
+        ).is_none());
+    }
+}
+
 impl NamesLayerAbove for Layer {
     fn above(&self) -> Option<Layer> {
         match self {
@@ -263,6 +311,9 @@ impl SendsRequests for RunningNexus {
                     None => return Response::Refused(Refusal::NoneAbove).into(),
                 },
             };
+            if let Some(refusal) = primary_route_refusal(&sender, &recipient) {
+                return Response::Refused(Refusal::PrimaryRouteRefused(refusal)).into();
+            }
             self.rest_ended_awake(&recipient);
             // Own the address until the direct call has a receipt or a
             // durable non-retryable failure. Background drain/wake may not

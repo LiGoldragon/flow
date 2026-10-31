@@ -15,7 +15,7 @@ flow-ethos = { path = "crates/flow-ethos", features = ["datom"] }
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 serde_json = "1"
 thiserror = "2"
-signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "f4c4205aff4125971b2b48a77105e35c1ed96741" }
+signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "9b1e2e3f52eca066c10f11d3283fd325a0356b0a" }
 meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "a1f04c4" }
 
 # Signal and Meta-Signal also depend on flow-ethos by this Git source. Resolve

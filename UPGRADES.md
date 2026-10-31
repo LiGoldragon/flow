@@ -1,3 +1,7 @@
+# Emergency typed delivery release
+
+Repins signal-flow 35 and meta-signal-flow 43. A Primary route now refuses every sender except its exact own Secondary, with both addresses in the typed refusal.
+
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
 Pins signal-flow 32.0.0 (e5e9d5) and meta-signal-flow 40.0.0 (f0f214), both

@@ -132,7 +132,6 @@ pub struct RunningNexus {
     pub codex_turns: codex_turns::CodexTurns,
     /// How far each flow's compactions have been read; see `compacting`.
     pub compactions: compacting::CompactionWatch,
-    pub heartbeat: Mutex<heartbeat::HeartbeatState>,
 }
 
 pub trait Dispatches {
@@ -689,7 +688,6 @@ impl OpensRunningNexus for RunningNexus {
             launch_calls: send_tool::LaunchCalls::default(),
             codex_turns: codex_turns::CodexTurns::default(),
             compactions: compacting::CompactionWatch::default(),
-            heartbeat: Mutex::new(heartbeat::HeartbeatState::default()),
         })
     }
 }
@@ -2167,7 +2165,6 @@ mod tests {
                 launch_calls: crate::send_tool::LaunchCalls::default(),
                 codex_turns: crate::codex_turns::CodexTurns::default(),
                 compactions: crate::compacting::CompactionWatch::default(),
-                heartbeat: std::sync::Mutex::new(crate::heartbeat::HeartbeatState::default()),
             };
             let herdr_config = directory.path().join("herdr-config");
             let session_socket = herdr_config.join("sessions/messaging-build/herdr.sock");

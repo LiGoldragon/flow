@@ -1466,6 +1466,25 @@ impl RecordsLogicalDeliveries for FlowStore {
         } else {
             commit
         };
+        let commit = if purpose == crate::heartbeat::DeliveryPurpose::Heartbeat {
+            let standing = self.engine.match_records(QueryPlan::key(
+                self.heartbeat_standings,
+                RecordKey::new(FlowStore::address_record_key(address)),
+            ))?;
+            if let [held] = standing.records() {
+                let mut next = held.clone();
+                next.baseline_awake = next.latest_awake;
+                next.baseline_working = next.latest_working;
+                next.baseline_sent = next.latest_sent;
+                next.baseline_queue = next.latest_queue;
+                next.outstanding = Some(id.clone());
+                commit.mutate(self.heartbeat_standings, next)
+            } else {
+                commit
+            }
+        } else {
+            commit
+        };
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
         Ok(signal_flow::PrivateSendResponse::SendAccepted(

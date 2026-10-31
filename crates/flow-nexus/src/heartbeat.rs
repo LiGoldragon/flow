@@ -245,16 +245,30 @@ impl RunsHeartbeat for crate::RunningNexus {
     }
 
     fn heartbeat_tick(&self, recipients: &[Address]) {
+        use crate::store::TracksHeartbeat;
         use crate::waking::SleepsAndWakesSeats;
         let Ok(evidence) = self.heartbeat_evidence(recipients) else {
             return;
         };
-        let deliveries = {
-            let mut state = self.heartbeat.lock().unwrap_or_else(|e| e.into_inner());
-            for outstanding in state.outstanding() {
-                if self
+        let Ok(mut standings) = self.store.heartbeat_standings() else {
+            return;
+        };
+        let mut deliveries = Vec::new();
+        for (address, own) in &evidence.recipients {
+            let Some(standing) = standings.iter_mut().find(|row| row.address == *address) else {
+                continue;
+            };
+            standing.latest_awake = evidence.shared.awake_metaflows as i64;
+            standing.latest_working = match evidence.shared.working_panes {
+                Observed::Known(count) => Some(count as i64),
+                Observed::Unknown => None,
+            };
+            standing.latest_sent = own.ordinary_messages_sent as i64;
+            standing.latest_queue = own.ordinary_queue_length as i64;
+            if let Some(outstanding) = standing.outstanding.as_ref()
+                && self
                     .store
-                    .logical_delivery_snapshot(&outstanding)
+                    .logical_delivery_snapshot(outstanding)
                     .ok()
                     .flatten()
                     .is_some_and(|snapshot| {
@@ -265,12 +279,34 @@ impl RunsHeartbeat for crate::RunningNexus {
                                 | signal_flow::DeliveryState::Withdrawn
                         )
                     })
-                {
-                    state.settled(&outstanding);
-                }
+            {
+                standing.outstanding = None;
             }
-            state.tick(&evidence)
-        };
+            if standing.changed() && standing.outstanding.is_none() {
+                deliveries.push(HeartbeatDelivery {
+                    recipient: address.clone(),
+                    body: HeartbeatState::reminder(
+                        address,
+                        &RecipientEvidence {
+                            ordinary_messages_sent: standing.baseline_sent as u64,
+                            ordinary_queue_length: standing.baseline_queue as usize,
+                        },
+                        own,
+                        &SharedEvidence {
+                            awake_metaflows: standing.baseline_awake as usize,
+                            working_panes: standing
+                                .baseline_working
+                                .map(|value| Observed::Known(value as usize))
+                                .unwrap_or(Observed::Unknown),
+                        },
+                        &evidence.shared,
+                    ),
+                });
+            }
+        }
+        if self.store.replace_heartbeat_standings(standings).is_err() {
+            return;
+        }
         for delivery in deliveries {
             let accepted = self.store.accept_logical_delivery_for(
                 &delivery.recipient,
@@ -280,18 +316,14 @@ impl RunsHeartbeat for crate::RunningNexus {
                 None,
                 DeliveryPurpose::Heartbeat,
             );
-            if let Ok(signal_flow::PrivateSendResponse::SendAccepted(acceptance)) = accepted {
-                self.heartbeat
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .admitted(&delivery.recipient, acceptance.logical_delivery_id);
+            if let Ok(signal_flow::PrivateSendResponse::SendAccepted(_)) = accepted {
                 self.wake_due(delivery.recipient);
             }
         }
     }
 
     fn keep_heartbeating(&self) {
-        use crate::store::ManagesMetaflowState;
+        use crate::store::{ManagesMetaflowState, StoredHeartbeatStanding, TracksHeartbeat};
         let mut active: Option<meta_signal_flow::HeartbeatConfig> = None;
         let mut waited = std::time::Duration::ZERO;
         while !crate::HoldsStopRequest::requested(&self.stopping) {
@@ -307,10 +339,37 @@ impl RunsHeartbeat for crate::RunningNexus {
                 if let Some(config) = active.as_ref()
                     && let Ok(evidence) = self.heartbeat_evidence(&config.heartbeat_recipients)
                 {
-                    self.heartbeat
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .sample_startup(&evidence);
+                    let Ok(held) = self.store.heartbeat_standings() else {
+                        continue;
+                    };
+                    let standings = evidence
+                        .recipients
+                        .iter()
+                        .map(|(address, own)| {
+                            held.iter()
+                                .find(|row| row.address == *address)
+                                .cloned()
+                                .unwrap_or(StoredHeartbeatStanding {
+                                    address: address.clone(),
+                                    baseline_awake: evidence.shared.awake_metaflows as i64,
+                                    baseline_working: match evidence.shared.working_panes {
+                                        Observed::Known(count) => Some(count as i64),
+                                        Observed::Unknown => None,
+                                    },
+                                    baseline_sent: own.ordinary_messages_sent as i64,
+                                    baseline_queue: own.ordinary_queue_length as i64,
+                                    latest_awake: evidence.shared.awake_metaflows as i64,
+                                    latest_working: match evidence.shared.working_panes {
+                                        Observed::Known(count) => Some(count as i64),
+                                        Observed::Unknown => None,
+                                    },
+                                    latest_sent: own.ordinary_messages_sent as i64,
+                                    latest_queue: own.ordinary_queue_length as i64,
+                                    outstanding: None,
+                                })
+                        })
+                        .collect();
+                    let _ = self.store.replace_heartbeat_standings(standings);
                 }
             }
             let step = std::time::Duration::from_millis(250);

@@ -124,6 +124,9 @@ const META_HEARTBEAT_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_heartbeat_configuration");
 const META_HEARTBEAT_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-heartbeat-configuration";
 const META_HEARTBEAT_CONFIGURATION_SCHEMA: &str = "flow-nexus-meta-heartbeat-configuration-v1";
+const HEARTBEAT_STANDING_TABLE_NAME: TableName = TableName::new("flow_nexus_heartbeat_standings");
+const HEARTBEAT_STANDING_FAMILY: &str = "flow-nexus-heartbeat-standing";
+const HEARTBEAT_STANDING_SCHEMA: &str = "flow-nexus-heartbeat-standing-v1";
 /// The default Minutes a new Memory holds until Configure declares one:
 /// the Minutes Flow gives a request that carries none of its own.
 pub(crate) const SEEDED_DEFAULT_MINUTES: i64 = 30;
@@ -240,6 +243,7 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_logical_delivery_events",
     "flow_nexus_simplified_reply_bindings",
     "flow_nexus_logical_delivery_purposes",
+    "flow_nexus_heartbeat_standings",
 ];
 /// The tables a configuration-only store may hold beside its own, each
 /// added by a later Flow.
@@ -1186,6 +1190,52 @@ impl DescribesHeartbeatTable for StoredMetaHeartbeatConfiguration {
             META_HEARTBEAT_CONFIGURATION_TABLE_NAME,
             FamilyName::new(META_HEARTBEAT_CONFIGURATION_FAMILY),
             SchemaHash::for_label(META_HEARTBEAT_CONFIGURATION_SCHEMA),
+        )
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredHeartbeatStanding {
+    pub address: Address,
+    pub baseline_awake: i64,
+    pub baseline_working: Option<i64>,
+    pub baseline_sent: i64,
+    pub baseline_queue: i64,
+    pub latest_awake: i64,
+    pub latest_working: Option<i64>,
+    pub latest_sent: i64,
+    pub latest_queue: i64,
+    pub outstanding: Option<String>,
+}
+impl StoredHeartbeatStanding {
+    pub(crate) fn changed(&self) -> bool {
+        self.baseline_awake != self.latest_awake
+            || self.baseline_sent != self.latest_sent
+            || self.baseline_queue != self.latest_queue
+    }
+}
+impl EngineRecord for StoredHeartbeatStanding {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.address))
+    }
+}
+impl MemoryDefinition for StoredHeartbeatStanding {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(HEARTBEAT_STANDING_SCHEMA)
+    }
+}
+trait DescribesHeartbeatStandingTable {
+    fn descriptor() -> TableDescriptor<StoredHeartbeatStanding>;
+}
+impl DescribesHeartbeatStandingTable for StoredHeartbeatStanding {
+    fn descriptor() -> TableDescriptor<StoredHeartbeatStanding> {
+        TableDescriptor::new(
+            HEARTBEAT_STANDING_TABLE_NAME,
+            FamilyName::new(HEARTBEAT_STANDING_FAMILY),
+            Self::schema_hash(),
         )
     }
 }
@@ -3875,10 +3925,52 @@ pub struct FlowStore {
     queue_delivery: QueueDeliveryTables,
     send_outcomes: SendOutcomeTables,
     logical_deliveries: LogicalDeliveryTables,
+    heartbeat_standings: TableReference<StoredHeartbeatStanding>,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows older than 0.34's shape;
     /// each is also logged.
     pub opening_settlements: Vec<LaunchAttemptSettlement>,
+}
+
+pub(crate) trait TracksHeartbeat {
+    fn heartbeat_standings(&self) -> Result<Vec<StoredHeartbeatStanding>, StoreError>;
+    fn replace_heartbeat_standings(
+        &self,
+        standings: Vec<StoredHeartbeatStanding>,
+    ) -> Result<(), StoreError>;
+}
+impl TracksHeartbeat for FlowStore {
+    fn heartbeat_standings(&self) -> Result<Vec<StoredHeartbeatStanding>, StoreError> {
+        Ok(self
+            .engine
+            .match_records(QueryPlan::all(self.heartbeat_standings))?
+            .records()
+            .to_vec())
+    }
+    fn replace_heartbeat_standings(
+        &self,
+        standings: Vec<StoredHeartbeatStanding>,
+    ) -> Result<(), StoreError> {
+        let held = self.heartbeat_standings()?;
+        let mut commit = self.engine.begin_atomic_commit();
+        for row in &held {
+            if !standings
+                .iter()
+                .any(|next| next.record_key() == row.record_key())
+            {
+                commit = commit.retract(self.heartbeat_standings, row.record_key());
+            }
+        }
+        for row in standings {
+            commit = match held.iter().find(|old| old.record_key() == row.record_key()) {
+                Some(old) if old == &row => commit,
+                Some(_) => commit.mutate(self.heartbeat_standings, row),
+                None => commit.assert(self.heartbeat_standings, row),
+            };
+        }
+        self.engine.commit_atomic(commit)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -4566,6 +4658,7 @@ impl OpensFlowStore for FlowStore {
         let queue_delivery_descriptors = QueueDeliveryTables::descriptors();
         let send_outcome_descriptors = SendOutcomeTables::descriptors();
         let logical_delivery_descriptors = LogicalDeliveryTables::descriptors();
+        let heartbeat_standing_descriptor = StoredHeartbeatStanding::descriptor();
         let mut engine = Engine::open(
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
@@ -4613,7 +4706,8 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&logical_delivery_descriptors.current)
                 .with_family(&logical_delivery_descriptors.events)
                 .with_family(&logical_delivery_descriptors.simplified_replies)
-                .with_family(&logical_delivery_descriptors.purposes),
+                .with_family(&logical_delivery_descriptors.purposes)
+                .with_family(&heartbeat_standing_descriptor),
         )?;
         let flows = engine.upgraded_flows(flows_descriptor)?;
         let native_owner_proofs = engine.register_table(native_owner_proofs_descriptor)?;
@@ -4652,6 +4746,7 @@ impl OpensFlowStore for FlowStore {
         let send_outcomes = SendOutcomeTables::register(&mut engine, send_outcome_descriptors)?;
         let logical_deliveries =
             LogicalDeliveryTables::register(&mut engine, logical_delivery_descriptors)?;
+        let heartbeat_standings = engine.register_table(heartbeat_standing_descriptor)?;
         let store = Self {
             engine,
             native_owner_environment_override: None,
@@ -4684,6 +4779,7 @@ impl OpensFlowStore for FlowStore {
             queue_delivery,
             send_outcomes,
             logical_deliveries,
+            heartbeat_standings,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -4839,6 +4935,7 @@ impl OpensFlowStore for FlowStore {
             SendOutcomeTables::register(&mut engine, SendOutcomeTables::descriptors())?;
         let logical_deliveries =
             LogicalDeliveryTables::register(&mut engine, LogicalDeliveryTables::descriptors())?;
+        let heartbeat_standings = engine.register_table(StoredHeartbeatStanding::descriptor())?;
         let store = Self {
             engine,
             native_owner_environment_override: None,
@@ -4871,6 +4968,7 @@ impl OpensFlowStore for FlowStore {
             queue_delivery,
             send_outcomes,
             logical_deliveries,
+            heartbeat_standings,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -7580,6 +7678,9 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-logical-delivery-purpose",
                 "flow-nexus-logical-delivery-purpose-v1",
             ),
+            "flow_nexus_heartbeat_standings" => {
+                (HEARTBEAT_STANDING_FAMILY, HEARTBEAT_STANDING_SCHEMA)
+            }
             "flow_nexus_compactions" => {
                 (compaction::COMPACTION_FAMILY, compaction::COMPACTION_SCHEMA)
             }

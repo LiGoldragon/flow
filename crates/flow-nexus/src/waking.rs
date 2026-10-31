@@ -520,7 +520,7 @@ pub trait PerformsWakeAndDrain {
     /// Performed off the dispatch gate; see the module documentation.
     fn wake(&self, address: Address) -> Outcome;
     /// Performed under the dispatch gate.
-    fn drain(&self, address: Address) -> Outcome;
+    fn drain(&self, address: Address, whole_queue: bool) -> Outcome;
     /// Hands over as many queued requests as can be settled now, oldest
     /// first. It stops at the first hand-over whose native receipt is not
     /// yet established, or at any refusal; work behind that request stays
@@ -960,6 +960,9 @@ trait RendersAttemptInput {
 
 impl RendersAttemptInput for QueueDeliveryAttempt {
     fn prompt_text(&self) -> String {
+        if !self.queue_batch.is_empty() {
+            return self.queue_batch.prompt_text();
+        }
         match &self.queue_evidence {
             meta_signal_flow::QueueEvidence::Logical(entry) => [entry.clone()].prompt_text(),
             meta_signal_flow::QueueEvidence::Legacy(legacy) => legacy.request.native_content(),
@@ -1668,7 +1671,7 @@ impl PerformsWakeAndDrain for RunningNexus {
         }
     }
 
-    fn drain(&self, address: Address) -> Outcome {
+    fn drain(&self, address: Address, whole_queue: bool) -> Outcome {
         let flow_id = match self.store.metaflow(&address) {
             Ok(Some(Metaflow {
                 state: flow_ethos::State::Awake(flow_id),
@@ -1716,7 +1719,7 @@ impl PerformsWakeAndDrain for RunningNexus {
                     {
                         return Outcome::Failed(Failed_Data::StoreRefused);
                     }
-                    return match self.drain(address) {
+                    return match self.drain(address, whole_queue) {
                         Outcome::Drained(mut following) => {
                             drained.append(&mut following);
                             Outcome::Drained(drained)
@@ -1830,20 +1833,19 @@ impl PerformsWakeAndDrain for RunningNexus {
                 }
             }
         };
-        let attempt = match self.store.prepare_oldest_delivery(
-            &address,
-            &flow_id,
-            &node.session_id,
-            node.harness_kind.clone(),
-            anchor,
-        ) {
+        let prepared = if whole_queue {
+            self.store.prepare_queue_cohort(&address, &flow_id, &node.session_id, node.harness_kind.clone(), anchor)
+        } else {
+            self.store.prepare_oldest_delivery(&address, &flow_id, &node.session_id, node.harness_kind.clone(), anchor)
+        };
+        let attempt = match prepared {
             Ok(PrepareQueueDelivery::Prepared(attempt)) => attempt,
             Ok(PrepareQueueDelivery::Empty) => return Outcome::Drained(drained),
             Ok(PrepareQueueDelivery::Outstanding(_)) | Err(_) => {
                 return refused(drained, Failed_Data::StoreRefused);
             }
         };
-        let text = [oldest.clone()].prompt_text();
+        let text = attempt.prompt_text();
         if !matches!(oldest.message, signal_flow::Message::Soft(_)) {
             let input = signal_flow::NativeInput {
                 logical_delivery_id: oldest.logical_delivery_id.clone(),
@@ -1969,7 +1971,7 @@ impl PerformsWakeAndDrain for RunningNexus {
         let mut removed = 0;
         let mut delivered = Vec::new();
         loop {
-            let outcome = self.drain(address.clone());
+            let outcome = self.drain(address.clone(), true);
             match outcome {
                 Outcome::Drained(mut entries) => delivered.append(&mut entries),
                 Outcome::AwaitingReceipt(id) => return Outcome::AwaitingReceipt(id),

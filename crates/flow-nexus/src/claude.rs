@@ -262,10 +262,10 @@ impl ReadsClaudeTurns for Path {
                 }
                 match row.get("type").and_then(Value::as_str) {
                     Some("user") => Some(false),
-                    Some("assistant") => Some(
-                        row.pointer("/message/stop_reason").and_then(Value::as_str)
-                            == Some("end_turn"),
-                    ),
+                    Some("assistant") => Some(matches!(
+                        row.pointer("/message/stop_reason").and_then(Value::as_str),
+                        Some("end_turn" | "stop_sequence")
+                    )),
                     _ => state,
                 }
             }) == Some(true)
@@ -535,6 +535,19 @@ mod tests {
             )
             .unwrap();
         assert!(!transcript.main_turn_ended("s"));
+    }
+
+    #[test]
+    fn a_main_stop_sequence_is_a_completed_turn() {
+        let directory = tempdir().unwrap();
+        let transcript = directory.path().join("turn.jsonl");
+        fs::write(
+            &transcript,
+            row(serde_json::json!({"type":"assistant","sessionId":"s","uuid":"a",
+                "message":{"stop_reason":"stop_sequence","content":[]}})),
+        )
+        .unwrap();
+        assert!(transcript.main_turn_ended("s"));
     }
 
     #[test]

@@ -398,6 +398,14 @@ pub(crate) trait RecordsLogicalDeliveries {
         state: DeliveryState,
         commit: AtomicCommit,
     ) -> Result<DeliverySnapshot, StoreError>;
+    /// Commits a cohort's lifecycle transitions with the caller's queue and
+    /// attempt mutations. Every member changes at the same durability
+    /// boundary and receives its own ordered observation cursor.
+    fn commit_logical_transitions(
+        &self,
+        transitions: &[(LogicalDeliveryId, DeliveryState)],
+        commit: AtomicCommit,
+    ) -> Result<Vec<DeliverySnapshot>, StoreError>;
     fn logical_delivery_snapshot(
         &self,
         id: &LogicalDeliveryId,
@@ -963,56 +971,67 @@ impl RecordsLogicalDeliveries for FlowStore {
         state: DeliveryState,
         commit: AtomicCommit,
     ) -> Result<DeliverySnapshot, StoreError> {
+        let mut snapshots = self.commit_logical_transitions(&[(id.clone(), state)], commit)?;
+        snapshots.pop().ok_or(StoreError::StateInvariant)
+    }
+    fn commit_logical_transitions(
+        &self,
+        transitions: &[(LogicalDeliveryId, DeliveryState)],
+        mut commit: AtomicCommit,
+    ) -> Result<Vec<DeliverySnapshot>, StoreError> {
         let _guard = self
             .logical_deliveries
             .write_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let key = RecordKey::new(id.clone());
-        let records = self
-            .engine
-            .match_records(QueryPlan::key(self.logical_deliveries.current, key))?;
-        let [current] = records.records() else {
-            return Err(StoreError::StateInvariant);
-        };
-        if current.snapshot.delivery_state == state {
-            if commit.operation_count() == 0 {
-                return Ok(current.snapshot.clone());
-            }
-            self.engine.commit_atomic(commit)?;
-            self.launch_changes.announce();
-            return Ok(current.snapshot.clone());
-        }
         let allocation = self.allocate_logical_cursor()?;
-        let next = allocation.cursor;
-        let create = !allocation.existing;
-        let mut snapshot = current.snapshot.clone();
-        snapshot.delivery_cursor = next;
-        snapshot.delivery_state = state;
-        let counter = LogicalDeliveryCounter {
-            next_cursor: next.checked_add(1).ok_or(StoreError::StateInvariant)?,
-        };
-        let commit = if create {
-            commit.assert(self.logical_deliveries.counter, counter)
-        } else {
-            commit.mutate(self.logical_deliveries.counter, counter)
-        };
-        let commit = commit
-            .mutate(
+        let mut next = allocation.cursor;
+        let mut changed = false;
+        let mut snapshots = Vec::with_capacity(transitions.len());
+        for (id, state) in transitions {
+            let records = self.engine.match_records(QueryPlan::key(
+                self.logical_deliveries.current,
+                RecordKey::new(id.clone()),
+            ))?;
+            let [current] = records.records() else {
+                return Err(StoreError::StateInvariant);
+            };
+            if current.snapshot.delivery_state == *state {
+                snapshots.push(current.snapshot.clone());
+                continue;
+            }
+            let mut snapshot = current.snapshot.clone();
+            snapshot.delivery_cursor = next;
+            snapshot.delivery_state = state.clone();
+            next = next.checked_add(1).ok_or(StoreError::StateInvariant)?;
+            commit = commit.mutate(
                 self.logical_deliveries.current,
                 CurrentLogicalDelivery {
                     snapshot: snapshot.clone(),
                 },
-            )
-            .assert(
+            ).assert(
                 self.logical_deliveries.events,
                 LogicalDeliveryEvent {
                     snapshot: snapshot.clone(),
                 },
             );
+            changed = true;
+            snapshots.push(snapshot);
+        }
+        if changed {
+            let counter = LogicalDeliveryCounter { next_cursor: next };
+            commit = if allocation.existing {
+                commit.mutate(self.logical_deliveries.counter, counter)
+            } else {
+                commit.assert(self.logical_deliveries.counter, counter)
+            };
+        }
+        if commit.operation_count() == 0 {
+            return Ok(snapshots);
+        }
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
-        Ok(snapshot)
+        Ok(snapshots)
     }
     fn logical_delivery_snapshot(
         &self,

@@ -498,7 +498,7 @@ impl Performs for RunningNexus {
                 false => Outcome::Failed(Failed_Data::HerdrRefused),
             },
             Operation::Wake(address) => self.wake(address),
-            Operation::Drain(address) => self.drain(address),
+            Operation::Drain(address) => self.drain(address, false),
         }
     }
 }

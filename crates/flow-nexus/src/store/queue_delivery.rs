@@ -19,7 +19,7 @@ use meta_signal_flow::{
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::AtomicCommit;
-use signal_flow::{Address, DeliveryState, HarnessKind, NativeReceipt, RetryCause, SentBy};
+use signal_flow::{Address, DeliveryState, HarnessKind, NativeReceipt, QueueEntry, RetryCause, SentBy};
 
 trait CarriesLegacySender {
     fn with_legacy_sender(self, sent_by: SentBy) -> QueueEvidence;
@@ -353,6 +353,10 @@ pub struct QueueDeliveryAttempt {
     pub history_anchor: NativeHistoryAnchor,
     pub address: Address,
     pub queue_evidence: QueueEvidence,
+    /// Every queue entry handed to the native seat by this one prompt,
+    /// oldest first. `queue_evidence` remains the first entry so the public
+    /// queue-delivery observation keeps naming the attempt's leading item.
+    pub queue_batch: Vec<QueueEntry>,
     pub phase: QueueDeliveryPhase,
 }
 
@@ -364,11 +368,60 @@ impl EngineRecord for QueueDeliveryAttempt {
 
 impl MemoryDefinition for QueueDeliveryAttempt {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(6)
+        MemoryVersion::new(7)
     }
 
     fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v7")
+    }
+}
+
+/// The attempt shape deployed before queue cohorts became one native input.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct QueueDeliveryAttemptV6 {
+    request_id: String,
+    attempt_id: String,
+    native_request_id: u64,
+    flow_id: String,
+    thread_id: String,
+    harness_kind: HarnessKind,
+    history_anchor: NativeHistoryAnchor,
+    address: Address,
+    queue_evidence: QueueEvidence,
+    phase: QueueDeliveryPhase,
+}
+
+impl EngineRecord for QueueDeliveryAttemptV6 {
+    fn record_key(&self) -> RecordKey { RecordKey::new(self.attempt_id.clone()) }
+}
+
+impl MemoryDefinition for QueueDeliveryAttemptV6 {
+    fn memory_version() -> MemoryVersion { MemoryVersion::new(6) }
+    fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v6")
+    }
+}
+
+impl UpgradeFrom<QueueDeliveryAttemptV6> for QueueDeliveryAttempt {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: QueueDeliveryAttemptV6) -> Decision<Self, Self::Refusal> {
+        let queue_batch = match &previous.queue_evidence {
+            QueueEvidence::Logical(entry) => vec![entry.clone()],
+            QueueEvidence::Legacy(_) => Vec::new(),
+        };
+        Decision::Ready(Self {
+            request_id: previous.request_id,
+            attempt_id: previous.attempt_id,
+            native_request_id: previous.native_request_id,
+            flow_id: previous.flow_id,
+            thread_id: previous.thread_id,
+            harness_kind: previous.harness_kind,
+            history_anchor: previous.history_anchor,
+            address: previous.address,
+            queue_evidence: previous.queue_evidence,
+            queue_batch,
+            phase: previous.phase,
+        })
     }
 }
 
@@ -424,6 +477,7 @@ impl UpgradeFrom<QueueDeliveryAttemptV4> for QueueDeliveryAttempt {
                     super::SentByBeforeFlow::Unknown => SentBy::Unknown,
                 },
             ),
+            queue_batch: Vec::new(),
             phase: previous.phase,
         })
     }
@@ -471,6 +525,7 @@ impl UpgradeFrom<QueueDeliveryAttemptV5> for QueueDeliveryAttempt {
                 .queued
                 .request
                 .with_legacy_sender(previous.queued.sent_by),
+            queue_batch: Vec::new(),
             phase: previous.phase,
         })
     }
@@ -545,27 +600,37 @@ pub(crate) trait DeclaresQueueDeliveryTables: Sized {
             }
         }
     }
-    /// A store before 0.38.0 keeps v4 attempts: each is carried unchanged.
+    /// Each prior attempt shape is carried forward without inventing native
+    /// evidence. A pre-cohort attempt becomes a cohort of its one logical
+    /// entry.
     fn upgraded_attempts(
         engine: &mut Engine,
         descriptor: TableDescriptor<QueueDeliveryAttempt>,
     ) -> Result<TableReference<QueueDeliveryAttempt>, StoreError> {
-        let from_v4 = descriptor.clone();
-        match engine.upgrade_table::<QueueDeliveryAttemptV5, QueueDeliveryAttempt>(descriptor) {
+        let from_v5 = descriptor.clone();
+        match engine.upgrade_table::<QueueDeliveryAttemptV6, QueueDeliveryAttempt>(descriptor) {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
             UpgradeOutcome::Failed(failure)
                 if failure.phase() == sema_engine::StoragePhase::Admission =>
             {
-                match engine.upgrade_table::<QueueDeliveryAttemptV4, QueueDeliveryAttempt>(from_v4)
-                {
+                let from_v4 = from_v5.clone();
+                match engine.upgrade_table::<QueueDeliveryAttemptV5, QueueDeliveryAttempt>(from_v5) {
                     UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
                     UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
                     UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-                    UpgradeOutcome::Failed(failure) => {
-                        Err(StoreError::QueueDeliveryUpgrade(format!("{failure:?}")))
+                    UpgradeOutcome::Failed(failure)
+                        if failure.phase() == sema_engine::StoragePhase::Admission =>
+                    {
+                        match engine.upgrade_table::<QueueDeliveryAttemptV4, QueueDeliveryAttempt>(from_v4) {
+                            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                            UpgradeOutcome::Failed(failure) => Err(StoreError::QueueDeliveryUpgrade(format!("{failure:?}"))),
+                        }
                     }
+                    UpgradeOutcome::Failed(failure) => Err(StoreError::QueueDeliveryUpgrade(format!("{failure:?}"))),
                 }
             }
             UpgradeOutcome::Failed(failure) => {
@@ -597,7 +662,8 @@ impl DeclaresQueueDeliveryTables for QueueDeliveryTables {
                 QueueDeliveryAttempt::schema_hash(),
             )
             .with_predecessor::<QueueDeliveryAttemptV4>()
-            .with_predecessor::<QueueDeliveryAttemptV5>(),
+            .with_predecessor::<QueueDeliveryAttemptV5>()
+            .with_predecessor::<QueueDeliveryAttemptV6>(),
         )
     }
 
@@ -637,6 +703,29 @@ pub trait AccountsQueueDelivery {
         thread_id: &str,
         harness_kind: HarnessKind,
         history_anchor: NativeHistoryAnchor,
+    ) -> Result<PrepareQueueDelivery, StoreError> {
+        self.prepare_delivery(address, flow_id, thread_id, harness_kind, history_anchor, false)
+    }
+    /// Prepares the complete queue snapshot as one native prompt attempt.
+    fn prepare_queue_cohort(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        thread_id: &str,
+        harness_kind: HarnessKind,
+        history_anchor: NativeHistoryAnchor,
+    ) -> Result<PrepareQueueDelivery, StoreError> {
+        self.prepare_delivery(address, flow_id, thread_id, harness_kind, history_anchor, true)
+    }
+    #[doc(hidden)]
+    fn prepare_delivery(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        thread_id: &str,
+        harness_kind: HarnessKind,
+        history_anchor: NativeHistoryAnchor,
+        cohort: bool,
     ) -> Result<PrepareQueueDelivery, StoreError>;
 
     /// Records the exact native response only when all correlation fields
@@ -901,13 +990,14 @@ impl AccountsQueueDelivery for FlowStore {
             .collect())
     }
 
-    fn prepare_oldest_delivery(
+    fn prepare_delivery(
         &self,
         address: &Address,
         flow_id: &str,
         thread_id: &str,
         harness_kind: HarnessKind,
         history_anchor: NativeHistoryAnchor,
+        cohort: bool,
     ) -> Result<PrepareQueueDelivery, StoreError> {
         // Also protects callers that encounter migrated data after opening.
         self.archive_legacy_queue()?;
@@ -917,7 +1007,12 @@ impl AccountsQueueDelivery for FlowStore {
         let Some(stored) = self.stored_metaflow(address)? else {
             return Ok(PrepareQueueDelivery::Empty);
         };
-        let Some(queued) = stored.metaflow.queue.first().cloned() else {
+        let queue_batch = if cohort {
+            stored.metaflow.queue.clone()
+        } else {
+            stored.metaflow.queue.iter().take(1).cloned().collect()
+        };
+        let Some(queued) = queue_batch.first().cloned() else {
             return Ok(PrepareQueueDelivery::Empty);
         };
         if flow_id.is_empty()
@@ -964,24 +1059,25 @@ impl AccountsQueueDelivery for FlowStore {
         let request_id = queued.logical_delivery_id.clone();
         let attempt_id = format!("queue-attempt-{attempt_number:016x}");
         let native_request_id = attempt_number;
-        let request = StoredDeliveryRequest {
-            request_id: request_id.clone(),
-            address: address.clone(),
-            queue_evidence: QueueEvidence::Logical(queued.clone()),
-            state: RequestState::Queued,
-        };
-        let logical_delivery_id = queued.logical_delivery_id.clone();
-        let old_request = self.engine.match_records(QueryPlan::key(
-            self.queue_delivery.requests,
-            RecordKey::new(request_id.clone()),
-        ))?;
-        let old_request = match old_request.records() {
-            [] => None,
-            [old] if old.address == *address && old.queue_evidence == request.queue_evidence => {
-                Some(old.clone())
-            }
-            _ => return Err(StoreError::StateInvariant),
-        };
+        let mut requests = Vec::with_capacity(queue_batch.len());
+        for entry in &queue_batch {
+            let request = StoredDeliveryRequest {
+                request_id: entry.logical_delivery_id.clone(),
+                address: address.clone(),
+                queue_evidence: QueueEvidence::Logical(entry.clone()),
+                state: RequestState::Queued,
+            };
+            let existing = self.engine.match_records(QueryPlan::key(
+                self.queue_delivery.requests,
+                RecordKey::new(request.request_id.clone()),
+            ))?;
+            let existed = match existing.records() {
+                [] => false,
+                [old] if old.address == *address && old.queue_evidence == request.queue_evidence => true,
+                _ => return Err(StoreError::StateInvariant),
+            };
+            requests.push((request, existed));
+        }
         let attempt = QueueDeliveryAttempt {
             request_id,
             attempt_id,
@@ -992,6 +1088,7 @@ impl AccountsQueueDelivery for FlowStore {
             history_anchor,
             address: address.clone(),
             queue_evidence: QueueEvidence::Logical(queued),
+            queue_batch: queue_batch.clone(),
             phase: QueueDeliveryPhase::Prepared,
         };
         let commit = self.engine.begin_atomic_commit();
@@ -1000,16 +1097,18 @@ impl AccountsQueueDelivery for FlowStore {
         } else {
             commit.assert(self.queue_delivery.counter, new_counter)
         };
-        let commit = if old_request.is_some() {
-            commit.mutate(self.queue_delivery.requests, request)
-        } else {
-            commit.assert(self.queue_delivery.requests, request)
-        };
-        self.commit_logical_transition(
-            &logical_delivery_id,
-            DeliveryState::Attempting,
-            commit.assert(self.queue_delivery.attempts, attempt.clone()),
-        )?;
+        let mut commit = commit.assert(self.queue_delivery.attempts, attempt.clone());
+        for (request, existed) in requests {
+            commit = if existed {
+                commit.mutate(self.queue_delivery.requests, request)
+            } else {
+                commit.assert(self.queue_delivery.requests, request)
+            };
+        }
+        let transitions = queue_batch.iter().map(|entry| {
+            (entry.logical_delivery_id.clone(), DeliveryState::Attempting)
+        }).collect::<Vec<_>>();
+        self.commit_logical_transitions(&transitions, commit)?;
         Ok(PrepareQueueDelivery::Prepared(attempt))
     }
 
@@ -1060,59 +1159,61 @@ impl AccountsQueueDelivery for FlowStore {
         let Some(mut metaflow) = self.stored_metaflow(&attempt.address)? else {
             return Ok(false);
         };
-        let QueueEvidence::Logical(logical_entry) = &attempt.queue_evidence else {
+        let QueueEvidence::Logical(first_entry) = &attempt.queue_evidence else {
             return Ok(false);
         };
-        if logical_entry.logical_delivery_id.starts_with("legacy:") {
+        let batch = if attempt.queue_batch.is_empty() {
+            vec![first_entry.clone()]
+        } else {
+            attempt.queue_batch.clone()
+        };
+        if batch.iter().any(|entry| entry.logical_delivery_id.starts_with("legacy:")) {
             // A late receipt is retained on its original attempt, but the
             // kept legacy archive never becomes a delivered lifecycle.
             return Ok(false);
         }
-        let logical_id = logical_entry.logical_delivery_id.clone();
         let native_receipt = NativeReceipt {
             harness_kind: attempt.harness_kind.clone(),
             native_session_id: attempt.thread_id.clone(),
             native_prompt_id: receipt.turn_id.clone(),
         };
         let is_parked = self.request_state(&attempt.request_id)? == Some(RequestState::Parked);
-        if !is_parked && metaflow.metaflow.queue.first() != Some(logical_entry) {
+        if !is_parked && !metaflow.metaflow.queue.starts_with(&batch) {
             return Ok(false);
         }
-        let requests = self
-            .engine
-            .match_records(QueryPlan::key(
+        let mut requests = Vec::with_capacity(batch.len());
+        for entry in &batch {
+            let rows = self.engine.match_records(QueryPlan::key(
                 self.queue_delivery.requests,
-                RecordKey::new(attempt.request_id.clone()),
-            ))?
-            .records()
-            .to_vec();
-        let [request] = requests.as_slice() else {
-            return Err(StoreError::StateInvariant);
-        };
-        if request.address != attempt.address
-            || request.queue_evidence != attempt.queue_evidence
-            || (!is_parked && request.state != RequestState::Queued)
-            || (is_parked && request.state != RequestState::Parked)
-        {
-            return Err(StoreError::StateInvariant);
+                RecordKey::new(entry.logical_delivery_id.clone()),
+            ))?;
+            let [request] = rows.records() else { return Err(StoreError::StateInvariant); };
+            let expected = QueueEvidence::Logical(entry.clone());
+            if request.address != attempt.address
+                || request.queue_evidence != expected
+                || (!is_parked && request.state != RequestState::Queued)
+                || (is_parked && request.state != RequestState::Parked)
+            {
+                return Err(StoreError::StateInvariant);
+            }
+            let mut request = request.clone();
+            request.state = RequestState::Settled;
+            requests.push(request);
         }
-        let mut request = request.clone();
-        request.state = RequestState::Settled;
         if !is_parked {
-            metaflow.metaflow.queue.remove(0);
+            metaflow.metaflow.queue.drain(..batch.len());
         }
         attempt.phase = QueueDeliveryPhase::Settled(receipt);
-        let commit = self
+        let mut commit = self
             .engine
             .begin_atomic_commit()
             .mutate(self.metaflows, metaflow)
-            .mutate(self.queue_delivery.requests, request)
             .mutate(self.queue_delivery.attempts, attempt);
-        self.commit_logical_transition(
-            &logical_id,
-            DeliveryState::Delivered(native_receipt),
-            commit,
-        )?;
+        for request in requests { commit = commit.mutate(self.queue_delivery.requests, request); }
+        let transitions = batch.iter().map(|entry| {
+            (entry.logical_delivery_id.clone(), DeliveryState::Delivered(native_receipt.clone()))
+        }).collect::<Vec<_>>();
+        self.commit_logical_transitions(&transitions, commit)?;
         Ok(true)
     }
 

@@ -15210,3 +15210,46 @@ mod v3_attempts {
         assert_eq!(current.flow_type, "Mind:Secondary:gpt-sol");
     }
 }
+
+#[cfg(test)]
+mod store_inventory {
+    /// Every family a store's catalog registers: its table, family name,
+    /// the schema label its hash matches, and its rows counted undecoded.
+    /// `FLOW_INVENTORY_STORE` names the store; only a repaired copy is read.
+    #[test]
+    #[ignore = "needs FLOW_INVENTORY_STORE naming a store to inventory"]
+    fn a_store_inventory_lists_every_family_and_its_rows() {
+        use redb::{ReadableDatabase as _, ReadableTable as _, ReadableTableMetadata as _};
+        use super::ReadsFlowMemory as _;
+        let source = std::env::var_os("FLOW_INVENTORY_STORE")
+            .map(std::path::PathBuf::from)
+            .expect("FLOW_INVENTORY_STORE names the store");
+        let directory = tempfile::tempdir().expect("copy directory");
+        let path = directory.path().join("flow.sema");
+        std::fs::copy(&source, &path).expect("store copied");
+        redb::Database::create(&path).map(drop).expect("copy repairs");
+        let database = redb::ReadOnlyDatabase::open(&path).expect("copy reads");
+        let read = database.begin_read().expect("read starts");
+        let catalog = read.open_table(super::SEMA_CATALOG_TABLE).expect("catalog");
+        for entry in catalog.iter().expect("catalog iterates") {
+            let (key, bytes) = entry.expect("catalog entry");
+            let table = key.value().to_owned();
+            let registration =
+                rkyv::from_bytes::<super::TableRegistration, rkyv::rancor::Error>(bytes.value())
+                    .expect("registration reads");
+            let identity = registration.identity();
+            let family = identity.family().as_str().to_owned();
+            let label = (1..=40)
+                .map(|version| format!("{family}-v{version}"))
+                .find(|label| super::SchemaHash::for_label(label) == identity.schema_hash())
+                .unwrap_or_else(|| format!("unlabelled {:?}", identity.schema_hash()));
+            let rows = match read.open_table(redb::TableDefinition::<String, &[u8]>::new(&table)) {
+                Ok(opened) => opened.len().expect("length"),
+                Err(redb::TableError::TableDoesNotExist(_)) => 0,
+                Err(error) => panic!("{table}: {error}"),
+            };
+            let recognized = super::FlowStore::is_current_flow_registration(&table, &registration);
+            println!("INVENTORY {table} {family} {label} rows={rows} recognized={recognized}");
+        }
+    }
+}

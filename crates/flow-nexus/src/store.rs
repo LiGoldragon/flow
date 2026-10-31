@@ -7550,6 +7550,10 @@ pub(crate) trait ReadsFlowMemory {
                 META_DEFAULT_MINUTES_CONFIGURATION_FAMILY,
                 META_DEFAULT_MINUTES_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_meta_heartbeat_configuration" => (
+                META_HEARTBEAT_CONFIGURATION_FAMILY,
+                META_HEARTBEAT_CONFIGURATION_SCHEMA,
+            ),
             "flow_nexus_send_outcome_counter" => {
                 (send_outcome::COUNTER_FAMILY, send_outcome::COUNTER_SCHEMA)
             }
@@ -7571,6 +7575,10 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_simplified_reply_bindings" => (
                 "flow-nexus-simplified-reply-binding",
                 "flow-nexus-simplified-reply-binding-v1",
+            ),
+            "flow_nexus_logical_delivery_purposes" => (
+                "flow-nexus-logical-delivery-purpose",
+                "flow-nexus-logical-delivery-purpose-v1",
             ),
             "flow_nexus_compactions" => {
                 (compaction::COMPACTION_FAMILY, compaction::COMPACTION_SCHEMA)

@@ -42,28 +42,6 @@ pub struct HeartbeatDelivery {
     pub body: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RecipientStanding {
-    baseline_shared: SharedEvidence,
-    baseline: RecipientEvidence,
-    latest_shared: SharedEvidence,
-    latest: RecipientEvidence,
-    outstanding: Option<String>,
-}
-
-#[derive(Default)]
-pub struct HeartbeatState {
-    recipients: Vec<(Address, RecipientStanding)>,
-}
-
-pub trait SamplesHeartbeat {
-    fn sample_startup(&mut self, evidence: &Evidence);
-    fn tick(&mut self, evidence: &Evidence) -> Vec<HeartbeatDelivery>;
-    fn admitted(&mut self, recipient: &Address, logical_delivery_id: String);
-    fn settled(&mut self, logical_delivery_id: &str);
-    fn outstanding(&self) -> Vec<String>;
-}
-
 pub trait RendersHeartbeat {
     fn reminder(
         recipient: &Address,
@@ -74,7 +52,7 @@ pub trait RendersHeartbeat {
     ) -> String;
 }
 
-impl RendersHeartbeat for HeartbeatState {
+impl RendersHeartbeat for HeartbeatDelivery {
     fn reminder(
         _recipient: &Address,
         baseline: &RecipientEvidence,
@@ -99,98 +77,9 @@ impl RendersHeartbeat for HeartbeatState {
     }
 }
 
-impl SamplesHeartbeat for HeartbeatState {
-    fn sample_startup(&mut self, evidence: &Evidence) {
-        self.recipients = evidence
-            .recipients
-            .iter()
-            .map(|(address, own)| {
-                (
-                    address.clone(),
-                    RecipientStanding {
-                        baseline_shared: evidence.shared.clone(),
-                        baseline: own.clone(),
-                        latest_shared: evidence.shared.clone(),
-                        latest: own.clone(),
-                        outstanding: None,
-                    },
-                )
-            })
-            .collect();
-    }
-
-    fn tick(&mut self, evidence: &Evidence) -> Vec<HeartbeatDelivery> {
-        let mut deliveries = Vec::new();
-        for (address, own) in &evidence.recipients {
-            if !self.recipients.iter().any(|(held, _)| held == address) {
-                self.recipients.push((
-                    address.clone(),
-                    RecipientStanding {
-                        baseline_shared: evidence.shared.clone(),
-                        baseline: own.clone(),
-                        latest_shared: evidence.shared.clone(),
-                        latest: own.clone(),
-                        outstanding: None,
-                    },
-                ));
-            }
-            let standing = &mut self
-                .recipients
-                .iter_mut()
-                .find(|(held, _)| held == address)
-                .expect("inserted")
-                .1;
-            standing.latest_shared = evidence.shared.clone();
-            standing.latest = own.clone();
-            let changed = standing.latest_shared != standing.baseline_shared
-                || standing.latest != standing.baseline;
-            if changed && standing.outstanding.is_none() {
-                deliveries.push(HeartbeatDelivery {
-                    recipient: address.clone(),
-                    body: Self::reminder(
-                        address,
-                        &standing.baseline,
-                        &standing.latest,
-                        &standing.baseline_shared,
-                        &standing.latest_shared,
-                    ),
-                });
-            }
-        }
-        deliveries
-    }
-
-    fn admitted(&mut self, recipient: &Address, logical_delivery_id: String) {
-        if let Some(standing) = self
-            .recipients
-            .iter_mut()
-            .find(|(address, _)| address == recipient)
-            .map(|(_, standing)| standing)
-        {
-            standing.baseline_shared = standing.latest_shared.clone();
-            standing.baseline = standing.latest.clone();
-            standing.outstanding = Some(logical_delivery_id);
-        }
-    }
-
-    fn settled(&mut self, logical_delivery_id: &str) {
-        for (_, standing) in &mut self.recipients {
-            if standing.outstanding.as_deref() == Some(logical_delivery_id) {
-                standing.outstanding = None;
-            }
-        }
-    }
-    fn outstanding(&self) -> Vec<String> {
-        self.recipients
-            .iter()
-            .map(|(_, standing)| standing)
-            .filter_map(|standing| standing.outstanding.clone())
-            .collect()
-    }
-}
-
 pub trait RunsHeartbeat {
     fn heartbeat_evidence(&self, recipients: &[Address]) -> Result<Evidence, crate::StoreError>;
+    fn sync_heartbeat(&self, recipients: &[Address]);
     fn heartbeat_tick(&self, recipients: &[Address]);
     fn keep_heartbeating(&self);
 }
@@ -260,6 +149,9 @@ impl RunsHeartbeat for crate::RunningNexus {
                 let metaflow = metaflows
                     .iter()
                     .find(|metaflow| metaflow.address == *address)?;
+                if !matches!(metaflow.state, flow_ethos::State::Awake(_)) {
+                    return None;
+                }
                 let ordinary_queue_length = metaflow
                     .queue
                     .iter()
@@ -295,6 +187,52 @@ impl RunsHeartbeat for crate::RunningNexus {
             },
             recipients,
         })
+    }
+
+    fn sync_heartbeat(&self, recipients: &[Address]) {
+        use crate::store::{StoredHeartbeatStanding, TracksHeartbeat};
+        let Ok(evidence) = self.heartbeat_evidence(recipients) else {
+            return;
+        };
+        let Ok(held) = self.store.heartbeat_standings() else {
+            return;
+        };
+        let standings = evidence
+            .recipients
+            .iter()
+            .map(|(address, own)| {
+                held.iter()
+                    .find(|row| row.address == *address)
+                    .cloned()
+                    .unwrap_or(StoredHeartbeatStanding {
+                        address: address.clone(),
+                        baseline_awake: evidence.shared.awake_metaflows as i64,
+                        baseline_working: match evidence.shared.working_panes {
+                            Observed::Known(count) | Observed::Partial(count) => Some(count as i64),
+                            Observed::Unknown => None,
+                        },
+                        baseline_working_complete: matches!(
+                            evidence.shared.working_panes,
+                            Observed::Known(_)
+                        ),
+                        baseline_sent: own.ordinary_messages_sent as i64,
+                        baseline_queue: own.ordinary_queue_length as i64,
+                        latest_awake: evidence.shared.awake_metaflows as i64,
+                        latest_working: match evidence.shared.working_panes {
+                            Observed::Known(count) | Observed::Partial(count) => Some(count as i64),
+                            Observed::Unknown => None,
+                        },
+                        latest_working_complete: matches!(
+                            evidence.shared.working_panes,
+                            Observed::Known(_)
+                        ),
+                        latest_sent: own.ordinary_messages_sent as i64,
+                        latest_queue: own.ordinary_queue_length as i64,
+                        outstanding: None,
+                    })
+            })
+            .collect();
+        let _ = self.store.replace_heartbeat_standings(standings);
     }
 
     fn heartbeat_tick(&self, recipients: &[Address]) {
@@ -340,7 +278,7 @@ impl RunsHeartbeat for crate::RunningNexus {
             if standing.changed() && standing.outstanding.is_none() {
                 deliveries.push(HeartbeatDelivery {
                     recipient: address.clone(),
-                    body: HeartbeatState::reminder(
+                    body: HeartbeatDelivery::reminder(
                         address,
                         &RecipientEvidence {
                             ordinary_messages_sent: standing.baseline_sent as u64,
@@ -384,7 +322,7 @@ impl RunsHeartbeat for crate::RunningNexus {
     }
 
     fn keep_heartbeating(&self) {
-        use crate::store::{ManagesMetaflowState, StoredHeartbeatStanding, TracksHeartbeat};
+        use crate::store::ManagesMetaflowState;
         let mut active: Option<meta_signal_flow::HeartbeatConfig> = None;
         let mut waited = std::time::Duration::ZERO;
         while !crate::HoldsStopRequest::requested(&self.stopping) {
@@ -397,52 +335,8 @@ impl RunsHeartbeat for crate::RunningNexus {
             if configured != active {
                 active = configured;
                 waited = std::time::Duration::ZERO;
-                if let Some(config) = active.as_ref()
-                    && let Ok(evidence) = self.heartbeat_evidence(&config.heartbeat_recipients)
-                {
-                    let Ok(held) = self.store.heartbeat_standings() else {
-                        continue;
-                    };
-                    let standings = evidence
-                        .recipients
-                        .iter()
-                        .map(|(address, own)| {
-                            held.iter()
-                                .find(|row| row.address == *address)
-                                .cloned()
-                                .unwrap_or(StoredHeartbeatStanding {
-                                    address: address.clone(),
-                                    baseline_awake: evidence.shared.awake_metaflows as i64,
-                                    baseline_working: match evidence.shared.working_panes {
-                                        Observed::Known(count) | Observed::Partial(count) => {
-                                            Some(count as i64)
-                                        }
-                                        Observed::Unknown => None,
-                                    },
-                                    baseline_working_complete: matches!(
-                                        evidence.shared.working_panes,
-                                        Observed::Known(_)
-                                    ),
-                                    baseline_sent: own.ordinary_messages_sent as i64,
-                                    baseline_queue: own.ordinary_queue_length as i64,
-                                    latest_awake: evidence.shared.awake_metaflows as i64,
-                                    latest_working: match evidence.shared.working_panes {
-                                        Observed::Known(count) | Observed::Partial(count) => {
-                                            Some(count as i64)
-                                        }
-                                        Observed::Unknown => None,
-                                    },
-                                    latest_working_complete: matches!(
-                                        evidence.shared.working_panes,
-                                        Observed::Known(_)
-                                    ),
-                                    latest_sent: own.ordinary_messages_sent as i64,
-                                    latest_queue: own.ordinary_queue_length as i64,
-                                    outstanding: None,
-                                })
-                        })
-                        .collect();
-                    let _ = self.store.replace_heartbeat_standings(standings);
+                if let Some(config) = active.as_ref() {
+                    self.sync_heartbeat(&config.heartbeat_recipients);
                 }
             }
             let step = std::time::Duration::from_millis(250);
@@ -457,102 +351,5 @@ impl RunsHeartbeat for crate::RunningNexus {
                 self.heartbeat_tick(&config.heartbeat_recipients);
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::store::{JudgesHeartbeatStanding, StoredHeartbeatStanding};
-    use signal_flow::{Aspect, Layer};
-
-    trait Fixtures {
-        fn address() -> Address;
-        fn evidence(sent: u64, queued: usize) -> Evidence;
-    }
-    struct Fixture;
-    impl Fixtures for Fixture {
-        fn address() -> Address {
-            Address {
-                aspect: Aspect::Field,
-                topic: "heartbeatTest".into(),
-                layer: Layer::Secondary,
-            }
-        }
-        fn evidence(sent: u64, queued: usize) -> Evidence {
-            Evidence {
-                shared: SharedEvidence {
-                    awake_metaflows: 1,
-                    working_panes: Observed::Unknown,
-                },
-                recipients: vec![(
-                    Self::address(),
-                    RecipientEvidence {
-                        ordinary_messages_sent: sent,
-                        ordinary_queue_length: queued,
-                    },
-                )],
-            }
-        }
-    }
-
-    #[test]
-    fn startup_and_unchanged_ticks_are_quiet() {
-        let mut state = HeartbeatState::default();
-        state.sample_startup(&Fixture::evidence(0, 0));
-        assert!(state.tick(&Fixture::evidence(0, 0)).is_empty());
-        assert!(state.tick(&Fixture::evidence(0, 0)).is_empty());
-    }
-
-    #[test]
-    fn admission_advances_baseline_and_outstanding_coalesces_latest() {
-        let mut state = HeartbeatState::default();
-        state.sample_startup(&Fixture::evidence(0, 0));
-        assert_eq!(state.tick(&Fixture::evidence(1, 1)).len(), 1);
-        state.admitted(&Fixture::address(), "heartbeat-1".into());
-        assert!(state.tick(&Fixture::evidence(2, 2)).is_empty());
-        state.settled("heartbeat-1");
-        let followup = state.tick(&Fixture::evidence(2, 2));
-        assert_eq!(followup.len(), 1);
-        assert!(followup[0].body.contains("1→2"));
-    }
-
-    #[test]
-    fn failed_admission_retains_baseline() {
-        let mut state = HeartbeatState::default();
-        state.sample_startup(&Fixture::evidence(0, 0));
-        assert_eq!(state.tick(&Fixture::evidence(1, 0)).len(), 1);
-        assert_eq!(state.tick(&Fixture::evidence(1, 0)).len(), 1);
-    }
-
-    #[test]
-    fn queue_length_is_compared_directly_and_unknown_panes_are_safe() {
-        let mut state = HeartbeatState::default();
-        state.sample_startup(&Fixture::evidence(4, 8));
-        let delivery = state.tick(&Fixture::evidence(4, 7)).pop().unwrap();
-        assert!(delivery.body.contains("8→7"));
-        assert!(delivery.body.contains("growth -1"));
-        assert!(delivery.body.contains("Unknown"));
-    }
-
-    #[test]
-    fn durable_standing_ignores_pane_only_changes_and_compares_raw_queue_length() {
-        let mut standing = StoredHeartbeatStanding {
-            address: Fixture::address(),
-            baseline_awake: 3,
-            baseline_working: Some(1),
-            baseline_working_complete: true,
-            baseline_sent: 4,
-            baseline_queue: 8,
-            latest_awake: 3,
-            latest_working: Some(2),
-            latest_working_complete: true,
-            latest_sent: 4,
-            latest_queue: 8,
-            outstanding: None,
-        };
-        assert!(!standing.changed());
-        standing.latest_queue = 7;
-        assert!(standing.changed());
     }
 }

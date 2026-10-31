@@ -2,8 +2,9 @@
 
 Pins signal-flow 38.0.0 (7b737d9) and meta-signal-flow 49.0.0
 (9f56b26). The typed heartbeat configuration is disabled when its family has
-no row. Enabling it begins a new accepted-message count epoch; deliveries
-from before this release have no purpose row and are not reinterpreted.
+no row. Deployment begins a new accepted-message count epoch whether or not
+heartbeat is enabled; earlier deliveries have no purpose row and are not
+reinterpreted.
 
 The first open adds three v1 Memory families without changing existing rows:
 

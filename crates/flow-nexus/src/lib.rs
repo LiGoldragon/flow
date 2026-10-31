@@ -1397,6 +1397,7 @@ mod tests {
     mod counters;
     mod delivery;
     mod ending;
+    mod heartbeat_production;
     mod launching_nexus;
     mod model;
     mod queue_drain;

@@ -6144,6 +6144,9 @@ impl RecordsFlowLifecycle for FlowStore {
         let Some(mut flow) = self.flow(flow_id)? else {
             return Ok(false);
         };
+        if !flow.lifecycle.is_live() {
+            return Ok(false);
+        }
         flow.lifecycle = FlowLifecycle::Stopped;
         // A flow that ends before its launch was confirmed gives back the
         // Address it held; a confirmed one puts its metaflow to sleep.

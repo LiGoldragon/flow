@@ -1221,6 +1221,17 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
 }
 
 #[test]
+fn a_repeated_stop_does_not_rewrite_a_terminal_flow() {
+    let fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    assert!(!fixture.nexus.store.record_stopped("abc123").unwrap());
+    assert_eq!(
+        fixture.nexus.store.flow_node("abc123").unwrap().unwrap().flow_lifecycle,
+        FlowLifecycle::Stopped
+    );
+}
+
+#[test]
 fn a_simplified_wake_sends_the_first_soft_request_without_an_empty_turn() {
     let mut fixture = NexusFixture::new();
     ended_simplified_claude(&fixture);

@@ -209,3 +209,26 @@ fn refused_heartbeat_admission_retains_its_durable_baseline() {
     ));
     assert_eq!(fixture.standing(&absent), standing);
 }
+
+#[test]
+fn configuration_churn_preserves_an_unknown_outstanding_delivery() {
+    let fixture = NexusFixture::new();
+    let awake = NexusFixture::recipient("heartbeatReselected");
+    fixture.seed(&awake, flow_ethos::State::Awake("awake-flow".into()));
+    fixture.nexus.sync_heartbeat(std::slice::from_ref(&awake));
+    let mut standing = fixture.standing(&awake);
+    standing.outstanding = Some("unknown-heartbeat".into());
+    fixture
+        .nexus
+        .store
+        .replace_heartbeat_standings(vec![standing.clone()])
+        .unwrap();
+
+    fixture.nexus.sync_heartbeat(&[]);
+    assert_eq!(fixture.standing(&awake), standing);
+    fixture.nexus.sync_heartbeat(std::slice::from_ref(&awake));
+    assert_eq!(fixture.standing(&awake), standing);
+    fixture.nexus.heartbeat_tick(std::slice::from_ref(&awake));
+    assert_eq!(fixture.standing(&awake), standing);
+    assert!(fixture.nexus.store.delivery_purposes().unwrap().is_empty());
+}

@@ -197,41 +197,37 @@ impl RunsHeartbeat for crate::RunningNexus {
         let Ok(held) = self.store.heartbeat_standings() else {
             return;
         };
-        let standings = evidence
-            .recipients
-            .iter()
-            .map(|(address, own)| {
-                held.iter()
-                    .find(|row| row.address == *address)
-                    .cloned()
-                    .unwrap_or(StoredHeartbeatStanding {
-                        address: address.clone(),
-                        baseline_awake: evidence.shared.awake_metaflows as i64,
-                        baseline_working: match evidence.shared.working_panes {
-                            Observed::Known(count) | Observed::Partial(count) => Some(count as i64),
-                            Observed::Unknown => None,
-                        },
-                        baseline_working_complete: matches!(
-                            evidence.shared.working_panes,
-                            Observed::Known(_)
-                        ),
-                        baseline_sent: own.ordinary_messages_sent as i64,
-                        baseline_queue: own.ordinary_queue_length as i64,
-                        latest_awake: evidence.shared.awake_metaflows as i64,
-                        latest_working: match evidence.shared.working_panes {
-                            Observed::Known(count) | Observed::Partial(count) => Some(count as i64),
-                            Observed::Unknown => None,
-                        },
-                        latest_working_complete: matches!(
-                            evidence.shared.working_panes,
-                            Observed::Known(_)
-                        ),
-                        latest_sent: own.ordinary_messages_sent as i64,
-                        latest_queue: own.ordinary_queue_length as i64,
-                        outstanding: None,
-                    })
-            })
-            .collect();
+        let mut standings = held;
+        for (address, own) in &evidence.recipients {
+            if !standings.iter().any(|row| row.address == *address) {
+                standings.push(StoredHeartbeatStanding {
+                    address: address.clone(),
+                    baseline_awake: evidence.shared.awake_metaflows as i64,
+                    baseline_working: match evidence.shared.working_panes {
+                        Observed::Known(count) | Observed::Partial(count) => Some(count as i64),
+                        Observed::Unknown => None,
+                    },
+                    baseline_working_complete: matches!(
+                        evidence.shared.working_panes,
+                        Observed::Known(_)
+                    ),
+                    baseline_sent: own.ordinary_messages_sent as i64,
+                    baseline_queue: own.ordinary_queue_length as i64,
+                    latest_awake: evidence.shared.awake_metaflows as i64,
+                    latest_working: match evidence.shared.working_panes {
+                        Observed::Known(count) | Observed::Partial(count) => Some(count as i64),
+                        Observed::Unknown => None,
+                    },
+                    latest_working_complete: matches!(
+                        evidence.shared.working_panes,
+                        Observed::Known(_)
+                    ),
+                    latest_sent: own.ordinary_messages_sent as i64,
+                    latest_queue: own.ordinary_queue_length as i64,
+                    outstanding: None,
+                });
+            }
+        }
         let _ = self.store.replace_heartbeat_standings(standings);
     }
 

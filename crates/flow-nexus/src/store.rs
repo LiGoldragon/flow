@@ -7446,6 +7446,10 @@ pub(crate) trait ReadsFlowMemory {
                     "flow-nexus-launch-attempt",
                     StoredLaunchAttemptV2::schema_hash(),
                 ),
+                (
+                    "flow-nexus-launch-attempt",
+                    StoredLaunchAttemptV3::schema_hash(),
+                ),
             ],
             "flow_nexus_meta_metaflow_configuration" => &[
                 (

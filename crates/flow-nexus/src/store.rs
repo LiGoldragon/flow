@@ -8579,6 +8579,72 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
 
     #[test]
+    fn heartbeat_admission_atomically_advances_and_survives_reopen() {
+        use super::{StoredHeartbeatStanding, TracksHeartbeat};
+        use crate::heartbeat::DeliveryPurpose;
+        use signal_flow::{Address, Aspect, Layer, Message, Metaflow, Request, SentBy};
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let recipient = Address {
+            aspect: Aspect::Field,
+            topic: "heartbeatTest".into(),
+            layer: Layer::Secondary,
+        };
+        store.seed_metaflow(Metaflow {
+            address: recipient.clone(),
+            state: flow_ethos::State::Asleep,
+            past: Vec::new(),
+            queue: Vec::new(),
+        });
+        store
+            .replace_heartbeat_standings(vec![StoredHeartbeatStanding {
+                address: recipient.clone(),
+                baseline_awake: 1,
+                baseline_working: None,
+                baseline_working_complete: false,
+                baseline_sent: 2,
+                baseline_queue: 3,
+                latest_awake: 4,
+                latest_working: Some(5),
+                latest_working_complete: true,
+                latest_sent: 6,
+                latest_queue: 7,
+                outstanding: None,
+            }])
+            .expect("standing persists");
+        let signal_flow::PrivateSendResponse::SendAccepted(accepted) = store
+            .accept_logical_delivery_for(
+                &recipient,
+                SentBy::Flow,
+                flow_ethos::Delivery::Wake,
+                Message::Soft(Request::Notice("heartbeat".into())),
+                None,
+                DeliveryPurpose::Heartbeat,
+            )
+            .expect("heartbeat admission commits")
+        else {
+            panic!("heartbeat accepted")
+        };
+        let standing = store.heartbeat_standings().unwrap().pop().unwrap();
+        assert_eq!(standing.baseline_awake, 4);
+        assert_eq!(standing.baseline_working, Some(5));
+        assert_eq!(standing.baseline_sent, 6);
+        assert_eq!(standing.baseline_queue, 7);
+        assert_eq!(
+            standing.outstanding,
+            Some(accepted.logical_delivery_id.clone())
+        );
+        assert!(store.delivery_purposes().unwrap().iter().any(|row| {
+            row.logical_delivery_id == accepted.logical_delivery_id
+                && row.purpose == DeliveryPurpose::Heartbeat
+        }));
+        drop(store);
+        let reopened = fixture.store();
+        let standing = reopened.heartbeat_standings().unwrap().pop().unwrap();
+        assert_eq!(standing.outstanding, Some(accepted.logical_delivery_id));
+    }
+
+    #[test]
     fn immediately_previous_catalog_upgrades_and_reopens_with_records() {
         use super::events::{EventV2, FlowEventsV2, NativeStopV2};
         use super::metaflow_declaration::{

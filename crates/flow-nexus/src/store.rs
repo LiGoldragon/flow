@@ -1199,10 +1199,12 @@ pub(crate) struct StoredHeartbeatStanding {
     pub address: Address,
     pub baseline_awake: i64,
     pub baseline_working: Option<i64>,
+    pub baseline_working_complete: bool,
     pub baseline_sent: i64,
     pub baseline_queue: i64,
     pub latest_awake: i64,
     pub latest_working: Option<i64>,
+    pub latest_working_complete: bool,
     pub latest_sent: i64,
     pub latest_queue: i64,
     pub outstanding: Option<String>,
@@ -8507,11 +8509,20 @@ pub(crate) trait ReadsFlowMemory {
                 )
             }
             ConfigurationChange::Heartbeat(heartbeat) => {
-                if heartbeat
-                    .as_ref()
-                    .is_some_and(|configured| configured.heartbeat_period_seconds <= 0)
-                {
-                    return Err(StoreError::StateInvariant);
+                if let Some(configured) = heartbeat.as_ref() {
+                    if configured.heartbeat_period_seconds <= 0 {
+                        return Err(StoreError::StateInvariant);
+                    }
+                    if configured
+                        .heartbeat_recipients
+                        .iter()
+                        .enumerate()
+                        .any(|(index, address)| {
+                            configured.heartbeat_recipients[..index].contains(address)
+                        })
+                    {
+                        return Err(StoreError::DuplicateConfigurationEntry);
+                    }
                 }
                 FlowStore::replace_configuration_family(
                     engine,

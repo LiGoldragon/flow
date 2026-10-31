@@ -14,7 +14,8 @@ use crate::store::{
 use crate::{Dispatches, OpensRunningNexus, RunningNexus};
 use meta_signal_flow::{
     ConfigurationChange, ConfigurationSnapshot, ConfigureLeaveOut, ConfigureModel, ConfigureNexus,
-    ConfigureOutcome, ConfigureRejection, ConfigureThreshold, Response as MetaResponse,
+    ConfigureOutcome, ConfigureRejection, ConfigureThreshold, HeartbeatConfig,
+    Response as MetaResponse,
 };
 use signal_flow::{
     Address, Aspect, Bind_Data, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin,
@@ -37,6 +38,37 @@ fn this_process() -> Process {
         pid: i64::from(std::process::id()),
         started,
     }
+}
+
+#[test]
+fn heartbeat_configuration_requires_a_positive_period_and_unique_recipients() {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let recipient = Address {
+        aspect: Aspect::Field,
+        topic: "heartbeatTest".into(),
+        layer: Layer::Secondary,
+    };
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::Heartbeat(Some(HeartbeatConfig {
+                heartbeat_period_seconds: 60,
+                heartbeat_recipients: vec![recipient.clone(), recipient],
+            }))
+        ),
+        MetaResponse::ConfigureRejected(ConfigureRejection::DuplicateEntry),
+    );
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::Heartbeat(Some(HeartbeatConfig {
+                heartbeat_period_seconds: 0,
+                heartbeat_recipients: vec![],
+            }))
+        ),
+        MetaResponse::ConfigureRejected(ConfigureRejection::StoreRefused),
+    );
 }
 
 const TERRA: &str = "gpt-5.6-terra";

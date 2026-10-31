@@ -3,6 +3,7 @@
 
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use signal_flow::Address;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeliveryPurpose {
@@ -13,6 +14,7 @@ pub enum DeliveryPurpose {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Observed<T> {
     Known(T),
+    Partial(T),
     Unknown,
 }
 
@@ -192,13 +194,61 @@ pub trait RunsHeartbeat {
 
 impl RunsHeartbeat for crate::RunningNexus {
     fn heartbeat_evidence(&self, recipients: &[Address]) -> Result<Evidence, crate::StoreError> {
-        use crate::store::ManagesMetaflowState;
+        use crate::herdr::ReadsHerdrPanes;
+        use crate::store::{ManagesMetaflowState, ReadsFlowRows};
         let metaflows = self.store.list_metaflows()?;
         let awake_metaflows = metaflows
             .iter()
             .filter(|metaflow| matches!(metaflow.state, flow_ethos::State::Awake(_)))
             .count();
         let purposes = self.store.delivery_purposes()?;
+        let mut panes = BTreeSet::new();
+        let mut coverage_complete = true;
+        for node in self.store.flow_nodes()? {
+            let signal_flow::EndpointSelection::Available(endpoint) = &node.endpoint_selection
+            else {
+                continue;
+            };
+            if endpoint.endpoint_path != self.codex_endpoints.next.socket {
+                continue;
+            }
+            match &node.herdr_route_selection {
+                signal_flow::HerdrRouteSelection::Available(route) => {
+                    panes.insert((
+                        route.herdr_session_name.clone(),
+                        route.herdr_pane_id.clone(),
+                    ));
+                }
+                signal_flow::HerdrRouteSelection::Unavailable => coverage_complete = false,
+            }
+        }
+        let mut snapshots = BTreeMap::new();
+        let mut working = 0usize;
+        for (session, pane) in panes {
+            let snapshot = snapshots
+                .entry(session.clone())
+                .or_insert_with(|| self.herdr.session_snapshot(&session));
+            let Some(agents) = snapshot
+                .as_ref()
+                .and_then(|value| value.pointer("/result/snapshot/agents"))
+                .and_then(serde_json::Value::as_array)
+            else {
+                coverage_complete = false;
+                continue;
+            };
+            let Some(agent) = agents.iter().find(|agent| {
+                agent.get("pane_id").and_then(serde_json::Value::as_str) == Some(pane.as_str())
+            }) else {
+                coverage_complete = false;
+                continue;
+            };
+            working += usize::from(
+                agent
+                    .get("agent_status")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("working"),
+            );
+        }
         let recipients = recipients
             .iter()
             .map(|address| {
@@ -232,13 +282,14 @@ impl RunsHeartbeat for crate::RunningNexus {
                 )
             })
             .collect();
-        // Herdr can report only NEXT-managed native panes. Until its existing
-        // correlation distinguishes heartbeat-only Working transitions, pane
-        // state remains explicitly unknown and never triggers a sample.
         Ok(Evidence {
             shared: SharedEvidence {
                 awake_metaflows,
-                working_panes: Observed::Unknown,
+                working_panes: if coverage_complete {
+                    Observed::Known(working)
+                } else {
+                    Observed::Partial(working)
+                },
             },
             recipients,
         })
@@ -260,9 +311,11 @@ impl RunsHeartbeat for crate::RunningNexus {
             };
             standing.latest_awake = evidence.shared.awake_metaflows as i64;
             standing.latest_working = match evidence.shared.working_panes {
-                Observed::Known(count) => Some(count as i64),
+                Observed::Known(count) | Observed::Partial(count) => Some(count as i64),
                 Observed::Unknown => None,
             };
+            standing.latest_working_complete =
+                matches!(evidence.shared.working_panes, Observed::Known(_));
             standing.latest_sent = own.ordinary_messages_sent as i64;
             standing.latest_queue = own.ordinary_queue_length as i64;
             if let Some(outstanding) = standing.outstanding.as_ref()
@@ -296,7 +349,13 @@ impl RunsHeartbeat for crate::RunningNexus {
                             awake_metaflows: standing.baseline_awake as usize,
                             working_panes: standing
                                 .baseline_working
-                                .map(|value| Observed::Known(value as usize))
+                                .map(|value| {
+                                    if standing.baseline_working_complete {
+                                        Observed::Known(value as usize)
+                                    } else {
+                                        Observed::Partial(value as usize)
+                                    }
+                                })
                                 .unwrap_or(Observed::Unknown),
                         },
                         &evidence.shared,
@@ -353,16 +412,28 @@ impl RunsHeartbeat for crate::RunningNexus {
                                     address: address.clone(),
                                     baseline_awake: evidence.shared.awake_metaflows as i64,
                                     baseline_working: match evidence.shared.working_panes {
-                                        Observed::Known(count) => Some(count as i64),
+                                        Observed::Known(count) | Observed::Partial(count) => {
+                                            Some(count as i64)
+                                        }
                                         Observed::Unknown => None,
                                     },
+                                    baseline_working_complete: matches!(
+                                        evidence.shared.working_panes,
+                                        Observed::Known(_)
+                                    ),
                                     baseline_sent: own.ordinary_messages_sent as i64,
                                     baseline_queue: own.ordinary_queue_length as i64,
                                     latest_awake: evidence.shared.awake_metaflows as i64,
                                     latest_working: match evidence.shared.working_panes {
-                                        Observed::Known(count) => Some(count as i64),
+                                        Observed::Known(count) | Observed::Partial(count) => {
+                                            Some(count as i64)
+                                        }
                                         Observed::Unknown => None,
                                     },
+                                    latest_working_complete: matches!(
+                                        evidence.shared.working_panes,
+                                        Observed::Known(_)
+                                    ),
                                     latest_sent: own.ordinary_messages_sent as i64,
                                     latest_queue: own.ordinary_queue_length as i64,
                                     outstanding: None,

@@ -296,7 +296,7 @@ impl RunsHeartbeat for crate::RunningNexus {
     }
 
     fn heartbeat_tick(&self, recipients: &[Address]) {
-        use crate::store::TracksHeartbeat;
+        use crate::store::{JudgesHeartbeatStanding, TracksHeartbeat};
         use crate::waking::SleepsAndWakesSeats;
         let Ok(evidence) = self.heartbeat_evidence(recipients) else {
             return;

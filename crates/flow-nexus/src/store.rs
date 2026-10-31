@@ -1209,7 +1209,10 @@ pub(crate) struct StoredHeartbeatStanding {
     pub latest_queue: i64,
     pub outstanding: Option<String>,
 }
-impl StoredHeartbeatStanding {
+pub(crate) trait JudgesHeartbeatStanding {
+    fn changed(&self) -> bool;
+}
+impl JudgesHeartbeatStanding for StoredHeartbeatStanding {
     pub(crate) fn changed(&self) -> bool {
         self.baseline_awake != self.latest_awake
             || self.baseline_sent != self.latest_sent
@@ -3335,6 +3338,8 @@ pub enum StoreError {
     ConfigurationReadViewChanged,
     #[error("a configuration declaration names one key twice")]
     DuplicateConfigurationEntry,
+    #[error("heartbeat period must be positive")]
+    InvalidHeartbeatPeriod,
     #[error("store path must be an absolute file path")]
     InvalidStorePath,
     #[error("meta configuration is not configured")]
@@ -5036,7 +5041,7 @@ impl OpensFlowStore for FlowStore {
             match attempt.phase {
                 QueueDeliveryPhase::ReceiptRecorded(_) => {
                     if !store.settle_recorded_delivery(&attempt.attempt_id)? {
-                        return Err(StoreError::StateInvariant);
+                        return Err(StoreError::InvalidHeartbeatPeriod);
                     }
                 }
                 QueueDeliveryPhase::Uncertain(_) => eprintln!(

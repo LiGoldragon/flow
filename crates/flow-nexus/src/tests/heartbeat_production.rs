@@ -1,8 +1,8 @@
 use super::NexusFixture;
 use crate::heartbeat::{DeliveryPurpose, RunsHeartbeat};
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
-use crate::store::metaflow::SeedsMetaflow;
-use crate::store::{ManagesMetaflowState, StoredHeartbeatStanding, TracksHeartbeat};
+use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+use crate::store::{StoredHeartbeatStanding, TracksHeartbeat};
 use signal_flow::{Address, Aspect, DeliveryState, Layer, Message, Metaflow, Request, SentBy};
 
 trait HeartbeatFixture {

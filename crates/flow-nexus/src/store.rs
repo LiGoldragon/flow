@@ -8612,6 +8612,18 @@ mod tests {
                 outstanding: None,
             }])
             .expect("standing persists");
+        let signal_flow::PrivateSendResponse::SendAccepted(ordinary) = store
+            .accept_logical_delivery(
+                &recipient,
+                SentBy::Flow,
+                flow_ethos::Delivery::Wake,
+                Message::Soft(Request::Notice("ordinary".into())),
+                None,
+            )
+            .expect("ordinary admission commits")
+        else {
+            panic!("ordinary accepted")
+        };
         let signal_flow::PrivateSendResponse::SendAccepted(accepted) = store
             .accept_logical_delivery_for(
                 &recipient,
@@ -8637,6 +8649,10 @@ mod tests {
         assert!(store.delivery_purposes().unwrap().iter().any(|row| {
             row.logical_delivery_id == accepted.logical_delivery_id
                 && row.purpose == DeliveryPurpose::Heartbeat
+        }));
+        assert!(store.delivery_purposes().unwrap().iter().any(|row| {
+            row.logical_delivery_id == ordinary.logical_delivery_id
+                && row.purpose == DeliveryPurpose::Ordinary
         }));
         drop(store);
         let reopened = fixture.store();

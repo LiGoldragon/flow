@@ -12,6 +12,7 @@ use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::send_tool::{
     HandlesSendCall, ReadsToolCall, SendCall, SendOutcome, SendRefusal, ToolCall, ToolCallKey,
 };
+use crate::heartbeat::DeliveryPurpose;
 use crate::send_tool::{DescribesSendInvocation, RespondsToSendCalls, SendTool, ServesSendTool};
 use crate::sending::{MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
@@ -752,6 +753,9 @@ fn dynamic_queue_admission_preserves_priority_without_waking() {
         held.queue[0].message,
         Message::MiddleAbrupt(Request::Order("retain this".into()))
     );
+    let purposes = fixture.nexus.store.delivery_purposes().unwrap();
+    assert_eq!(purposes.len(), 1);
+    assert_eq!(purposes[0].purpose, DeliveryPurpose::Ordinary);
 }
 
 /// At the Nexus's start the send tool subscribes to every live Codex thread

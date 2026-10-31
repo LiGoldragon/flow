@@ -1,3 +1,20 @@
+# Flow 0.44.0
+
+Pins signal-flow 38.0.0 (7b737d9) and meta-signal-flow 49.0.0
+(9f56b26). The typed heartbeat configuration is disabled when its family has
+no row. Enabling it begins a new accepted-message count epoch; deliveries
+from before this release have no purpose row and are not reinterpreted.
+
+The first open adds three v1 Memory families without changing existing rows:
+
+- `flow_nexus_meta_heartbeat_configuration`, the optional period and recipient list;
+- `flow_nexus_logical_delivery_purposes`, one `Ordinary` or `Heartbeat` purpose for each newly admitted logical delivery; and
+- `flow_nexus_heartbeat_standings`, each recipient's durable baseline, latest evidence and outstanding heartbeat delivery.
+
+Take an immutable Memory snapshot before the first 0.44.0 open. Earlier Flow
+versions do not recognize these families. Rollback restores that snapshot
+before starting the earlier binary; it never opens the upgraded Memory.
+
 # Flow 0.42.1
 
 Pins signal-flow 38.0.0 (7b737d9) and meta-signal-flow 47.0.0

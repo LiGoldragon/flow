@@ -47,6 +47,7 @@ mod fixture_executable;
 /// both outputs fresh. The `datom` feature enables their textual CLI surface.
 #[allow(unexpected_cfgs, clippy::large_enum_variant)]
 pub mod generated;
+pub mod heartbeat;
 pub mod herdr;
 pub mod launching;
 pub mod observe_agent;
@@ -131,6 +132,7 @@ pub struct RunningNexus {
     pub codex_turns: codex_turns::CodexTurns,
     /// How far each flow's compactions have been read; see `compacting`.
     pub compactions: compacting::CompactionWatch,
+    pub heartbeat: Mutex<heartbeat::HeartbeatState>,
 }
 
 pub trait Dispatches {
@@ -687,6 +689,7 @@ impl OpensRunningNexus for RunningNexus {
             launch_calls: send_tool::LaunchCalls::default(),
             codex_turns: codex_turns::CodexTurns::default(),
             compactions: compacting::CompactionWatch::default(),
+            heartbeat: Mutex::new(heartbeat::HeartbeatState::default()),
         })
     }
 }

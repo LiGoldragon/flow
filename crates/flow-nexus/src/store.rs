@@ -60,7 +60,7 @@ use message_v41::{MetaflowV41, RequestV41};
 use meta_signal_flow::{
     ConfigurationChange, ConfigurationSnapshot, ConfigureCounters, ConfigureLeaveOut,
     ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureOutcome, ConfigureSendServer,
-    ConfigureThreshold, CountersRefusal,
+    ConfigureThreshold, CountersRefusal, HeartbeatConfig,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -120,6 +120,10 @@ const META_DEFAULT_MINUTES_CONFIGURATION_FAMILY: &str =
     "flow-nexus-meta-default-minutes-configuration";
 const META_DEFAULT_MINUTES_CONFIGURATION_SCHEMA: &str =
     "flow-nexus-meta-default-minutes-configuration-v1";
+const META_HEARTBEAT_CONFIGURATION_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_meta_heartbeat_configuration");
+const META_HEARTBEAT_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-heartbeat-configuration";
+const META_HEARTBEAT_CONFIGURATION_SCHEMA: &str = "flow-nexus-meta-heartbeat-configuration-v1";
 /// The default Minutes a new Memory holds until Configure declares one:
 /// the Minutes Flow gives a request that carries none of its own.
 pub(crate) const SEEDED_DEFAULT_MINUTES: i64 = 30;
@@ -225,6 +229,7 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_meta_model_threshold_configuration",
     "flow_nexus_meta_investigation_configuration",
     "flow_nexus_meta_default_minutes_configuration",
+    "flow_nexus_meta_heartbeat_configuration",
     "flow_nexus_compactions",
     "flow_nexus_reminders",
     "flow_nexus_successor_intents",
@@ -234,6 +239,7 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_logical_delivery_current",
     "flow_nexus_logical_delivery_events",
     "flow_nexus_simplified_reply_bindings",
+    "flow_nexus_logical_delivery_purposes",
 ];
 /// The tables a configuration-only store may hold beside its own, each
 /// added by a later Flow.
@@ -243,6 +249,7 @@ const CONFIGURATION_ONLY_ADDED_TABLES: &[&str] = &[
     "flow_nexus_meta_model_threshold_configuration",
     "flow_nexus_meta_investigation_configuration",
     "flow_nexus_meta_default_minutes_configuration",
+    "flow_nexus_meta_heartbeat_configuration",
     "flow_nexus_meta_metaflow_configuration",
 ];
 // These are this Flow source's authored Memory version candidates. They are
@@ -1153,6 +1160,32 @@ impl DescribesDefaultMinutesTable for StoredMetaDefaultMinutesConfiguration {
             META_DEFAULT_MINUTES_CONFIGURATION_TABLE_NAME,
             FamilyName::new(META_DEFAULT_MINUTES_CONFIGURATION_FAMILY),
             SchemaHash::for_label(META_DEFAULT_MINUTES_CONFIGURATION_SCHEMA),
+        )
+    }
+}
+
+/// The configured sampling heartbeat; no row means disabled.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredMetaHeartbeatConfiguration {
+    heartbeat: HeartbeatConfig,
+}
+
+impl EngineRecord for StoredMetaHeartbeatConfiguration {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new("heartbeat")
+    }
+}
+
+trait DescribesHeartbeatTable {
+    fn descriptor() -> TableDescriptor<StoredMetaHeartbeatConfiguration>;
+}
+
+impl DescribesHeartbeatTable for StoredMetaHeartbeatConfiguration {
+    fn descriptor() -> TableDescriptor<StoredMetaHeartbeatConfiguration> {
+        TableDescriptor::new(
+            META_HEARTBEAT_CONFIGURATION_TABLE_NAME,
+            FamilyName::new(META_HEARTBEAT_CONFIGURATION_FAMILY),
+            SchemaHash::for_label(META_HEARTBEAT_CONFIGURATION_SCHEMA),
         )
     }
 }
@@ -3779,6 +3812,7 @@ pub(crate) struct MetaConfigurationTables {
     pub(crate) metaflows: TableReference<metaflow_declaration::StoredMetaMetaflowConfiguration>,
     investigation: TableReference<StoredMetaInvestigationConfiguration>,
     default_minutes: TableReference<StoredMetaDefaultMinutesConfiguration>,
+    heartbeat: TableReference<StoredMetaHeartbeatConfiguration>,
 }
 
 trait RegistersMetaConfigurationTables: Sized {
@@ -3801,6 +3835,7 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
                 .register_table(StoredMetaInvestigationConfiguration::descriptor())?,
             default_minutes: engine
                 .register_table(StoredMetaDefaultMinutesConfiguration::descriptor())?,
+            heartbeat: engine.register_table(StoredMetaHeartbeatConfiguration::descriptor())?,
             metaflows: engine.upgraded_metaflow_declarations(
                 <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor(),
             )?,
@@ -3871,6 +3906,7 @@ pub struct ConfiguredFamilies {
     pub metaflows: Vec<ConfigureMetaflow>,
     pub investigation: Option<Address>,
     pub default_minutes: i64,
+    pub heartbeat: Option<HeartbeatConfig>,
 }
 
 pub trait CompletesSnapshot {
@@ -3889,6 +3925,7 @@ impl CompletesSnapshot for ConfiguredFamilies {
             metaflows: self.metaflows,
             investigation: self.investigation,
             default_minutes: self.default_minutes,
+            heartbeat: self.heartbeat,
             counters,
         }
     }
@@ -3961,6 +3998,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let meta_thresholds_descriptor = StoredMetaThresholdConfiguration::descriptor();
         let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
         let meta_default_minutes_descriptor = StoredMetaDefaultMinutesConfiguration::descriptor();
+        let meta_heartbeat_descriptor = StoredMetaHeartbeatConfiguration::descriptor();
         let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         let meta_metaflows_descriptor = <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor();
@@ -3983,6 +4021,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_send_servers_descriptor)
                 .with_family(&meta_investigation_descriptor)
                 .with_family(&meta_default_minutes_descriptor)
+                .with_family(&meta_heartbeat_descriptor)
                 .with_family(&meta_metaflows_descriptor),
         )?;
         let state = engine.register_table(state_descriptor)?;
@@ -3997,6 +4036,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
             investigation: engine.register_table(meta_investigation_descriptor)?,
             default_minutes: engine.register_table(meta_default_minutes_descriptor)?,
+            heartbeat: engine.register_table(meta_heartbeat_descriptor)?,
             metaflows: engine.upgraded_metaflow_declarations(meta_metaflows_descriptor)?,
         };
         if !recognized {
@@ -4553,6 +4593,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&<send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor())
                 .with_family(&meta_investigation_descriptor)
                 .with_family(&StoredMetaDefaultMinutesConfiguration::descriptor())
+                .with_family(&StoredMetaHeartbeatConfiguration::descriptor())
                 .with_family(&compactions_descriptor)
                 .with_family(&reminders_descriptor)
                 .with_family(&successor_intents_descriptor)
@@ -4571,7 +4612,8 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&logical_delivery_descriptors.counter)
                 .with_family(&logical_delivery_descriptors.current)
                 .with_family(&logical_delivery_descriptors.events)
-                .with_family(&logical_delivery_descriptors.simplified_replies),
+                .with_family(&logical_delivery_descriptors.simplified_replies)
+                .with_family(&logical_delivery_descriptors.purposes),
         )?;
         let flows = engine.upgraded_flows(flows_descriptor)?;
         let native_owner_proofs = engine.register_table(native_owner_proofs_descriptor)?;
@@ -8077,6 +8119,7 @@ pub(crate) trait ReadsFlowMemory {
         let send_server_rows = engine.match_records(QueryPlan::all(tables.send_servers))?;
         let investigation_rows = engine.match_records(QueryPlan::all(tables.investigation))?;
         let default_minutes_rows = engine.match_records(QueryPlan::all(tables.default_minutes))?;
+        let heartbeat_rows = engine.match_records(QueryPlan::all(tables.heartbeat))?;
         let metaflow_rows = engine.match_records(QueryPlan::all(tables.metaflows))?;
         if models_rows.database_marker() != marker
             || metaflow_rows.database_marker() != marker
@@ -8085,6 +8128,7 @@ pub(crate) trait ReadsFlowMemory {
             || send_server_rows.database_marker() != marker
             || investigation_rows.database_marker() != marker
             || default_minutes_rows.database_marker() != marker
+            || heartbeat_rows.database_marker() != marker
             || engine.current_database_marker()? != marker
         {
             return Err(StoreError::ConfigurationReadViewChanged);
@@ -8113,6 +8157,11 @@ pub(crate) trait ReadsFlowMemory {
         let default_minutes = match default_minutes_rows.records() {
             [] => SEEDED_DEFAULT_MINUTES,
             [stored] => stored.default_minutes,
+            _ => return Err(StoreError::StateInvariant),
+        };
+        let heartbeat = match heartbeat_rows.records() {
+            [] => None,
+            [stored] => Some(stored.heartbeat.clone()),
             _ => return Err(StoreError::StateInvariant),
         };
         let mut default_leave_outs = leave_out_rows
@@ -8147,6 +8196,7 @@ pub(crate) trait ReadsFlowMemory {
             investigation,
             metaflows,
             default_minutes,
+            heartbeat,
         }))
     }
 
@@ -8238,6 +8288,9 @@ pub(crate) trait ReadsFlowMemory {
                 entries.iter().map(|entry| &entry.address).collect()
             }
             ConfigurationChange::Investigation(address) => vec![address],
+            ConfigurationChange::Heartbeat(Some(config)) => {
+                config.heartbeat_recipients.iter().collect()
+            }
             _ => Vec::new(),
         };
         if let Some(refused) = addresses
@@ -8342,6 +8395,22 @@ pub(crate) trait ReadsFlowMemory {
                     engine,
                     tables.default_minutes,
                     vec![StoredMetaDefaultMinutesConfiguration { default_minutes }],
+                )
+            }
+            ConfigurationChange::Heartbeat(heartbeat) => {
+                if heartbeat
+                    .as_ref()
+                    .is_some_and(|configured| configured.heartbeat_period_seconds <= 0)
+                {
+                    return Err(StoreError::StateInvariant);
+                }
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.heartbeat,
+                    heartbeat
+                        .into_iter()
+                        .map(|heartbeat| StoredMetaHeartbeatConfiguration { heartbeat })
+                        .collect(),
                 )
             }
             // A store opened for configuration only holds no counters; the

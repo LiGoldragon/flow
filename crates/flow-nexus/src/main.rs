@@ -169,6 +169,10 @@ fn main() -> ExitCode {
             nexus.keep_reminding()
         });
         scope.spawn(|| {
+            use flow_nexus::heartbeat::RunsHeartbeat;
+            nexus.keep_heartbeating()
+        });
+        scope.spawn(|| {
             if signals.watch(&|| nexus.stopping.requested()) {
                 nexus.stop(&sockets);
             }

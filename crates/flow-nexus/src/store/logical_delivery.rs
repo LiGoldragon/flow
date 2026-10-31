@@ -28,6 +28,27 @@ pub(super) const CURRENT_SCHEMA: &str = "flow-nexus-logical-delivery-current-v5"
 pub(super) const EVENT_SCHEMA: &str = "flow-nexus-logical-delivery-event-v5";
 const SIMPLIFIED_REPLY_TABLE_NAME: TableName =
     TableName::new("flow_nexus_simplified_reply_bindings");
+const PURPOSE_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_purposes");
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LogicalDeliveryPurpose {
+    pub logical_delivery_id: String,
+    pub address: Address,
+    pub purpose: crate::heartbeat::DeliveryPurpose,
+}
+impl EngineRecord for LogicalDeliveryPurpose {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.logical_delivery_id.clone())
+    }
+}
+impl MemoryDefinition for LogicalDeliveryPurpose {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-logical-delivery-purpose-v1")
+    }
+}
 
 pub(crate) trait CorePresentationRoute {
     fn is_core_presentation(&self) -> bool;
@@ -370,6 +391,7 @@ pub(crate) struct LogicalDeliveryTables {
     pub(crate) current: TableReference<CurrentLogicalDelivery>,
     pub(crate) events: TableReference<LogicalDeliveryEvent>,
     pub(crate) simplified_replies: TableReference<SimplifiedReplyBinding>,
+    pub(crate) purposes: TableReference<LogicalDeliveryPurpose>,
     pub(crate) write_gate: Mutex<()>,
 }
 pub(crate) struct LogicalDeliveryDescriptors {
@@ -377,6 +399,7 @@ pub(crate) struct LogicalDeliveryDescriptors {
     pub(crate) current: TableDescriptor<CurrentLogicalDelivery>,
     pub(crate) events: TableDescriptor<LogicalDeliveryEvent>,
     pub(crate) simplified_replies: TableDescriptor<SimplifiedReplyBinding>,
+    pub(crate) purposes: TableDescriptor<LogicalDeliveryPurpose>,
 }
 /// Each family upgrades from the newest predecessor its stored identity
 /// names: v4 (0.41), then v3 (0.40.4 to 0.40.10), v2, then v1. A predecessor whose
@@ -511,6 +534,11 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
                 FamilyName::new("flow-nexus-simplified-reply-binding"),
                 SimplifiedReplyBinding::schema_hash(),
             ),
+            purposes: TableDescriptor::new(
+                PURPOSE_TABLE_NAME,
+                FamilyName::new("flow-nexus-logical-delivery-purpose"),
+                LogicalDeliveryPurpose::schema_hash(),
+            ),
         }
     }
     fn register(
@@ -522,6 +550,7 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
             current: Self::upgraded_current(engine, descriptors.current)?,
             events: Self::upgraded_events(engine, descriptors.events)?,
             simplified_replies: engine.register_table(descriptors.simplified_replies)?,
+            purposes: engine.register_table(descriptors.purposes)?,
             write_gate: Mutex::new(()),
         })
     }
@@ -562,6 +591,24 @@ pub(crate) trait RecordsLogicalDeliveries {
         delivery: Delivery,
         message: Message,
         held_lock: Option<VerifiedDeliveryLock>,
+    ) -> Result<signal_flow::PrivateSendResponse, StoreError> {
+        self.accept_logical_delivery_for(
+            address,
+            sent_by,
+            delivery,
+            message,
+            held_lock,
+            crate::heartbeat::DeliveryPurpose::Ordinary,
+        )
+    }
+    fn accept_logical_delivery_for(
+        &self,
+        address: &Address,
+        sent_by: SentBy,
+        delivery: Delivery,
+        message: Message,
+        held_lock: Option<VerifiedDeliveryLock>,
+        purpose: crate::heartbeat::DeliveryPurpose,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError>;
     #[cfg(test)]
     fn transition_logical_delivery(
@@ -611,6 +658,7 @@ pub(crate) trait RecordsLogicalDeliveries {
         &self,
         address: &Address,
     ) -> Result<meta_signal_flow::DebugSnapshot, StoreError>;
+    fn delivery_purposes(&self) -> Result<Vec<LogicalDeliveryPurpose>, StoreError>;
     fn bind_simplified_reply(&self, binding: SimplifiedReplyBinding) -> Result<(), StoreError>;
     /// What the flow's reply binding owes: nothing, or an answer to an
     /// input not yet received, or one to an input received under its
@@ -629,6 +677,13 @@ pub(crate) trait RecordsLogicalDeliveries {
     ) -> Result<Option<Address>, StoreError>;
 }
 impl RecordsLogicalDeliveries for FlowStore {
+    fn delivery_purposes(&self) -> Result<Vec<LogicalDeliveryPurpose>, StoreError> {
+        Ok(self
+            .engine
+            .match_records(QueryPlan::all(self.logical_deliveries.purposes))?
+            .records()
+            .to_vec())
+    }
     fn debug_snapshot(
         &self,
         address: &Address,
@@ -1010,6 +1065,14 @@ impl RecordsLogicalDeliveries for FlowStore {
                     self.logical_deliveries.events,
                     LogicalDeliveryEvent { snapshot },
                 )
+                .assert(
+                    self.logical_deliveries.purposes,
+                    LogicalDeliveryPurpose {
+                        logical_delivery_id: format!("logical-delivery-{cursor:020}"),
+                        address: target.clone(),
+                        purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
+                    },
+                )
                 .assert(self.send_calls, record(outcome.clone())),
         )?;
         self.launch_changes.announce();
@@ -1238,13 +1301,14 @@ impl RecordsLogicalDeliveries for FlowStore {
         self.launch_changes.announce();
         Ok(())
     }
-    fn accept_logical_delivery(
+    fn accept_logical_delivery_for(
         &self,
         address: &Address,
         sent_by: SentBy,
         delivery: Delivery,
         message: Message,
         held_lock: Option<VerifiedDeliveryLock>,
+        purpose: crate::heartbeat::DeliveryPurpose,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError> {
         let _guard = self
             .logical_deliveries
@@ -1358,6 +1422,14 @@ impl RecordsLogicalDeliveries for FlowStore {
                 self.logical_deliveries.events,
                 LogicalDeliveryEvent {
                     snapshot: snapshot.clone(),
+                },
+            )
+            .assert(
+                self.logical_deliveries.purposes,
+                LogicalDeliveryPurpose {
+                    logical_delivery_id: id.clone(),
+                    address: address.clone(),
+                    purpose,
                 },
             );
         let commit = self.assert_logical_request(address, entry, commit);

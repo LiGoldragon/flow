@@ -21,9 +21,16 @@ use crate::caller::{
 };
 use crate::composition::JoinsPurpose;
 use crate::delivery::body::RendersNativeContent;
+use crate::generated::operation::{Failed_Data, Operation, Outcome};
+use crate::harness_command::{
+    HarnessCommandResources, RehearsesHarnessResources, RendersShellCommand,
+};
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::ClaimsNativeIdentity;
+use crate::herdr::launch::ConstructsHarnessCommand;
+use crate::launching::ReadsHarnessArguments;
 use crate::metaflow::IdentifiesPeerProcess;
+use crate::performing::Performs;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
@@ -43,9 +50,9 @@ use crate::waking::{
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
-    Address, Aspect, Caller, Delivery, HarnessKind, HerdrRoute, Launch_Data, LaunchProfile, Layer,
-    Message, PrivateSendResponse, Process, Recipient, Refusal, Request, Response, SendPayloadSize,
-    SendRequest, SendableMessage, SentBy, StartRejection, Unknown_Data,
+    Address, Aspect, Caller, Delivery, HarnessKind, HerdrRoute, LaunchProfile, LaunchRequest,
+    Layer, Message, PrivateSendResponse, Process, Recipient, Refusal, Request, Response,
+    SendPayloadSize, SendRequest, SendableMessage, SentBy, StartRejection, Unknown_Data,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -489,17 +496,38 @@ pub trait LaunchesDeclared {
     /// dispatched as any other.
     fn declared_launch(
         &self,
-        launch: Launch_Data,
+        launch: LaunchRequest,
         caller: Option<&Process>,
     ) -> Result<signal_flow::Query, Box<Response>>;
+    /// The profile and predecessor state one declared request reads. A
+    /// rehearsal uses semantic identities and performs no Herdr read.
+    fn declared_profile(
+        &self,
+        launch: LaunchRequest,
+        caller: Option<&Process>,
+        rehearsal: bool,
+    ) -> Result<(LaunchProfile, Option<String>), Box<Response>>;
 }
 
 impl LaunchesDeclared for RunningNexus {
     fn declared_launch(
         &self,
-        launch: Launch_Data,
+        launch: LaunchRequest,
         caller: Option<&Process>,
     ) -> Result<signal_flow::Query, Box<Response>> {
+        let (profile, predecessor) = self.declared_profile(launch, caller, false)?;
+        Ok(match predecessor {
+            Some(_) => signal_flow::Query::Replace(profile),
+            None => signal_flow::Query::Start(profile),
+        })
+    }
+
+    fn declared_profile(
+        &self,
+        launch: LaunchRequest,
+        caller: Option<&Process>,
+        rehearsal: bool,
+    ) -> Result<(LaunchProfile, Option<String>), Box<Response>> {
         let store_refused = |error: crate::store::StoreError| {
             Box::new(Response::Refused(Refusal::Store(error.to_string())))
         };
@@ -532,13 +560,21 @@ impl LaunchesDeclared for RunningNexus {
         // A Launch addressed to an Awake metaflow refreshes it: the flow it
         // is Awake as is replaced by the launch, never typed into.
         let predecessor = self.live_awake_flow(&address);
-        let herdr_session_name = caller
-            .and_then(|process| u32::try_from(process.pid).ok())
-            .and_then(|process_id| CallerProcess { process_id }.caller_pane(&self.herdr))
-            .map(|pane| pane.herdr_session_name)
-            .unwrap_or_else(|| DEFAULT_HERDR_SESSION.to_owned());
+        let herdr_session_name = if rehearsal {
+            "<session>".to_owned()
+        } else {
+            caller
+                .and_then(|process| u32::try_from(process.pid).ok())
+                .and_then(|process_id| CallerProcess { process_id }.caller_pane(&self.herdr))
+                .map(|pane| pane.herdr_session_name)
+                .unwrap_or_else(|| DEFAULT_HERDR_SESSION.to_owned())
+        };
         let profile = LaunchProfile {
-            launch_request_id: "launch".minted_id(),
+            launch_request_id: if rehearsal {
+                "rehearse-launch".into()
+            } else {
+                "launch".minted_id()
+            },
             system_modules: declaration.system_modules,
             user_modules: declaration.user_modules,
             address: address.clone(),
@@ -553,10 +589,69 @@ impl LaunchesDeclared for RunningNexus {
             // The declaration's purpose is composed ahead of the brief.
             instruction_prompt: launch.instruction_prompt.with_purpose(&declaration.purpose),
         };
-        Ok(match predecessor {
-            Some(_) => signal_flow::Query::Replace(profile),
-            None => signal_flow::Query::Start(profile),
-        })
+        Ok((profile, predecessor))
+    }
+}
+
+/// Renders one declared launch's final native invocation without creating
+/// any resource or writing any state.
+pub(crate) trait RehearsesDeclared {
+    fn rehearse_declared(&self, launch: LaunchRequest) -> Response;
+}
+
+impl RehearsesDeclared for RunningNexus {
+    fn rehearse_declared(&self, launch: LaunchRequest) -> Response {
+        let rejected = |response: Response| match response {
+            Response::StartRejected(rejection) => Response::RehearseRejected(rejection),
+            Response::Refused(_) => {
+                Response::RehearseRejected(StartRejection::LaunchPersistenceRefused)
+            }
+            _ => Response::RehearseRejected(StartRejection::LaunchPersistenceRefused),
+        };
+        let (profile, _) = match self.declared_profile(launch, None, true) {
+            Ok(profile) => profile,
+            Err(response) => return rejected(*response),
+        };
+        let harness_arguments = match self.harness_arguments(&profile.address) {
+            Ok(arguments) => arguments,
+            Err(rejection) => return Response::RehearseRejected(rejection),
+        };
+        let composed = match self.perform(Operation::Compose(profile)) {
+            Outcome::Composed(composed) => composed,
+            Outcome::Failed(Failed_Data::ContextRefused(refusal)) => {
+                return Response::RehearseRejected(StartRejection::ContextRefused(refusal));
+            }
+            Outcome::Failed(Failed_Data::LeaveOutRefused(refusal)) => {
+                return Response::RehearseRejected(StartRejection::LeaveOutRefused(refusal));
+            }
+            Outcome::Failed(Failed_Data::CompositionRefused(refusal)) => {
+                return Response::RehearseRejected(StartRejection::CompositionRefused(refusal));
+            }
+            _ => {
+                return Response::RehearseRejected(StartRejection::LaunchPersistenceRefused);
+            }
+        };
+        let resources = HarnessCommandResources::rehearsal(&composed.harness_kind);
+        match self
+            .herdr
+            .harness_command(&composed, resources, &harness_arguments)
+        {
+            Ok(command) => Response::Rehearsed(command.shell_command()),
+            Err(failure) => {
+                let cause = match failure {
+                    crate::herdr::launch::SpawnFailure::Refused(cause) => cause,
+                    crate::herdr::launch::SpawnFailure::Unattempted(_) => {
+                        signal_flow::SpawnRefusalCause::CommandTooLong
+                    }
+                };
+                Response::RehearseRejected(StartRejection::HarnessSpawnRefused(
+                    signal_flow::HarnessSpawnRefusal {
+                        spawn_refusal_cause: cause,
+                        opened_thread_option: None,
+                    },
+                ))
+            }
+        }
     }
 }
 

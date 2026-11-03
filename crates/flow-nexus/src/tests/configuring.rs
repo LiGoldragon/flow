@@ -13,8 +13,9 @@ use crate::store::{
 };
 use crate::{Dispatches, OpensRunningNexus, RunningNexus};
 use meta_signal_flow::{
-    ConfigurationChange, ConfigurationSnapshot, ConfigureLeaveOut, ConfigureModel, ConfigureNexus,
-    ConfigureOutcome, ConfigureRejection, ConfigureThreshold, Response as MetaResponse,
+    ConfigurationChange, ConfigurationSnapshot, ConfigureHarnessFlags, ConfigureLeaveOut,
+    ConfigureModel, ConfigureNexus, ConfigureOutcome, ConfigureRejection, ConfigureThreshold,
+    Response as MetaResponse,
 };
 use signal_flow::{
     Address, Aspect, Bind_Data, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin,
@@ -37,6 +38,65 @@ fn this_process() -> Process {
         pid: i64::from(std::process::id()),
         started,
     }
+}
+
+#[test]
+fn harness_flags_are_per_metaflow_persistent_and_absent_by_default() {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let address = Address {
+        aspect: Aspect::Field,
+        topic: "flagsTest".into(),
+        layer: Layer::Secondary,
+    };
+    assert!(
+        nexus
+            .store
+            .configuration_snapshot()
+            .unwrap()
+            .unwrap()
+            .configured_harness_flags
+            .is_empty(),
+        "an older configuration has the empty family"
+    );
+    assert_eq!(nexus.store.harness_flags(&address).unwrap(), "");
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::HarnessFlags(vec![
+                ConfigureHarnessFlags {
+                    address: address.clone(),
+                    harness_flags: "--one 'two three'".into(),
+                },
+                ConfigureHarnessFlags {
+                    address: address.clone(),
+                    harness_flags: "--duplicate".into(),
+                },
+            ])
+        ),
+        MetaResponse::ConfigureRejected(ConfigureRejection::DuplicateEntry)
+    );
+    assert_eq!(nexus.store.harness_flags(&address).unwrap(), "");
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::HarnessFlags(vec![ConfigureHarnessFlags {
+                address: address.clone(),
+                harness_flags: "--one 'two three'".into(),
+            }])
+        ),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    assert_eq!(
+        nexus.store.harness_flags(&address).unwrap(),
+        "--one 'two three'"
+    );
+    drop(nexus);
+    let reopened = fixture.open();
+    assert_eq!(
+        reopened.store.harness_flags(&address).unwrap(),
+        "--one 'two three'"
+    );
 }
 
 const TERRA: &str = "gpt-5.6-terra";
@@ -421,6 +481,7 @@ fn each_family_is_its_last_declaration() {
             default_leave_outs: second,
             send_servers,
             metaflows: Vec::new(),
+            configured_harness_flags: Vec::new(),
             investigation: None,
             default_minutes: crate::store::SEEDED_DEFAULT_MINUTES,
             counters: meta_signal_flow::ConfigureCounters {

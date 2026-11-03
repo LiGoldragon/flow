@@ -232,12 +232,12 @@ fn a_send_to_a_bad_topic_is_topic_refused() {
 #[test]
 fn launch_with_a_bad_topic_is_topic_refused() {
     use crate::Dispatches;
-    use signal_flow::{Address, Launch_Data, Remembering};
+    use signal_flow::{Address, LaunchRequest, Remembering};
     let fixture = NexusFixture::new();
     fixture.claims_flow_ids();
     let _ = fs::remove_file(&fixture.snapshot_program);
     configure(&fixture, &[(Layer::Secondary, Aspect::Mind, "gpt-6-sol")]);
-    let response = fixture.nexus.dispatch(Query::Launch(Launch_Data {
+    let response = fixture.nexus.dispatch(Query::Launch(LaunchRequest {
         address: Address {
             aspect: Aspect::Mind,
             topic: "PrimaryCommitting".into(),

@@ -30,6 +30,25 @@ flow --system-modules '[ spirit-core vision-design ]' '<one inline Start or Repl
 flow --system-modules '[]' '<one inline Start or Replace Query datom>'
 ```
 
+`Rehearse` carries the same declared `LaunchRequest` as `Launch`. It reads the
+metaflow's configuration and composed context, then returns the one final
+native invocation without creating a pane, thread, identity, prompt fd, file,
+registration, queue entry, or lifecycle record. Every argv word is
+single-quoted, including semantic placeholders such as `'<flow-id>'`,
+`'<pane>'`, `'<prompt-fd>'`, and `'<thread>'`; a manual runner supplies those
+resources before invoking the result.
+
+Each metaflow may configure a `HarnessFlags.String`. Its words form the final
+harness-option tail after effort. Unquoted whitespace separates words; single
+quotes preserve their entire interior; double quotes preserve whitespace and
+only interpret backslash before dollar, backtick, double quote, backslash, or
+newline; outside quotes backslash protects the next character and continues a
+line before newline. Quoted empty words are kept. The syntax performs no
+expansion, substitution, evaluation, assignment, comment, or operator
+interpretation, so `Artifact*`, `#`, `;`, `|`, and `>` are literal words.
+Unclosed quotes and incomplete trailing escapes are typed refusals before any
+launch effect.
+
 The ordinary pane operations use the same typed edge:
 
 ```sh

@@ -51,6 +51,7 @@ pub mod generated;
 mod executable_default_configuration {
     include!(env!("FLOW_NEXUS_DEFAULT_CONFIGURATION_RS"));
 }
+pub(crate) mod harness_command;
 pub mod herdr;
 pub mod launching;
 pub mod observe_agent;
@@ -74,14 +75,14 @@ use context::{CurriculumComposer, OpensCurriculumComposer};
 use delivery::{DeliversMessages, lease::LeasesPanes};
 use generated::operation::{Operation, Outcome, Record_Data};
 use generated::starter::DerivesOrigin;
-use launching::{AdmitsLaunch, LaunchesFlows, ObservesLaunch};
+use launching::{AdmitsLaunch, LaunchesFlows, ObservesLaunch, ReadsHarnessArguments};
 use observe_agent::ObservesAgent;
 use observe_sends::ObservesLogicalSends;
 use peer::{AdmitsMetaPeer, NamesMetaPeer, ResolvesPeer};
 use performing::Performs;
 use reporting::RecordsReports;
 use send_tool::ServesLaunchCalls;
-use sending::{BindsSeats, LaunchesDeclared, SendsRequests};
+use sending::{BindsSeats, LaunchesDeclared, RehearsesDeclared, SendsRequests};
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRouteSelection, ObserveSelection, Origin,
     Process, Query, Response, StartRejection,
@@ -164,14 +165,20 @@ impl Dispatches for RunningNexus {
     /// takes it: a new Primary's Secondary is started first, off the gate.
     fn dispatch(&self, query: Query) -> Response {
         match query {
-            Query::Start(profile) => match self.secondary_first(&profile) {
-                Ok(()) => self.dispatch_from(Query::Start(profile), Origin::Unbound),
-                Err(rejection) => Response::StartRejected(rejection),
-            },
+            Query::Start(profile) => {
+                if let Err(rejection) = self.harness_arguments(&profile.address) {
+                    return Response::StartRejected(rejection);
+                }
+                match self.secondary_first(&profile) {
+                    Ok(()) => self.dispatch_from(Query::Start(profile), Origin::Unbound),
+                    Err(rejection) => Response::StartRejected(rejection),
+                }
+            }
             Query::Launch(launch) => match self.declared_launch(launch, None) {
                 Ok(query) => self.dispatch(query),
                 Err(refusal) => *refusal,
             },
+            Query::Rehearse(launch) => self.rehearse_declared(launch),
             query => self.dispatch_from(query, Origin::Unbound),
         }
     }
@@ -224,6 +231,7 @@ impl Dispatches for RunningNexus {
                 Ok(query) => self.dispatch_from(query, origin),
                 Err(refusal) => *refusal,
             },
+            Query::Rehearse(launch) => self.rehearse_declared(launch),
             Query::LaunchStatus(launch_request_id) => self.launch_status(&launch_request_id),
             // Over a connection Observe streams; a direct dispatch answers the
             // subscription's opening frame.
@@ -1440,6 +1448,7 @@ mod tests {
     mod queue_drain;
     mod refresh_and_compaction;
     mod refreshing;
+    mod rehearsing;
     mod repairing;
     mod reservation;
     mod seat_binding;
@@ -5517,7 +5526,7 @@ mod tests {
     fn a_launch_is_composed_from_the_declaration_or_refused_undeclared() {
         use crate::sending::LaunchesDeclared;
         use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, ConfigureModel};
-        use signal_flow::{Address, Launch_Data, Layer};
+        use signal_flow::{Address, LaunchRequest, Layer};
         let fixture = NexusFixture::new();
         let declared = Address {
             aspect: Aspect::Field,
@@ -5553,7 +5562,7 @@ mod tests {
                 )),
             meta_signal_flow::Response::Configured(_)
         ));
-        let launch = |address: Address| Launch_Data {
+        let launch = |address: Address| LaunchRequest {
             address,
             remembering: signal_flow::Remembering::Predecessors(1),
             instruction_prompt: "Publish the newest edition.".into(),

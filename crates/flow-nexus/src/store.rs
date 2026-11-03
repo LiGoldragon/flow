@@ -58,9 +58,9 @@ use std::{
 
 use message_v41::{MetaflowV41, RequestV41};
 use meta_signal_flow::{
-    ConfigurationChange, ConfigurationSnapshot, ConfigureCounters, ConfigureLeaveOut,
-    ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureOutcome, ConfigureSendServer,
-    ConfigureThreshold, CountersRefusal, HeartbeatConfig,
+    ConfigurationChange, ConfigurationSnapshot, ConfigureCounters, ConfigureHarnessFlags,
+    ConfigureLeaveOut, ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureOutcome,
+    ConfigureSendServer, ConfigureThreshold, CountersRefusal, HeartbeatConfig,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -124,6 +124,11 @@ const META_HEARTBEAT_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_heartbeat_configuration");
 const META_HEARTBEAT_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-heartbeat-configuration";
 const META_HEARTBEAT_CONFIGURATION_SCHEMA: &str = "flow-nexus-meta-heartbeat-configuration-v1";
+const META_HARNESS_FLAGS_CONFIGURATION_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_meta_harness_flags_configuration");
+const META_HARNESS_FLAGS_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-harness-flags-configuration";
+const META_HARNESS_FLAGS_CONFIGURATION_SCHEMA: &str =
+    "flow-nexus-meta-harness-flags-configuration-v1";
 const HEARTBEAT_STANDING_TABLE_NAME: TableName = TableName::new("flow_nexus_heartbeat_standings");
 const HEARTBEAT_STANDING_FAMILY: &str = "flow-nexus-heartbeat-standing";
 const HEARTBEAT_STANDING_SCHEMA: &str = "flow-nexus-heartbeat-standing-v1";
@@ -233,6 +238,7 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_meta_investigation_configuration",
     "flow_nexus_meta_default_minutes_configuration",
     "flow_nexus_meta_heartbeat_configuration",
+    "flow_nexus_meta_harness_flags_configuration",
     "flow_nexus_compactions",
     "flow_nexus_reminders",
     "flow_nexus_successor_intents",
@@ -254,6 +260,7 @@ const CONFIGURATION_ONLY_ADDED_TABLES: &[&str] = &[
     "flow_nexus_meta_investigation_configuration",
     "flow_nexus_meta_default_minutes_configuration",
     "flow_nexus_meta_heartbeat_configuration",
+    "flow_nexus_meta_harness_flags_configuration",
     "flow_nexus_meta_metaflow_configuration",
 ];
 // These are this Flow source's authored Memory version candidates. They are
@@ -1190,6 +1197,43 @@ impl DescribesHeartbeatTable for StoredMetaHeartbeatConfiguration {
             META_HEARTBEAT_CONFIGURATION_TABLE_NAME,
             FamilyName::new(META_HEARTBEAT_CONFIGURATION_FAMILY),
             SchemaHash::for_label(META_HEARTBEAT_CONFIGURATION_SCHEMA),
+        )
+    }
+}
+
+/// Extra native harness arguments for one metaflow, keyed by Address. An
+/// absent row means the empty argument string.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredMetaHarnessFlagsConfiguration {
+    configured: ConfigureHarnessFlags,
+}
+
+impl EngineRecord for StoredMetaHarnessFlagsConfiguration {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.configured.address))
+    }
+}
+
+impl MemoryDefinition for StoredMetaHarnessFlagsConfiguration {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(META_HARNESS_FLAGS_CONFIGURATION_SCHEMA)
+    }
+}
+
+trait DescribesHarnessFlagsTable {
+    fn descriptor() -> TableDescriptor<StoredMetaHarnessFlagsConfiguration>;
+}
+
+impl DescribesHarnessFlagsTable for StoredMetaHarnessFlagsConfiguration {
+    fn descriptor() -> TableDescriptor<StoredMetaHarnessFlagsConfiguration> {
+        TableDescriptor::new(
+            META_HARNESS_FLAGS_CONFIGURATION_TABLE_NAME,
+            FamilyName::new(META_HARNESS_FLAGS_CONFIGURATION_FAMILY),
+            Self::schema_hash(),
         )
     }
 }
@@ -3870,6 +3914,7 @@ pub(crate) struct MetaConfigurationTables {
     investigation: TableReference<StoredMetaInvestigationConfiguration>,
     default_minutes: TableReference<StoredMetaDefaultMinutesConfiguration>,
     heartbeat: TableReference<StoredMetaHeartbeatConfiguration>,
+    harness_flags: TableReference<StoredMetaHarnessFlagsConfiguration>,
 }
 
 trait RegistersMetaConfigurationTables: Sized {
@@ -3893,6 +3938,8 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             default_minutes: engine
                 .register_table(StoredMetaDefaultMinutesConfiguration::descriptor())?,
             heartbeat: engine.register_table(StoredMetaHeartbeatConfiguration::descriptor())?,
+            harness_flags: engine
+                .register_table(StoredMetaHarnessFlagsConfiguration::descriptor())?,
             metaflows: engine.upgraded_metaflow_declarations(
                 <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor(),
             )?,
@@ -4006,6 +4053,7 @@ pub struct ConfiguredFamilies {
     pub investigation: Option<Address>,
     pub default_minutes: i64,
     pub heartbeat: Option<HeartbeatConfig>,
+    pub configured_harness_flags: Vec<ConfigureHarnessFlags>,
 }
 
 pub trait CompletesSnapshot {
@@ -4025,6 +4073,7 @@ impl CompletesSnapshot for ConfiguredFamilies {
             investigation: self.investigation,
             default_minutes: self.default_minutes,
             heartbeat: self.heartbeat,
+            configured_harness_flags: self.configured_harness_flags,
             counters,
         }
     }
@@ -4098,6 +4147,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
         let meta_default_minutes_descriptor = StoredMetaDefaultMinutesConfiguration::descriptor();
         let meta_heartbeat_descriptor = StoredMetaHeartbeatConfiguration::descriptor();
+        let meta_harness_flags_descriptor = StoredMetaHarnessFlagsConfiguration::descriptor();
         let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         let meta_metaflows_descriptor = <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor();
@@ -4121,6 +4171,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_investigation_descriptor)
                 .with_family(&meta_default_minutes_descriptor)
                 .with_family(&meta_heartbeat_descriptor)
+                .with_family(&meta_harness_flags_descriptor)
                 .with_family(&meta_metaflows_descriptor),
         )?;
         let state = engine.register_table(state_descriptor)?;
@@ -4136,6 +4187,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             investigation: engine.register_table(meta_investigation_descriptor)?,
             default_minutes: engine.register_table(meta_default_minutes_descriptor)?,
             heartbeat: engine.register_table(meta_heartbeat_descriptor)?,
+            harness_flags: engine.register_table(meta_harness_flags_descriptor)?,
             metaflows: engine.upgraded_metaflow_declarations(meta_metaflows_descriptor)?,
         };
         if !recognized {
@@ -4694,6 +4746,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&meta_investigation_descriptor)
                 .with_family(&StoredMetaDefaultMinutesConfiguration::descriptor())
                 .with_family(&StoredMetaHeartbeatConfiguration::descriptor())
+                .with_family(&StoredMetaHarnessFlagsConfiguration::descriptor())
                 .with_family(&compactions_descriptor)
                 .with_family(&reminders_descriptor)
                 .with_family(&successor_intents_descriptor)
@@ -5076,6 +5129,8 @@ pub(crate) trait ManagesMetaflowState: Sized {
         address: &Address,
         harness_kind: &HarnessKind,
     ) -> Result<Vec<LeaveOut>, StoreError>;
+    /// Extra native argv configured for this metaflow; empty when absent.
+    fn harness_flags(&self, address: &Address) -> Result<String, StoreError>;
     fn stored_metaflow(&self, address: &Address) -> Result<Option<StoredMetaflow>, StoreError>;
     fn stored_metaflow_process(
         &self,
@@ -5152,6 +5207,20 @@ impl ManagesMetaflowState for FlowStore {
         match rows.records() {
             [] => Ok(Vec::new()),
             [stored] => Ok(stored.leave_out.leave_outs.clone()),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn harness_flags(&self, address: &Address) -> Result<String, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.meta_configuration_tables.harness_flags,
+            RecordKey::new(FlowStore::address_record_key(address)),
+        ))?;
+        match rows.records() {
+            [] => Ok(String::new()),
+            [stored] if stored.configured.address == *address => {
+                Ok(stored.configured.harness_flags.clone())
+            }
             _ => Err(StoreError::StateInvariant),
         }
     }
@@ -5302,6 +5371,9 @@ impl AppliesFlowQuery for FlowStore {
             Query::Start(_) => Ok(Response::StartRejected(
                 StartRejection::LaunchPersistenceRefused,
             )),
+            Query::Rehearse(_) => Ok(Response::RehearseRejected(
+                StartRejection::LaunchPersistenceRefused,
+            )),
             // A refresh closes a pane, which the store alone cannot.
             Query::Refresh(_) => Ok(Response::Refused(signal_flow::Refusal::Store(
                 "the store alone closes no pane".into(),
@@ -5363,6 +5435,7 @@ impl ReservesPendingStart for FlowStore {
                 .reserve_start("legacy-test-start".into(), Origin::Unbound)
                 .map(Some),
             Query::Refresh(_)
+            | Query::Rehearse(_)
             | Query::ResolveRecipient(_)
             | Query::Stop(_)
             | Query::Current(_)
@@ -7659,6 +7732,10 @@ pub(crate) trait ReadsFlowMemory {
                 META_HEARTBEAT_CONFIGURATION_FAMILY,
                 META_HEARTBEAT_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_meta_harness_flags_configuration" => (
+                META_HARNESS_FLAGS_CONFIGURATION_FAMILY,
+                META_HARNESS_FLAGS_CONFIGURATION_SCHEMA,
+            ),
             "flow_nexus_send_outcome_counter" => {
                 (send_outcome::COUNTER_FAMILY, send_outcome::COUNTER_SCHEMA)
             }
@@ -8236,6 +8313,7 @@ pub(crate) trait ReadsFlowMemory {
         let investigation_rows = engine.match_records(QueryPlan::all(tables.investigation))?;
         let default_minutes_rows = engine.match_records(QueryPlan::all(tables.default_minutes))?;
         let heartbeat_rows = engine.match_records(QueryPlan::all(tables.heartbeat))?;
+        let harness_flags_rows = engine.match_records(QueryPlan::all(tables.harness_flags))?;
         let metaflow_rows = engine.match_records(QueryPlan::all(tables.metaflows))?;
         if models_rows.database_marker() != marker
             || metaflow_rows.database_marker() != marker
@@ -8245,6 +8323,7 @@ pub(crate) trait ReadsFlowMemory {
             || investigation_rows.database_marker() != marker
             || default_minutes_rows.database_marker() != marker
             || heartbeat_rows.database_marker() != marker
+            || harness_flags_rows.database_marker() != marker
             || engine.current_database_marker()? != marker
         {
             return Err(StoreError::ConfigurationReadViewChanged);
@@ -8303,6 +8382,13 @@ pub(crate) trait ReadsFlowMemory {
             .map(|stored| stored.metaflow.clone())
             .collect::<Vec<_>>();
         metaflows.sort_by_key(|metaflow| FlowStore::address_record_key(&metaflow.address));
+        let mut configured_harness_flags = harness_flags_rows
+            .records()
+            .iter()
+            .map(|stored| stored.configured.clone())
+            .collect::<Vec<_>>();
+        configured_harness_flags
+            .sort_by_key(|configured| FlowStore::address_record_key(&configured.address));
         Ok(Some(ConfiguredFamilies {
             nexus,
             models,
@@ -8313,6 +8399,7 @@ pub(crate) trait ReadsFlowMemory {
             metaflows,
             default_minutes,
             heartbeat,
+            configured_harness_flags,
         }))
     }
 
@@ -8403,6 +8490,9 @@ pub(crate) trait ReadsFlowMemory {
             ConfigurationChange::Metaflows(entries) => {
                 entries.iter().map(|entry| &entry.address).collect()
             }
+            ConfigurationChange::HarnessFlags(entries) => {
+                entries.iter().map(|entry| &entry.address).collect()
+            }
             ConfigurationChange::Investigation(address) => vec![address],
             ConfigurationChange::Heartbeat(Some(config)) => {
                 config.heartbeat_recipients.iter().collect()
@@ -8478,6 +8568,16 @@ pub(crate) trait ReadsFlowMemory {
                     )
                     .collect(),
             ),
+            ConfigurationChange::HarnessFlags(configured) => {
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.harness_flags,
+                    configured
+                        .into_iter()
+                        .map(|configured| StoredMetaHarnessFlagsConfiguration { configured })
+                        .collect(),
+                )
+            }
             ConfigurationChange::SendServers(send_servers) => {
                 FlowStore::replace_configuration_family(
                     engine,

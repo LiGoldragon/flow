@@ -127,4 +127,5 @@ Operation
            LeaveOutRefused.LeaveOutRefusal
            SpawnRefused.HarnessSpawnRefusal
            LaunchRefused.NativeLaunchRefusal ] ]
-[ PaneLaunch.{ ComposedLaunch HerdrPaneBinding Option<FlowId> Option<NativeSessionId> } ]
+[ HarnessArguments.Vector<String>
+  PaneLaunch.{ ComposedLaunch HerdrPaneBinding Option<FlowId> Option<NativeSessionId> HarnessArguments } ]

@@ -1,5 +1,7 @@
 #![allow(dead_code, non_camel_case_types, non_snake_case)]
 #[rustfmt::skip]
+pub type HarnessArguments = std::vec::Vec<String>;
+#[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct PaneLaunch {
@@ -7,6 +9,7 @@ pub struct PaneLaunch {
     pub herdr_pane_binding: signal_flow::HerdrPaneBinding,
     pub flow_id_option: std::option::Option<signal_flow::FlowId>,
     pub native_session_id_option: std::option::Option<signal_flow::NativeSessionId>,
+    pub harness_arguments: HarnessArguments,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

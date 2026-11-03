@@ -407,6 +407,7 @@ mod tests {
             default_leave_outs: vec![],
             send_servers: vec![],
             metaflows: rows.clone(),
+            configured_harness_flags: vec![],
             investigation: None,
             default_minutes: 30,
             heartbeat: None,

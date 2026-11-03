@@ -821,7 +821,7 @@ fn a_launch_to_an_awake_metaflow_names_the_replace_of_its_flow() {
     );
     awake_seat(&fixture, vec![]);
     let Ok(Query::Replace(profile)) = fixture.nexus.declared_launch(
-        signal_flow::Launch_Data {
+        signal_flow::LaunchRequest {
             address: seat_address(),
             remembering: signal_flow::Remembering::Predecessors(1),
             instruction_prompt: "Take up the work.".into(),

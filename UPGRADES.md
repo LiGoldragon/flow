@@ -1,3 +1,23 @@
+# Flow 0.45.0
+
+Pins signal-flow 39.0.0 (74f4dae) and meta-signal-flow 50.0.0
+(9e4bdb4). `Rehearse` accepts the same declared `LaunchRequest` as `Launch`
+and returns the single final native command with every argv word shell-quoted.
+It reads configuration and composed context but creates no pane, thread,
+identity, prompt fd or lifecycle record. Effect-created resources appear as
+typed semantic placeholders for a manual runner to supply.
+
+The first open adds `flow_nexus_meta_harness_flags_configuration`, v1. Its
+per-metaflow `HarnessFlags.String` defaults to empty when no row exists and is
+parsed before launch effects. A malformed quoted word or trailing escape is a
+typed refusal. The parsed words form the final option tail after effort in the
+same argv constructor used by launch and rehearsal.
+
+Take an immutable Memory snapshot before the first 0.45.0 open. Earlier Flow
+versions do not recognize the new family. Rollback restores that snapshot
+before starting the earlier binary; it never opens the upgraded Memory. The
+three heartbeat families and all their rows remain unchanged.
+
 # Flow 0.44.0
 
 Pins signal-flow 38.0.0 (7b737d9) and meta-signal-flow 49.0.0

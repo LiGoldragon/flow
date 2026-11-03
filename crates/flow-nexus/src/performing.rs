@@ -17,7 +17,7 @@ use crate::generated::operation::{
 use crate::generated::starter::DerivesHarness;
 use crate::herdr::launch::{
     CreatesHerdrLaunchPane, NativeTargetRefusal, ObservesNativeLaunchBinding, SpawnFailure,
-    StartsNativeHerdrHarness, SubmitsStartupPart, TitleRefusal, TitlesNativeFlow,
+    StartsConfiguredNativeHerdrHarness, SubmitsStartupPart, TitleRefusal, TitlesNativeFlow,
 };
 use crate::herdr::{OperatesHerdrPane, ReadsHerdrPanes};
 use crate::send_tool::ServesLaunchCalls;
@@ -304,7 +304,8 @@ impl Performs for RunningNexus {
                 composed_launch,
                 herdr_pane_binding,
                 flow_id_option,
-                ..
+                harness_arguments,
+                native_session_id_option: _,
             }) => {
                 // Codex: the thread is opened lean through the app-server
                 // and named with its title, then the TUI attaches to it while
@@ -380,15 +381,17 @@ impl Performs for RunningNexus {
                 // Herdr's start returns once the TUI is at rest; the thread
                 // it attaches to has no turn yet.
                 let started = match &opened {
-                    Some(thread) => self.herdr.attach_codex_harness(
+                    Some(thread) => self.herdr.attach_configured_codex_harness(
                         &composed_launch,
                         &herdr_pane_binding,
                         thread,
+                        &harness_arguments,
                     ),
-                    None => self.herdr.start_native_harness(
+                    None => self.herdr.start_configured_native_harness(
                         &composed_launch,
                         &herdr_pane_binding,
                         flow_id_option.as_deref(),
+                        &harness_arguments,
                     ),
                 };
                 match started {
@@ -434,6 +437,7 @@ impl Performs for RunningNexus {
                 herdr_pane_binding,
                 flow_id_option,
                 native_session_id_option,
+                harness_arguments: _,
             }) => {
                 let observed = match native_session_id_option {
                     Some(thread) => self.herdr.observe_attached_codex_binding(

@@ -10,11 +10,13 @@ use crate::generated::operation::{
     Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
 };
 use crate::generated::starter::CarriesFlowId;
+use crate::harness_command::ParsesHarnessFlags;
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::{ChecksComposedLaunch, ObservesNativeLaunchBinding};
 use crate::performing::ClassifiesNativeLaunchFailure;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
+use crate::store::ManagesMetaflowState;
 use crate::store::NamesConfiguredModel;
 use crate::store::NamesLiveFlow;
 use crate::store::ReadsLaunchInspectionRecords;
@@ -37,10 +39,10 @@ use crate::{
     },
 };
 use signal_flow::{
-    BindingRefusal, ComposedLaunch, EndpointSelection, Event, FlowLifecycle, FlowNode, HarnessKind,
-    HerdrRoute, HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
-    LaunchInspection, LaunchProfile, LaunchStatusRejection, Launched, NativeLaunchFailure,
-    NativeLaunchIntent, NativeLaunchRefusal, NativeLaunchStage, Origin,
+    Address, BindingRefusal, ComposedLaunch, EndpointSelection, Event, FlowLifecycle, FlowNode,
+    HarnessKind, HerdrRoute, HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase,
+    LaunchAttemptReservation, LaunchInspection, LaunchProfile, LaunchStatusRejection, Launched,
+    NativeLaunchFailure, NativeLaunchIntent, NativeLaunchRefusal, NativeLaunchStage, Origin,
     RegistrationAcknowledgement, RegistrationRefusal, ReplaceRejection, Replaced, Response,
     StartRejection, StopRejection,
 };
@@ -191,11 +193,32 @@ pub trait LaunchesFlows {
         launch: ComposedLaunch,
         origin: Origin,
         reserved: Option<String>,
+        harness_arguments: Vec<String>,
     ) -> Response;
+}
+
+/// Reads and parses the configured native argv tail before any launch effect.
+pub(crate) trait ReadsHarnessArguments {
+    fn harness_arguments(&self, address: &Address) -> Result<Vec<String>, StartRejection>;
+}
+
+impl ReadsHarnessArguments for RunningNexus {
+    fn harness_arguments(&self, address: &Address) -> Result<Vec<String>, StartRejection> {
+        self.store
+            .harness_flags(address)
+            .map_err(|_| StartRejection::LaunchPersistenceRefused)?
+            .as_str()
+            .harness_arguments()
+            .map_err(StartRejection::MalformedHarnessFlags)
+    }
 }
 
 impl LaunchesFlows for RunningNexus {
     fn start(&self, mut profile: LaunchProfile, origin: Origin) -> Response {
+        let harness_arguments = match self.harness_arguments(&profile.address) {
+            Ok(arguments) => arguments,
+            Err(rejection) => return Response::StartRejected(rejection),
+        };
         profile.model_name = match self.store.configured_model(&profile.address) {
             Ok(Some(model)) => model,
             Ok(None) | Err(_) => {
@@ -369,7 +392,7 @@ impl LaunchesFlows for RunningNexus {
             None => launch,
         };
         let harness_kind = launch.harness_kind.clone();
-        let response = self.launch_reserved(launch, origin, reserved.clone());
+        let response = self.launch_reserved(launch, origin, reserved.clone(), harness_arguments);
         // The launch's own responder ends with it, whatever it came to.
         self.close_launch_responder();
         // A launch refused after its pane exists leaves nothing running: its
@@ -390,6 +413,7 @@ impl LaunchesFlows for RunningNexus {
         launch: ComposedLaunch,
         origin: Origin,
         reserved: Option<String>,
+        harness_arguments: Vec<String>,
     ) -> Response {
         let persistence = || Response::StartRejected(StartRejection::LaunchPersistenceRefused);
         let native_intent = NativeLaunchIntent {
@@ -424,6 +448,7 @@ impl LaunchesFlows for RunningNexus {
             herdr_pane_binding: pane,
             flow_id_option: reserved,
             native_session_id_option: None,
+            harness_arguments,
         };
         // A Codex Spawn names the thread it opened, idle and titled, that
         // the TUI attached to; Bind requires that thread, and Submit gives

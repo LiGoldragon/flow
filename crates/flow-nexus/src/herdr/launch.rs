@@ -16,6 +16,7 @@ use crate::generated::starter::{
     DeliveryIntended, JsonRow, LeanStart, PaneBound, PromptsThroughHerdrSocket, ReadsStartupRecord,
     ReadsTypedUserText, RendersLeanStart, StartupReading, Textual,
 };
+use crate::harness_command::HarnessCommandResources;
 use crate::herdr::reservation::ChoosesNativeSession;
 use crate::title::{NativeTitle, ShowsNativeTitle, TitlesFlow};
 use sha2::{Digest, Sha256};
@@ -61,6 +62,24 @@ pub trait StartsNativeHerdrHarness {
     ) -> Result<(), SpawnFailure>;
 }
 
+/// The production Spawn path, carrying the preflight-parsed configured tail.
+pub(crate) trait StartsConfiguredNativeHerdrHarness {
+    fn start_configured_native_harness(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        reserved: Option<&str>,
+        harness_arguments: &[String],
+    ) -> Result<(), SpawnFailure>;
+    fn attach_configured_codex_harness(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        thread: &str,
+        harness_arguments: &[String],
+    ) -> Result<(), SpawnFailure>;
+}
+
 /// How a harness is told its native session at spawn.
 enum ClaudeSession {
     /// The harness chooses its own session.
@@ -80,6 +99,7 @@ trait SpawnsNativeHarness {
         pane: &HerdrPaneBinding,
         flow_id: Option<&str>,
         session: ClaudeSession,
+        harness_arguments: &[String],
     ) -> Result<(), SpawnFailure>;
 }
 
@@ -1753,7 +1773,7 @@ impl StartsNativeHerdrHarness for HerdrCli {
             Some(session) => ClaudeSession::Chosen(session),
             None => ClaudeSession::Unchosen,
         };
-        self.spawn_native_harness(launch, pane, reserved, session)
+        self.spawn_native_harness(launch, pane, reserved, session, &[])
     }
 
     fn attach_codex_harness(
@@ -1768,7 +1788,152 @@ impl StartsNativeHerdrHarness for HerdrCli {
         if thread.is_empty() {
             return Err("an attached Codex harness needs its opened thread".into());
         }
-        self.spawn_native_harness(launch, pane, None, ClaudeSession::Attached(thread.into()))
+        self.spawn_native_harness(
+            launch,
+            pane,
+            None,
+            ClaudeSession::Attached(thread.into()),
+            &[],
+        )
+    }
+}
+
+impl StartsConfiguredNativeHerdrHarness for HerdrCli {
+    fn start_configured_native_harness(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        reserved: Option<&str>,
+        harness_arguments: &[String],
+    ) -> Result<(), SpawnFailure> {
+        let session = match reserved.and_then(|_| self.reserved_native_session_id(launch)) {
+            Some(session) => ClaudeSession::Chosen(session),
+            None => ClaudeSession::Unchosen,
+        };
+        self.spawn_native_harness(launch, pane, reserved, session, harness_arguments)
+    }
+
+    fn attach_configured_codex_harness(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        thread: &str,
+        harness_arguments: &[String],
+    ) -> Result<(), SpawnFailure> {
+        if launch.harness_kind != HarnessKind::Codex || thread.is_empty() {
+            return Err("a configured Codex attach needs its opened thread".into());
+        }
+        self.spawn_native_harness(
+            launch,
+            pane,
+            None,
+            ClaudeSession::Attached(thread.into()),
+            harness_arguments,
+        )
+    }
+}
+
+/// Builds the one final Herdr/native argv from a launch, a typed resource
+/// projection and the configured parsed tail. Actual start and rehearsal use
+/// this same constructor.
+pub(crate) trait ConstructsHarnessCommand {
+    fn harness_command(
+        &self,
+        launch: &ComposedLaunch,
+        resources: HarnessCommandResources,
+        harness_arguments: &[String],
+    ) -> Result<Vec<String>, SpawnFailure>;
+}
+
+impl ConstructsHarnessCommand for HerdrCli {
+    fn harness_command(
+        &self,
+        launch: &ComposedLaunch,
+        resources: HarnessCommandResources,
+        harness_arguments: &[String],
+    ) -> Result<Vec<String>, SpawnFailure> {
+        let executable = self
+            .executable
+            .to_str()
+            .ok_or_else(|| SpawnFailure::Unattempted("Herdr path must be valid UTF-8".into()))?;
+        let harness = launch.harness_kind.expected_harness();
+        let mut arguments = vec![
+            "--session".into(),
+            resources.herdr_session,
+            "agent".into(),
+            "start".into(),
+            resources.agent,
+            "--kind".into(),
+            harness.into(),
+            "--pane".into(),
+            resources.pane,
+            "--timeout".into(),
+            "30000".into(),
+        ];
+        if launch.harness_kind == HarnessKind::Codex {
+            arguments.push("--executable".into());
+            arguments.push(resources.program.clone());
+        }
+        arguments.push("--".into());
+        let typed_from = arguments.len();
+        if let Some(socket) = resources.codex_socket {
+            arguments.push("--remote".into());
+            arguments.push(format!("unix://{socket}"));
+        }
+        if launch.harness_kind == HarnessKind::Claude {
+            let required = |value: Option<String>, name: &str| {
+                value.ok_or_else(|| {
+                    SpawnFailure::Unattempted(format!("Claude command needs {name}"))
+                })
+            };
+            let title = required(resources.claude_title, "its reserved Flow identity")?;
+            arguments.push("--settings".into());
+            arguments.push(required(resources.claude_settings, "its settings")?);
+            arguments.push(Self::CLAUDE_REMOTE_CONTROL_FLAG.into());
+            arguments.push(title.clone());
+            arguments.push(Self::CLAUDE_NAME_FLAG.into());
+            arguments.push(title);
+            arguments.push("--system-prompt-file".into());
+            arguments.push(required(resources.prompt_fd, "its system prompt fd")?);
+            if let Some(session) = resources.claude_session {
+                arguments.push("--session-id".into());
+                arguments.push(session);
+            }
+        }
+        arguments.push("--model".into());
+        arguments.push(launch.launch_profile.model_name.clone());
+        match launch.harness_kind {
+            HarnessKind::Claude => {
+                arguments.push("--effort".into());
+                arguments.push(launch.launch_profile.effort.clone());
+            }
+            HarnessKind::Codex => {
+                arguments.push("-c".into());
+                arguments.push(format!(
+                    "model_reasoning_effort={}",
+                    launch.launch_profile.effort
+                ));
+                arguments.push("-c".into());
+                arguments.push(resources.codex_title.ok_or_else(|| {
+                    SpawnFailure::Unattempted("Codex command needs its title setting".into())
+                })?);
+            }
+        }
+        arguments.extend(launch.lean_start().arguments());
+        arguments.extend_from_slice(harness_arguments);
+        if let Some(thread) = resources.thread {
+            arguments.push("resume".into());
+            arguments.push(thread);
+        }
+        let typed = std::iter::once(resources.program)
+            .chain(arguments[typed_from..].iter().cloned())
+            .collect::<Vec<_>>();
+        if let Some(cause) = typed.typed_command_refusal() {
+            return Err(SpawnFailure::Refused(cause));
+        }
+        Ok(std::iter::once(executable.to_owned())
+            .chain(arguments)
+            .collect())
     }
 }
 
@@ -1779,6 +1944,7 @@ impl SpawnsNativeHarness for HerdrCli {
         pane: &HerdrPaneBinding,
         reserved: Option<&str>,
         session: ClaudeSession,
+        harness_arguments: &[String],
     ) -> Result<(), SpawnFailure> {
         launch.binding_matches_launch(pane)?;
         // A Claude session is named at start with its title, so its Flow ID
@@ -1812,23 +1978,9 @@ impl SpawnsNativeHarness for HerdrCli {
         if launch.harness_kind == HarnessKind::Claude {
             self.prepare_claude_pane_environment(launch, pane, reserved)?;
         }
-        let harness = launch.harness_kind.expected_harness();
-        let mut arguments = vec![
-            "--session".into(),
-            pane.herdr_session_name.clone(),
-            "agent".into(),
-            "start".into(),
-            pane.herdr_agent_name.clone(),
-            "--kind".into(),
-            harness.into(),
-            "--pane".into(),
-            pane.herdr_pane_id.clone(),
-            "--timeout".into(),
-            "30000".into(),
-        ];
         // The program Herdr types first: Herdr's own name for the kind, or
         // the configured Codex client.
-        let mut program = harness.to_owned();
+        let mut program = launch.harness_kind.expected_harness().to_owned();
         let codex_endpoint = if launch.harness_kind == HarnessKind::Codex {
             let endpoint = self
                 .codex_endpoints
@@ -1844,89 +1996,43 @@ impl SpawnsNativeHarness for HerdrCli {
                 .to_str()
                 .ok_or("configured Codex client path must be valid UTF-8")?
                 .to_owned();
-            arguments.push("--executable".into());
-            arguments.push(program.clone());
             Some(endpoint)
         } else {
             None
         };
-        arguments.push("--".into());
-        let typed_from = arguments.len();
-        if let Some(endpoint) = codex_endpoint {
-            arguments.push("--remote".into());
-            arguments.push(format!("unix://{}", endpoint.socket));
-        }
-        if let Some(title) = &claude_title {
-            arguments.push("--settings".into());
-            arguments.push(self.claude_flag_settings(&launch.lean_start()));
-            // Every Claude Flow is remotely controllable under its title;
-            // the title begins with `{`, never `-`, so the optional value
-            // binds to the flag.
-            arguments.push(Self::CLAUDE_REMOTE_CONTROL_FLAG.into());
-            arguments.push(title.as_str().into());
-            // The session is named at launch with the same title: the name
-            // Claude records in its transcript and shows in the prompt box,
-            // the resume picker and the terminal title. `/rename` is a
-            // slash command, which a launch leaving out the Skill tool
-            // (`--disable-slash-commands`) cannot run.
-            arguments.push(Self::CLAUDE_NAME_FLAG.into());
-            arguments.push(title.as_str().into());
-            // The composed system prompt is read from the in-memory file
-            // this Nexus holds open until the session has bound; it never
-            // travels in the typed command and never touches a disk.
-            arguments.push("--system-prompt-file".into());
-            arguments.push(self.hold_system_prompt(launch)?);
-            match &session {
-                ClaudeSession::Unchosen | ClaudeSession::Attached(_) => {}
-                ClaudeSession::Chosen(session) => {
-                    arguments.push("--session-id".into());
-                    arguments.push(session.clone());
-                }
-            }
-        }
-        arguments.push("--model".into());
-        arguments.push(launch.launch_profile.model_name.clone());
-        match launch.harness_kind {
-            HarnessKind::Claude => {
-                arguments.push("--effort".into());
-                arguments.push(launch.launch_profile.effort.clone());
-            }
-            // The thread already holds the composed system prompt as its
-            // base instructions, given at thread/start and given again after
-            // the TUI attaches; the TUI is not given it.
-            HarnessKind::Codex => {
-                arguments.push("-c".into());
-                arguments.push(format!(
-                    "model_reasoning_effort={}",
-                    launch.launch_profile.effort
-                ));
-                // The terminal title is the thread title alone, which Title
-                // sets to the seat's struct: codex-tui 0.161.0-alpha.2 names
-                // its items in `[tui].terminal_title`, and without this list
-                // appends the project name (" | primary").
-                arguments.push("-c".into());
-                arguments.push(CODEX_TERMINAL_TITLE.into());
-            }
-        }
-        // The launch's leave-outs, as its harness's own switches.
-        arguments.extend(launch.lean_start().arguments());
-        // The subcommand follows every switch: the TUI resumes the thread
-        // Flow opened and named, idle until Submit gives it its first turn.
-        if let (HarnessKind::Codex, ClaudeSession::Attached(thread)) =
-            (&launch.harness_kind, &session)
-        {
-            arguments.push("resume".into());
-            arguments.push(thread.clone());
-        }
-        let typed = std::iter::once(program)
-            .chain(arguments[typed_from..].iter().cloned())
-            .collect::<Vec<_>>();
-        if let Some(cause) = typed.typed_command_refusal() {
-            self.release_system_prompt(&launch.launch_profile.launch_request_id);
-            return Err(SpawnFailure::Refused(cause));
-        }
+        let prompt_fd = if launch.harness_kind == HarnessKind::Claude {
+            Some(self.hold_system_prompt(launch)?)
+        } else {
+            None
+        };
+        let resources = HarnessCommandResources {
+            herdr_session: pane.herdr_session_name.clone(),
+            agent: pane.herdr_agent_name.clone(),
+            pane: pane.herdr_pane_id.clone(),
+            program,
+            codex_socket: codex_endpoint.map(|endpoint| endpoint.socket.clone()),
+            claude_settings: (launch.harness_kind == HarnessKind::Claude)
+                .then(|| self.claude_flag_settings(&launch.lean_start())),
+            claude_title: claude_title.map(|title| title.as_str().to_owned()),
+            prompt_fd,
+            claude_session: match &session {
+                ClaudeSession::Chosen(session) => Some(session.clone()),
+                ClaudeSession::Unchosen | ClaudeSession::Attached(_) => None,
+            },
+            codex_title: (launch.harness_kind == HarnessKind::Codex)
+                .then(|| CODEX_TERMINAL_TITLE.into()),
+            thread: match &session {
+                ClaudeSession::Attached(thread) => Some(thread.clone()),
+                ClaudeSession::Chosen(_) | ClaudeSession::Unchosen => None,
+            },
+        };
+        let command = self
+            .harness_command(launch, resources, harness_arguments)
+            .inspect_err(|_| {
+                self.release_system_prompt(&launch.launch_profile.launch_request_id)
+            })?;
         // No positional prompt: the first USER message is typed after.
-        self.run_agent_start(&arguments)
+        self.run_agent_start(&command[1..])
             .inspect_err(|_| self.release_system_prompt(&launch.launch_profile.launch_request_id))
     }
 }

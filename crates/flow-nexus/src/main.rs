@@ -133,14 +133,29 @@ fn main() -> ExitCode {
             };
             let mut initialization_error = None;
             let nexus = loop {
-                if let Err(error) = ConfigurationStartup::serve_normal_configuration(
+                match ConfigurationStartup::serve_normal_configuration(
                     &start,
                     &signals,
                     &listeners,
                     initialization_error.take(),
                 ) {
-                    eprintln!("flow-nexus: configuration service: {error}");
-                    return ExitCode::FAILURE;
+                    Ok(()) => {}
+                    Err(ConfigureOnlyError::Store(error)) => {
+                        initialization_error = Some(error.to_string());
+                        if let Err(retry_error) =
+                            ConfigurationStartup::serve_configuration_reacquisition(
+                                &start, &signals, &listeners, &error,
+                            )
+                        {
+                            eprintln!("flow-nexus: configuration service: {retry_error}");
+                            return ExitCode::FAILURE;
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        eprintln!("flow-nexus: configuration service: {error}");
+                        return ExitCode::FAILURE;
+                    }
                 }
                 // The configuration transaction is closed before the
                 // configured store opens. The same listeners stay owned by
@@ -507,6 +522,74 @@ trait RunsConfigurationStartup {
             meta.and(ordinary)
         });
         drop(store);
+        served.map_err(ConfigureOnlyError::Other)
+    }
+
+    /// Keeps the same service present when the stopped configuration store
+    /// cannot yet be reacquired. One meta request observes the store refusal,
+    /// then the caller's next connection gets a fresh reacquisition attempt.
+    fn serve_configuration_reacquisition(
+        start: &flow_ethos::Start,
+        signals: &TerminationSignals,
+        listeners: &NexusListeners,
+        error: &StoreError,
+    ) -> Result<(), ConfigureOnlyError> {
+        let retry = AtomicBool::new(false);
+        let stopping = AtomicBool::new(false);
+        let finished = AtomicBool::new(false);
+        let ordinary_socket = Path::new(&start.ordinary_socket_path);
+        let meta_socket = Path::new(&start.meta_socket_path);
+        let served = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                if signals.watch(&|| finished.load(Ordering::SeqCst)) {
+                    stopping.store(true, Ordering::SeqCst);
+                    let _ = UnixStream::connect(ordinary_socket);
+                    let _ = UnixStream::connect(meta_socket);
+                }
+            });
+            let ordinary = scope.spawn(|| {
+                ConfigurationStartup::serve_configuring_ordinary(
+                    &listeners.ordinary,
+                    &retry,
+                    &stopping,
+                )
+            });
+            let meta = (|| {
+                let (mut peer, _) = listeners
+                    .meta
+                    .accept()
+                    .map_err(|accept| accept.to_string())?;
+                if stopping.load(Ordering::SeqCst) {
+                    return Err("stopped while configuration was unavailable".to_owned());
+                }
+                peer.set_read_timeout(Some(Duration::from_secs(5)))
+                    .and_then(|_| peer.set_write_timeout(Some(Duration::from_secs(5))))
+                    .map_err(|timeout| timeout.to_string())?;
+                if let Some(refusal) = ConfigurationStartup::peer_is_authorized_for_configuration(
+                    peer.peer_process(),
+                    "",
+                ) {
+                    peer.write_meta_response(&MetaResponse::MetaRefused(refusal))?;
+                } else {
+                    let _ = peer.read_meta_query()?;
+                    peer.write_meta_response(&MetaResponse::Refused(
+                        meta_signal_flow::StoreRefusal::Store(error.to_string()),
+                    ))?;
+                }
+                retry.store(true, Ordering::SeqCst);
+                let _ = UnixStream::connect(ordinary_socket);
+                Ok(())
+            })();
+            if meta.is_err() {
+                stopping.store(true, Ordering::SeqCst);
+                let _ = UnixStream::connect(ordinary_socket);
+            }
+            let ordinary = ordinary
+                .join()
+                .map_err(|_| "configuration ordinary listener panicked".to_owned())?;
+            finished.store(true, Ordering::SeqCst);
+            meta.and(ordinary)
+        });
         served.map_err(ConfigureOnlyError::Other)
     }
 

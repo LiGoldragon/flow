@@ -16,10 +16,7 @@ use std::{
     os::unix::net::{UnixListener, UnixStream},
     path::Path,
     process::ExitCode,
-    sync::{
-        Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
@@ -131,17 +128,11 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let mut initialization_error = None;
             let nexus = loop {
-                match ConfigurationStartup::serve_normal_configuration(
-                    &start,
-                    &signals,
-                    &listeners,
-                    initialization_error.take(),
-                ) {
+                match ConfigurationStartup::serve_normal_configuration(&start, &signals, &listeners)
+                {
                     Ok(()) => {}
                     Err(ConfigureOnlyError::Store(error)) => {
-                        initialization_error = Some(error.to_string());
                         if let Err(retry_error) =
                             ConfigurationStartup::serve_configuration_reacquisition(
                                 &start, &signals, &listeners, &error,
@@ -166,7 +157,7 @@ fn main() -> ExitCode {
                         ConfigurationStartup::report_unrecognized_store(&path, &reason);
                         return ExitCode::FAILURE;
                     }
-                    Err(error) => initialization_error = Some(error.to_string()),
+                    Err(_) => {}
                 }
             };
             (nexus, Some(listeners))
@@ -340,17 +331,11 @@ trait RunsConfigurationStartup {
     fn configuring_meta_response(
         store: &ConfigurationOnlyStore,
         query: MetaQuery,
-        initialization_error: &Mutex<Option<String>>,
     ) -> (MetaResponse, bool) {
         let response = match query {
-            MetaQuery::Readiness => initialization_error
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone()
-                .map_or_else(
-                    || MetaResponse::Readiness(meta_signal_flow::NexusReadiness::ConfigServing),
-                    |error| MetaResponse::Refused(meta_signal_flow::StoreRefusal::Store(error)),
-                ),
+            MetaQuery::Readiness => {
+                MetaResponse::Readiness(meta_signal_flow::NexusReadiness::ConfigServing)
+            }
             MetaQuery::Configuration => match store.configuration_snapshot() {
                 // Counters exist only in the running store, so the complete
                 // public snapshot is unavailable until Ready.
@@ -394,25 +379,20 @@ trait RunsConfigurationStartup {
             )),
         };
         let ready = if matches!(&response, MetaResponse::Configured(_)) {
-            match store.configuration_snapshot() {
-                Ok(Some(_)) => {
-                    *initialization_error
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-                    true
-                }
-                Ok(None) => false,
-                Err(error) => {
-                    *initialization_error
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.to_string());
-                    false
-                }
-            }
+            matches!(store.configuration_snapshot(), Ok(Some(_)))
         } else {
             false
         };
         (response, ready)
+    }
+
+    fn unavailable_configuration_response(query: MetaQuery, error: &StoreError) -> MetaResponse {
+        match query {
+            MetaQuery::Readiness => {
+                MetaResponse::Readiness(meta_signal_flow::NexusReadiness::ConfigServing)
+            }
+            _ => MetaResponse::Refused(meta_signal_flow::StoreRefusal::Store(error.to_string())),
+        }
     }
 
     fn serve_configuring_ordinary(
@@ -441,7 +421,6 @@ trait RunsConfigurationStartup {
         ready: &AtomicBool,
         stopping: &AtomicBool,
         ordinary_socket: &Path,
-        initialization_error: &Mutex<Option<String>>,
     ) -> Result<(), String> {
         while !ready.load(Ordering::SeqCst) && !stopping.load(Ordering::SeqCst) {
             let (mut peer, _) = listener.accept().map_err(|error| error.to_string())?;
@@ -458,11 +437,8 @@ trait RunsConfigurationStartup {
                 peer.write_meta_response(&MetaResponse::MetaRefused(refusal))?;
                 continue;
             }
-            let (response, becomes_ready) = ConfigurationStartup::configuring_meta_response(
-                store,
-                peer.read_meta_query()?,
-                initialization_error,
-            );
+            let (response, becomes_ready) =
+                ConfigurationStartup::configuring_meta_response(store, peer.read_meta_query()?);
             peer.write_meta_response(&response)?;
             if becomes_ready {
                 ready.store(true, Ordering::SeqCst);
@@ -476,7 +452,6 @@ trait RunsConfigurationStartup {
         start: &flow_ethos::Start,
         signals: &TerminationSignals,
         listeners: &NexusListeners,
-        initial_error: Option<String>,
     ) -> Result<(), ConfigureOnlyError> {
         let store = ConfigurationOnlyStore::open(Path::new(&start.store_path))
             .map_err(ConfigureOnlyError::Store)?;
@@ -488,7 +463,6 @@ trait RunsConfigurationStartup {
         let ready = AtomicBool::new(false);
         let stopping = AtomicBool::new(false);
         let finished = AtomicBool::new(false);
-        let initialization_error = Mutex::new(initial_error);
         let ordinary_socket = Path::new(&start.ordinary_socket_path);
         let meta_socket = Path::new(&start.meta_socket_path);
         let served = std::thread::scope(|scope| {
@@ -513,7 +487,6 @@ trait RunsConfigurationStartup {
                 &ready,
                 &stopping,
                 ordinary_socket,
-                &initialization_error,
             );
             if meta.is_err() {
                 stopping.store(true, Ordering::SeqCst);
@@ -530,8 +503,9 @@ trait RunsConfigurationStartup {
     }
 
     /// Keeps the same service present when the stopped configuration store
-    /// cannot yet be reacquired. One meta request observes the store refusal,
-    /// then the caller's next connection gets a fresh reacquisition attempt.
+    /// cannot yet be reacquired. Readiness remains a truthful service-state
+    /// observation; an operation that needs Memory receives this acquisition
+    /// attempt's refusal. The next connection gets a fresh attempt.
     fn serve_configuration_reacquisition(
         start: &flow_ethos::Start,
         signals: &TerminationSignals,
@@ -575,10 +549,11 @@ trait RunsConfigurationStartup {
                 ) {
                     peer.write_meta_response(&MetaResponse::MetaRefused(refusal))?;
                 } else {
-                    let _ = peer.read_meta_query()?;
-                    peer.write_meta_response(&MetaResponse::Refused(
-                        meta_signal_flow::StoreRefusal::Store(error.to_string()),
-                    ))?;
+                    let response = ConfigurationStartup::unavailable_configuration_response(
+                        peer.read_meta_query()?,
+                        error,
+                    );
+                    peer.write_meta_response(&response)?;
                 }
                 retry.store(true, Ordering::SeqCst);
                 let _ = UnixStream::connect(ordinary_socket);
@@ -754,7 +729,6 @@ mod tests {
             net::{UnixListener, UnixStream},
         },
         path::{Path, PathBuf},
-        sync::Mutex,
     };
 
     #[test]
@@ -984,9 +958,8 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary home");
         let store = ConfigurationOnlyStore::open(&directory.path().join("flow.sema"))
             .expect("fresh store opens");
-        let error = Mutex::new(None);
         assert_eq!(
-            ConfigurationStartup::configuring_meta_response(&store, MetaQuery::Readiness, &error,),
+            ConfigurationStartup::configuring_meta_response(&store, MetaQuery::Readiness),
             (
                 MetaResponse::Readiness(meta_signal_flow::NexusReadiness::ConfigServing),
                 false,
@@ -995,7 +968,6 @@ mod tests {
         let (configured, becomes_ready) = ConfigurationStartup::configuring_meta_response(
             &store,
             MetaQuery::Configure(nexus_change("/bin/true", "/tmp/message.sock")),
-            &error,
         );
         assert_eq!(
             configured,
@@ -1008,27 +980,27 @@ mod tests {
         let (unchanged, remains_ready) = ConfigurationStartup::configuring_meta_response(
             &store,
             MetaQuery::Configure(nexus_change("/bin/true", "/tmp/message.sock")),
-            &error,
         );
         assert_eq!(
             unchanged,
             MetaResponse::Configured(meta_signal_flow::ConfigureOutcome::Unchanged)
         );
         assert!(remains_ready, "an identical declaration remains ready");
+    }
 
-        let initialization_error = Mutex::new(Some("snapshot refused".to_owned()));
+    #[test]
+    fn unavailable_configuration_memory_does_not_poison_readiness() {
+        let error = flow_nexus::store::StoreError::NotConfigured;
         assert_eq!(
-            ConfigurationStartup::configuring_meta_response(
-                &store,
-                MetaQuery::Readiness,
-                &initialization_error,
+            ConfigurationStartup::unavailable_configuration_response(MetaQuery::Readiness, &error,),
+            MetaResponse::Readiness(meta_signal_flow::NexusReadiness::ConfigServing)
+        );
+        assert_eq!(
+            ConfigurationStartup::unavailable_configuration_response(
+                MetaQuery::Configuration,
+                &error,
             ),
-            (
-                MetaResponse::Refused(meta_signal_flow::StoreRefusal::Store(
-                    "snapshot refused".to_owned(),
-                )),
-                false,
-            )
+            MetaResponse::Refused(meta_signal_flow::StoreRefusal::Store(error.to_string()))
         );
     }
 

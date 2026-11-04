@@ -12,9 +12,6 @@
       url = "github:LiGoldragon/Curriculum/d8aa45d";
       flake = false;
     };
-    # The public default remains the last unconfigured Flow artifact while
-    # callers move explicitly to lib.<system>.mkFlowPackage.
-    unconfigured-flow.url = "github:LiGoldragon/flow/d3ab87ee18b1dd30947d5f0089f5abb4bafa80d5";
   };
 
   outputs =
@@ -24,7 +21,6 @@
       fenix,
       crane,
       curriculum,
-      unconfigured-flow,
     }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
@@ -155,10 +151,16 @@
           context = mkContext system;
         in
         {
-          # Intentionally the last unconfigured artifact. A 0.43 package
-          # is built only through lib.<system>.mkFlowPackage with an explicit
-          # defaultConfiguration; production has supplied none yet.
-          default = unconfigured-flow.packages.${system}.default;
+          # The public default is the current authored source, built without
+          # executable configuration. Configured deployments use the explicit
+          # lib.<system>.mkFlowPackage constructor below.
+          default = context.craneLib.buildPackage (
+            context.commonArgs
+            // {
+              inherit (context) cargoArtifacts;
+              cargoExtraArgs = "--workspace";
+            }
+          );
           # The flow-nexus library test executable, built so a test kept
           # out of every check (one that needs a store no repository holds,
           # named at run time) can be run by name where a build runs.

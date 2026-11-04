@@ -23,16 +23,3 @@ too, and meta-signal-flow's `Configuration` has no field for either, so no
 **Proper fix:** meta-signal-flow's `Configuration` gains Claude's home and
 its skill catalogs, `flow-defaults` derives their defaults from `HOME`, and
 these two reads go.
-
-## Clients choose a Nexus by `FLOW_SOCKET` and `FLOW_META_SOCKET`
-
-The clients reach the default sockets under the caller's
-`XDG_RUNTIME_DIR`. `FLOW_SOCKET` and `FLOW_META_SOCKET` name another Nexus's
-socket instead: the deployment's next-slot wrappers (`flow-next`,
-`flow-next-meta`) select the next Nexus this way, and a Nexus whose sockets
-`Configure` moved is reached only so. They configure nothing in the Nexus.
-No test needs them.
-
-**Proper fix:** undecided. A wrapper that sets `XDG_RUNTIME_DIR` to its
-slot's runtime anchor reaches the same path with no Flow variable, but a
-moved socket would then have no way to be named.

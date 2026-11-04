@@ -4,10 +4,11 @@
 ;; declarations, the ids and counters, the guard, the re-bind lines, the
 ;; seats read back and the window.
 ;;
-;; Usage: bb flow-capsule-test.clj <path to flow-capsule.clj>
+;; Usage: bb flow-capsule-test.clj <path to flow-capsule.clj> <flow package>
 (require '[babashka.fs :as fs] '[clojure.string :as str])
 
 (load-file (first *command-line-args*))
+(def flow-package (second *command-line-args*))
 
 (def failures (atom []))
 
@@ -212,14 +213,21 @@
              {:pane_id "w3:p1" :label "{ Psyche test Quaternary 3d4e5f }"}
              {:pane_id "w4:p1" :label "{ Mind test Secondary 6a7b8c }"}
              {:pane_id "w5:p1" :label "{ Mind test Quaternary 9d0e1f }"}]
-      lines (flow-capsule/rebind-lines panes "/nix/store/new" #(clojure.string/ends-with? % "Quaternary"))]
+      lines (flow-capsule/rebind-lines panes flow-package #(clojure.string/ends-with? % "Quaternary"))]
   (check "the trackers' stand-ins come first, then the rest in pane order"
          (= ["w3:p1" "w5:p1" "w2:p1" "w4:p1"] (map :pane lines)))
   (check "each line names its pane's FlowId and Address"
          (= {:pane "w2:p1" :flow-id "0a1b2c" :address "{ Psyche test Secondary }"}
             (dissoc (nth lines 2) :line)))
-  (check "the typed line is the shell prefix and the new client's BindSeat"
-         (= "! /nix/store/new/bin/flow 'BindSeat.{ Psyche test Secondary }'" (:line (nth lines 2)))))
+  (check "the typed line carries the Rust-composed invocation to the new client"
+         (= (str "! " flow-package "/bin/flow '{ " flow-capsule/ordinary-socket
+                 " BindSeat.{ Psyche test Secondary } }'")
+            (:line (nth lines 2))))
+  (let [{:keys [exit err]}
+        (flow-capsule/run {} (str flow-package "/bin/flow")
+                          "{ /run/user/1001/flow-testing/no-owner.sock Metaflows }")]
+    (check "the packaged client accepts the helper's envelope before transport"
+           (and (= 2 exit) (not (str/includes? err "invalid Flow invocation"))))))
 
 ;; The readback: each Awake seat's FlowId by Address; a seat whose FlowId
 ;; changed, went Asleep or is gone is a changed seat.

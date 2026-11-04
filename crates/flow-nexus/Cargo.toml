@@ -10,6 +10,7 @@ path = "src/main.rs"
 default = ["datom"]
 datom = []
 [dependencies]
+flow = { path = "../flow" }
 flow-defaults = { path = "../flow-defaults" }
 flow-native = { path = "../flow-native" }
 flow-ethos.workspace = true

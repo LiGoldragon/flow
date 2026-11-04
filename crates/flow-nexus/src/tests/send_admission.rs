@@ -583,9 +583,8 @@ fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
     let flow = |text: &str| -> String {
         let output = std::process::Command::new(&cli)
             .env_clear()
-            .env("FLOW_SOCKET", &socket)
             .env("HERDR_PANE_ID", "w5:p1")
-            .arg(text)
+            .arg(format!("{{ «{}» {text} }}", socket.to_string_lossy()))
             .output()
             .expect("flow runs");
         assert!(output.status.success(), "{text}: {output:?}");

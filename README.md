@@ -243,11 +243,10 @@ exact-byte composition, the Codex native skill catalog working directory, the
 Flow workspace root, and the project Claude skill catalog. `CODEX_HOME` and
 `CLAUDE_CONFIG_DIR` select native transcript and personal-skill roots, and
 `CLAUDE_ENTERPRISE_SKILLS_DIR` optionally adds the highest-precedence Claude
-skill catalog (see `NON_IDEAL_AGENTS.md`). The clients reach the default
-sockets under the caller's `XDG_RUNTIME_DIR`; `FLOW_SOCKET` and
-`FLOW_META_SOCKET` name another Nexus's socket instead. Flow exports
-`FLOW_SOCKET` into every Claude pane it launches as its own ordinary socket,
-so that flow's hook and `flow` calls reach the Nexus that launched it.
+skill catalog (see `NON_IDEAL_AGENTS.md`). Each client invocation is one
+typed struct: the target socket followed by its existing Query. The client
+sends the Query alone over that socket. Every Claude hook command carries
+the launching Nexus's ordinary socket in typed hook configuration.
 
 A fresh Flow receives exactly one prompt. The harness starts with no
 positional prompt, and the composed first prompt opens with the native skill
@@ -361,11 +360,9 @@ The Flow commands and the `flow-nexus.service` user unit are declared by the
 operating system's Home configuration, which pins this repository's package
 and writes the unit; this repository carries no installable unit.
 
-`launcher/flow-start.mjs` starts a standard flow from the workspace's
-`config/main-flow` declarations: `flow-start <Aspect> <topic> <Layer> [-p
-<predecessor>] [-n] [task ...]`. It reads `FLOW_WORKSPACE` (the workspace root)
-and `FLOW_START_LIBRARY` (the workspace tools directory holding the start
-adapter); the Home configuration packages it with both set.
+`launcher/flow-start.mjs` reports that this package has no launcher until its
+external workspace adapter has a packaged typed socket invocation contract.
+Launching remains available through an explicit typed Flow client invocation.
 
 This branch is source-published and is not an installed or live-accepted
 deployment. Its final compilation and test gate must run on the configured

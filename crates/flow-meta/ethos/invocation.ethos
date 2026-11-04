@@ -1,0 +1,9 @@
+; The meta text edge names the Nexus instance with its socket and the
+; existing meta Query. The Query alone crosses the Nexus wire.
+
+Library
+[ flow_ethos:MetaSocketPath
+  meta_signal_flow:Query ]
+[ Invocation.{ MetaSocketPath Query } ]
+[]
+[]

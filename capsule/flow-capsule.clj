@@ -149,6 +149,8 @@
 (defn read-datom [text]
   (try (first (parse-one (tokenize (str/trim (or text ""))))) (catch Exception _ nil)))
 
+(def package-interface (atom {}))
+
 (defn head [d] (:head d))
 (defn body [d] (:body d))
 (defn items [d] (:items d))
@@ -194,6 +196,17 @@
       (do (p/destroy-tree proc) {:exit -1 :out "" :err (str "timed out after " timeout " ms")})
       (select-keys result [:exit :out :err]))))
 
+(defn client-argument [pkg client socket query]
+  (case (get @package-interface pkg)
+    :query query
+    :invocation (let [composer (str pkg "/bin/" client "-compose-invocation")
+                      {:keys [exit out err]} (run {} composer socket query)]
+                  (if (zero? exit)
+                    (str/trim out)
+                    (throw (ex-info "typed client invocation composition failed"
+                                    {:package pkg :client client :error (str/trim err)}))))
+    (throw (ex-info "package client interface is undeclared" {:package pkg}))))
+
 (defn herdr [& args]
   (apply run {} "herdr" "--session" session args))
 
@@ -214,18 +227,20 @@
   "One ordinary-socket call; `pane` is the pane the caller stands in."
   ([datom] (flow datom @driver-pane))
   ([datom pane]
-   (reply-text (run {:env (clean-env (merge (marks pane) {"FLOW_SOCKET" ordinary-socket}))}
-                    (str @package "/bin/flow") datom))))
+   (reply-text (run {:env (clean-env (marks pane))}
+                    (str @package "/bin/flow")
+                    (client-argument @package "flow" ordinary-socket datom)))))
 
 (defn flow-process
   "An ordinary-socket call started now and read later."
   [datom pane]
-  (p/process [(str @package "/bin/flow") datom]
-             {:env (clean-env (merge (marks pane) {"FLOW_SOCKET" ordinary-socket})) :out :string :err :string :in ""}))
+  (p/process [(str @package "/bin/flow") (client-argument @package "flow" ordinary-socket datom)]
+             {:env (clean-env (marks pane)) :out :string :err :string :in ""}))
 
 (defn flow-meta [datom]
-  (reply-text (run {:env (clean-env (merge (marks @driver-pane) {"FLOW_META_SOCKET" meta-socket}))}
-                   (str @package "/bin/flow-meta") datom)))
+  (reply-text (run {:env (clean-env (marks @driver-pane))}
+                   (str @package "/bin/flow-meta")
+                   (client-argument @package "flow-meta" meta-socket datom))))
 
 ;; ---------------------------------------------------------------- observing
 
@@ -850,9 +865,9 @@
       (when-not (watch 10 #(or (listens? pid meta-socket) (not (p/alive? child))))
         (p/destroy child))
       (let [reply (if (p/alive? child)
-                    (reply-text (run {:env (clean-env {"PATH" (str pkg "/bin:" (System/getenv "PATH"))
-                                                       "FLOW_META_SOCKET" meta-socket})}
-                                     (str pkg "/bin/flow-meta") datom))
+                    (reply-text (run {:env (clean-env {"PATH" (str pkg "/bin:" (System/getenv "PATH"))})}
+                                     (str pkg "/bin/flow-meta")
+                                     (client-argument pkg "flow-meta" meta-socket datom)))
                     (str "configuration-only Nexus exited before listening: " (str/trim (slurp log))))
             exit (:exit (deref child 15000 {:exit "still running"}))]
         (when (= exit "still running") (p/destroy child))
@@ -898,7 +913,6 @@
           :when (or (str/includes? cmd capsule-runtime) (str/includes? cmd store-path)
                     (str/includes? env (str "XDG_RUNTIME_DIR=" capsule-runtime "\u0000"))
                     (str/includes? cmd (str "--session " session))
-                    (str/includes? env (str "FLOW_SOCKET=" ordinary-socket))
                     (str/includes? env (str "HERDR_SESSION=" session)))]
       (str pid " " (str/trim cmd)))))
 
@@ -1371,6 +1385,9 @@
   [probe start!]
   (if (some owner-answers? (vals probe)) :refused (start!)))
 
+(defn shell-quote [text]
+  (str "'" (str/replace text "'" "'\"'\"'") "'"))
+
 (defn rebind-lines
   "One line per seat pane, as the procedure's C7 makes them from the pane
   list: the trackers (tracker? of `Aspect topic Layer`) first, then the rest
@@ -1380,9 +1397,15 @@
                      (when-let [[_ aspect topic layer flow-id]
                                 (re-matches #"\{ (\w+) (\S+) (\w+) ([0-9a-f]{6}) \}" (str label))]
                        (let [words (str aspect " " topic " " layer)]
-                         {:pane pane_id :flow-id flow-id :address (str "{ " words " }")
-                          :line (str "! " pkg "/bin/flow 'BindSeat.{ " words " }'")
-                          :tracker (boolean (tracker? words))})))
+                         (let [query (str "BindSeat.{ " words " }")
+                               {:keys [exit out err]}
+                               (run {} (str pkg "/bin/flow-compose-invocation") ordinary-socket query)]
+                           (when-not (zero? exit)
+                             (throw (ex-info "typed rebind composition failed"
+                                             {:package pkg :error (str/trim err)})))
+                           {:pane pane_id :flow-id flow-id :address (str "{ " words " }")
+                            :line (str "! " pkg "/bin/flow " (shell-quote (str/trim out)))
+                            :tracker (boolean (tracker? words))}))))
                    pane-list)]
     (mapv #(dissoc % :tracker) (concat (filter :tracker rows) (remove :tracker rows)))))
 
@@ -1427,14 +1450,16 @@
 (defn meta-at
   "One meta call by pkg's client on socket, from no pane: the owner."
   [pkg socket datom]
-  (reply-text (run {:env (package-env pkg {"FLOW_META_SOCKET" socket})} (str pkg "/bin/flow-meta") datom)))
+  (reply-text (run {:env (package-env pkg {})} (str pkg "/bin/flow-meta")
+                   (client-argument pkg "flow-meta" socket datom))))
 
 (defn guard-probe
   "The guard's reading, as the declared unit's ExecStartPre would take it:
   each of the capsule's Flow sockets asked by pkg's client."
   [pkg]
-  {:ordinary (reply-text (run {:env (package-env pkg (merge (marks @driver-pane) {"FLOW_SOCKET" ordinary-socket}))}
-                              (str pkg "/bin/flow") "Metaflows"))
+  {:ordinary (reply-text (run {:env (package-env pkg (marks @driver-pane))}
+                              (str pkg "/bin/flow")
+                              (client-argument pkg "flow" ordinary-socket "Metaflows")))
    :meta (meta-at pkg meta-socket "Configuration")})
 
 (defn guard-refuses? [probe] (boolean (some owner-answers? (vals probe))))
@@ -1486,8 +1511,9 @@
   closed: the state of every logical delivery the sender sent. Nil when no
   frame comes in 20 s."
   [pane]
-  (let [proc (p/process [(str @package "/bin/flow") "ObserveSends.None"]
-                        {:env (clean-env (merge (marks pane) {"FLOW_SOCKET" ordinary-socket}))
+  (let [proc (p/process [(str @package "/bin/flow")
+                         (client-argument @package "flow" ordinary-socket "ObserveSends.None")]
+                        {:env (clean-env (marks pane))
                          :out :stream :err :string :in ""})
         line (deref (future (try (.readLine (java.io.BufferedReader. (java.io.InputStreamReader. (:out proc))))
                                  (catch Exception _ nil)))
@@ -1951,6 +1977,7 @@
       (refuse "usage: flow-capsule --takeover <old flow package> <new flow package> [--log <path>]"))
     (reset! old-package (str (fs/canonicalize old)))
     (reset! new-package (str (fs/canonicalize new)))
+    (reset! package-interface {@old-package :query @new-package :invocation})
     (reset! package @old-package)
     (let [log (or (second (drop-while #(not= % "--log") options)) (str state-root "/nexus.log"))
           wall (now)
@@ -1992,6 +2019,7 @@
     (when-not (and pkg (not (str/starts-with? pkg "--")))
       (refuse "usage: flow-capsule <flow-package> [--keep-going] [--log <path>]"))
     (reset! package (str (fs/canonicalize pkg)))
+    (reset! package-interface {@package :invocation})
     (reset! keep-going (boolean (some #{"--keep-going"} options)))
     (let [log (or (second (drop-while #(not= % "--log") options)) (str state-root "/nexus.log"))
           wall (System/currentTimeMillis)

@@ -13,12 +13,12 @@ default = []
 datom = ["dep:datom-codec", "dep:protos"]
 
 [dependencies]
-datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "4dff16b4f7412febc3b71aac8b49680cd20988cb", optional = true }
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "eb10157a0336e3aa2401e5b2046211fc8e736397", optional = true }
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3", optional = true }
 rkyv.workspace = true
 
 [build-dependencies]
-ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "07714b0171802787bea1eefe4caa2d826d9c4030" }
+ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "0eeb3dfc500aa7d79ec2fb338449fe6be1f17ea7" }
 
 [lints.rust]
 unsafe_code = "forbid"

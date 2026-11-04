@@ -5,18 +5,18 @@ use ethos_zero::{Actualizing, File, Generating, Potential};
 
 fn main() {
     let root = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest"));
-    for name in [
-        "operation",
-        "startup",
-        "library",
-        "curriculum",
-        "starter",
-        "send_tool",
-        "landing",
-        "memory",
+    for (name, generated_name) in [
+        ("operation", "operation"),
+        ("startup", "startup_generated"),
+        ("library", "library"),
+        ("curriculum", "curriculum"),
+        ("starter", "starter"),
+        ("send_tool", "send_tool"),
+        ("landing", "landing"),
+        ("memory", "memory"),
     ] {
         let source_path = format!("ethos/{name}.ethos");
-        let generated_path = format!("src/generated/{name}.rs");
+        let generated_path = format!("src/generated/{generated_name}.rs");
         println!("cargo:rerun-if-changed={source_path}");
         println!("cargo:rerun-if-changed={generated_path}");
         let source = std::fs::read_to_string(root.join(&source_path)).expect("source");

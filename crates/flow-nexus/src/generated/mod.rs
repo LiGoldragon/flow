@@ -4,3 +4,4 @@ pub mod operation;
 pub mod send_tool;
 pub mod starter;
 pub mod startup;
+mod startup_generated;

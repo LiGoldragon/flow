@@ -1,50 +1,19 @@
-#![allow(dead_code, non_camel_case_types, non_snake_case)]
-#[rustfmt::skip]
-pub type OrdinarySocketPath = String;
-#[rustfmt::skip]
-pub type MetaSocketPath = String;
-#[rustfmt::skip]
-pub type StorePath = String;
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct Start {
-    pub ordinary_socket_path: OrdinarySocketPath,
-    pub meta_socket_path: MetaSocketPath,
-    pub store_path: StorePath,
-}
-#[rustfmt::skip]
-pub type Path = String;
-#[rustfmt::skip]
-pub type Reason = String;
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct StoreRefusal {
-    pub path: Path,
-    pub reason: Reason,
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub enum StartRefusal {
-    Store(StoreRefusal),
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct StoreCheckRequest {
-    pub store_path: StorePath,
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub enum StoreCheck {
-    Opens(StorePath),
-    Absent(StorePath),
-    Refused(StoreRefusal),
-}
-#[rustfmt::skip]
-pub trait ChecksStore {
-    fn check(&self) -> StoreCheck;
+//! Startup's generated contract and the canonical startup refusal.
+//!
+//! The schema-generated items live apart so this authored module can keep
+//! the public `flow_nexus::generated::startup::StartRefusal` path bound to
+//! its single owner in flow-ethos.
+
+pub use flow_ethos::{StartRefusal, StoreRefusal};
+pub use super::startup_generated::*;
+
+#[cfg(test)]
+mod tests {
+    use super::StartRefusal;
+
+    #[test]
+    fn startup_refusal_is_the_flow_ethos_type() {
+        fn canonical(_: flow_ethos::StartRefusal) {}
+        let _: fn(StartRefusal) = canonical;
+    }
 }

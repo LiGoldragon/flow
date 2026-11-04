@@ -15,7 +15,7 @@ use crate::{Dispatches, OpensRunningNexus, RunningNexus};
 use meta_signal_flow::{
     ConfigurationChange, ConfigurationSnapshot, ConfigureHarnessFlags, ConfigureLeaveOut,
     ConfigureModel, ConfigureNexus, ConfigureOutcome, ConfigureRejection, ConfigureThreshold,
-    Response as MetaResponse,
+    HeartbeatConfig, Response as MetaResponse,
 };
 use signal_flow::{
     Address, Aspect, Bind_Data, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin,
@@ -96,6 +96,37 @@ fn harness_flags_are_per_metaflow_persistent_and_absent_by_default() {
     assert_eq!(
         reopened.store.harness_flags(&address).unwrap(),
         "--one 'two three'"
+    );
+}
+
+#[test]
+fn heartbeat_configuration_requires_a_positive_period_and_unique_recipients() {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let recipient = Address {
+        aspect: Aspect::Field,
+        topic: "heartbeatTest".into(),
+        layer: Layer::Secondary,
+    };
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::Heartbeat(Some(HeartbeatConfig {
+                heartbeat_period_seconds: 60,
+                heartbeat_recipients: vec![recipient.clone(), recipient],
+            }))
+        ),
+        MetaResponse::ConfigureRejected(ConfigureRejection::DuplicateEntry),
+    );
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::Heartbeat(Some(HeartbeatConfig {
+                heartbeat_period_seconds: 0,
+                heartbeat_recipients: vec![],
+            }))
+        ),
+        MetaResponse::ConfigureRejected(ConfigureRejection::StoreRefused),
     );
 }
 
@@ -484,6 +515,7 @@ fn each_family_is_its_last_declaration() {
             configured_harness_flags: Vec::new(),
             investigation: None,
             default_minutes: crate::store::SEEDED_DEFAULT_MINUTES,
+            heartbeat: None,
             counters: meta_signal_flow::ConfigureCounters {
                 logical_delivery: 1,
                 queue_attempt: 3,
@@ -790,7 +822,7 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     let nexus = fixture.open();
     let seeded = ask(&nexus, "Configuration");
     assert!(
-        seeded.ends_with(" None 30 { 1 3 1 } }"),
+        seeded.ends_with(" None 30 None { 1 3 1 } }"),
         "seeded at 30: {seeded}"
     );
     assert_eq!(
@@ -812,12 +844,15 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
         );
     }
     let declared = ask(&nexus, "Configuration");
-    assert!(declared.ends_with(" None 45 { 1 3 1 } }"), "{declared}");
+    assert!(
+        declared.ends_with(" None 45 None { 1 3 1 } }"),
+        "{declared}"
+    );
     drop(nexus);
     let reopened = fixture.open();
     let kept = ask(&reopened, "Configuration");
     assert!(
-        kept.ends_with(" None 45 { 1 3 1 } }"),
+        kept.ends_with(" None 45 None { 1 3 1 } }"),
         "kept across a reopen: {kept}"
     );
 }
@@ -854,7 +889,7 @@ fn configured_counters_are_kept_across_a_reopen() {
     let reopened = fixture.open();
     let kept = ask(&reopened, "Configuration");
     assert!(
-        kept.ends_with(" None 30 { 120 45 300 } }"),
+        kept.ends_with(" None 30 None { 120 45 300 } }"),
         "kept across a reopen: {kept}"
     );
     assert_eq!(

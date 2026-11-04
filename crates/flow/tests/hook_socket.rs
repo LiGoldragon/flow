@@ -1,7 +1,5 @@
-//! `flow-hook` reports to the Nexus its environment names in FLOW_SOCKET,
-//! the one Flow exports into the pane of a flow it launches, even when the
-//! default ordinary socket under the caller's runtime directory does not
-//! exist (a seat launched by the next slot's Nexus).
+//! `flow-hook` reports through its typed socket configuration and ignores a
+//! different socket in the inherited environment.
 use std::{
     io::{Read, Write},
     os::unix::net::UnixListener,
@@ -9,7 +7,7 @@ use std::{
 };
 
 #[test]
-fn the_hook_reports_to_the_socket_its_launching_nexus_exported() {
+fn the_hook_reports_only_to_its_typed_socket_configuration() {
     let root = tempfile::tempdir().expect("temporary root");
     let runtime = root.path().join("run");
     std::fs::create_dir_all(&runtime).expect("runtime directory");
@@ -17,6 +15,8 @@ fn the_hook_reports_to_the_socket_its_launching_nexus_exported() {
     std::fs::create_dir_all(&launching).expect("launching Nexus's socket directory");
     let listener =
         UnixListener::bind(launching.join("flow.sock")).expect("fixture launching Nexus binds");
+    let other = UnixListener::bind(launching.join("other.sock")).expect("other Nexus binds");
+    other.set_nonblocking(true).expect("nonblocking fixture");
     // The query is handed over before the reply is written, so once the
     // hook has ended it is either here or was never sent.
     let (received, receiving) = std::sync::mpsc::channel();
@@ -39,10 +39,11 @@ fn the_hook_reports_to_the_socket_its_launching_nexus_exported() {
             .expect("reply written");
     });
     let mut hook = Command::new(env!("CARGO_BIN_EXE_flow-hook"))
+        .arg(format!("{{ {} }}", launching.join("flow.sock").display()))
         .env_clear()
         .env("XDG_RUNTIME_DIR", &runtime)
         .env("FLOW_ID", "5a4d0b")
-        .env("FLOW_SOCKET", launching.join("flow.sock"))
+        .env("FLOW_SOCKET", launching.join("other.sock"))
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -68,8 +69,15 @@ fn the_hook_reports_to_the_socket_its_launching_nexus_exported() {
         })
     );
     assert_eq!(
+        other
+            .accept()
+            .expect_err("other socket is untouched")
+            .kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "Stop\tReport.{ «5a4d0b» Stopped.{ Some.«s» Some.«/t/s.jsonl» None } }\t0\tReported\n"
+        "Stop\tReport.{ 5a4d0b Stopped.{ Some.s Some./t/s.jsonl None } }\t0\tReported\n"
     );
     assert!(!runtime.join("flow/flow.sock").exists());
 }

@@ -216,6 +216,7 @@ fn production_rehearse_success_and_refusal_create_nothing() {
     };
     let declaration = meta_signal_flow::ConfigureMetaflow {
         address: address.clone(),
+        root_option: None,
         system_modules: vec!["spirit-core".into()],
         user_modules: vec!["operation-main-flow".into()],
         flow_kind: signal_flow::FlowKind::Regular,

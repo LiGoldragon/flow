@@ -60,7 +60,7 @@ use message_v41::{MetaflowV41, RequestV41};
 use meta_signal_flow::{
     ConfigurationChange, ConfigurationSnapshot, ConfigureCounters, ConfigureHarnessFlags,
     ConfigureLeaveOut, ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureOutcome,
-    ConfigureSendServer, ConfigureThreshold, CountersRefusal,
+    ConfigureSendServer, ConfigureThreshold, CountersRefusal, HeartbeatConfig,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -125,6 +125,13 @@ const META_HARNESS_FLAGS_CONFIGURATION_TABLE_NAME: TableName =
 const META_HARNESS_FLAGS_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-harness-flags-configuration";
 const META_HARNESS_FLAGS_CONFIGURATION_SCHEMA: &str =
     "flow-nexus-meta-harness-flags-configuration-v1";
+const META_HEARTBEAT_CONFIGURATION_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_meta_heartbeat_configuration");
+const META_HEARTBEAT_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-heartbeat-configuration";
+const META_HEARTBEAT_CONFIGURATION_SCHEMA: &str = "flow-nexus-meta-heartbeat-configuration-v1";
+const HEARTBEAT_STANDING_TABLE_NAME: TableName = TableName::new("flow_nexus_heartbeat_standings");
+const HEARTBEAT_STANDING_FAMILY: &str = "flow-nexus-heartbeat-standing";
+const HEARTBEAT_STANDING_SCHEMA: &str = "flow-nexus-heartbeat-standing-v1";
 /// The default Minutes a new Memory holds until Configure declares one:
 /// the Minutes Flow gives a request that carries none of its own.
 pub(crate) const SEEDED_DEFAULT_MINUTES: i64 = 30;
@@ -231,6 +238,7 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_meta_investigation_configuration",
     "flow_nexus_meta_default_minutes_configuration",
     "flow_nexus_meta_harness_flags_configuration",
+    "flow_nexus_meta_heartbeat_configuration",
     "flow_nexus_compactions",
     "flow_nexus_reminders",
     "flow_nexus_successor_intents",
@@ -240,6 +248,8 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_logical_delivery_current",
     "flow_nexus_logical_delivery_events",
     "flow_nexus_simplified_reply_bindings",
+    "flow_nexus_logical_delivery_purposes",
+    "flow_nexus_heartbeat_standings",
 ];
 /// The tables a configuration-only store may hold beside its own, each
 /// added by a later Flow.
@@ -250,6 +260,7 @@ const CONFIGURATION_ONLY_ADDED_TABLES: &[&str] = &[
     "flow_nexus_meta_investigation_configuration",
     "flow_nexus_meta_default_minutes_configuration",
     "flow_nexus_meta_harness_flags_configuration",
+    "flow_nexus_meta_heartbeat_configuration",
     "flow_nexus_meta_metaflow_configuration",
 ];
 // These are this Flow source's authored Memory version candidates. They are
@@ -1196,6 +1207,83 @@ impl DescribesHarnessFlagsTable for StoredMetaHarnessFlagsConfiguration {
         TableDescriptor::new(
             META_HARNESS_FLAGS_CONFIGURATION_TABLE_NAME,
             FamilyName::new(META_HARNESS_FLAGS_CONFIGURATION_FAMILY),
+            Self::schema_hash(),
+        )
+    }
+}
+
+/// The configured sampling heartbeat; no row means disabled.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredMetaHeartbeatConfiguration {
+    heartbeat: HeartbeatConfig,
+}
+
+impl EngineRecord for StoredMetaHeartbeatConfiguration {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new("heartbeat")
+    }
+}
+
+trait DescribesHeartbeatTable {
+    fn descriptor() -> TableDescriptor<StoredMetaHeartbeatConfiguration>;
+}
+
+impl DescribesHeartbeatTable for StoredMetaHeartbeatConfiguration {
+    fn descriptor() -> TableDescriptor<StoredMetaHeartbeatConfiguration> {
+        TableDescriptor::new(
+            META_HEARTBEAT_CONFIGURATION_TABLE_NAME,
+            FamilyName::new(META_HEARTBEAT_CONFIGURATION_FAMILY),
+            SchemaHash::for_label(META_HEARTBEAT_CONFIGURATION_SCHEMA),
+        )
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredHeartbeatStanding {
+    pub address: Address,
+    pub baseline_awake: i64,
+    pub baseline_working: Option<i64>,
+    pub baseline_working_complete: bool,
+    pub baseline_sent: i64,
+    pub baseline_queue: i64,
+    pub latest_awake: i64,
+    pub latest_working: Option<i64>,
+    pub latest_working_complete: bool,
+    pub latest_sent: i64,
+    pub latest_queue: i64,
+    pub outstanding: Option<String>,
+}
+pub(crate) trait JudgesHeartbeatStanding {
+    fn changed(&self) -> bool;
+}
+impl JudgesHeartbeatStanding for StoredHeartbeatStanding {
+    fn changed(&self) -> bool {
+        self.baseline_awake != self.latest_awake
+            || self.baseline_sent != self.latest_sent
+            || self.baseline_queue != self.latest_queue
+    }
+}
+impl EngineRecord for StoredHeartbeatStanding {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.address))
+    }
+}
+impl MemoryDefinition for StoredHeartbeatStanding {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(HEARTBEAT_STANDING_SCHEMA)
+    }
+}
+trait DescribesHeartbeatStandingTable {
+    fn descriptor() -> TableDescriptor<StoredHeartbeatStanding>;
+}
+impl DescribesHeartbeatStandingTable for StoredHeartbeatStanding {
+    fn descriptor() -> TableDescriptor<StoredHeartbeatStanding> {
+        TableDescriptor::new(
+            HEARTBEAT_STANDING_TABLE_NAME,
+            FamilyName::new(HEARTBEAT_STANDING_FAMILY),
             Self::schema_hash(),
         )
     }
@@ -2423,11 +2511,159 @@ impl EngineRecord for StoredLaunchOutcome {
 
 impl MemoryDefinition for StoredLaunchOutcome {
     fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(9)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-launch-outcome-v9")
+    }
+}
+
+/// The v8 outcome before a missing-module context refusal carried its
+/// identity. Its Start and Replace rejection nesting is frozen here rather
+/// than borrowed from the current Signal.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchOutcomeV8 {
+    launch_request_id: String,
+    launch_outcome: LaunchOutcomeV8,
+}
+
+impl EngineRecord for StoredLaunchOutcomeV8 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.launch_request_id.clone())
+    }
+}
+
+impl MemoryDefinition for StoredLaunchOutcomeV8 {
+    fn memory_version() -> MemoryVersion {
         MemoryVersion::new(8)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-launch-outcome-v8")
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum ContextRefusalV38 {
+    ComposerUnavailable,
+    ComposerRejected,
+    MetaflowMismatch,
+    PayloadMismatch,
+    ModuleMissing,
+    RecordMissing,
+    SystemTooLarge,
+    ModuleTooLarge,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum StartRejectionV38 {
+    CompositionRefused(signal_flow::CompositionRefusal),
+    LaunchRequestConflict,
+    LaunchPersistenceRefused,
+    NativeLaunchRefused(signal_flow::NativeLaunchRefusal),
+    BindingRefused(signal_flow::BindingRefusal),
+    RegistrationRefused(signal_flow::RegistrationRefusal),
+    IntentPersistenceRefused,
+    OriginUnavailable,
+    AddressAwake,
+    ContextRefused(ContextRefusalV38),
+    LeaveOutRefused(signal_flow::LeaveOutRefusal),
+    HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
+    ModelRefused(signal_flow::ModelRefusal),
+    NoSecondary,
+    Undeclared,
+    TopicRefused(String),
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum ReplaceRejectionV38 {
+    PredecessorAbsent,
+    UnknownPredecessor,
+    PredecessorStopped,
+    LaunchRefused(StartRejectionV38),
+    ReapRefused(signal_flow::StopRejection),
+    Locked,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum LaunchOutcomeV8 {
+    Started(LaunchedRecord),
+    Replaced(ReplacedRecord),
+    StartRejected(StartRejectionV38),
+    ReplaceRejected(ReplaceRejectionV38),
+}
+
+impl From<ContextRefusalV38> for signal_flow::ContextRefusal {
+    fn from(refusal: ContextRefusalV38) -> Self {
+        match refusal {
+            ContextRefusalV38::ComposerUnavailable => Self::ComposerUnavailable,
+            ContextRefusalV38::ComposerRejected => Self::ComposerRejected,
+            ContextRefusalV38::MetaflowMismatch => Self::MetaflowMismatch,
+            ContextRefusalV38::PayloadMismatch => Self::PayloadMismatch,
+            ContextRefusalV38::ModuleMissing => Self::ModuleMissing(None),
+            ContextRefusalV38::RecordMissing => Self::RecordMissing,
+            ContextRefusalV38::SystemTooLarge => Self::SystemTooLarge,
+            ContextRefusalV38::ModuleTooLarge => Self::ModuleTooLarge,
+        }
+    }
+}
+
+impl From<StartRejectionV38> for StartRejection {
+    fn from(rejection: StartRejectionV38) -> Self {
+        match rejection {
+            StartRejectionV38::CompositionRefused(value) => Self::CompositionRefused(value),
+            StartRejectionV38::LaunchRequestConflict => Self::LaunchRequestConflict,
+            StartRejectionV38::LaunchPersistenceRefused => Self::LaunchPersistenceRefused,
+            StartRejectionV38::NativeLaunchRefused(value) => Self::NativeLaunchRefused(value),
+            StartRejectionV38::BindingRefused(value) => Self::BindingRefused(value),
+            StartRejectionV38::RegistrationRefused(value) => Self::RegistrationRefused(value),
+            StartRejectionV38::IntentPersistenceRefused => Self::IntentPersistenceRefused,
+            StartRejectionV38::OriginUnavailable => Self::OriginUnavailable,
+            StartRejectionV38::AddressAwake => Self::AddressAwake,
+            StartRejectionV38::ContextRefused(value) => Self::ContextRefused(value.into()),
+            StartRejectionV38::LeaveOutRefused(value) => Self::LeaveOutRefused(value),
+            StartRejectionV38::HarnessSpawnRefused(value) => Self::HarnessSpawnRefused(value),
+            StartRejectionV38::ModelRefused(value) => Self::ModelRefused(value),
+            StartRejectionV38::NoSecondary => Self::NoSecondary,
+            StartRejectionV38::Undeclared => Self::Undeclared,
+            StartRejectionV38::TopicRefused(value) => Self::TopicRefused(value),
+        }
+    }
+}
+
+impl From<ReplaceRejectionV38> for ReplaceRejection {
+    fn from(rejection: ReplaceRejectionV38) -> Self {
+        match rejection {
+            ReplaceRejectionV38::PredecessorAbsent => Self::PredecessorAbsent,
+            ReplaceRejectionV38::UnknownPredecessor => Self::UnknownPredecessor,
+            ReplaceRejectionV38::PredecessorStopped => Self::PredecessorStopped,
+            ReplaceRejectionV38::LaunchRefused(value) => Self::LaunchRefused(value.into()),
+            ReplaceRejectionV38::ReapRefused(value) => Self::ReapRefused(value),
+            ReplaceRejectionV38::Locked => Self::Locked,
+        }
+    }
+}
+
+impl From<LaunchOutcomeV8> for LaunchOutcome {
+    fn from(outcome: LaunchOutcomeV8) -> Self {
+        match outcome {
+            LaunchOutcomeV8::Started(value) => Self::Started(value),
+            LaunchOutcomeV8::Replaced(value) => Self::Replaced(value),
+            LaunchOutcomeV8::StartRejected(value) => Self::StartRejected(value.into()),
+            LaunchOutcomeV8::ReplaceRejected(value) => Self::ReplaceRejected(value.into()),
+        }
+    }
+}
+
+impl UpgradeFrom<StoredLaunchOutcomeV8> for StoredLaunchOutcome {
+    type Refusal = EndedAddressOutcome;
+
+    fn upgrade_from(previous: StoredLaunchOutcomeV8) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            launch_request_id: previous.launch_request_id,
+            launch_outcome: previous.launch_outcome.into(),
+        })
     }
 }
 
@@ -2477,7 +2713,7 @@ enum StartRejectionV32 {
     IntentPersistenceRefused,
     OriginUnavailable,
     AddressAwake,
-    ContextRefused(signal_flow::ContextRefusal),
+    ContextRefused(ContextRefusalV38),
     LeaveOutRefused(signal_flow::LeaveOutRefusal),
     HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
     ModelRefused(signal_flow::ModelRefusal),
@@ -2512,7 +2748,7 @@ impl From<StartRejectionV32> for StartRejection {
             StartRejectionV32::IntentPersistenceRefused => Self::IntentPersistenceRefused,
             StartRejectionV32::OriginUnavailable => Self::OriginUnavailable,
             StartRejectionV32::AddressAwake => Self::AddressAwake,
-            StartRejectionV32::ContextRefused(refusal) => Self::ContextRefused(refusal),
+            StartRejectionV32::ContextRefused(refusal) => Self::ContextRefused(refusal.into()),
             StartRejectionV32::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
             StartRejectionV32::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
             StartRejectionV32::ModelRefused(refusal) => Self::ModelRefused(refusal),
@@ -2644,7 +2880,7 @@ impl From<ContextRefusalV30> for signal_flow::ContextRefusal {
             ContextRefusalV30::ComposerRejected => Self::ComposerRejected,
             ContextRefusalV30::MetaflowMismatch => Self::MetaflowMismatch,
             ContextRefusalV30::PayloadMismatch => Self::PayloadMismatch,
-            ContextRefusalV30::ModuleMissing => Self::ModuleMissing,
+            ContextRefusalV30::ModuleMissing => Self::ModuleMissing(None),
             ContextRefusalV30::SystemTooLarge => Self::SystemTooLarge,
             ContextRefusalV30::ModuleTooLarge => Self::ModuleTooLarge,
         }
@@ -3299,6 +3535,8 @@ pub enum StoreError {
     ConfigurationReadViewChanged,
     #[error("a configuration declaration names one key twice")]
     DuplicateConfigurationEntry,
+    #[error("heartbeat period must be positive")]
+    InvalidHeartbeatPeriod,
     #[error("store path must be an absolute file path")]
     InvalidStorePath,
     #[error("meta configuration is not configured")]
@@ -3703,12 +3941,20 @@ impl UpgradesFlowFamilies for Engine {
         let admission = |failure: &sema_engine::StorageFailure| {
             failure.phase() == sema_engine::StoragePhase::Admission
         };
+        let from_v7 = descriptor.clone();
         let from_v6 = descriptor.clone();
         let from_v5 = descriptor.clone();
         let from_v4 = descriptor.clone();
         let from_v3 = descriptor.clone();
         let from_v2 = descriptor.clone();
-        match self.upgrade_table::<StoredLaunchOutcomeV7, StoredLaunchOutcome>(descriptor) {
+        match self.upgrade_table::<StoredLaunchOutcomeV8, StoredLaunchOutcome>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
+            UpgradeOutcome::Failed(failure) if admission(&failure) => {}
+            UpgradeOutcome::Failed(failure) => return Err(failed(failure)),
+        }
+        match self.upgrade_table::<StoredLaunchOutcomeV7, StoredLaunchOutcome>(from_v7) {
             UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
             UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
@@ -3831,6 +4077,7 @@ pub(crate) struct MetaConfigurationTables {
     investigation: TableReference<StoredMetaInvestigationConfiguration>,
     default_minutes: TableReference<StoredMetaDefaultMinutesConfiguration>,
     harness_flags: TableReference<StoredMetaHarnessFlagsConfiguration>,
+    heartbeat: TableReference<StoredMetaHeartbeatConfiguration>,
 }
 
 trait RegistersMetaConfigurationTables: Sized {
@@ -3855,6 +4102,7 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
                 .register_table(StoredMetaDefaultMinutesConfiguration::descriptor())?,
             harness_flags: engine
                 .register_table(StoredMetaHarnessFlagsConfiguration::descriptor())?,
+            heartbeat: engine.register_table(StoredMetaHeartbeatConfiguration::descriptor())?,
             metaflows: engine.upgraded_metaflow_declarations(
                 <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor(),
             )?,
@@ -3894,10 +4142,52 @@ pub struct FlowStore {
     queue_delivery: QueueDeliveryTables,
     send_outcomes: SendOutcomeTables,
     logical_deliveries: LogicalDeliveryTables,
+    heartbeat_standings: TableReference<StoredHeartbeatStanding>,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows older than 0.34's shape;
     /// each is also logged.
     pub opening_settlements: Vec<LaunchAttemptSettlement>,
+}
+
+pub(crate) trait TracksHeartbeat {
+    fn heartbeat_standings(&self) -> Result<Vec<StoredHeartbeatStanding>, StoreError>;
+    fn replace_heartbeat_standings(
+        &self,
+        standings: Vec<StoredHeartbeatStanding>,
+    ) -> Result<(), StoreError>;
+}
+impl TracksHeartbeat for FlowStore {
+    fn heartbeat_standings(&self) -> Result<Vec<StoredHeartbeatStanding>, StoreError> {
+        Ok(self
+            .engine
+            .match_records(QueryPlan::all(self.heartbeat_standings))?
+            .records()
+            .to_vec())
+    }
+    fn replace_heartbeat_standings(
+        &self,
+        standings: Vec<StoredHeartbeatStanding>,
+    ) -> Result<(), StoreError> {
+        let held = self.heartbeat_standings()?;
+        let mut commit = self.engine.begin_atomic_commit();
+        for row in &held {
+            if !standings
+                .iter()
+                .any(|next| next.record_key() == row.record_key())
+            {
+                commit = commit.retract(self.heartbeat_standings, row.record_key());
+            }
+        }
+        for row in standings {
+            commit = match held.iter().find(|old| old.record_key() == row.record_key()) {
+                Some(old) if old == &row => commit,
+                Some(_) => commit.mutate(self.heartbeat_standings, row),
+                None => commit.assert(self.heartbeat_standings, row),
+            };
+        }
+        self.engine.commit_atomic(commit)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -3926,6 +4216,7 @@ pub struct ConfiguredFamilies {
     pub investigation: Option<Address>,
     pub default_minutes: i64,
     pub configured_harness_flags: Vec<ConfigureHarnessFlags>,
+    pub heartbeat: Option<HeartbeatConfig>,
 }
 
 pub trait CompletesSnapshot {
@@ -3945,6 +4236,7 @@ impl CompletesSnapshot for ConfiguredFamilies {
             investigation: self.investigation,
             default_minutes: self.default_minutes,
             configured_harness_flags: self.configured_harness_flags,
+            heartbeat: self.heartbeat,
             counters,
         }
     }
@@ -4019,6 +4311,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
         let meta_default_minutes_descriptor = StoredMetaDefaultMinutesConfiguration::descriptor();
         let meta_harness_flags_descriptor = StoredMetaHarnessFlagsConfiguration::descriptor();
+        let meta_heartbeat_descriptor = StoredMetaHeartbeatConfiguration::descriptor();
         let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         let meta_metaflows_descriptor = <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor();
@@ -4042,6 +4335,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_investigation_descriptor)
                 .with_family(&meta_default_minutes_descriptor)
                 .with_family(&meta_harness_flags_descriptor)
+                .with_family(&meta_heartbeat_descriptor)
                 .with_family(&meta_metaflows_descriptor),
         )?;
         let state = engine.register_table(state_descriptor)?;
@@ -4069,6 +4363,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             investigation: engine.register_table(meta_investigation_descriptor)?,
             default_minutes: engine.register_table(meta_default_minutes_descriptor)?,
             harness_flags: engine.register_table(meta_harness_flags_descriptor)?,
+            heartbeat: engine.register_table(meta_heartbeat_descriptor)?,
             metaflows: engine.upgraded_metaflow_declarations(meta_metaflows_descriptor)?,
         };
         if !recognized {
@@ -4541,7 +4836,8 @@ impl OpensFlowStore for FlowStore {
         .with_predecessor::<StoredLaunchOutcomeV4>()
         .with_predecessor::<StoredLaunchOutcomeV5>()
         .with_predecessor::<StoredLaunchOutcomeV6>()
-        .with_predecessor::<StoredLaunchOutcomeV7>();
+        .with_predecessor::<StoredLaunchOutcomeV7>()
+        .with_predecessor::<StoredLaunchOutcomeV8>();
         let replacements_descriptor = TableDescriptor::<Replacement>::new(
             FLOW_REPLACEMENT_TABLE_NAME,
             FamilyName::new("flow-nexus-replacement"),
@@ -4599,6 +4895,7 @@ impl OpensFlowStore for FlowStore {
         let queue_delivery_descriptors = QueueDeliveryTables::descriptors();
         let send_outcome_descriptors = SendOutcomeTables::descriptors();
         let logical_delivery_descriptors = LogicalDeliveryTables::descriptors();
+        let heartbeat_standing_descriptor = StoredHeartbeatStanding::descriptor();
         let mut engine = Engine::open(
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
@@ -4627,6 +4924,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&meta_investigation_descriptor)
                 .with_family(&StoredMetaDefaultMinutesConfiguration::descriptor())
                 .with_family(&StoredMetaHarnessFlagsConfiguration::descriptor())
+                .with_family(&StoredMetaHeartbeatConfiguration::descriptor())
                 .with_family(&compactions_descriptor)
                 .with_family(&reminders_descriptor)
                 .with_family(&successor_intents_descriptor)
@@ -4645,7 +4943,9 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&logical_delivery_descriptors.counter)
                 .with_family(&logical_delivery_descriptors.current)
                 .with_family(&logical_delivery_descriptors.events)
-                .with_family(&logical_delivery_descriptors.simplified_replies),
+                .with_family(&logical_delivery_descriptors.simplified_replies)
+                .with_family(&logical_delivery_descriptors.purposes)
+                .with_family(&heartbeat_standing_descriptor),
         )?;
         let flows = engine.upgraded_flows(flows_descriptor)?;
         let native_owner_proofs = engine.register_table(native_owner_proofs_descriptor)?;
@@ -4684,6 +4984,7 @@ impl OpensFlowStore for FlowStore {
         let send_outcomes = SendOutcomeTables::register(&mut engine, send_outcome_descriptors)?;
         let logical_deliveries =
             LogicalDeliveryTables::register(&mut engine, logical_delivery_descriptors)?;
+        let heartbeat_standings = engine.register_table(heartbeat_standing_descriptor)?;
         let store = Self {
             engine,
             native_owner_environment_override: None,
@@ -4716,6 +5017,7 @@ impl OpensFlowStore for FlowStore {
             queue_delivery,
             send_outcomes,
             logical_deliveries,
+            heartbeat_standings,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -4807,7 +5109,8 @@ impl OpensFlowStore for FlowStore {
             .with_predecessor::<StoredLaunchOutcomeV4>()
             .with_predecessor::<StoredLaunchOutcomeV5>()
             .with_predecessor::<StoredLaunchOutcomeV6>()
-            .with_predecessor::<StoredLaunchOutcomeV7>(),
+            .with_predecessor::<StoredLaunchOutcomeV7>()
+            .with_predecessor::<StoredLaunchOutcomeV8>(),
         )?;
         let replacements = engine.register_table(TableDescriptor::new(
             FLOW_REPLACEMENT_TABLE_NAME,
@@ -4871,6 +5174,7 @@ impl OpensFlowStore for FlowStore {
             SendOutcomeTables::register(&mut engine, SendOutcomeTables::descriptors())?;
         let logical_deliveries =
             LogicalDeliveryTables::register(&mut engine, LogicalDeliveryTables::descriptors())?;
+        let heartbeat_standings = engine.register_table(StoredHeartbeatStanding::descriptor())?;
         let store = Self {
             engine,
             native_owner_environment_override: None,
@@ -4903,6 +5207,7 @@ impl OpensFlowStore for FlowStore {
             queue_delivery,
             send_outcomes,
             logical_deliveries,
+            heartbeat_standings,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -7606,6 +7911,10 @@ pub(crate) trait ReadsFlowMemory {
                 META_HARNESS_FLAGS_CONFIGURATION_FAMILY,
                 META_HARNESS_FLAGS_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_meta_heartbeat_configuration" => (
+                META_HEARTBEAT_CONFIGURATION_FAMILY,
+                META_HEARTBEAT_CONFIGURATION_SCHEMA,
+            ),
             "flow_nexus_send_outcome_counter" => {
                 (send_outcome::COUNTER_FAMILY, send_outcome::COUNTER_SCHEMA)
             }
@@ -7628,6 +7937,13 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-simplified-reply-binding",
                 "flow-nexus-simplified-reply-binding-v1",
             ),
+            "flow_nexus_logical_delivery_purposes" => (
+                "flow-nexus-logical-delivery-purpose",
+                "flow-nexus-logical-delivery-purpose-v1",
+            ),
+            "flow_nexus_heartbeat_standings" => {
+                (HEARTBEAT_STANDING_FAMILY, HEARTBEAT_STANDING_SCHEMA)
+            }
             "flow_nexus_compactions" => {
                 (compaction::COMPACTION_FAMILY, compaction::COMPACTION_SCHEMA)
             }
@@ -7748,6 +8064,10 @@ pub(crate) trait ReadsFlowMemory {
                     "flow-nexus-launch-outcome",
                     StoredLaunchOutcomeV7::schema_hash(),
                 ),
+                (
+                    "flow-nexus-launch-outcome",
+                    StoredLaunchOutcomeV8::schema_hash(),
+                ),
             ],
             "flow_nexus_launch_attempts" => &[
                 (
@@ -7775,6 +8095,10 @@ pub(crate) trait ReadsFlowMemory {
                 (
                     metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
                     SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v3"),
+                ),
+                (
+                    metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
+                    SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v4"),
                 ),
             ],
             "flow_nexus_metaflows" => &[
@@ -8182,6 +8506,7 @@ pub(crate) trait ReadsFlowMemory {
         let investigation_rows = engine.match_records(QueryPlan::all(tables.investigation))?;
         let default_minutes_rows = engine.match_records(QueryPlan::all(tables.default_minutes))?;
         let harness_flags_rows = engine.match_records(QueryPlan::all(tables.harness_flags))?;
+        let heartbeat_rows = engine.match_records(QueryPlan::all(tables.heartbeat))?;
         let metaflow_rows = engine.match_records(QueryPlan::all(tables.metaflows))?;
         if models_rows.database_marker() != marker
             || metaflow_rows.database_marker() != marker
@@ -8191,6 +8516,7 @@ pub(crate) trait ReadsFlowMemory {
             || investigation_rows.database_marker() != marker
             || default_minutes_rows.database_marker() != marker
             || harness_flags_rows.database_marker() != marker
+            || heartbeat_rows.database_marker() != marker
             || engine.current_database_marker()? != marker
         {
             return Err(StoreError::ConfigurationReadViewChanged);
@@ -8219,6 +8545,11 @@ pub(crate) trait ReadsFlowMemory {
         let default_minutes = match default_minutes_rows.records() {
             [] => SEEDED_DEFAULT_MINUTES,
             [stored] => stored.default_minutes,
+            _ => return Err(StoreError::StateInvariant),
+        };
+        let heartbeat = match heartbeat_rows.records() {
+            [] => None,
+            [stored] => Some(stored.heartbeat.clone()),
             _ => return Err(StoreError::StateInvariant),
         };
         let mut default_leave_outs = leave_out_rows
@@ -8261,6 +8592,7 @@ pub(crate) trait ReadsFlowMemory {
             metaflows,
             default_minutes,
             configured_harness_flags,
+            heartbeat,
         }))
     }
 
@@ -8355,6 +8687,9 @@ pub(crate) trait ReadsFlowMemory {
                 entries.iter().map(|entry| &entry.address).collect()
             }
             ConfigurationChange::Investigation(address) => vec![address],
+            ConfigurationChange::Heartbeat(Some(config)) => {
+                config.heartbeat_recipients.iter().collect()
+            }
             _ => Vec::new(),
         };
         if let Some(refused) = addresses
@@ -8471,6 +8806,31 @@ pub(crate) trait ReadsFlowMemory {
                     vec![StoredMetaDefaultMinutesConfiguration { default_minutes }],
                 )
             }
+            ConfigurationChange::Heartbeat(heartbeat) => {
+                if let Some(configured) = heartbeat.as_ref() {
+                    if configured.heartbeat_period_seconds <= 0 {
+                        return Err(StoreError::InvalidHeartbeatPeriod);
+                    }
+                    if configured
+                        .heartbeat_recipients
+                        .iter()
+                        .enumerate()
+                        .any(|(index, address)| {
+                            configured.heartbeat_recipients[..index].contains(address)
+                        })
+                    {
+                        return Err(StoreError::DuplicateConfigurationEntry);
+                    }
+                }
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.heartbeat,
+                    heartbeat
+                        .into_iter()
+                        .map(|heartbeat| StoredMetaHeartbeatConfiguration { heartbeat })
+                        .collect(),
+                )
+            }
             // A store opened for configuration only holds no counters; the
             // running store declares them (`counters::ConfiguresCounters`).
             ConfigurationChange::Counters(_) => {
@@ -8508,8 +8868,91 @@ mod tests {
     use crate::store::logical_delivery::{RecordsLogicalDeliveries, SimplifiedReplyBinding};
     use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
     use crate::store::queue_delivery::AccountsQueueDelivery;
+    use sema_engine::MemoryDefinition;
     use std::fs;
     use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn heartbeat_admission_atomically_advances_and_survives_reopen() {
+        use super::{StoredHeartbeatStanding, TracksHeartbeat};
+        use crate::heartbeat::DeliveryPurpose;
+        use signal_flow::{Address, Aspect, Layer, Message, Metaflow, Request, SentBy};
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let recipient = Address {
+            aspect: Aspect::Field,
+            topic: "heartbeatTest".into(),
+            layer: Layer::Secondary,
+        };
+        store.seed_metaflow(Metaflow {
+            address: recipient.clone(),
+            state: flow_ethos::State::Asleep,
+            past: Vec::new(),
+            queue: Vec::new(),
+        });
+        store
+            .replace_heartbeat_standings(vec![StoredHeartbeatStanding {
+                address: recipient.clone(),
+                baseline_awake: 1,
+                baseline_working: None,
+                baseline_working_complete: false,
+                baseline_sent: 2,
+                baseline_queue: 3,
+                latest_awake: 4,
+                latest_working: Some(5),
+                latest_working_complete: true,
+                latest_sent: 6,
+                latest_queue: 7,
+                outstanding: None,
+            }])
+            .expect("standing persists");
+        let signal_flow::PrivateSendResponse::SendAccepted(ordinary) = store
+            .accept_logical_delivery(
+                &recipient,
+                SentBy::Flow,
+                flow_ethos::Delivery::Wake,
+                Message::Soft(Request::Notice("ordinary".into())),
+                None,
+            )
+            .expect("ordinary admission commits")
+        else {
+            panic!("ordinary accepted")
+        };
+        let signal_flow::PrivateSendResponse::SendAccepted(accepted) = store
+            .accept_logical_delivery_for(
+                &recipient,
+                SentBy::Flow,
+                flow_ethos::Delivery::Wake,
+                Message::Soft(Request::Notice("heartbeat".into())),
+                None,
+                DeliveryPurpose::Heartbeat,
+            )
+            .expect("heartbeat admission commits")
+        else {
+            panic!("heartbeat accepted")
+        };
+        let standing = store.heartbeat_standings().unwrap().pop().unwrap();
+        assert_eq!(standing.baseline_awake, 4);
+        assert_eq!(standing.baseline_working, Some(5));
+        assert_eq!(standing.baseline_sent, 6);
+        assert_eq!(standing.baseline_queue, 7);
+        assert_eq!(
+            standing.outstanding,
+            Some(accepted.logical_delivery_id.clone())
+        );
+        assert!(store.delivery_purposes().unwrap().iter().any(|row| {
+            row.logical_delivery_id == accepted.logical_delivery_id
+                && row.purpose == DeliveryPurpose::Heartbeat
+        }));
+        assert!(store.delivery_purposes().unwrap().iter().any(|row| {
+            row.logical_delivery_id == ordinary.logical_delivery_id
+                && row.purpose == DeliveryPurpose::Ordinary
+        }));
+        drop(store);
+        let reopened = fixture.store();
+        let standing = reopened.heartbeat_standings().unwrap().pop().unwrap();
+        assert_eq!(standing.outstanding, Some(accepted.logical_delivery_id));
+    }
 
     #[test]
     fn immediately_previous_catalog_upgrades_and_reopens_with_records() {
@@ -8607,6 +9050,7 @@ mod tests {
             assert_eq!(declaration.user_modules, ["user"]);
             assert_eq!(declaration.flow_kind, signal_flow::FlowKind::Regular);
             assert_eq!(declaration.tool_set, signal_flow::ToolSet::Default);
+            assert_eq!(declaration.root_option, None);
             let events = super::events::RecordsHarnessEvents::events(&store, "old-flow")
                 .unwrap()
                 .unwrap();
@@ -8615,6 +9059,92 @@ mod tests {
                 matches!(&events[1], signal_flow::Event::Stopped(stop) if stop.native_session_id_option.as_deref() == Some("old-session") && stop.last_assistant_message_option.is_none())
             );
         }
+    }
+
+    #[test]
+    fn v4_metaflow_declaration_upgrades_to_default_workspace_and_reopens() {
+        use super::metaflow_declaration::{
+            ConfigureMetaflowV4, ReadsMetaflowDeclarations, StoredMetaMetaflowConfigurationV4,
+        };
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        drop(fixture.configured_store());
+        let table = "flow_nexus_meta_metaflow_configuration";
+        let database = redb::Database::open(fixture.path()).unwrap();
+        let write = database.begin_write().unwrap();
+        write
+            .open_table(super::SEMA_CATALOG_TABLE)
+            .unwrap()
+            .remove(table)
+            .unwrap();
+        write
+            .delete_table(redb::TableDefinition::<&str, &[u8]>::new(table))
+            .unwrap();
+        write.commit().unwrap();
+        drop(database);
+        let mut engine = Engine::open(EngineOpen::new(
+            fixture.path(),
+            SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
+        ))
+        .unwrap();
+        let declarations = engine
+            .register_table::<StoredMetaMetaflowConfigurationV4>(TableDescriptor::new(
+                TableName::new(table),
+                FamilyName::new("flow-nexus-meta-metaflow-configuration"),
+                StoredMetaMetaflowConfigurationV4::schema_hash(),
+            ))
+            .unwrap();
+        let address = Address {
+            aspect: Aspect::Mind,
+            topic: "workspaceMigration".into(),
+            layer: Layer::Secondary,
+        };
+        engine
+            .assert(Assertion::new(
+                declarations,
+                StoredMetaMetaflowConfigurationV4 {
+                    metaflow: ConfigureMetaflowV4 {
+                        address: address.clone(),
+                        system_modules: vec!["spirit:core".into()],
+                        user_modules: vec!["vision:flow-nexus".into()],
+                        flow_kind: signal_flow::FlowKind::Regular,
+                        tool_set: signal_flow::ToolSet::Default,
+                        continuity: meta_signal_flow::Continuity::OnDemand,
+                        purpose: "Uses a configurable workspace.".into(),
+                        records: vec!["flows/f35668/vision/flow-nexus.md".into()],
+                    },
+                },
+            ))
+            .unwrap();
+        drop(engine);
+
+        for _ in 0..2 {
+            let store = fixture.configured_store();
+            let declaration = store.metaflow_declaration(&address).unwrap().unwrap();
+            assert_eq!(declaration.root_option, None);
+            assert_eq!(declaration.purpose, "Uses a configurable workspace.");
+            assert_eq!(declaration.records, ["flows/f35668/vision/flow-nexus.md"]);
+        }
+        {
+            let store = fixture.configured_store();
+            let mut declaration = store.metaflow_declaration(&address).unwrap().unwrap();
+            declaration.root_option = Some("/srv/workspace".into());
+            store
+                .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
+                    declaration,
+                ]))
+                .unwrap();
+        }
+        assert_eq!(
+            fixture
+                .configured_store()
+                .metaflow_declaration(&address)
+                .unwrap()
+                .unwrap()
+                .root_option
+                .as_deref(),
+            Some("/srv/workspace")
+        );
     }
 
     /// A store written before Continuity, before a session's end was an
@@ -9622,6 +10152,10 @@ mod tests {
     use super::{
         ContextRefusalV30, LaunchOutcomeV6, ReplaceRejectionV30, StartRejectionV30,
         StoredLaunchOutcomeV6,
+    };
+    use super::{
+        ContextRefusalV38, LaunchOutcomeV8, ReplaceRejectionV38, StartRejectionV38,
+        StoredLaunchOutcomeV8,
     };
     use super::{FlowRecordV5, LaunchedRecordV2, OriginClueBeforeOrigin, ReplacedRecordV2};
     use super::{LaunchOutcomeV3, ReplaceRejectionV17, StartRejectionV17, StoredLaunchOutcomeV3};
@@ -12604,7 +13138,7 @@ mod tests {
             (
                 "v5-context",
                 LaunchOutcome::StartRejected(StartRejection::ContextRefused(
-                    signal_flow::ContextRefusal::ModuleMissing,
+                    signal_flow::ContextRefusal::ModuleMissing(None),
                 )),
             ),
             (
@@ -12664,6 +13198,20 @@ mod tests {
                 launch_request_id: "v7-locked".into(),
                 launch_outcome: LaunchOutcomeV7::ReplaceRejected(ReplaceRejectionV32::Locked),
             },
+            StoredLaunchOutcomeV7 {
+                launch_request_id: "v7-missing".into(),
+                launch_outcome: LaunchOutcomeV7::StartRejected(StartRejectionV32::ContextRefused(
+                    ContextRefusalV38::ModuleMissing,
+                )),
+            },
+            StoredLaunchOutcomeV7 {
+                launch_request_id: "v7-replace-missing".into(),
+                launch_outcome: LaunchOutcomeV7::ReplaceRejected(
+                    ReplaceRejectionV32::LaunchRefused(StartRejectionV32::ContextRefused(
+                        ContextRefusalV38::ModuleMissing,
+                    )),
+                ),
+            },
         ];
         {
             let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
@@ -12704,6 +13252,20 @@ mod tests {
                 "v7-locked",
                 LaunchOutcome::ReplaceRejected(ReplaceRejection::Locked),
             ),
+            (
+                "v7-missing",
+                LaunchOutcome::StartRejected(StartRejection::ContextRefused(
+                    signal_flow::ContextRefusal::ModuleMissing(None),
+                )),
+            ),
+            (
+                "v7-replace-missing",
+                LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                    StartRejection::ContextRefused(signal_flow::ContextRefusal::ModuleMissing(
+                        None,
+                    )),
+                )),
+            ),
         ] {
             assert_eq!(
                 store
@@ -12713,6 +13275,88 @@ mod tests {
                 "the v7 outcome for {request} survives the family upgrade"
             );
         }
+        drop(store);
+        assert_eq!(
+            fixture.store().launch_outcome("v7-missing").unwrap(),
+            Some(LaunchOutcome::StartRejected(
+                StartRejection::ContextRefused(signal_flow::ContextRefusal::ModuleMissing(None))
+            ))
+        );
+    }
+
+    #[test]
+    fn v8_missing_module_identity_upgrades_to_historical_unknown_and_reopens() {
+        let fixture = StoreFixture::new();
+        let rows = [
+            StoredLaunchOutcomeV8 {
+                launch_request_id: "v8-start".into(),
+                launch_outcome: LaunchOutcomeV8::StartRejected(StartRejectionV38::ContextRefused(
+                    ContextRefusalV38::ModuleMissing,
+                )),
+            },
+            StoredLaunchOutcomeV8 {
+                launch_request_id: "v8-replace".into(),
+                launch_outcome: LaunchOutcomeV8::ReplaceRejected(
+                    ReplaceRejectionV38::LaunchRefused(StartRejectionV38::ContextRefused(
+                        ContextRefusalV38::ModuleMissing,
+                    )),
+                ),
+            },
+        ];
+        {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("outcome store opens");
+            let outcomes = engine
+                .register_table(TableDescriptor::new(
+                    TableName::new("flow_nexus_launch_outcomes"),
+                    FamilyName::new("flow-nexus-launch-outcome"),
+                    SchemaHash::for_label("flow-nexus-launch-outcome-v8"),
+                ))
+                .expect("v8 outcome family registers");
+            for row in rows {
+                engine
+                    .assert(Assertion::new(outcomes, row))
+                    .expect("v8 outcome persists");
+            }
+        }
+        let expected = [
+            (
+                "v8-start",
+                LaunchOutcome::StartRejected(StartRejection::ContextRefused(
+                    signal_flow::ContextRefusal::ModuleMissing(None),
+                )),
+            ),
+            (
+                "v8-replace",
+                LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                    StartRejection::ContextRefused(signal_flow::ContextRefusal::ModuleMissing(
+                        None,
+                    )),
+                )),
+            ),
+        ];
+        let store = fixture.store();
+        for (request, outcome) in &expected {
+            assert_eq!(
+                store.launch_outcome(request).unwrap(),
+                Some(outcome.clone())
+            );
+        }
+        let current = LaunchOutcome::StartRejected(StartRejection::ContextRefused(
+            signal_flow::ContextRefusal::ModuleMissing(Some("vision:absent".into())),
+        ));
+        store
+            .record_launch_outcome("v9-current", current.clone())
+            .expect("the current identity-bearing outcome persists");
+        drop(store);
+        let reopened = fixture.store();
+        for (request, outcome) in expected {
+            assert_eq!(reopened.launch_outcome(request).unwrap(), Some(outcome));
+        }
+        assert_eq!(
+            reopened.launch_outcome("v9-current").unwrap(),
+            Some(current)
+        );
     }
 
     /// A 0.35.22 to 0.39 store's outcomes, each rejection in signal-flow

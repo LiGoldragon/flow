@@ -6,7 +6,7 @@
 use crate::HoldsStopRequest;
 use crate::delivery::lease::LeasesPanes;
 use crate::generated::operation::{
-    Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Settled_Data,
+    Failed_Data, Open_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Settled_Data,
     Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
 };
 use crate::generated::starter::CarriesFlowId;
@@ -17,18 +17,19 @@ use crate::performing::ClassifiesNativeLaunchFailure;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
 use crate::store::ManagesMetaflowState;
-use crate::store::NamesConfiguredModel;
 use crate::store::NamesLiveFlow;
 use crate::store::ReadsLaunchInspectionRecords;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::metaflow::TakesLaunchAddress;
+use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
 use crate::store::opened_thread::RecordsOpenedThreads;
 use crate::store::{
     AnnouncesLaunchChanges, ReadsCreatedLaunchPane, RecordsCreatedLaunchPane,
     RecordsNativeLaunchBinding,
 };
 use crate::store::{AnswersLaunchOutcome, LaunchedRecord, ReplacedRecord};
+use crate::store::{ConfiguresFlowStore, NamesConfiguredModel};
 use crate::waking::{RestsEndedAwake, SettlesStopsAtConfirmation, WakePolicy};
 use crate::{
     RunningNexus,
@@ -46,6 +47,7 @@ use signal_flow::{
     RegistrationAcknowledgement, RegistrationRefusal, ReplaceRejection, Replaced, Response,
     StartRejection, StopRejection,
 };
+use std::path::Path;
 
 trait InterpretsLaunchObservations {
     fn stops_reported(&self, flow_id: &str) -> i64;
@@ -193,6 +195,7 @@ pub trait LaunchesFlows {
         launch: ComposedLaunch,
         origin: Origin,
         reserved: Option<String>,
+        root: meta_signal_flow::Root,
         harness_arguments: Vec<String>,
     ) -> Response;
 }
@@ -210,6 +213,37 @@ impl ReadsHarnessArguments for RunningNexus {
             .as_str()
             .harness_arguments()
             .map_err(StartRejection::MalformedHarnessFlags)
+    }
+}
+
+impl RunningNexus {
+    /// Resolves the declaration's optional launch workspace against the
+    /// Nexus source root. The source root remains the home of records and
+    /// reservations; this path is only the harness cwd.
+    pub(crate) fn launch_root(
+        &self,
+        address: &signal_flow::Address,
+    ) -> Result<meta_signal_flow::Root, StartRejection> {
+        let declaration = self
+            .store
+            .metaflow_declaration(address)
+            .map_err(|_| StartRejection::LaunchPersistenceRefused)?;
+        let root = match declaration.and_then(|declaration| declaration.root_option) {
+            Some(root) => root,
+            None => {
+                self.store
+                    .runtime_configuration()
+                    .map_err(|_| StartRejection::LaunchPersistenceRefused)?
+                    .source_root
+            }
+        };
+        let path = Path::new(&root);
+        if !path.is_absolute() || !path.is_dir() {
+            return Err(StartRejection::CompositionRefused(
+                signal_flow::CompositionRefusal::Unconfigured,
+            ));
+        }
+        Ok(root)
     }
 }
 
@@ -330,6 +364,10 @@ impl LaunchesFlows for RunningNexus {
             }
             return Response::LaunchPending(attempt);
         }
+        let root = match self.launch_root(&profile.address) {
+            Ok(root) => root,
+            Err(rejection) => return Response::StartRejected(rejection),
+        };
         let persistence = || Response::StartRejected(StartRejection::LaunchPersistenceRefused);
         // A hold an ended flow still keeps on this Address is given back
         // first, so the refusal reads what Metaflows reports.
@@ -392,7 +430,8 @@ impl LaunchesFlows for RunningNexus {
             None => launch,
         };
         let harness_kind = launch.harness_kind.clone();
-        let response = self.launch_reserved(launch, origin, reserved.clone(), harness_arguments);
+        let response =
+            self.launch_reserved(launch, origin, reserved.clone(), root, harness_arguments);
         // The launch's own responder ends with it, whatever it came to.
         self.close_launch_responder();
         // A launch refused after its pane exists leaves nothing running: its
@@ -413,6 +452,7 @@ impl LaunchesFlows for RunningNexus {
         launch: ComposedLaunch,
         origin: Origin,
         reserved: Option<String>,
+        root: meta_signal_flow::Root,
         harness_arguments: Vec<String>,
     ) -> Response {
         let persistence = || Response::StartRejected(StartRejection::LaunchPersistenceRefused);
@@ -429,7 +469,10 @@ impl LaunchesFlows for RunningNexus {
         {
             return persistence();
         }
-        let pane = match self.perform(Operation::Open(launch.clone())) {
+        let pane = match self.perform(Operation::Open(Open_Data {
+            composed_launch: launch.clone(),
+            root: root.clone(),
+        })) {
             Outcome::Opened(pane) => pane,
             outcome => return Self::native_refused(NativeLaunchStage::Open, outcome),
         };
@@ -445,6 +488,7 @@ impl LaunchesFlows for RunningNexus {
         };
         let pane_launch = PaneLaunch {
             composed_launch: launch.clone(),
+            root,
             herdr_pane_binding: pane,
             flow_id_option: reserved,
             native_session_id_option: None,
@@ -715,6 +759,9 @@ impl LaunchesFlows for RunningNexus {
             }
             Ok(Some(_)) => {}
             Err(_) => return persistence(),
+        }
+        if let Err(rejection) = self.launch_root(&profile.address) {
+            return refused(ReplaceRejection::LaunchRefused(rejection));
         }
         if self.perform(Operation::Record(Record_Data::Replacing(Replacement {
             launch_request_id: launch_request_id.clone(),

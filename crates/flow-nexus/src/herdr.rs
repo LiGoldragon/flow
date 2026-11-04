@@ -131,11 +131,8 @@ pub struct HerdrCli {
     /// Stop in every Claude flow Flow launches: the one installed beside
     /// this Nexus's own executable.
     pub(crate) harness_hook: PathBuf,
-    /// This Nexus's own ordinary socket, the one it serves: every Claude
-    /// pane it launches gets it as `FLOW_SOCKET`, so the `flow` CLI that
-    /// `flow-hook` runs reports to the Nexus that launched the flow, not to
-    /// whatever Nexus the default path under the pane's runtime directory
-    /// names.
+    /// This Nexus's own ordinary socket, carried in every Claude hook's
+    /// typed configuration so its reports return to the launching Nexus.
     pub(crate) ordinary_socket: PathBuf,
     /// The in-memory file of each Claude start's composed system prompt,
     /// by launch request, held from the start until its session has bound.

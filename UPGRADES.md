@@ -1,20 +1,69 @@
+# Flow 0.48.0
+
+Merges the complete 0.47.0 line with configured native harness arguments and
+launch rehearsal. A `PaneLaunch` carries both its explicit `Root` working
+directory and its parsed `HarnessArguments`: transport configuration and native
+harness behavior remain separate typed values and each is read once before
+launch effects. The same argv constructor serves launch and rehearsal.
+
+The first open adds `flow_nexus_meta_harness_flags_configuration`, v1, alongside
+the 0.47 families. Its per-metaflow `HarnessFlags.String` defaults to empty when
+no row exists. A malformed quoted word or trailing escape is a typed refusal.
+
+Take an immutable Memory snapshot before the first 0.48.0 open. Earlier Flow
+versions do not recognize the combined families. Rollback restores that
+snapshot before starting the earlier binary; it never opens the upgraded
+Memory.
+
+# Flow 0.47.0
+
+Pins meta-signal-flow 51.0.0 (a39d9c8), signal-flow 39.0.0
+(61bbf5d), and Curriculum d8aa45d. A missing-module context refusal now
+carries `Some(ModuleIdentity)` when the current Curriculum or verification
+path knows which module is absent. Historical refusals carry `None`; no
+identity is inferred from their text.
+
+On first open, `flow-nexus-launch-outcome` upgrades from v8 to v9. Its v8
+Start and Replace rejection shapes are frozen, and every historical unit
+`ModuleMissing` becomes `ModuleMissing.None`, including a Start rejection
+nested in `ReplaceRejected.LaunchRefused`. The v7 predecessor is likewise
+frozen before conversion, and the older predecessor chain continues through
+its existing upgrades. Take an immutable Memory snapshot before the first
+0.47.0 open. Earlier Flow versions do not recognize the v9 family; rollback
+restores the snapshot before starting the earlier binary.
+
+# Flow 0.46.0
+
+Pins meta-signal-flow 50.0.0 (1214f7a) and signal-flow 38.0.0
+(7b737d9). A metaflow declaration now carries `Option<Root>` immediately
+after its Address. `None` runs new flows in the Nexus source root; `Some`
+runs them in that absolute existing directory. The selected root is the
+harness working directory only. Flow records, reservations and artifacts
+remain under the Nexus source root.
+
+On first open, `flow-nexus-meta-metaflow-configuration` upgrades from v4 to
+v5. Every v4 declaration is preserved and receives `None`; the earlier v1,
+v2 and v3 predecessors likewise default to `None` through their registered
+upgrade paths. Take an immutable Memory snapshot before the first 0.46.0
+open. Earlier Flow versions do not recognize the v5 family; rollback restores
+the snapshot before starting the earlier binary.
+
 # Flow 0.44.0
 
-Pins signal-flow 39.0.0 (74f4dae) and meta-signal-flow 49.0.0
-(939c9cd). `Rehearse` accepts the same declared `LaunchRequest` as `Launch`
-and returns the single final native command with every argv word shell-quoted.
-It reads configuration and composed context but creates no pane, thread,
-identity, prompt fd or lifecycle record. Effect-created resources appear as
-typed semantic placeholders for a manual runner to supply.
+Pins signal-flow 38.0.0 (7b737d9) and meta-signal-flow 49.0.0
+(9f56b26). The typed heartbeat configuration is disabled when its family has
+no row. Deployment begins a new accepted-message count epoch whether or not
+heartbeat is enabled; earlier deliveries have no purpose row and are not
+reinterpreted.
 
-The first open adds `flow_nexus_meta_harness_flags_configuration`, v1. Its
-per-metaflow `HarnessFlags.String` defaults to empty when no row exists and is
-parsed before launch effects. A malformed quoted word or trailing escape is a
-typed refusal. The parsed words form the final option tail after effort in the
-same argv constructor used by launch and rehearsal.
+The first open adds three v1 Memory families without changing existing rows:
+
+- `flow_nexus_meta_heartbeat_configuration`, the optional period and recipient list;
+- `flow_nexus_logical_delivery_purposes`, one `Ordinary` or `Heartbeat` purpose for each newly admitted logical delivery; and
+- `flow_nexus_heartbeat_standings`, each recipient's durable baseline, latest evidence and outstanding heartbeat delivery.
 
 Take an immutable Memory snapshot before the first 0.44.0 open. Earlier Flow
-versions do not recognize the new family. Rollback restores that snapshot
+versions do not recognize these families. Rollback restores that snapshot
 before starting the earlier binary; it never opens the upgraded Memory.
 
 # Flow 0.43.0
@@ -543,7 +592,7 @@ at the first open, and drops `flow_nexus_meta_threshold_configuration`.
   and Field reaches Psyche only after Psyche sent to it while this Nexus
   runs.
 - **A flow is launched from its declaration.** `flow-meta
-  'Configure.Metaflows.[ { { Psyche core Secondary } [ ... ] [ ... ] } ]'`
+  'Configure.Metaflows.[ { { Psyche core Secondary } None [ ... ] [ ... ] } ]'`
   declares each metaflow's system and user modules; `flow 'Launch.{ {
   Psyche core Secondary } «brief» }'` starts it at the model configured for
   its layer and aspect, at medium effort (low for an OpenAI Quaternary),

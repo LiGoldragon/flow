@@ -19,6 +19,9 @@ use crate::generated::starter::{
 use crate::harness_command::HarnessCommandResources;
 use crate::herdr::reservation::ChoosesNativeSession;
 use crate::title::{NativeTitle, ShowsNativeTitle, TitlesFlow};
+use datom_codec::{Datomizable, Path as DatomPath};
+use flow::HookConfiguration;
+use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
 use signal_flow::{
     ComposedLaunch, HarnessKind, HerdrPaneBinding, NativeLaunchBinding, NativeLaunchFailure,
@@ -37,6 +40,11 @@ use std::{
 /// Creates topology without launching a harness or sending a prompt.
 pub trait CreatesHerdrLaunchPane {
     fn create_launch_pane(&self, launch: &ComposedLaunch) -> Result<HerdrPaneBinding, String>;
+    fn create_launch_pane_in(
+        &self,
+        launch: &ComposedLaunch,
+        root: &Path,
+    ) -> Result<HerdrPaneBinding, String>;
 }
 
 /// Starts the selected native interactive harness without a positional prompt.
@@ -475,17 +483,28 @@ pub(crate) trait PreparesClaudePane {
 
 impl PreparesClaudePane for HerdrCli {
     fn claude_flag_settings(&self, lean: &LeanStart) -> String {
+        let configuration = HookConfiguration {
+            ordinary_socket_path: self.ordinary_socket.to_string_lossy().into_owned(),
+        }
+        .datomize(DatomPath::new())
+        .protosize()
+        .compact();
+        let command = format!(
+            "{} {}",
+            self.harness_hook.to_string_lossy().shell_quoted(),
+            configuration.shell_quoted()
+        );
         let hook = serde_json::json!([{
             "hooks": [{
                 "type": "command",
-                "command": self.harness_hook.to_string_lossy(),
+                "command": command,
             }]
         }]);
         let every_tool = serde_json::json!([{
             "matcher": "*",
             "hooks": [{
                 "type": "command",
-                "command": self.harness_hook.to_string_lossy(),
+                "command": command,
             }]
         }]);
         let mut settings = serde_json::json!({
@@ -527,11 +546,8 @@ impl PreparesClaudePane for HerdrCli {
             "pane".into(),
             "run".into(),
             pane.herdr_pane_id.clone(),
-            marker_suffix.claude_environment_preparation(
-                reserved,
-                &self.ordinary_socket,
-                &launch.lean_start().environment(),
-            ),
+            marker_suffix
+                .claude_environment_preparation(reserved, &launch.lean_start().environment()),
         ])?;
         let response = self.run_json(&[
             "--session".into(),
@@ -982,19 +998,14 @@ impl CapturesTranscripts for HerdrCli {
 }
 
 /// The shell line typed into a Claude launch pane before the harness: it
-/// removes the inherited Claude identity, exports `FLOW_SOCKET` as the
-/// ordinary socket of the Nexus launching the flow, and, for a launch
-/// Reserve gave a FlowId, exports that FlowId as FLOW_ID. The harness Herdr
-/// starts at that prompt, and every hook it runs, carries both, so
-/// `flow-hook`'s `flow` reports to this Nexus whatever runtime directory
-/// the pane's shell has. The FlowId is a claim alias, lowercase hex, so it
-/// needs no quoting; the socket path is quoted for the shell.
+/// removes inherited Claude identity and, when Reserve gave the launch a
+/// FlowId, exports that FlowId as FLOW_ID. The hook's typed configuration
+/// in Claude's flag settings carries the Nexus socket separately.
 pub(crate) trait PreparesClaudeEnvironment {
     /// `environment` is the launch's leave-out variables, each NAME=value.
     fn claude_environment_preparation(
         &self,
         reserved: Option<&str>,
-        socket: &Path,
         environment: &[String],
     ) -> String;
 }
@@ -1003,7 +1014,6 @@ impl PreparesClaudeEnvironment for str {
     fn claude_environment_preparation(
         &self,
         reserved: Option<&str>,
-        socket: &Path,
         environment: &[String],
     ) -> String {
         let marker_suffix = self;
@@ -1015,9 +1025,8 @@ impl PreparesClaudeEnvironment for str {
             .map(|variable| format!(" && export {}", variable.shell_quoted()))
             .collect::<String>();
         format!(
-            "unset {} && export FLOW_SOCKET={}{flow_id}{leave_outs} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
+            "unset {}{flow_id}{leave_outs} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
             HerdrCli::CLAUDE_INHERITED_ENVIRONMENT.join(" "),
-            socket.to_string_lossy().shell_quoted(),
             marker_suffix
         )
     }
@@ -1717,6 +1726,18 @@ impl TitlesNativeFlow for HerdrCli {
 
 impl CreatesHerdrLaunchPane for HerdrCli {
     fn create_launch_pane(&self, launch: &ComposedLaunch) -> Result<HerdrPaneBinding, String> {
+        let root = self.configured_workspace_root()?.to_path_buf();
+        self.create_launch_pane_in(launch, &root)
+    }
+
+    fn create_launch_pane_in(
+        &self,
+        launch: &ComposedLaunch,
+        root: &Path,
+    ) -> Result<HerdrPaneBinding, String> {
+        if !root.is_absolute() || !root.is_dir() {
+            return Err("configured metaflow root is not an absolute directory".into());
+        }
         let agent_name = launch.launch_agent_name();
         let response = self.run_json(&[
             "--session".into(),
@@ -1724,9 +1745,8 @@ impl CreatesHerdrLaunchPane for HerdrCli {
             "workspace".into(),
             "create".into(),
             "--cwd".into(),
-            self.configured_workspace_root()?
-                .to_str()
-                .ok_or_else(|| "configured workspace root is not UTF-8".to_owned())?
+            root.to_str()
+                .ok_or_else(|| "configured metaflow root is not UTF-8".to_owned())?
                 .into(),
             // No label: the agent name is internal, and the workspace is
             // labelled with the title once the Flow ID is claimed.
@@ -3168,11 +3188,19 @@ printf '%s\n' "$alias"
             "1234567812344abc8def123456789abc",
             &agent_name,
         );
-        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        let workspace = tempfile::tempdir().expect("metaflow workspace");
+        let pane = adapter
+            .create_launch_pane_in(&launch, workspace.path())
+            .expect("created pane in metaflow workspace");
         adapter
             .start_native_harness(&launch, &pane, None)
             .expect("started exact Codex client");
         let calls = fs::read_to_string(root.path().join("calls")).expect("launch calls");
+        let create = calls
+            .lines()
+            .find(|line| line.contains("workspace create"))
+            .expect("workspace create call");
+        assert!(create.contains(&format!("--cwd {}", workspace.path().display())));
         let start = calls
             .lines()
             .find(|line| line.contains("agent start"))
@@ -3390,6 +3418,31 @@ printf '%s\n' "$alias"
     }
 
     #[test]
+    fn every_claude_hook_command_carries_the_typed_nexus_socket() {
+        let adapter = HerdrCli::default()
+            .with_ordinary_socket(Path::new("/fixture/run/flow-next/flow/flow.sock"));
+        let settings: serde_json::Value = serde_json::from_str(
+            &adapter.claude_flag_settings(&launch(HarnessKind::Claude).lean_start()),
+        )
+        .expect("settings JSON");
+        for event in [
+            "SessionStart",
+            "PostToolUse",
+            "UserPromptSubmit",
+            "Stop",
+            "SessionEnd",
+        ] {
+            let command = settings["hooks"][event][0]["hooks"][0]["command"]
+                .as_str()
+                .expect("hook command");
+            assert!(
+                command.ends_with("'{ /fixture/run/flow-next/flow/flow.sock }'"),
+                "{event}: {command}"
+            );
+        }
+    }
+
+    #[test]
     fn a_receipt_showing_a_removed_tool_refuses_the_launch() {
         use signal_flow::LeaveOut;
         let native_session = "12345678-1234-4abc-8def-123456789abc";
@@ -3437,7 +3490,7 @@ printf '%s\n' "$alias"
         let mut command = std::process::Command::new("sh");
         command.arg("-c").arg(format!(
             "{}; {checks}",
-            ("test-marker").claude_environment_preparation(None, Path::new("/run/flow.sock"), &[]),
+            ("test-marker").claude_environment_preparation(None, &[]),
         ));
         for name in HerdrCli::CLAUDE_INHERITED_ENVIRONMENT {
             command.env(name, "/home/li/.claude/jobs/108ab020");
@@ -3464,11 +3517,7 @@ printf '%s\n' "$alias"
             .arg("-c")
             .arg(format!(
                 "{}; sh -c 'printf %s \"$FLOW_ID\"'",
-                ("test-marker").claude_environment_preparation(
-                    Some("5a4d0b"),
-                    Path::new("/run/flow.sock"),
-                    &[]
-                ),
+                ("test-marker").claude_environment_preparation(Some("5a4d0b"), &[]),
             ))
             .env("FLOW_ID", "0a0a0a")
             .output()
@@ -3477,31 +3526,6 @@ printf '%s\n' "$alias"
         assert_eq!(
             String::from_utf8(output.stdout).expect("UTF-8"),
             "FLOW_CLAUDE_ENV_READY_test-marker\n5a4d0b"
-        );
-    }
-
-    /// The launching Nexus's ordinary socket reaches the harness's
-    /// environment as FLOW_SOCKET, replacing one the pane's shell
-    /// inherited, as one word however the path is spelled.
-    #[test]
-    fn claude_environment_preparation_exports_the_launching_nexus_socket() {
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!(
-                "{}; sh -c 'printf %s \"$FLOW_SOCKET\"'",
-                ("test-marker").claude_environment_preparation(
-                    None,
-                    Path::new("/run/user/1001/flow-next/it's a $HOME/flow.sock"),
-                    &[]
-                ),
-            ))
-            .env("FLOW_SOCKET", "/run/user/1001/flow/flow.sock")
-            .output()
-            .expect("shell environment witness");
-        assert!(output.status.success());
-        assert_eq!(
-            String::from_utf8(output.stdout).expect("UTF-8"),
-            "FLOW_CLAUDE_ENV_READY_test-marker\n/run/user/1001/flow-next/it's a $HOME/flow.sock"
         );
     }
 
@@ -3529,7 +3553,6 @@ printf '%s\n' "$alias"
             .lines()
             .find(|line| line.contains("pane run"))
             .expect("pane prepared");
-        assert!(prepared.contains("export FLOW_SOCKET='/fixture/run/flow-next/flow/flow.sock'"));
         assert!(prepared.contains("export FLOW_ID=123456"));
         assert!(prepared.contains("FLOW_CLAUDE_ENV_READY_"));
         assert!(!prepared.contains("CLAUDE_CODE_ARTIFACT"));
@@ -3672,17 +3695,9 @@ printf '%s\n' "$alias"
             SYSTEM_TEXT,
             "the harness read the composed system prompt whole from the held file"
         );
+        let settings = adapter.claude_flag_settings(&launch.lean_start());
         assert!(start_call.ends_with(&format!(
-            "-- --settings {} --remote-control {title} --name {title} --system-prompt-file {system_prompt_file} --session-id {session} --model model-current --effort high",
-            concat!(
-                r#"{"hooks":{"#,
-                r#""PostToolUse":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}],"matcher":"*"}],"#,
-                r#""SessionEnd":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
-                r#""SessionStart":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
-                r#""Stop":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
-                r#""UserPromptSubmit":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}]},"#,
-                r#""permissions":{"defaultMode":"bypassPermissions"}}"#
-            ),
+            "-- --settings {settings} --remote-control {title} --name {title} --system-prompt-file {system_prompt_file} --session-id {session} --model model-current --effort high",
         )));
         // The flag settings name the launch's own mode, which suppresses the
         // auto-mode default offer, and carry the harness hook on SessionStart,

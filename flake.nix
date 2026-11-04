@@ -9,7 +9,7 @@
     # The Curriculum whose schema Flow pins (crates/flow-nexus/ethos/
     # curriculum.ethos): the capsule runs its own Curriculum Nexus from it.
     curriculum = {
-      url = "github:LiGoldragon/Curriculum/91acf293a0d0cce1793b458d5377fe78f841e0c1";
+      url = "github:LiGoldragon/Curriculum/d8aa45d";
       flake = false;
     };
     # The public default remains the last unconfigured Flow artifact while
@@ -53,7 +53,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.44.0";
+            version = "0.48.0";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -235,7 +235,7 @@
             context.pkgs.runCommand "flow-capsule-witnesses"
               { nativeBuildInputs = [ context.pkgs.babashka ]; }
               ''
-                bb ${./capsule/flow-capsule-test.clj} ${./capsule/flow-capsule.clj} > result.txt \
+                bb ${./capsule/flow-capsule-test.clj} ${./capsule/flow-capsule.clj} ${self.packages.${system}.default} > result.txt \
                   || { cat result.txt; exit 1; }
                 cat result.txt
                 cp result.txt "$out"
@@ -379,12 +379,14 @@
             "herdr::launch::tests::a_reserved_claude_launch_starts_as_its_session_with_its_flow_id";
           flow-reserved-flow-id-in-the-environment = context.exactTest "flow-nexus"
             "herdr::launch::tests::claude_environment_preparation_exports_the_reserved_flow_id";
-          flow-launch-exports-its-nexus-socket = context.exactTest "flow-nexus"
-            "herdr::launch::tests::claude_environment_preparation_exports_the_launching_nexus_socket";
+          flow-launch-configures-its-hook-socket = context.exactTest "flow-nexus"
+            "herdr::launch::tests::every_claude_hook_command_carries_the_typed_nexus_socket";
           flow-launch-socket-from-the-start = context.exactTest "flow-nexus"
             "tests::launching_nexus::a_launch_receives_the_socket_from_each_typed_start";
+          flow-two-explicit-nexuses-are-isolated = context.exactTest "flow-nexus"
+            "two_explicit_starts_serve_disjoint_sockets_and_memory";
           flow-hook-reports-to-its-launching-nexus = context.exactTest "flow"
-            "the_hook_reports_to_the_socket_its_launching_nexus_exported";
+            "the_hook_reports_only_to_its_typed_socket_configuration";
           flow-retire-keeps-history = context.exactTest "flow-nexus"
             "tests::retire_keeps_the_row_and_takes_the_flow_out_of_receiving";
           flow-deliver-never-interleaves = context.exactTest "flow-nexus"
@@ -419,10 +421,10 @@
             "tests::waking::a_launched_seat_identifies_through_its_pane_and_its_order_wakes_an_asleep_seat";
           flow-send-server-identifies-codex-thread = context.exactTest "flow-nexus"
             "tests::waking::a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread";
-          flow-client-default-socket = context.exactTest "flow"
-            "the_client_reaches_the_default_ordinary_socket_under_the_runtime_directory";
-          flow-meta-client-default-socket = context.exactTest "flow-meta"
-            "the_meta_client_reaches_the_default_meta_socket_under_the_runtime_directory";
+          flow-client-explicit-socket = context.exactTest "flow"
+            "the_client_uses_only_the_explicit_socket";
+          flow-meta-client-explicit-socket = context.exactTest "flow-meta"
+            "the_client_uses_only_the_explicit_socket";
           flow-configuration-only-over-meta = context.exactTest "flow-nexus"
             "configure_only_commits_before_normal_start_uses_the_declared_store";
           flow-configure-family-is-its-last-declaration = context.exactTest "flow-nexus"

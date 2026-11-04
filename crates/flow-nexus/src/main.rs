@@ -169,6 +169,10 @@ fn main() -> ExitCode {
             nexus.keep_reminding()
         });
         scope.spawn(|| {
+            use flow_nexus::heartbeat::RunsHeartbeat;
+            nexus.keep_heartbeating()
+        });
+        scope.spawn(|| {
             if signals.watch(&|| nexus.stopping.requested()) {
                 nexus.stop(&sockets);
             }
@@ -278,6 +282,9 @@ trait RunsConfigurationStartup {
                 }
                 Err(StoreError::CountersRefused(refusal)) => {
                     MetaResponse::ConfigureRejected(ConfigureRejection::CountersRefused(refusal))
+                }
+                Err(StoreError::InvalidHeartbeatPeriod) => {
+                    MetaResponse::ConfigureRejected(ConfigureRejection::StoreRefused)
                 }
                 Err(error) => {
                     MetaResponse::Refused(meta_signal_flow::StoreRefusal::Store(error.to_string()))

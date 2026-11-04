@@ -271,5 +271,6 @@ pub enum Outcome {
     ResolvedSources(std::vec::Vec<ResolvedModule>),
     StartupComposed(StartupComposition),
     RoleComposed(RoleComposition),
+    ModuleMissing(ModuleIdentity),
     Rejected(String),
 }

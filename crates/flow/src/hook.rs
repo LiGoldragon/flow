@@ -32,7 +32,11 @@
 //! writes one tab-separated line on stderr (event, datom, the CLI's exit
 //! code, the CLI's whole output) for whoever reads it.
 
+use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+use flow::{HookConfiguration, Invocation};
 use flow_native::{DigestsPrompt, ReadsClaudePaste};
+use protos::{Compactable, Protosizable, ReaderBudget};
+use signal_flow::{Event, NativePrompt, NativeStop, Query, Report_Data};
 use std::{
     env,
     io::Read,
@@ -44,12 +48,13 @@ use std::{
 struct HarnessHook {
     input: serde_json::Value,
     flow_id: Option<String>,
+    configuration: Option<HookConfiguration>,
 }
 
 /// What the hook does with one event.
 #[derive(Debug, PartialEq, Eq)]
 enum HookCall {
-    Report(String),
+    Report(Box<Query>),
     Nothing(&'static str),
 }
 
@@ -62,16 +67,8 @@ trait ChoosesHookCall {
     fn call(&self) -> HookCall;
 }
 
-trait QuotesDatomString {
-    /// A datom string in guillemets: every glyph is content until the
-    /// closing guillemet, which is escaped with a backslash.
-    fn quoted(&self) -> String;
-}
-
 trait ReadsHookField {
-    /// The input's string field as a datom Option: `Some.«value»`, or
-    /// `None` when the input does not carry it.
-    fn optional(&self, field: &str) -> String;
+    fn optional(&self, field: &str) -> Option<String>;
 }
 
 trait ReportsThroughCli {
@@ -87,22 +84,27 @@ impl ReadsHookInput for HarnessHook {
             flow_id: env::var("FLOW_ID")
                 .ok()
                 .filter(|flow_id| !flow_id.is_empty()),
+            configuration: env::args().nth(1).and_then(|source| {
+                let mut budget = Budget {
+                    remaining: 65_536,
+                    reader: ReaderBudget { remaining: 65_536 },
+                    depth: 0,
+                    maximum_depth: 1_024,
+                };
+                Potential::<HookConfiguration>::from(source)
+                    .actualize(&mut budget)
+                    .ok()
+            }),
         }
-    }
-}
-
-impl QuotesDatomString for str {
-    fn quoted(&self) -> String {
-        format!("«{}»", self.replace('»', "\\»"))
     }
 }
 
 impl ReadsHookField for HarnessHook {
-    fn optional(&self, field: &str) -> String {
-        match self.input.get(field).and_then(serde_json::Value::as_str) {
-            Some(value) => format!("Some.{}", value.quoted()),
-            None => "None".to_owned(),
-        }
+    fn optional(&self, field: &str) -> Option<String> {
+        self.input
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
     }
 }
 
@@ -120,23 +122,22 @@ impl ChoosesHookCall for HarnessHook {
             return HookCall::Nothing("no FLOW_ID in the harness environment");
         };
         let event = match self.event_name().as_str() {
-            "SessionStart" => format!("Started.{}", self.optional("session_id")),
+            "SessionStart" => Event::Started(self.optional("session_id")),
             "PostToolUse" => match self
                 .input
                 .get("tool_name")
                 .and_then(serde_json::Value::as_str)
             {
-                Some(tool_name) => format!("ToolUsed.{}", tool_name.quoted()),
+                Some(tool_name) => Event::ToolUsed(tool_name.to_owned()),
                 None => return HookCall::Nothing("PostToolUse without a tool_name"),
             },
             "UserPromptSubmit" => {
                 match self.input.get("prompt").and_then(serde_json::Value::as_str) {
-                    Some(prompt) => format!(
-                        "PromptSubmitted.{{ {} {} {} }}",
-                        self.optional("session_id"),
-                        self.optional("prompt_id"),
-                        prompt.submitted_claude_text().prompt_sha256()
-                    ),
+                    Some(prompt) => Event::PromptSubmitted(NativePrompt {
+                        native_session_id_option: self.optional("session_id"),
+                        prompt_id_option: self.optional("prompt_id"),
+                        prompt_sha256: prompt.submitted_claude_text().prompt_sha256(),
+                    }),
                     None => return HookCall::Nothing("UserPromptSubmit without a prompt"),
                 }
             }
@@ -146,36 +147,52 @@ impl ChoosesHookCall for HarnessHook {
                 if self.input.get("reason").and_then(serde_json::Value::as_str)
                     == Some("clear") =>
             {
-                format!("Cleared.{}", self.optional("session_id"))
+                Event::Cleared(self.optional("session_id"))
             }
             // The session ends: the flow has exited, whether or not
             // anything looks at its pane.
-            "SessionEnd" => format!("Ended.{}", self.optional("session_id")),
-            "Stop" => format!(
-                "Stopped.{{ {} {} {} }}",
-                self.optional("session_id"),
-                self.optional("transcript_path"),
-                self.optional("last_assistant_message")
-            ),
+            "SessionEnd" => Event::Ended(self.optional("session_id")),
+            "Stop" => Event::Stopped(NativeStop {
+                native_session_id_option: self.optional("session_id"),
+                transcript_path_option: self.optional("transcript_path"),
+                last_assistant_message_option: self.optional("last_assistant_message"),
+            }),
             _ => return HookCall::Nothing("no Report for this event"),
         };
-        HookCall::Report(format!("Report.{{ {} {event} }}", flow_id.quoted()))
+        HookCall::Report(Box::new(Query::Report(Report_Data {
+            flow_id: flow_id.clone(),
+            event,
+        })))
     }
 }
 
 impl ReportsThroughCli for HarnessHook {
     fn run(&self) -> String {
-        let datom = match self.call() {
-            HookCall::Report(datom) => datom,
+        let query = match self.call() {
+            HookCall::Report(query) => *query,
             HookCall::Nothing(reason) => return format!("{}\t-\t-\t{reason}", self.event_name()),
         };
+        let datom = query.datomize(vec![]).protosize().compact();
+        let Some(configuration) = &self.configuration else {
+            return format!(
+                "{}\t{datom}\t-\tinvalid hook configuration",
+                self.event_name()
+            );
+        };
+        let invocation = Invocation {
+            ordinary_socket_path: configuration.ordinary_socket_path.clone(),
+            query,
+        }
+        .datomize(vec![])
+        .protosize()
+        .compact();
         // The `flow` CLI installed beside this executable, else on PATH.
         let client = env::current_exe()
             .ok()
             .and_then(|path| path.parent().map(|directory| directory.join("flow")))
             .filter(|path| path.is_file())
             .unwrap_or_else(|| PathBuf::from("flow"));
-        match Command::new(client).arg(&datom).output() {
+        match Command::new(client).arg(invocation).output() {
             Ok(output) => {
                 let reply = format!(
                     "{}{}",
@@ -202,11 +219,30 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{ChoosesHookCall, HarnessHook, HookCall};
+    use datom_codec::{Actualizing, Budget, Potential};
+    use protos::ReaderBudget;
+
+    fn report(source: String) -> HookCall {
+        let mut budget = Budget {
+            remaining: 65_536,
+            reader: ReaderBudget { remaining: 65_536 },
+            depth: 0,
+            maximum_depth: 1_024,
+        };
+        HookCall::Report(Box::new(
+            Potential::<signal_flow::Query>::from(source)
+                .actualize(&mut budget)
+                .expect("fixture query"),
+        ))
+    }
 
     fn hook(input: serde_json::Value, flow_id: Option<&str>) -> HarnessHook {
         HarnessHook {
             input,
             flow_id: flow_id.map(str::to_owned),
+            configuration: Some(flow::HookConfiguration {
+                ordinary_socket_path: "unused".into(),
+            }),
         }
     }
 
@@ -220,7 +256,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Started.Some.«s» }".into())
+            report("Report.{ «5a4d0b» Started.Some.«s» }".into())
         );
         assert_eq!(
             hook(
@@ -228,7 +264,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» ToolUsed.«Bash» }".into())
+            report("Report.{ «5a4d0b» ToolUsed.«Bash» }".into())
         );
         assert_eq!(
             hook(
@@ -238,7 +274,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report(
+            report(
                 "Report.{ «5a4d0b» Stopped.{ Some.«s» Some.«/t/s.jsonl» Some.«answer» } }".into()
             )
         );
@@ -248,7 +284,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Stopped.{ None None None } }".into())
+            report("Report.{ «5a4d0b» Stopped.{ None None None } }".into())
         );
         assert_eq!(
             hook(
@@ -257,7 +293,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Stopped.{ None None Some.«» } }".into())
+            report("Report.{ «5a4d0b» Stopped.{ None None Some.«» } }".into())
         );
         assert_eq!(
             hook(
@@ -266,7 +302,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Ended.Some.«s» }".into())
+            report("Report.{ «5a4d0b» Ended.Some.«s» }".into())
         );
         assert_eq!(
             hook(
@@ -275,7 +311,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Ended.Some.«s» }".into())
+            report("Report.{ «5a4d0b» Ended.Some.«s» }".into())
         );
     }
 
@@ -291,7 +327,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Cleared.Some.«s1» }".into())
+            report("Report.{ «5a4d0b» Cleared.Some.«s1» }".into())
         );
         assert_eq!(
             hook(
@@ -300,7 +336,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Started.Some.«s2» }".into())
+            report("Report.{ «5a4d0b» Started.Some.«s2» }".into())
         );
     }
 
@@ -323,7 +359,7 @@ mod tests {
                     Some("5a4d0b")
                 )
                 .call(),
-                HookCall::Report(format!(
+                report(format!(
                     "Report.{{ «5a4d0b» PromptSubmitted.{{ Some.«s» Some.«p» {digest} }} }}"
                 ))
             );
@@ -357,21 +393,11 @@ mod tests {
     /// The hook's datom is one the Flow CLI reads as the Report it means.
     #[test]
     fn the_correlated_datoms_read_as_signal_flow_reports() {
-        use datom_codec::{Actualizing, Budget, Potential};
-        use protos::ReaderBudget;
         let read = |input: serde_json::Value| {
-            let HookCall::Report(datom) = hook(input, Some("5a4d0b")).call() else {
+            let HookCall::Report(query) = hook(input, Some("5a4d0b")).call() else {
                 panic!("the event is reported")
             };
-            let mut budget = Budget {
-                remaining: 4096,
-                reader: ReaderBudget { remaining: 4096 },
-                depth: 0,
-                maximum_depth: 1024,
-            };
-            Potential::<signal_flow::Query>::from(datom)
-                .actualize(&mut budget)
-                .unwrap()
+            *query
         };
         assert_eq!(
             read(
@@ -419,25 +445,15 @@ mod tests {
 
     #[test]
     fn the_hook_datom_reads_as_a_signal_flow_report() {
-        use datom_codec::{Actualizing, Budget, Potential};
-        use protos::ReaderBudget;
-        let HookCall::Report(datom) = hook(
+        let HookCall::Report(query) = hook(
             serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Bash"}),
             Some("5a4d0b"),
         )
         .call() else {
             panic!("a tool use is reported")
         };
-        let mut budget = Budget {
-            remaining: 4096,
-            reader: ReaderBudget { remaining: 4096 },
-            depth: 0,
-            maximum_depth: 1024,
-        };
         assert_eq!(
-            Potential::<signal_flow::Query>::from(datom)
-                .actualize(&mut budget)
-                .unwrap(),
+            *query,
             signal_flow::Query::Report(signal_flow::Report_Data {
                 flow_id: "5a4d0b".into(),
                 event: signal_flow::Event::ToolUsed("Bash".into()),

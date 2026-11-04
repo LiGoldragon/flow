@@ -1462,7 +1462,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_identity_the_composer_rejects_refuses_the_launch() {
+    fn a_missing_identity_refuses_the_launch_with_its_identity() {
         let mut profile = fixture_profile();
         profile.user_modules.push("unknown-module".into());
         assert_eq!(
@@ -1474,7 +1474,9 @@ pub(crate) mod tests {
                 },
                 Vec::<signal_flow::LeaveOut>::new(),
             ),
-            Err(CompositionError::Context(ContextRefusal::ComposerRejected))
+            Err(CompositionError::Context(ContextRefusal::ModuleMissing(
+                Some("unknown-module".into())
+            )))
         );
     }
 

@@ -10,7 +10,7 @@ use crate::codex::{
 };
 use crate::composition::{ComposesLaunch, CompositionError, HarnessedProfile};
 use crate::generated::operation::{
-    Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Asleep_Data,
+    Failed_Data, Open_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Asleep_Data,
     Record_Data_Awoken_Data, Record_Data_Context_Data, Record_Data_Harness_Data,
     Record_Data_Settled_Data, Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
 };
@@ -296,12 +296,19 @@ impl Performs for RunningNexus {
                 Ok(_) => Outcome::Failed(Failed_Data::Unstarted),
                 Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
             },
-            Operation::Open(launch) => match self.herdr.create_launch_pane(&launch) {
+            Operation::Open(Open_Data {
+                composed_launch,
+                root,
+            }) => match self
+                .herdr
+                .create_launch_pane_in(&composed_launch, std::path::Path::new(&root))
+            {
                 Ok(pane) => Outcome::Opened(pane),
                 Err(error) => NativeLaunchRefusal::refused(NativeLaunchStage::Open, error),
             },
             Operation::Spawn(PaneLaunch {
                 composed_launch,
+                root,
                 herdr_pane_binding,
                 flow_id_option,
                 harness_arguments,
@@ -316,42 +323,46 @@ impl Performs for RunningNexus {
                         .codex_endpoints
                         .adapter_for(&composed_launch.launch_profile.model_name)
                         .and_then(|adapter| {
-                            adapter.open_thread(&composed_launch, &mut |thread| {
-                                // Before anything runs on it: the thread is
-                                // recorded as this launch's, durably (a
-                                // remote-resumed TUI never reports it to
-                                // Herdr, so a launch recovered after this
-                                // start binds to it, and a call is sent from
-                                // this launch's Address), and its FlowId is
-                                // claimed, which names its title.
-                                use crate::herdr::launch::ClaimsNativeIdentity;
-                                use crate::store::opened_thread::RecordsOpenedThreads;
-                                use crate::title::{ShowsNativeTitle, TitlesFlow};
-                                let refused = |detail: String| {
-                                    crate::codex::CodexAdapterUnavailable::Protocol(detail)
-                                };
-                                if !self
-                                    .store
-                                    .record_opened_thread(
-                                        &composed_launch.launch_profile.launch_request_id,
-                                        thread,
-                                    )
-                                    .unwrap_or(false)
-                                {
-                                    return Err(refused(format!(
-                                        "opened thread {thread} not recorded as the launch's"
-                                    )));
-                                }
-                                let flow_id = self
-                                    .herdr
-                                    .claim_flow_identity(&HarnessKind::Codex, thread)
-                                    .map_err(refused)?;
-                                composed_launch
-                                    .launch_profile
-                                    .native_title(&flow_id)
-                                    .map(|title| title.as_str().to_owned())
-                                    .map_err(|refusal| refused(refusal.to_string()))
-                            })
+                            adapter.open_thread_in(
+                                &composed_launch,
+                                std::path::Path::new(&root),
+                                &mut |thread| {
+                                    // Before anything runs on it: the thread is
+                                    // recorded as this launch's, durably (a
+                                    // remote-resumed TUI never reports it to
+                                    // Herdr, so a launch recovered after this
+                                    // start binds to it, and a call is sent from
+                                    // this launch's Address), and its FlowId is
+                                    // claimed, which names its title.
+                                    use crate::herdr::launch::ClaimsNativeIdentity;
+                                    use crate::store::opened_thread::RecordsOpenedThreads;
+                                    use crate::title::{ShowsNativeTitle, TitlesFlow};
+                                    let refused = |detail: String| {
+                                        crate::codex::CodexAdapterUnavailable::Protocol(detail)
+                                    };
+                                    if !self
+                                        .store
+                                        .record_opened_thread(
+                                            &composed_launch.launch_profile.launch_request_id,
+                                            thread,
+                                        )
+                                        .unwrap_or(false)
+                                    {
+                                        return Err(refused(format!(
+                                            "opened thread {thread} not recorded as the launch's"
+                                        )));
+                                    }
+                                    let flow_id = self
+                                        .herdr
+                                        .claim_flow_identity(&HarnessKind::Codex, thread)
+                                        .map_err(refused)?;
+                                    composed_launch
+                                        .launch_profile
+                                        .native_title(&flow_id)
+                                        .map(|title| title.as_str().to_owned())
+                                        .map_err(|refusal| refused(refusal.to_string()))
+                                },
+                            )
                         }) {
                         // That connection answers the thread's calls while
                         // the launch holds the gate.
@@ -437,7 +448,7 @@ impl Performs for RunningNexus {
                 herdr_pane_binding,
                 flow_id_option,
                 native_session_id_option,
-                harness_arguments: _,
+                ..
             }) => {
                 let observed = match native_session_id_option {
                     Some(thread) => self.herdr.observe_attached_codex_binding(

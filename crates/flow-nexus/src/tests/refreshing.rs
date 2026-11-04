@@ -46,6 +46,7 @@ fn declare(fixture: &NexusFixture, at: Address) {
         .nexus
         .store
         .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+            root_option: None,
             address: at,
             system_modules: vec!["spirit-core".into(), "intent-flow".into()],
             user_modules: vec!["operation-main-flow".into()],

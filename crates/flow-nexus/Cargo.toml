@@ -11,6 +11,7 @@ default = ["datom"]
 datom = []
 executable-default-configuration = []
 [dependencies]
+flow = { path = "../flow" }
 flow-defaults = { path = "../flow-defaults" }
 flow-native = { path = "../flow-native" }
 flow-ethos.workspace = true

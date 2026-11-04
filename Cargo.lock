@@ -221,10 +221,11 @@ checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
 name = "flow"
-version = "0.44.0"
+version = "0.48.0"
 dependencies = [
  "datom-codec",
- "flow-defaults",
+ "ethos-zero 17.0.0",
+ "flow-ethos",
  "flow-native",
  "protos",
  "rkyv",
@@ -235,11 +236,11 @@ dependencies = [
 
 [[package]]
 name = "flow-defaults"
-version = "0.44.0"
+version = "0.48.0"
 
 [[package]]
 name = "flow-ethos"
-version = "0.44.0"
+version = "0.48.0"
 dependencies = [
  "datom-codec",
  "ethos-zero 17.0.0",
@@ -249,10 +250,11 @@ dependencies = [
 
 [[package]]
 name = "flow-meta"
-version = "0.44.0"
+version = "0.48.0"
 dependencies = [
  "datom-codec",
- "flow-defaults",
+ "ethos-zero 17.0.0",
+ "flow-ethos",
  "meta-signal-flow",
  "protos",
  "rkyv",
@@ -262,18 +264,19 @@ dependencies = [
 
 [[package]]
 name = "flow-native"
-version = "0.44.0"
+version = "0.48.0"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "flow-nexus"
-version = "0.44.0"
+version = "0.48.0"
 dependencies = [
  "base64",
  "datom-codec",
  "ethos-zero 17.0.0",
+ "flow",
  "flow-defaults",
  "flow-ethos",
  "flow-native",
@@ -476,8 +479,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "meta-signal-flow"
-version = "49.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=939c9cd0a4453ff4a68523497a3752f5c92d740c#939c9cd0a4453ff4a68523497a3752f5c92d740c"
+version = "52.0.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=6519765ad2fb3fb563a02db08f55f99db73a0af9#6519765ad2fb3fb563a02db08f55f99db73a0af9"
 dependencies = [
  "datom-codec",
  "ethos-zero 17.0.0",
@@ -857,8 +860,8 @@ dependencies = [
 
 [[package]]
 name = "signal-flow"
-version = "39.0.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=74f4dae4bcf909e3ca16a64d2f4736a308223eb2#74f4dae4bcf909e3ca16a64d2f4736a308223eb2"
+version = "40.0.0"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=58f5dbeec17bd4b98cbb43d38f0842f9ef29728b#58f5dbeec17bd4b98cbb43d38f0842f9ef29728b"
 dependencies = [
  "datom-codec",
  "ethos-zero 17.0.0",

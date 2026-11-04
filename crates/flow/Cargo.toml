@@ -2,14 +2,21 @@
 name = "flow"
 version.workspace = true
 edition.workspace = true
+build = "build.rs"
+[features]
+default = ["datom"]
+datom = []
 [[bin]]
 name = "flow"
 path = "src/main.rs"
 [[bin]]
 name = "flow-hook"
 path = "src/hook.rs"
+[[bin]]
+name = "flow-compose-invocation"
+path = "src/compose_invocation.rs"
 [dependencies]
-flow-defaults = { path = "../flow-defaults" }
+flow-ethos = { path = "../flow-ethos", features = ["datom"] }
 flow-native = { path = "../flow-native" }
 datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "4dff16b4f7412febc3b71aac8b49680cd20988cb" }
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3" }
@@ -18,3 +25,5 @@ serde_json.workspace = true
 signal-flow = { workspace = true, features = ["datom"] }
 [dev-dependencies]
 tempfile = "3"
+[build-dependencies]
+ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "07714b0171802787bea1eefe4caa2d826d9c4030" }

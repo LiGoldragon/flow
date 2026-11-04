@@ -65,6 +65,7 @@
 
 Operation
 [ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch Origin LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request QueueEntry LogicalDeliveryId ContextRefusal CompositionRefusal LeaveOutRefusal NativeSessionId HarnessSpawnRefusal NativeLaunchRefusal ]
+  meta_signal_flow:Root
   flow_nexus:[ LaunchOutcome Replacement ] ]
 [ Compose.LaunchProfile
   Reserve.{ ComposedLaunch Origin }
@@ -86,7 +87,7 @@ Operation
            Awoken.{ Address FlowId Delivered.Integer } ]
   Register.{ FlowNode Caller }
   Confirm.FlowId
-  Open.ComposedLaunch
+  Open.{ ComposedLaunch Root }
   Spawn.PaneLaunch
   Bind.PaneLaunch
   Title.{ ComposedLaunch NativeLaunchBinding }
@@ -128,4 +129,4 @@ Operation
            SpawnRefused.HarnessSpawnRefusal
            LaunchRefused.NativeLaunchRefusal ] ]
 [ HarnessArguments.Vector<String>
-  PaneLaunch.{ ComposedLaunch HerdrPaneBinding Option<FlowId> Option<NativeSessionId> HarnessArguments } ]
+  PaneLaunch.{ ComposedLaunch Root HerdrPaneBinding Option<FlowId> Option<NativeSessionId> HarnessArguments } ]

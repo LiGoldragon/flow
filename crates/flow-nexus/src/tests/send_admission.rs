@@ -361,6 +361,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
     assert!(fixture.nexus.direct_send_lease(&target).is_err());
     assert!(fixture.nexus.store.metaflow(&target).unwrap().is_none());
     let declaration = meta_signal_flow::ConfigureMetaflow {
+        root_option: None,
         address: target.clone(),
         system_modules: vec!["spirit-core".into()],
         user_modules: vec![],
@@ -583,9 +584,8 @@ fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
     let flow = |text: &str| -> String {
         let output = std::process::Command::new(&cli)
             .env_clear()
-            .env("FLOW_SOCKET", &socket)
             .env("HERDR_PANE_ID", "w5:p1")
-            .arg(text)
+            .arg(format!("{{ «{}» {text} }}", socket.to_string_lossy()))
             .output()
             .expect("flow runs");
         assert!(output.status.success(), "{text}: {output:?}");

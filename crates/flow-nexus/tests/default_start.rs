@@ -151,6 +151,79 @@ fn configure_fresh(home: &Path, runtime: &Path, start: &Start) {
     wait_successfully(&mut nexus);
 }
 
+fn meta_call(
+    nexus: &mut StartedNexus,
+    socket: &str,
+    query: &meta_signal_flow::Query,
+) -> meta_signal_flow::Response {
+    let mut peer = connect(Path::new(socket), nexus);
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(query).expect("meta query encodes");
+    peer.write_all(&(bytes.len() as u32).to_be_bytes())
+        .and_then(|_| peer.write_all(&bytes))
+        .expect("meta query written");
+    let mut length = [0; 4];
+    peer.read_exact(&mut length).expect("meta response length");
+    let mut reply = vec![0; u32::from_be_bytes(length) as usize];
+    peer.read_exact(&mut reply).expect("meta response");
+    rkyv::from_bytes::<meta_signal_flow::Response, rkyv::rancor::Error>(&reply)
+        .expect("meta response decodes")
+}
+
+#[test]
+fn two_explicit_starts_serve_disjoint_sockets_and_memory() {
+    let home_a = tempfile::tempdir().expect("home A");
+    let home_b = tempfile::tempdir().expect("home B");
+    let runtime_a = tempfile::tempdir().expect("runtime A");
+    let runtime_b = tempfile::tempdir().expect("runtime B");
+    let state_a = tempfile::tempdir().expect("state A");
+    let state_b = tempfile::tempdir().expect("state B");
+    let start_a = start(runtime_a.path(), state_a.path());
+    let start_b = start(runtime_b.path(), state_b.path());
+    configure_fresh(home_a.path(), runtime_a.path(), &start_a);
+    configure_fresh(home_b.path(), runtime_b.path(), &start_b);
+
+    let mut nexus_a = spawn(home_a.path(), runtime_a.path(), &start_a, false);
+    let mut nexus_b = spawn(home_b.path(), runtime_b.path(), &start_b, false);
+    for (nexus, start) in [(&mut nexus_a, &start_a), (&mut nexus_b, &start_b)] {
+        let mut ordinary = connect(Path::new(&start.ordinary_socket_path), nexus);
+        ordinary
+            .write_query(&signal_flow::Query::Metaflows)
+            .expect("Metaflows written");
+        assert!(matches!(
+            ordinary.read_response().expect("Metaflows answered"),
+            signal_flow::Response::Listed(rows) if rows.is_empty()
+        ));
+    }
+
+    let meta_a = meta_call(
+        &mut nexus_a,
+        &start_a.meta_socket_path,
+        &meta_signal_flow::Query::Configuration,
+    );
+    let meta_b = meta_call(
+        &mut nexus_b,
+        &start_b.meta_socket_path,
+        &meta_signal_flow::Query::Configuration,
+    );
+    let meta_signal_flow::Response::Configuration(configuration_a) = meta_a else {
+        panic!("instance A returns its Configuration")
+    };
+    let meta_signal_flow::Response::Configuration(configuration_b) = meta_b else {
+        panic!("instance B returns its Configuration")
+    };
+    assert_eq!(
+        configuration_a.nexus.source_root,
+        home_a.path().join("source").to_string_lossy()
+    );
+    assert_eq!(
+        configuration_b.nexus.source_root,
+        home_b.path().join("source").to_string_lossy()
+    );
+    assert_ne!(start_a.store_path, start_b.store_path);
+    assert!(Path::new(&start_a.store_path).exists());
+    assert!(Path::new(&start_b.store_path).exists());
+}
+
 #[test]
 fn configure_only_commits_before_normal_start_uses_the_declared_store() {
     let home = tempfile::tempdir().expect("temporary home");

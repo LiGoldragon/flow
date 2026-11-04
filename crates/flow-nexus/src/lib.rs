@@ -733,9 +733,12 @@ impl OpensRunningNexus for RunningNexus {
                 .with_ordinary_socket(&ordinary_socket),
             // A launch's context is composed by the Curriculum Nexus at the
             // socket the configuration names, read as the Nexus opens.
-            composer: LaunchComposer::with_context(context::ContextComposer::Curriculum(
-                CurriculumComposer::at(&snapshot.nexus.curriculum_nexus_path),
-            )),
+            composer: LaunchComposer::with_presentation_prompt(
+                context::ContextComposer::Curriculum(CurriculumComposer::at(
+                    &snapshot.nexus.curriculum_nexus_path,
+                )),
+                snapshot.nexus.presentation_prompt_option.clone(),
+            ),
             dispatch_gate: Mutex::new(()),
             pane_leases: delivery::lease::PaneLeases::default(),
             waking: waking::WakingMetaflows::default(),
@@ -900,18 +903,13 @@ impl ServesConnection for Connection {
             }
             Query::Deliver(request) => {
                 let address = request.lock.address.clone();
-                let delivery = request.delivery.clone();
                 let answer =
                     nexus.dispatch_metaflow_peer(Query::Deliver(request), self.process.as_ref());
                 let accepted = matches!(answer.response, Response::SendAccepted(_));
                 let written = self.peer.write_response(&answer.response);
                 drop(self);
                 if accepted {
-                    if delivery == signal_flow::Delivery::Wake {
-                        nexus.wake_due(address);
-                    } else {
-                        nexus.drain_awake(&address);
-                    }
+                    nexus.wake_due(address);
                 }
                 return written;
             }
@@ -922,11 +920,7 @@ impl ServesConnection for Connection {
                 let written = self.peer.write_response(&answer.response);
                 drop(self);
                 if let Some(pending) = answer.pending {
-                    if pending.delivery == signal_flow::Delivery::Wake {
-                        nexus.wake_due(pending.address);
-                    } else {
-                        nexus.drain_awake(&pending.address);
-                    }
+                    nexus.wake_due(pending.address);
                 }
                 return written;
             }
@@ -1604,7 +1598,6 @@ mod tests {
                 topic: "core".into(),
                 layer: signal_flow::Layer::Secondary,
             }),
-            delivery: signal_flow::Delivery::Queue,
             sendable_message: signal_flow::SendableMessage::Soft(
                 signal_flow::SendableRequest::Notice("ledger witness".into()),
             ),
@@ -3170,7 +3163,7 @@ mod tests {
                     topic: "core".into(),
                     layer: Layer::Tertiary,
                 }),
-                delivery: signal_flow::Delivery::Queue,
+                delivery: flow_ethos::Delivery::Queue,
                 message: signal_flow::Message::Soft(signal_flow::Request::Order(
                     "leave queued".into(),
                 )),
@@ -3236,7 +3229,7 @@ mod tests {
                 topic: "core".into(),
                 layer: Layer::Tertiary,
             }),
-            delivery: signal_flow::Delivery::Queue,
+            delivery: flow_ethos::Delivery::Queue,
             message: signal_flow::Message::Soft(signal_flow::Request::Order("leave queued".into())),
         }];
         fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
@@ -3844,7 +3837,7 @@ mod tests {
             .accept_logical_delivery(
                 &recipient,
                 signal_flow::SentBy::Sender(sender.clone()),
-                signal_flow::Delivery::Queue,
+                flow_ethos::Delivery::Queue,
                 signal_flow::Message::Soft(signal_flow::Request::Order(
                     "resume from durable state".into(),
                 )),
@@ -5289,8 +5282,7 @@ mod tests {
         use crate::store::ReadsFlowMemory;
         use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
         use signal_flow::{
-            Address, Delivery, Layer, Message, Metaflow, QueueEntry, Recipient, Request,
-            SendRequest, SentBy,
+            Address, Layer, Message, Metaflow, QueueEntry, Recipient, Request, SendRequest, SentBy,
         };
         let fixture = NexusFixture::new();
         bind_existing_caller(&fixture, "a001", "pane-1");
@@ -5329,7 +5321,6 @@ mod tests {
                 .send_request(
                     SendRequest {
                         recipient,
-                        delivery: Delivery::Queue,
                         sendable_message: sendable_message(Message::Soft(request)),
                     },
                     Some(peer),
@@ -5377,7 +5368,7 @@ mod tests {
             vec![QueueEntry {
                 logical_delivery_id: "logical-delivery-00000000000000000001".into(),
                 sent_by: SentBy::Sender(sender),
-                delivery: Delivery::Queue,
+                delivery: flow_ethos::Delivery::Queue,
                 message: Message::Soft(order.clone()),
             }]
         );
@@ -5399,8 +5390,8 @@ mod tests {
         use crate::store::metaflow::SeedsMetaflow;
         use flow_ethos::{Answerable, ResultPayload, State};
         use signal_flow::{
-            Address, Delivery, DeliveryState, Layer, Message, NativeReceipt, PrivateSendResponse,
-            Refusal, SendableMessage, SendableRequest, SentBy,
+            Address, DeliveryState, Layer, Message, NativeReceipt, PrivateSendResponse, Refusal,
+            SendableMessage, SendableRequest, SentBy,
         };
 
         let fixture = NexusFixture::new();
@@ -5428,7 +5419,7 @@ mod tests {
                 .accept_logical_delivery(
                     &recipient,
                     SentBy::Sender(sender.clone()),
-                    Delivery::Queue,
+                    flow_ethos::Delivery::Queue,
                     Message::Soft(flow_ethos::Request::Order(order.clone())),
                     None,
                 )
@@ -5512,8 +5503,8 @@ mod tests {
         use crate::store::metaflow::SeedsMetaflow;
         use flow_ethos::{Answerable, AnswerableTask, DonePayload, State};
         use signal_flow::{
-            Address, Delivery, DeliveryState, Layer, Message, NativeReceipt, PrivateSendResponse,
-            Refusal, SendableMessage, SendableRequest, SentBy,
+            Address, DeliveryState, Layer, Message, NativeReceipt, PrivateSendResponse, Refusal,
+            SendableMessage, SendableRequest, SentBy,
         };
 
         let fixture = NexusFixture::new();
@@ -5544,7 +5535,7 @@ mod tests {
                 .accept_logical_delivery(
                     &recipient,
                     SentBy::Sender(sender.clone()),
-                    Delivery::Queue,
+                    flow_ethos::Delivery::Queue,
                     Message::Soft(flow_ethos::Request::Task(task.clone())),
                     None,
                 )
@@ -5598,7 +5589,7 @@ mod tests {
                 .accept_logical_delivery(
                     &sender,
                     SentBy::Sender(recipient.clone()),
-                    Delivery::Queue,
+                    flow_ethos::Delivery::Queue,
                     private_done,
                     None,
                 )

@@ -20,6 +20,7 @@ use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::SeedsMetaflow;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::waking::{PerformsWakeAndDrain, ReconcilesQueueDelivery, SettlesStopsAtConfirmation};
+use flow_ethos::Delivery;
 use flow_ethos::State;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{
@@ -28,8 +29,8 @@ use meta_signal_flow::{
     VisibleResolveQueueDeliveryRejected,
 };
 use signal_flow::{
-    Address, Aspect, Delivery, Event, Layer, Message, Metaflow, NativePrompt, NativeStop,
-    QueueEntry, Report_Data, Request, Response, SentBy,
+    Address, Aspect, Event, Layer, Message, Metaflow, NativePrompt, NativeStop, QueueEntry,
+    Report_Data, Request, Response, SentBy,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,7 +51,7 @@ fn from_core(body: &str) -> TestRequest {
             layer: Layer::Secondary,
         }),
         request: Request::Order(body.into()),
-        delivery: Delivery::Wake,
+        delivery: flow_ethos::Delivery::Wake,
     }
 }
 
@@ -181,7 +182,7 @@ fn logical_delivery_snapshots_are_sender_filtered_replayable_and_idempotent() {
         .accept_logical_delivery(
             &target,
             SentBy::Sender(sender.clone()),
-            Delivery::Queue,
+            flow_ethos::Delivery::Queue,
             Message::Soft(Request::Notice("cursor witness".into())),
             None,
         )

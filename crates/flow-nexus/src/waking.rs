@@ -1427,7 +1427,7 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 
     fn drain_awake(&self, address: &Address) {
-        let resting = {
+        {
             let _turn = self
                 .dispatch_gate
                 .lock()
@@ -1447,38 +1447,18 @@ impl SleepsAndWakesSeats for RunningNexus {
             let Ok(Some(node)) = self.store.flow_node(&flow_id) else {
                 return;
             };
-            // A seat whose pane is gone has ended: its flow is recorded
-            // Exited, which puts the metaflow Asleep, and the wake that
-            // follows starts a fresh flow.
             if matches!(
                 self.herdr.pane_presence(&node),
                 PanePresence::Absent | PanePresence::Bare
             ) {
-                let _ = self.perform(Operation::Record(Record_Data::Exited(flow_id.clone())));
+                let _ = self.perform(Operation::Record(Record_Data::Exited(flow_id)));
                 return;
             }
-            // A pressing message anywhere in the queue hands the whole
-            // queue over now, the Soft ones before it included.
-            if metaflow
-                .queue
-                .iter()
-                .any(|entry| !matches!(entry.message, signal_flow::Message::Soft(_)))
-            {
-                let _ = self.drain_all(address.clone());
-                None
-            } else {
-                let known_resting = match node.harness_kind {
-                    HarnessKind::Codex => self.codex_resting(&flow_id),
-                    HarnessKind::Claude => self.claude_main_turn_ended(&node),
-                };
-                known_resting.then_some(flow_id)
-            }
-        };
-        // The recipient of an answer the drain queued is woken off the gate.
-        self.wake_deferred();
-        if let Some(flow_id) = resting {
-            self.settle_stopped(&flow_id);
+            // Every priority is submitted immediately to an Awake seat.
+            // The delivery engine interrupts only for HardAbrupt.
+            let _ = self.drain_all(address.clone());
         }
+        self.wake_deferred();
     }
 
     fn wake_due(&self, address: Address) {
@@ -1569,7 +1549,7 @@ impl SleepsAndWakesSeats for RunningNexus {
             && (metaflow
                 .queue
                 .iter()
-                .any(|entry| entry.delivery == signal_flow::Delivery::Wake)
+                .any(|entry| !matches!(entry.message, signal_flow::Message::Soft(_)))
                 || matches!(self.store.successor_intent(&metaflow.address), Ok(Some(_))))
     }
 
@@ -1788,7 +1768,7 @@ impl RefreshesMetaflows for RunningNexus {
         let wakes = metaflow
             .queue
             .iter()
-            .any(|entry| entry.delivery == signal_flow::Delivery::Wake);
+            .any(|entry| !matches!(entry.message, signal_flow::Message::Soft(_)));
         let refreshed = Response::Refreshed(Refreshed {
             address: address.clone(),
             flow_id: flow_id.clone(),
@@ -3069,7 +3049,7 @@ impl WakesInParts for RunningNexus {
                 self.store.accept_logical_delivery(
                     &up,
                     signal_flow::SentBy::Flow,
-                    signal_flow::Delivery::Wake,
+                    flow_ethos::Delivery::Wake,
                     signal_flow::Message::Soft(signal_flow::Request::Notice(notice)),
                     None,
                 )
@@ -3276,7 +3256,7 @@ impl WakesInParts for RunningNexus {
             let wakes = metaflow
                 .queue
                 .iter()
-                .any(|entry| entry.delivery == signal_flow::Delivery::Wake);
+                .any(|entry| !matches!(entry.message, signal_flow::Message::Soft(_)));
             // A Maintained metaflow, or one holding work that wakes it, is
             // owed its successor, started before the predecessor rests.
             if continuity == Continuity::Maintained || wakes {

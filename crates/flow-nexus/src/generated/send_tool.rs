@@ -25,7 +25,6 @@ pub enum SendPriority {
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct SendArguments {
     pub target: Target,
-    pub delivery: signal_flow::Delivery,
     pub send_priority: SendPriority,
     pub send_kind: SendKind,
     pub body: Body,

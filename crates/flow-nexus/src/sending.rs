@@ -50,9 +50,9 @@ use crate::waking::{
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
-    Address, Aspect, Caller, Delivery, HarnessKind, HerdrRoute, LaunchProfile, LaunchRequest,
-    Layer, Message, PrivateSendResponse, Process, Recipient, Refusal, Request, Response,
-    SendPayloadSize, SendRequest, SendableMessage, SentBy, StartRejection, Unknown_Data,
+    Address, Aspect, Caller, HarnessKind, HerdrRoute, LaunchProfile, LaunchRequest, Layer, Message,
+    PrivateSendResponse, Process, Recipient, Refusal, Request, Response, SendPayloadSize,
+    SendRequest, SendableMessage, SentBy, StartRejection, Unknown_Data,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -180,7 +180,6 @@ impl NamesLayerAbove for Layer {
 /// What a Send answers.
 pub struct PendingSend {
     pub address: Address,
-    pub delivery: Delivery,
 }
 
 pub struct SendAnswer {
@@ -213,22 +212,27 @@ impl SendsRequests for RunningNexus {
         use sha2::{Digest, Sha256};
 
         let abrupt = !matches!(&send.sendable_message, SendableMessage::Soft(_));
-        let direct = abrupt && send.delivery == Delivery::Wake;
         let digest_text = send.datomize(Vec::new()).protosize().compact();
         let request_digest = format!("{:x}", Sha256::digest(digest_text.as_bytes()));
+        // Authenticate the caller when the Send arrives. A refresh may hold
+        // the address until its successor is committed; that transition
+        // cannot make the already-arrived caller cease to be this request's
+        // sender.
+        let observed_sender = peer.map(|peer| self.sending_address(peer));
+        let sender = observed_sender
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .cloned();
         let recipient = match &send.recipient {
             Recipient::Address(address) => Some(address.clone()),
-            Recipient::Up => peer
-                .and_then(|peer| self.sending_address(peer).ok())
-                .and_then(|sender| {
-                    sender.layer.above().map(|layer| Address {
-                        aspect: sender.aspect,
-                        topic: sender.topic,
-                        layer,
-                    })
-                }),
+            Recipient::Up => sender.as_ref().and_then(|sender| {
+                sender.layer.above().map(|layer| Address {
+                    aspect: sender.aspect.clone(),
+                    topic: sender.topic.clone(),
+                    layer,
+                })
+            }),
         };
-        let sender = peer.and_then(|peer| self.sending_address(peer).ok());
         let mut answer = (|| -> SendAnswer {
             let _turn = self
                 .dispatch_gate
@@ -262,11 +266,11 @@ impl SendsRequests for RunningNexus {
                 ))
                 .into();
             };
-            let sender = match self.sending_address(peer) {
-                Ok(sender) => sender,
-                Err(refusal) => match *refusal {
+            let sender = match observed_sender.as_ref() {
+                Some(Ok(sender)) => sender.clone(),
+                Some(Err(refusal)) => match refusal.as_ref() {
                     Response::Refused(reason) => {
-                        return PrivateSendResponse::Refused(reason).into();
+                        return PrivateSendResponse::Refused(reason.clone()).into();
                     }
                     response => {
                         return PrivateSendResponse::Refused(Refusal::Store(format!(
@@ -275,8 +279,13 @@ impl SendsRequests for RunningNexus {
                         .into();
                     }
                 },
+                None => unreachable!("the absent peer returned above"),
             };
-            let delivery = send.delivery.clone();
+            let delivery = if abrupt {
+                flow_ethos::Delivery::Wake
+            } else {
+                flow_ethos::Delivery::Queue
+            };
             let recipient = match send.recipient {
                 Recipient::Address(address) => address,
                 Recipient::Up => match sender.layer.above() {
@@ -302,19 +311,13 @@ impl SendsRequests for RunningNexus {
             if let Some(refusal) = message.oversized_refusal(&sender) {
                 return PrivateSendResponse::Refused(refusal).into();
             }
-            if abrupt && delivery == Delivery::Queue {
-                return PrivateSendResponse::Failed(signal_flow::SendFailure {
-                    logical_delivery_id_option: None,
-                    send_failure_reason: signal_flow::SendFailureReason::QueueNotPermitted,
-                })
-                .into();
-            }
             self.rest_ended_awake(&recipient);
             // Own the address until the direct call has a receipt or a
             // durable non-retryable failure. Background drain/wake may not
             // submit this same request independently. A metaflow another
             // holds takes the request into its queue instead.
-            let direct_lease = if direct {
+            let direct_requested = abrupt || self.live_awake_flow(&recipient).is_some();
+            let direct_lease = if direct_requested {
                 match self.direct_send_lease(&recipient) {
                     Ok(lease) => lease,
                     Err(refusal) => return (*refusal).into(),
@@ -361,10 +364,7 @@ impl SendsRequests for RunningNexus {
                 }
                 Ok(private_response) => {
                     let pending = matches!(private_response, PrivateSendResponse::SendAccepted(_))
-                        .then(|| PendingSend {
-                            address: recipient,
-                            delivery,
-                        });
+                        .then(|| PendingSend { address: recipient });
                     let response =
                         crate::message_projection::visible_send_response(&private_response);
                     SendAnswer {
@@ -378,9 +378,7 @@ impl SendsRequests for RunningNexus {
                 }
             }
         })();
-        if (direct || abrupt)
-            && let PrivateSendResponse::Refused(refusal) = &answer.private_response
-        {
+        if abrupt && let PrivateSendResponse::Refused(refusal) = &answer.private_response {
             answer.private_response = PrivateSendResponse::Failed(signal_flow::SendFailure {
                 logical_delivery_id_option: None,
                 send_failure_reason: signal_flow::SendFailureReason::Refused(refusal.clone()),
@@ -1208,21 +1206,34 @@ impl CompletesDirectSends for RunningNexus {
         let Some(lease) = self.waking.hold(address) else {
             return Ok(None);
         };
-        if !self
-            .store
-            .prepare_declared_metaflow(address)
-            .map_err(|error| {
-                failed(SendFailureReason::Refused(Refusal::Store(
-                    error.to_string(),
-                )))
-            })?
+        // A refresh owns the Address until its predecessor has become the
+        // same metaflow Asleep.  Work admitted after that hold releases
+        // belongs to this existing metaflow even when starting its next flow
+        // will need configuration that is presently absent.  Configuration
+        // is only the prerequisite for creating a metaflow that does not yet
+        // exist; wake feasibility is judged after durable admission.
+        let existing = self.store.metaflow(address).map_err(|error| {
+            failed(SendFailureReason::Refused(Refusal::Store(
+                error.to_string(),
+            )))
+        })?;
+        if existing.is_none()
+            && !self
+                .store
+                .prepare_declared_metaflow(address)
+                .map_err(|error| {
+                    failed(SendFailureReason::Refused(Refusal::Store(
+                        error.to_string(),
+                    )))
+                })?
         {
             return Err(failed(SendFailureReason::RecipientUnavailable(
                 address.clone(),
             )));
         }
         let flow_id = self.live_awake_flow(address);
-        if flow_id.is_none()
+        if existing.is_none()
+            && flow_id.is_none()
             && (!matches!(self.store.metaflow_declaration(address), Ok(Some(_)))
                 || !matches!(self.store.configured_model(address), Ok(Some(_))))
         {
@@ -1231,8 +1242,8 @@ impl CompletesDirectSends for RunningNexus {
             )));
         }
         match self.store.metaflow(address) {
-            Ok(Some(metaflow)) if metaflow.queue.is_empty() => {}
-            Ok(_) => return Ok(None),
+            Ok(Some(_)) => {}
+            Ok(None) => return Ok(None),
             Err(error) => {
                 return Err(failed(SendFailureReason::Refused(Refusal::Store(
                     error.to_string(),
@@ -1318,6 +1329,37 @@ impl CompletesDirectSends for RunningNexus {
             break;
         }
         let observed = format!("{outcome:?}");
+        if matches!(
+            self.store.logical_delivery_snapshot(&logical_id),
+            Ok(Some(signal_flow::DeliverySnapshot {
+                delivery_state: DeliveryState::Queued,
+                ..
+            }))
+        ) && self.carrying_attempt(address, &logical_id).is_none()
+        {
+            // Starting the next flow failed before any native submission.
+            // The existing metaflow still owns the same admitted request;
+            // report this attempt truthfully without parking or discarding
+            // work that a later configured wake can take up.
+            let rejection = if matches!(self.store.metaflow_declaration(address), Ok(None)) {
+                signal_flow::StartRejection::Undeclared
+            } else {
+                signal_flow::StartRejection::CompositionRefused(
+                    signal_flow::CompositionRefusal::Unconfigured,
+                )
+            };
+            if let Ok(Some(metaflow)) = self.store.metaflow(address) {
+                let _ = self.store.mark_queue_retryable(
+                    &metaflow.queue,
+                    signal_flow::RetryCause::WakeRefused(rejection),
+                );
+            }
+            return PrivateSendResponse::Failed(SendFailure {
+                logical_delivery_id_option: Some(logical_id),
+                send_failure_reason: SendFailureReason::NotSent(observed),
+            })
+            .into();
+        }
         let state = {
             let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
             // A native transcript can land without a harness hook. One

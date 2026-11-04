@@ -14,7 +14,8 @@ use sema_engine::{
 };
 
 pub(super) const META_NEXUS_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-nexus-configuration";
-pub(super) const META_NEXUS_CONFIGURATION_SCHEMA: &str = "flow-nexus-meta-nexus-configuration-v3";
+pub(super) const META_NEXUS_CONFIGURATION_SCHEMA: &str = "flow-nexus-meta-nexus-configuration-v4";
+const META_NEXUS_CONFIGURATION_V3_SCHEMA: &str = "flow-nexus-meta-nexus-configuration-v3";
 const META_NEXUS_CONFIGURATION_V2_SCHEMA: &str = "flow-nexus-meta-nexus-configuration-v2";
 
 /// The declared Nexus, one row.
@@ -31,11 +32,68 @@ impl EngineRecord for StoredMetaNexusConfiguration {
 
 impl MemoryDefinition for StoredMetaNexusConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
+        MemoryVersion::new(4)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(META_NEXUS_CONFIGURATION_SCHEMA)
+    }
+}
+
+/// The 0.48 declaration before the presentation role became typed runtime
+/// configuration. Its exact field order is the archived v3 representation.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConfigureNexusV3 {
+    pub(super) source_root: String,
+    pub(super) stable_codex: meta_signal_flow::CodexEndpoint,
+    pub(super) next_codex: meta_signal_flow::CodexEndpoint,
+    pub(super) harness_profiles: Vec<meta_signal_flow::HarnessProfile>,
+    pub(super) meta_aspects: Vec<signal_flow::Aspect>,
+    pub(super) message_nexus_path_option: Option<String>,
+    pub(super) message_nexus_binary_option: Option<String>,
+    pub(super) curriculum_nexus_path: String,
+    pub(super) lease: i64,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) struct StoredMetaNexusConfigurationV3 {
+    pub(super) nexus: ConfigureNexusV3,
+}
+
+impl EngineRecord for StoredMetaNexusConfigurationV3 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new("nexus")
+    }
+}
+
+impl MemoryDefinition for StoredMetaNexusConfigurationV3 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(3)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(META_NEXUS_CONFIGURATION_V3_SCHEMA)
+    }
+}
+
+impl UpgradeFrom<StoredMetaNexusConfigurationV3> for StoredMetaNexusConfiguration {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: StoredMetaNexusConfigurationV3) -> Decision<Self, Self::Refusal> {
+        let previous = previous.nexus;
+        Decision::Ready(Self {
+            nexus: ConfigureNexus {
+                source_root: previous.source_root,
+                stable_codex: previous.stable_codex,
+                next_codex: previous.next_codex,
+                harness_profiles: previous.harness_profiles,
+                meta_aspects: previous.meta_aspects,
+                message_nexus_path_option: previous.message_nexus_path_option,
+                message_nexus_binary_option: previous.message_nexus_binary_option,
+                curriculum_nexus_path: previous.curriculum_nexus_path,
+                lease: previous.lease,
+                presentation_prompt_option: None,
+            },
+        })
     }
 }
 
@@ -139,6 +197,7 @@ impl UpgradeFrom<StoredMetaNexusConfigurationV2> for StoredMetaNexusConfiguratio
                     .then_some(previous.message_nexus_binary),
                 curriculum_nexus_path: previous.curriculum_nexus_path,
                 lease: previous.lease,
+                presentation_prompt_option: None,
             },
         })
     }
@@ -205,6 +264,7 @@ impl DescribesNexusConfigurationTable for StoredMetaNexusConfiguration {
         )
         .with_predecessor::<StoredMetaNexusConfigurationV1>()
         .with_predecessor::<StoredMetaNexusConfigurationV2>()
+        .with_predecessor::<StoredMetaNexusConfigurationV3>()
     }
 }
 
@@ -220,8 +280,8 @@ impl UpgradesNexusConfiguration for Engine {
         &mut self,
         descriptor: TableDescriptor<StoredMetaNexusConfiguration>,
     ) -> Result<TableReference<StoredMetaNexusConfiguration>, StoreError> {
-        let from_v1 = descriptor.clone();
-        match self.upgrade_table::<StoredMetaNexusConfigurationV2, StoredMetaNexusConfiguration>(
+        let from_v2 = descriptor.clone();
+        match self.upgrade_table::<StoredMetaNexusConfigurationV3, StoredMetaNexusConfiguration>(
             descriptor,
         ) {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
@@ -230,13 +290,29 @@ impl UpgradesNexusConfiguration for Engine {
             UpgradeOutcome::Failed(failure)
                 if failure.phase() == sema_engine::StoragePhase::Admission =>
             {
-                match self
-                    .upgrade_table::<StoredMetaNexusConfigurationV1, StoredMetaNexusConfiguration>(
-                        from_v1.with_predecessor::<StoredMetaNexusConfigurationV1>(),
-                    ) {
+                let from_v1 = from_v2.clone();
+                match self.upgrade_table::<
+                    StoredMetaNexusConfigurationV2,
+                    StoredMetaNexusConfiguration,
+                >(from_v2) {
                     UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
                     UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
                     UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                    UpgradeOutcome::Failed(failure)
+                        if failure.phase() == sema_engine::StoragePhase::Admission =>
+                    {
+                        match self.upgrade_table::<
+                            StoredMetaNexusConfigurationV1,
+                            StoredMetaNexusConfiguration,
+                        >(from_v1) {
+                            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                            UpgradeOutcome::Failed(failure) => {
+                                Err(StoreError::NexusUpgrade(format!("{failure:?}")))
+                            }
+                        }
+                    }
                     UpgradeOutcome::Failed(failure) => {
                         Err(StoreError::NexusUpgrade(format!("{failure:?}")))
                     }
@@ -252,8 +328,9 @@ impl UpgradesNexusConfiguration for Engine {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigureNexusV1, DefaultsCurriculumSocket, NamesCurriculumSocket,
+        ConfigureNexusV1, ConfigureNexusV3, DefaultsCurriculumSocket, NamesCurriculumSocket,
         StoredMetaNexusConfiguration, StoredMetaNexusConfigurationV2,
+        StoredMetaNexusConfigurationV3,
     };
     use flow_defaults::{DefaultConfiguration, ReadsAnchors};
     use sema_engine::{Decision, UpgradeFrom};
@@ -327,6 +404,46 @@ mod tests {
         let Decision::Ready(upgraded) = StoredMetaNexusConfiguration::upgrade_from(v2);
         assert!(upgraded.nexus.message_nexus_path_option.is_none());
         assert!(upgraded.nexus.message_nexus_binary_option.is_none());
+    }
+
+    #[test]
+    fn v3_keeps_every_value_and_adds_no_presentation_prompt() {
+        let v2 = archived().with_curriculum("/run/curriculum.sock".into());
+        let previous = ConfigureNexusV3 {
+            source_root: v2.nexus.source_root,
+            stable_codex: v2.nexus.stable_codex,
+            next_codex: v2.nexus.next_codex,
+            harness_profiles: v2.nexus.harness_profiles,
+            meta_aspects: v2.nexus.meta_aspects,
+            message_nexus_path_option: Some("/run/message.sock".into()),
+            message_nexus_binary_option: Some("/usr/bin/message-nexus".into()),
+            curriculum_nexus_path: v2.nexus.curriculum_nexus_path,
+            lease: v2.nexus.lease,
+        };
+        let expected = previous.clone();
+        let Decision::Ready(upgraded) =
+            StoredMetaNexusConfiguration::upgrade_from(StoredMetaNexusConfigurationV3 {
+                nexus: previous,
+            });
+        assert_eq!(upgraded.nexus.source_root, expected.source_root);
+        assert_eq!(upgraded.nexus.stable_codex, expected.stable_codex);
+        assert_eq!(upgraded.nexus.next_codex, expected.next_codex);
+        assert_eq!(upgraded.nexus.harness_profiles, expected.harness_profiles);
+        assert_eq!(upgraded.nexus.meta_aspects, expected.meta_aspects);
+        assert_eq!(
+            upgraded.nexus.message_nexus_path_option,
+            expected.message_nexus_path_option
+        );
+        assert_eq!(
+            upgraded.nexus.message_nexus_binary_option,
+            expected.message_nexus_binary_option
+        );
+        assert_eq!(
+            upgraded.nexus.curriculum_nexus_path,
+            expected.curriculum_nexus_path
+        );
+        assert_eq!(upgraded.nexus.lease, expected.lease);
+        assert_eq!(upgraded.nexus.presentation_prompt_option, None);
     }
 
     /// The upgrade names the socket Curriculum serves under the opening

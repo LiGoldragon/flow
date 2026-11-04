@@ -301,10 +301,15 @@ impl MutatesMetaflows for FlowStore {
             }
             return Ok(signal_flow::PrivateSendResponse::Refused(refusal));
         }
+        let delivery = if matches!(request.message, signal_flow::Message::Soft(_)) {
+            flow_ethos::Delivery::Queue
+        } else {
+            flow_ethos::Delivery::Wake
+        };
         self.accept_logical_delivery(
             &request.lock.address,
             SentBy::Sender(request.lock.sender.clone()),
-            request.delivery,
+            delivery,
             request.message,
             Some(VerifiedDeliveryLock {
                 lock: request.lock.clone(),
@@ -777,6 +782,7 @@ mod tests {
                     message_nexus_binary_option: Some(binary),
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 30,
+                    presentation_prompt_option: None,
                 }))
                 .expect("Nexus configuration");
             drop(configuration);
@@ -882,7 +888,6 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock: forged,
-                        delivery: flow_ethos::Delivery::Queue,
                         message: flow_ethos::Message::Soft(body.clone())
                     },
                     101
@@ -905,7 +910,6 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock: lock.clone(),
-                        delivery: flow_ethos::Delivery::Queue,
                         message: flow_ethos::Message::Soft(body.clone())
                     },
                     101
@@ -935,7 +939,6 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock,
-                        delivery: flow_ethos::Delivery::Queue,
                         message: flow_ethos::Message::Soft(Request::Notice("duplicate".into()))
                     },
                     102
@@ -981,7 +984,6 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock,
-                        delivery: flow_ethos::Delivery::Queue,
                         message: flow_ethos::Message::Soft(Request::Notice("expired".into()))
                     },
                     40

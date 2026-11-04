@@ -23,8 +23,8 @@ use crate::{HoldsStopRequest, generated::send_tool::DeclaresSendTool};
 use flow_ethos::State;
 use meta_signal_flow::QueueEvidence;
 use signal_flow::{
-    Address, Aspect, Caller, Delivery, FlowNode, HerdrRoute, HerdrRouteSelection, Layer, Message,
-    Metaflow, PowerLevel, QueueEntry, Request, SentBy,
+    Address, Aspect, Caller, FlowNode, HerdrRoute, HerdrRouteSelection, Layer, Message, Metaflow,
+    PowerLevel, QueueEntry, Request, SentBy,
 };
 use std::{
     path::{Path, PathBuf},
@@ -46,7 +46,7 @@ fn queue_entry(id: impl Into<String>, queued: TestRequest) -> QueueEntry {
     QueueEntry {
         logical_delivery_id: id.into(),
         sent_by: queued.sent_by,
-        delivery: Delivery::Wake,
+        delivery: flow_ethos::Delivery::Wake,
         message: Message::Soft(queued.request),
     }
 }
@@ -116,7 +116,6 @@ fn send_request(
                     "topic": to.topic,
                     "layer": format!("{:?}", to.layer)
                 },
-            "delivery": "Wake",
             "priority": "Soft",
             "kind": kind,
                 "body": body
@@ -135,7 +134,6 @@ fn tool_call(thread: &str, call: &str, body: &str) -> ToolCall {
         tool_name: SendTool::tool_name(),
         arguments: serde_json::json!({
             "target": { "aspect": "Mind", "topic": "gamma", "layer": "Secondary" },
-            "delivery": "Wake",
             "priority": "Soft",
             "kind": "Order",
             "body": body
@@ -711,12 +709,11 @@ fn a_call_key_recorded_with_other_content_is_refused() {
 }
 
 #[test]
-fn dynamic_send_requires_explicit_delivery_and_priority() {
+fn dynamic_send_requires_priority() {
     use crate::generated::send_tool::{ReadsSendArguments, SendPriority};
 
     let explicit = tool_call(THREAD_A, "explicit", "typed admission");
-    let arguments = explicit.send_arguments().expect("explicit policy is valid");
-    assert_eq!(arguments.delivery, Delivery::Wake);
+    let arguments = explicit.send_arguments().expect("priority is valid");
     assert_eq!(arguments.send_priority, SendPriority::Soft);
 
     let mut old_shape = explicit;
@@ -730,15 +727,14 @@ fn dynamic_send_requires_explicit_delivery_and_priority() {
 }
 
 #[test]
-fn dynamic_queue_admission_preserves_priority_without_waking() {
+fn soft_dynamic_admission_queues_without_waking() {
     let fixture = NexusFixture::new();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.asleep_at(asleep_target());
     let mut call = tool_call(THREAD_A, "queue-only", "retain this");
     call.arguments = serde_json::json!({
         "target": { "aspect": "Mind", "topic": "flow", "layer": "Secondary" },
-        "delivery": "Queue",
-        "priority": "MiddleAbrupt",
+        "priority": "Soft",
         "kind": "Order",
         "body": "retain this"
     })
@@ -748,10 +744,10 @@ fn dynamic_queue_admission_preserves_priority_without_waking() {
     let held = fixture.stored_at(&asleep_target());
     assert_eq!(held.state, State::Asleep);
     assert_eq!(held.queue.len(), 1);
-    assert_eq!(held.queue[0].delivery, Delivery::Queue);
+    assert_eq!(held.queue[0].delivery, flow_ethos::Delivery::Queue);
     assert_eq!(
         held.queue[0].message,
-        Message::MiddleAbrupt(Request::Order("retain this".into()))
+        Message::Soft(Request::Order("retain this".into()))
     );
     let purposes = fixture.nexus.store.delivery_purposes().unwrap();
     assert_eq!(purposes.len(), 1);
@@ -846,7 +842,6 @@ fn a_call_to_a_topic_that_is_not_camel_case_is_refused_as_written() {
         let mut call = tool_call(THREAD_A, call_id, "x");
         call.arguments = serde_json::json!({
             "target": { "aspect": "Mind", "topic": topic, "layer": "Secondary" },
-            "delivery": "Wake",
             "priority": "Soft",
             "kind": "Order",
             "body": "x"
@@ -1233,7 +1228,7 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
     assert_eq!(held.state, State::Asleep);
     assert_eq!(held.queue.len(), 1);
     assert_eq!(held.queue[0].sent_by, SentBy::Sender(sender.clone()));
-    assert_eq!(held.queue[0].delivery, Delivery::Wake);
+    assert_eq!(held.queue[0].delivery, flow_ethos::Delivery::Wake);
     assert_eq!(
         held.queue[0].message,
         Message::Soft(Request::Order("first-turn-witness".into()))
@@ -1451,7 +1446,7 @@ fn a_queued_request_is_rendered_as_its_datom_in_one_vector() {
         QueueEntry {
             logical_delivery_id: "render-2".into(),
             sent_by: SentBy::Unknown,
-            delivery: Delivery::Queue,
+            delivery: flow_ethos::Delivery::Queue,
             message: Message::Soft(Request::Notice("kept".into())),
         },
     ];
@@ -1512,7 +1507,6 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
             "authorized-content",
             core(),
             &core_primary(),
-            Delivery::Wake,
             Message::Soft(Request::Question("source".into())),
             0,
         )
@@ -1528,7 +1522,6 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
             "unauthorized-content",
             unauthorized_sender,
             &core_primary(),
-            Delivery::Wake,
             Message::Soft(Request::Question("must not enter".into())),
             0,
         )
@@ -2149,7 +2142,7 @@ fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
         queue: vec![QueueEntry {
             logical_delivery_id: "logical-delivery-test".into(),
             sent_by: order.sent_by,
-            delivery: Delivery::Wake,
+            delivery: flow_ethos::Delivery::Wake,
             message: Message::Soft(order.request),
         }],
     });

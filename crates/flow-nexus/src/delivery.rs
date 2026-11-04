@@ -492,10 +492,6 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         } else {
             self.nexus.writable_state(self.target)?
         };
-        let soft = matches!(self.request.message, Message::Soft(_));
-        if soft && !matches!(agent_state, AgentState::Idle | AgentState::Done) {
-            return Err(DeliveryRejection::RecipientWorking);
-        }
         self.step(LeaseStep::Acquired)?;
         let mut interrupt_witness = InterruptWitness::NotRequested;
         if hard && agent_state == AgentState::Working {

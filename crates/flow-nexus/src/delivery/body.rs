@@ -340,11 +340,7 @@ mod tests {
             visible_sender: signal_flow::VisibleSender::Nexus,
             content: Content::Text("/compact".into()),
         });
-        assert!(
-            hard.pane_text()
-                .as_str()
-                .starts_with("HardAbrupt.{ Nexus ")
-        );
+        assert!(hard.pane_text().as_str().starts_with("HardAbrupt.{ Nexus "));
     }
 
     #[test]
@@ -405,7 +401,7 @@ mod tests {
                 signal_flow::QueueEntry {
                     logical_delivery_id: input.logical_delivery_id.clone(),
                     sent_by: input.sent_by.clone(),
-                    delivery: signal_flow::Delivery::Wake,
+                    delivery: flow_ethos::Delivery::Wake,
                     message: input.message.clone(),
                 }
                 .visible_input(&signal_flow::Address {
@@ -443,7 +439,7 @@ mod tests {
         let entries = [input.clone(), second.clone()].map(|input| signal_flow::QueueEntry {
             logical_delivery_id: input.logical_delivery_id,
             sent_by: input.sent_by,
-            delivery: signal_flow::Delivery::Queue,
+            delivery: flow_ethos::Delivery::Queue,
             message: input.message,
         });
         let cohort = entries.prompt_text(&signal_flow::Address {
@@ -481,7 +477,7 @@ mod tests {
                     signal_flow::QueueEntry {
                         logical_delivery_id: "native-content".into(),
                         sent_by: signal_flow::SentBy::Flow,
-                        delivery: signal_flow::Delivery::Wake,
+                        delivery: flow_ethos::Delivery::Wake,
                         message: signal_flow::Message::HardAbrupt(signal_flow::Request::Order(
                             text.into(),
                         )),

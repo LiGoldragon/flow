@@ -147,6 +147,7 @@ mod tests {
 
             curriculum_nexus_path: "/fixture/curriculum.sock".into(),
             lease: 60,
+            presentation_prompt_option: None,
         };
         let query = Query::Configure(ConfigurationChange::Nexus(nexus.clone()));
         let datom = query.datomize(vec![]).protosize().compact();
@@ -280,6 +281,7 @@ mod tests {
 
                 curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                 lease: 60,
+                presentation_prompt_option: None,
             },
             models: vec![],
             thresholds: vec![],

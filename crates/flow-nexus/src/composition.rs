@@ -53,19 +53,11 @@ impl From<ContextRefusal> for CompositionError {
 #[derive(Clone, Debug)]
 pub struct LaunchComposer {
     context: ContextComposer,
+    presentation_prompt_option: Option<String>,
 }
 
 trait ComposesPresentationRole {
     fn presentation_prompt(&self, address: &Address) -> Result<Option<String>, CompositionError>;
-    fn presentation_prompt_from(
-        &self,
-        address: &Address,
-        path: Option<std::ffi::OsString>,
-    ) -> Result<Option<String>, CompositionError>;
-    fn read_presentation_prompt(
-        &self,
-        path: std::ffi::OsString,
-    ) -> Result<String, CompositionError>;
     fn compose_system_prompt<N: Profiled, O: ReadsVerifiedContext, P: SegmentListing>(
         &self,
         profile: N,
@@ -77,46 +69,17 @@ trait ComposesPresentationRole {
 
 impl ComposesPresentationRole for LaunchComposer {
     fn presentation_prompt(&self, address: &Address) -> Result<Option<String>, CompositionError> {
-        self.presentation_prompt_from(address, std::env::var_os("FLOW_CORE_PRESENTATION_PROMPT"))
-    }
-
-    fn presentation_prompt_from(
-        &self,
-        address: &Address,
-        path: Option<std::ffi::OsString>,
-    ) -> Result<Option<String>, CompositionError> {
         if address.aspect != Aspect::Psyche
             || address.topic != "core"
             || address.layer != Layer::Primary
         {
             return Ok(None);
         }
-        let path = path.ok_or_else(|| {
-            CompositionError::PresentationPromptUnavailable(
-                "FLOW_CORE_PRESENTATION_PROMPT is not set".into(),
-            )
-        })?;
-        self.read_presentation_prompt(path).map(Some)
-    }
-
-    fn read_presentation_prompt(
-        &self,
-        path: std::ffi::OsString,
-    ) -> Result<String, CompositionError> {
-        let bytes = std::fs::read(&path).map_err(|error| {
-            CompositionError::PresentationPromptUnavailable(format!(
-                "could not read {}: {error}",
-                std::path::PathBuf::from(&path).display()
-            ))
-        })?;
-        if bytes.is_empty() {
-            return Err(CompositionError::PresentationPromptUnavailable(format!(
-                "{} is empty",
-                std::path::PathBuf::from(&path).display()
-            )));
-        }
-        String::from_utf8(bytes)
-            .map_err(|error| CompositionError::PresentationPromptUnavailable(error.to_string()))
+        Ok(self
+            .presentation_prompt_option
+            .as_ref()
+            .filter(|prompt| !prompt.trim().is_empty())
+            .cloned())
     }
 
     fn compose_system_prompt<N: Profiled, O: ReadsVerifiedContext, P: SegmentListing>(
@@ -158,11 +121,28 @@ impl ComposesPresentationRole for LaunchComposer {
 
 pub trait OpensLaunchComposer {
     fn with_context(context: ContextComposer) -> Self;
+    fn with_presentation_prompt(
+        context: ContextComposer,
+        presentation_prompt_option: Option<String>,
+    ) -> Self;
 }
 
 impl OpensLaunchComposer for LaunchComposer {
     fn with_context(context: ContextComposer) -> Self {
-        Self { context }
+        Self {
+            context,
+            presentation_prompt_option: None,
+        }
+    }
+
+    fn with_presentation_prompt(
+        context: ContextComposer,
+        presentation_prompt_option: Option<String>,
+    ) -> Self {
+        Self {
+            context,
+            presentation_prompt_option,
+        }
     }
 }
 
@@ -753,6 +733,20 @@ pub(crate) mod tests {
         ))
     }
 
+    fn fixture_composer_with_presentation(prompt: Option<String>) -> LaunchComposer {
+        LaunchComposer::with_presentation_prompt(
+            crate::context::ContextComposer::Fixture(FixtureComposer::from(
+                &[
+                    ("spirit-core", "Spirit body."),
+                    ("intent-flow", "Intent body."),
+                    ("operation-main-flow", "Main flow body."),
+                    ("knowledge-flow", "Knowledge body."),
+                ][..],
+            )),
+            prompt,
+        )
+    }
+
     /// The raw records of the flows a launch remembers are composed into its
     /// first message after its USER modules and before its brief, and the
     /// composer is asked for exactly those flows; a launch remembering none
@@ -846,64 +840,51 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn presentation_prompt_file_read_preserves_bytes_and_fails_when_unreadable() {
-        let path = std::env::temp_dir().join(format!(
-            "flow-core-presentation-{}-{}.md",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        let contents = b"Exact role line\nsecond line\n";
-        std::fs::write(&path, contents).unwrap();
+    fn configured_presentation_prompt_preserves_exact_text_and_omits_blank_text() {
+        let address = Address {
+            aspect: Aspect::Psyche,
+            topic: "core".into(),
+            layer: Layer::Primary,
+        };
+        let exact = "  Exact role line\nsecond line\n  ".to_owned();
         assert_eq!(
-            fixture_composer()
-                .read_presentation_prompt(path.clone().into_os_string())
-                .unwrap()
-                .as_bytes(),
-            contents
+            fixture_composer_with_presentation(Some(exact.clone()))
+                .presentation_prompt(&address)
+                .unwrap(),
+            Some(exact)
         );
-        std::fs::remove_file(&path).unwrap();
-        std::fs::write(&path, b"").unwrap();
-        assert!(
-            fixture_composer()
-                .read_presentation_prompt(path.clone().into_os_string())
-                .is_err()
-        );
-        std::fs::remove_file(&path).unwrap();
-        let missing = path.with_extension("missing").into_os_string();
-        assert!(
-            fixture_composer()
-                .read_presentation_prompt(missing)
-                .is_err()
-        );
+        for blank in [None, Some(String::new()), Some(" \n\t ".into())] {
+            assert_eq!(
+                fixture_composer_with_presentation(blank)
+                    .presentation_prompt(&address)
+                    .unwrap(),
+                None
+            );
+        }
     }
 
     #[test]
-    fn other_addresses_do_not_read_the_presentation_prompt_environment() {
-        let composer = fixture_composer();
+    fn an_absent_presentation_prompt_leaves_every_address_unchanged() {
+        let composer = fixture_composer_with_presentation(None);
         assert_eq!(
             composer
-                .presentation_prompt_from(
-                    &Address {
-                        aspect: Aspect::Field,
-                        topic: "core".into(),
-                        layer: Layer::Primary,
-                    },
-                    None,
-                )
+                .presentation_prompt(&Address {
+                    aspect: Aspect::Field,
+                    topic: "core".into(),
+                    layer: Layer::Primary,
+                })
                 .unwrap(),
             None
         );
-        assert!(
+        assert_eq!(
             composer
-                .presentation_prompt_from(
-                    &Address {
-                        aspect: Aspect::Psyche,
-                        topic: "core".into(),
-                        layer: Layer::Primary,
-                    },
-                    None,
-                )
-                .is_err()
+                .presentation_prompt(&Address {
+                    aspect: Aspect::Psyche,
+                    topic: "core".into(),
+                    layer: Layer::Primary,
+                })
+                .unwrap(),
+            None
         );
     }
 
@@ -1403,7 +1384,7 @@ pub(crate) mod tests {
         let order = QueueEntry {
             logical_delivery_id: "logical-delivery-0000000000000001".into(),
             sent_by: SentBy::Flow,
-            delivery: signal_flow::Delivery::Queue,
+            delivery: flow_ethos::Delivery::Queue,
             message: signal_flow::Message::Soft(Request::Order("investigate".into())),
         };
         assert_eq!(

@@ -19,7 +19,7 @@ use crate::store::queue_delivery::{
 };
 use crate::store::send_outcome::RecordsSendOutcomes;
 use flow_ethos::State;
-use signal_flow::{Delivery, Layer, Message, Metaflow, Request, SendAcceptance, SentBy};
+use signal_flow::{Layer, Message, Metaflow, Request, SendAcceptance, SentBy};
 
 fn ask(fixture: &NexusFixture, text: &str) -> String {
     use datom_codec::{Actualizing, Budget, Datomizable, Potential};
@@ -65,6 +65,7 @@ fn configured() -> NexusFixture {
 
                 curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                 lease: 30,
+                presentation_prompt_option: None,
             },
         ))
         .expect("Nexus configured");
@@ -168,7 +169,7 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
         .accept_logical_delivery(
             &seat,
             SentBy::Unknown,
-            Delivery::Queue,
+            flow_ethos::Delivery::Queue,
             Message::Soft(Request::Notice("counted".into())),
             None,
         )

@@ -123,6 +123,7 @@ fn configuration(_start: &Start, home: &Path) -> meta_signal_flow::ConfigureNexu
 
         curriculum_nexus_path: "/fixture/curriculum.sock".into(),
         lease: 60,
+        presentation_prompt_option: None,
     }
 }
 

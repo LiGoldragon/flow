@@ -9,7 +9,7 @@ use crate::RunningNexus;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::reminder::{AdvancesReminder, RecordsReminders};
 use crate::waking::SleepsAndWakesSeats;
-use signal_flow::{Address, Delivery, Message, Request, SentBy};
+use signal_flow::{Address, Message, Request, SentBy};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// How often Flow looks for reminders due.
@@ -60,7 +60,7 @@ impl RemindsCallers for RunningNexus {
                     match self.store.accept_logical_delivery(
                         &address,
                         SentBy::Flow,
-                        Delivery::Wake,
+                        flow_ethos::Delivery::Queue,
                         Message::Soft(Request::Notice(notice)),
                         None,
                     ) {

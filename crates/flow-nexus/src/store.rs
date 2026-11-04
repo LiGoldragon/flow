@@ -8121,6 +8121,10 @@ pub(crate) trait ReadsFlowMemory {
                     nexus_configuration::META_NEXUS_CONFIGURATION_FAMILY,
                     <nexus_configuration::StoredMetaNexusConfigurationV2 as MemoryDefinition>::schema_hash(),
                 ),
+                (
+                    nexus_configuration::META_NEXUS_CONFIGURATION_FAMILY,
+                    <nexus_configuration::StoredMetaNexusConfigurationV3 as MemoryDefinition>::schema_hash(),
+                ),
             ],
             "flow_nexus_logical_delivery_current" => &[
                 (
@@ -10263,6 +10267,7 @@ mod tests {
 
                         curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                         lease: 60,
+                        presentation_prompt_option: None,
                     },
                 ))
                 .expect("configuration commits");
@@ -11164,6 +11169,7 @@ mod tests {
 
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
+                    presentation_prompt_option: None,
                 },
             ))
             .expect("configuration commits");
@@ -11228,6 +11234,7 @@ mod tests {
 
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
+                    presentation_prompt_option: None,
                 },
             ))
             .expect("configuration commits");
@@ -11302,6 +11309,7 @@ mod tests {
 
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
+                    presentation_prompt_option: None,
                 },
             ))
             .expect("configuration commits");
@@ -11402,6 +11410,7 @@ mod tests {
 
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
+                    presentation_prompt_option: None,
                 },
             ))
             .expect("configuration commits");
@@ -13951,6 +13960,7 @@ mod tests {
 
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
+                    presentation_prompt_option: None,
                 },
             ))
             .expect("Nexus configured");

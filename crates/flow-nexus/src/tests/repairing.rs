@@ -15,6 +15,7 @@ use crate::store::queue_delivery::{
     AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery, QueueDeliveryPhase,
 };
 use crate::store::{ManagesMetaflowState, ReadsFlowRoles, ReadsFlowRows, RegistersFlowIdentity};
+use crate::waking::HoldsWakingMetaflows;
 use crate::{Dispatches, DispatchesSerially};
 use flow_ethos::State;
 use meta_signal_flow::{
@@ -23,8 +24,8 @@ use meta_signal_flow::{
     WithdrawRejected_Data,
 };
 use signal_flow::{
-    Address, Aspect, Delivery, DeliveryState, HarnessKind, HerdrRoute, HerdrRouteSelection, Layer,
-    Lock_Data, Message, Metaflow, QueueEntry, Recipient, Request, Response, SentBy,
+    Address, Aspect, DeliveryState, HarnessKind, HerdrRoute, HerdrRouteSelection, Layer, Lock_Data,
+    Message, Metaflow, QueueEntry, Recipient, Request, Response, SentBy,
 };
 use std::fs;
 
@@ -44,7 +45,7 @@ fn entry(id: &str) -> QueueEntry {
     QueueEntry {
         logical_delivery_id: id.into(),
         sent_by: SentBy::Unknown,
-        delivery: Delivery::Queue,
+        delivery: flow_ethos::Delivery::Queue,
         message: Message::Soft(Request::Order(format!("Order {id}."))),
     }
 }
@@ -147,6 +148,7 @@ fn inspect_answers_the_metaflow_whole() {
 
                 curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                 lease: 60,
+                presentation_prompt_option: None,
             },
         ))
         .expect("Nexus configured");
@@ -404,7 +406,7 @@ fn withdraw_takes_one_request_out_and_closes_its_attempt() {
         .accept_logical_delivery(
             &seat_address(),
             SentBy::Unknown,
-            Delivery::Queue,
+            flow_ethos::Delivery::Queue,
             Message::Soft(Request::Order("Never handed over.".into())),
             None,
         )
@@ -425,6 +427,11 @@ fn withdraw_takes_one_request_out_and_closes_its_attempt() {
 
     // The oldest is handed over and nothing is seen of it since.
     let attempt_id = prepared(&fixture);
+    let _held = fixture
+        .nexus
+        .waking
+        .hold(&seat_address())
+        .expect("withdrawal test holds background delivery");
 
     assert_eq!(withdraw(&never, seat_address()), MetaResponse::Withdrawn);
     assert_eq!(stored(&fixture).queue, vec![entry("withdraw-1")]);

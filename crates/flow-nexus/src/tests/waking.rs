@@ -30,7 +30,7 @@ use crate::waking::{
 };
 use flow_ethos::State;
 use signal_flow::{
-    Address, Aspect, Delivery, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
+    Address, Aspect, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
     HerdrRoute, HerdrRouteSelection, LaunchProfile, Layer, Message, Metaflow, NativeLaunchBinding,
     NativeLaunchIntent, Origin, PowerLevel, QueueEntry, Request, SentBy,
 };
@@ -87,8 +87,8 @@ impl Unsent for Request {
         QueueEntry {
             logical_delivery_id,
             sent_by: SentBy::Unknown,
-            delivery: Delivery::Wake,
-            message: Message::Soft(self),
+            delivery: flow_ethos::Delivery::Wake,
+            message: Message::MiddleAbrupt(self),
         }
     }
 }
@@ -484,7 +484,7 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
     let task = QueueEntry {
         logical_delivery_id: "logical-delivery-00000000000000000001".into(),
         sent_by: from(Aspect::Psyche, Layer::Primary),
-        delivery: Delivery::Wake,
+        delivery: flow_ethos::Delivery::Wake,
         message: Message::MiddleAbrupt(Request::Task(flow_ethos::AnswerableTask {
             minutes: 30,
             string: "Draft the proposal.".into(),
@@ -493,7 +493,7 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
     let reminder = QueueEntry {
         logical_delivery_id: "logical-delivery-00000000000000000002".into(),
         sent_by: SentBy::Flow,
-        delivery: Delivery::Wake,
+        delivery: flow_ethos::Delivery::Wake,
         message: Message::Soft(Request::Notice(
             "Reminder 1 of 4: task logical-delivery-00000000000000000001 has no Done after 30 minutes."
                 .into(),
@@ -502,7 +502,7 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
     let done = QueueEntry {
         logical_delivery_id: "logical-delivery-00000000000000000003".into(),
         sent_by: from(Aspect::Mind, Layer::Secondary),
-        delivery: Delivery::Wake,
+        delivery: flow_ethos::Delivery::Wake,
         message: Message::Soft(Request::Done(flow_ethos::DonePayload::Historical(
             flow_ethos::Historical_Data {
                 logical_delivery_id: "logical-delivery-00000000000000000000".into(),
@@ -649,8 +649,8 @@ fn an_order_wakes_an_asleep_primary_fresh() {
     assert_eq!(node.session_id, world.session());
 }
 
-/// A seat that goes idle with work queued starts a native hand-over but
-/// keeps the request queued until native history receipts it.
+/// A seat that goes idle with work queued hands over its whole ordered
+/// cohort and removes it after the exact native receipt.
 #[test]
 fn a_resting_seat_with_work_queued_is_handed_the_oldest_request_and_stays_awake() {
     let fixture = NexusFixture::new();
@@ -671,25 +671,26 @@ fn a_resting_seat_with_work_queued_is_handed_the_oldest_request_and_stays_awake(
 
     assert!(matches!(
         fixture.nexus.settle_stopped(CLAUDE_SEAT),
-        AtStop::Kept(KeptAtStop::DrainRefused(outcome))
-            if matches!(*outcome, Outcome::WaitingForTurn(_))
+        AtStop::Drained(_)
     ));
     let kept = stored(&fixture, Layer::Secondary);
     assert_eq!(kept.state, State::Awake(CLAUDE_SEAT.into()));
-    assert_eq!(
-        kept.queue,
-        vec![
-            Request::Notice("first".into()),
-            Request::Result(flow_ethos::ResultPayload::Historical("second".into()))
-        ]
-        .unsent()
+    assert!(
+        kept.queue.is_empty(),
+        "the exact receipt settles the cohort"
     );
     assert!(!closes(&fixture), "it keeps its pane");
-    assert_eq!(fixture.typed(), None, "the working seat receives no input");
+    assert_eq!(
+        fixture.typed().as_deref(),
+        Some(
+            "[ { Unknown MiddleAbrupt.Notice.first } { Unknown MiddleAbrupt.Result.Historical.second } ]"
+        ),
+        "the resting seat receives the whole ordered cohort"
+    );
 }
 
-/// An explicit all-queue delivery preserves the durable queue until each
-/// native history receipt exists.
+/// An explicit all-queue delivery settles the whole ordered cohort on its
+/// exact native receipt.
 #[test]
 fn explicit_delivery_hands_over_every_queued_request_in_order() {
     let fixture = NexusFixture::new();
@@ -709,12 +710,9 @@ fn explicit_delivery_hands_over_every_queued_request_in_order() {
 
     assert_eq!(
         fixture.nexus.drain_all(address(Layer::Secondary)),
-        Outcome::WaitingForTurn(first.logical_delivery_id.clone())
+        Outcome::Drained(vec![first, second])
     );
-    assert_eq!(
-        stored(&fixture, Layer::Secondary).queue,
-        vec![first, second]
-    );
+    assert!(stored(&fixture, Layer::Secondary).queue.is_empty());
 }
 
 /// A Claude agent Herdr shows Working, as its screen reads while its main
@@ -801,7 +799,7 @@ fn a_flow_that_stopped_while_working_or_awaited_is_kept() {
 
 /// An explicit wake applies to queued work without judging its request kind.
 #[test]
-fn explicit_wake_does_not_judge_message_kind() {
+fn abrupt_priority_makes_a_wake_due_at_every_layer() {
     assert!(RunningNexus::rests_at(&signal_flow::AgentState::Idle));
     assert!(RunningNexus::rests_at(&signal_flow::AgentState::Done));
     assert!(!RunningNexus::rests_at(&signal_flow::AgentState::Working));
@@ -1426,10 +1424,9 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
     let woken = stored(&fixture, Layer::Secondary);
     assert_eq!(woken.state, State::Awake(flow_id.clone()));
     assert_eq!(woken.past, vec!["abc123".to_owned()]);
-    assert_eq!(
-        woken.queue,
-        vec![Request::Order("D".into()).unsent()],
-        "the later arrival stays behind the fixed startup batch"
+    assert!(
+        woken.queue.is_empty(),
+        "the later arrival is delivered immediately"
     );
     let turns = world.user_turns(&fixture);
     assert!(
@@ -1437,6 +1434,15 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
             && turn.contains("Notice.B")
             && turn.contains("Question.C")),
         "the fixed batch is the first turn: {turns:?}"
+    );
+    assert_eq!(
+        turns.len(),
+        2,
+        "the later arrival is a second prompt: {turns:?}"
+    );
+    assert!(
+        turns[1].contains("Order.D"),
+        "the later prompt carries D: {turns:?}"
     );
     let node = fixture.nexus.store.flow_node(&flow_id).unwrap().unwrap();
     assert_eq!(node.session_id, new_session);
@@ -1447,7 +1453,7 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
 }
 
 #[test]
-fn a_simplified_wake_sends_the_first_soft_request_without_an_empty_turn() {
+fn a_simplified_wake_sends_the_first_abrupt_request_without_an_empty_turn() {
     let mut fixture = NexusFixture::new();
     ended_simplified_claude(&fixture);
     let at = address(Layer::Secondary);
@@ -1474,8 +1480,8 @@ fn a_simplified_wake_sends_the_first_soft_request_without_an_empty_turn() {
         .accept_logical_delivery(
             &at,
             SentBy::Sender(sender.clone()),
-            Delivery::Wake,
-            Message::Soft(Request::Order("judge this".into())),
+            flow_ethos::Delivery::Wake,
+            Message::MiddleAbrupt(Request::Order("judge this".into())),
             None,
         )
         .unwrap()
@@ -1548,8 +1554,8 @@ fn a_simplified_startup_leaves_its_second_request_ordered() {
             .accept_logical_delivery(
                 &at,
                 SentBy::Sender(sender.clone()),
-                Delivery::Wake,
-                Message::Soft(Request::Order(body.into())),
+                flow_ethos::Delivery::Wake,
+                Message::MiddleAbrupt(Request::Order(body.into())),
                 None,
             )
             .unwrap()
@@ -1937,6 +1943,7 @@ pub(super) fn message_peer(fixture: &NexusFixture) -> (super::MarkedProcess, sig
                 message_nexus_binary_option: Some(message_executable),
                 curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                 lease: 30,
+                presentation_prompt_option: None,
             },
         ))
         .expect("Nexus configured");
@@ -2114,7 +2121,6 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
             .dispatch_metaflow_peer(
                 signal_flow::Query::Deliver(Deliver_Data {
                     lock: lock.clone(),
-                    delivery: Delivery::Wake,
                     message: Message::Soft(oversized),
                 }),
                 Some(&message),
@@ -2165,20 +2171,17 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         panic!("the rejected request releases its verified lock")
     };
     let order = Request::Order("Run the tier tests.".into());
+    let world = fixture.fresh_claude_world();
     let answer = fixture.nexus.dispatch_metaflow_peer(
         signal_flow::Query::Deliver(Deliver_Data {
             lock,
-            delivery: Delivery::Wake,
-            message: Message::Soft(order.clone()),
+            message: Message::MiddleAbrupt(order.clone()),
         }),
         Some(&message),
     );
-    let signal_flow::PrivateSendResponse::SendAccepted(acceptance) = answer.private_response else {
-        panic!("delivery is accepted with a logical identity")
+    let signal_flow::PrivateSendResponse::Sent(receipt) = answer.private_response else {
+        panic!("delivery answers from the successor's exact receipt")
     };
-
-    let world = fixture.fresh_claude_world();
-    fixture.nexus.wake_due(at.clone());
     let woken = stored(&fixture, Layer::Secondary);
     let State::Awake(flow_id) = &woken.state else {
         panic!(
@@ -2190,10 +2193,10 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     // The woken flow's accepted first prompt carries the Order with the
     // Sender its Lock named.
     let sent = QueueEntry {
-        logical_delivery_id: acceptance.logical_delivery_id,
+        logical_delivery_id: receipt.logical_delivery_id,
         sent_by: SentBy::Sender(sender_address.clone()),
-        delivery: Delivery::Wake,
-        message: Message::Soft(order.clone()),
+        delivery: flow_ethos::Delivery::Wake,
+        message: Message::MiddleAbrupt(order.clone()),
     };
     assert!(woken.queue.is_empty());
     let turns = world.user_turns(&fixture);
@@ -2629,7 +2632,6 @@ fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
     let response = fixture.nexus.dispatch_metaflow_peer(
         signal_flow::Query::Deliver(Deliver_Data {
             lock,
-            delivery: Delivery::Wake,
             message: Message::Soft(order.clone()),
         }),
         Some(&message),
@@ -2643,7 +2645,7 @@ fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
     };
     assert_eq!(entry.logical_delivery_id, accepted.logical_delivery_id);
     assert_eq!(entry.sent_by, SentBy::Sender(sender_address));
-    assert_eq!(entry.delivery, Delivery::Wake);
+    assert_eq!(entry.delivery, flow_ethos::Delivery::Queue);
     assert_eq!(entry.message, Message::Soft(order));
 }
 
@@ -3254,6 +3256,7 @@ fn configure_secondary_model(fixture: &NexusFixture, native: &str) {
 
                 curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                 lease: 30,
+                presentation_prompt_option: None,
             },
         ))
         .expect("Nexus configured");
@@ -3607,7 +3610,7 @@ fn a_refused_wake_keeps_its_queue_and_each_delivery_names_why() {
                 .accept_logical_delivery(
                     &at,
                     SentBy::Sender(sender.clone()),
-                    Delivery::Queue,
+                    flow_ethos::Delivery::Queue,
                     Message::Soft(Request::Order(body.into())),
                     None,
                 )
@@ -3725,7 +3728,7 @@ fn a_missing_module_wake_keeps_its_identity_in_the_caller_outcome_and_queue_stat
         .accept_logical_delivery(
             &at,
             SentBy::Sender(sender.clone()),
-            Delivery::Queue,
+            flow_ethos::Delivery::Queue,
             Message::Soft(Request::Order("A".into())),
             None,
         )
@@ -3910,6 +3913,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
 
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 30,
+                    presentation_prompt_option: None,
                 },
             ))
             .expect("Nexus configured");
@@ -3963,8 +3967,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
                         "topic": recipient.topic,
                         "layer": format!("{:?}", recipient.layer)
                     },
-                    "delivery": "Wake",
-                    "priority": "Soft",
+                    "priority": "MiddleAbrupt",
                     "kind": "Order",
                     "body": FIRST_CALL_BODY
                 }
@@ -4735,13 +4738,17 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
                 "topic": recipient.topic,
             "layer": format!("{:?}", recipient.layer)
             },
-            "delivery": "Wake",
-            "priority": "Soft",
+            "priority": "MiddleAbrupt",
             "kind": "Order",
             "body": FIRST_CALL_BODY
         }
     });
     let call = ToolCall::read_tool_call(params).expect("the call reads");
+    let _held = fixture
+        .nexus
+        .waking
+        .hold(&recipient)
+        .expect("the interrupted launch holds delivery before its answer");
     // The earlier Nexus commits the call; its answer never leaves.
     let committed = fixture.nexus.handle_send_call(call);
     let SendOutcome::Accepted(accepted) = &committed else {
@@ -4790,7 +4797,7 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
     assert_eq!(target.queue[0].logical_delivery_id, logical_delivery_id);
     assert_eq!(
         target.queue[0].message,
-        Message::Soft(Request::Order(FIRST_CALL_BODY.into()))
+        Message::MiddleAbrupt(Request::Order(FIRST_CALL_BODY.into()))
     );
     assert!(
         restarted.nexus.wake_is_due(&target),
@@ -4823,6 +4830,7 @@ fn sender_holding_a_lock(fixture: &NexusFixture) -> Address {
 
                 curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                 lease: 30,
+                presentation_prompt_option: None,
             },
         ))
         .expect("Nexus configured");

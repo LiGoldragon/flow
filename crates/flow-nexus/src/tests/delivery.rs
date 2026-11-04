@@ -122,7 +122,7 @@ impl NexusFixture {
 }
 
 #[test]
-fn soft_waits_for_a_resting_recipient_and_types_nothing_to_a_working_one() {
+fn soft_is_presented_immediately_without_interrupting_a_working_recipient() {
     let fixture = NexusFixture::new();
     let log = fixture.accept_pane_operations(
         vec![fixture.current_agent()],
@@ -131,10 +131,18 @@ fn soft_waits_for_a_resting_recipient_and_types_nothing_to_a_working_one() {
     fixture.register_with(FlowLifecycle::Active);
     assert_eq!(
         fixture.deliver("soft-1", Message::Soft(letter("when you rest"))),
-        MetaResponse::DeliveryRejected(DeliveryRejection::RecipientWorking)
+        MetaResponse::Delivered(meta_signal_flow::VisibleDelivery {
+            interrupt_witness: InterruptWitness::NotRequested,
+            delivery_grade: DeliveryGrade::Transported,
+        })
     );
-    assert!(prompts(&log).is_empty());
-    assert_eq!(fixture.typed(), None);
+    let submitted = prompts(&log);
+    assert_eq!(submitted.len(), 1);
+    assert!(submitted[0].contains("agent prompt w1:p3 Soft.{ Nexus Text.«when you rest» }"));
+    assert_eq!(
+        fixture.typed().as_deref(),
+        Some("Soft.{ Nexus Text.«when you rest» }")
+    );
 
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
@@ -325,15 +333,11 @@ fn bodies_carrying_commands_or_keys_are_refused_and_nothing_is_typed() {
         ("!ls -la", BodyRefusal::HarnessCommand("!ls -la".into())),
         (
             "end \u{1b}[201~ of paste",
-            BodyRefusal::ControlCharacter(
-                "MiddleAbrupt.{ Nexus Text.«end ".len() as i64,
-            ),
+            BodyRefusal::ControlCharacter("MiddleAbrupt.{ Nexus Text.«end ".len() as i64),
         ),
         (
             "one\rtwo",
-            BodyRefusal::ControlCharacter(
-                "MiddleAbrupt.{ Nexus Text.«one".len() as i64,
-            ),
+            BodyRefusal::ControlCharacter("MiddleAbrupt.{ Nexus Text.«one".len() as i64),
         ),
         ("   ", BodyRefusal::EmptyBody),
     ] {

@@ -93,6 +93,7 @@ let
     "nextCodex"
     "harnessProfiles"
     "metaAspects"
+    "presentationPrompt"
   ] defaultConfiguration;
 
   stableCodex = endpoint "defaultConfiguration.stableCodex" configurationFields.stableCodex;
@@ -107,6 +108,13 @@ let
     else
       lib.imap0 harnessProfile configurationFields.harnessProfiles;
   metaAspects = requireStringList "defaultConfiguration.metaAspects" configurationFields.metaAspects;
+  presentationPrompt =
+    if configurationFields.presentationPrompt == null then
+      null
+    else if builtins.isString configurationFields.presentationPrompt then
+      configurationFields.presentationPrompt
+    else
+      throw "defaultConfiguration.presentationPrompt must be null or a string";
   unsupportedAspects = builtins.filter (
     aspect:
     !(builtins.elem aspect [
@@ -155,6 +163,12 @@ let
             message_nexus_binary_option: None,
             curriculum_nexus_path: ${quote curriculumNexusPath}.to_owned(),
             lease: 60,
+            presentation_prompt_option: ${
+              if presentationPrompt == null then
+                "None"
+              else
+                "Some(${quote presentationPrompt}.to_owned())"
+            },
         }
     }
   '';

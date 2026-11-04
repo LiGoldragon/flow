@@ -532,6 +532,9 @@ pub(crate) trait KeepsSendCalls {
     fn send_call(&self, key: &ToolCallKey) -> Result<Option<SendCall>, StoreError>;
     /// Records a call refused before anything was queued.
     fn record_send_call(&self, call: SendCall) -> Result<(), StoreError>;
+    /// Replaces the recorded answer of the same call after its one logical
+    /// delivery advances. This never admits or submits work.
+    fn update_send_call(&self, call: SendCall) -> Result<(), StoreError>;
 }
 
 impl KeepsSendCalls for FlowStore {
@@ -611,6 +614,15 @@ impl KeepsSendCalls for FlowStore {
 
     fn record_send_call(&self, call: SendCall) -> Result<(), StoreError> {
         self.engine.assert(Assertion::new(self.send_calls, call))?;
+        Ok(())
+    }
+
+    fn update_send_call(&self, call: SendCall) -> Result<(), StoreError> {
+        self.engine.commit_atomic(
+            self.engine
+                .begin_atomic_commit()
+                .mutate(self.send_calls, call),
+        )?;
         Ok(())
     }
 }

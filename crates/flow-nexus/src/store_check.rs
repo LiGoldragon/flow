@@ -124,6 +124,7 @@ mod tests {
 
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
+                    presentation_prompt_option: None,
                 },
             ))
             .unwrap();

@@ -23,14 +23,12 @@
 //! Flow holds on the calling thread, and the metaflow Awake as it; before
 //! that flow is Awake, the Address of the unsettled launch that opened the
 //! thread, while no other flow or launch holds it. Its
-//! request is durably admitted with its explicit delivery and priority, and
+//! request is durably admitted with its priority, and
 //! the accepted call and logical-delivery identity are recorded in the same
 //! commit. A replay is answered from its record and cannot create another
 //! logical delivery. The answer is the typed acceptance as a datom.
 //!
-//! Whether the target wakes is persisted in the queue entry's explicit
-//! Delivery policy, never inferred from the answer. A Nexus checks that
-//! policy after admission and on restart.
+//! The recipient state and priority determine submission: Awake receives every priority now; Asleep retains Soft and wakes for either abrupt priority.
 
 use crate::caller::NamesRootThread;
 use crate::codex::{
@@ -54,7 +52,7 @@ use crate::{HoldsStopRequest, RunningNexus, store::AnnouncesLaunchChanges};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
-use signal_flow::{Address, Aspect, Delivery, HarnessKind, Layer, Message, Request};
+use signal_flow::{Address, Aspect, HarnessKind, Layer, Message, Request};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::mpsc,
@@ -74,7 +72,7 @@ impl DeclaresSendTool for SendTool {
         serde_json::json!({
             "type": "function",
             "name": Self::tool_name(),
-            "description": "Send one request from this flow to the flow at a metaflow Address. Choose whether Flow should wake the recipient or only queue the request, and choose its priority. The answer is a durable logical-delivery acceptance or a typed refusal.",
+            "description": "Send one request from this flow to the flow at a metaflow Address. Priority determines interruption and whether an asleep recipient wakes. The answer is a durable logical-delivery outcome or a typed refusal.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -92,11 +90,6 @@ impl DeclaresSendTool for SendTool {
                         "required": ["aspect", "topic", "layer"],
                         "additionalProperties": false
                     },
-                    "delivery": {
-                        "type": "string",
-                        "enum": ["Wake", "Queue"],
-                        "description": "Wake explicitly wakes the recipient after admission; Queue retains work without requesting a wake."
-                    },
                     "priority": {
                         "type": "string",
                         "enum": ["HardAbrupt", "MiddleAbrupt", "Soft"],
@@ -109,7 +102,7 @@ impl DeclaresSendTool for SendTool {
                     },
                     "body": { "type": "string", "minLength": 1 }
                 },
-                "required": ["target", "delivery", "priority", "kind", "body"],
+                "required": ["target", "priority", "kind", "body"],
                 "additionalProperties": false
             }
         })
@@ -194,7 +187,6 @@ impl JournalsSendInvocations for RunningNexus {
 trait ReadsSendFields {
     fn aspect(value: &serde_json::Value) -> Option<Aspect>;
     fn layer(value: &serde_json::Value) -> Option<Layer>;
-    fn delivery(value: &serde_json::Value) -> Option<Delivery>;
     fn priority(value: &serde_json::Value) -> Option<SendPriority>;
     fn kind(value: &serde_json::Value) -> Option<SendKind>;
     fn only_fields(value: &serde_json::Value, fields: &[&str]) -> bool;
@@ -230,14 +222,6 @@ impl ReadsSendFields for ToolCall {
         }
     }
 
-    fn delivery(value: &serde_json::Value) -> Option<Delivery> {
-        match value.as_str()? {
-            "Wake" => Some(Delivery::Wake),
-            "Queue" => Some(Delivery::Queue),
-            _ => None,
-        }
-    }
-
     fn priority(value: &serde_json::Value) -> Option<SendPriority> {
         match value.as_str()? {
             "HardAbrupt" => Some(SendPriority::HardAbrupt),
@@ -257,10 +241,7 @@ impl ReadsSendFields for ToolCall {
 impl ReadsSendArguments for ToolCall {
     fn send_arguments(&self) -> Option<SendArguments> {
         let arguments = serde_json::from_str::<serde_json::Value>(&self.arguments).ok()?;
-        if !Self::only_fields(
-            &arguments,
-            &["target", "delivery", "priority", "kind", "body"],
-        ) {
+        if !Self::only_fields(&arguments, &["target", "priority", "kind", "body"]) {
             return None;
         }
         let target = arguments.get("target")?;
@@ -281,7 +262,6 @@ impl ReadsSendArguments for ToolCall {
                 topic: topic.to_owned(),
                 layer: Self::layer(target.get("layer")?)?,
             },
-            delivery: Self::delivery(arguments.get("delivery")?)?,
             send_priority: Self::priority(arguments.get("priority")?)?,
             send_kind: Self::kind(arguments.get("kind")?)?,
             body: body.to_owned(),
@@ -402,6 +382,14 @@ impl RefusesSendCall for RunningNexus {}
 impl HandlesSendCall for RunningNexus {
     fn handle_send_call<N: ToolCallCarrying>(&self, input: N) -> SendOutcome {
         let call = input.tool_call();
+        let call_key = call.tool_call_key.clone();
+        let content_sha256 = call.content_sha256();
+        let previously_recorded = self
+            .store
+            .send_call(&call.tool_call_key)
+            .ok()
+            .flatten()
+            .is_some();
         let outcome = {
             let _turn = self
                 .dispatch_gate
@@ -409,12 +397,35 @@ impl HandlesSendCall for RunningNexus {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.handle_held_send_call(call)
         };
-        if let SendOutcome::Accepted(accepted) = &outcome
+        if !previously_recorded
+            && let SendOutcome::Accepted(accepted) = &outcome
             && accepted.send_acceptance.delivery_state == signal_flow::DeliveryState::Queued
         {
             self.wake_due(accepted.target.clone());
         }
-        outcome
+        let mut accepted = match outcome {
+            SendOutcome::Accepted(accepted) => accepted,
+            other => return other,
+        };
+        let Ok(Some(snapshot)) = self
+            .store
+            .logical_delivery_snapshot(&accepted.send_acceptance.logical_delivery_id)
+        else {
+            return SendOutcome::Accepted(accepted);
+        };
+        if snapshot.delivery_state != accepted.send_acceptance.delivery_state {
+            accepted.send_acceptance.delivery_state = snapshot.delivery_state;
+            accepted.send_acceptance.delivery_cursor = snapshot.delivery_cursor;
+            let refreshed = SendOutcome::Accepted(accepted.clone());
+            let _ = self.store.update_send_call(SendCall {
+                tool_call_key: call_key,
+                content_sha256,
+                send_outcome: refreshed.clone(),
+            });
+            refreshed
+        } else {
+            SendOutcome::Accepted(accepted)
+        }
     }
 
     fn handle_held_send_call<N: ToolCallCarrying>(&self, input: N) -> SendOutcome {
@@ -492,7 +503,6 @@ impl HandlesSendCall for RunningNexus {
                     &content_sha256,
                     sender,
                     &arguments.target,
-                    arguments.delivery,
                     message,
                     now,
                 )

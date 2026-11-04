@@ -1,7 +1,7 @@
 //! The ordinary Message bridge uses the accepted socket's kernel identity.
 use crate::caller::{BindsCallerPane, CallerProcess, LocatesCallerPane, NamesRootThread};
 use crate::sending::RefusesUnidentified;
-use crate::sending::{CompletesDirectSends, IdentifiesSender};
+use crate::sending::{CompletesDirectSends, IdentifiesSender, SendsRequests};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::send_server::{NamesThreadMetaflow, SendServerTrust, TrustsSendServers};
@@ -177,19 +177,10 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     let recipient = request.lock.address.clone();
                     self.rest_ended_awake(&request.lock.address);
                     let abrupt = !matches!(&request.message, signal_flow::Message::Soft(_));
-                    if abrupt && request.delivery == signal_flow::Delivery::Queue {
-                        let private =
-                            signal_flow::PrivateSendResponse::Failed(signal_flow::SendFailure {
-                                logical_delivery_id_option: None,
-                                send_failure_reason:
-                                    signal_flow::SendFailureReason::QueueNotPermitted,
-                            });
-                        return private.into();
-                    }
-                    let direct = abrupt && request.delivery == signal_flow::Delivery::Wake;
+                    let direct_requested = abrupt || self.live_awake_flow(&recipient).is_some();
                     // A metaflow another holds takes the request into its
                     // queue instead.
-                    let direct_lease = if direct {
+                    let direct_lease = if direct_requested {
                         match self.direct_send_lease(&recipient) {
                             Ok(lease) => lease,
                             Err(refusal) => return (*refusal).into(),

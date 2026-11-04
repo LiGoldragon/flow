@@ -233,6 +233,7 @@ impl ConfiguredStore {
             ),
             curriculum_nexus_path: "/fixture/curriculum.sock".into(),
             lease,
+            presentation_prompt_option: None,
         }
     }
 

@@ -21,8 +21,7 @@ use meta_signal_flow::{
     ConfigurationChange, ConfigureMetaflow, ConfigureModel, ConfigureThreshold, Continuity,
 };
 use signal_flow::{
-    Address, Aspect, Caller, Delivery, FlowLifecycle, Layer, Message, Metaflow, PowerLevel,
-    Request, SentBy,
+    Address, Aspect, Caller, FlowLifecycle, Layer, Message, Metaflow, PowerLevel, Request, SentBy,
 };
 use std::fs;
 use std::io::Write;
@@ -71,7 +70,7 @@ fn seat_metaflow_with(queue: Vec<Request>) -> Metaflow {
             .map(|(index, request)| signal_flow::QueueEntry {
                 logical_delivery_id: format!("refresh-test-{index}"),
                 sent_by: SentBy::Unknown,
-                delivery: Delivery::Queue,
+                delivery: flow_ethos::Delivery::Queue,
                 message: Message::Soft(request),
             })
             .collect(),
@@ -442,7 +441,8 @@ fn an_on_demand_seat_refreshed_with_a_waking_request_starts_its_successor_first(
         vec!["spirit-core".into(), "intent-flow".into()],
     );
     let mut waking = seat_metaflow_with(vec![Request::Order("For the successor.".into())]);
-    waking.queue[0].delivery = Delivery::Wake;
+    waking.queue[0].delivery = flow_ethos::Delivery::Wake;
+    waking.queue[0].message = Message::MiddleAbrupt(Request::Order("For the successor.".into()));
     fixture.nexus.store.seed_metaflow(waking);
     owe_staged_successor(&fixture);
     fixture.herdr_for_replacement_showing(0, vec![claude_agent(&fixture)]);

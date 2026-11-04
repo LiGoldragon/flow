@@ -593,6 +593,7 @@ mod tests {
             message_nexus_binary_option: Some(binary.into()),
             curriculum_nexus_path: "/fixture/curriculum.sock".into(),
             lease: 60,
+            presentation_prompt_option: None,
         })
     }
 

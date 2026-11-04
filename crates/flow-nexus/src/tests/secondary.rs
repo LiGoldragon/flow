@@ -181,7 +181,7 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
 fn a_send_to_a_bad_topic_is_topic_refused() {
     use crate::sending::SendsRequests;
     use crate::store::metaflow::SleepsMetaflows;
-    use signal_flow::{Address, Delivery, Recipient, SendRequest};
+    use signal_flow::{Address, Recipient, SendRequest};
     let fixture = NexusFixture::new();
     for topic in ["PrimaryCommitting", "primary-committing", "", "9lives"] {
         let recipient = Address {
@@ -192,7 +192,6 @@ fn a_send_to_a_bad_topic_is_topic_refused() {
         let sent = fixture.nexus.send_request(
             SendRequest {
                 recipient: Recipient::Address(recipient.clone()),
-                delivery: Delivery::Queue,
                 sendable_message: signal_flow::SendableMessage::Soft(
                     signal_flow::SendableRequest::Order("Never queued.".into()),
                 ),
@@ -209,7 +208,6 @@ fn a_send_to_a_bad_topic_is_topic_refused() {
         let abrupt = fixture.nexus.send_request(
             SendRequest {
                 recipient: Recipient::Address(recipient),
-                delivery: Delivery::Wake,
                 sendable_message: signal_flow::SendableMessage::HardAbrupt(
                     signal_flow::SendableRequest::Order("Never typed.".into()),
                 ),

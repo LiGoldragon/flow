@@ -42,6 +42,7 @@ fn a_launch_receives_the_socket_from_each_typed_start() {
                 .to_string_lossy()
                 .into_owned(),
             lease: 60,
+            presentation_prompt_option: None,
         }))
         .expect("whole typed Nexus configuration commits");
     drop(config);

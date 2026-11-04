@@ -580,7 +580,6 @@ pub(crate) trait RecordsLogicalDeliveries {
         content_sha256: &str,
         sender: Address,
         target: &Target,
-        delivery: Delivery,
         message: Message,
         now: i64,
     ) -> Result<ToolSendOutcome, StoreError>;
@@ -881,7 +880,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         target.metaflow.queue.push(QueueEntry {
             logical_delivery_id: id.clone(),
             sent_by: SentBy::Sender(source.clone()),
-            delivery: Delivery::Wake,
+            delivery: flow_ethos::Delivery::Wake,
             message: Message::Soft(if core_presentation {
                 Request::Order(body.to_owned())
             } else {
@@ -909,7 +908,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             notification.metaflow.queue.push(QueueEntry {
                 logical_delivery_id: notice_id.clone(),
                 sent_by: SentBy::Sender(binding.source.clone()),
-                delivery: Delivery::Wake,
+                delivery: flow_ethos::Delivery::Wake,
                 message: Message::Soft(Request::Notice(
                     "The native presentation source was queued for Psyche book Tertiary as the sole artifact source. Publication is not yet witnessed.".into(),
                 )),
@@ -969,7 +968,6 @@ impl RecordsLogicalDeliveries for FlowStore {
         content_sha256: &str,
         sender: Address,
         target: &Target,
-        delivery: Delivery,
         message: Message,
         now: i64,
     ) -> Result<ToolSendOutcome, StoreError> {
@@ -1016,6 +1014,11 @@ impl RecordsLogicalDeliveries for FlowStore {
         let cursor = allocation.cursor;
         let create_counter = !allocation.existing;
         let id = format!("logical-delivery-{cursor:020}");
+        let delivery = if matches!(message, Message::Soft(_)) {
+            flow_ethos::Delivery::Queue
+        } else {
+            flow_ethos::Delivery::Wake
+        };
         let entry = QueueEntry {
             logical_delivery_id: id.clone(),
             sent_by: SentBy::Sender(sender.clone()),
@@ -1089,8 +1092,8 @@ impl RecordsLogicalDeliveries for FlowStore {
         };
         let mut changed = false;
         for entry in &mut stored.metaflow.queue {
-            if entry.delivery != Delivery::Wake {
-                entry.delivery = Delivery::Wake;
+            if entry.delivery != flow_ethos::Delivery::Wake {
+                entry.delivery = flow_ethos::Delivery::Wake;
                 changed = true;
             }
         }

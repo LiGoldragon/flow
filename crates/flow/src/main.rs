@@ -160,14 +160,14 @@ mod tests {
                 .map(|Invocation { query, .. }| query)
         }
     }
-    use signal_flow::{Delivery, Query, Recipient, Response, SendableMessage, SendableRequest};
+    use signal_flow::{Query, Recipient, Response, SendableMessage, SendableRequest};
 
     #[test]
-    fn send_names_queue_or_wake_and_deliver_all_is_typed() {
+    fn send_priority_and_deliver_all_are_typed() {
         let client = FlowClient;
         let Query::Send(send) = client
             .parse_query(
-                ["Send.{ Address.{ Mind core Secondary } Wake Soft.Order.«Review.» }".into()]
+                ["Send.{ Address.{ Mind core Secondary } Soft.Order.«Review.» }".into()]
                     .into_iter(),
             )
             .expect("current Send parses")
@@ -175,21 +175,19 @@ mod tests {
             panic!("fixture must remain a Send")
         };
         assert!(matches!(send.recipient, Recipient::Address(_)));
-        assert_eq!(send.delivery, Delivery::Wake);
         assert_eq!(
             send.sendable_message,
             SendableMessage::Soft(SendableRequest::Order("Review.".into()))
         );
         let Query::Send(queued) = client
             .parse_query(
-                ["Send.{ Up Queue Soft.Result.{ Order.«Review.» «Ready.» } }".into()].into_iter(),
+                ["Send.{ Up Soft.Result.{ Order.«Review.» «Ready.» } }".into()].into_iter(),
             )
-            .expect("explicit Queue parses")
+            .expect("Send parses")
         else {
             panic!("fixture must remain a Send")
         };
         assert_eq!(queued.recipient, Recipient::Up);
-        assert_eq!(queued.delivery, Delivery::Queue);
         assert!(matches!(
             client
                 .parse_query(["DeliverAll.{ Mind core Secondary }".into()].into_iter())
@@ -209,16 +207,16 @@ mod tests {
             "Soft.Psyches.[ { «context» «verbatim» } ]",
         ] {
             let explicit = client
-                .parse_query([format!("Send.{{ Up Wake {message} }}")].into_iter())
-                .expect("explicit Wake parses");
+                .parse_query([format!("Send.{{ Up {message} }}")].into_iter())
+                .expect("Send parses");
             assert!(matches!(explicit, Query::Send(_)));
         }
         for invalid in [
             "Send.{}",
             "Send.{ Up }",
-            "Send.{ Up Wake Soft.Order.«Review.» extra }",
+            "Send.{ Up Soft.Order.«Review.» extra }",
             "Send.{ Up Unknown Soft.Order.«Review.» }",
-            "Send.{ Up Wake }",
+            "Send.{ Up Soft.Order.«Review.» extra }",
             "Send.{ Unknown Soft.Order.«Review.» }",
             "Send.[ Up Soft.Order.«Review.» ]",
         ] {
@@ -397,7 +395,7 @@ mod tests {
         );
         let Query::Send(send) = client
             .parse_query(
-                ["Send.{ Address.{ Mind core Secondary } Wake Soft.Task.{ 30 «Check the capsule run.» } }"
+                ["Send.{ Address.{ Mind core Secondary } Soft.Task.{ 30 «Check the capsule run.» } }"
                     .into()]
                 .into_iter(),
             )
@@ -411,8 +409,8 @@ mod tests {
         assert_eq!(task.minutes, 30);
         assert_eq!(task.string, "Check the capsule run.");
         for text in [
-            "Send.{ Up Wake Soft.Task.{ soon «Check the capsule run.» } }",
-            "Send.{ Up Wake Soft.Task.{ 9223372036854775808 «Check the capsule run.» } }",
+            "Send.{ Up Soft.Task.{ soon «Check the capsule run.» } }",
+            "Send.{ Up Soft.Task.{ 9223372036854775808 «Check the capsule run.» } }",
         ] {
             assert!(
                 client.parse_query([text.into()].into_iter()).is_err(),

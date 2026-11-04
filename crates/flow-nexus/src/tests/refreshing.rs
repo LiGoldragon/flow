@@ -18,22 +18,34 @@ use super::{
     codex_agent_in,
 };
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
-use crate::sending::SendsRequests;
+use crate::sending::{IdentifiesSender, SendsRequests};
 use crate::store::context::JudgesThreshold;
-use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow, SleepsMetaflows};
 use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, ReadsFlowRows};
 use crate::waking::{HoldsWakingMetaflows, SleepsAndWakesSeats};
 use crate::{Dispatches, DispatchesSerially};
+use flow_ethos::Delivery;
 use flow_ethos::State;
 use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, Continuity};
 use signal_flow::{
-    Address, Delivery, FlowLifecycle, HerdrRouteSelection, Layer, Message, Metaflow, Origin, Query,
+    Address, FlowLifecycle, HerdrRouteSelection, Layer, Message, Metaflow, Origin, Query,
     Recipient, RefreshRejection, Refreshed, Refusal, ReplaceRejection, Request, Response,
     SendRequest, SentBy, Unknown_Data,
 };
 use std::fs;
 use std::time::Duration;
+
+/// Releases a fixture operation even when an assertion unwinds before the
+/// scoped worker threads are joined. Cleanup is idempotent and cannot replace
+/// the assertion that exposed it.
+struct ReleasesFixtureOnDrop(std::path::PathBuf);
+
+impl Drop for ReleasesFixtureOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.0, "");
+    }
+}
 
 fn seat_address() -> Address {
     address(Layer::Secondary)
@@ -73,7 +85,7 @@ fn awake_seat(fixture: &NexusFixture, queue: Vec<Request>) {
             .map(|(index, request)| signal_flow::QueueEntry {
                 logical_delivery_id: format!("refreshing-test-{index}"),
                 sent_by: SentBy::Unknown,
-                delivery: Delivery::Queue,
+                delivery: flow_ethos::Delivery::Queue,
                 message: Message::Soft(request),
             })
             .collect(),
@@ -245,7 +257,6 @@ fn a_refresh_is_refused_locked_while_another_holds_the_metaflow() {
 fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending_flow() {
     const ENDING: &str = "abc123";
     let mut fixture = NexusFixture::new();
-    bind_existing_caller(&fixture, "a001", "pane-1");
     // The ending flow was launched, so a wake composes its successor from
     // that launch.
     launched_claude_ended_by(&fixture, |_| true);
@@ -259,9 +270,43 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
     let HerdrRouteSelection::Available(route) = &ending.herdr_route_selection else {
         panic!("the ending flow has its pane");
     };
+    let world = fixture.fresh_claude_world();
+    let caller_agent = codex_agent_in("pane-1", "terminal-pane-1");
+    let fresh_script = fs::read_to_string(&fixture.snapshot_program)
+        .expect("fresh Herdr")
+        .replacen(
+            "  *\"api snapshot\"*) a=; [ -f \"$S/harness\" ] && a=$(agent);",
+            &format!(
+                "  *\"api snapshot\"*) a='{caller_agent}'; [ -f \"$S/harness\" ] && a=\"$a,$(agent)\";"
+            ),
+            1,
+        );
+    // Bind the exact kernel caller directly to a separate metaflow. This
+    // leaves the recipient's Claude model declaration untouched.
+    let sender_address = Address {
+        aspect: signal_flow::Aspect::Mind,
+        topic: "sender".into(),
+        layer: Layer::Secondary,
+    };
+    let peer = FlowStore::process_identity_for_pid(std::process::id()).unwrap();
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .bind_metaflow(
+                signal_flow::Bind_Data {
+                    address: sender_address.clone(),
+                    process: peer.clone(),
+                },
+                &peer,
+                Some("a001".into()),
+            )
+            .unwrap(),
+        Response::Bound("a001".into())
+    );
     let log = fixture.accept_pane_operations(
         vec![
-            codex_agent_in("pane-1", "terminal-pane-1"),
+            caller_agent,
             serde_json::json!({
                 "agent":"claude", "agent_status":"idle", "name":route.herdr_agent_name,
                 "workspace_id":"w1", "pane_id":route.herdr_pane_id,
@@ -293,8 +338,11 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
         ),
         1,
     ));
-    let caller = MarkedProcess::spawn("sleep", &["30"], "pane-1");
-    let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
+    assert_eq!(
+        fixture.nexus.sending_address(&peer).unwrap(),
+        sender_address,
+        "the caller is authenticated before the recipient transition starts"
+    );
     let request = Request::Order("For the successor.".into());
     let ended = |fixture: &NexusFixture| {
         fixture
@@ -307,6 +355,7 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
     };
 
     let (refreshed, sent) = std::thread::scope(|scope| {
+        let _release_on_drop = ReleasesFixtureOnDrop(release.clone());
         let refreshing = scope.spawn(|| {
             fixture
                 .nexus
@@ -326,8 +375,9 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
             let answer = nexus.send_request(
                 SendRequest {
                     recipient: Recipient::Address(seat_address()),
-                    delivery: Delivery::Wake,
-                    sendable_message: super::sendable_message(Message::Soft(request.clone())),
+                    sendable_message: super::sendable_message(Message::MiddleAbrupt(
+                        request.clone(),
+                    )),
                 },
                 Some(peer),
             );
@@ -338,6 +388,13 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
             answer.recv_timeout(Duration::from_millis(500)).is_err(),
             "the Send is not admitted while the refresh holds the metaflow"
         );
+        // The request has arrived and is waiting behind the refresh. The
+        // world now changes to the one in which the successor is launched;
+        // its authenticated sender belongs to the request already in hand.
+        FixtureExecutable {
+            path: fixture.snapshot_program.clone(),
+        }
+        .install(&fresh_script);
         assert!(fixture.typed().is_none(), "nothing reaches the ending flow");
         fs::write(&release, "").expect("close released");
         (
@@ -354,12 +411,11 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
         })
     );
     assert!(
-        matches!(sent.response, Response::SendAccepted(_)),
+        matches!(sent.response, Response::Sent(_)),
         "{:?}",
         sent.response
     );
-    let pending = sent.pending.expect("the Send asks for a wake");
-    assert_eq!(pending.delivery, Delivery::Wake);
+    assert!(sent.pending.is_none());
     assert!(
         fs::read_to_string(&log)
             .unwrap_or_default()
@@ -371,14 +427,7 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
         "nothing was typed into the ending flow"
     );
     assert_eq!(ended(&fixture), FlowLifecycle::Stopped);
-    let asleep = stored(&fixture);
-    assert_eq!(asleep.state, State::Asleep);
-    assert_eq!(asleep.past, vec![ENDING.to_owned()]);
-    assert_eq!(requests(&asleep), vec![request.clone()]);
-
-    // The waking request the Send asked for starts the successor.
-    let world = fixture.fresh_claude_world();
-    fixture.nexus.wake_due(pending.address);
+    // The waking request starts the successor before it answers Sent.
     let woken = stored(&fixture);
     let State::Awake(successor) = woken.state.clone() else {
         panic!("the successor is woken; Herdr calls: {}", world.calls());
@@ -513,10 +562,15 @@ fn refreshable_with_staged_successor(
         queue: vec![signal_flow::QueueEntry {
             logical_delivery_id: "refreshing-successor-0".into(),
             sent_by: SentBy::Unknown,
-            delivery,
-            message: signal_flow::Message::Soft(signal_flow::Request::Order(
-                "For the successor.".into(),
-            )),
+            delivery: delivery.clone(),
+            message: match &delivery {
+                Delivery::Wake => signal_flow::Message::MiddleAbrupt(signal_flow::Request::Order(
+                    "For the successor.".into(),
+                )),
+                Delivery::Queue => signal_flow::Message::Soft(signal_flow::Request::Order(
+                    "For the successor.".into(),
+                )),
+            },
         }],
     });
     owe_staged_successor(&fixture);
@@ -532,8 +586,8 @@ fn refreshable_with_staged_successor(
 #[test]
 fn a_refresh_owed_a_successor_starts_it_before_the_ending_flow_is_reaped() {
     for (continuity, delivery) in [
-        (Continuity::Maintained, Delivery::Queue),
-        (Continuity::OnDemand, Delivery::Wake),
+        (Continuity::Maintained, flow_ethos::Delivery::Queue),
+        (Continuity::OnDemand, flow_ethos::Delivery::Wake),
     ] {
         let (fixture, _) = refreshable_with_successor(continuity.clone(), delivery.clone());
         assert_eq!(
@@ -583,8 +637,11 @@ fn a_refresh_owed_a_successor_starts_it_before_the_ending_flow_is_reaped() {
 /// and the lock is released.
 #[test]
 fn a_refresh_whose_successor_stays_unconfirmed_answers_successor_unconfirmed() {
-    let (fixture, _) =
-        refreshable_with_staged_successor(Continuity::Maintained, Delivery::Queue, false);
+    let (fixture, _) = refreshable_with_staged_successor(
+        Continuity::Maintained,
+        flow_ethos::Delivery::Queue,
+        false,
+    );
     assert_eq!(
         fixture.nexus.dispatch(Query::Refresh(seat_address())),
         Response::RefreshRejected(RefreshRejection::SuccessorUnconfirmed)
@@ -638,7 +695,6 @@ fn an_abrupt_send_to_a_held_metaflow_is_queued_never_refused_busy() {
     let sent = fixture.nexus.send_request(
         SendRequest {
             recipient: Recipient::Address(seat_address()),
-            delivery: Delivery::Wake,
             sendable_message: super::sendable_message(Message::HardAbrupt(request.clone())),
         },
         Some(&peer),
@@ -649,7 +705,6 @@ fn an_abrupt_send_to_a_held_metaflow_is_queued_never_refused_busy() {
         sent.response
     );
     let pending = sent.pending.expect("the queued Send asks for a wake");
-    assert_eq!(pending.delivery, Delivery::Wake);
     let metaflow = stored(&fixture);
     assert_eq!(requests(&metaflow), vec![request]);
     assert!(matches!(metaflow.queue[0].message, Message::HardAbrupt(_)));
@@ -660,10 +715,9 @@ fn an_abrupt_send_to_a_held_metaflow_is_queued_never_refused_busy() {
     drop(held);
 }
 
-/// A HardAbrupt or MiddleAbrupt Send that asks for a wake, to a seat whose
-/// queue is not empty, whose delivery is outstanding, or which is past its
-/// context threshold, is queued and answered accepted: a Send is never
-/// refused for the seat's state.
+/// A HardAbrupt or MiddleAbrupt Send to an ordinary Awake queue drains its
+/// whole cohort immediately. An outstanding delivery or threshold refresh
+/// still owns the Address, so the newly admitted work waits behind it.
 #[test]
 fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
     use crate::store::context::JudgesThreshold as _;
@@ -746,22 +800,36 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
             let sent = fixture.nexus.send_request(
                 SendRequest {
                     recipient: Recipient::Address(seat_address()),
-                    delivery: Delivery::Wake,
                     sendable_message: super::sendable_message(abrupt(Request::Order(
                         "Arrived while busy.".into(),
                     ))),
                 },
                 Some(&peer),
             );
-            let Response::SendAccepted(acceptance) = &sent.response else {
-                panic!("{busy:?}: {:?}", sent.response)
-            };
-            assert_eq!(
-                acceptance.visible_delivery_state,
-                signal_flow::VisibleDeliveryState::Queued,
-                "{busy:?}"
-            );
-            assert_eq!(stored(&fixture).queue.len(), queued_before + 1, "{busy:?}");
+            match busy {
+                Busy::QueueNotEmpty => {
+                    assert!(
+                        matches!(sent.response, Response::Sent(_)),
+                        "{:?}",
+                        sent.response
+                    );
+                    assert!(
+                        stored(&fixture).queue.is_empty(),
+                        "the exact receipt settles all"
+                    );
+                }
+                Busy::DeliveryOutstanding | Busy::PastThreshold => {
+                    let Response::SendAccepted(acceptance) = &sent.response else {
+                        panic!("{busy:?}: {:?}", sent.response)
+                    };
+                    assert_eq!(
+                        acceptance.visible_delivery_state,
+                        signal_flow::VisibleDeliveryState::Queued,
+                        "{busy:?}"
+                    );
+                    assert_eq!(stored(&fixture).queue.len(), queued_before + 1, "{busy:?}");
+                }
+            }
         }
     }
 }
@@ -795,7 +863,7 @@ fn a_send_to_a_primary_is_accepted_from_a_primary_and_from_a_secondary() {
                 .accept_logical_delivery(
                     &target,
                     SentBy::Sender(sender.clone()),
-                    Delivery::Queue,
+                    flow_ethos::Delivery::Queue,
                     Message::Soft(request),
                     None,
                 )
@@ -843,7 +911,8 @@ fn a_launch_to_an_awake_metaflow_names_the_replace_of_its_flow() {
 /// successor.
 #[test]
 fn a_launch_ordered_replace_holds_the_metaflow_and_types_nothing_into_its_predecessor() {
-    let (fixture, profile) = refreshable_with_successor(Continuity::OnDemand, Delivery::Queue);
+    let (fixture, profile) =
+        refreshable_with_successor(Continuity::OnDemand, flow_ethos::Delivery::Queue);
 
     let held = fixture
         .nexus
@@ -931,8 +1000,8 @@ fn a_successor_that_cannot_start_answers_refresh_s_own_rejection() {
     waking.queue = vec![signal_flow::QueueEntry {
         logical_delivery_id: "refreshing-wake-0".into(),
         sent_by: SentBy::Unknown,
-        delivery: Delivery::Wake,
-        message: signal_flow::Message::Soft(signal_flow::Request::Order(
+        delivery: flow_ethos::Delivery::Wake,
+        message: signal_flow::Message::MiddleAbrupt(signal_flow::Request::Order(
             "Wake the successor.".into(),
         )),
     }];
@@ -984,7 +1053,8 @@ fn a_successor_that_cannot_start_answers_refresh_s_own_rejection() {
 /// intent is recorded before the launch and given with the confirmation.
 #[test]
 fn a_launch_ordered_replace_owes_its_successor_until_it_is_confirmed() {
-    let (fixture, profile) = refreshable_with_successor(Continuity::OnDemand, Delivery::Queue);
+    let (fixture, profile) =
+        refreshable_with_successor(Continuity::OnDemand, flow_ethos::Delivery::Queue);
     fixture
         .nexus
         .store
@@ -1014,7 +1084,8 @@ fn a_launch_ordered_replace_owes_its_successor_until_it_is_confirmed() {
 #[test]
 fn a_nexus_start_starts_a_successor_owed_after_a_refresh_or_a_replace() {
     for cause in [SuccessionCause::Ordered, SuccessionCause::Replace] {
-        let (fixture, _) = refreshable_with_successor(Continuity::Maintained, Delivery::Queue);
+        let (fixture, _) =
+            refreshable_with_successor(Continuity::Maintained, flow_ethos::Delivery::Queue);
         fixture
             .nexus
             .store

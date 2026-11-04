@@ -1262,38 +1262,9 @@ impl ReconcilesQueueDelivery for RunningNexus {
                     .any(|(_, text)| text.prompt_sha256() == prompt.prompt_sha256)
         });
         let Some(attempt) = attempt else {
-            // A Simplified flow's first input was part of its launch rather
-            // than an ordinary queue-delivery attempt. Its exact launch
-            // intent and this correlated hook prove which prompt landed.
-            let startup_matches = self
-                .store
-                .launch_requests_bound_to(flow_id)
-                .ok()
-                .into_iter()
-                .flatten()
-                .filter_map(|launch| self.store.launch_attempt(&launch).ok().flatten())
-                .filter_map(|attempt| attempt.prompt_delivery_intent_option)
-                .any(|intent| {
-                    intent.harness_kind == HarnessKind::Claude
-                        && prompt.native_session_id_option.as_deref()
-                            == Some(intent.native_session_id.as_str())
-                        && prompt.prompt_sha256 == intent.prompt_sha256
-                });
-            if startup_matches
-                && let (Some(native_session_id), Some(native_prompt_id)) = (
-                    prompt.native_session_id_option.clone(),
-                    prompt.prompt_id_option.clone(),
-                )
-            {
-                let _ = self.store.record_simplified_startup_receipt(
-                    flow_id,
-                    &signal_flow::NativeReceipt {
-                        harness_kind: HarnessKind::Claude,
-                        native_session_id,
-                        native_prompt_id,
-                    },
-                );
-            }
+            // The correlated hook is durable launch evidence. The logical
+            // input becomes Delivered only when confirm_wake atomically
+            // applies that exact receipt and removes its startup prefix.
             return;
         };
         // A native hook proves that a submission was observed, not that an
@@ -2594,15 +2565,6 @@ impl WakesInParts for RunningNexus {
         if has_logical && receipt.is_none() {
             return false;
         }
-        if let Some(receipt) = receipt {
-            if self
-                .store
-                .record_startup_receipts(startup, &receipt)
-                .is_err()
-            {
-                return false;
-            }
-        }
         if simplified
             && let Some(oldest) = startup.first()
             && let signal_flow::SentBy::Sender(recipient) = &oldest.sent_by
@@ -2619,7 +2581,7 @@ impl WakesInParts for RunningNexus {
             }
         }
         self.store
-            .settle_wake_startup(address, flow_id, startup)
+            .settle_wake_startup_receipts(address, flow_id, startup, receipt.as_ref())
             .unwrap_or(false)
     }
 

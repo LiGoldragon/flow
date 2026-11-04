@@ -21,14 +21,14 @@ use crate::store::context::RecordsContextSize;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::{
-    ReadsFlowRows, RecordsFlowLifecycle, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
-    RegistersFlowIdentity, ReservesLaunchAttempt,
+    OpensFlowStore, ReadsFlowRows, RecordsFlowLifecycle, RecordsNativeLaunchBinding,
+    RecordsNativeLaunchIntent, RegistersFlowIdentity, ReservesLaunchAttempt,
 };
 use crate::waking::{
     AnswersWakeRefusal, AtStop, FreshContext, HoldsWakingMetaflows, KeptAtStop,
     PerformsWakeAndDrain, SleepsAndWakesSeats, WakePlan, WakePolicy, WakeRefusal,
 };
-use flow_ethos::State;
+use flow_ethos::{Delivery, State};
 use signal_flow::{
     Address, Aspect, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
     HerdrRoute, HerdrRouteSelection, LaunchProfile, Layer, Message, Metaflow, NativeLaunchBinding,
@@ -857,8 +857,17 @@ fn the_store_sleeps_and_awakens_removing_only_the_confirmed_startup_batch() {
     );
     assert!(!store.awaken_metaflow(&at, "bbbbbb", 2).unwrap());
     assert!(store.awaken_metaflow(&at, "bbbbbb", 0).unwrap());
-    let startup = vec![Request::Order("A".into()), Request::Order("B".into())].unsent();
-    assert!(store.settle_wake_startup(&at, "bbbbbb", &startup).unwrap());
+    let startup = store.metaflow(&at).unwrap().unwrap().queue[..2].to_vec();
+    let receipt = signal_flow::NativeReceipt {
+        harness_kind: HarnessKind::Claude,
+        native_session_id: "legacy-session-receipt".into(),
+        native_prompt_id: "legacy-prompt-receipt".into(),
+    };
+    assert!(
+        store
+            .settle_wake_startup_receipts(&at, "bbbbbb", &startup, Some(&receipt))
+            .unwrap()
+    );
     let woken = store.metaflow(&at).unwrap().unwrap();
     assert_eq!(woken.state, State::Awake("bbbbbb".into()));
     assert_eq!(
@@ -871,6 +880,16 @@ fn the_store_sleeps_and_awakens_removing_only_the_confirmed_startup_batch() {
         vec![Request::Order("C".into())].unsent(),
         "the later arrival remains behind the confirmed startup batch"
     );
+    for entry in startup {
+        assert!(matches!(
+            store
+                .logical_delivery_snapshot(&entry.logical_delivery_id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            signal_flow::DeliveryState::Delivered(ref delivered) if delivered == &receipt
+        ));
+    }
     assert!(
         store
             .remove_oldest_queued(&at, &Request::Order("C".into()).unsent())
@@ -881,6 +900,136 @@ fn the_store_sleeps_and_awakens_removing_only_the_confirmed_startup_batch() {
         store.metaflow_awake_as("bbbbbb").unwrap().unwrap().address,
         at
     );
+}
+
+#[test]
+fn a_wake_receipt_settles_its_logical_prefix_atomically_and_preserves_the_suffix() {
+    let fixture = NexusFixture::new();
+    let store = &fixture.nexus.store;
+    let at = address(Layer::Tertiary);
+    store.seed_metaflow(metaflow(
+        Layer::Tertiary,
+        State::Awake("bbbbbb".into()),
+        vec![],
+        vec![],
+    ));
+    let sender = address(Layer::Quaternary);
+    for body in ["A", "B", "C"] {
+        let accepted = store
+            .accept_logical_delivery(
+                &at,
+                SentBy::Sender(sender.clone()),
+                Delivery::Wake,
+                Message::MiddleAbrupt(Request::Order(body.into())),
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            accepted,
+            signal_flow::PrivateSendResponse::SendAccepted(_)
+        ));
+    }
+    let queued = store.metaflow(&at).unwrap().unwrap().queue;
+    let startup = queued[..2].to_vec();
+    let later = queued[2].clone();
+    let receipt = signal_flow::NativeReceipt {
+        harness_kind: HarnessKind::Claude,
+        native_session_id: "session-receipt".into(),
+        native_prompt_id: "prompt-receipt".into(),
+    };
+
+    assert!(
+        !store
+            .settle_wake_startup_receipts(&at, "notbbb", &startup, Some(&receipt))
+            .unwrap(),
+        "a different flow changes neither lifecycle nor queue"
+    );
+    assert_eq!(store.metaflow(&at).unwrap().unwrap().queue, queued);
+    assert!(
+        !store
+            .settle_wake_startup_receipts(&at, "bbbbbb", &startup[1..], Some(&receipt))
+            .unwrap(),
+        "a non-prefix changes neither lifecycle nor queue"
+    );
+    assert_eq!(store.metaflow(&at).unwrap().unwrap().queue, queued);
+    assert!(
+        store
+            .settle_wake_startup_receipts(&at, "bbbbbb", &startup, None)
+            .is_err(),
+        "logical deliveries require an exact receipt"
+    );
+    assert_eq!(store.metaflow(&at).unwrap().unwrap().queue, queued);
+
+    // Reconcile the partial shape an older split settlement could leave:
+    // one exact receipt is durable while its queue entry remains.
+    store
+        .transition_logical_delivery(
+            &startup[0].logical_delivery_id,
+            signal_flow::DeliveryState::Delivered(receipt.clone()),
+        )
+        .unwrap();
+    let conflicting = signal_flow::NativeReceipt {
+        harness_kind: HarnessKind::Claude,
+        native_session_id: "other-session".into(),
+        native_prompt_id: "other-prompt".into(),
+    };
+    assert!(
+        store
+            .settle_wake_startup_receipts(&at, "bbbbbb", &startup, Some(&conflicting))
+            .is_err(),
+        "a conflicting receipt cannot rewrite evidence or drain the queue"
+    );
+    assert_eq!(store.metaflow(&at).unwrap().unwrap().queue, queued);
+    assert!(matches!(
+        store
+            .logical_delivery_snapshot(&startup[1].logical_delivery_id)
+            .unwrap()
+            .unwrap()
+            .delivery_state,
+        signal_flow::DeliveryState::Queued
+    ));
+    assert!(
+        store
+            .settle_wake_startup_receipts(&at, "bbbbbb", &startup, Some(&receipt))
+            .unwrap()
+    );
+    let settled = store.metaflow(&at).unwrap().unwrap();
+    assert_eq!(settled.queue, vec![later.clone()]);
+    for entry in &startup {
+        assert!(matches!(
+            store
+                .logical_delivery_snapshot(&entry.logical_delivery_id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            signal_flow::DeliveryState::Delivered(ref delivered) if delivered == &receipt
+        ));
+    }
+    assert!(matches!(
+        store
+            .logical_delivery_snapshot(&later.logical_delivery_id)
+            .unwrap()
+            .unwrap()
+            .delivery_state,
+        signal_flow::DeliveryState::Queued
+    ));
+    let NexusFixture {
+        directory, nexus, ..
+    } = fixture;
+    let path = directory.path().join("flow.sema");
+    drop(nexus);
+    let reopened = crate::store::FlowStore::open(&path).unwrap();
+    assert_eq!(reopened.metaflow(&at).unwrap().unwrap().queue, vec![later]);
+    for entry in startup {
+        assert!(matches!(
+            reopened
+                .logical_delivery_snapshot(&entry.logical_delivery_id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            signal_flow::DeliveryState::Delivered(ref delivered) if delivered == &receipt
+        ));
+    }
 }
 
 /// The context a wake composes a fresh flow from: the module identities,

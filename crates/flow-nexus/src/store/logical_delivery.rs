@@ -633,20 +633,15 @@ pub(crate) trait RecordsLogicalDeliveries {
         queue: &[QueueEntry],
         cause: signal_flow::RetryCause,
     ) -> Result<usize, StoreError>;
-    /// Records the launch receipt for every logical request carried by a
-    /// fresh wake's accepted first prompt. Seeded legacy queue entries with
-    /// no logical row remain only in their preserved queue evidence.
-    fn record_startup_receipts(
+    /// Under one durable commit, records the exact native receipt for every
+    /// logical request in a fresh wake's fixed startup prefix and removes
+    /// only that prefix from the metaflow queue.
+    fn settle_wake_startup_receipts(
         &self,
-        queue: &[QueueEntry],
-        receipt: &signal_flow::NativeReceipt,
-    ) -> Result<(), StoreError>;
-    /// Records the correlated first-prompt hook for the one input a
-    /// Simplified startup bound before its native row was observable.
-    fn record_simplified_startup_receipt(
-        &self,
+        address: &Address,
         flow_id: &str,
-        receipt: &signal_flow::NativeReceipt,
+        startup: &[QueueEntry],
+        receipt: Option<&signal_flow::NativeReceipt>,
     ) -> Result<bool, StoreError>;
     fn read_logical_delivery_snapshots(
         &self,
@@ -709,53 +704,99 @@ impl RecordsLogicalDeliveries for FlowStore {
             logical_delivery_id_vector,
         })
     }
-    fn record_simplified_startup_receipt(
+    fn settle_wake_startup_receipts(
         &self,
+        address: &Address,
         flow_id: &str,
-        receipt: &signal_flow::NativeReceipt,
+        startup: &[QueueEntry],
+        receipt: Option<&signal_flow::NativeReceipt>,
     ) -> Result<bool, StoreError> {
-        let binding = self.engine.match_records(QueryPlan::key(
-            self.logical_deliveries.simplified_replies,
-            RecordKey::new(flow_id.to_owned()),
-        ))?;
-        let Some(binding) = binding.records().first() else {
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(mut stored) = self.stored_metaflow(address)? else {
             return Ok(false);
         };
-        let Some(snapshot) = self.logical_delivery_snapshot(&binding.input_delivery_id)? else {
-            return Ok(false);
-        };
-        if matches!(snapshot.delivery_state, DeliveryState::Delivered(_)) {
-            return Ok(true);
-        }
-        if !matches!(snapshot.delivery_state, DeliveryState::Queued) {
+        if stored.metaflow.state != flow_ethos::State::Awake(flow_id.to_owned())
+            || !stored.metaflow.queue.starts_with(startup)
+        {
             return Ok(false);
         }
-        self.commit_logical_transition(
-            &binding.input_delivery_id,
-            DeliveryState::Delivered(receipt.clone()),
-            self.engine.begin_atomic_commit(),
-        )?;
-        Ok(true)
-    }
 
-    fn record_startup_receipts(
-        &self,
-        queue: &[QueueEntry],
-        receipt: &signal_flow::NativeReceipt,
-    ) -> Result<(), StoreError> {
-        for entry in queue {
-            if self
-                .logical_delivery_snapshot(&entry.logical_delivery_id)?
-                .is_some()
-            {
-                self.commit_logical_transition(
-                    &entry.logical_delivery_id,
-                    DeliveryState::Delivered(receipt.clone()),
-                    self.engine.begin_atomic_commit(),
-                )?;
+        let allocation = self.allocate_logical_cursor()?;
+        let mut next_cursor = allocation.cursor;
+        let mut changed = false;
+        let mut commit = self.engine.begin_atomic_commit();
+        let mut seen = std::collections::HashSet::new();
+        for entry in startup {
+            let records = self.engine.match_records(QueryPlan::key(
+                self.logical_deliveries.current,
+                RecordKey::new(entry.logical_delivery_id.clone()),
+            ))?;
+            let Some(current) = records.records().first() else {
+                // A legacy queue entry has no logical lifecycle row. Its
+                // exact prefix position is still consumed by this receipt.
+                continue;
+            };
+            if !seen.insert(entry.logical_delivery_id.clone()) {
+                return Err(StoreError::StateInvariant);
             }
+            if records.records().len() != 1 {
+                return Err(StoreError::StateInvariant);
+            }
+            if current.snapshot.address != *address {
+                return Err(StoreError::StateInvariant);
+            }
+            let delivered =
+                DeliveryState::Delivered(receipt.cloned().ok_or(StoreError::StateInvariant)?);
+            if current.snapshot.delivery_state == delivered {
+                // Reconcile the historical partial shape: the receipt was
+                // durable but the exact prefix had not yet been removed.
+                continue;
+            }
+            if matches!(current.snapshot.delivery_state, DeliveryState::Delivered(_)) {
+                return Err(StoreError::StateInvariant);
+            }
+            if !matches!(
+                current.snapshot.delivery_state,
+                DeliveryState::Queued | DeliveryState::Retryable(_)
+            ) {
+                return Err(StoreError::StateInvariant);
+            }
+            let mut snapshot = current.snapshot.clone();
+            snapshot.delivery_cursor = next_cursor;
+            snapshot.delivery_state = delivered;
+            next_cursor = next_cursor
+                .checked_add(1)
+                .ok_or(StoreError::StateInvariant)?;
+            commit = commit
+                .mutate(
+                    self.logical_deliveries.current,
+                    CurrentLogicalDelivery {
+                        snapshot: snapshot.clone(),
+                    },
+                )
+                .assert(
+                    self.logical_deliveries.events,
+                    LogicalDeliveryEvent { snapshot },
+                );
+            changed = true;
         }
-        Ok(())
+        if changed {
+            let counter = LogicalDeliveryCounter { next_cursor };
+            commit = if allocation.existing {
+                commit.mutate(self.logical_deliveries.counter, counter)
+            } else {
+                commit.assert(self.logical_deliveries.counter, counter)
+            };
+        }
+        stored.metaflow.queue.drain(..startup.len());
+        commit = commit.mutate(self.metaflows, stored);
+        self.engine.commit_atomic(commit)?;
+        self.launch_changes.announce();
+        Ok(true)
     }
     fn bind_simplified_reply(&self, binding: SimplifiedReplyBinding) -> Result<(), StoreError> {
         let _guard = self

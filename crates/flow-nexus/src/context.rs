@@ -159,6 +159,10 @@ impl ComposesFlowContext for CurriculumComposer {
             input.context_request().startup_selection(),
         )) {
             Ok(CurriculumOutcome::StartupComposed(composition)) => Ok(composition),
+            Ok(CurriculumOutcome::ModuleMissing(module_identity)) => {
+                eprintln!("flow-nexus: Curriculum found no module: {module_identity}");
+                Err(ContextRefusal::ModuleMissing(Some(module_identity)))
+            }
             // Curriculum names a remembered flow whose records it could not
             // read "record missing".
             Ok(CurriculumOutcome::Rejected(reason)) if reason.starts_with("record missing") => {
@@ -265,15 +269,22 @@ impl VerifiesContext for VerifiedContext {
         };
         let system_rows = placed(StartupPlacement::System);
         let user_rows = placed(StartupPlacement::User);
-        let present = |identities: &[String], placed: &[ContextProvenance]| {
-            identities
-                .iter()
-                .all(|identity| placed.iter().any(|row| &row.module_identity == identity))
-        };
-        if !present(&request.system_modules, &system_rows)
-            || !present(&request.user_modules, &user_rows)
-        {
-            return Err(ContextRefusal::ModuleMissing);
+        let missing = request
+            .system_modules
+            .iter()
+            .zip(std::iter::repeat(&system_rows))
+            .chain(
+                request
+                    .user_modules
+                    .iter()
+                    .zip(std::iter::repeat(&user_rows)),
+            )
+            .find_map(|(identity, placed)| {
+                (!placed.iter().any(|row| &row.module_identity == identity))
+                    .then(|| identity.clone())
+            });
+        if let Some(identity) = missing {
+            return Err(ContextRefusal::ModuleMissing(Some(identity)));
         }
         let ordered = |placed: &[ContextProvenance]| {
             placed
@@ -372,7 +383,7 @@ impl ComposesFlowContext for FixtureComposer {
                 let body = self
                     .bodies
                     .get(identity)
-                    .ok_or(ContextRefusal::ComposerRejected)?;
+                    .ok_or_else(|| ContextRefusal::ModuleMissing(Some(identity.clone())))?;
                 rows.push(ContextProvenance {
                     module_identity: identity.clone(),
                     repository_name: "fixture-context".into(),
@@ -544,7 +555,7 @@ mod tests {
             .retain(|row| row.module_identity != "knowledge-flow");
         assert_eq!(
             VerifiedContext::verified(&request, composition),
-            Err(ContextRefusal::ModuleMissing)
+            Err(ContextRefusal::ModuleMissing(Some("knowledge-flow".into())))
         );
     }
 
@@ -554,7 +565,7 @@ mod tests {
         request.user_modules.push("unknown-module".into());
         assert_eq!(
             fixture().compose_flow_context(&request),
-            Err(ContextRefusal::ComposerRejected)
+            Err(ContextRefusal::ModuleMissing(Some("unknown-module".into())))
         );
     }
 

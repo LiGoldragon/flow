@@ -8,6 +8,7 @@ use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::RunningNexus;
 use crate::composition::{ComposesLaunch, FreshSeat, RendersQueuedWork};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+use crate::generated::operation::Failed_Data;
 use crate::generated::operation::{Operation, Outcome};
 use crate::generated::starter::ProfilesFreshSeat;
 use crate::herdr::launch::ChecksComposedLaunch;
@@ -24,8 +25,8 @@ use crate::store::{
     RegistersFlowIdentity, ReservesLaunchAttempt,
 };
 use crate::waking::{
-    AtStop, FreshContext, HoldsWakingMetaflows, KeptAtStop, PerformsWakeAndDrain,
-    SleepsAndWakesSeats, WakePlan, WakePolicy,
+    AnswersWakeRefusal, AtStop, FreshContext, HoldsWakingMetaflows, KeptAtStop,
+    PerformsWakeAndDrain, SleepsAndWakesSeats, WakePlan, WakePolicy, WakeRefusal,
 };
 use flow_ethos::State;
 use signal_flow::{
@@ -34,6 +35,16 @@ use signal_flow::{
     NativeLaunchIntent, Origin, PowerLevel, QueueEntry, Request, SentBy,
 };
 use std::fs;
+
+#[test]
+fn a_wake_refusal_notice_keeps_the_missing_module_identity() {
+    let refusal = signal_flow::ContextRefusal::ModuleMissing(Some("vision:absent".into()));
+    assert_eq!(
+        WakeRefusal::StartRejected(signal_flow::StartRejection::ContextRefused(refusal.clone()))
+            .failure(),
+        Failed_Data::ContextRefused(refusal)
+    );
+}
 
 pub(super) fn address(layer: Layer) -> Address {
     Address {
@@ -3669,6 +3680,78 @@ fn a_refused_wake_keeps_its_queue_and_each_delivery_names_why() {
     assert!(
         woken.queue.is_empty(),
         "the first prompt takes the same queue"
+    );
+}
+
+#[test]
+fn a_missing_module_wake_keeps_its_identity_in_the_caller_outcome_and_queue_state() {
+    let fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    fixture.claims_flow_ids();
+    let at = address(Layer::Secondary);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        vec![],
+    ));
+    configure_secondary_model(&fixture, "claude-fixture");
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
+            meta_signal_flow::ConfigureMetaflow {
+                root_option: None,
+                address: at.clone(),
+                system_modules: vec!["vision:absent".into()],
+                user_modules: vec![],
+                flow_kind: signal_flow::FlowKind::Regular,
+                tool_set: signal_flow::ToolSet::Default,
+                continuity: meta_signal_flow::Continuity::Maintained,
+                purpose: String::new(),
+                records: vec![],
+            },
+        ]))
+        .expect("the missing module is a valid declaration");
+    let sender = Address {
+        aspect: Aspect::Psyche,
+        topic: "core".into(),
+        layer: Layer::Secondary,
+    };
+    let signal_flow::PrivateSendResponse::SendAccepted(accepted) = fixture
+        .nexus
+        .store
+        .accept_logical_delivery(
+            &at,
+            SentBy::Sender(sender.clone()),
+            Delivery::Queue,
+            Message::Soft(Request::Order("A".into())),
+            None,
+        )
+        .unwrap()
+    else {
+        panic!("the request is accepted")
+    };
+    let refusal = signal_flow::ContextRefusal::ModuleMissing(Some("vision:absent".into()));
+
+    assert_eq!(
+        fixture.nexus.perform(Operation::Wake(at)),
+        Outcome::Failed(Failed_Data::ContextRefused(refusal.clone()))
+    );
+    let observed = fixture
+        .nexus
+        .store
+        .read_logical_delivery_snapshots(&sender, None)
+        .unwrap();
+    assert_eq!(
+        observed.delivery_snapshot_vector[0].logical_delivery_id,
+        accepted.logical_delivery_id
+    );
+    assert_eq!(
+        observed.delivery_snapshot_vector[0].delivery_state,
+        signal_flow::DeliveryState::Retryable(signal_flow::RetryCause::WakeRefused(
+            signal_flow::StartRejection::ContextRefused(refusal)
+        ))
     );
 }
 

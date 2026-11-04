@@ -2464,11 +2464,159 @@ impl EngineRecord for StoredLaunchOutcome {
 
 impl MemoryDefinition for StoredLaunchOutcome {
     fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(9)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-launch-outcome-v9")
+    }
+}
+
+/// The v8 outcome before a missing-module context refusal carried its
+/// identity. Its Start and Replace rejection nesting is frozen here rather
+/// than borrowed from the current Signal.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchOutcomeV8 {
+    launch_request_id: String,
+    launch_outcome: LaunchOutcomeV8,
+}
+
+impl EngineRecord for StoredLaunchOutcomeV8 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.launch_request_id.clone())
+    }
+}
+
+impl MemoryDefinition for StoredLaunchOutcomeV8 {
+    fn memory_version() -> MemoryVersion {
         MemoryVersion::new(8)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-launch-outcome-v8")
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum ContextRefusalV38 {
+    ComposerUnavailable,
+    ComposerRejected,
+    MetaflowMismatch,
+    PayloadMismatch,
+    ModuleMissing,
+    RecordMissing,
+    SystemTooLarge,
+    ModuleTooLarge,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum StartRejectionV38 {
+    CompositionRefused(signal_flow::CompositionRefusal),
+    LaunchRequestConflict,
+    LaunchPersistenceRefused,
+    NativeLaunchRefused(signal_flow::NativeLaunchRefusal),
+    BindingRefused(signal_flow::BindingRefusal),
+    RegistrationRefused(signal_flow::RegistrationRefusal),
+    IntentPersistenceRefused,
+    OriginUnavailable,
+    AddressAwake,
+    ContextRefused(ContextRefusalV38),
+    LeaveOutRefused(signal_flow::LeaveOutRefusal),
+    HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
+    ModelRefused(signal_flow::ModelRefusal),
+    NoSecondary,
+    Undeclared,
+    TopicRefused(String),
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum ReplaceRejectionV38 {
+    PredecessorAbsent,
+    UnknownPredecessor,
+    PredecessorStopped,
+    LaunchRefused(StartRejectionV38),
+    ReapRefused(signal_flow::StopRejection),
+    Locked,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum LaunchOutcomeV8 {
+    Started(LaunchedRecord),
+    Replaced(ReplacedRecord),
+    StartRejected(StartRejectionV38),
+    ReplaceRejected(ReplaceRejectionV38),
+}
+
+impl From<ContextRefusalV38> for signal_flow::ContextRefusal {
+    fn from(refusal: ContextRefusalV38) -> Self {
+        match refusal {
+            ContextRefusalV38::ComposerUnavailable => Self::ComposerUnavailable,
+            ContextRefusalV38::ComposerRejected => Self::ComposerRejected,
+            ContextRefusalV38::MetaflowMismatch => Self::MetaflowMismatch,
+            ContextRefusalV38::PayloadMismatch => Self::PayloadMismatch,
+            ContextRefusalV38::ModuleMissing => Self::ModuleMissing(None),
+            ContextRefusalV38::RecordMissing => Self::RecordMissing,
+            ContextRefusalV38::SystemTooLarge => Self::SystemTooLarge,
+            ContextRefusalV38::ModuleTooLarge => Self::ModuleTooLarge,
+        }
+    }
+}
+
+impl From<StartRejectionV38> for StartRejection {
+    fn from(rejection: StartRejectionV38) -> Self {
+        match rejection {
+            StartRejectionV38::CompositionRefused(value) => Self::CompositionRefused(value),
+            StartRejectionV38::LaunchRequestConflict => Self::LaunchRequestConflict,
+            StartRejectionV38::LaunchPersistenceRefused => Self::LaunchPersistenceRefused,
+            StartRejectionV38::NativeLaunchRefused(value) => Self::NativeLaunchRefused(value),
+            StartRejectionV38::BindingRefused(value) => Self::BindingRefused(value),
+            StartRejectionV38::RegistrationRefused(value) => Self::RegistrationRefused(value),
+            StartRejectionV38::IntentPersistenceRefused => Self::IntentPersistenceRefused,
+            StartRejectionV38::OriginUnavailable => Self::OriginUnavailable,
+            StartRejectionV38::AddressAwake => Self::AddressAwake,
+            StartRejectionV38::ContextRefused(value) => Self::ContextRefused(value.into()),
+            StartRejectionV38::LeaveOutRefused(value) => Self::LeaveOutRefused(value),
+            StartRejectionV38::HarnessSpawnRefused(value) => Self::HarnessSpawnRefused(value),
+            StartRejectionV38::ModelRefused(value) => Self::ModelRefused(value),
+            StartRejectionV38::NoSecondary => Self::NoSecondary,
+            StartRejectionV38::Undeclared => Self::Undeclared,
+            StartRejectionV38::TopicRefused(value) => Self::TopicRefused(value),
+        }
+    }
+}
+
+impl From<ReplaceRejectionV38> for ReplaceRejection {
+    fn from(rejection: ReplaceRejectionV38) -> Self {
+        match rejection {
+            ReplaceRejectionV38::PredecessorAbsent => Self::PredecessorAbsent,
+            ReplaceRejectionV38::UnknownPredecessor => Self::UnknownPredecessor,
+            ReplaceRejectionV38::PredecessorStopped => Self::PredecessorStopped,
+            ReplaceRejectionV38::LaunchRefused(value) => Self::LaunchRefused(value.into()),
+            ReplaceRejectionV38::ReapRefused(value) => Self::ReapRefused(value),
+            ReplaceRejectionV38::Locked => Self::Locked,
+        }
+    }
+}
+
+impl From<LaunchOutcomeV8> for LaunchOutcome {
+    fn from(outcome: LaunchOutcomeV8) -> Self {
+        match outcome {
+            LaunchOutcomeV8::Started(value) => Self::Started(value),
+            LaunchOutcomeV8::Replaced(value) => Self::Replaced(value),
+            LaunchOutcomeV8::StartRejected(value) => Self::StartRejected(value.into()),
+            LaunchOutcomeV8::ReplaceRejected(value) => Self::ReplaceRejected(value.into()),
+        }
+    }
+}
+
+impl UpgradeFrom<StoredLaunchOutcomeV8> for StoredLaunchOutcome {
+    type Refusal = EndedAddressOutcome;
+
+    fn upgrade_from(previous: StoredLaunchOutcomeV8) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            launch_request_id: previous.launch_request_id,
+            launch_outcome: previous.launch_outcome.into(),
+        })
     }
 }
 
@@ -2518,7 +2666,7 @@ enum StartRejectionV32 {
     IntentPersistenceRefused,
     OriginUnavailable,
     AddressAwake,
-    ContextRefused(signal_flow::ContextRefusal),
+    ContextRefused(ContextRefusalV38),
     LeaveOutRefused(signal_flow::LeaveOutRefusal),
     HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
     ModelRefused(signal_flow::ModelRefusal),
@@ -2553,7 +2701,7 @@ impl From<StartRejectionV32> for StartRejection {
             StartRejectionV32::IntentPersistenceRefused => Self::IntentPersistenceRefused,
             StartRejectionV32::OriginUnavailable => Self::OriginUnavailable,
             StartRejectionV32::AddressAwake => Self::AddressAwake,
-            StartRejectionV32::ContextRefused(refusal) => Self::ContextRefused(refusal),
+            StartRejectionV32::ContextRefused(refusal) => Self::ContextRefused(refusal.into()),
             StartRejectionV32::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
             StartRejectionV32::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
             StartRejectionV32::ModelRefused(refusal) => Self::ModelRefused(refusal),
@@ -2685,7 +2833,7 @@ impl From<ContextRefusalV30> for signal_flow::ContextRefusal {
             ContextRefusalV30::ComposerRejected => Self::ComposerRejected,
             ContextRefusalV30::MetaflowMismatch => Self::MetaflowMismatch,
             ContextRefusalV30::PayloadMismatch => Self::PayloadMismatch,
-            ContextRefusalV30::ModuleMissing => Self::ModuleMissing,
+            ContextRefusalV30::ModuleMissing => Self::ModuleMissing(None),
             ContextRefusalV30::SystemTooLarge => Self::SystemTooLarge,
             ContextRefusalV30::ModuleTooLarge => Self::ModuleTooLarge,
         }
@@ -3742,12 +3890,20 @@ impl UpgradesFlowFamilies for Engine {
         let admission = |failure: &sema_engine::StorageFailure| {
             failure.phase() == sema_engine::StoragePhase::Admission
         };
+        let from_v7 = descriptor.clone();
         let from_v6 = descriptor.clone();
         let from_v5 = descriptor.clone();
         let from_v4 = descriptor.clone();
         let from_v3 = descriptor.clone();
         let from_v2 = descriptor.clone();
-        match self.upgrade_table::<StoredLaunchOutcomeV7, StoredLaunchOutcome>(descriptor) {
+        match self.upgrade_table::<StoredLaunchOutcomeV8, StoredLaunchOutcome>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
+            UpgradeOutcome::Failed(failure) if admission(&failure) => {}
+            UpgradeOutcome::Failed(failure) => return Err(failed(failure)),
+        }
+        match self.upgrade_table::<StoredLaunchOutcomeV7, StoredLaunchOutcome>(from_v7) {
             UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
             UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
@@ -4608,7 +4764,8 @@ impl OpensFlowStore for FlowStore {
         .with_predecessor::<StoredLaunchOutcomeV4>()
         .with_predecessor::<StoredLaunchOutcomeV5>()
         .with_predecessor::<StoredLaunchOutcomeV6>()
-        .with_predecessor::<StoredLaunchOutcomeV7>();
+        .with_predecessor::<StoredLaunchOutcomeV7>()
+        .with_predecessor::<StoredLaunchOutcomeV8>();
         let replacements_descriptor = TableDescriptor::<Replacement>::new(
             FLOW_REPLACEMENT_TABLE_NAME,
             FamilyName::new("flow-nexus-replacement"),
@@ -4878,7 +5035,8 @@ impl OpensFlowStore for FlowStore {
             .with_predecessor::<StoredLaunchOutcomeV4>()
             .with_predecessor::<StoredLaunchOutcomeV5>()
             .with_predecessor::<StoredLaunchOutcomeV6>()
-            .with_predecessor::<StoredLaunchOutcomeV7>(),
+            .with_predecessor::<StoredLaunchOutcomeV7>()
+            .with_predecessor::<StoredLaunchOutcomeV8>(),
         )?;
         let replacements = engine.register_table(TableDescriptor::new(
             FLOW_REPLACEMENT_TABLE_NAME,
@@ -7808,6 +7966,10 @@ pub(crate) trait ReadsFlowMemory {
                     "flow-nexus-launch-outcome",
                     StoredLaunchOutcomeV7::schema_hash(),
                 ),
+                (
+                    "flow-nexus-launch-outcome",
+                    StoredLaunchOutcomeV8::schema_hash(),
+                ),
             ],
             "flow_nexus_launch_attempts" => &[
                 (
@@ -9863,6 +10025,10 @@ mod tests {
     use super::{
         ContextRefusalV30, LaunchOutcomeV6, ReplaceRejectionV30, StartRejectionV30,
         StoredLaunchOutcomeV6,
+    };
+    use super::{
+        ContextRefusalV38, LaunchOutcomeV8, ReplaceRejectionV38, StartRejectionV38,
+        StoredLaunchOutcomeV8,
     };
     use super::{FlowRecordV5, LaunchedRecordV2, OriginClueBeforeOrigin, ReplacedRecordV2};
     use super::{LaunchOutcomeV3, ReplaceRejectionV17, StartRejectionV17, StoredLaunchOutcomeV3};
@@ -12840,7 +13006,7 @@ mod tests {
             (
                 "v5-context",
                 LaunchOutcome::StartRejected(StartRejection::ContextRefused(
-                    signal_flow::ContextRefusal::ModuleMissing,
+                    signal_flow::ContextRefusal::ModuleMissing(None),
                 )),
             ),
             (
@@ -12900,6 +13066,20 @@ mod tests {
                 launch_request_id: "v7-locked".into(),
                 launch_outcome: LaunchOutcomeV7::ReplaceRejected(ReplaceRejectionV32::Locked),
             },
+            StoredLaunchOutcomeV7 {
+                launch_request_id: "v7-missing".into(),
+                launch_outcome: LaunchOutcomeV7::StartRejected(StartRejectionV32::ContextRefused(
+                    ContextRefusalV38::ModuleMissing,
+                )),
+            },
+            StoredLaunchOutcomeV7 {
+                launch_request_id: "v7-replace-missing".into(),
+                launch_outcome: LaunchOutcomeV7::ReplaceRejected(
+                    ReplaceRejectionV32::LaunchRefused(StartRejectionV32::ContextRefused(
+                        ContextRefusalV38::ModuleMissing,
+                    )),
+                ),
+            },
         ];
         {
             let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
@@ -12940,6 +13120,20 @@ mod tests {
                 "v7-locked",
                 LaunchOutcome::ReplaceRejected(ReplaceRejection::Locked),
             ),
+            (
+                "v7-missing",
+                LaunchOutcome::StartRejected(StartRejection::ContextRefused(
+                    signal_flow::ContextRefusal::ModuleMissing(None),
+                )),
+            ),
+            (
+                "v7-replace-missing",
+                LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                    StartRejection::ContextRefused(signal_flow::ContextRefusal::ModuleMissing(
+                        None,
+                    )),
+                )),
+            ),
         ] {
             assert_eq!(
                 store
@@ -12949,6 +13143,88 @@ mod tests {
                 "the v7 outcome for {request} survives the family upgrade"
             );
         }
+        drop(store);
+        assert_eq!(
+            fixture.store().launch_outcome("v7-missing").unwrap(),
+            Some(LaunchOutcome::StartRejected(
+                StartRejection::ContextRefused(signal_flow::ContextRefusal::ModuleMissing(None))
+            ))
+        );
+    }
+
+    #[test]
+    fn v8_missing_module_identity_upgrades_to_historical_unknown_and_reopens() {
+        let fixture = StoreFixture::new();
+        let rows = [
+            StoredLaunchOutcomeV8 {
+                launch_request_id: "v8-start".into(),
+                launch_outcome: LaunchOutcomeV8::StartRejected(StartRejectionV38::ContextRefused(
+                    ContextRefusalV38::ModuleMissing,
+                )),
+            },
+            StoredLaunchOutcomeV8 {
+                launch_request_id: "v8-replace".into(),
+                launch_outcome: LaunchOutcomeV8::ReplaceRejected(
+                    ReplaceRejectionV38::LaunchRefused(StartRejectionV38::ContextRefused(
+                        ContextRefusalV38::ModuleMissing,
+                    )),
+                ),
+            },
+        ];
+        {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("outcome store opens");
+            let outcomes = engine
+                .register_table(TableDescriptor::new(
+                    TableName::new("flow_nexus_launch_outcomes"),
+                    FamilyName::new("flow-nexus-launch-outcome"),
+                    SchemaHash::for_label("flow-nexus-launch-outcome-v8"),
+                ))
+                .expect("v8 outcome family registers");
+            for row in rows {
+                engine
+                    .assert(Assertion::new(outcomes, row))
+                    .expect("v8 outcome persists");
+            }
+        }
+        let expected = [
+            (
+                "v8-start",
+                LaunchOutcome::StartRejected(StartRejection::ContextRefused(
+                    signal_flow::ContextRefusal::ModuleMissing(None),
+                )),
+            ),
+            (
+                "v8-replace",
+                LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                    StartRejection::ContextRefused(signal_flow::ContextRefusal::ModuleMissing(
+                        None,
+                    )),
+                )),
+            ),
+        ];
+        let store = fixture.store();
+        for (request, outcome) in &expected {
+            assert_eq!(
+                store.launch_outcome(request).unwrap(),
+                Some(outcome.clone())
+            );
+        }
+        let current = LaunchOutcome::StartRejected(StartRejection::ContextRefused(
+            signal_flow::ContextRefusal::ModuleMissing(Some("vision:absent".into())),
+        ));
+        store
+            .record_launch_outcome("v9-current", current.clone())
+            .expect("the current identity-bearing outcome persists");
+        drop(store);
+        let reopened = fixture.store();
+        for (request, outcome) in expected {
+            assert_eq!(reopened.launch_outcome(request).unwrap(), Some(outcome));
+        }
+        assert_eq!(
+            reopened.launch_outcome("v9-current").unwrap(),
+            Some(current)
+        );
     }
 
     /// A 0.35.22 to 0.39 store's outcomes, each rejection in signal-flow

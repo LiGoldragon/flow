@@ -1,3 +1,20 @@
+# Flow 0.47.0
+
+Pins meta-signal-flow 51.0.0 (a39d9c8), signal-flow 39.0.0
+(61bbf5d), and Curriculum d8aa45d. A missing-module context refusal now
+carries `Some(ModuleIdentity)` when the current Curriculum or verification
+path knows which module is absent. Historical refusals carry `None`; no
+identity is inferred from their text.
+
+On first open, `flow-nexus-launch-outcome` upgrades from v8 to v9. Its v8
+Start and Replace rejection shapes are frozen, and every historical unit
+`ModuleMissing` becomes `ModuleMissing.None`, including a Start rejection
+nested in `ReplaceRejected.LaunchRefused`. The v7 predecessor is likewise
+frozen before conversion, and the older predecessor chain continues through
+its existing upgrades. Take an immutable Memory snapshot before the first
+0.47.0 open. Earlier Flow versions do not recognize the v9 family; rollback
+restores the snapshot before starting the earlier binary.
+
 # Flow 0.46.0
 
 Pins meta-signal-flow 50.0.0 (1214f7a) and signal-flow 38.0.0

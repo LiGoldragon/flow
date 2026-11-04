@@ -9,7 +9,7 @@
     # The Curriculum whose schema Flow pins (crates/flow-nexus/ethos/
     # curriculum.ethos): the capsule runs its own Curriculum Nexus from it.
     curriculum = {
-      url = "github:LiGoldragon/Curriculum/91acf293a0d0cce1793b458d5377fe78f841e0c1";
+      url = "github:LiGoldragon/Curriculum/d8aa45d";
       flake = false;
     };
   };
@@ -49,7 +49,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.46.0";
+            version = "0.47.0";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {

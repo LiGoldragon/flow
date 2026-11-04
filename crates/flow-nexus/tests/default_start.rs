@@ -6,8 +6,10 @@ use flow_nexus::CarriesSignalFrames;
 use flow_nexus::store::ConfiguresOnlyStore;
 use protos::{Compactable, Protosizable};
 use std::{
-    io::{Read, Write},
-    os::unix::net::UnixStream,
+    fs,
+    io::{BufRead, Read, Write},
+    os::unix::fs::PermissionsExt,
+    os::unix::net::{UnixListener, UnixStream},
     path::Path,
     process::{Child, Command, Stdio},
     time::Duration,
@@ -45,6 +47,14 @@ fn spawn(home: &Path, runtime: &Path, start: &Start, configure_only: bool) -> St
         .env_clear()
         .env("HOME", home)
         .env("XDG_RUNTIME_DIR", runtime)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                home.join("bin").display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
         .stderr(Stdio::piped());
     if configure_only {
         command.arg("--configure-only");
@@ -106,6 +116,7 @@ fn endpoint(name: &str, home: &Path) -> meta_signal_flow::CodexEndpoint {
 }
 
 fn configuration(_start: &Start, home: &Path) -> meta_signal_flow::ConfigureNexus {
+    fs::create_dir_all(home.join("source/flows")).expect("configured source root");
     meta_signal_flow::ConfigureNexus {
         source_root: home.join("source").to_string_lossy().into_owned(),
         stable_codex: endpoint("stable", home),
@@ -121,9 +132,143 @@ fn configuration(_start: &Start, home: &Path) -> meta_signal_flow::ConfigureNexu
 
         message_nexus_binary_option: Some("/opt/message-nexus".into()),
 
-        curriculum_nexus_path: "/fixture/curriculum.sock".into(),
+        curriculum_nexus_path: home.join("curriculum.sock").to_string_lossy().into_owned(),
         lease: 60,
     }
+}
+
+fn install_script(path: &Path, body: &str) {
+    fs::create_dir_all(path.parent().expect("script directory")).expect("script directory");
+    fs::write(path, body).expect("fixture script");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("fixture executable");
+}
+
+fn install_launch_fakes(home: &Path, runtime: &Path, starts: usize) -> std::thread::JoinHandle<()> {
+    let bin = home.join("bin");
+    let herdr_socket = runtime.join("fake-herdr.sock");
+    let calls = home.join("herdr-calls");
+    let herdr = format!(
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> '{calls}'
+case "$*" in
+  "session list --json") printf '%s\n' '{{"sessions":[{{"name":"test","socket_path":"{socket}"}}]}}' ;;
+  *"workspace create"*) printf '%s\n' '{{"result":{{"workspace":{{"workspace_id":"w7"}},"root_pane":{{"pane_id":"w7:p1","terminal_id":"term-native"}}}}}}' ;;
+  *"pane run"*) sh -c "$6" > "$HOME/marker" ;;
+  *"pane wait-output"*) marker=$(printf '%s\n' "$*" | sed 's/.*--match \([^ ]*\).*/\1/'); line=$(grep -Fx "$marker" "$HOME/marker") || exit 10; printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$line" ;;
+  *"agent start"*) prev=; for a in "$@"; do [ "$prev" = --session-id ] && printf '%s' "$a" > "$HOME/fake-session"; [ "$prev" = --name ] && printf '%s' "$a" > "$HOME/native-title"; prev=$a; done; session=$(cat "$HOME/fake-session"); title=$(cat "$HOME/native-title"); mkdir -p "$HOME/.claude/projects"; printf '{{"type":"custom-title","customTitle":"%s","sessionId":"%s"}}\n' "$title" "$session" > "$HOME/.claude/projects/$session.jsonl"; printf '%s\n' '{{"result":{{"agent":{{"name":"fixture"}}}}}}' ;;
+  *"agent wait"*) printf '%s\n' '{{"result":{{"status":"idle"}}}}' ;;
+  *"agent get"*) session=$(cat "$HOME/fake-session"); name="$5"; title=$(cat "$HOME/native-title"); printf '%s' "$name" > "$HOME/fake-agent"; printf '{{"result":{{"agent":{{"name":"%s","agent":"claude","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"herdr:claude","agent":"claude","kind":"id","value":"%s"}}}}}}}}\n' "$name" "$title" "$session" ;;
+  *" api snapshot"*) session=$(cat "$HOME/fake-session"); name=$(cat "$HOME/fake-agent"); printf '{{"id":"fake:snapshot","result":{{"snapshot":{{"agents":[{{"name":"%s","agent":"claude","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"agent_session":{{"source":"herdr:claude","agent":"claude","kind":"id","value":"%s"}}}}],"protocol":20,"version":"0.8.2"}},"type":"session_snapshot"}}}}\n' "$name" "$session" ;;
+  *"pane rename w7:p1 "*) printf '%s' "$*" | sed 's/.*pane rename w7:p1 //' > "$HOME/pane-label"; printf '%s\n' '{{"result":{{}}}}' ;;
+  *"pane report-metadata w7:p1 "*) printf '%s' "$*" | sed 's/.*--display-agent //' > "$HOME/pane-display"; printf '%s\n' '{{"result":{{}}}}' ;;
+  *"pane get w7:p1"*) label=$(cat "$HOME/pane-label"); display=$(cat "$HOME/pane-display"); printf '{{"result":{{"pane":{{"pane_id":"w7:p1","terminal_id":"term-native","label":"%s","display_agent":"%s"}}}}}}\n' "$label" "$display" ;;
+  *"workspace rename w7 "*) printf '%s' "$*" | sed 's/.*workspace rename w7 //' > "$HOME/workspace-label"; printf '%s\n' '{{"result":{{}}}}' ;;
+  *"workspace get w7"*) label=$(cat "$HOME/workspace-label"); printf '{{"result":{{"workspace":{{"workspace_id":"w7","label":"%s"}}}}}}\n' "$label" ;;
+  *) exit 8 ;;
+esac
+"#,
+        calls = calls.display(),
+        socket = herdr_socket.display(),
+    );
+    install_script(&bin.join("herdr"), &herdr);
+    install_script(
+        &bin.join("flow-id"),
+        r#"#!/bin/sh
+flows=; session=; prev=
+for a in "$@"; do [ "$prev" = --flows-root ] && flows=$a; [ "$prev" = --parent-session ] && session=$a; prev=$a; done
+identity=$(printf '%s' "$session" | tr -d '-')
+alias=$(printf '%s' "$identity" | cut -c1-6)
+mkdir -p "$flows/$alias"
+: > "$flows/.$alias.flow-id.lock"
+printf 'version=1\nharness=claude\nidentity=%s\nalias=%s\nuuid-version=uuid-v5\n' "$identity" "$alias" > "$flows/.$alias.flow-id"
+printf '%s\n' "$alias"
+"#,
+    );
+    let listener = UnixListener::bind(&herdr_socket).expect("fake Herdr socket");
+    let home = home.to_path_buf();
+    std::thread::spawn(move || {
+        for _ in 0..starts {
+            let (stream, _) = listener.accept().expect("Herdr prompt connection");
+            let mut line = String::new();
+            std::io::BufReader::new(&stream)
+                .read_line(&mut line)
+                .expect("Herdr prompt request");
+            let request: serde_json::Value = serde_json::from_str(&line).expect("prompt JSON");
+            let text = request["params"]["text"].as_str().expect("prompt text");
+            let session = fs::read_to_string(home.join("fake-session")).expect("session");
+            let transcript = home.join(format!(".claude/projects/{session}.jsonl"));
+            let user = serde_json::json!({"type":"user","sessionId":session,"message":{"role":"user","content":text}});
+            let answer = serde_json::json!({"type":"assistant","sessionId":session,"uuid":format!("turn-{session}"),"effort":"medium","perTurnEffort":"medium","message":{"model":"claude-test","content":[{"type":"text","text":"ready"}]}});
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(transcript)
+                .expect("transcript");
+            writeln!(file, "{user}\n{answer}").expect("receipt records");
+            let mut stream = stream;
+            stream
+                .write_all(b"{\"id\":\"flow:prompt\",\"result\":{\"type\":\"agent_prompted\"}}\n")
+                .expect("Herdr prompt reply");
+        }
+    })
+}
+
+fn serve_curriculum(socket: &Path, starts: usize) -> std::thread::JoinHandle<()> {
+    use sha2::{Digest, Sha256};
+    fs::create_dir_all(socket.parent().expect("Curriculum directory"))
+        .expect("Curriculum directory");
+    let listener = UnixListener::bind(socket).expect("fake Curriculum socket");
+    std::thread::spawn(move || {
+        for _ in 0..starts {
+            let (mut stream, _) = listener.accept().expect("Curriculum connection");
+            let mut length = [0; 4];
+            stream
+                .read_exact(&mut length)
+                .expect("Curriculum query length");
+            let mut frame = vec![0; u32::from_be_bytes(length) as usize];
+            stream.read_exact(&mut frame).expect("Curriculum query");
+            let query =
+                rkyv::from_bytes::<flow_nexus::CurriculumQuery, rkyv::rancor::Error>(&frame)
+                    .expect("Curriculum query decodes");
+            let flow_nexus::CurriculumQuery::ComposeStartup(selection) = query else {
+                panic!("only ComposeStartup is expected")
+            };
+            assert_eq!(selection.system_modules, ["spirit-core"]);
+            assert!(selection.user_modules.is_empty());
+            let body = "Spirit body.";
+            let system_text = format!(
+                "These are your skills, given here; do not reload them.\n\nModule IDs: spirit-core\n\n<!-- module: spirit-core -->\n{body}\n<!-- end-module: spirit-core -->\n"
+            );
+            let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
+            let empty_hash = digest("");
+            let outcome =
+                flow_nexus::CurriculumOutcome::StartupComposed(flow_nexus::StartupComposition {
+                    system_text: system_text.clone(),
+                    user_text: String::new(),
+                    records_text: String::new(),
+                    system_payload_sha256: digest(&system_text),
+                    user_payload_sha256: empty_hash.clone(),
+                    records_payload_sha256: empty_hash,
+                    context_provenance_vector: vec![flow_nexus::ContextProvenance {
+                        module_identity: "spirit-core".into(),
+                        repository_name: "fixture-context".into(),
+                        source_revision: "0".repeat(40),
+                        source_relative_path: "spirit-core.md".into(),
+                        source_sha256: digest(body),
+                        body_sha256: digest(body),
+                        rendered_sha256: digest(body),
+                        startup_placement:
+                            flow_nexus::generated::curriculum::StartupPlacement::System,
+                        integer: 0,
+                    }],
+                });
+            let answer =
+                rkyv::to_bytes::<rkyv::rancor::Error>(&outcome).expect("Curriculum answer encodes");
+            stream
+                .write_all(&(answer.len() as u32).to_be_bytes())
+                .and_then(|_| stream.write_all(&answer))
+                .expect("Curriculum answer");
+        }
+    })
 }
 
 fn configure_fresh(home: &Path, runtime: &Path, start: &Start) {
@@ -169,14 +314,14 @@ fn meta_call(
         .expect("meta response decodes")
 }
 
-fn launch_profile() -> signal_flow::LaunchProfile {
+fn launch_profile(request: &str, topic: &str) -> signal_flow::LaunchProfile {
     signal_flow::LaunchProfile {
-        launch_request_id: "not-configured-test".into(),
-        system_modules: vec!["spirit:core".into()],
+        launch_request_id: request.into(),
+        system_modules: vec!["spirit-core".into()],
         user_modules: vec![],
         address: signal_flow::Address {
             aspect: signal_flow::Aspect::Mind,
-            topic: "readiness".into(),
+            topic: topic.into(),
             layer: signal_flow::Layer::Secondary,
         },
         model_name: "gpt-test".into(),
@@ -191,12 +336,15 @@ fn launch_profile() -> signal_flow::LaunchProfile {
     }
 }
 
+#[cfg(not(feature = "executable-default-configuration"))]
 #[test]
 fn ordinary_empty_start_configures_and_becomes_ready_without_restart() {
     let home = tempfile::tempdir().expect("temporary home");
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
     let state = tempfile::tempdir().expect("dedicated state directory");
     let start = start(runtime.path(), state.path());
+    let prompt_server = install_launch_fakes(home.path(), runtime.path(), 2);
+    let curriculum = serve_curriculum(&home.path().join("curriculum.sock"), 2);
     let mut nexus = spawn(home.path(), runtime.path(), &start, false);
 
     assert_eq!(
@@ -209,13 +357,20 @@ fn ordinary_empty_start_configures_and_becomes_ready_without_restart() {
     );
     let mut ordinary = connect(Path::new(&start.ordinary_socket_path), &mut nexus);
     ordinary
-        .write_query(&signal_flow::Query::Start(launch_profile()))
+        .write_query(&signal_flow::Query::Start(launch_profile(
+            "not-configured-test",
+            "readinessBefore",
+        )))
         .expect("Start written while configuring");
     assert_eq!(
         ordinary.read_response().expect("Start answered"),
         signal_flow::Response::StartRejected(signal_flow::StartRejection::NotConfigured)
     );
     drop(ordinary);
+    assert!(
+        !home.path().join("herdr-calls").exists(),
+        "no launch or recovery effect runs before configuration"
+    );
 
     assert_eq!(
         meta_call(
@@ -235,6 +390,34 @@ fn ordinary_empty_start_configures_and_becomes_ready_without_restart() {
         ),
         meta_signal_flow::Response::Readiness(meta_signal_flow::NexusReadiness::Ready)
     );
+    assert_eq!(
+        meta_call(
+            &mut nexus,
+            &start.meta_socket_path,
+            &meta_signal_flow::Query::Configure(meta_signal_flow::ConfigurationChange::Models(
+                vec![meta_signal_flow::ConfigureModel {
+                    layer: signal_flow::Layer::Secondary,
+                    aspect: signal_flow::Aspect::Mind,
+                    native: "claude-test".into(),
+                }],
+            )),
+        ),
+        meta_signal_flow::Response::Configured(meta_signal_flow::ConfigureOutcome::Replaced)
+    );
+    let mut ordinary = connect(Path::new(&start.ordinary_socket_path), &mut nexus);
+    ordinary
+        .write_query(&signal_flow::Query::Start(launch_profile(
+            "configured-start",
+            "configuredStart",
+        )))
+        .expect("configured Start written");
+    let response = ordinary.read_response().expect("configured Start answered");
+    let calls = fs::read_to_string(home.path().join("herdr-calls")).unwrap_or_default();
+    assert!(
+        matches!(response, signal_flow::Response::Started(_)),
+        "{response:?}\nHerdr calls:\n{calls}"
+    );
+    drop(ordinary);
 
     assert!(terminate(&mut nexus).success());
     let mut reopened = spawn(home.path(), runtime.path(), &start, false);
@@ -246,6 +429,122 @@ fn ordinary_empty_start_configures_and_becomes_ready_without_restart() {
         ),
         meta_signal_flow::Response::Readiness(meta_signal_flow::NexusReadiness::Ready)
     );
+    let mut ordinary = connect(Path::new(&start.ordinary_socket_path), &mut reopened);
+    ordinary
+        .write_query(&signal_flow::Query::Start(launch_profile(
+            "reopened-start",
+            "reopenedStart",
+        )))
+        .expect("reopened Start written");
+    let response = ordinary.read_response().expect("reopened Start answered");
+    let calls = fs::read_to_string(home.path().join("herdr-calls")).unwrap_or_default();
+    assert!(
+        matches!(response, signal_flow::Response::Started(_)),
+        "{response:?}\nHerdr calls:\n{calls}"
+    );
+    drop(ordinary);
+    assert!(terminate(&mut reopened).success());
+    prompt_server.join().expect("fake Herdr served both Starts");
+    curriculum
+        .join()
+        .expect("fake Curriculum served both Starts");
+    let calls = fs::read_to_string(home.path().join("herdr-calls")).expect("Herdr call ledger");
+    let lines = calls.lines().collect::<Vec<_>>();
+    let launches = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| line.contains("workspace create").then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(launches.len(), 2, "Herdr calls:\n{calls}");
+    let expected = [
+        "workspace create",
+        "workspace rename",
+        "pane report-metadata",
+        "pane run",
+        "pane wait-output",
+        "agent start",
+        "agent wait",
+        "agent get named",
+        "api snapshot",
+        "agent wait",
+        "agent get pane",
+        "agent get pane",
+        "agent get pane",
+        "pane rename",
+        "pane report-metadata",
+        "pane get",
+        "workspace rename",
+        "workspace get",
+        "agent get pane",
+        "agent get pane",
+        "agent wait",
+        "session list",
+    ];
+    for (number, (start_at, request)) in launches
+        .iter()
+        .copied()
+        .zip(["configured-start", "reopened-start"])
+        .enumerate()
+    {
+        let end = launches.get(number + 1).copied().unwrap_or(lines.len());
+        let launch = &lines[start_at..end];
+        let operation = |line: &&str| {
+            if line.contains("workspace create") {
+                "workspace create"
+            } else if line.contains("workspace rename") {
+                "workspace rename"
+            } else if line.contains("workspace get") {
+                "workspace get"
+            } else if line.contains("pane report-metadata") {
+                "pane report-metadata"
+            } else if line.contains("pane run") {
+                "pane run"
+            } else if line.contains("pane wait-output") {
+                "pane wait-output"
+            } else if line.contains("agent start") {
+                "agent start"
+            } else if line.contains("agent wait") {
+                "agent wait"
+            } else if line.contains("agent get w7:p1") {
+                "agent get pane"
+            } else if line.contains("agent get") {
+                "agent get named"
+            } else if line.contains("api snapshot") {
+                "api snapshot"
+            } else if line.contains("pane rename") {
+                "pane rename"
+            } else if line.contains("pane get") {
+                "pane get"
+            } else if *line == "session list --json" {
+                "session list"
+            } else {
+                "unexpected"
+            }
+        };
+        assert_eq!(
+            launch.iter().map(operation).collect::<Vec<_>>(),
+            expected,
+            "Herdr calls:\n{calls}"
+        );
+        assert!(launch[0].contains(&format!("FLOW_LAUNCH_REQUEST_ID={request}")));
+        let start = launch
+            .iter()
+            .find(|line| line.contains("agent start"))
+            .expect("one agent start");
+        assert!(start.contains(" --model claude-test --effort medium"));
+        let session = start
+            .split(" --session-id ")
+            .nth(1)
+            .and_then(|tail| tail.split_whitespace().next())
+            .expect("selected session");
+        let alias = session.replace('-', "").chars().take(6).collect::<String>();
+        assert!(
+            launch
+                .iter()
+                .any(|line| line.contains(&format!("export FLOW_ID={alias}"))),
+            "selected session {session} binds its claimed FlowId; calls:\n{calls}"
+        );
+    }
 }
 
 #[test]

@@ -427,6 +427,8 @@
             "the_client_uses_only_the_explicit_socket";
           flow-configuration-only-over-meta = context.exactTest "flow-nexus"
             "configure_only_commits_before_normal_start_uses_the_declared_store";
+          flow-empty-configures-launches-and-reopens = context.exactTest "flow-nexus"
+            "ordinary_empty_start_configures_and_becomes_ready_without_restart";
           flow-configure-family-is-its-last-declaration = context.exactTest "flow-nexus"
             "tests::configuring::each_family_is_its_last_declaration";
           flow-launch-takes-replaced-defaults = context.exactTest "flow-nexus"

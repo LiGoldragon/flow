@@ -352,7 +352,11 @@ trait RunsConfigurationStartup {
                     |error| MetaResponse::Refused(meta_signal_flow::StoreRefusal::Store(error)),
                 ),
             MetaQuery::Configuration => match store.configuration_snapshot() {
-                Ok(Some(snapshot)) => MetaResponse::Configuration(snapshot),
+                // Counters exist only in the running store, so the complete
+                // public snapshot is unavailable until Ready.
+                Ok(Some(_)) => MetaResponse::Refused(meta_signal_flow::StoreRefusal::Store(
+                    StoreError::NotConfigured.to_string(),
+                )),
                 Ok(None) => MetaResponse::Unconfigured,
                 Err(error) => {
                     MetaResponse::Refused(meta_signal_flow::StoreRefusal::Store(error.to_string()))

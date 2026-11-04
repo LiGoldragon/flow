@@ -1,6 +1,6 @@
 ;; flow-capsule: the real-world test of a Flow package in a capsule of its own.
 ;;
-;; Usage: flow-capsule <flow-package> [--keep-going] [--log <path>]
+;; Usage: flow-capsule <flow-package> [--workspace-only] [--keep-going] [--log <path>]
 ;;        flow-capsule --takeover <old flow package> <new flow package> [--log <path>]
 ;;
 ;; --takeover runs the bie3.6 takeover and rollback instead of the
@@ -71,6 +71,9 @@
 (def curriculum-contexts (str state-root "/curriculum-context"))
 (def source-parent (str (fs/path (System/getProperty "java.io.tmpdir") "flow-testing")))
 (def source-root (str source-parent "/source"))
+(def workspace-a (str source-parent "/workspace-a"))
+(def workspace-b (str source-parent "/workspace-b"))
+(def invalid-workspace (str source-parent "/workspace-absent"))
 (def capsule-flows (str source-root "/flows"))
 ;; Flow's default source root's flows directory, where the running Flow keeps
 ;; its flows: the verdict checks that none of the capsule's flows is there.
@@ -292,6 +295,35 @@
   (let [node (first (heads-named "Some" (second (items (body (read-datom inspected))))))]
     (some-> node body items second str)))
 
+(defn bound-process-id
+  "The native process pid exposed by Inspect.Address for its current binding."
+  [inspected]
+  (let [[_ binding _ _] (items (body (read-datom inspected)))
+        [_ process-option] (items binding)]
+    (when (= "Some" (head process-option))
+      (some-> process-option body items first str parse-long))))
+
+(defn process-cwd [pid]
+  (when pid
+    (try (str (fs/canonicalize (str "/proc/" pid "/cwd")))
+         (catch Exception _ nil))))
+
+(defn native-processes
+  "Live processes carrying one flow identity, with their independently read cwd."
+  [flow-id]
+  (vec
+   (keep (fn [dir]
+           (let [pid (str (fs/file-name dir))
+                 env (try (slurp (str dir "/environ")) (catch Exception _ ""))]
+             (when (and (re-matches #"\d+" pid)
+                        (str/includes? env (str "FLOW_ID=" flow-id "\u0000")))
+               {:pid (parse-long pid) :cwd (process-cwd pid)})))
+         (fs/list-dir "/proc"))))
+
+(defn native-cwd [flow-id]
+  (let [roots (set (keep :cwd (native-processes flow-id)))]
+    (when (= 1 (count roots)) (first roots))))
+
 (defn transcript-first-user
   "The first user turn of a Claude transcript, as text."
   [native]
@@ -342,6 +374,19 @@
                             (str/split-lines (slurp (fs/file libexec "configure.datom")))))]
     (str/replace-first line "Simplified Explicit.[] Maintained" "Simplified Explicit.[] OnDemand")))
 
+(defn workspace-configuration [workspaces]
+  (let [line (first (filter #(str/starts-with? % "Configure.Metaflows.")
+                            (str/split-lines (slurp (fs/file libexec "configure.datom")))))]
+    (reduce (fn [configuration [address root]]
+              (str/replace-first configuration
+                                 (str "{ " address " None ")
+                                 (str "{ " address " Some.«" root "» ")))
+            line
+            workspaces)))
+
+(defn secondary-workspace-configuration [root]
+  (workspace-configuration [[secondary root]]))
+
 (defn launch [addr] (flow (str "Launch.{ " addr " Predecessors.0 «" brief "» }")))
 
 (defn awake-flow [addr] (let [m (current addr)] (when (= :awake (:state m)) (:flow m))))
@@ -357,6 +402,8 @@
 (defn send-to [addr delivery message pane]
   (flow (str "Send.{ Address." addr " " delivery " " message " }") pane))
 
+(declare nexus nexus-log start-nexus!)
+
 (def base-scenarios
   [["0 sender seat: Launch { Psyche test Secondary } (Maintained)"
     (fn []
@@ -364,6 +411,76 @@
             awake (when (str/starts-with? reply "Started.") (watch 30 #(awake-flow secondary)))]
         {:reply reply :pass (boolean (and (str/starts-with? reply "Started.") awake))
          :watched (str "Metaflows: Secondary Awake as " awake "; it is the sender of every Send below")}))]
+
+   ["0a workspace: default, continuation, invalid replacement, updated replacement"
+    (fn []
+      (let [initial-flow (str (awake-flow secondary))
+            initial-processes (native-processes initial-flow)
+            initial-cwd (native-cwd initial-flow)
+            configured-a (flow-meta (secondary-workspace-configuration workspace-a))
+            replaced-a (launch secondary)
+            flow-a (str (awake-flow secondary))
+            processes-a (native-processes flow-a)
+            cwd-a (native-cwd flow-a)
+            configured-invalid (flow-meta (secondary-workspace-configuration invalid-workspace))
+            n @nexus
+            _ (p/destroy n)
+            stopped (:exit (deref n 20000 {:exit "still running"}))
+            _ (fs/delete-if-exists ordinary-socket)
+            _ (fs/delete-if-exists meta-socket)
+            _ (start-nexus! @nexus-log)
+            continued-flow (str (awake-flow secondary))
+            continued-processes (native-processes continued-flow)
+            continued-cwd (native-cwd continued-flow)
+            invalid-replacement (launch secondary)
+            after-invalid-flow (str (awake-flow secondary))
+            after-invalid-cwd (native-cwd after-invalid-flow)
+            configured-b (flow-meta (workspace-configuration [[secondary workspace-b]
+                                                               [quaternary workspace-a]]))
+            replaced-b (launch secondary)
+            flow-b (str (awake-flow secondary))
+            processes-b (native-processes flow-b)
+            cwd-b (native-cwd flow-b)
+            started-a (launch quaternary)
+            flow-other-a (str (awake-flow quaternary))
+            cwd-other-a (native-cwd flow-other-a)
+            started-default (launch tertiary-address)
+            flow-default (str (awake-flow tertiary-address))
+            cwd-default (native-cwd flow-default)
+            record-files (filter fs/regular-file? (file-seq (fs/file capsule-flows)))
+            records-stay (and (seq record-files)
+                              (every? #(str/starts-with? (str %) (str source-root "/flows/"))
+                                      record-files))]
+        {:reply (str "A: " configured-a " / " replaced-a
+                     " / invalid: " configured-invalid " / restart " stopped
+                     " / replace: " invalid-replacement
+                     " / B: " configured-b " / " replaced-b)
+         :pass (boolean (and (= initial-cwd source-root)
+                             (str/starts-with? configured-a "Configured.")
+                             (str/starts-with? replaced-a "Replaced.")
+                             (seq initial-processes) (not= initial-flow flow-a)
+                             (seq processes-a) (= cwd-a workspace-a)
+                             (str/starts-with? configured-invalid "Configured.")
+                             (= continued-flow flow-a) (= (set continued-processes) (set processes-a))
+                             (= continued-cwd workspace-a)
+                             (str/includes? invalid-replacement "CompositionRefused.Unconfigured")
+                             (= after-invalid-flow flow-a) (= after-invalid-cwd workspace-a)
+                             (str/starts-with? configured-b "Configured.")
+                             (str/starts-with? replaced-b "Replaced.")
+                             (not= flow-b flow-a) (seq processes-b)
+                             (= cwd-b workspace-b)
+                             (str/starts-with? started-a "Started.") (= cwd-other-a workspace-a)
+                             (str/starts-with? started-default "Started.") (= cwd-default source-root)
+                             records-stay))
+         :watched (str "default flow " initial-flow " processes " initial-processes " cwd " initial-cwd
+                       "; A flow " flow-a " processes " processes-a " cwd " cwd-a
+                       "; after invalid declaration and Nexus restart flow " continued-flow
+                       " processes " continued-processes " cwd " continued-cwd
+                       "; refused replacement kept " after-invalid-flow " cwd " after-invalid-cwd
+                       "; simultaneous B flow " flow-b " processes " processes-b " cwd " cwd-b
+                       ", A flow " flow-other-a " cwd " cwd-other-a
+                       ", default flow " flow-default " cwd " cwd-default
+                       "; records remain under " source-root " " records-stay)}))]
 
    ["1 launch Quaternary"
     (fn []
@@ -663,7 +780,7 @@
   [metaflows-line addr]
   (let [want (map str (address-items addr))]
     (some (fn [entry]
-            (let [[a _ _ kind _ wake] (items entry)]
+            (let [[a _root _ _ kind _ wake] (items entry)]
               (when (= (map str (items a)) want)
                 [(str kind) (str wake)])))
           (items (loop [d (read-datom metaflows-line)] (if (head d) (recur (body d)) d))))))
@@ -738,6 +855,8 @@
         (str "[agents]\ncodex_executables = [\"" codex-client "\"]\n"))
   (fs/create-dirs capsule-runtime)
   (fs/create-dirs capsule-flows)
+  (fs/create-dirs workspace-a)
+  (fs/create-dirs workspace-b)
   (reset! herdr-server (p/process ["herdr" "--session" session "server"]
                                   {:env (clean-env) :out :discard :err :discard :in ""}))
   (when-not (watch 15 #(get-in (herdr-json "workspace" "list") [:result :workspaces]))
@@ -1299,8 +1418,8 @@
                   (cond
                     (str/starts-with? line "Configure.Metaflows.")
                     (append-entries (str/replace line " OnDemand «" " Maintained «")
-                                    [(str "{ " codex-secondary " [ spirit:core intent:models ] [] Simplified Explicit.[] Maintained «» [] }")
-                                     (str "{ " asleep-primary " [ spirit:core intent:models ] [] Regular Default OnDemand «» [] }")])
+                                    [(str "{ " codex-secondary " None [ spirit:core intent:models ] [] Simplified Explicit.[] Maintained «» [] }")
+                                     (str "{ " asleep-primary " None [ spirit:core intent:models ] [] Regular Default OnDemand «» [] }")])
                     (and codex-model (str/starts-with? line "Configure.Models."))
                     (append-entries line [(str "{ Secondary Mind " codex-model " }")])
                     (str/starts-with? line "Configure.LeaveOuts.")
@@ -1309,7 +1428,11 @@
                       line)
                     :else line))
         replay (mapv line-of lines)]
-    {:old (vec (remove #(str/starts-with? % "Configure.DefaultMinutes.") replay))
+    {:old (->> replay
+               (remove #(str/starts-with? % "Configure.DefaultMinutes."))
+               (mapv #(if (str/starts-with? % "Configure.Metaflows.")
+                        (str/replace % #"(\{ \{ (?:Psyche|Mind|Field) [^}]+ \}) None " "$1 ")
+                        %)))
      :replay replay}))
 
 (def id-pattern #"logical-delivery-\d{20}|queue-attempt-[0-9a-f]{16}|send-outcome-[0-9a-f]{16}")
@@ -2021,7 +2144,9 @@
     (reset! package (str (fs/canonicalize pkg)))
     (reset! package-interface {@package :invocation})
     (reset! keep-going (boolean (some #{"--keep-going"} options)))
-    (let [log (or (second (drop-while #(not= % "--log") options)) (str state-root "/nexus.log"))
+    (let [workspace-only (boolean (some #{"--workspace-only"} options))
+          selected-scenarios (if workspace-only (subvec base-scenarios 0 2) scenarios)
+          log (or (second (drop-while #(not= % "--log") options)) (str state-root "/nexus.log"))
           wall (System/currentTimeMillis)
           passed (atom true)
           version (str/trim (:out (run {} (str @package "/bin/flow-nexus") "--version")))
@@ -2043,7 +2168,7 @@
         (reset! nexus-log log)
         (start-nexus! log)
         (println (str "configuration | " (flow-meta "Configuration")))
-        (loop [[[name f] & more] scenarios]
+        (loop [[[name f] & more] selected-scenarios]
           (when name
             (let [ok (scenario name f)]
               (when-not ok (reset! passed false))

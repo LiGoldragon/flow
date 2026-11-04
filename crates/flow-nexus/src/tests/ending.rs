@@ -109,6 +109,7 @@ fn declare_secondary(fixture: &NexusFixture, continuity: meta_signal_flow::Conti
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
             meta_signal_flow::ConfigureMetaflow {
+                root_option: None,
                 address: address(Layer::Secondary),
                 system_modules: vec!["spirit:core".into(), "intent:flow".into()],
                 user_modules: vec![],

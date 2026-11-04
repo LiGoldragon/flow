@@ -1472,10 +1472,10 @@ mod tests {
         context::FixtureComposer,
         herdr::HerdrCli,
         store::{
-            FlowStore, LaunchOutcome, OpensFlowStore, RecordsFlowLifecycle, RecordsLaunchOutcome,
-            RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent,
-            RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RegistersFlowIdentity,
-            ReservesLaunchAttempt,
+            ConfiguresFlowStore, FlowStore, LaunchOutcome, OpensFlowStore, RecordsFlowLifecycle,
+            RecordsLaunchOutcome, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
+            RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
+            RecordsRegistrationAcknowledgement, RegistersFlowIdentity, ReservesLaunchAttempt,
         },
     };
     use signal_flow::{
@@ -2143,6 +2143,13 @@ mod tests {
             };
             let mut store =
                 FlowStore::open(&directory.path().join("flow.sema")).expect("fixture store");
+            let mut runtime = store
+                .runtime_configuration()
+                .expect("fixture runtime configuration");
+            runtime.source_root = directory.path().to_string_lossy().into_owned();
+            store
+                .configure_runtime(runtime)
+                .expect("fixture source root configuration");
             store.set_native_owner_environment_for_tests(crate::store::NativeOwnerEnvironment {
                 host_id: "isolated-test-host".into(),
                 boot_id: "isolated-test-boot".into(),
@@ -4275,6 +4282,99 @@ mod tests {
         }
     }
 
+    #[test]
+    fn metaflows_resolve_their_own_workspace_or_the_nexus_source_root() {
+        use crate::store::{ConfiguresFlowStore as _, ManagesMetaflowState as _};
+        let fixture = NexusFixture::new();
+        let first = fixture.staged_launch("workspace-first", None).profile;
+        let second = fixture.staged_launch("workspace-default", None).profile;
+        let own_root = fixture.directory.path().join("first-workspace");
+        fs::create_dir(&own_root).unwrap();
+        let declaration =
+            |profile: &LaunchProfile, root_option| meta_signal_flow::ConfigureMetaflow {
+                address: profile.address.clone(),
+                root_option,
+                system_modules: profile.system_modules.clone(),
+                user_modules: profile.user_modules.clone(),
+                flow_kind: profile.flow_kind.clone(),
+                tool_set: profile.tool_set.clone(),
+                continuity: meta_signal_flow::Continuity::OnDemand,
+                purpose: String::new(),
+                records: vec![],
+            };
+        fixture
+            .nexus
+            .store
+            .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
+                declaration(&first, Some(own_root.to_string_lossy().into_owned())),
+                declaration(&second, None),
+            ]))
+            .unwrap();
+        assert_eq!(
+            fixture.nexus.launch_root(&first.address).unwrap(),
+            own_root.to_string_lossy()
+        );
+        assert_eq!(
+            fixture.nexus.launch_root(&second.address).unwrap(),
+            fixture
+                .nexus
+                .store
+                .runtime_configuration()
+                .unwrap()
+                .source_root
+        );
+    }
+
+    #[test]
+    fn invalid_metaflow_workspace_is_refused_before_launch_reservation_or_native_artifacts() {
+        use crate::store::{ManagesMetaflowState as _, ReadsLaunchAttempt as _};
+        let fixture = NexusFixture::new();
+        let staged = fixture.staged_launch("invalid-workspace", None);
+        let invalid = fixture.directory.path().join("absent-workspace");
+        fixture
+            .nexus
+            .store
+            .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
+                meta_signal_flow::ConfigureMetaflow {
+                    address: staged.profile.address.clone(),
+                    root_option: Some(invalid.to_string_lossy().into_owned()),
+                    system_modules: staged.profile.system_modules.clone(),
+                    user_modules: staged.profile.user_modules.clone(),
+                    flow_kind: staged.profile.flow_kind.clone(),
+                    tool_set: staged.profile.tool_set.clone(),
+                    continuity: meta_signal_flow::Continuity::OnDemand,
+                    purpose: String::new(),
+                    records: vec![],
+                },
+            ]))
+            .expect("invalid workspace declaration is stored as configuration");
+
+        assert_eq!(
+            crate::launching::LaunchesFlows::start(
+                &fixture.nexus,
+                staged.profile.clone(),
+                staged.origin,
+            ),
+            Response::StartRejected(StartRejection::CompositionRefused(
+                signal_flow::CompositionRefusal::Unconfigured,
+            ))
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .launch_attempt(&staged.profile.launch_request_id)
+                .unwrap(),
+            None
+        );
+        assert!(!invalid.exists());
+        assert!(
+            !fs::read_to_string(fixture.directory.path().join("calls"))
+                .unwrap_or_default()
+                .contains("workspace create")
+        );
+    }
+
     impl StagedLaunch {
         /// The profile a Start or Replace carries; an ordinary dispatch
         /// with no calling flow derives the Unbound origin.
@@ -5492,6 +5592,7 @@ mod tests {
                 .nexus
                 .dispatch_meta(meta_signal_flow::Query::Configure(
                     ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+                        root_option: None,
                         address: declared.clone(),
                         system_modules: vec!["spirit-core".into()],
                         user_modules: vec!["knowledge-flow".into()],

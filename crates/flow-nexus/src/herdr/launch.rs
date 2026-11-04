@@ -39,6 +39,11 @@ use std::{
 /// Creates topology without launching a harness or sending a prompt.
 pub trait CreatesHerdrLaunchPane {
     fn create_launch_pane(&self, launch: &ComposedLaunch) -> Result<HerdrPaneBinding, String>;
+    fn create_launch_pane_in(
+        &self,
+        launch: &ComposedLaunch,
+        root: &Path,
+    ) -> Result<HerdrPaneBinding, String>;
 }
 
 /// Starts the selected native interactive harness without a positional prompt.
@@ -1701,6 +1706,18 @@ impl TitlesNativeFlow for HerdrCli {
 
 impl CreatesHerdrLaunchPane for HerdrCli {
     fn create_launch_pane(&self, launch: &ComposedLaunch) -> Result<HerdrPaneBinding, String> {
+        let root = self.configured_workspace_root()?.to_path_buf();
+        self.create_launch_pane_in(launch, &root)
+    }
+
+    fn create_launch_pane_in(
+        &self,
+        launch: &ComposedLaunch,
+        root: &Path,
+    ) -> Result<HerdrPaneBinding, String> {
+        if !root.is_absolute() || !root.is_dir() {
+            return Err("configured metaflow root is not an absolute directory".into());
+        }
         let agent_name = launch.launch_agent_name();
         let response = self.run_json(&[
             "--session".into(),
@@ -1708,9 +1725,8 @@ impl CreatesHerdrLaunchPane for HerdrCli {
             "workspace".into(),
             "create".into(),
             "--cwd".into(),
-            self.configured_workspace_root()?
-                .to_str()
-                .ok_or_else(|| "configured workspace root is not UTF-8".to_owned())?
+            root.to_str()
+                .ok_or_else(|| "configured metaflow root is not UTF-8".to_owned())?
                 .into(),
             // No label: the agent name is internal, and the workspace is
             // labelled with the title once the Flow ID is claimed.
@@ -3066,11 +3082,19 @@ printf '%s\n' "$alias"
             "1234567812344abc8def123456789abc",
             &agent_name,
         );
-        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        let workspace = tempfile::tempdir().expect("metaflow workspace");
+        let pane = adapter
+            .create_launch_pane_in(&launch, workspace.path())
+            .expect("created pane in metaflow workspace");
         adapter
             .start_native_harness(&launch, &pane, None)
             .expect("started exact Codex client");
         let calls = fs::read_to_string(root.path().join("calls")).expect("launch calls");
+        let create = calls
+            .lines()
+            .find(|line| line.contains("workspace create"))
+            .expect("workspace create call");
+        assert!(create.contains(&format!("--cwd {}", workspace.path().display())));
         let start = calls
             .lines()
             .find(|line| line.contains("agent start"))

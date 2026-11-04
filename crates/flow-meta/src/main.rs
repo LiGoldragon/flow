@@ -246,6 +246,7 @@ mod tests {
         };
         let rows: Vec<_> = (0..31)
             .map(|index| ConfigureMetaflow {
+                root_option: None,
                 address: Address {
                     aspect: Aspect::Mind,
                     topic: format!("printer{index}"),

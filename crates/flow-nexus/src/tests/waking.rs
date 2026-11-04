@@ -108,6 +108,7 @@ pub(super) fn maintain(fixture: &NexusFixture, address: Address) {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
             meta_signal_flow::ConfigureMetaflow {
+                root_option: None,
                 address,
                 system_modules: vec!["spirit-core".into(), "intent-flow".into()],
                 user_modules: vec!["operation-main-flow".into()],
@@ -1916,7 +1917,7 @@ pub(super) fn message_peer(fixture: &NexusFixture) -> (super::MarkedProcess, sig
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
             meta_signal_flow::ConfigureNexus {
-                source_root: settings.source_root,
+                source_root: fixture.directory.path().to_string_lossy().into_owned(),
                 stable_codex: settings.stable_codex,
                 next_codex: settings.next_codex,
                 harness_profiles: settings.harness_profile_vector,
@@ -3232,7 +3233,7 @@ fn configure_secondary_model(fixture: &NexusFixture, native: &str) {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
             meta_signal_flow::ConfigureNexus {
-                source_root: settings.source_root,
+                source_root: fixture.directory.path().to_string_lossy().into_owned(),
                 stable_codex: settings.stable_codex,
                 next_codex: settings.next_codex,
                 harness_profiles: settings.harness_profile_vector,
@@ -3815,7 +3816,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
             .store
             .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
                 meta_signal_flow::ConfigureNexus {
-                    source_root: settings.source_root,
+                    source_root: self.directory.path().to_string_lossy().into_owned(),
                     stable_codex: settings.stable_codex,
                     next_codex: settings.next_codex,
                     harness_profiles: settings.harness_profile_vector,
@@ -4727,7 +4728,7 @@ fn sender_holding_a_lock(fixture: &NexusFixture) -> Address {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
             meta_signal_flow::ConfigureNexus {
-                source_root: settings.source_root,
+                source_root: fixture.directory.path().to_string_lossy().into_owned(),
                 stable_codex: settings.stable_codex,
                 next_codex: settings.next_codex,
                 harness_profiles: settings.harness_profile_vector,
@@ -5033,6 +5034,7 @@ fn a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first() {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
             meta_signal_flow::ConfigureMetaflow {
+                root_option: None,
                 address: address(Layer::Secondary),
                 system_modules: vec!["spirit-core".into(), "intent-flow".into()],
                 user_modules: vec!["operation-main-flow".into()],

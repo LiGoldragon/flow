@@ -7836,6 +7836,10 @@ pub(crate) trait ReadsFlowMemory {
                     metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
                     SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v3"),
                 ),
+                (
+                    metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
+                    SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v4"),
+                ),
             ],
             "flow_nexus_metaflows" => &[
                 ("flow-nexus-metaflow", StoredMetaflowV1::schema_hash()),
@@ -8575,6 +8579,7 @@ mod tests {
     use crate::store::logical_delivery::{RecordsLogicalDeliveries, SimplifiedReplyBinding};
     use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
     use crate::store::queue_delivery::AccountsQueueDelivery;
+    use sema_engine::MemoryDefinition;
     use std::fs;
     use std::os::unix::fs::MetadataExt;
 
@@ -8756,6 +8761,7 @@ mod tests {
             assert_eq!(declaration.user_modules, ["user"]);
             assert_eq!(declaration.flow_kind, signal_flow::FlowKind::Regular);
             assert_eq!(declaration.tool_set, signal_flow::ToolSet::Default);
+            assert_eq!(declaration.root_option, None);
             let events = super::events::RecordsHarnessEvents::events(&store, "old-flow")
                 .unwrap()
                 .unwrap();
@@ -8764,6 +8770,92 @@ mod tests {
                 matches!(&events[1], signal_flow::Event::Stopped(stop) if stop.native_session_id_option.as_deref() == Some("old-session") && stop.last_assistant_message_option.is_none())
             );
         }
+    }
+
+    #[test]
+    fn v4_metaflow_declaration_upgrades_to_default_workspace_and_reopens() {
+        use super::metaflow_declaration::{
+            ConfigureMetaflowV4, ReadsMetaflowDeclarations, StoredMetaMetaflowConfigurationV4,
+        };
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        drop(fixture.configured_store());
+        let table = "flow_nexus_meta_metaflow_configuration";
+        let database = redb::Database::open(fixture.path()).unwrap();
+        let write = database.begin_write().unwrap();
+        write
+            .open_table(super::SEMA_CATALOG_TABLE)
+            .unwrap()
+            .remove(table)
+            .unwrap();
+        write
+            .delete_table(redb::TableDefinition::<&str, &[u8]>::new(table))
+            .unwrap();
+        write.commit().unwrap();
+        drop(database);
+        let mut engine = Engine::open(EngineOpen::new(
+            fixture.path(),
+            SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
+        ))
+        .unwrap();
+        let declarations = engine
+            .register_table::<StoredMetaMetaflowConfigurationV4>(TableDescriptor::new(
+                TableName::new(table),
+                FamilyName::new("flow-nexus-meta-metaflow-configuration"),
+                StoredMetaMetaflowConfigurationV4::schema_hash(),
+            ))
+            .unwrap();
+        let address = Address {
+            aspect: Aspect::Mind,
+            topic: "workspaceMigration".into(),
+            layer: Layer::Secondary,
+        };
+        engine
+            .assert(Assertion::new(
+                declarations,
+                StoredMetaMetaflowConfigurationV4 {
+                    metaflow: ConfigureMetaflowV4 {
+                        address: address.clone(),
+                        system_modules: vec!["spirit:core".into()],
+                        user_modules: vec!["vision:flow-nexus".into()],
+                        flow_kind: signal_flow::FlowKind::Regular,
+                        tool_set: signal_flow::ToolSet::Default,
+                        continuity: meta_signal_flow::Continuity::OnDemand,
+                        purpose: "Uses a configurable workspace.".into(),
+                        records: vec!["flows/f35668/vision/flow-nexus.md".into()],
+                    },
+                },
+            ))
+            .unwrap();
+        drop(engine);
+
+        for _ in 0..2 {
+            let store = fixture.configured_store();
+            let declaration = store.metaflow_declaration(&address).unwrap().unwrap();
+            assert_eq!(declaration.root_option, None);
+            assert_eq!(declaration.purpose, "Uses a configurable workspace.");
+            assert_eq!(declaration.records, ["flows/f35668/vision/flow-nexus.md"]);
+        }
+        {
+            let store = fixture.configured_store();
+            let mut declaration = store.metaflow_declaration(&address).unwrap().unwrap();
+            declaration.root_option = Some("/srv/workspace".into());
+            store
+                .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
+                    declaration,
+                ]))
+                .unwrap();
+        }
+        assert_eq!(
+            fixture
+                .configured_store()
+                .metaflow_declaration(&address)
+                .unwrap()
+                .unwrap()
+                .root_option
+                .as_deref(),
+            Some("/srv/workspace")
+        );
     }
 
     /// A store written before Continuity, before a session's end was an

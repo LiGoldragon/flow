@@ -4,6 +4,7 @@
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct PaneLaunch {
     pub composed_launch: signal_flow::ComposedLaunch,
+    pub root: meta_signal_flow::Root,
     pub herdr_pane_binding: signal_flow::HerdrPaneBinding,
     pub flow_id_option: std::option::Option<signal_flow::FlowId>,
     pub native_session_id_option: std::option::Option<signal_flow::NativeSessionId>,
@@ -86,6 +87,13 @@ pub struct Register_Data {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Open_Data {
+    pub composed_launch: signal_flow::ComposedLaunch,
+    pub root: meta_signal_flow::Root,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Title_Data {
     pub composed_launch: signal_flow::ComposedLaunch,
     pub native_launch_binding: signal_flow::NativeLaunchBinding,
@@ -106,7 +114,7 @@ pub enum Operation {
     Record(Record_Data),
     Register(Register_Data),
     Confirm(signal_flow::FlowId),
-    Open(signal_flow::ComposedLaunch),
+    Open(Open_Data),
     Spawn(PaneLaunch),
     Bind(PaneLaunch),
     Title(Title_Data),

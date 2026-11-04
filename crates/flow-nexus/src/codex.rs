@@ -11,7 +11,7 @@ use signal_flow::{ComposedLaunch, HarnessKind, PromptDeliveryIntent, PromptDeliv
 use std::{
     collections::BTreeSet,
     io::{BufRead, BufReader, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
         Arc, Mutex,
@@ -319,9 +319,16 @@ impl CarriesUserText for serde_json::Value {
 /// subscribed to its server requests and is kept as the launch's responder
 /// until the launch ends.
 pub(crate) trait OpensCodexThread {
+    #[cfg(test)]
     fn open_thread(
         &self,
         launch: &ComposedLaunch,
+        title_for: &mut dyn FnMut(&str) -> Result<String, CodexAdapterUnavailable>,
+    ) -> Result<(String, ThreadConnection), CodexAdapterUnavailable>;
+    fn open_thread_in(
+        &self,
+        launch: &ComposedLaunch,
+        root: &Path,
         title_for: &mut dyn FnMut(&str) -> Result<String, CodexAdapterUnavailable>,
     ) -> Result<(String, ThreadConnection), CodexAdapterUnavailable>;
 }
@@ -1022,14 +1029,30 @@ impl OpensBoundCodexSession for CodexAdapter {
 }
 
 impl OpensCodexThread for CodexAdapter {
+    #[cfg(test)]
     fn open_thread(
         &self,
         launch: &ComposedLaunch,
         title_for: &mut dyn FnMut(&str) -> Result<String, CodexAdapterUnavailable>,
     ) -> Result<(String, ThreadConnection), CodexAdapterUnavailable> {
+        let root = self.workspace_root.clone();
+        self.open_thread_in(launch, &root, title_for)
+    }
+
+    fn open_thread_in(
+        &self,
+        launch: &ComposedLaunch,
+        root: &Path,
+        title_for: &mut dyn FnMut(&str) -> Result<String, CodexAdapterUnavailable>,
+    ) -> Result<(String, ThreadConnection), CodexAdapterUnavailable> {
         if launch.harness_kind != HarnessKind::Codex {
             return Err(CodexAdapterUnavailable::Protocol(
                 "the composed launch is no Codex launch this endpoint serves".into(),
+            ));
+        }
+        if !root.is_absolute() || !root.is_dir() {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "configured metaflow root is not an absolute directory".into(),
             ));
         }
         // The send tool is declared behind the experimental API, which is
@@ -1059,7 +1082,7 @@ impl OpensCodexThread for CodexAdapter {
             "thread/start",
             serde_json::json!({
                 "model": launch.launch_profile.model_name,
-                "cwd": self.workspace_root,
+                "cwd": root,
                 "approvalPolicy": "never",
                 "sandbox": "danger-full-access",
                 "baseInstructions": launch.system_prompt.system_prompt_text,
@@ -2480,10 +2503,12 @@ mod tests {
             fake.websocket_frame(r#"{"id":5,"result":{}}"#),
         ];
         let (_directory, executable, record) = RecordingFakeProxy.install_probed(&frames);
+        let workspace = tempfile::tempdir().expect("metaflow workspace");
+        let adapter = lean_adapter_at(executable, &launch);
         let mut given = Vec::new();
         assert_eq!(
-            lean_adapter_at(executable, &launch)
-                .open_thread(&launch, &mut |thread| {
+            adapter
+                .open_thread_in(&launch, workspace.path(), &mut |thread| {
                     given.push(thread.to_owned());
                     Ok(OPENED_TITLE.into())
                 })
@@ -2509,6 +2534,7 @@ mod tests {
             ]
         );
         let start = &requests[2]["params"];
+        assert_eq!(start["cwd"], workspace.path().to_string_lossy().as_ref());
         assert_eq!(
             start["baseInstructions"],
             launch.system_prompt.system_prompt_text

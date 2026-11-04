@@ -361,6 +361,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
     assert!(fixture.nexus.direct_send_lease(&target).is_err());
     assert!(fixture.nexus.store.metaflow(&target).unwrap().is_none());
     let declaration = meta_signal_flow::ConfigureMetaflow {
+        root_option: None,
         address: target.clone(),
         system_modules: vec!["spirit-core".into()],
         user_modules: vec![],

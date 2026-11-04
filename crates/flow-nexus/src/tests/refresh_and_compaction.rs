@@ -112,6 +112,7 @@ pub(super) fn declare_seat(
         .nexus
         .store
         .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+            root_option: None,
             address: seat_address(),
             system_modules,
             user_modules: vec!["operation-main-flow".into()],

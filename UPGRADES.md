@@ -1,3 +1,19 @@
+# Flow 0.46.0
+
+Pins meta-signal-flow 50.0.0 (1214f7a) and signal-flow 38.0.0
+(7b737d9). A metaflow declaration now carries `Option<Root>` immediately
+after its Address. `None` runs new flows in the Nexus source root; `Some`
+runs them in that absolute existing directory. The selected root is the
+harness working directory only. Flow records, reservations and artifacts
+remain under the Nexus source root.
+
+On first open, `flow-nexus-meta-metaflow-configuration` upgrades from v4 to
+v5. Every v4 declaration is preserved and receives `None`; the earlier v1,
+v2 and v3 predecessors likewise default to `None` through their registered
+upgrade paths. Take an immutable Memory snapshot before the first 0.46.0
+open. Earlier Flow versions do not recognize the v5 family; rollback restores
+the snapshot before starting the earlier binary.
+
 # Flow 0.44.0
 
 Pins signal-flow 38.0.0 (7b737d9) and meta-signal-flow 49.0.0
@@ -536,7 +552,7 @@ at the first open, and drops `flow_nexus_meta_threshold_configuration`.
   and Field reaches Psyche only after Psyche sent to it while this Nexus
   runs.
 - **A flow is launched from its declaration.** `flow-meta
-  'Configure.Metaflows.[ { { Psyche core Secondary } [ ... ] [ ... ] } ]'`
+  'Configure.Metaflows.[ { { Psyche core Secondary } None [ ... ] [ ... ] } ]'`
   declares each metaflow's system and user modules; `flow 'Launch.{ {
   Psyche core Secondary } «brief» }'` starts it at the model configured for
   its layer and aspect, at medium effort (low for an OpenAI Quaternary),

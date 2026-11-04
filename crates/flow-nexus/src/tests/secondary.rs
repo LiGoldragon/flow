@@ -133,6 +133,7 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
             None
         );
         let declared = meta_signal_flow::ConfigureMetaflow {
+            root_option: None,
             address: signal_flow::Address {
                 aspect: Aspect::Mind,
                 topic: topic.into(),

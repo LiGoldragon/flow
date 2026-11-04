@@ -132,10 +132,10 @@
              "Configure.Models.[ { Secondary Psyche haiku } { Quaternary Mind luna } ]"
              "Configure.DefaultMinutes.30"
              "Configure.LeaveOuts.[ { { Mind test Quaternary } Codex [ CodexAgentsMd ] } ]"
-             (str "Configure.Metaflows.[ { { Psyche test Secondary } [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] }"
-                  " { { Psyche test Tertiary } [ spirit:core ] [] Regular Default OnDemand «» [] }"
-                  " { { Psyche test Quaternary } [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] }"
-                  " { { Mind test Quaternary } [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] } ]")]
+             (str "Configure.Metaflows.[ { { Psyche test Secondary } None [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] }"
+                  " { { Psyche test Tertiary } None [ spirit:core ] [] Regular Default OnDemand «» [] }"
+                  " { { Psyche test Quaternary } None [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] }"
+                  " { { Mind test Quaternary } None [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] } ]")]
       {:keys [old replay]} (flow-capsule/takeover-configuration lines)
       metaflows (first (filter #(clojure.string/starts-with? % "Configure.Metaflows.") old))]
   (check "the old Nexus is not given DefaultMinutes"
@@ -143,8 +143,11 @@
   (check "the replay carries every old declaration and DefaultMinutes, in the file's order"
          (= (map #(subs % 0 14) replay)
             ["Configure.Nexu" "Configure.Mode" "Configure.Defa" "Configure.Leav" "Configure.Meta"]))
-  (check "the replay's declarations equal the old ones"
-         (= (remove #(clojure.string/starts-with? % "Configure.DefaultMinutes.") replay) old))
+  (check "the old declarations omit the new workspace position and the replay keeps it"
+         (and (not (clojure.string/includes? metaflows "} None ["))
+              (clojure.string/includes?
+               (first (filter #(clojure.string/starts-with? % "Configure.Metaflows.") replay))
+               "} None [")))
   (check "no kept seat is OnDemand but the asleep Primary"
          (= 1 (count (re-seq #"OnDemand" metaflows))))
   (check "the asleep Primary is declared OnDemand"
@@ -260,7 +263,7 @@
 (let [replay ["Configure.Models.[ { Secondary Psyche haiku } ]"
               "Configure.Nexus.{ /src 60 }"
               "Configure.DefaultMinutes.30"
-              "Configure.Metaflows.[ { { Psyche test Secondary } [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] } ]"]
+              "Configure.Metaflows.[ { { Psyche test Secondary } None [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] } ]"]
       plan (flow-capsule/seed-plan replay "Configure.Counters.{ 3 2 1 }" "Configure.Counters.{ 2 1 0 }")
       steps (map (juxt :via :datom) plan)]
   (check "the seed declares the Nexus first, through a configuration-only Nexus"
@@ -271,7 +274,7 @@
   (check "the rest of the replay follows configuration-only, in the file's order"
          (= [[:configure-only "Configure.Models.[ { Secondary Psyche haiku } ]"]
              [:configure-only "Configure.DefaultMinutes.30"]
-             [:configure-only "Configure.Metaflows.[ { { Psyche test Secondary } [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] } ]"]]
+             [:configure-only "Configure.Metaflows.[ { { Psyche test Secondary } None [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] } ]"]]
             (drop 4 steps)))
   (check "no Counters goes to a configuration-only Nexus"
          (not-any? (fn [[via datom]] (and (= via :configure-only) (str/starts-with? datom "Configure.Counters."))) steps))
@@ -368,8 +371,8 @@
 
 ;; Scenario 20 needs a seat that takes its whole queue on a wake: a Regular
 ;; OnDemand seat (a Simplified seat takes its oldest alone).
-(let [metaflows (str "Configure.Metaflows.[ { { Psyche test Tertiary } [ spirit:core ] [] Regular Default OnDemand «» [] }"
-                     " { { Psyche test Quaternary } [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] } ]")]
+(let [metaflows (str "Configure.Metaflows.[ { { Psyche test Tertiary } None [ spirit:core ] [] Regular Default OnDemand «» [] }"
+                     " { { Psyche test Quaternary } None [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] } ]")]
   (check "a seat's declaration reads its FlowKind and wake policy"
          (= ["Regular" "OnDemand"] (flow-capsule/seat-declaration metaflows "{ Psyche test Tertiary }")))
   (check "a Simplified seat reads as Simplified"

@@ -348,6 +348,9 @@ impl Dispatches for RunningNexus {
         resolver: Option<meta_signal_flow::ResolverIdentity>,
     ) -> meta_signal_flow::Response {
         match query {
+            meta_signal_flow::Query::Readiness => {
+                meta_signal_flow::Response::Readiness(meta_signal_flow::NexusReadiness::Ready)
+            }
             meta_signal_flow::Query::Configuration => match self.store.configuration_snapshot() {
                 Ok(Some(snapshot)) => meta_signal_flow::Response::Configuration(snapshot),
                 Ok(None) => meta_signal_flow::Response::Unconfigured,
@@ -1029,6 +1032,22 @@ pub trait ListensOnSocket {
         Self: Sync + Sized,
     {
         let listener = ClaimedSocket::bind(socket)?;
+        let result = self.listen_on(&listener, surface, serve);
+        let _ = fs::remove_file(socket);
+        result
+    }
+
+    /// Serves a listener this process already owns. Startup uses this to keep
+    /// the same sockets while configuration becomes a ready Nexus.
+    fn listen_on(
+        &self,
+        listener: &UnixListener,
+        surface: &str,
+        serve: fn(Connection, &Self) -> Result<(), String>,
+    ) -> Result<(), String>
+    where
+        Self: Sync + Sized,
+    {
         std::thread::scope(|scope| {
             // A stop requested before the bind found no listener to wake.
             let incoming = listener
@@ -1058,7 +1077,6 @@ pub trait ListensOnSocket {
             }
         });
         // Every accepted connection has finished: the scope joined them.
-        let _ = fs::remove_file(socket);
         if self.stopping() {
             Ok(())
         } else {
@@ -1360,21 +1378,31 @@ impl DispatchesSerially for RunningNexus {
 
 pub trait ServesOrdinary {
     fn serve_ordinary(&self, socket: &Path) -> Result<(), String>;
+    fn serve_ordinary_listener(&self, listener: &UnixListener) -> Result<(), String>;
 }
 
 impl ServesOrdinary for RunningNexus {
     fn serve_ordinary(&self, socket: &Path) -> Result<(), String> {
         self.listen(socket, "ordinary", Connection::serve_ordinary)
     }
+
+    fn serve_ordinary_listener(&self, listener: &UnixListener) -> Result<(), String> {
+        self.listen_on(listener, "ordinary", Connection::serve_ordinary)
+    }
 }
 
 pub trait ServesMeta {
     fn serve_meta(&self, socket: &Path) -> Result<(), String>;
+    fn serve_meta_listener(&self, listener: &UnixListener) -> Result<(), String>;
 }
 
 impl ServesMeta for RunningNexus {
     fn serve_meta(&self, socket: &Path) -> Result<(), String> {
         self.listen(socket, "meta", Connection::serve_meta)
+    }
+
+    fn serve_meta_listener(&self, listener: &UnixListener) -> Result<(), String> {
+        self.listen_on(listener, "meta", Connection::serve_meta)
     }
 }
 
@@ -1556,6 +1584,17 @@ mod tests {
         /// `messaging-build`: the test process listens on it, standing as
         /// that server, and every marked fixture process descends from it.
         _herdr_server: UnixListener,
+    }
+
+    #[test]
+    fn a_running_nexus_reports_ready() {
+        let fixture = NexusFixture::new();
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::Readiness),
+            meta_signal_flow::Response::Readiness(meta_signal_flow::NexusReadiness::Ready)
+        );
     }
 
     #[test]

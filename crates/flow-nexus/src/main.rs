@@ -16,7 +16,10 @@ use std::{
     os::unix::net::{UnixListener, UnixStream},
     path::Path,
     process::ExitCode,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -118,8 +121,41 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let nexus = match RunningNexus::open(&defaults, &start) {
-        Ok(nexus) => nexus,
+    let (nexus, listeners) = match RunningNexus::open(&defaults, &start) {
+        Ok(nexus) => (nexus, None),
+        Err(StoreError::NotConfigured) => {
+            let listeners = match NexusListeners::bind(&start) {
+                Ok(listeners) => listeners,
+                Err(error) => {
+                    eprintln!("flow-nexus: cannot bind configuration service: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let mut initialization_error = None;
+            let nexus = loop {
+                if let Err(error) = ConfigurationStartup::serve_normal_configuration(
+                    &start,
+                    &signals,
+                    &listeners,
+                    initialization_error.take(),
+                ) {
+                    eprintln!("flow-nexus: configuration service: {error}");
+                    return ExitCode::FAILURE;
+                }
+                // The configuration transaction is closed before the
+                // configured store opens. The same listeners stay owned by
+                // this service throughout the handoff.
+                match RunningNexus::open(&defaults, &start) {
+                    Ok(nexus) => break nexus,
+                    Err(StoreError::UnrecognizedMemory { path, reason }) => {
+                        ConfigurationStartup::report_unrecognized_store(&path, &reason);
+                        return ExitCode::FAILURE;
+                    }
+                    Err(error) => initialization_error = Some(error.to_string()),
+                }
+            };
+            (nexus, Some(listeners))
+        }
         Err(StoreError::UnrecognizedMemory { path, reason }) => {
             ConfigurationStartup::report_unrecognized_store(&path, &reason);
             return ExitCode::FAILURE;
@@ -177,9 +213,24 @@ fn main() -> ExitCode {
                 nexus.stop(&sockets);
             }
         });
-        scope.spawn(|| serve("ordinary", ordinary, nexus.serve_ordinary(ordinary)));
-        serve("meta", meta, nexus.serve_meta(meta));
+        scope.spawn(|| {
+            let served = listeners.as_ref().map_or_else(
+                || nexus.serve_ordinary(ordinary),
+                |listeners| nexus.serve_ordinary_listener(&listeners.ordinary),
+            );
+            serve("ordinary", ordinary, served)
+        });
+        let served = listeners.as_ref().map_or_else(
+            || nexus.serve_meta(meta),
+            |listeners| nexus.serve_meta_listener(&listeners.meta),
+        );
+        serve("meta", meta, served);
     });
+    if listeners.is_some() {
+        for socket in sockets {
+            let _ = fs::remove_file(socket);
+        }
+    }
     drop(nexus);
     if failed.load(Ordering::SeqCst) {
         ExitCode::FAILURE
@@ -189,6 +240,20 @@ fn main() -> ExitCode {
 }
 
 struct ConfigurationStartup;
+
+struct NexusListeners {
+    ordinary: UnixListener,
+    meta: UnixListener,
+}
+
+impl NexusListeners {
+    fn bind(start: &flow_ethos::Start) -> Result<Self, String> {
+        Ok(Self {
+            ordinary: ClaimedSocket::bind(Path::new(&start.ordinary_socket_path))?,
+            meta: ClaimedSocket::bind(Path::new(&start.meta_socket_path))?,
+        })
+    }
+}
 
 trait RunsConfigurationStartup {
     fn admits_configuration_peer(
@@ -238,6 +303,211 @@ trait RunsConfigurationStartup {
 
     fn configuration_listener(socket: &Path) -> Result<UnixListener, String> {
         ClaimedSocket::bind(socket)
+    }
+
+    fn configuring_ordinary_response(query: signal_flow::Query) -> signal_flow::Response {
+        match query {
+            signal_flow::Query::Start(_) | signal_flow::Query::Launch(_) => {
+                signal_flow::Response::StartRejected(signal_flow::StartRejection::NotConfigured)
+            }
+            signal_flow::Query::Rehearse(_) => {
+                signal_flow::Response::RehearseRejected(signal_flow::StartRejection::NotConfigured)
+            }
+            signal_flow::Query::Replace(_) => signal_flow::Response::ReplaceRejected(
+                signal_flow::ReplaceRejection::LaunchRefused(
+                    signal_flow::StartRejection::NotConfigured,
+                ),
+            ),
+            _ => signal_flow::Response::Refused(signal_flow::Refusal::NotConfigured),
+        }
+    }
+
+    fn configuring_meta_response(
+        store: &ConfigurationOnlyStore,
+        query: MetaQuery,
+        initialization_error: &Mutex<Option<String>>,
+    ) -> (MetaResponse, bool) {
+        let response = match query {
+            MetaQuery::Readiness => initialization_error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .map_or_else(
+                    || MetaResponse::Readiness(meta_signal_flow::NexusReadiness::ConfigServing),
+                    |error| MetaResponse::Refused(meta_signal_flow::StoreRefusal::Store(error)),
+                ),
+            MetaQuery::Configuration => match store.configuration_snapshot() {
+                Ok(Some(snapshot)) => MetaResponse::Configuration(snapshot),
+                Ok(None) => MetaResponse::Unconfigured,
+                Err(error) => {
+                    MetaResponse::Refused(meta_signal_flow::StoreRefusal::Store(error.to_string()))
+                }
+            },
+            MetaQuery::Configure(change) => match store.configure_change(change) {
+                Ok(outcome) => MetaResponse::Configured(outcome),
+                Err(StoreError::DuplicateConfigurationEntry) => {
+                    MetaResponse::ConfigureRejected(ConfigureRejection::DuplicateEntry)
+                }
+                Err(StoreError::CodexModelsOverlap) => {
+                    MetaResponse::ConfigureRejected(ConfigureRejection::CodexModelsOverlap)
+                }
+                Err(StoreError::LeaveOutNotForHarness) => {
+                    MetaResponse::ConfigureRejected(ConfigureRejection::LeaveOutNotForHarness)
+                }
+                Err(StoreError::TopicRefused(topic)) => {
+                    MetaResponse::ConfigureRejected(ConfigureRejection::TopicRefused(topic))
+                }
+                Err(StoreError::MinutesRefused(refusal)) => {
+                    MetaResponse::ConfigureRejected(ConfigureRejection::MinutesRefused(refusal))
+                }
+                Err(StoreError::CountersRefused(refusal)) => {
+                    MetaResponse::ConfigureRejected(ConfigureRejection::CountersRefused(refusal))
+                }
+                Err(StoreError::InvalidHeartbeatPeriod) => {
+                    MetaResponse::ConfigureRejected(ConfigureRejection::StoreRefused)
+                }
+                Err(error) => {
+                    MetaResponse::Refused(meta_signal_flow::StoreRefusal::Store(error.to_string()))
+                }
+            },
+            _ => MetaResponse::Refused(meta_signal_flow::StoreRefusal::Store(
+                StoreError::NotConfigured.to_string(),
+            )),
+        };
+        let ready = if matches!(&response, MetaResponse::Configured(_)) {
+            match store.configuration_snapshot() {
+                Ok(Some(_)) => {
+                    *initialization_error
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                    true
+                }
+                Ok(None) => false,
+                Err(error) => {
+                    *initialization_error
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.to_string());
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        (response, ready)
+    }
+
+    fn serve_configuring_ordinary(
+        listener: &UnixListener,
+        ready: &AtomicBool,
+        stopping: &AtomicBool,
+    ) -> Result<(), String> {
+        while !ready.load(Ordering::SeqCst) && !stopping.load(Ordering::SeqCst) {
+            let (mut peer, _) = listener.accept().map_err(|error| error.to_string())?;
+            if ready.load(Ordering::SeqCst) || stopping.load(Ordering::SeqCst) {
+                break;
+            }
+            peer.set_read_timeout(Some(Duration::from_secs(5)))
+                .and_then(|_| peer.set_write_timeout(Some(Duration::from_secs(5))))
+                .map_err(|error| error.to_string())?;
+            let response = ConfigurationStartup::configuring_ordinary_response(peer.read_query()?);
+            peer.write_response(&response)?;
+        }
+        Ok(())
+    }
+
+    fn serve_configuring_meta(
+        listener: &UnixListener,
+        store: &ConfigurationOnlyStore,
+        message_nexus_binary_option: &str,
+        ready: &AtomicBool,
+        stopping: &AtomicBool,
+        ordinary_socket: &Path,
+        initialization_error: &Mutex<Option<String>>,
+    ) -> Result<(), String> {
+        while !ready.load(Ordering::SeqCst) && !stopping.load(Ordering::SeqCst) {
+            let (mut peer, _) = listener.accept().map_err(|error| error.to_string())?;
+            if stopping.load(Ordering::SeqCst) {
+                break;
+            }
+            peer.set_read_timeout(Some(Duration::from_secs(5)))
+                .and_then(|_| peer.set_write_timeout(Some(Duration::from_secs(5))))
+                .map_err(|error| error.to_string())?;
+            if let Some(refusal) = ConfigurationStartup::peer_is_authorized_for_configuration(
+                peer.peer_process(),
+                message_nexus_binary_option,
+            ) {
+                peer.write_meta_response(&MetaResponse::MetaRefused(refusal))?;
+                continue;
+            }
+            let (response, becomes_ready) = ConfigurationStartup::configuring_meta_response(
+                store,
+                peer.read_meta_query()?,
+                initialization_error,
+            );
+            peer.write_meta_response(&response)?;
+            if becomes_ready {
+                ready.store(true, Ordering::SeqCst);
+                let _ = UnixStream::connect(ordinary_socket);
+            }
+        }
+        Ok(())
+    }
+
+    fn serve_normal_configuration(
+        start: &flow_ethos::Start,
+        signals: &TerminationSignals,
+        listeners: &NexusListeners,
+        initial_error: Option<String>,
+    ) -> Result<(), ConfigureOnlyError> {
+        let store = ConfigurationOnlyStore::open(Path::new(&start.store_path))
+            .map_err(ConfigureOnlyError::Store)?;
+        let message_nexus_binary_option = store
+            .configuration_snapshot()
+            .map_err(ConfigureOnlyError::Store)?
+            .and_then(|snapshot| snapshot.nexus.message_nexus_binary_option)
+            .unwrap_or_default();
+        let ready = AtomicBool::new(false);
+        let stopping = AtomicBool::new(false);
+        let finished = AtomicBool::new(false);
+        let initialization_error = Mutex::new(initial_error);
+        let ordinary_socket = Path::new(&start.ordinary_socket_path);
+        let meta_socket = Path::new(&start.meta_socket_path);
+        let served = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                if signals.watch(&|| finished.load(Ordering::SeqCst)) {
+                    stopping.store(true, Ordering::SeqCst);
+                    let _ = UnixStream::connect(ordinary_socket);
+                    let _ = UnixStream::connect(meta_socket);
+                }
+            });
+            let ordinary = scope.spawn(|| {
+                ConfigurationStartup::serve_configuring_ordinary(
+                    &listeners.ordinary,
+                    &ready,
+                    &stopping,
+                )
+            });
+            let meta = ConfigurationStartup::serve_configuring_meta(
+                &listeners.meta,
+                &store,
+                &message_nexus_binary_option,
+                &ready,
+                &stopping,
+                ordinary_socket,
+                &initialization_error,
+            );
+            if meta.is_err() {
+                stopping.store(true, Ordering::SeqCst);
+                let _ = UnixStream::connect(ordinary_socket);
+            }
+            let ordinary = ordinary
+                .join()
+                .map_err(|_| "configuration ordinary listener panicked".to_owned())?;
+            finished.store(true, Ordering::SeqCst);
+            meta.and(ordinary)
+        });
+        drop(store);
+        served.map_err(ConfigureOnlyError::Other)
     }
 
     fn serve_one_configuration(
@@ -397,6 +667,7 @@ mod tests {
             net::{UnixListener, UnixStream},
         },
         path::{Path, PathBuf},
+        sync::Mutex,
     };
 
     #[test]
@@ -594,6 +865,84 @@ mod tests {
             curriculum_nexus_path: "/fixture/curriculum.sock".into(),
             lease: 60,
         })
+    }
+
+    #[test]
+    fn config_serving_refuses_effects_and_reports_its_actual_state() {
+        assert_eq!(
+            ConfigurationStartup::configuring_ordinary_response(signal_flow::Query::Start(
+                signal_flow::LaunchProfile {
+                    launch_request_id: "readiness-test".into(),
+                    system_modules: vec!["spirit:core".into()],
+                    user_modules: vec![],
+                    address: signal_flow::Address {
+                        aspect: signal_flow::Aspect::Mind,
+                        topic: "readiness".into(),
+                        layer: signal_flow::Layer::Secondary,
+                    },
+                    model_name: "gpt-test".into(),
+                    effort: "medium".into(),
+                    flow_id_option: None,
+                    remembering: signal_flow::Remembering::Predecessors(0),
+                    herdr_session_name: "test".into(),
+                    leave_outs_option: None,
+                    instruction_prompt: "test".into(),
+                    flow_kind: signal_flow::FlowKind::Regular,
+                    tool_set: signal_flow::ToolSet::Default,
+                },
+            )),
+            signal_flow::Response::StartRejected(signal_flow::StartRejection::NotConfigured)
+        );
+
+        let directory = tempfile::tempdir().expect("temporary home");
+        let store = ConfigurationOnlyStore::open(&directory.path().join("flow.sema"))
+            .expect("fresh store opens");
+        let error = Mutex::new(None);
+        assert_eq!(
+            ConfigurationStartup::configuring_meta_response(&store, MetaQuery::Readiness, &error,),
+            (
+                MetaResponse::Readiness(meta_signal_flow::NexusReadiness::ConfigServing),
+                false,
+            )
+        );
+        let (configured, becomes_ready) = ConfigurationStartup::configuring_meta_response(
+            &store,
+            MetaQuery::Configure(nexus_change("/bin/true", "/tmp/message.sock")),
+            &error,
+        );
+        assert_eq!(
+            configured,
+            MetaResponse::Configured(meta_signal_flow::ConfigureOutcome::Replaced)
+        );
+        assert!(
+            becomes_ready,
+            "the first complete Nexus declaration is ready"
+        );
+        let (unchanged, remains_ready) = ConfigurationStartup::configuring_meta_response(
+            &store,
+            MetaQuery::Configure(nexus_change("/bin/true", "/tmp/message.sock")),
+            &error,
+        );
+        assert_eq!(
+            unchanged,
+            MetaResponse::Configured(meta_signal_flow::ConfigureOutcome::Unchanged)
+        );
+        assert!(remains_ready, "an identical declaration remains ready");
+
+        let initialization_error = Mutex::new(Some("snapshot refused".to_owned()));
+        assert_eq!(
+            ConfigurationStartup::configuring_meta_response(
+                &store,
+                MetaQuery::Readiness,
+                &initialization_error,
+            ),
+            (
+                MetaResponse::Refused(meta_signal_flow::StoreRefusal::Store(
+                    "snapshot refused".to_owned(),
+                )),
+                false,
+            )
+        );
     }
 
     /// A Nexus opened for configuration only holds no counters: a Counters

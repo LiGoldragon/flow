@@ -169,6 +169,85 @@ fn meta_call(
         .expect("meta response decodes")
 }
 
+fn launch_profile() -> signal_flow::LaunchProfile {
+    signal_flow::LaunchProfile {
+        launch_request_id: "not-configured-test".into(),
+        system_modules: vec!["spirit:core".into()],
+        user_modules: vec![],
+        address: signal_flow::Address {
+            aspect: signal_flow::Aspect::Mind,
+            topic: "readiness".into(),
+            layer: signal_flow::Layer::Secondary,
+        },
+        model_name: "gpt-test".into(),
+        effort: "medium".into(),
+        flow_id_option: None,
+        remembering: signal_flow::Remembering::Predecessors(0),
+        herdr_session_name: "test".into(),
+        leave_outs_option: None,
+        instruction_prompt: "test".into(),
+        flow_kind: signal_flow::FlowKind::Regular,
+        tool_set: signal_flow::ToolSet::Default,
+    }
+}
+
+#[test]
+fn ordinary_empty_start_configures_and_becomes_ready_without_restart() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let runtime = tempfile::tempdir().expect("temporary runtime directory");
+    let state = tempfile::tempdir().expect("dedicated state directory");
+    let start = start(runtime.path(), state.path());
+    let mut nexus = spawn(home.path(), runtime.path(), &start, false);
+
+    assert_eq!(
+        meta_call(
+            &mut nexus,
+            &start.meta_socket_path,
+            &meta_signal_flow::Query::Readiness,
+        ),
+        meta_signal_flow::Response::Readiness(meta_signal_flow::NexusReadiness::ConfigServing,)
+    );
+    let mut ordinary = connect(Path::new(&start.ordinary_socket_path), &mut nexus);
+    ordinary
+        .write_query(&signal_flow::Query::Start(launch_profile()))
+        .expect("Start written while configuring");
+    assert_eq!(
+        ordinary.read_response().expect("Start answered"),
+        signal_flow::Response::StartRejected(signal_flow::StartRejection::NotConfigured)
+    );
+    drop(ordinary);
+
+    assert_eq!(
+        meta_call(
+            &mut nexus,
+            &start.meta_socket_path,
+            &meta_signal_flow::Query::Configure(meta_signal_flow::ConfigurationChange::Nexus(
+                configuration(&start, home.path())
+            ),),
+        ),
+        meta_signal_flow::Response::Configured(meta_signal_flow::ConfigureOutcome::Replaced)
+    );
+    assert_eq!(
+        meta_call(
+            &mut nexus,
+            &start.meta_socket_path,
+            &meta_signal_flow::Query::Readiness,
+        ),
+        meta_signal_flow::Response::Readiness(meta_signal_flow::NexusReadiness::Ready)
+    );
+
+    assert!(terminate(&mut nexus).success());
+    let mut reopened = spawn(home.path(), runtime.path(), &start, false);
+    assert_eq!(
+        meta_call(
+            &mut reopened,
+            &start.meta_socket_path,
+            &meta_signal_flow::Query::Readiness,
+        ),
+        meta_signal_flow::Response::Readiness(meta_signal_flow::NexusReadiness::Ready)
+    );
+}
+
 #[test]
 fn two_explicit_starts_serve_disjoint_sockets_and_memory() {
     let home_a = tempfile::tempdir().expect("home A");

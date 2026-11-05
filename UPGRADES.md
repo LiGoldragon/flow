@@ -1,3 +1,10 @@
+# Flow 0.50.0
+
+No Memory family changes. An awake recipient receives every priority through
+its native pane immediately; HardAbrupt alone interrupts a working recipient.
+A Simplified recipient already answering its preceding input leaves later
+messages durably queued and their Sends accepted until its turn is free.
+
 # Flow 0.49.0
 
 Adds the ordinary `Adopt.{ Address NativeSessionId }` operation. The Nexus

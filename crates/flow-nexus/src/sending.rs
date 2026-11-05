@@ -249,13 +249,13 @@ impl SendsRequests for RunningNexus {
                     .into();
                 }
             }
-            let Some(peer) = peer else {
+            if peer.is_none() {
                 return PrivateSendResponse::Refused(Refusal::unidentified(Process {
                     pid: 0,
                     started: 0,
                 }))
                 .into();
-            };
+            }
             let Some(_now) = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .ok()
@@ -360,7 +360,7 @@ impl SendsRequests for RunningNexus {
             drop(_turn);
             match admitted {
                 Ok(PrivateSendResponse::SendAccepted(acceptance)) if direct => {
-                    self.complete_direct_send(&recipient, acceptance.logical_delivery_id)
+                    self.complete_direct_send(&recipient, acceptance)
                 }
                 Ok(private_response) => {
                     let pending = matches!(private_response, PrivateSendResponse::SendAccepted(_))
@@ -1178,7 +1178,11 @@ pub(crate) trait CompletesDirectSends {
         &self,
         address: &Address,
     ) -> Result<Option<crate::waking::WakingLease<'_>>, Box<PrivateSendResponse>>;
-    fn complete_direct_send(&self, address: &Address, logical_id: String) -> SendAnswer;
+    fn complete_direct_send(
+        &self,
+        address: &Address,
+        acceptance: signal_flow::SendAcceptance,
+    ) -> SendAnswer;
     /// The attempt still to settle that carried `logical_id`: the one
     /// outstanding, else the latest parked once its payload was typed.
     fn carrying_attempt(
@@ -1308,7 +1312,11 @@ impl CompletesDirectSends for RunningNexus {
             .rev()
             .find(|attempt| attempt.request_id == logical_id)
     }
-    fn complete_direct_send(&self, address: &Address, logical_id: String) -> SendAnswer {
+    fn complete_direct_send(
+        &self,
+        address: &Address,
+        acceptance: signal_flow::SendAcceptance,
+    ) -> SendAnswer {
         use crate::store::AnnouncesLaunchChanges;
         use signal_flow::{DeliveryState, SendFailure, SendFailureReason, SendReceipt};
         use std::time::{Duration, Instant};
@@ -1325,6 +1333,31 @@ impl CompletesDirectSends for RunningNexus {
             let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
             self.drain_all(address.clone())
         };
+        let logical_id = acceptance.logical_delivery_id.clone();
+        // Waiting is a disposition, not a failed attempt: admission already
+        // made the request durable. Preserve its exact acceptance while no
+        // native attempt exists, and let the ordinary pending path schedule
+        // the Address again after this reply.
+        if matches!(
+            outcome,
+            crate::generated::operation::Outcome::WaitingForTurn(_)
+        ) && matches!(
+            self.store.logical_delivery_snapshot(&logical_id),
+            Ok(Some(signal_flow::DeliverySnapshot {
+                delivery_state: DeliveryState::Queued,
+                ..
+            }))
+        ) && self.carrying_attempt(address, &logical_id).is_none()
+        {
+            let private_response = PrivateSendResponse::SendAccepted(acceptance);
+            return SendAnswer {
+                response: crate::message_projection::visible_send_response(&private_response),
+                private_response,
+                pending: Some(PendingSend {
+                    address: address.clone(),
+                }),
+            };
+        }
         // This budget bounds waiting, not evidence. Expiry is uncertainty,
         // never proof of absence and never permission for a new attempt.
         let deadline = Instant::now() + Duration::from_secs(10);

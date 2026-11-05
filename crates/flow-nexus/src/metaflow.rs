@@ -201,7 +201,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     if direct {
                         let private = match response.private_response {
                             signal_flow::PrivateSendResponse::SendAccepted(accepted) => {
-                                self.complete_direct_send(&recipient, accepted.logical_delivery_id)
+                                self.complete_direct_send(&recipient, accepted)
                                     .private_response
                             }
                             signal_flow::PrivateSendResponse::Refused(refusal) => {

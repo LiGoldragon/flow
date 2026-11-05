@@ -1278,6 +1278,11 @@ fn ended_simplified_claude(fixture: &NexusFixture) -> LaunchedClaude {
     })
 }
 
+/// The launched Claude flow abc123, Simplified and still Active.
+fn active_simplified_claude(fixture: &NexusFixture) -> LaunchedClaude {
+    launched_claude_ended_by_with(fixture, signal_flow::FlowKind::Simplified, "", |_| true)
+}
+
 /// The launched Claude flow abc123, ended by `end`. The fixture Herdr logs
 /// every call and lists no agent; a wake replaces it with the fresh world.
 pub(super) fn launched_claude_ended_by(
@@ -1744,6 +1749,102 @@ fn a_simplified_startup_leaves_its_second_request_ordered() {
         panic!("the first input alone owns the reply binding")
     };
     assert_eq!(binding.input_delivery_id, first.logical_delivery_id);
+}
+
+/// A Simplified flow already owes one reply. Further ordinary Sends are
+/// durably admitted in order and answered with their original acceptance;
+/// waiting for that native turn is not a failed delivery attempt.
+#[test]
+fn a_simplified_reply_wait_returns_each_durable_acceptance_without_native_input() {
+    use crate::sending::SendsRequests;
+    use crate::store::logical_delivery::SimplifiedReplyBinding;
+    use crate::store::{FlowStore, ReadsFlowMemory};
+    use signal_flow::{DeliveryState, Recipient, Response, SendRequest};
+
+    let fixture = NexusFixture::new();
+    super::bind_existing_caller(&fixture, "a001", "pane-1");
+    let launched = active_simplified_claude(&fixture);
+    let at = address(Layer::Secondary);
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: at.clone(),
+        state: State::Awake("abc123".into()),
+        past: vec![],
+        queue: vec![],
+    });
+    let mut recipient_agent = fixture.settled_agent();
+    recipient_agent["agent"] = serde_json::Value::String("claude".into());
+    recipient_agent["agent_session"] = serde_json::json!({
+        "source":"herdr:claude", "agent":"claude", "kind":"id",
+        "value": launched.session
+    });
+    fixture.accept_pane_operations(
+        vec![
+            super::codex_agent_in("pane-1", "terminal-pane-1"),
+            recipient_agent,
+        ],
+        PromptFixture::PromptedUnrecorded("w1:p3"),
+    );
+    fixture
+        .nexus
+        .store
+        .bind_simplified_reply(SimplifiedReplyBinding {
+            flow_id: "abc123".into(),
+            input_delivery_id: "already-in-turn".into(),
+            source: at.clone(),
+            recipient: Address {
+                aspect: Aspect::Mind,
+                topic: "core".into(),
+                layer: Layer::Secondary,
+            },
+            completed: false,
+        })
+        .unwrap();
+    let caller = super::MarkedProcess::spawn("sleep", &["30"], "pane-1");
+    let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
+    let send = |body: &str| {
+        fixture.nexus.send_request(
+            SendRequest {
+                recipient: Recipient::Address(at.clone()),
+                sendable_message: super::sendable_message(Message::Soft(Request::Order(
+                    body.into(),
+                ))),
+            },
+            Some(&peer),
+        )
+    };
+
+    let first = send("first waits");
+    let second = send("second waits behind it");
+    let accepted = [first, second].map(|answer| {
+        assert!(matches!(answer.response, Response::SendAccepted(_)));
+        assert!(answer.pending.is_some(), "waiting remains scheduled");
+        let signal_flow::PrivateSendResponse::SendAccepted(acceptance) = answer.private_response
+        else {
+            panic!("waiting is answered with its durable acceptance")
+        };
+        let snapshot = fixture
+            .nexus
+            .store
+            .logical_delivery_snapshot(&acceptance.logical_delivery_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.delivery_cursor, acceptance.delivery_cursor);
+        assert_eq!(snapshot.delivery_state, DeliveryState::Queued);
+        acceptance.logical_delivery_id
+    });
+    assert_ne!(accepted[0], accepted[1]);
+    let queued = fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue;
+    assert_eq!(
+        queued
+            .iter()
+            .map(|entry| entry.logical_delivery_id.as_str())
+            .collect::<Vec<_>>(),
+        accepted.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+    assert!(
+        fixture.typed().unwrap_or_default().is_empty(),
+        "waiting before a native attempt types nothing"
+    );
 }
 
 #[test]

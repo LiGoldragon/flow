@@ -70,23 +70,19 @@ use crate::claude::{
     ClaudeQueuedHistory, ClaudeTranscriptCursor, LocatesClaudeTranscript, MeasuresClaudeContext,
     ReadsClaudeTurns,
 };
-use crate::codex::{
-    CodexTurnHistory, ReadsCodexTurnHistory, SelectsCodexEndpoint, SubmitsQueuedCodexTurn,
-};
+use crate::codex::{CodexTurnHistory, ReadsCodexTurnHistory, SelectsCodexEndpoint};
 use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
 use crate::composition::{FreshSeat, JoinsPurpose, RendersQueuedWork};
 use crate::delivery::body::RendersNativeContent;
 use crate::delivery::lease::LeasesPanes;
-use crate::delivery::{
-    DeliversMessages, FindsDeliveryTarget, PaneRefusal, ReadsLeasedPane, TargetRefusal,
-};
+use crate::delivery::{DeliversMessages, FindsDeliveryTarget, ReadsLeasedPane};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
     Record_Data_Context_Data,
 };
 use crate::generated::starter::ProfilesFreshSeat;
-use crate::herdr::pane::{PaneAgent, Placement, WritesPane};
-use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes, ReadsHerdrRoster};
+use crate::herdr::pane::{PaneAgent, WritesPane};
+use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes};
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
@@ -106,7 +102,6 @@ use crate::store::queue_delivery::{
 use crate::store::successor::{OwesSuccessors, ReadsContinuity, SuccessionCause, SuccessorIntent};
 use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
-    RecordsFlowLifecycle,
 };
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
@@ -467,19 +462,6 @@ impl NotesRefreshRefusals for RefreshRefusals {
     }
 }
 
-/// Why work was not typed into a live flow's pane. Each is logged by name;
-/// the operation answers `HerdrRefused` for every one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HandOverRefusal {
-    /// The flow is not a live, routable flow Flow holds.
-    Target(TargetRefusal),
-    /// The pane is not writable: gone, not ready, Blocked, or its composer
-    /// holds text or cannot be read.
-    Pane(PaneRefusal),
-    /// Herdr refused the text before any of it reached the pane.
-    Refused,
-}
-
 /// Why a wake did not leave its seat Awake. Every refusal is logged by
 /// name; the operation answers the `Failed` it maps to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -767,10 +749,6 @@ trait WakesInParts {
         startup: &[QueueEntry],
         simplified: bool,
     ) -> bool;
-    /// Types text into a live flow's pane under its lease, as Flow's own
-    /// write: no Priority head, since it is not a Message. A refusal is
-    /// logged by its reason.
-    fn hand_over(&self, flow_id: &str, text: &str) -> Result<(), HandOverRefusal>;
     fn last_launch_profile(&self, flow_id: &str) -> Option<LaunchProfile>;
     /// Writes the context size the flow's native transcript shows now, the
     /// size a Compact of the flow is judged by.
@@ -2009,18 +1987,6 @@ impl PerformsWakeAndDrain for RunningNexus {
         } else {
             queue
         };
-        let soft = |entry: &QueueEntry| matches!(entry.message, signal_flow::Message::Soft(_));
-        // A seat in its turn takes the queue only when a pressing message is
-        // in it; an all-Soft queue waits for the turn's end.
-        if cohort.iter().all(soft) {
-            let resting = match node.harness_kind {
-                HarnessKind::Codex => self.codex_resting(&flow_id),
-                HarnessKind::Claude => self.claude_main_turn_ended(&node),
-            };
-            if !resting {
-                return Outcome::WaitingForTurn(oldest.logical_delivery_id);
-            }
-        }
         let refused = |drained: Vec<QueueEntry>, failure| {
             if drained.is_empty() {
                 Outcome::Failed(failure)
@@ -2029,9 +1995,9 @@ impl PerformsWakeAndDrain for RunningNexus {
             }
         };
         // Native history is anchored before any native input.
-        let (anchor, model) = match node.harness_kind {
+        let anchor = match node.harness_kind {
             HarnessKind::Claude => match self.claude_delivery_cursor(&node) {
-                Some(cursor) => (NativeHistoryAnchor::ClaudeTranscript(cursor), None),
+                Some(cursor) => NativeHistoryAnchor::ClaudeTranscript(cursor),
                 None => return refused(drained, Failed_Data::HerdrRefused),
             },
             HarnessKind::Codex => {
@@ -2044,7 +2010,7 @@ impl PerformsWakeAndDrain for RunningNexus {
                     Err(_) => return refused(drained, Failed_Data::CodexRefused),
                 };
                 match adapter.newest_turn(&node.session_id) {
-                    Ok(newest) => (NativeHistoryAnchor::CodexTurns(newest), Some(adapter)),
+                    Ok(newest) => NativeHistoryAnchor::CodexTurns(newest),
                     Err(_) => return refused(drained, Failed_Data::CodexRefused),
                 }
             }
@@ -2062,7 +2028,6 @@ impl PerformsWakeAndDrain for RunningNexus {
                 return refused(drained, Failed_Data::StoreRefused);
             }
         };
-        let text = cohort.prompt_text(&address);
         let absent = |observation: String| {
             self.store
                 .mark_delivery_absent(
@@ -2074,63 +2039,50 @@ impl PerformsWakeAndDrain for RunningNexus {
                 )
                 .unwrap_or(false)
         };
-        if !cohort.iter().all(soft) {
-            // One Waking carries the whole cohort, every input under its own
-            // id, sender and priority; the strongest priority in it is how
-            // the payload is typed.
-            use crate::message_projection::ProjectsQueueEntry;
-            let waking = cohort
-                .iter()
-                .map(|entry| entry.visible_input(&address))
-                .collect::<Vec<_>>();
-            let visible_sender = oldest.visible_input(&address).visible_sender;
-            let letter = meta_signal_flow::Letter {
-                visible_sender,
-                content: meta_signal_flow::Content::Waking(waking),
-            };
-            let message = if cohort
-                .iter()
-                .any(|entry| matches!(entry.message, signal_flow::Message::HardAbrupt(_)))
-            {
-                meta_signal_flow::Message::HardAbrupt(letter)
-            } else {
-                meta_signal_flow::Message::MiddleAbrupt(letter)
-            };
-            let result = self.deliver(meta_signal_flow::DeliveryRequest {
-                delivery_id: attempt.attempt_id.clone(),
-                flow_id: flow_id.clone(),
-                message,
-            });
-            let proved_absent = matches!(&result,
-                meta_signal_flow::Response::DeliveryRejected(rejected)
-                    if matches!(rejected,
-                        meta_signal_flow::DeliveryRejection::UnknownFlow
-                        | meta_signal_flow::DeliveryRejection::FlowStopped
-                        | meta_signal_flow::DeliveryRejection::RouteUnavailable
-                        | meta_signal_flow::DeliveryRejection::RecipientWorking
-                        | meta_signal_flow::DeliveryRejection::RecipientBlocked
-                        | meta_signal_flow::DeliveryRejection::ComposerOccupied));
-            if proved_absent {
-                absent(format!("{result:?}"));
-                return refused(drained, Failed_Data::HerdrRefused);
-            }
-        } else if let Some(adapter) = model {
-            let submitted = adapter.submit_queued_turn(
-                &node.session_id,
-                &attempt.attempt_id,
-                attempt.native_request_id,
-                &text,
-            );
-            if let Err(error) = &submitted {
-                eprintln!("flow-nexus: Codex submission of queued work is uncertain: {error:?}");
-            }
-        } else if let Err(refusal) = self.hand_over(&flow_id, &text) {
-            // Herdr refused before any of the text reached the pane.
-            return if absent(format!("{refusal:?}")) {
-                refused(drained, Failed_Data::HerdrRefused)
-            } else {
-                refused(drained, Failed_Data::StoreRefused)
-            };
+        // One Waking carries the whole cohort, every input under its own id,
+        // sender and priority. Every priority uses the same pane delivery;
+        // only a cohort containing HardAbrupt interrupts a working seat.
+        use crate::message_projection::ProjectsQueueEntry;
+        let waking = cohort
+            .iter()
+            .map(|entry| entry.visible_input(&address))
+            .collect::<Vec<_>>();
+        let visible_sender = oldest.visible_input(&address).visible_sender;
+        let letter = meta_signal_flow::Letter {
+            visible_sender,
+            content: meta_signal_flow::Content::Waking(waking),
+        };
+        let message = if cohort
+            .iter()
+            .any(|entry| matches!(entry.message, signal_flow::Message::HardAbrupt(_)))
+        {
+            meta_signal_flow::Message::HardAbrupt(letter)
+        } else if cohort
+            .iter()
+            .any(|entry| matches!(entry.message, signal_flow::Message::MiddleAbrupt(_)))
+        {
+            meta_signal_flow::Message::MiddleAbrupt(letter)
+        } else {
+            meta_signal_flow::Message::Soft(letter)
+        };
+        let result = self.deliver(meta_signal_flow::DeliveryRequest {
+            delivery_id: attempt.attempt_id.clone(),
+            flow_id: flow_id.clone(),
+            message,
+        });
+        let proved_absent = matches!(&result,
+            meta_signal_flow::Response::DeliveryRejected(rejected)
+                if matches!(rejected,
+                    meta_signal_flow::DeliveryRejection::UnknownFlow
+                    | meta_signal_flow::DeliveryRejection::FlowStopped
+                    | meta_signal_flow::DeliveryRejection::RouteUnavailable
+                    | meta_signal_flow::DeliveryRejection::RecipientWorking
+                    | meta_signal_flow::DeliveryRejection::RecipientBlocked
+                    | meta_signal_flow::DeliveryRejection::ComposerOccupied
+                    | meta_signal_flow::DeliveryRejection::NotDelivered));
+        if proved_absent {
+            absent(format!("{result:?}"));
+            return refused(drained, Failed_Data::HerdrRefused);
         }
         // Typed once, never typed again: every message the payload carried
         // leaves the queue as an Uncertain attempt of the same native
@@ -2750,38 +2702,6 @@ impl WakesInParts for RunningNexus {
                 flow_id,
                 launch_request_id,
             })
-    }
-
-    fn hand_over(&self, flow_id: &str, text: &str) -> Result<(), HandOverRefusal> {
-        let handed = (|| {
-            let target = self
-                .delivery_target(flow_id)
-                .map_err(HandOverRefusal::Target)?;
-            let _lease = self.pane_leases.hold(&target.route);
-            let agent_state = self
-                .writable_state(&target)
-                .map_err(HandOverRefusal::Pane)?;
-            let observe = matches!(agent_state, AgentState::Idle | AgentState::Done);
-            match self.herdr.place(&target.route, text, observe) {
-                Placement::Placed { observed: true }
-                    if self.herdr.route_is_available(&target.node) =>
-                {
-                    let _ = self.store.record_active(flow_id);
-                    Ok(())
-                }
-                Placement::Placed { .. } => Ok(()),
-                // It may have reached the pane: it is never typed twice.
-                Placement::Uncertain => {
-                    eprintln!("flow-nexus: work typed into flow {flow_id}, reaction unknown");
-                    Ok(())
-                }
-                Placement::Refused => Err(HandOverRefusal::Refused),
-            }
-        })();
-        if let Err(refusal) = &handed {
-            eprintln!("flow-nexus: work not typed into flow {flow_id}: {refusal:?}");
-        }
-        handed
     }
 
     fn last_launch_profile(&self, flow_id: &str) -> Option<LaunchProfile> {

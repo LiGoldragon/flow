@@ -24,10 +24,14 @@ fn letter(text: &str) -> Letter {
 
 impl NexusFixture {
     fn deliver(&self, delivery_id: &str, message: Message) -> MetaResponse {
+        self.deliver_to("908786", delivery_id, message)
+    }
+
+    fn deliver_to(&self, flow_id: &str, delivery_id: &str, message: Message) -> MetaResponse {
         self.nexus
             .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
                 delivery_id: delivery_id.into(),
-                flow_id: "908786".into(),
+                flow_id: flow_id.into(),
                 message,
             }))
     }
@@ -161,6 +165,73 @@ fn soft_is_presented_immediately_without_interrupting_a_working_recipient() {
         fixture.typed().as_deref(),
         Some("Soft.{ Nexus Text.«when you rest» }")
     );
+}
+
+/// Both native harnesses use one pane delivery path at every priority and
+/// seat state. Hard alone interrupts a Working recipient; every other case
+/// places the prompt without an interrupt.
+#[test]
+fn both_harnesses_deliver_every_priority_and_only_hard_interrupts_working() {
+    use crate::store::RegistersFlowIdentity;
+    for harness_kind in [
+        signal_flow::HarnessKind::Claude,
+        signal_flow::HarnessKind::Codex,
+    ] {
+        for working in [false, true] {
+            for (priority, message) in [
+                ("hard", Message::HardAbrupt(letter("hard"))),
+                ("middle", Message::MiddleAbrupt(letter("middle"))),
+                ("soft", Message::Soft(letter("soft"))),
+            ] {
+                let fixture = NexusFixture::new();
+                let (flow_id, mut agent) = if harness_kind == signal_flow::HarnessKind::Claude {
+                    super::waking::claude_seat(&fixture, 40_000);
+                    (
+                        super::waking::CLAUDE_SEAT,
+                        super::waking::claude_agent(&fixture),
+                    )
+                } else {
+                    fixture
+                        .nexus
+                        .store
+                        .register_flow(fixture.node())
+                        .expect("delivery target registered");
+                    ("908786", fixture.current_agent())
+                };
+                agent["agent_status"] =
+                    serde_json::Value::String(if working { "working" } else { "idle" }.into());
+                let harness_name = match harness_kind {
+                    signal_flow::HarnessKind::Claude => "claude",
+                    signal_flow::HarnessKind::Codex => "codex",
+                };
+                fixture.accept_pane_operations(vec![agent], PromptFixture::Prompted("w1:p3"));
+
+                let response = fixture.deliver_to(
+                    flow_id,
+                    &format!("{harness_name}-{working}-{priority}"),
+                    message,
+                );
+                let MetaResponse::Delivered(delivery) = response else {
+                    panic!("{harness_name} {working} {priority}: {response:?}")
+                };
+                let expected = if working && priority == "hard" {
+                    InterruptWitness::Observed
+                } else {
+                    InterruptWitness::NotRequested
+                };
+                assert_eq!(
+                    delivery.interrupt_witness, expected,
+                    "{harness_name} {working} {priority}"
+                );
+                assert!(
+                    fixture
+                        .typed()
+                        .is_some_and(|typed| typed.contains(priority)),
+                    "{harness_name} {working} {priority}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

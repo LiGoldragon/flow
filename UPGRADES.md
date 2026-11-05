@@ -1,3 +1,9 @@
+# Flow 0.51.0
+
+An admitted Send whose native receipt remains uncertain answers with its same
+durable acceptance and current Uncertain state. It is never submitted again;
+only an exact native receipt answers Sent.
+
 # Flow 0.50.0
 
 No Memory family changes. An awake recipient receives every priority through

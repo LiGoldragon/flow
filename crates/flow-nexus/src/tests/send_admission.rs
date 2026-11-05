@@ -274,17 +274,24 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         };
         writer.join().unwrap();
         if duplicate {
-            assert!(
-                matches!(
-                    answer,
-                    Response::Failed(signal_flow::VisibleSendFailure {
-                        visible_send_failure_reason:
-                            signal_flow::VisibleSendFailureReason::ReceiptUncertain,
-                        ..
-                    })
-                ),
-                "{:?}",
-                answer
+            let Response::SendAccepted(accepted) = answer else {
+                panic!("uncertain admitted send: {answer:?}")
+            };
+            assert_eq!(
+                accepted.visible_delivery_state,
+                signal_flow::VisibleDeliveryState::Uncertain
+            );
+            use crate::store::send_outcome::RecordsSendOutcomes;
+            let outcomes = fixture.nexus.store.read_send_outcomes().unwrap();
+            let meta_signal_flow::OrdinarySendOutcome::Accepted(durable) =
+                &outcomes.last().unwrap().ordinary_send_outcome
+            else {
+                panic!("uncertain send remains an acceptance")
+            };
+            assert_eq!(durable.delivery_cursor, accepted.delivery_cursor);
+            assert_eq!(
+                durable.delivery_state,
+                signal_flow::DeliveryState::Uncertain
             );
             continue;
         }

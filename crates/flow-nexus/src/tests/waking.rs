@@ -1847,6 +1847,83 @@ fn a_simplified_reply_wait_returns_each_durable_acceptance_without_native_input(
     );
 }
 
+/// An address lease never holds admission or another recipient: the held
+/// recipient answers promptly with its acceptance while the other dispatches.
+#[test]
+fn a_held_address_accepts_while_an_independent_recipient_dispatches() {
+    use crate::sending::SendsRequests;
+    use crate::store::{FlowStore, ReadsFlowMemory};
+    use signal_flow::{Recipient, Response, SendRequest};
+
+    let fixture = NexusFixture::new();
+    super::bind_existing_caller(&fixture, "a001", "pane-1");
+    let held = address(Layer::Secondary);
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: held.clone(),
+        state: State::Asleep,
+        past: vec![],
+        queue: vec![],
+    });
+    let mut independent = address(Layer::Secondary);
+    independent.topic = "independent".into();
+    claude_seat(&fixture, 40_000);
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: independent.clone(),
+        state: State::Awake(CLAUDE_SEAT.into()),
+        past: vec![],
+        queue: vec![],
+    });
+    fixture.accept_pane_operations(
+        vec![
+            super::codex_agent_in("pane-1", "terminal-pane-1"),
+            claude_agent(&fixture),
+        ],
+        PromptFixture::PromptedUnrecorded("w1:p3"),
+    );
+    let caller = super::MarkedProcess::spawn("sleep", &["30"], "pane-1");
+    let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
+    let lease = fixture.nexus.waking.hold(&held).expect("address held");
+    let first = fixture.nexus.send_request(
+        SendRequest {
+            recipient: Recipient::Address(held.clone()),
+            sendable_message: super::sendable_message(Message::MiddleAbrupt(Request::Order(
+                "held admission".into(),
+            ))),
+        },
+        Some(&peer),
+    );
+    assert!(
+        matches!(first.response, Response::SendAccepted(_)),
+        "held: {:?}",
+        first.response
+    );
+    assert!(first.pending.is_some());
+    assert_eq!(stored(&fixture, Layer::Secondary).queue.len(), 1);
+    fixture
+        .nexus
+        .store
+        .accept_logical_delivery(
+            &independent,
+            SentBy::Sender(address(Layer::Tertiary)),
+            Delivery::Wake,
+            Message::Soft(Request::Order("independent dispatch".into())),
+            None,
+        )
+        .unwrap();
+    assert!(matches!(
+        fixture.nexus.perform(Operation::Drain(independent)),
+        Outcome::Drained(_)
+    ));
+    assert!(
+        fixture
+            .typed()
+            .unwrap_or_default()
+            .contains("independent dispatch"),
+        "the other address dispatches while the first lease remains held"
+    );
+    drop(lease);
+}
+
 #[test]
 fn a_wake_that_cannot_start_puts_the_work_back_and_stays_asleep() {
     let fixture = NexusFixture::new();

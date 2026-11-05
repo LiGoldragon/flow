@@ -173,6 +173,9 @@ trait RunsFakeAppServer {
     /// Run `run` answers a reconciliation: `thread/read` with the thread
     /// idle or active, then one page of `turns`, newest first.
     fn serve_turn_history(&self, run: u64, thread: &str, idle: bool, turns: Vec<serde_json::Value>);
+    /// Run `run` answers the single `thread/turns/list` request used to
+    /// anchor a delivery before native input.
+    fn serve_newest_turn(&self, run: u64, turn: Option<&str>);
     fn queued_turn_texts(&self) -> Vec<String>;
 }
 
@@ -289,6 +292,21 @@ impl RunsFakeAppServer for FakeAppServer {
             })),
             frame(&serde_json::json!({
                 "id": 3,
+                "result": { "data": turns, "nextCursor": null }
+            })),
+        ]
+        .concat();
+        std::fs::write(self.directory.path().join(format!("frames-{run}")), frames).unwrap();
+    }
+
+    fn serve_newest_turn(&self, run: u64, turn: Option<&str>) {
+        let turns = turn
+            .map(|turn| vec![serde_json::json!({ "id": turn })])
+            .unwrap_or_default();
+        let frames = [
+            frame(&serde_json::json!({ "id": 1, "result": {} })),
+            frame(&serde_json::json!({
+                "id": 2,
                 "result": { "data": turns, "nextCursor": null }
             })),
         ]
@@ -636,6 +654,17 @@ fn a_call_queued_before_a_crash_is_answered_from_its_record_when_replayed() {
     })
     .expect("the replayed call answered");
     accepted_text(answer["contentItems"][0]["text"].as_str().unwrap());
+    let replayed = fixture
+        .nexus
+        .store
+        .send_call(&tool_call(THREAD_A, "call-a", "exactly once").tool_call_key)
+        .unwrap()
+        .expect("the original acceptance remains recorded")
+        .send_outcome;
+    assert_eq!(
+        replayed, handled,
+        "the same call key returns its first answer"
+    );
     assert_eq!(
         fixture.target_queue(),
         vec![sent(sender_a(), "exactly once")]
@@ -1679,7 +1708,8 @@ fn a_codex_native_event_delivers_the_oldest_cohort_through_its_pane() {
         verbatim: "Make it so.".into(),
     }));
     let brief = from_core(Request::Order("Your brief.".into()));
-    fixture.awake_codex_seat(vec![psyche.clone(), brief.clone()]);
+    let notice = from_core(Request::Notice("Then report.".into()));
+    fixture.awake_codex_seat(vec![psyche.clone(), brief.clone(), notice.clone()]);
 
     let fake = seat_responding(
         &mut fixture,
@@ -1694,14 +1724,16 @@ fn a_codex_native_event_delivers_the_oldest_cohort_through_its_pane() {
 
     assert_eq!(fixture.typed_count(&psyche), 1);
     assert_eq!(fixture.typed_count(&brief), 1);
+    assert_eq!(fixture.typed_count(&notice), 1);
     assert!(
         fake.queued_turn_texts().is_empty(),
         "pane delivery never starts a Codex turn"
     );
     let typed = fixture.typed().unwrap_or_default();
     assert!(
-        typed.find("Make it so.") < typed.find("Your brief."),
-        "both, in order: {typed}"
+        typed.find("Make it so.") < typed.find("Your brief.")
+            && typed.find("Your brief.") < typed.find("Then report."),
+        "the whole Codex cohort is placed oldest first: {typed}"
     );
     assert!(typed.contains("Sender.{ Psyche core Secondary }"));
     assert_eq!(fixture.seat_queue(), vec![]);
@@ -1964,7 +1996,8 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
     use meta_signal_flow::{Undecided, VisibleQueueDeliveryStanding};
     let mut fixture = NexusFixture::new();
     let first = from_core(Request::Order("First.".into()));
-    fixture.awake_codex_seat(vec![first]);
+    let second = from_core(Request::Order("Second.".into()));
+    fixture.awake_codex_seat(vec![first.clone(), second.clone()]);
     let fake = FakeAppServer::install(vec![]);
     fixture.adapter("gpt-sol", &fake);
     crashed_before_receipt(&fixture);
@@ -1989,20 +2022,80 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
         true,
         vec![history_turn("turn-unrelated", "completed", None)],
     );
+    fake.serve_turn_history(
+        3,
+        SEAT_THREAD,
+        true,
+        vec![history_turn("turn-unrelated", "completed", None)],
+    );
+    fake.serve_newest_turn(4, Some("turn-unrelated"));
+    for run in 5..=20 {
+        fake.serve_turn_history(
+            run,
+            SEAT_THREAD,
+            true,
+            vec![history_turn("turn-unrelated", "completed", None)],
+        );
+    }
     // The undecidable attempt is parked: it names why, is never resent,
     // and no longer holds the queue.
-    assert_eq!(
-        fixture.nexus.perform(Operation::Drain(seat_at())),
-        Outcome::Drained(vec![])
+    let progressed = fixture.nexus.perform(Operation::Drain(seat_at()));
+    assert!(
+        matches!(progressed, Outcome::Drained(_)),
+        "suffix progress: {progressed:?}"
     );
     assert_eq!(
         codex_standings(&fixture),
-        vec![VisibleQueueDeliveryStanding::Uncertain(Some(
-            Undecided::HistoryReplaced
-        ))]
+        vec![
+            VisibleQueueDeliveryStanding::Uncertain(Some(Undecided::HistoryReplaced)),
+            VisibleQueueDeliveryStanding::Uncertain(Some(Undecided::AbsenceUnprovable)),
+        ]
     );
     assert!(fake.queued_turn_texts().is_empty(), "never resent");
     assert_eq!(fixture.seat_queue(), vec![]);
+    let typed = fixture.typed().unwrap_or_default();
+    assert_eq!(
+        typed.matches("First.").count(),
+        0,
+        "the head is not replayed"
+    );
+    assert_eq!(
+        typed.matches("Second.").count(),
+        1,
+        "parking the uncertain head lets its ordered suffix advance"
+    );
+    let third = fake.written_on(3, |message| message["method"] == "thread/read");
+    let third_history = third
+        .iter()
+        .filter(|message| {
+            matches!(
+                message["method"].as_str(),
+                Some("thread/read" | "thread/turns/list")
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(third_history[0]["method"], "thread/read");
+    assert_eq!(third_history[1]["method"], "thread/turns/list");
+    assert_eq!(third_history[1]["params"]["itemsView"], "full");
+    let fourth = fake.written_on(4, |message| message["method"] == "thread/turns/list");
+    let newest = fourth
+        .iter()
+        .find(|message| message["method"] == "thread/turns/list")
+        .expect("newest-turn request");
+    assert_eq!(newest["params"]["itemsView"], "notLoaded");
+
+    assert!(matches!(
+        fixture.nexus.perform(Operation::Drain(seat_at())),
+        Outcome::Drained(_)
+    ));
+    let typed = fixture.typed().unwrap_or_default();
+    assert_eq!(typed.matches("First.").count(), 0, "the head stays parked");
+    assert_eq!(
+        typed.matches("Second.").count(),
+        1,
+        "the suffix is not replayed"
+    );
+    assert!(fake.queued_turn_texts().is_empty(), "no later replay");
 }
 
 /// A Nexus start whose reconciliation reads the history of a Codex seat

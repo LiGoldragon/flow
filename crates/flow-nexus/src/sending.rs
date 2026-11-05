@@ -1441,8 +1441,13 @@ impl CompletesDirectSends for RunningNexus {
                 })
                 .into();
             }
-            Ok(DeliveryState::Uncertain | DeliveryState::Attempting) => {
-                SendFailureReason::ReceiptUncertain
+            Ok(delivery_state @ (DeliveryState::Uncertain | DeliveryState::Attempting)) => {
+                return PrivateSendResponse::SendAccepted(signal_flow::SendAcceptance {
+                    logical_delivery_id: logical_id,
+                    delivery_cursor: acceptance.delivery_cursor,
+                    delivery_state,
+                })
+                .into();
             }
             Ok(_) => SendFailureReason::NotSent(observed),
             Err(error) => SendFailureReason::Refused(Refusal::Store(error.to_string())),

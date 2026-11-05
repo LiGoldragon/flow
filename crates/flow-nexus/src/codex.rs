@@ -29,8 +29,36 @@ use tungstenite::{
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
+/// The nonce of one WebSocket upgrade: sixteen bytes, unique per upgrade.
+pub trait ProducesNonce: Send + Sync {
+    fn nonce(&self) -> std::io::Result<[u8; 16]>;
+}
+
+/// The production nonce: sixteen bytes read from `/dev/urandom`.
+pub struct RandomNonce;
+
+impl ProducesNonce for RandomNonce {
+    fn nonce(&self) -> std::io::Result<[u8; 16]> {
+        let mut nonce = [0; 16];
+        std::fs::File::open("/dev/urandom")?.read_exact(&mut nonce)?;
+        Ok(nonce)
+    }
+}
+
+/// A fixed nonce, for fake proxies that answer with the matching accept key.
+#[cfg(test)]
+pub struct SampleNonce;
+
+#[cfg(test)]
+impl ProducesNonce for SampleNonce {
+    fn nonce(&self) -> std::io::Result<[u8; 16]> {
+        Ok(*b"the sample nonce")
+    }
+}
+
 #[derive(Clone)]
 pub struct CodexAdapter {
+    pub nonces: Arc<dyn ProducesNonce>,
     pub executable: PathBuf,
     pub socket: String,
     pub model: String,
@@ -54,6 +82,7 @@ pub struct CodexEndpoints {
     pub next: CodexEndpoint,
     pub timeout: Duration,
     pub workspace_root: PathBuf,
+    pub nonces: Arc<dyn ProducesNonce>,
 }
 
 pub trait SelectsCodexEndpoint {
@@ -93,6 +122,7 @@ impl SelectsCodexEndpoint for CodexEndpoints {
             model: model.to_owned(),
             timeout: self.timeout,
             workspace_root: self.workspace_root.clone(),
+            nonces: self.nonces.clone(),
         })
     }
 }
@@ -151,6 +181,7 @@ impl From<&RuntimeConfiguration> for CodexEndpoints {
             next: CodexEndpoint::from(&configuration.next_codex),
             timeout: Self::APP_SERVER_TIMEOUT,
             workspace_root: PathBuf::from(&configuration.source_root),
+            nonces: Arc::new(RandomNonce),
         }
     }
 }
@@ -469,16 +500,10 @@ impl SpawnsCodexProxy for CodexAdapter {
             .stdout
             .take()
             .ok_or_else(|| CodexAdapterUnavailable::Proxy("proxy stdout was unavailable".into()))?;
-        #[cfg(test)]
-        let nonce = *b"the sample nonce";
-        #[cfg(not(test))]
-        let nonce = {
-            let mut nonce = [0; 16];
-            std::fs::File::open("/dev/urandom")
-                .and_then(|mut source| source.read_exact(&mut nonce))
-                .map_err(|error| CodexAdapterUnavailable::Proxy(error.to_string()))?;
-            nonce
-        };
+        let nonce = self
+            .nonces
+            .nonce()
+            .map_err(|error| CodexAdapterUnavailable::Proxy(error.to_string()))?;
         let key = STANDARD.encode(nonce);
         let mut digest = Sha1::new();
         digest.update(key.as_bytes());
@@ -2048,6 +2073,7 @@ mod tests {
             model: "gpt-5.6".into(),
             timeout: Duration::from_millis(100),
             workspace_root: std::env::current_dir().unwrap(),
+            nonces: Arc::new(SampleNonce),
         }
     }
 
@@ -2084,6 +2110,7 @@ mod tests {
             },
             timeout: Duration::from_secs(10),
             workspace_root: PathBuf::from("/home/test/primary"),
+            nonces: Arc::new(SampleNonce),
         }
     }
 

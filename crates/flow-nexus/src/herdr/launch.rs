@@ -446,14 +446,11 @@ pub(crate) trait PreparesClaudePane {
         "CLAUDE_CODE_SESSION_KIND",
         "FLOW_ID",
     ];
-    /// The permission-skipping flag. The installed `claude` (CriomOS-home's
-    /// claude-code package) already execs `.claude-wrapped
-    /// --dangerously-skip-permissions "$@"`, and 88475f's pane showed it
-    /// twice when Flow passed it as well. Flow therefore never passes it:
-    /// the launch's own permission mode is carried by the flag settings
-    /// below, and the flag, when present, comes once, from the package.
-    #[cfg(test)]
-    const CLAUDE_SKIP_PERMISSIONS_FLAG: &'static str = "--dangerously-skip-permissions";
+    /// The installed `claude` (CriomOS-home's claude-code package) already
+    /// execs `.claude-wrapped --dangerously-skip-permissions "$@"`, and
+    /// 88475f's pane showed the flag twice when Flow passed it as well.
+    /// Flow therefore never passes it: the launch's own permission mode is
+    /// carried by the flag settings below.
     /// Claude offers "Make auto mode your default permission mode?" when the
     /// user settings name a non-auto default mode and no other settings
     /// source names one. Flag settings are such a source: naming the mode the
@@ -1447,10 +1444,8 @@ pub(crate) trait TitlesClaudeSession {
     const TITLE_READBACK_ATTEMPTS: usize = 40;
     /// The source under which Flow reports a pane's displayed agent to Herdr.
     const DISPLAY_SOURCE: &'static str = "flow";
-    #[cfg(not(test))]
-    const TITLE_READBACK_INTERVAL: Duration = Duration::from_millis(250);
-    #[cfg(test)]
-    const TITLE_READBACK_INTERVAL: Duration = Duration::from_millis(1);
+    /// How long to wait between two readbacks of a pane's title.
+    fn title_readback_interval(&self) -> Duration;
     /// Every title the native Claude transcript records for its session, in
     /// the order written; empty while no transcript or no title record
     /// exists.
@@ -1494,6 +1489,10 @@ pub(crate) trait TitlesClaudeSession {
 }
 
 impl TitlesClaudeSession for HerdrCli {
+    fn title_readback_interval(&self) -> Duration {
+        self.title_readback_interval
+    }
+
     fn claude_transcript_titles(
         &self,
         pane: &HerdrPaneBinding,
@@ -1549,7 +1548,7 @@ impl TitlesClaudeSession for HerdrCli {
                 }
                 Err(refusal) => return Err(refusal.into()),
             }
-            std::thread::sleep(Self::TITLE_READBACK_INTERVAL);
+            std::thread::sleep(self.title_readback_interval());
         }
         Err(last)
     }
@@ -1576,7 +1575,7 @@ impl TitlesClaudeSession for HerdrCli {
             if terminal == Some(title.as_str()) && record_agrees {
                 return Ok(());
             }
-            std::thread::sleep(Self::TITLE_READBACK_INTERVAL);
+            std::thread::sleep(self.title_readback_interval());
         }
         Err(TitleRefusal::ReadbackDiffers)
     }
@@ -2257,10 +2256,7 @@ impl ReadsHerdrRefusal for signal_flow::HerdrRefusal {
 /// refusal.
 pub(crate) trait WaitsForPaneRest {
     /// How long Herdr's `agent wait` may take before a bind or a first prompt.
-    #[cfg(not(test))]
-    const REST_WAIT_MILLISECONDS: &'static str = "30000";
-    #[cfg(test)]
-    const REST_WAIT_MILLISECONDS: &'static str = "1000";
+    fn rest_wait(&self) -> Duration;
     /// The refusal text a bind or a prompt that never found the pane at rest
     /// carries; the failure classifier reads it as not-ready.
     const NOT_READY: &'static str = "Herdr agent did not come to rest: not ready";
@@ -2268,6 +2264,10 @@ pub(crate) trait WaitsForPaneRest {
 }
 
 impl WaitsForPaneRest for HerdrCli {
+    fn rest_wait(&self) -> Duration {
+        self.rest_wait
+    }
+
     fn await_pane_rest(&self, pane: &HerdrPaneBinding) -> Result<(), String> {
         self.run_status(&[
             "--session".into(),
@@ -2280,7 +2280,7 @@ impl WaitsForPaneRest for HerdrCli {
             "--until".into(),
             "done".into(),
             "--timeout".into(),
-            Self::REST_WAIT_MILLISECONDS.into(),
+            self.rest_wait().as_millis().to_string(),
         ])
         .map_err(|_| Self::NOT_READY.to_owned())
     }
@@ -3216,7 +3216,6 @@ printf '%s\n' "$alias"
         assert!(!start.contains("--remote-control"));
         assert_eq!(start.matches("--remote").count(), 1);
         assert!(!calls.contains("pane run"));
-        assert!(!start.contains(HerdrCli::CLAUDE_SKIP_PERMISSIONS_FLAG));
         // The harness starts with no positional prompt; the one first prompt
         // travels later in a single app-server turn/start.
         assert!(
@@ -3714,7 +3713,7 @@ printf '%s\n' "$alias"
             .split(' ')
             .filter(|argument| !SYSTEM_TEXT.split(' ').any(|word| word == *argument))
             .collect::<Vec<_>>();
-        let pane_argv = std::iter::once(HerdrCli::CLAUDE_SKIP_PERMISSIONS_FLAG)
+        let pane_argv = std::iter::once("--dangerously-skip-permissions")
             .chain(flow_arguments.iter().copied())
             .collect::<Vec<_>>();
         for flag in pane_argv

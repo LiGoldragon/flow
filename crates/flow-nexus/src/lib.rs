@@ -734,9 +734,9 @@ impl OpensRunningNexus for RunningNexus {
             // A launch's context is composed by the Curriculum Nexus at the
             // socket the configuration names, read as the Nexus opens.
             composer: LaunchComposer::with_presentation_prompt(
-                context::ContextComposer::Curriculum(CurriculumComposer::at(
+                context::ContextComposer(std::sync::Arc::new(CurriculumComposer::at(
                     &snapshot.nexus.curriculum_nexus_path,
-                )),
+                ))),
                 snapshot.nexus.presentation_prompt_option.clone(),
             ),
             dispatch_gate: Mutex::new(()),
@@ -2186,6 +2186,7 @@ mod tests {
                 },
                 timeout: Duration::from_secs(1),
                 workspace_root: directory.path().to_path_buf(),
+                nonces: std::sync::Arc::new(crate::codex::SampleNonce),
             };
             let mut store =
                 FlowStore::open(&directory.path().join("flow.sema")).expect("fixture store");
@@ -2205,15 +2206,15 @@ mod tests {
                 codex_endpoints: codex_endpoints.clone(),
                 herdr: HerdrCli::at(snapshot_program.clone(), flows_root)
                     .with_codex_endpoints(codex_endpoints),
-                composer: LaunchComposer::with_context(crate::context::ContextComposer::Fixture(
-                    FixtureComposer::from(
+                composer: LaunchComposer::with_context(crate::context::ContextComposer(
+                    std::sync::Arc::new(FixtureComposer::from(
                         &[
                             ("spirit-core", "Spirit body."),
                             ("intent-flow", "Intent body."),
                             ("operation-main-flow", "Main flow body."),
                             ("knowledge-flow", "Knowledge body."),
                         ][..],
-                    ),
+                    )),
                 )),
                 dispatch_gate: std::sync::Mutex::new(()),
                 pane_leases: crate::delivery::lease::PaneLeases::default(),

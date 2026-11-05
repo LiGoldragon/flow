@@ -138,6 +138,10 @@ pub struct HerdrCli {
     /// by launch request, held from the start until its session has bound.
     pub(crate) held_system_prompts:
         std::sync::Mutex<std::collections::HashMap<String, std::fs::File>>,
+    /// How long to wait between two readbacks of a pane's title.
+    title_readback_interval: std::time::Duration,
+    /// How long Herdr's `agent wait` may take before a bind or a first prompt.
+    rest_wait: std::time::Duration,
 }
 
 impl Default for HerdrCli {
@@ -184,6 +188,7 @@ impl Default for HerdrCli {
                 },
                 timeout: std::time::Duration::from_secs(10),
                 workspace_root: workspace_root.clone(),
+                nonces: std::sync::Arc::new(crate::codex::RandomNonce),
             },
             claude_transcript_root: claude_home.join("projects"),
             claude_daemon: crate::claude::ClaudeDaemon::under(&claude_home),
@@ -194,6 +199,8 @@ impl Default for HerdrCli {
                 .unwrap_or_else(|| PathBuf::from("flow-hook")),
             ordinary_socket: defaults.ordinary_socket_path(),
             held_system_prompts: Default::default(),
+            title_readback_interval: std::time::Duration::from_millis(250),
+            rest_wait: std::time::Duration::from_secs(30),
         }
     }
 }
@@ -385,6 +392,7 @@ impl ConfiguresHerdrCli for HerdrCli {
                     .parent()
                     .expect("fixture flows root has a parent")
                     .to_path_buf(),
+                nonces: std::sync::Arc::new(crate::codex::SampleNonce),
             },
             claude_transcript_root: fixture_root.join("claude"),
             claude_daemon: crate::claude::ClaudeDaemon::under(&fixture_root.join("claude-home")),
@@ -394,6 +402,8 @@ impl ConfiguresHerdrCli for HerdrCli {
             harness_hook: PathBuf::from("/fixture/bin/flow-hook"),
             ordinary_socket: PathBuf::from("/fixture/run/flow-next/flow/flow.sock"),
             held_system_prompts: Default::default(),
+            title_readback_interval: std::time::Duration::from_millis(1),
+            rest_wait: std::time::Duration::from_secs(1),
         }
     }
 }

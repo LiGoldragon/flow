@@ -221,6 +221,7 @@ impl Dispatches for RunningNexus {
             // binds from it, and its Launch starts as an Unbound one would.
             Query::DeliverAll(_)
             | Query::BindSeat(_)
+            | Query::Adopt(_)
             | Query::ObserveSends(_)
             | Query::ObserveSender(_) => Response::Refused(
                 <signal_flow::Refusal as sending::RefusesUnidentified>::unidentified(
@@ -936,6 +937,16 @@ impl ServesConnection for Connection {
                 let written = self.peer.write_response(&response);
                 drop(self);
                 if matches!(response, Response::Bound(_)) {
+                    nexus.drain_awake(&address);
+                }
+                return written;
+            }
+            Query::Adopt(request) => {
+                let address = request.address.clone();
+                let response = nexus.adopt(request, self.process.as_ref());
+                let written = self.peer.write_response(&response);
+                drop(self);
+                if matches!(response, Response::Adopted(_)) {
                     nexus.drain_awake(&address);
                 }
                 return written;

@@ -968,10 +968,34 @@ impl FindsSeat for RunningNexus {
 pub trait BindsSeats {
     /// Binds the seat `peer` runs in as the metaflow at `address`.
     fn bind_seat(&self, address: Address, peer: Option<&Process>) -> Response;
+    /// Adopts the seat only when its authenticated session is the supplied one.
+    fn adopt(&self, request: signal_flow::Adopt_Data, peer: Option<&Process>) -> Response;
 }
 
 impl BindsSeats for RunningNexus {
     fn bind_seat(&self, address: Address, peer: Option<&Process>) -> Response {
+        self.adopt_seat(address, None, peer)
+    }
+
+    fn adopt(&self, request: signal_flow::Adopt_Data, peer: Option<&Process>) -> Response {
+        match self.adopt_seat(
+            request.address,
+            Some(request.native_session_id.as_str()),
+            peer,
+        ) {
+            Response::Bound(flow_id) => Response::Adopted(flow_id),
+            response => response,
+        }
+    }
+}
+
+impl RunningNexus {
+    fn adopt_seat(
+        &self,
+        address: Address,
+        expected_session: Option<&str>,
+        peer: Option<&Process>,
+    ) -> Response {
         let _turn = self
             .dispatch_gate
             .lock()
@@ -986,14 +1010,16 @@ impl BindsSeats for RunningNexus {
         // A seat Flow already knows binds idempotently through the same
         // kernel-authenticated resolver as Send. Claude children do not
         // carry a Codex thread or resume command.
-        match self.identify_peer_process(peer.clone()) {
-            Ok(Response::Identified(known)) if known == address => {
-                if let Some(flow_id) = self.live_awake_flow(&address) {
-                    return Response::Bound(flow_id);
+        if expected_session.is_none() {
+            match self.identify_peer_process(peer.clone()) {
+                Ok(Response::Identified(known)) if known == address => {
+                    if let Some(flow_id) = self.live_awake_flow(&address) {
+                        return Response::Bound(flow_id);
+                    }
                 }
+                Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+                _ => {}
             }
-            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
-            _ => {}
         }
         let Some(process_id) = u32::try_from(peer.pid).ok() else {
             return unidentified();
@@ -1035,6 +1061,9 @@ impl BindsSeats for RunningNexus {
         let Some(native_session_id) = text("/agent_session/value").or(thread.clone()) else {
             return unidentified();
         };
+        if expected_session.is_some_and(|expected| expected != native_session_id) {
+            return unidentified();
+        }
         let (
             Some(herdr_workspace_id),
             Some(herdr_pane_id),

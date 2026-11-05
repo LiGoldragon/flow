@@ -410,6 +410,56 @@ fn a_claude_seat_binds_on_an_empty_store_under_its_sessions_flow_id() {
     }
 }
 
+/// Adopt authenticates an unbound socket peer before adding it. The supplied
+/// session is checked before the known-seat idempotency shortcut, so the same
+/// live seat cannot use a different session after its first adoption.
+#[test]
+fn an_unbound_claude_seat_adopts_only_its_authenticated_session() {
+    use super::MarkedProcess;
+    use crate::sending::SendsRequests;
+    let fixture = NexusFixture::new();
+    fixture.configures_claude_secondaries();
+    fixture.claims_claude_sessions();
+    let address = psyche_flow_secondary();
+    let claude = MarkedProcess::spawn("sleep", &["30"], "w1:p3");
+    fixture.claude_session_file(claude.0.id(), HARNESS_SESSION);
+    fixture.herdr_panes(
+        vec![claude_in_pane(Some(HARNESS_SESSION))],
+        "{ Psyche flow Secondary }",
+        claude.0.id(),
+    );
+    let peer = FlowStore::process_identity_for_pid(claude.0.id()).unwrap();
+    let request = |session: &str| signal_flow::Adopt_Data {
+        address: address.clone(),
+        native_session_id: session.into(),
+    };
+
+    assert!(matches!(
+        fixture
+            .nexus
+            .adopt(request("different-session"), Some(&peer)),
+        Response::Refused(Refusal::Unidentified(_))
+    ));
+    assert_eq!(fixture.nexus.live_awake_flow(&address), None);
+
+    for _ in 0..2 {
+        assert_eq!(
+            fixture.nexus.adopt(request(HARNESS_SESSION), Some(&peer)),
+            Response::Adopted(HARNESS_FLOW_ID.into())
+        );
+    }
+    assert!(matches!(
+        fixture
+            .nexus
+            .adopt(request("different-session"), Some(&peer)),
+        Response::Refused(Refusal::Unidentified(_))
+    ));
+    assert_eq!(
+        fixture.nexus.live_awake_flow(&address).as_deref(),
+        Some(HARNESS_FLOW_ID)
+    );
+}
+
 /// A pane Herdr holds no agent record for names no seat: BindSeat refuses,
 /// and what the pane showed is kept as raw evidence (its pane, its label,
 /// no session, the time it was read), never made into an identity.

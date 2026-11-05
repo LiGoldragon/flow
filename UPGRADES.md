@@ -1,3 +1,14 @@
+# Flow 0.49.0
+
+Adds the ordinary `Adopt.{ Address NativeSessionId }` operation. The Nexus
+authenticates the Unix peer, locates its actual Herdr seat and native session,
+and requires that session to equal the request before deriving its FlowId and
+using the existing atomic running-seat adoption. It answers `Adopted.FlowId`
+or the existing typed `Refused` response. `BindSeat` remains available.
+
+No Memory family changes. A fresh 0.49 Memory can run beside 0.48; adoption
+does not migrate or import the earlier store.
+
 # Flow 0.48.0
 
 Merges the complete 0.47.0 line with configured native harness arguments and

@@ -120,4 +120,11 @@ mod tests {
             assert_eq!(pair[1], ("end", pair[0].1));
         }
     }
+
+    #[test]
+    fn a_held_pane_does_not_hold_another() {
+        let leases = PaneLeases::default();
+        let _first = leases.hold(&route("w1:p1"));
+        let _second = leases.hold(&route("w1:p2"));
+    }
 }

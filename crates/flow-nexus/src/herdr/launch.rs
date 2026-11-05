@@ -3216,6 +3216,7 @@ printf '%s\n' "$alias"
         assert!(!start.contains("--remote-control"));
         assert_eq!(start.matches("--remote").count(), 1);
         assert!(!calls.contains("pane run"));
+        assert!(!start.contains("--dangerously-skip-permissions"));
         // The harness starts with no positional prompt; the one first prompt
         // travels later in a single app-server turn/start.
         assert!(

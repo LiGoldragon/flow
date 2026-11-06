@@ -3,7 +3,8 @@
 An Address names its Model: `Address.{ Aspect Topic Model }`,
 `Model.[ Fable Opus Sonnet Haiku Astra Sol Luna Terra ]`, in place of its
 Layer; any model stands in any aspect. No model ranks above another. Pins
-signal-flow 45.0.0 (9abc022) and meta-signal-flow 57.0.0 (31e3979).
+signal-flow 45.0.0 (9abc022) and meta-signal-flow 57.0.0 (31e3979); the
+capsule runs Curriculum 3f74f77, whose callers name their Model.
 
 - A recipient is the Address a Send names: `Send.{ { Mind core Sol }
   Soft.Order.«…» }`. `Up` is gone, and with it `NoneAbove` and `NoLayer`; no

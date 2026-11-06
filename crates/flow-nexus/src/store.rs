@@ -2669,20 +2669,6 @@ impl ManagesMetaflowState for FlowStore {
     ) -> Result<ConfigureOutcome, StoreError> {
         use counters::ConfiguresCounters;
         match change {
-            ConfigurationChange::HandoverPolicies(policies) => {
-                if policies.iter().enumerate().any(|(i,p)| p.warning_share_left > 100 || p.every_minutes <= 0 || policies[..i].iter().any(|q| q.model_name == p.model_name)) { return Err(StoreError::DuplicateConfigurationEntry); }
-                let old = engine.match_records(QueryPlan::all(tables.handover))?.records().first().cloned().unwrap_or_else(handover_configuration::unconfigured);
-                FlowStore::replace_configuration_family(engine,tables.handover,vec![handover_configuration::StoredHandoverConfiguration { policies: meta_signal_flow::HandoverPoliciesConfiguration::Configured(policies), archive: old.archive, count: old.count }])
-            }
-            ConfigurationChange::HandoverArchive(path) => {
-                let old = engine.match_records(QueryPlan::all(tables.handover))?.records().first().cloned().unwrap_or_else(handover_configuration::unconfigured);
-                FlowStore::replace_configuration_family(engine,tables.handover,vec![handover_configuration::StoredHandoverConfiguration { policies: old.policies, archive: meta_signal_flow::HandoverArchiveConfiguration::Configured(path), count: old.count }])
-            }
-            ConfigurationChange::HandoverCount(count) => {
-                if count < 0 { return Err(StoreError::DuplicateConfigurationEntry); }
-                let old = engine.match_records(QueryPlan::all(tables.handover))?.records().first().cloned().unwrap_or_else(handover_configuration::unconfigured);
-                FlowStore::replace_configuration_family(engine,tables.handover,vec![handover_configuration::StoredHandoverConfiguration { policies: old.policies, archive: old.archive, count: meta_signal_flow::HandoverCountConfiguration::Configured(count) }])
-            }
             ConfigurationChange::Counters(declared) => self.configure_counters(declared),
             change => FlowStore::configure_meta_change(
                 &self.engine,
@@ -5173,6 +5159,20 @@ pub(crate) trait ReadsFlowMemory {
             return Err(StoreError::TopicRefused(refused.topic.clone()));
         }
         match change {
+            ConfigurationChange::HandoverPolicies(policies) => {
+                if policies.iter().enumerate().any(|(i,p)| p.warning_share_left > 100 || p.every_minutes <= 0 || policies[..i].iter().any(|q| q.model_name == p.model_name)) { return Err(StoreError::DuplicateConfigurationEntry); }
+                let old = engine.match_records(QueryPlan::all(tables.handover))?.records().first().cloned().unwrap_or_else(handover_configuration::unconfigured);
+                FlowStore::replace_configuration_family(engine,tables.handover,vec![handover_configuration::StoredHandoverConfiguration { policies: meta_signal_flow::HandoverPoliciesConfiguration::Configured(policies), archive: old.archive, count: old.count }])
+            }
+            ConfigurationChange::HandoverArchive(path) => {
+                let old = engine.match_records(QueryPlan::all(tables.handover))?.records().first().cloned().unwrap_or_else(handover_configuration::unconfigured);
+                FlowStore::replace_configuration_family(engine,tables.handover,vec![handover_configuration::StoredHandoverConfiguration { policies: old.policies, archive: meta_signal_flow::HandoverArchiveConfiguration::Configured(path), count: old.count }])
+            }
+            ConfigurationChange::HandoverCount(count) => {
+                if count < 0 { return Err(StoreError::DuplicateConfigurationEntry); }
+                let old = engine.match_records(QueryPlan::all(tables.handover))?.records().first().cloned().unwrap_or_else(handover_configuration::unconfigured);
+                FlowStore::replace_configuration_family(engine,tables.handover,vec![handover_configuration::StoredHandoverConfiguration { policies: old.policies, archive: old.archive, count: meta_signal_flow::HandoverCountConfiguration::Configured(count) }])
+            }
             ConfigurationChange::Nexus(nexus) => {
                 if nexus
                     .stable_codex

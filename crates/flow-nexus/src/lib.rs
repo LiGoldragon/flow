@@ -157,6 +157,11 @@ pub trait Dispatches {
     /// origin, or the owner. A protected Address's flow is restarted,
     /// refreshed, replaced or stopped only as the asker may.
     fn dispatch_asked(&self, query: Query, asker: protecting::Asker) -> Response;
+    fn handover_caller(&self, asker: &protecting::Asker) -> Result<signal_flow::Address, signal_flow::HandoverRefusal>;
+    fn keep_handover(&self, request: signal_flow::Keep_Data, asker: protecting::Asker) -> Response;
+    fn drop_handover(&self, request: signal_flow::Drop_Data, asker: protecting::Asker) -> Response;
+    fn glance_handover(&self, address: signal_flow::Address) -> Response;
+    fn read_handover(&self, address: signal_flow::Address) -> Response;
     /// A meta query with no peer behind it: one that records who asked is
     /// refused as PeerUnknown.
     fn dispatch_meta(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response {

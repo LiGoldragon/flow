@@ -130,8 +130,8 @@ const META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA: &str =
 /// family and none of these; it is opened, and each is registered empty.
 const ADDED_IN_0531: &[&str] = &[
     "flow_nexus_meta_protected_address_configuration",
-    "flow_nexus_meta_handover_configuration",
 ];
+const OPTIONAL_HANDOVER_TABLE: &str = "flow_nexus_meta_handover_configuration";
 const HEARTBEAT_STANDING_TABLE_NAME: TableName = TableName::new("flow_nexus_heartbeat_standings");
 const HEARTBEAT_STANDING_FAMILY: &str = "flow-nexus-heartbeat-standing";
 const HEARTBEAT_STANDING_SCHEMA: &str = "flow-nexus-heartbeat-standing-v2";
@@ -4757,7 +4757,7 @@ pub(crate) trait ReadsFlowMemory {
             actual.iter().all(|name| tables.contains(&name.as_str()))
                 && tables
                     .iter()
-                    .all(|name| actual.contains(*name) || ADDED_IN_0531.contains(name))
+                    .all(|name| actual.contains(*name) || ADDED_IN_0531.contains(name) || *name == OPTIONAL_HANDOVER_TABLE)
                 && (ADDED_IN_0531.iter().all(|name| actual.contains(*name))
                     || ADDED_IN_0531.iter().all(|name| !actual.contains(*name)))
         };

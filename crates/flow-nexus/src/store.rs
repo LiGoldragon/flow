@@ -154,6 +154,7 @@ const CONFIGURATION_ONLY_TABLES: &[&str] = &[
     "flow_nexus_meta_heartbeat_configuration",
     "flow_nexus_meta_metaflow_configuration",
     "flow_nexus_meta_protected_address_configuration",
+    "flow_nexus_meta_handover_configuration",
 ];
 /// The tables a running store holds, all of them.
 const RUNNING_TABLES: &[&str] = &[
@@ -207,6 +208,7 @@ const RUNNING_TABLES: &[&str] = &[
     "flow_nexus_restarts",
     "flow_nexus_seat_births",
     "flow_nexus_meta_protected_address_configuration",
+    "flow_nexus_meta_handover_configuration",
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family

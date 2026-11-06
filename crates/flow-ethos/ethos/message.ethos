@@ -13,12 +13,13 @@ Library
   Minutes.Integer
   ; Who sent. Flow is the flow that held the Address when the message was
   ; admitted, its FlowId resolved by Flow from the calling process, never
-  ; supplied by a caller. Living is the living psyche. Nexus is Flow itself
-  ; speaking: a reminder, a landing's order, a compaction's investigation.
+  ; supplied by a caller. Living is the living psyche. Notification is
+  ; Flow itself speaking: a reminder, a landing's order, a compaction's
+  ; investigation.
   ; Captured at admission, never rewritten by refresh or delivery.
   Sender.[ Flow.{ Address FlowId }
            Living
-           Nexus ]
+           Notification ]
   ; The closed set of request kinds. An Order carries the Minutes after
   ; which an unanswered order is reminded; a Result names the logical
   ; delivery of the order it answers; Psyche is the living's words, one or

@@ -107,16 +107,17 @@ pub struct DueReminder {
 
 /// The reminder's next state once one is sent at `now`.
 pub trait AdvancesReminder {
-    fn advanced(&self, now: i64) -> (DueReminder, Option<Reminder>);
+    fn advanced(&self, task_words: &str, now: i64) -> (DueReminder, Option<Reminder>);
 }
 
 impl AdvancesReminder for Reminder {
-    fn advanced(&self, now: i64) -> (DueReminder, Option<Reminder>) {
+    fn advanced(&self, task_words: &str, now: i64) -> (DueReminder, Option<Reminder>) {
         let sent = self.sent + 1;
         let last = sent >= TASK_REMINDERS;
         let notice = format!(
-            "Reminder {sent} of {TASK_REMINDERS}: task {} to {} has no Done after {} minutes.",
-            self.key,
+            "Reminder {sent} of {TASK_REMINDERS}: the task of {} minutes, {}, to {} has no Done after {} minutes.",
+            self.minutes,
+            task_words,
             self.recipient.named(),
             self.minutes * sent,
         );
@@ -129,8 +130,9 @@ impl AdvancesReminder for Reminder {
             (
                 secondary,
                 format!(
-                    "Failure: task {} from {} to {} has no Done after {TASK_REMINDERS} reminders.",
-                    self.key,
+                    "Failure: the task of {} minutes, {}, from {} to {} has no Done after {TASK_REMINDERS} reminders.",
+                    self.minutes,
+                    task_words,
                     self.address.named(),
                     self.recipient.named(),
                 ),
@@ -294,11 +296,13 @@ mod tests {
             due: Some(600),
             sent: 0,
         };
+        let mut notices = Vec::new();
         let mut failures = Vec::new();
         let mut now = 600;
         for _ in 0..TASK_REMINDERS {
-            let (due, next) = reminder.advanced(now);
+            let (due, next) = reminder.advanced("Review the fix", now);
             assert_eq!(due.address, address(Layer::Tertiary));
+            notices.push(due.notice);
             failures.push(due.failure.clone());
             reminder = next.expect("a task stays open for its Done");
             now += 600;
@@ -309,6 +313,26 @@ mod tests {
         assert_eq!(
             failures[3].as_ref().map(|(to, _)| to.clone()),
             Some(address(Layer::Secondary))
+        );
+        assert_eq!(
+            notices[0],
+            "Reminder 1 of 4: the task of 10 minutes, Review the fix, to Field core Secondary has no Done after 10 minutes."
+        );
+        assert!(
+            notices
+                .iter()
+                .all(|text| !text.contains("logical-delivery-1"))
+        );
+        assert_eq!(
+            failures[3].as_ref().map(|(_, text)| text.as_str()),
+            Some(
+                "Failure: the task of 10 minutes, Review the fix, from Mind core Tertiary to Field core Secondary has no Done after 4 reminders."
+            )
+        );
+        assert!(
+            failures[3]
+                .as_ref()
+                .is_some_and(|(_, text)| !text.contains("logical-delivery-1"))
         );
     }
 

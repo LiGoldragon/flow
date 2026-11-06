@@ -7,6 +7,7 @@
 use crate::HoldsStopRequest;
 use crate::RunningNexus;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
+use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::reminder::{AdvancesReminder, RecordsReminders};
 use crate::waking::SleepsAndWakesSeats;
 use signal_flow::{Address, Message, Request, SentBy};
@@ -52,8 +53,32 @@ impl RemindsCallers for RunningNexus {
                     return;
                 }
             };
+            let retained = match self.store.retained_logical_requests() {
+                Ok(retained) => retained,
+                Err(error) => {
+                    eprintln!("flow-nexus: retained tasks unreadable: {error}");
+                    return;
+                }
+            };
             for reminder in due {
-                let (sent, next) = reminder.advanced(now);
+                let Some(task_words) = retained.iter().find_map(|request| {
+                    if request.entry.logical_delivery_id != reminder.key {
+                        return None;
+                    }
+                    let request = match &request.entry.message {
+                        Message::HardAbrupt(request)
+                        | Message::MiddleAbrupt(request)
+                        | Message::Soft(request) => request,
+                    };
+                    match request {
+                        Request::Task(task) => Some(task.string.as_str()),
+                        _ => None,
+                    }
+                }) else {
+                    eprintln!("flow-nexus: a reminder's retained task was unreadable");
+                    continue;
+                };
+                let (sent, next) = reminder.advanced(task_words, now);
                 let mut notices = vec![(sent.address.clone(), sent.notice.clone())];
                 notices.extend(sent.failure.clone());
                 for (address, notice) in notices {

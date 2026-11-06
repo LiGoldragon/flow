@@ -91,7 +91,7 @@ impl NexusFixture {
                 delivery_id: delivery_id.into(),
                 flow_id: "908786".into(),
                 message: Message::Soft(Letter {
-                    visible_sender: signal_flow::VisibleSender::Nexus,
+                    visible_sender: signal_flow::VisibleSender::Notification,
                     content: Content::Text(text.into()),
                 }),
             }))
@@ -343,7 +343,7 @@ fn a_stalled_prompt_left_in_the_composer_is_submitted() {
 
 fn hard_abrupt(text: &str) -> Message {
     Message::HardAbrupt(Letter {
-        visible_sender: signal_flow::VisibleSender::Nexus,
+        visible_sender: signal_flow::VisibleSender::Notification,
         content: Content::Text(text.into()),
     })
 }
@@ -384,7 +384,7 @@ fn a_letter_an_interrupt_put_back_is_taken_out_and_the_hard_abrupt_lands() {
     assert_eq!(presses.len(), 2);
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("HardAbrupt.{ Nexus Text.stop }")
+        Some("HardAbrupt.{ Notification Text.stop }")
     );
 }
 
@@ -427,7 +427,7 @@ fn a_letter_claudes_interrupt_put_back_is_taken_out_by_one_ctrl_c() {
     assert_eq!(fixture.composer_holds(), None, "the pane is free again");
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("HardAbrupt.{ Nexus Text.stop }")
+        Some("HardAbrupt.{ Notification Text.stop }")
     );
 }
 
@@ -473,7 +473,7 @@ fn a_prompt_claudes_interrupt_put_back_is_submitted_again_and_the_hard_abrupt_fo
     assert_eq!(fixture.composer_holds(), None, "the pane is free again");
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("HardAbrupt.{ Nexus Text.stop }")
+        Some("HardAbrupt.{ Notification Text.stop }")
     );
 }
 
@@ -554,7 +554,7 @@ fn a_native_input_matching_a_letter_shaped_prompt_is_submitted_again_never_retra
     fixture.interrupt_restores(FixtureComposer::Claude, text);
     fixture.register_under(FixtureComposer::Claude);
     let message = Message::HardAbrupt(Letter {
-        visible_sender: signal_flow::VisibleSender::Nexus,
+        visible_sender: signal_flow::VisibleSender::Notification,
         content: Content::Waking(vec![
             signal_flow::QueueEntry {
                 logical_delivery_id: "logical-delivery-00000000000000000002".into(),
@@ -611,6 +611,6 @@ fn a_prompt_codexs_interrupt_put_back_is_submitted_again() {
     );
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("HardAbrupt.{ Nexus Text.stop }")
+        Some("HardAbrupt.{ Notification Text.stop }")
     );
 }

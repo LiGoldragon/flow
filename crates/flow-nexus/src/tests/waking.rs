@@ -495,7 +495,7 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
         sent_by: SentBy::Flow,
         delivery: flow_ethos::Delivery::Wake,
         message: Message::Soft(Request::Notice(
-            "Reminder 1 of 4: task logical-delivery-00000000000000000001 has no Done after 30 minutes."
+            "Reminder 1 of 4: the task of 30 minutes, Draft the proposal., to Psyche flow Secondary has no Done after 30 minutes."
                 .into(),
         )),
     };

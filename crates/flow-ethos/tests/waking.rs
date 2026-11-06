@@ -7,7 +7,7 @@ use protos::{Compactable, Protosizable, ReaderBudget};
 // The waking of the ruled contract (bie3-1 2.5): four inputs, oldest first,
 // one top-level vector; the same Address under two FlowIds, the living, and
 // Flow itself.
-const WAKING: &str = "[ { logical-delivery-7 Flow.{ { Psyche vision Primary } f94581 } Soft.Order.{ 30 «Draft the proposal.» } } { logical-delivery-8 Living Soft.Psyche.[ { «a context» «the living said { braces }» } ] } { logical-delivery-9 Flow.{ { Psyche vision Primary } e3a1b2 } MiddleAbrupt.Result.{ logical-delivery-7 «Done.» } } { logical-delivery-10 Nexus HardAbrupt.Notice.«a datom inside: { x }» } ]";
+const WAKING: &str = "[ { logical-delivery-7 Flow.{ { Psyche vision Primary } f94581 } Soft.Order.{ 30 «Draft the proposal.» } } { logical-delivery-8 Living Soft.Psyche.[ { «a context» «the living said { braces }» } ] } { logical-delivery-9 Flow.{ { Psyche vision Primary } e3a1b2 } MiddleAbrupt.Result.{ logical-delivery-7 «Done.» } } { logical-delivery-10 Notification HardAbrupt.Notice.«a datom inside: { x }» } ]";
 
 fn budget() -> Budget {
     Budget {
@@ -36,10 +36,10 @@ fn a_waking_keeps_each_sender_as_admitted() {
         .map(|input| match &input.sender {
             Sender::Flow(flow) => flow.flow_id.clone(),
             Sender::Living => "Living".to_owned(),
-            Sender::Nexus => "Nexus".to_owned(),
+            Sender::Notification => "Notification".to_owned(),
         })
         .collect();
-    assert_eq!(senders, ["f94581", "Living", "e3a1b2", "Nexus"]);
+    assert_eq!(senders, ["f94581", "Living", "e3a1b2", "Notification"]);
 }
 
 #[test]

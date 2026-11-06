@@ -1393,7 +1393,7 @@ pub(crate) mod tests {
                 topic: "flow".into(),
                 layer: signal_flow::Layer::Secondary
             }),
-            "[ { Nexus Soft.Order.investigate } ]"
+            "[ { Notification Soft.Order.investigate } ]"
         );
     }
 

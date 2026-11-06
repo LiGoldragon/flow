@@ -319,7 +319,7 @@ mod tests {
 
     fn soft(text: &str) -> Message {
         Message::Soft(Letter {
-            visible_sender: signal_flow::VisibleSender::Nexus,
+            visible_sender: signal_flow::VisibleSender::Notification,
             content: Content::Text(text.into()),
         })
     }
@@ -334,13 +334,17 @@ mod tests {
             soft("Stage 1 is deployed; run the tier tests.")
                 .pane_text()
                 .as_str(),
-            "Soft.{ Nexus Text.«Stage 1 is deployed; run the tier tests.» }"
+            "Soft.{ Notification Text.«Stage 1 is deployed; run the tier tests.» }"
         );
         let hard = Message::HardAbrupt(Letter {
-            visible_sender: signal_flow::VisibleSender::Nexus,
+            visible_sender: signal_flow::VisibleSender::Notification,
             content: Content::Text("/compact".into()),
         });
-        assert!(hard.pane_text().as_str().starts_with("HardAbrupt.{ Nexus "));
+        assert!(
+            hard.pane_text()
+                .as_str()
+                .starts_with("HardAbrupt.{ Notification ")
+        );
     }
 
     #[test]
@@ -396,7 +400,7 @@ mod tests {
             )),
         };
         let message = Message::HardAbrupt(Letter {
-            visible_sender: signal_flow::VisibleSender::Nexus,
+            visible_sender: signal_flow::VisibleSender::Notification,
             content: Content::Waking(vec![
                 signal_flow::QueueEntry {
                     logical_delivery_id: input.logical_delivery_id.clone(),
@@ -472,7 +476,7 @@ mod tests {
     fn native_content_commands_and_control_keys_are_still_refused() {
         let native = |text: &str| {
             Message::HardAbrupt(Letter {
-                visible_sender: signal_flow::VisibleSender::Nexus,
+                visible_sender: signal_flow::VisibleSender::Notification,
                 content: Content::Waking(vec![
                     signal_flow::QueueEntry {
                         logical_delivery_id: "native-content".into(),
@@ -543,7 +547,7 @@ mod tests {
 
     #[test]
     fn keys_are_refused_at_their_offset_in_the_pane_text() {
-        let head = "Soft.{ Nexus Text.«".len() as i64;
+        let head = "Soft.{ Notification Text.«".len() as i64;
         for (text, at) in [
             // Each text holds a space, so it is rendered in guillemets.
             ("a \u{1b}b", 2),
@@ -569,7 +573,7 @@ mod tests {
             Some(BodyRefusal::EmptyBody)
         );
         let relay = Message::MiddleAbrupt(Letter {
-            visible_sender: signal_flow::VisibleSender::Nexus,
+            visible_sender: signal_flow::VisibleSender::Notification,
             content: Content::Psyche(Psyche_Data {
                 psyche_context: "context".into(),
                 psyche_verbatim: " ".into(),

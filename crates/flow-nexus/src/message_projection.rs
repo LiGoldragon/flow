@@ -146,7 +146,7 @@ impl ProjectsQueueEntry for flow_ethos::QueueEntry {
         let visible_sender = match &self.sent_by {
             SentBy::Sender(address) => VisibleSender::Sender(address.clone()),
             SentBy::Unknown => VisibleSender::Unknown,
-            SentBy::Flow => VisibleSender::Nexus,
+            SentBy::Flow => VisibleSender::Notification,
         };
         VisibleNativeInput {
             visible_sender,
@@ -163,7 +163,7 @@ pub(crate) fn visible_delivery_snapshot(
         visible_sender: match &value.sent_by {
             SentBy::Sender(address) => VisibleSender::Sender(address.clone()),
             SentBy::Unknown => VisibleSender::Unknown,
-            SentBy::Flow => VisibleSender::Nexus,
+            SentBy::Flow => VisibleSender::Notification,
         },
         address: value.address.clone(),
         visible_delivery_state: visible_delivery_state(&value.delivery_state),
@@ -260,7 +260,7 @@ pub(crate) fn visible_queue_evidence(
             let sender = match &value.sent_by {
                 SentBy::Sender(address) => VisibleSender::Sender(address.clone()),
                 SentBy::Unknown => VisibleSender::Unknown,
-                SentBy::Flow => VisibleSender::Nexus,
+                SentBy::Flow => VisibleSender::Notification,
             };
             meta_signal_flow::VisibleQueueEvidence::Legacy(
                 meta_signal_flow::VisibleQueueEvidence_Legacy_Data {

@@ -14,7 +14,7 @@ pub struct Flow_Data {
 pub enum Sender {
     Flow(Flow_Data),
     Living,
-    Nexus,
+    Notification,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

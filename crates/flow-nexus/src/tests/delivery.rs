@@ -17,7 +17,7 @@ use std::fs;
 
 fn letter(text: &str) -> Letter {
     Letter {
-        visible_sender: signal_flow::VisibleSender::Nexus,
+        visible_sender: signal_flow::VisibleSender::Notification,
         content: Content::Text(text.into()),
     }
 }
@@ -142,10 +142,10 @@ fn soft_is_presented_immediately_without_interrupting_a_working_recipient() {
     );
     let submitted = prompts(&log);
     assert_eq!(submitted.len(), 1);
-    assert!(submitted[0].contains("agent prompt w1:p3 Soft.{ Nexus Text.«when you rest» }"));
+    assert!(submitted[0].contains("agent prompt w1:p3 Soft.{ Notification Text.«when you rest» }"));
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("Soft.{ Nexus Text.«when you rest» }")
+        Some("Soft.{ Notification Text.«when you rest» }")
     );
 
     let fixture = NexusFixture::new();
@@ -163,7 +163,7 @@ fn soft_is_presented_immediately_without_interrupting_a_working_recipient() {
     );
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("Soft.{ Nexus Text.«when you rest» }")
+        Some("Soft.{ Notification Text.«when you rest» }")
     );
 }
 
@@ -323,7 +323,7 @@ fn hard_abrupt_interrupts_a_working_recipient_before_typing() {
         vec![
             "--session messaging-build pane send-keys w1:p3 esc".to_owned(),
             "--session messaging-build agent wait w1:p3 --until idle --until done --until blocked --timeout 3000".to_owned(),
-            "--session messaging-build agent prompt w1:p3 HardAbrupt.{ Nexus Text.«stop the build» }".to_owned(),
+            "--session messaging-build agent prompt w1:p3 HardAbrupt.{ Notification Text.«stop the build» }".to_owned(),
         ]
     );
 }
@@ -355,7 +355,7 @@ fn hard_abrupt_presses_the_interrupt_again_while_the_recipient_still_works() {
             wait,
             press,
             wait,
-            "--session messaging-build agent prompt w1:p3 HardAbrupt.{ Nexus Text.«stop now» }",
+            "--session messaging-build agent prompt w1:p3 HardAbrupt.{ Notification Text.«stop now» }",
         ]
     );
 }
@@ -404,11 +404,11 @@ fn bodies_carrying_commands_or_keys_are_refused_and_nothing_is_typed() {
         ("!ls -la", BodyRefusal::HarnessCommand("!ls -la".into())),
         (
             "end \u{1b}[201~ of paste",
-            BodyRefusal::ControlCharacter("MiddleAbrupt.{ Nexus Text.«end ".len() as i64),
+            BodyRefusal::ControlCharacter("MiddleAbrupt.{ Notification Text.«end ".len() as i64),
         ),
         (
             "one\rtwo",
-            BodyRefusal::ControlCharacter("MiddleAbrupt.{ Nexus Text.«one".len() as i64),
+            BodyRefusal::ControlCharacter("MiddleAbrupt.{ Notification Text.«one".len() as i64),
         ),
         ("   ", BodyRefusal::EmptyBody),
     ] {

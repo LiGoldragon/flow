@@ -2526,14 +2526,14 @@ mod tests {
 
     fn middle_abrupt(text: &str) -> meta_signal_flow::Message {
         meta_signal_flow::Message::MiddleAbrupt(meta_signal_flow::Letter {
-            visible_sender: signal_flow::VisibleSender::Nexus,
+            visible_sender: signal_flow::VisibleSender::Notification,
             content: meta_signal_flow::Content::Text(text.into()),
         })
     }
 
     /// The pane text of a MiddleAbrupt from the Nexus, written out by hand.
     fn rendered(text: &str) -> String {
-        format!("MiddleAbrupt.{{ Nexus Text.«{text}» }}")
+        format!("MiddleAbrupt.{{ Notification Text.«{text}» }}")
     }
 
     fn prompts(operation_log: &std::path::Path) -> Vec<String> {
@@ -2545,7 +2545,7 @@ mod tests {
             .collect()
     }
 
-    const OBSERVED_PROMPT: &str = "--session messaging-build agent prompt w1:p3 MiddleAbrupt.{ Nexus Text.«bare prompt» } --wait --until working --until idle --until done --until blocked --timeout 10000";
+    const OBSERVED_PROMPT: &str = "--session messaging-build agent prompt w1:p3 MiddleAbrupt.{ Notification Text.«bare prompt» } --wait --until working --until idle --until done --until blocked --timeout 10000";
 
     #[test]
     fn observed_send_promotes_a_pending_flow_and_types_only_the_bare_input() {

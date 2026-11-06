@@ -2798,6 +2798,26 @@ mod tests {
                 QueueEvidence::Logical(woken(queued(body)))
             );
         }
+        // Opening the repaired store again changes nothing more.
+        let aligned_rows: Vec<_> = ["first", "second"]
+            .iter()
+            .map(|body| request_rows(&reopened, &format!("logical-{body}")))
+            .collect();
+        let aligned_queue = reopened.metaflow(&address()).unwrap().unwrap();
+        drop(reopened);
+        let reopened = fixture.reopen();
+        assert_eq!(
+            ["first", "second"]
+                .iter()
+                .map(|body| request_rows(&reopened, &format!("logical-{body}")))
+                .collect::<Vec<_>>(),
+            aligned_rows
+        );
+        assert_eq!(
+            reopened.metaflow(&address()).unwrap().unwrap(),
+            aligned_queue
+        );
+        assert!(reopened.delivery_attempts().unwrap().is_empty());
         let Ok(PrepareQueueDelivery::Prepared(attempt)) = prepare_codex(&reopened) else {
             panic!("the aligned oldest request prepares once")
         };

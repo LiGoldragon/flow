@@ -22,7 +22,9 @@ use crate::restarting::{FencesSeatEvents, SeatWitness};
 use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow};
 use crate::store::restart::RecordsRestarts;
 use crate::store::successor::OwesSuccessors;
-use crate::store::{FlowStore, ReadsFlowMemory, ReadsFlowRows, RegistersFlowIdentity};
+use crate::store::{
+    FlowStore, ManagesMetaflowState, ReadsFlowMemory, ReadsFlowRows, RegistersFlowIdentity,
+};
 use crate::waking::SleepsAndWakesSeats;
 use flow_ethos::State;
 use meta_signal_flow::{OldSeat, RestartFailure, RestartPhase, RestartRecord};
@@ -1172,6 +1174,341 @@ fn restart_interrupted_stop_needs_quiesced_spawn() {
         "the interrupted spawn's harness is stopped"
     );
     assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+}
+
+/// abc123's metaflow declared with `system_modules`, the launch's own user
+/// modules, and `root_option`.
+fn declared(fixture: &NexusFixture, system_modules: &[&str], root_option: Option<String>) {
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
+            meta_signal_flow::ConfigureMetaflow {
+                root_option,
+                address: address(Model::Sol),
+                system_modules: system_modules.iter().map(|&module| module.into()).collect(),
+                user_modules: vec!["operation-main-flow".into()],
+                flow_kind: signal_flow::FlowKind::Regular,
+                tool_set: signal_flow::ToolSet::Default,
+                continuity: meta_signal_flow::Continuity::OnDemand,
+                purpose: String::new(),
+                records: vec![],
+            },
+        ]))
+        .expect("metaflow declared");
+}
+
+/// abc123's launch declared as it was launched: it composes.
+fn declared_composable(fixture: &NexusFixture) {
+    declared(fixture, &["spirit-core", "intent-flow"], None);
+}
+
+/// abc123's metaflow declared naming a module Curriculum does not hold.
+fn declared_uncomposable(fixture: &NexusFixture) {
+    declared(fixture, &["vision:absent"], None);
+}
+
+fn harness_flags(fixture: &NexusFixture, flags: &str) {
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::HarnessFlags(vec![
+            meta_signal_flow::ConfigureHarnessFlags {
+                address: address(Model::Sol),
+                harness_flags: flags.into(),
+            },
+        ]))
+        .expect("harness flags configured");
+}
+
+fn resume_refused(category: &str) -> Response {
+    Response::RestartRefused(RestartRefusal::ResumeRefused(ResumeRefused_Data {
+        flow_id: FLOW.into(),
+        string: category.into(),
+    }))
+}
+
+/// The old seat exactly as it was before the refused restart: its harness
+/// `old` running, abc123 Active and Awake in w1:p3, the restart record
+/// `record`, and every Herdr call a read, so no pane was closed, opened or
+/// typed into.
+fn old_seat_untouched(
+    world: &RestartWorld,
+    fixture: &NexusFixture,
+    old: &Process,
+    kept: Option<RestartRecord>,
+) {
+    assert!(FlowStore::process_is_live(old), "the old harness runs on");
+    assert_eq!(route_pane(fixture), OLD_PANE);
+    assert_eq!(node(fixture).session_id, world.seat.session);
+    assert_eq!(node(fixture).flow_lifecycle, FlowLifecycle::Active);
+    assert_eq!(stored(fixture, Model::Sol).state, State::Awake(FLOW.into()));
+    assert_eq!(record(fixture), kept);
+    assert!(
+        world
+            .fresh
+            .calls()
+            .lines()
+            .all(|line| line.contains("api snapshot")
+                || line.contains("process-info")
+                || line.contains("session list")),
+        "only reads reach Herdr: {}",
+        world.fresh.calls()
+    );
+    assert!(world.fresh.user_turns(fixture).is_empty(), "nothing typed");
+}
+
+/// The resume's composition is refused (its declaration names a module
+/// Curriculum does not hold): ResumeRefused NotComposed, answered before
+/// anything is closed or written. No Closing, no Failed; the old harness,
+/// its pane and its process as they were, nothing typed.
+#[test]
+fn restart_composition_refused_old_harness_untouched() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    declared_uncomposable(&fixture);
+
+    assert_eq!(restarted(&fixture), resume_refused("NotComposed"));
+    old_seat_untouched(&world, &fixture, &old, None);
+}
+
+/// The declared root is no directory: ResumeRefused RootRefused, before
+/// anything is closed or written; the old harness as it was.
+#[test]
+fn restart_root_refused_old_harness_untouched() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    let absent = fixture.directory.path().join("absent-root");
+    declared(
+        &fixture,
+        &["spirit-core", "intent-flow"],
+        Some(absent.to_string_lossy().into_owned()),
+    );
+
+    assert_eq!(restarted(&fixture), resume_refused("RootRefused"));
+    old_seat_untouched(&world, &fixture, &old, None);
+}
+
+/// The configured harness flags do not parse: ResumeRefused
+/// MalformedHarnessFlags, before anything is closed or written; the old
+/// harness as it was.
+#[test]
+fn restart_harness_flags_refused_old_harness_untouched() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    harness_flags(&fixture, "'unfinished");
+
+    assert_eq!(restarted(&fixture), resume_refused("MalformedHarnessFlags"));
+    old_seat_untouched(&world, &fixture, &old, None);
+}
+
+/// The resume's command line, built with its title, settings and session
+/// as the spawn builds it, is longer than Herdr types: ResumeRefused
+/// CommandTooLong, before anything is closed or written; the old harness
+/// as it was.
+#[test]
+fn restart_command_line_refused_old_harness_untouched() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    harness_flags(&fixture, &format!("--append {}", "x".repeat(4096)));
+
+    assert_eq!(restarted(&fixture), resume_refused("CommandTooLong"));
+    old_seat_untouched(&world, &fixture, &old, None);
+}
+
+/// Composed first, a restart still closes the old harness once, before the
+/// new pane, then resumes the same session with `--resume`, its hooks aimed
+/// at this Nexus's socket and no other.
+#[test]
+fn restart_precomposed_success_closes_once_resumes_same_session() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    declared_composable(&fixture);
+
+    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+
+    let calls = world.fresh.calls();
+    let closes: Vec<usize> = calls
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains(&format!("pane close {OLD_PANE}")))
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(closes.len(), 1, "{calls}");
+    let create = calls
+        .lines()
+        .position(|line| line.contains("workspace create"))
+        .expect("a new pane");
+    assert!(
+        closes[0] < create,
+        "the old harness closes before the new pane"
+    );
+    assert!(ended(&old));
+    let resumes = world.resumes();
+    assert_eq!(resumes.len(), 1, "{calls}");
+    let resume = &resumes[0];
+    assert!(
+        resume.contains(&format!("--resume {}", world.seat.session)),
+        "{resume}"
+    );
+    assert!(!resume.contains("--session-id"), "{resume}");
+    let sockets = resume.matches(".sock").count();
+    assert!(sockets > 0, "{resume}");
+    assert_eq!(
+        resume
+            .matches("/fixture/run/flow-next/flow/flow.sock")
+            .count(),
+        sockets,
+        "the hooks report to this Nexus only: {resume}"
+    );
+    assert_eq!(node(&fixture).session_id, world.seat.session);
+    assert_eq!(route_pane(&fixture), NEW_PANE);
+    assert_eq!(record(&fixture), None);
+}
+
+/// A restart refused before the close, retried once composition works,
+/// restarts as any restart does: one close, one resume of the same session.
+#[test]
+fn restart_retry_after_composition_refused_restarts() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    declared_uncomposable(&fixture);
+    assert_eq!(restarted(&fixture), resume_refused("NotComposed"));
+    old_seat_untouched(&world, &fixture, &old, None);
+
+    declared_composable(&fixture);
+    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
+        1
+    );
+    assert!(ended(&old));
+    assert_eq!(world.resumes().len(), 1);
+    assert!(world.resumes()[0].contains(&format!("--resume {}", world.seat.session)));
+    assert_eq!(route_pane(&fixture), NEW_PANE);
+    assert_eq!(record(&fixture), None);
+}
+
+/// The Nexus died once Closing was written: its successor composes again,
+/// then closes the old pane once and resumes the same session, as before.
+#[test]
+fn restart_crash_after_closing_reconciles() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    let mut left = RestartRecord {
+        restart_phase: RestartPhase::Closing,
+        ..spawning_record(&world, next_pane("restart-agent"))
+    };
+    left.old_seat.process_option = Some(old.clone());
+    fixture.nexus.store.record_restart(left).unwrap();
+    fixture.reopen_store();
+    fixture.nexus.recover_wakes();
+
+    assert_eq!(
+        world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
+        1
+    );
+    assert!(ended(&old));
+    assert_eq!(world.resumes().len(), 1);
+    assert!(world.resumes()[0].contains(&format!("--resume {}", world.seat.session)));
+    assert_eq!(record(&fixture), None);
+    assert_eq!(route_pane(&fixture), NEW_PANE);
+}
+
+/// The Nexus died once Closing was written, and its successor cannot
+/// compose the resume: the record is Failed NotComposed and the old pane is
+/// not touched; a retry once composition works closes it and resumes.
+#[test]
+fn restart_crash_after_closing_composition_refused_old_harness_untouched() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    let mut left = RestartRecord {
+        restart_phase: RestartPhase::Closing,
+        ..spawning_record(&world, next_pane("restart-agent"))
+    };
+    left.old_seat.process_option = Some(old.clone());
+    fixture.nexus.store.record_restart(left.clone()).unwrap();
+    declared_uncomposable(&fixture);
+    fixture.reopen_store();
+    fixture.nexus.recover_wakes();
+
+    let failed = RestartRecord {
+        restart_phase: RestartPhase::Failed(RestartFailure::ResumeRefused("NotComposed".into())),
+        ..left
+    };
+    old_seat_untouched(&world, &fixture, &old, Some(failed));
+
+    declared_composable(&fixture);
+    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
+        1
+    );
+    assert!(ended(&old));
+    assert_eq!(world.resumes().len(), 1);
+    assert_eq!(record(&fixture), None);
+}
+
+/// What 0.53.0 left: the old pane closed, its harness exited, then the
+/// resume not composed, the record Failed NotComposed. Retried while
+/// composition is still refused, the record stays exactly as it was;
+/// retried once it composes, the same session is resumed with `--resume`,
+/// nothing closed again.
+#[test]
+fn restart_failed_not_composed_by_0530_retry_resumes_same_session() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    assert!(
+        std::process::Command::new(&fixture.snapshot_program)
+            .args(["--session", "fixture-session", "pane", "close", OLD_PANE])
+            .output()
+            .expect("fixture Herdr")
+            .status
+            .success()
+    );
+    assert!(ended(&old), "0.53.0 closed the old harness");
+    let left = RestartRecord {
+        restart_phase: RestartPhase::Failed(RestartFailure::ResumeRefused("NotComposed".into())),
+        old_seat: OldSeat {
+            process_option: Some(old.clone()),
+            ..spawning_record(&world, next_pane("restart-agent")).old_seat
+        },
+        ..spawning_record(&world, next_pane("restart-agent"))
+    };
+    fixture.nexus.store.record_restart(left.clone()).unwrap();
+
+    declared_uncomposable(&fixture);
+    assert_eq!(restarted(&fixture), resume_refused("NotComposed"));
+    assert_eq!(record(&fixture), Some(left));
+    assert!(world.resumes().is_empty());
+
+    declared_composable(&fixture);
+    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
+        1,
+        "only 0.53.0's close: {}",
+        world.fresh.calls()
+    );
+    let resumes = world.resumes();
+    assert_eq!(resumes.len(), 1);
+    assert!(
+        resumes[0].contains(&format!("--resume {}", world.seat.session)),
+        "{}",
+        resumes[0]
+    );
+    assert_eq!(node(&fixture).session_id, world.seat.session);
+    assert_eq!(route_pane(&fixture), NEW_PANE);
+    assert_eq!(record(&fixture), None);
 }
 
 /// Where the old Nexus's hooks report: the place an adopted seat's hooks

@@ -53,7 +53,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.53.0";
+            version = "0.53.1";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -610,6 +610,25 @@
             "tests::restarting::restart_crash_around_bind_commit_delivers_once";
           flow-restart-interrupted-stop-needs-quiesced-spawn = context.exactTest "flow-nexus"
             "tests::restarting::restart_interrupted_stop_needs_quiesced_spawn";
+          # 0.53.1: the resume is composed and validated before the old harness closes.
+          flow-restart-composition-refused-old-harness-untouched = context.exactTest "flow-nexus"
+            "tests::restarting::restart_composition_refused_old_harness_untouched";
+          flow-restart-root-refused-old-harness-untouched = context.exactTest "flow-nexus"
+            "tests::restarting::restart_root_refused_old_harness_untouched";
+          flow-restart-harness-flags-refused-old-harness-untouched = context.exactTest "flow-nexus"
+            "tests::restarting::restart_harness_flags_refused_old_harness_untouched";
+          flow-restart-command-line-refused-old-harness-untouched = context.exactTest "flow-nexus"
+            "tests::restarting::restart_command_line_refused_old_harness_untouched";
+          flow-restart-precomposed-success-closes-once-resumes-same-session = context.exactTest "flow-nexus"
+            "tests::restarting::restart_precomposed_success_closes_once_resumes_same_session";
+          flow-restart-retry-after-composition-refused-restarts = context.exactTest "flow-nexus"
+            "tests::restarting::restart_retry_after_composition_refused_restarts";
+          flow-restart-crash-after-closing-reconciles = context.exactTest "flow-nexus"
+            "tests::restarting::restart_crash_after_closing_reconciles";
+          flow-restart-crash-after-closing-composition-refused-old-harness-untouched = context.exactTest "flow-nexus"
+            "tests::restarting::restart_crash_after_closing_composition_refused_old_harness_untouched";
+          flow-restart-failed-not-composed-by-0530-retry-resumes-same-session = context.exactTest "flow-nexus"
+            "tests::restarting::restart_failed_not_composed_by_0530_retry_resumes_same_session";
           # The cutover with both Nexuses live: the old side cannot take or end
           # the custody a new Nexus Adopted and Restarted.
           flow-restart-cutover-two-nexus = context.exactTest "flow-nexus"

@@ -8,13 +8,17 @@
 //! The RestartRecord is the restart's lock on the flow's Address, durable
 //! in Memory and read by every admission: while it stands, a Send queues,
 //! nothing is handed to the seat, no Stop the seat reports settles it, and
-//! no end of the flow is recorded. Each phase is written before the effect
-//! it names: Closing before the old pane is closed, Closed once the old
-//! pane is gone and its harness process proven exited, Opening before the
-//! new pane is created, Spawning with that pane before the harness is
-//! resumed in it. The resumed seat is bound in one write that names its
-//! route and its SeatBirth and removes the record; its queue then goes
-//! through the ordinary delivery custody.
+//! no end of the flow is recorded. Before Closing is written the resume is
+//! composed and validated in full: its launch composed, its root and
+//! harness flags read, its title, settings and command line built as the
+//! spawn builds them. A refusal there closes nothing and writes nothing:
+//! the old harness runs on and its record stays as it was. Each phase is
+//! written before the effect it names: Closing before the old pane is
+//! closed, Closed once the old pane is gone and its harness process proven
+//! exited, Opening before the new pane is created, Spawning with that pane
+//! before the harness is resumed in it. The resumed seat is bound in one
+//! write that names its route and its SeatBirth and removes the record; its
+//! queue then goes through the ordinary delivery custody.
 //!
 //! A failure keeps the session, the queue and the Address held, as
 //! Failed, for a retry, which reconciles the old harness first, or for the
@@ -65,8 +69,9 @@ pub trait RestartsFlows {
     /// takes it for each step, so a Send arriving meanwhile is admitted and
     /// queues.
     fn restart(&self, flow_id: &str, origin: &Origin) -> Response;
-    /// Takes up every restart an earlier Nexus left: Closing is reconciled
-    /// against the old pane, Closed resumes, Opening is Interrupted, and
+    /// Takes up every restart an earlier Nexus left: Closing and Closed are
+    /// composed again first, then Closing is reconciled against the old
+    /// pane and Closed resumes; Opening is Interrupted, and
     /// Spawning binds the seat its pane shows or is Interrupted. Failed and
     /// Interrupted stay as they are.
     fn recover_restarts(&self);
@@ -233,31 +238,54 @@ impl DiscardsCreatedPane for HerdrCli {
     }
 }
 
+/// What a restart resumes its session with, composed and validated before
+/// the old harness is closed. It is held in memory from Closing through
+/// Spawning, so the launch validated is the launch resumed; a Nexus that
+/// takes up a restart another left composes it again, by the same steps,
+/// before it touches the old seat.
+struct ResumeLaunch {
+    composed_launch: signal_flow::ComposedLaunch,
+    root: meta_signal_flow::Root,
+    harness_arguments: Vec<String>,
+}
+
+/// A restart under way, and the launch it resumes with.
+struct PreparedRestart {
+    record: RestartRecord,
+    resume_launch: ResumeLaunch,
+}
+
 /// The steps of one restart, each run under the gate unless it says not.
 trait RestartsInSteps {
-    /// The checks, then Closing written; a retry of a Failed restart is
-    /// written Closing again, so its old harness is reconciled first.
-    fn begun(&self, flow_id: &str, origin: &Origin) -> Result<RestartRecord, Box<Response>>;
+    /// The checks, the resume composed and validated, then Closing written;
+    /// a retry of a Failed restart is written Closing again, so its old
+    /// harness is reconciled first. A refusal writes nothing.
+    fn begun(&self, flow_id: &str, origin: &Origin) -> Result<PreparedRestart, Box<Response>>;
+    /// A restart another Nexus left at Closing or Closed, its resume
+    /// composed and validated again; refused, the record is Failed and
+    /// nothing is closed.
+    fn taken_up(&self, record: RestartRecord) -> Result<PreparedRestart, Box<Response>>;
     /// The old pane closed, or found gone, and its harness proven exited:
     /// Closed written. Anything else is Failed.
-    fn closed_old(&self, record: RestartRecord) -> Result<RestartRecord, Box<Response>>;
-    /// From Closed: composed, Opening written, the pane opened and recorded
-    /// Spawning, the harness resumed and bound off the gate, then bound or
-    /// abandoned under it.
-    fn resumed(&self, record: RestartRecord) -> Response;
+    fn closed_old(&self, prepared: PreparedRestart) -> Result<PreparedRestart, Box<Response>>;
+    /// From Closed: Opening written, the pane opened and recorded Spawning,
+    /// the harness resumed with the prepared launch and bound off the gate,
+    /// then bound or abandoned under it.
+    fn resumed(&self, prepared: PreparedRestart) -> Response;
     /// The launch a resume runs: the current declaration's modules, the
-    /// flow's own Model, this Nexus's hooks; no brief.
-    fn resumed_launch(
+    /// flow's own Model, this Nexus's hooks; no brief. Composed, its root
+    /// and harness flags read, and its command line rehearsed; nothing is
+    /// written and no pane is touched.
+    fn resume_launch(&self, record: &RestartRecord) -> Result<ResumeLaunch, RestartFailure>;
+    /// The resume's command line built as the spawn builds it, with its
+    /// title, its settings and its session, and checked as the spawn checks
+    /// it; only the pane, which does not exist yet, is a placeholder.
+    fn rehearsed(
         &self,
         record: &RestartRecord,
-    ) -> Result<
-        (
-            signal_flow::ComposedLaunch,
-            meta_signal_flow::Root,
-            Vec<String>,
-        ),
-        RestartFailure,
-    >;
+        launch: &signal_flow::ComposedLaunch,
+        harness_arguments: &[String],
+    ) -> Result<(), RestartFailure>;
     /// Off the gate: the pane holds the same FlowId, session and Model,
     /// verified as an adopted seat is, with the birth of its harness.
     fn verified_resume(
@@ -330,7 +358,7 @@ impl RefusesStoreForRestart for StoreError {
 }
 
 impl RestartsInSteps for RunningNexus {
-    fn begun(&self, flow_id: &str, origin: &Origin) -> Result<RestartRecord, Box<Response>> {
+    fn begun(&self, flow_id: &str, origin: &Origin) -> Result<PreparedRestart, Box<Response>> {
         use crate::store::NamesConfiguredModel;
         use crate::store::address_hold::HoldsLaunchAddress;
         use crate::store::metaflow::SleepsMetaflows;
@@ -361,8 +389,15 @@ impl RestartsInSteps for RunningNexus {
                             attempts: record.attempts + 1,
                             ..record
                         };
+                        // Refused here, the Failed record stays as it was.
+                        let resume_launch = self
+                            .resume_launch(&retried)
+                            .map_err(|failure| Box::new(failure.answer(flow_id)))?;
                         if self.written(&retried) {
-                            Ok(retried)
+                            Ok(PreparedRestart {
+                                record: retried,
+                                resume_launch,
+                            })
                         } else {
                             Err(Box::new(StoreError::StateInvariant.refused()))
                         }
@@ -444,14 +479,35 @@ impl RestartsInSteps for RunningNexus {
             restart_phase: RestartPhase::Closing,
             attempts: 1,
         };
+        // Refused here, nothing is written and the old harness runs on.
+        let resume_launch = self
+            .resume_launch(&record)
+            .map_err(|failure| Box::new(failure.answer(flow_id)))?;
         if !self.written(&record) {
             return Err(Box::new(StoreError::StateInvariant.refused()));
         }
-        Ok(record)
+        Ok(PreparedRestart {
+            record,
+            resume_launch,
+        })
     }
 
-    fn closed_old(&self, record: RestartRecord) -> Result<RestartRecord, Box<Response>> {
+    fn taken_up(&self, record: RestartRecord) -> Result<PreparedRestart, Box<Response>> {
+        match self.resume_launch(&record) {
+            Ok(resume_launch) => Ok(PreparedRestart {
+                record,
+                resume_launch,
+            }),
+            Err(failure) => Err(Box::new(self.failed(record, failure))),
+        }
+    }
+
+    fn closed_old(&self, prepared: PreparedRestart) -> Result<PreparedRestart, Box<Response>> {
         use crate::delivery::lease::LeasesPanes;
+        let PreparedRestart {
+            record,
+            resume_launch,
+        } = prepared;
         let Some(old) = self.seat_node(&record, record.old_seat.herdr_route.clone()) else {
             return Err(Box::new(self.failed(record, RestartFailure::CloseUnproven)));
         };
@@ -495,20 +551,29 @@ impl RestartsInSteps for RunningNexus {
         if !self.written(&closed) {
             return Err(Box::new(StoreError::StateInvariant.refused()));
         }
-        Ok(closed)
+        Ok(PreparedRestart {
+            record: closed,
+            resume_launch,
+        })
     }
 
-    fn resumed(&self, record: RestartRecord) -> Response {
+    fn resumed(&self, prepared: PreparedRestart) -> Response {
+        let PreparedRestart {
+            record,
+            resume_launch:
+                ResumeLaunch {
+                    composed_launch: launch,
+                    root,
+                    harness_arguments,
+                },
+        } = prepared;
         let flow_id = record.flow_id.clone();
-        let opened = {
+        let pane: HerdrPaneBinding;
+        let spawning = {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let (launch, root, harness_arguments) = match self.resumed_launch(&record) {
-                Ok(launch) => launch,
-                Err(failure) => return self.failed(record, failure),
-            };
             // The spawn's intent is durable before any pane exists.
             let opening = RestartRecord {
                 restart_phase: RestartPhase::Opening,
@@ -517,7 +582,7 @@ impl RestartsInSteps for RunningNexus {
             if !self.written(&opening) {
                 return StoreError::StateInvariant.refused();
             }
-            let pane = match self.perform(Operation::Open(Open_Data {
+            pane = match self.perform(Operation::Open(Open_Data {
                 composed_launch: launch.clone(),
                 root: root.clone(),
             })) {
@@ -532,9 +597,8 @@ impl RestartsInSteps for RunningNexus {
             if !self.written(&spawning) {
                 return StoreError::StateInvariant.refused();
             }
-            (spawning, launch, root, harness_arguments, pane)
+            spawning
         };
-        let (spawning, launch, root, harness_arguments, pane) = opened;
         let model = launch.launch_profile.model_name.clone();
         let request = launch.launch_profile.launch_request_id.clone();
         let verified = match self.perform(Operation::Resume(PaneLaunch {
@@ -568,17 +632,7 @@ impl RestartsInSteps for RunningNexus {
         }
     }
 
-    fn resumed_launch(
-        &self,
-        record: &RestartRecord,
-    ) -> Result<
-        (
-            signal_flow::ComposedLaunch,
-            meta_signal_flow::Root,
-            Vec<String>,
-        ),
-        RestartFailure,
-    > {
+    fn resume_launch(&self, record: &RestartRecord) -> Result<ResumeLaunch, RestartFailure> {
         use crate::launching::ReadsHarnessArguments;
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
         let refused = |category: &str| RestartFailure::ResumeRefused(category.into());
@@ -631,7 +685,7 @@ impl RestartsInSteps for RunningNexus {
             tool_set,
             instruction_prompt: String::new(),
         };
-        let launch = match self.perform(Operation::Compose(profile)) {
+        let composed_launch = match self.perform(Operation::Compose(profile)) {
             Outcome::Composed(launch) => launch,
             _ => return Err(refused("NotComposed")),
         };
@@ -641,7 +695,58 @@ impl RestartsInSteps for RunningNexus {
         let harness_arguments = self
             .harness_arguments(&record.address)
             .map_err(|_| refused("MalformedHarnessFlags"))?;
-        Ok((launch, root, harness_arguments))
+        self.rehearsed(record, &composed_launch, &harness_arguments)?;
+        Ok(ResumeLaunch {
+            composed_launch,
+            root,
+            harness_arguments,
+        })
+    }
+
+    fn rehearsed(
+        &self,
+        record: &RestartRecord,
+        launch: &signal_flow::ComposedLaunch,
+        harness_arguments: &[String],
+    ) -> Result<(), RestartFailure> {
+        use crate::harness_command::HarnessCommandResources;
+        use crate::herdr::launch::{
+            ChecksComposedLaunch, ConstructsHarnessCommand, NamesHerdrHarness, PreparesClaudePane,
+            SpawnFailure,
+        };
+        use crate::title::{ShowsNativeTitle, TitlesFlow};
+        let refused = |category: String| RestartFailure::ResumeRefused(category);
+        // Only a Claude harness is resumed in a pane.
+        if launch.harness_kind != HarnessKind::Claude {
+            return Err(refused("HarnessMismatch".into()));
+        }
+        let title = launch
+            .launch_profile
+            .native_title(&record.flow_id)
+            .map_err(|_| refused("TitleRefused".into()))?;
+        let resources = HarnessCommandResources {
+            herdr_session: launch.launch_profile.herdr_session_name.clone(),
+            agent: launch.launch_agent_name(),
+            // The pane is made only once the old harness is closed.
+            pane: "<pane>".into(),
+            program: launch.harness_kind.expected_harness().to_owned(),
+            codex_socket: None,
+            claude_settings: Some(self.herdr.claude_flag_settings(&launch.lean_start())),
+            claude_title: Some(title.as_str().to_owned()),
+            // The longest path a held system prompt is read by.
+            prompt_fd: Some(format!("/proc/{}/fd/{}", std::process::id(), i32::MAX)),
+            claude_session: None,
+            claude_resume: Some(record.native_session_id.clone()),
+            codex_title: None,
+            thread: None,
+        };
+        self.herdr
+            .harness_command(launch, resources, harness_arguments)
+            .map(|_| ())
+            .map_err(|failure| match failure {
+                SpawnFailure::Refused(cause) => refused(format!("{cause:?}")),
+                SpawnFailure::Unattempted(_) => refused("CommandUnformed".into()),
+            })
     }
 
     fn verified_resume(
@@ -866,7 +971,7 @@ impl RestartsFlows for RunningNexus {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.begun(flow_id, origin)
-                .and_then(|record| self.closed_old(record))
+                .and_then(|prepared| self.closed_old(prepared))
         };
         let response = match closed {
             Ok(closed) => self.resumed(closed),
@@ -893,20 +998,35 @@ impl RestartsFlows for RunningNexus {
         for record in records {
             let flow_id = record.flow_id.clone();
             let response = match record.restart_phase.clone() {
+                // Composed before the old pane is touched again: refused,
+                // the record is Failed and the old harness runs on.
                 RestartPhase::Closing => {
                     let closed = {
                         let _turn = self
                             .dispatch_gate
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        self.closed_old(record)
+                        self.taken_up(record)
+                            .and_then(|prepared| self.closed_old(prepared))
                     };
                     match closed {
                         Ok(closed) => self.resumed(closed),
                         Err(response) => *response,
                     }
                 }
-                RestartPhase::Closed => self.resumed(record),
+                RestartPhase::Closed => {
+                    let prepared = {
+                        let _turn = self
+                            .dispatch_gate
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        self.taken_up(record)
+                    };
+                    match prepared {
+                        Ok(prepared) => self.resumed(prepared),
+                        Err(response) => *response,
+                    }
+                }
                 // No pane was recorded: whether Herdr made one is unproven.
                 RestartPhase::Opening => {
                     let _turn = self

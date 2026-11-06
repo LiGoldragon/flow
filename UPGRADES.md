@@ -1,3 +1,29 @@
+# Flow 0.53.1
+
+A Restart composes and validates its resume before it closes anything: the
+launch composed from the Address's current declaration, its root and harness
+flags read, and its title, hook settings and command line built and checked
+as the spawn builds them. Only then is Closing written, the old harness
+closed, and the same native session resumed with that launch. 0.53.0
+composed only after the old harness was closed, so a refused composition
+(`NotComposed`) left the flow with no harness until a retry.
+
+- A refusal before the close answers `RestartRefused.ResumeRefused` with its
+  category (`NotComposed`, `RootRefused`, `MalformedHarnessFlags`,
+  `TitleRefused`, `CommandTooLong`, `ControlCharacter`, `CommandUnformed`,
+  `HarnessMismatch`) and writes nothing: no record for a first restart, and
+  a Failed record left as it was for a retry. The old harness runs on, its
+  pane untouched, nothing typed.
+- The composed launch is held in memory through Closing, Closed and
+  Opening. A Nexus that takes up a restart left at Closing or Closed
+  composes again by the same steps first; refused at Closing, the record is
+  Failed and the old pane is not touched.
+- A Failed record 0.53.0 left (the old harness closed, `NotComposed`) is
+  retried as any Failed record: once composition works, the same session
+  resumes.
+
+Pins and Memory are unchanged: 0.53.1 opens the store 0.53.0 wrote.
+
 # Flow 0.53.0
 
 Frozen 0.52.0 plus Restart. Pins signal-flow 46.0.0 and meta-signal-flow

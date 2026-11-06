@@ -241,7 +241,7 @@ checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
 name = "flow"
-version = "0.53.1"
+version = "0.53.2"
 dependencies = [
  "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
@@ -256,11 +256,11 @@ dependencies = [
 
 [[package]]
 name = "flow-defaults"
-version = "0.53.1"
+version = "0.53.2"
 
 [[package]]
 name = "flow-ethos"
-version = "0.53.1"
+version = "0.53.2"
 dependencies = [
  "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
@@ -270,7 +270,7 @@ dependencies = [
 
 [[package]]
 name = "flow-meta"
-version = "0.53.1"
+version = "0.53.2"
 dependencies = [
  "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
@@ -284,14 +284,14 @@ dependencies = [
 
 [[package]]
 name = "flow-native"
-version = "0.53.1"
+version = "0.53.2"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "flow-nexus"
-version = "0.53.1"
+version = "0.53.2"
 dependencies = [
  "base64",
  "datom-codec 0.33.0",
@@ -499,8 +499,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "meta-signal-flow"
-version = "64.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=efc0bf5d42ce9ce1babaa39d52fd55637bd48f80#efc0bf5d42ce9ce1babaa39d52fd55637bd48f80"
+version = "66.0.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=aef7fd3ae7b0c9fd5419395d6a3fdc45d3c5ea8e#aef7fd3ae7b0c9fd5419395d6a3fdc45d3c5ea8e"
 dependencies = [
  "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
@@ -887,8 +887,8 @@ dependencies = [
 
 [[package]]
 name = "signal-flow"
-version = "51.0.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=9f159d91f5ed08b161fe99da7f964434e4e584d5#9f159d91f5ed08b161fe99da7f964434e4e584d5"
+version = "52.0.0"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=32902052a31745f0ddb6c35c8013146d0dfca4d6#32902052a31745f0ddb6c35c8013146d0dfca4d6"
 dependencies = [
  "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
@@ -1153,49 +1153,49 @@ dependencies = [
 
 [[package]]
 name = "windows_aarch64_gnullvm"
-version = "0.53.1"
+version = "0.53.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a9d8416fa8b42f5c947f8482c43e7d89e73a173cead56d044f6a56104a6d1b53"
 
 [[package]]
 name = "windows_aarch64_msvc"
-version = "0.53.1"
+version = "0.53.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9d782e804c2f632e395708e99a94275910eb9100b2114651e04744e9b125006"
 
 [[package]]
 name = "windows_i686_gnu"
-version = "0.53.1"
+version = "0.53.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "960e6da069d81e09becb0ca57a65220ddff016ff2d6af6a223cf372a506593a3"
 
 [[package]]
 name = "windows_i686_gnullvm"
-version = "0.53.1"
+version = "0.53.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fa7359d10048f68ab8b09fa71c3daccfb0e9b559aed648a8f95469c27057180c"
 
 [[package]]
 name = "windows_i686_msvc"
-version = "0.53.1"
+version = "0.53.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e7ac75179f18232fe9c285163565a57ef8d3c89254a30685b57d83a38d326c2"
 
 [[package]]
 name = "windows_x86_64_gnu"
-version = "0.53.1"
+version = "0.53.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c3842cdd74a865a8066ab39c8a7a473c0778a3f29370b5fd6b4b9aa7df4a499"
 
 [[package]]
 name = "windows_x86_64_gnullvm"
-version = "0.53.1"
+version = "0.53.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ffa179e2d07eee8ad8f57493436566c7cc30ac536a3379fdf008f47f6bb7ae1"
 
 [[package]]
 name = "windows_x86_64_msvc"
-version = "0.53.1"
+version = "0.53.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 

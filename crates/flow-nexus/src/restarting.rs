@@ -1,9 +1,27 @@
 //! Restart: a live flow's harness is closed and its own native session is
 //! resumed in a new pane, the FlowId, session, Model and transcript kept,
 //! with its Address's current launch configuration, modules and hooks aimed
-//! at this Nexus, and no prompt typed. This slice restarts a Claude flow,
-//! Awake and resting, asked from outside; every other case is refused
-//! Unsupported.
+//! at this Nexus, and no prompt typed. A Claude flow, Awake and resting,
+//! asked from outside, is restarted at once. A Claude flow working, asked
+//! from outside, or asking for its own restart, is answered RestartOwed at
+//! once, before anything closes its pane, and its record written Owed: the
+//! restart runs at the first real Stop the bound seat reports after that.
+//! Codex, Asleep and a past flow are refused Unsupported, and so is a
+//! working seat whose harness process Herdr does not show, since no Stop
+//! could be told as its own.
+//!
+//! The correlated Stop: a Stopped report naming the flow's session and
+//! transcript, whose caller, read while it waits for its answer, descends
+//! from the birth of the seat's harness process recorded at Owed and is
+//! marked in the seat's pane, and which arrives once the Owed record is
+//! durable. The Owed record also names the count of the flow's harness
+//! events recorded when it was written, since a Stop report carries no
+//! turn id or cursor; a Stop arriving with fewer recorded is not its Stop.
+//! A Stop is never made up, and an event of any other seat runs nothing.
+//! That Stop is handled as any (an answer it owes queued; no drain, sleep or
+//! refresh, since the record holds the Address), and then the restart runs
+//! from Closing; a seat past its threshold is refreshed only at a later
+//! real Stop of the resumed seat.
 //!
 //! The RestartRecord is the restart's lock on the flow's Address, durable
 //! in Memory and read by every admission: while it stands, a Send queues,
@@ -46,8 +64,8 @@ use meta_signal_flow::{
     RestartRecord,
 };
 use signal_flow::{
-    FlowNode, HarnessKind, HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, Origin, Process,
-    Refusal, Response, RestartRefusal, ResumeRefused_Data, StopRejection,
+    Event, FlowNode, HarnessKind, HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, Origin,
+    Process, Refusal, Response, RestartRefusal, ResumeRefused_Data, StopRejection,
 };
 use std::collections::BTreeSet;
 
@@ -61,14 +79,17 @@ pub struct SeatWitness {
 
 /// Restart as the Nexus serves it.
 pub trait RestartsFlows {
-    /// Restarts `flow_id`, as `origin` asked. Runs off the dispatch gate and
-    /// takes it for each step, so a Send arriving meanwhile is admitted and
-    /// queues.
+    /// Restarts `flow_id`, as `origin` asked, or records it owed. Runs off
+    /// the dispatch gate and takes it for each step, so a Send arriving
+    /// meanwhile is admitted and queues.
     fn restart(&self, flow_id: &str, origin: &Origin) -> Response;
+    /// Runs an owed restart at its correlated Stop: `owed` is the record the
+    /// report's caller was attributed to as it arrived. Whether it ran.
+    fn restart_at_stop(&self, flow_id: &str, event: &Event, owed: RestartRecord) -> bool;
     /// Takes up every restart an earlier Nexus left: Closing is reconciled
     /// against the old pane, Closed resumes, Opening is Interrupted, and
     /// Spawning binds the seat its pane shows or is Interrupted. Failed and
-    /// Interrupted stay as they are.
+    /// Interrupted stay as they are, and Owed still waits for a real Stop.
     fn recover_restarts(&self);
     /// The owner's Stop of a flow under a restart record, under the gate:
     /// every pane Herdr shows holding the session is closed, and the
@@ -91,6 +112,12 @@ pub(crate) trait FencesSeatEvents {
     /// restart holds the flow, and only while the flow still runs where and
     /// as the witness saw it. None witnesses the flow as it stands.
     fn witness_holds(&self, flow_id: &str, witness: Option<&SeatWitness>) -> bool;
+    /// The Owed record a report by `caller` arriving now may run: the
+    /// record Owed and durable, no fewer events recorded than it names,
+    /// and the caller descending from the birth it recorded and marked in
+    /// the seat's pane, where the flow still runs. Read while the caller
+    /// waits for its answer.
+    fn owed_to(&self, flow_id: &str, caller: Option<CallerProcess>) -> Option<RestartRecord>;
 }
 
 /// Closes a pane a restart created, known by the pane and terminal Herdr
@@ -237,10 +264,15 @@ impl DiscardsCreatedPane for HerdrCli {
 trait RestartsInSteps {
     /// The checks, then Closing written; a retry of a Failed restart is
     /// written Closing again, so its old harness is reconciled first.
-    fn begun(&self, flow_id: &str, origin: &Origin) -> Result<RestartRecord, Response>;
+    fn begun(&self, flow_id: &str, origin: &Origin) -> Result<Begun, Box<Response>>;
     /// The old pane closed, or found gone, and its harness proven exited:
     /// Closed written. Anything else is Failed.
-    fn closed_old(&self, record: RestartRecord) -> Result<RestartRecord, Response>;
+    fn closed_old(&self, record: RestartRecord) -> Result<RestartRecord, Box<Response>>;
+    /// A working or asking seat's restart recorded Owed, naming the birth
+    /// of its harness and the count of its events now.
+    fn owed(&self, record: RestartRecord) -> Result<Begun, Box<Response>>;
+    /// From Closed: resumed, then its queue handed to it.
+    fn carried_out(&self, closed: RestartRecord) -> Response;
     /// From Closed: composed, Opening written, the pane opened and recorded
     /// Spawning, the harness resumed and bound off the gate, then bound or
     /// abandoned under it.
@@ -291,6 +323,12 @@ trait RestartsInSteps {
     fn seat_node(&self, record: &RestartRecord, route: HerdrRoute) -> Option<FlowNode>;
 }
 
+/// How a restart begins: now, from Closing, or owed until its Stop.
+enum Begun {
+    Now(Box<RestartRecord>),
+    Owed,
+}
+
 /// A refusal of a restart, naming its flow.
 trait AnswersRestartFailure {
     fn answer(&self, flow_id: &str) -> Response;
@@ -321,34 +359,39 @@ impl AnswersRestartFailure for RestartFailure {
 /// A store that could not be written or read, as a restart answers it.
 trait RefusesStoreForRestart {
     fn refused(self) -> Response;
+    fn boxed(self) -> Box<Response>;
 }
 
 impl RefusesStoreForRestart for StoreError {
     fn refused(self) -> Response {
         Response::Refused(Refusal::Store(self.to_string()))
     }
+
+    fn boxed(self) -> Box<Response> {
+        Box::new(self.refused())
+    }
 }
 
 impl RestartsInSteps for RunningNexus {
-    fn begun(&self, flow_id: &str, origin: &Origin) -> Result<RestartRecord, Response> {
+    fn begun(&self, flow_id: &str, origin: &Origin) -> Result<Begun, Box<Response>> {
         use crate::store::NamesConfiguredModel;
         use crate::store::address_hold::HoldsLaunchAddress;
         use crate::store::metaflow::SleepsMetaflows;
         use crate::store::queue_delivery::AccountsQueueDelivery;
         use crate::waking::{HoldsWakingMetaflows, ReadsClaudeDelivery, WakePolicy};
         let refused = |refusal: fn(String) -> RestartRefusal| {
-            Err(Response::RestartRefused(refusal(flow_id.to_owned())))
+            Err(Box::new(Response::RestartRefused(refusal(
+                flow_id.to_owned(),
+            ))))
         };
         let node = match self.store.flow_node(flow_id) {
             Ok(Some(node)) => node,
             Ok(None) => return refused(RestartRefusal::UnknownFlow),
-            Err(error) => return Err(error.refused()),
+            Err(error) => return Err(error.boxed()),
         };
-        // A flow asking for its own restart is owed one at its Stop, which
-        // this slice does not serve.
-        if matches!(origin, Origin::Flow(asking) if asking.flow_id == flow_id) {
-            return refused(RestartRefusal::Unsupported);
-        }
+        // A flow asking for its own restart is working: it is owed one at
+        // its Stop.
+        let asks_itself = matches!(origin, Origin::Flow(asking) if asking.flow_id == flow_id);
         match self.store.restart_record(flow_id) {
             Ok(None) => {}
             Ok(Some(record)) => {
@@ -360,18 +403,18 @@ impl RestartsInSteps for RunningNexus {
                             ..record
                         };
                         if self.written(&retried) {
-                            Ok(retried)
+                            Ok(Begun::Now(Box::new(retried)))
                         } else {
-                            Err(StoreError::StateInvariant.refused())
+                            Err(StoreError::StateInvariant.boxed())
                         }
                     }
                     RestartPhase::Interrupted(_) => refused(RestartRefusal::Interrupted),
                     _ => refused(RestartRefusal::Busy),
                 };
             }
-            Err(error) => return Err(error.refused()),
+            Err(error) => return Err(error.boxed()),
         }
-        // Asleep, Past, Codex: other slices.
+        // Asleep, Past, Codex: not served.
         if !node.flow_lifecycle.is_live() || node.harness_kind != HarnessKind::Claude {
             return refused(RestartRefusal::Unsupported);
         }
@@ -384,7 +427,7 @@ impl RestartsInSteps for RunningNexus {
         let address = match self.store.metaflow_awake_as(flow_id) {
             Ok(Some(metaflow)) => metaflow.address,
             Ok(None) => return refused(RestartRefusal::Unsupported),
-            Err(error) => return Err(error.refused()),
+            Err(error) => return Err(error.boxed()),
         };
         if self.waking.is_waking(&address)
             || !matches!(self.store.address_hold(flow_id), Ok(None))
@@ -401,30 +444,28 @@ impl RestartsInSteps for RunningNexus {
         ) {
             (Some(actual), Ok(Some(configured))) if actual == configured => {}
             _ => {
-                return Err(Response::RestartRefused(RestartRefusal::ResumeRefused(
-                    ResumeRefused_Data {
+                return Err(Box::new(Response::RestartRefused(
+                    RestartRefusal::ResumeRefused(ResumeRefused_Data {
                         flow_id: flow_id.to_owned(),
                         string: "ModelDiffers".into(),
-                    },
+                    }),
                 )));
             }
         }
         let presence = self.herdr.pane_presence(&node);
-        match presence {
+        // A working seat, or one asking for its own restart, is restarted
+        // at its Stop.
+        let working = match presence {
             PanePresence::Unknown => return refused(RestartRefusal::CloseRefused),
-            // A working seat is restarted at its Stop, which this slice
-            // does not serve.
             PanePresence::Present => {
                 let resting = match self.herdr.pane_agent(&node) {
                     PaneAgent::Present { agent_state, .. } => Self::rests_at(&agent_state),
                     PaneAgent::Absent | PaneAgent::Unreadable => false,
                 };
-                if !resting || !self.claude_main_turn_ended(&node) {
-                    return refused(RestartRefusal::Unsupported);
-                }
+                asks_itself || !resting || !self.claude_main_turn_ended(&node)
             }
-            PanePresence::Bare | PanePresence::Absent => {}
-        }
+            PanePresence::Bare | PanePresence::Absent => asks_itself,
+        };
         let process_option = match presence {
             PanePresence::Present | PanePresence::Bare => {
                 self.herdr.harness_process(&route, &node.session_id)
@@ -442,16 +483,83 @@ impl RestartsInSteps for RunningNexus {
             restart_phase: RestartPhase::Closing,
             attempts: 1,
         };
-        if !self.written(&record) {
-            return Err(StoreError::StateInvariant.refused());
+        if working {
+            return self.owed(record);
         }
-        Ok(record)
+        if !self.written(&record) {
+            return Err(StoreError::StateInvariant.boxed());
+        }
+        Ok(Begun::Now(Box::new(record)))
     }
 
-    fn closed_old(&self, record: RestartRecord) -> Result<RestartRecord, Response> {
+    fn owed(&self, record: RestartRecord) -> Result<Begun, Box<Response>> {
+        use crate::store::events::RecordsHarnessEvents;
+        let flow_id = record.flow_id.clone();
+        // Its Stop is told by the birth of the seat's harness: one a
+        // restart bound, else the one Herdr shows running the session in
+        // its pane now. A seat with no birth shown has no Stop to wait on.
+        let birth = match self.store.seat_birth(&flow_id) {
+            Ok(Some(birth)) if birth.herdr_route == record.old_seat.herdr_route => {
+                Some(birth.process)
+            }
+            Ok(_) => record.old_seat.process_option.clone(),
+            Err(error) => return Err(error.boxed()),
+        };
+        let Some(birth) = birth else {
+            return Err(Box::new(Response::RestartRefused(
+                RestartRefusal::Unsupported(flow_id),
+            )));
+        };
+        let recorded = |store: &FlowStore| {
+            store
+                .events(&flow_id)
+                .map(|events| events.map_or(0, |events| events.len() as i64))
+        };
+        let position = recorded(&self.store).map_err(StoreError::boxed)?;
+        let mut owed = RestartRecord {
+            old_seat: OldSeat {
+                herdr_route: record.old_seat.herdr_route.clone(),
+                process_option: Some(birth),
+            },
+            restart_phase: RestartPhase::Owed(position),
+            ..record
+        };
+        if !self.written(&owed) {
+            return Err(StoreError::StateInvariant.boxed());
+        }
+        // A report recorded while Owed was written is counted before it:
+        // only one arriving after the durable record may run it.
+        let after = recorded(&self.store).map_err(StoreError::boxed)?;
+        if after != position {
+            owed.restart_phase = RestartPhase::Owed(after);
+            if !self.written(&owed) {
+                return Err(StoreError::StateInvariant.boxed());
+            }
+        }
+        eprintln!(
+            "flow-nexus: restart of flow {flow_id} is owed at its Stop, after report {after}"
+        );
+        Ok(Begun::Owed)
+    }
+
+    fn carried_out(&self, closed: RestartRecord) -> Response {
+        let flow_id = closed.flow_id.clone();
+        let response = self.resumed(closed);
+        // The queue that waited goes through the ordinary delivery custody.
+        if let Response::Restarted(_) = &response
+            && let Ok(Some(metaflow)) =
+                crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(&self.store, &flow_id)
+        {
+            crate::waking::SleepsAndWakesSeats::drain_awake(self, &metaflow.address);
+        }
+        response
+    }
+
+    fn closed_old(&self, record: RestartRecord) -> Result<RestartRecord, Box<Response>> {
         use crate::delivery::lease::LeasesPanes;
+        let failed = |record, failure| Box::new(self.failed(record, failure));
         let Some(old) = self.seat_node(&record, record.old_seat.herdr_route.clone()) else {
-            return Err(self.failed(record, RestartFailure::CloseUnproven));
+            return Err(failed(record, RestartFailure::CloseUnproven));
         };
         match self.herdr.pane_ownership(&old) {
             PaneOwnership::Owned | PaneOwnership::Bare => {
@@ -460,15 +568,15 @@ impl RestartsInSteps for RunningNexus {
                     self.perform(Operation::Close(old.clone()))
                 };
                 if closed != Outcome::Closed {
-                    return Err(self.failed(record, RestartFailure::CloseRefused));
+                    return Err(failed(record, RestartFailure::CloseRefused));
                 }
             }
             PaneOwnership::Absent => {}
             PaneOwnership::Unknown => {
-                return Err(self.failed(record, RestartFailure::CloseRefused));
+                return Err(failed(record, RestartFailure::CloseRefused));
             }
             PaneOwnership::Foreign | PaneOwnership::Unproven | PaneOwnership::Unidentified => {
-                return Err(self.failed(record, RestartFailure::CloseUnproven));
+                return Err(failed(record, RestartFailure::CloseUnproven));
             }
         }
         // Closed only by positive identity: the pane gone, no pane holding
@@ -484,14 +592,14 @@ impl RestartsInSteps for RunningNexus {
                 .as_ref()
                 .is_none_or(ProvesExit::has_exited);
         if !gone {
-            return Err(self.failed(record, RestartFailure::CloseUnproven));
+            return Err(failed(record, RestartFailure::CloseUnproven));
         }
         let closed = RestartRecord {
             restart_phase: RestartPhase::Closed,
             ..record
         };
         if !self.written(&closed) {
-            return Err(StoreError::StateInvariant.refused());
+            return Err(StoreError::StateInvariant.boxed());
         }
         Ok(closed)
     }
@@ -863,21 +971,54 @@ impl RestartsFlows for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.begun(flow_id, origin)
-                .and_then(|record| self.closed_old(record))
+            match self.begun(flow_id, origin) {
+                Ok(Begun::Now(record)) => self.closed_old(*record),
+                Ok(Begun::Owed) => return Response::RestartOwed(flow_id.to_owned()),
+                Err(response) => Err(response),
+            }
+        };
+        match closed {
+            Ok(closed) => self.carried_out(closed),
+            Err(response) => *response,
+        }
+    }
+
+    fn restart_at_stop(&self, flow_id: &str, event: &Event, owed: RestartRecord) -> bool {
+        use crate::reporting::RecordsReports;
+        use crate::waking::CorrelatesNativeEvents;
+        let Event::Stopped(stop) = event else {
+            return false;
+        };
+        if !self.correlated_stop(flow_id, stop) {
+            return false;
+        }
+        // The Stop is handled as any: an answer it owes is queued; the
+        // record holds the Address, so nothing is drained, slept or
+        // refreshed.
+        self.after_attributed_report(&flow_id.to_owned(), event);
+        let closed = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !matches!(self.store.restart_record(flow_id), Ok(Some(current)) if current == owed) {
+                return false;
+            }
+            let closing = RestartRecord {
+                restart_phase: RestartPhase::Closing,
+                ..owed
+            };
+            if !self.written(&closing) {
+                return false;
+            }
+            self.closed_old(closing)
         };
         let response = match closed {
-            Ok(closed) => self.resumed(closed),
-            Err(response) => return response,
+            Ok(closed) => self.carried_out(closed),
+            Err(response) => *response,
         };
-        // The queue that waited goes through the ordinary delivery custody.
-        if let Response::Restarted(_) = &response
-            && let Ok(Some(metaflow)) =
-                crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(&self.store, flow_id)
-        {
-            crate::waking::SleepsAndWakesSeats::drain_awake(self, &metaflow.address);
-        }
-        response
+        eprintln!("flow-nexus: owed restart of flow {flow_id} ran at its Stop: {response:?}");
+        true
     }
 
     fn recover_restarts(&self) {
@@ -901,7 +1042,7 @@ impl RestartsFlows for RunningNexus {
                     };
                     match closed {
                         Ok(closed) => self.resumed(closed),
-                        Err(response) => response,
+                        Err(response) => *response,
                     }
                 }
                 RestartPhase::Closed => self.resumed(record),
@@ -928,7 +1069,10 @@ impl RestartsFlows for RunningNexus {
                         Err(_) => self.interrupted(record, Some(pane)),
                     }
                 }
-                RestartPhase::Failed(_) | RestartPhase::Interrupted(_) => continue,
+                // An owed restart still waits for its seat's real Stop.
+                RestartPhase::Owed(_) | RestartPhase::Failed(_) | RestartPhase::Interrupted(_) => {
+                    continue;
+                }
             };
             eprintln!("flow-nexus: restart of flow {flow_id} taken up at start: {response:?}");
         }
@@ -936,7 +1080,9 @@ impl RestartsFlows for RunningNexus {
 
     fn stop_restarting(&self, record: RestartRecord) -> Response {
         let pane = match &record.restart_phase {
-            RestartPhase::Failed(_) => None,
+            // Nothing of an owed restart has run: the seat is stopped as it
+            // stands, its record Failed.Stopped.
+            RestartPhase::Owed(_) | RestartPhase::Failed(_) => None,
             RestartPhase::Interrupted(Some(pane)) => Some(pane.clone()),
             RestartPhase::Interrupted(None) => {
                 return Response::StopRejected(StopRejection::SpawnUnproven);
@@ -1014,5 +1160,30 @@ impl FencesSeatEvents for RunningNexus {
             return false;
         }
         witness.is_none_or(|witness| self.seat_witness(flow_id).as_ref() == Some(witness))
+    }
+
+    fn owed_to(&self, flow_id: &str, caller: Option<CallerProcess>) -> Option<RestartRecord> {
+        use crate::store::events::RecordsHarnessEvents;
+        let record = self.store.restart_record(flow_id).ok()??;
+        let RestartPhase::Owed(position) = record.restart_phase else {
+            return None;
+        };
+        let recorded = self.store.events(flow_id).ok()??.len() as i64;
+        let birth = record.old_seat.process_option.as_ref()?;
+        let route = &record.old_seat.herdr_route;
+        let current = self.seat_witness(flow_id).is_some_and(|witness| {
+            witness.route.herdr_session_name == route.herdr_session_name
+                && witness.route.herdr_pane_id == route.herdr_pane_id
+                && witness.route.herdr_terminal_id == route.herdr_terminal_id
+        });
+        let caller = caller.filter(|_| current && recorded >= position)?;
+        let process = FlowStore::process_identity_for_pid(caller.process_id)?;
+        let attributed = FlowStore::process_lineage(&process).contains(birth)
+            && caller.caller_pane(&self.herdr)
+                == Some(CallerPane {
+                    herdr_session_name: route.herdr_session_name.clone(),
+                    herdr_pane_id: route.herdr_pane_id.clone(),
+                });
+        attributed.then_some(record)
     }
 }

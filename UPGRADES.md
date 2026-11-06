@@ -1,7 +1,8 @@
 # Flow 0.53.0
 
-Frozen 0.52.0 plus Restart. Pins signal-flow 46.0.0 and meta-signal-flow
-58.0.0.
+Frozen 0.52.0 plus Restart. Pins signal-flow 47.0.0 (1b69, branch
+`0.53.0-restart-owed-b75b`, adding `RestartOwed`) and meta-signal-flow 60.0.0
+(3f46, the same branch, on the Warning wire 59.0.0, adding `Owed`).
 
 - `Restart.FlowId` closes a flow's harness and resumes the same native
   session in a new pane: the FlowId, session, model and transcript stay. No
@@ -19,9 +20,28 @@ Frozen 0.52.0 plus Restart. Pins signal-flow 46.0.0 and meta-signal-flow
   Nexus that launched it, is restarted as any resting Claude seat is: the
   same FlowId and native session, resumed with its hooks aimed at this
   Nexus, so its reports reach this Nexus and the old seat's are fenced.
-- A working seat, and a flow asking for its own restart, stay refused
-  `Unsupported`: the wire has no `RestartOwed` answer and no `Owed` phase
-  yet. Nothing is recorded, closed or resumed for them.
+- A Claude seat working, asked from outside, and a flow asking for its own
+  restart (its origin derived from the calling process), are answered
+  `RestartOwed` at once, before anything closes the pane; the record is
+  written `Owed`, naming the birth of the seat's harness and the count of
+  the flow's harness events then, since a Stop report carries no turn id.
+- An owed restart runs at its correlated Stop: the first real Stop naming
+  the flow's session and transcript, from a hook descending from that
+  harness and marked in its pane, arriving after `Owed` is durable. Working
+  events keep it owed; a Stop of no known caller or of another seat runs
+  nothing, and no Stop is made up. That Stop is handled as any (an answer it
+  owes queued; no drain, sleep or refresh), then the restart runs from
+  Closing and the queue drains once to the resumed seat; nothing is typed.
+- A seat past its threshold at that Stop is restarted first; a later real
+  Stop of the resumed seat refreshes it.
+- A Nexus that dies while a restart is owed reopens it `Owed`, still waiting
+  for a real Stop. Inspect shows `Owed`. An owner's Stop of an owed flow
+  closes its seat and records `Failed.Stopped`, as for a failed restart.
+- An Asleep flow asked from outside stays refused `Unsupported`, with
+  nothing recorded, closed or resumed; so do Codex and a past flow.
+- The 59.0.0 meta wire comes with the pin: each `ConfigureThreshold` names
+  its `Warning`. This branch stores and reads it and warns no flow; the
+  Warning work does that.
 
 0.53.0 opens no earlier store, as 0.52.0 does not; it starts from a new store.
 

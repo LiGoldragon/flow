@@ -111,6 +111,7 @@ impl NexusFixture {
                 meta_signal_flow::ConfigureThreshold {
                     model_name: "claude-opus-5-5".into(),
                     refresh,
+                    warning: 0,
                 },
             ]))
             .expect("threshold configured");

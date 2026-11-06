@@ -614,8 +614,22 @@
           # Nexus; a working seat and a flow's own restart stay refused.
           flow-restart-adopted-seat-resumes-hooked-to-this-nexus = context.exactTest "flow-nexus"
             "tests::restarting::restart_adopted_seat_resumes_hooked_to_this_nexus";
-          flow-restart-owed-cases-refused-unsupported = context.exactTest "flow-nexus"
-            "tests::restarting::restart_owed_cases_refused_unsupported";
+          # Restart, the running-seat cutover: a working seat, or a flow
+          # asking for its own restart, is owed it until its correlated Stop.
+          flow-restart-working-owed-until-stop = context.exactTest "flow-nexus"
+            "tests::restarting::restart_working_owed_until_stop";
+          flow-restart-self-owed-answer-before-close = context.exactTest "flow-nexus"
+            "tests::restarting::restart_self_owed_answer_before_close";
+          flow-restart-owed-before-threshold-refresh = context.exactTest "flow-nexus"
+            "tests::restarting::restart_owed_before_threshold_refresh";
+          flow-restart-owed-before-drain = context.exactTest "flow-nexus"
+            "tests::restarting::restart_owed_before_drain";
+          flow-restart-owed-nexus-death-still-waits = context.exactTest "flow-nexus"
+            "tests::restarting::restart_owed_nexus_death_still_waits";
+          flow-restart-inspect-shows-owed = context.exactTest "flow-nexus"
+            "tests::restarting::restart_inspect_shows_owed";
+          flow-restart-asleep-outside-refused-unsupported = context.exactTest "flow-nexus"
+            "tests::restarting::restart_asleep_outside_refused_unsupported";
         }
       );
 

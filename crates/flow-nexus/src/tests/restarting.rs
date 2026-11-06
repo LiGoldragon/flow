@@ -1431,61 +1431,464 @@ fn restart_adopted_seat_resumes_hooked_to_this_nexus() {
     );
 }
 
-/// What stays refused in this slice, because the wire has no answer for
-/// it: a seat working, asked from outside, and a flow asking for its own
-/// restart are each refused Unsupported, with no record written, nothing
-/// closed, nothing resumed, and the flow as it was in its pane.
-#[test]
-fn restart_owed_cases_refused_unsupported() {
-    use crate::restarting::RestartsFlows;
-    let mut fixture = NexusFixture::new();
-    let world = fixture.restart_world(true);
-    let old = world.old_harness();
-    let unchanged = |fixture: &NexusFixture| {
-        assert_eq!(record(fixture), None);
-        assert!(world.calls_naming("pane close").is_empty());
-        assert!(world.resumes().is_empty());
-        assert!(!ended(&old), "the harness still runs");
-        assert_eq!(route_pane(fixture), OLD_PANE);
-        assert_eq!(node(fixture).flow_lifecycle, FlowLifecycle::Active);
-    };
-
-    let own = signal_flow::Origin::Flow(signal_flow::FlowOrigin {
-        flow_id: FLOW.into(),
-        session_id: world.seat.session.clone(),
-    });
-    assert_eq!(
-        fixture.nexus.restart(FLOW, &own),
-        Response::RestartRefused(RestartRefusal::Unsupported(FLOW.into()))
+/// abc123's harness is working: the main turn a prompt opened runs, and
+/// Herdr shows the agent working.
+fn set_working(world: &RestartWorld, fixture: &NexusFixture) {
+    append_turn_row(
+        world,
+        fixture,
+        serde_json::json!({
+            "type": "user",
+            "sessionId": world.seat.session,
+            "uuid": "a-turn-runs",
+            "message": { "content": "work" }
+        }),
     );
-    unchanged(&fixture);
+    let agent_path = world.fresh.state.join("old-agent");
+    let mut agent: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&agent_path).unwrap()).unwrap();
+    agent["agent_status"] = "working".into();
+    fs::write(&agent_path, agent.to_string()).unwrap();
+}
 
-    // A turn runs: its prompt is the transcript's last main-thread row,
-    // and Herdr shows the agent working.
+/// The turn that ran ends: its transcript records the main turn's
+/// end_turn, as Claude writes it before its Stop hook runs.
+fn turn_ends(world: &RestartWorld, fixture: &NexusFixture) {
+    append_turn_row(
+        world,
+        fixture,
+        serde_json::json!({
+            "type": "assistant",
+            "sessionId": world.seat.session,
+            "uuid": "the-turn-ends",
+            "message": { "stop_reason": "end_turn", "content": [{ "type": "text", "text": "done" }] }
+        }),
+    );
+}
+
+fn append_turn_row(world: &RestartWorld, fixture: &NexusFixture, row: serde_json::Value) {
     let transcript = fixture
         .directory
         .path()
         .join("native-transcripts/claude/-home-li-primary")
         .join(format!("{}.jsonl", world.seat.session));
     let mut rows = fs::read_to_string(&transcript).unwrap();
-    rows.push_str(&format!(
-        "{}\n",
-        serde_json::json!({
-            "type": "user",
-            "sessionId": world.seat.session,
-            "uuid": "a-turn-runs",
-            "message": { "content": "work" }
-        })
-    ));
+    rows.push_str(&format!("{row}\n"));
     fs::write(&transcript, rows).unwrap();
-    let agent_path = world.fresh.state.join("old-agent");
-    let mut agent: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&agent_path).unwrap()).unwrap();
-    agent["agent_status"] = "working".into();
-    fs::write(&agent_path, agent.to_string()).unwrap();
+}
+
+/// A report as the ordinary socket serves it, owed restarts included: its
+/// caller is attributed while it waits, the report recorded, then it acts
+/// when attributed to the bound seat, or runs the restart it was owed for.
+/// Whether it acted or ran.
+fn socket_report(fixture: &NexusFixture, event: Event, caller: Option<CallerProcess>) -> bool {
+    use crate::restarting::RestartsFlows;
+    let acts = fixture.nexus.report_acts(FLOW, caller);
+    let owed = fixture.nexus.owed_to(FLOW, caller);
+    assert_eq!(
+        fixture.nexus.report(Report_Data {
+            flow_id: FLOW.into(),
+            event: event.clone(),
+        }),
+        Response::Reported
+    );
+    if acts {
+        fixture
+            .nexus
+            .after_attributed_report(&FLOW.to_owned(), &event);
+        return true;
+    }
+    owed.is_some_and(|owed| fixture.nexus.restart_at_stop(FLOW, &event, owed))
+}
+
+/// A process marked in abc123's pane as Herdr marks a pane's processes,
+/// but not born of its harness: another seat's hook.
+struct StrangerHook(std::process::Child);
+
+impl Drop for StrangerHook {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl StrangerHook {
+    fn caller(&self) -> CallerProcess {
+        CallerProcess {
+            process_id: self.0.id(),
+        }
+    }
+}
+
+fn stranger_hook() -> StrangerHook {
+    StrangerHook(
+        std::process::Command::new("sleep")
+            .arg("60")
+            .env("HERDR_PANE_ID", OLD_PANE)
+            .env("HERDR_SESSION", "fixture-session")
+            .spawn()
+            .expect("stranger hook"),
+    )
+}
+
+/// The record abc123's owed restart holds: Owed, naming the birth of the
+/// old harness.
+fn owed_record(fixture: &NexusFixture, world: &RestartWorld) -> RestartRecord {
+    let held = record(fixture).expect("a restart is owed");
+    assert!(
+        matches!(held.restart_phase, RestartPhase::Owed(_)),
+        "{held:?}"
+    );
+    assert_eq!(held.old_seat.process_option, Some(world.old_harness()));
+    assert_eq!(held.old_seat.herdr_route.herdr_pane_id, OLD_PANE);
+    held
+}
+
+/// Nothing of the restart has run: no pane closed, no harness resumed, the
+/// old harness running in its pane and the flow as it was.
+fn nothing_ran(fixture: &NexusFixture, world: &RestartWorld, old: &Process) {
+    assert!(world.calls_naming("pane close").is_empty());
+    assert!(world.resumes().is_empty());
+    assert!(world.calls_naming("workspace create").is_empty());
+    assert!(!ended(old), "the harness still runs");
+    assert_eq!(route_pane(fixture), OLD_PANE);
+    assert_eq!(node(fixture).flow_lifecycle, FlowLifecycle::Active);
+    assert_eq!(stored(fixture, Model::Sol).state, State::Awake(FLOW.into()));
+}
+
+/// The owed restart ran: the old pane closed once and the same session
+/// resumed once in the new pane, bound, the record gone.
+fn restart_ran(fixture: &NexusFixture, world: &RestartWorld, old: &Process) {
+    assert_eq!(
+        world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
+        1
+    );
+    let resumes = world.resumes();
+    assert_eq!(resumes.len(), 1, "{}", world.fresh.calls());
+    assert!(
+        resumes[0].contains(&format!("--resume {}", world.seat.session)),
+        "{}",
+        resumes[0]
+    );
+    assert!(resumes[0].contains(&format!("--pane {NEW_PANE}")));
+    assert!(ended(old), "the old harness exited");
+    assert_eq!(record(fixture), None);
+    assert_eq!(route_pane(fixture), NEW_PANE);
+    let after = node(fixture);
+    assert_eq!(after.session_id, world.seat.session);
+    assert_eq!(after.flow_lifecycle, FlowLifecycle::Active);
+    assert_eq!(stored(fixture, Model::Sol).state, State::Awake(FLOW.into()));
+}
+
+/// abc123 is working, asked from outside: RestartOwed at once, its record
+/// Owed and nothing closed. A working event of its own seat keeps it owed;
+/// a Stop no caller stands behind, a Stop of another seat marked in its
+/// pane, and a Stop of its own seat that arrived before Owed was written
+/// run nothing. Its own seat's first real Stop after Owed runs the
+/// restart: the same session resumed in a new pane.
+#[test]
+fn restart_working_owed_until_stop() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    let old_hook = world.old_hook();
+    set_working(&world, &fixture);
+    // A Stop of the seat's own hook that arrived before the restart was
+    // asked is attributed to no owed restart.
+    assert_eq!(fixture.nexus.owed_to(FLOW, Some(old_hook)), None);
+
+    assert_eq!(restarted(&fixture), Response::RestartOwed(FLOW.into()));
+    let owed = owed_record(&fixture, &world);
+    nothing_ran(&fixture, &world, &old);
+
+    // The seat goes on working: it stays owed.
+    assert!(!socket_report(
+        &fixture,
+        Event::ToolUsed("Bash".into()),
+        Some(old_hook)
+    ));
+    assert!(!socket_report(
+        &fixture,
+        Event::PromptSubmitted(signal_flow::NativePrompt {
+            native_session_id_option: Some(world.seat.session.clone()),
+            prompt_id_option: None,
+            prompt_sha256: "work".into(),
+        }),
+        Some(old_hook)
+    ));
+    assert_eq!(record(&fixture), Some(owed.clone()));
+    // A Stop is never made up from nothing, nor taken from another seat.
+    assert!(!socket_report(&fixture, stop_of(&world, &fixture), None));
+    let stranger = stranger_hook();
+    assert!(!socket_report(
+        &fixture,
+        stop_of(&world, &fixture),
+        Some(stranger.caller())
+    ));
+    assert_eq!(record(&fixture), Some(owed));
+    // A second Restart while owed is Busy.
+    assert_eq!(
+        restarted(&fixture),
+        Response::RestartRefused(RestartRefusal::Busy(FLOW.into()))
+    );
+    nothing_ran(&fixture, &world, &old);
+
+    turn_ends(&world, &fixture);
+    assert!(socket_report(
+        &fixture,
+        stop_of(&world, &fixture),
+        Some(old_hook)
+    ));
+    restart_ran(&fixture, &world, &old);
+    assert!(
+        world.calls_naming("agent prompt").is_empty(),
+        "nothing is typed into the resumed seat: {}",
+        world.fresh.calls()
+    );
+}
+
+/// abc123 asks for its own restart, its origin derived from the calling
+/// process as the ordinary socket derives it: RestartOwed before anything
+/// closes its pane, though Herdr shows it resting; then its own Stop runs
+/// the restart as for a working seat.
+#[test]
+fn restart_self_owed_answer_before_close() {
+    use crate::generated::starter::DerivesOrigin;
+    use crate::restarting::RestartsFlows;
+    use crate::store::SeedsRole;
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    let old_hook = world.old_hook();
+    // abc123's role, as its launch registered it: what a caller in its pane
+    // is resolved to.
+    fixture.nexus.store.seed_role(signal_flow::Caller {
+        flow_id: FLOW.into(),
+        aspect: Aspect::Mind,
+        model_name: "claude-fixture".into(),
+    });
+    assert_eq!(
+        old_hook.caller_pane(&fixture.nexus.herdr),
+        Some(CallerPane {
+            herdr_session_name: "fixture-session".into(),
+            herdr_pane_id: OLD_PANE.into(),
+        })
+    );
+    let origin = fixture.nexus.origin_of(Some(old_hook));
+    assert_eq!(
+        origin,
+        signal_flow::Origin::Flow(signal_flow::FlowOrigin {
+            flow_id: FLOW.into(),
+            session_id: world.seat.session.clone(),
+        })
+    );
+
+    assert_eq!(
+        fixture.nexus.restart(FLOW, &origin),
+        Response::RestartOwed(FLOW.into())
+    );
+    owed_record(&fixture, &world);
+    nothing_ran(&fixture, &world, &old);
+
+    assert!(socket_report(
+        &fixture,
+        stop_of(&world, &fixture),
+        Some(old_hook)
+    ));
+    restart_ran(&fixture, &world, &old);
+}
+
+/// abc123, past its model's refresh threshold, is owed a restart: its
+/// correlated Stop restarts it and does not refresh it. Only a later real
+/// Stop, of the resumed seat, refreshes it.
+#[test]
+fn restart_owed_before_threshold_refresh() {
+    use crate::store::ManagesMetaflowState;
+    use crate::store::context::RecordsContextSize;
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    let old_hook = world.old_hook();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Thresholds(vec![
+            meta_signal_flow::ConfigureThreshold {
+                model_name: "claude-fixture".into(),
+                refresh: 100_000,
+                warning: 0,
+            },
+        ]))
+        .expect("threshold configured");
+    fixture
+        .nexus
+        .store
+        .record_context_size(FLOW, 150_000)
+        .unwrap();
+    assert!(matches!(
+        crate::store::context::JudgesThreshold::past_threshold(&fixture.nexus.store, FLOW),
+        Ok(true)
+    ));
+    set_working(&world, &fixture);
+    assert_eq!(restarted(&fixture), Response::RestartOwed(FLOW.into()));
+
+    turn_ends(&world, &fixture);
+    assert!(socket_report(
+        &fixture,
+        stop_of(&world, &fixture),
+        Some(old_hook)
+    ));
+    restart_ran(&fixture, &world, &old);
+    assert!(
+        world
+            .calls_naming(&format!("pane close {NEW_PANE}"))
+            .is_empty(),
+        "the resumed seat is not refreshed at the Stop that restarted it"
+    );
+
+    // The resumed seat's own Stop refreshes it: an OnDemand seat with
+    // nothing queued is closed, its metaflow Asleep.
+    assert!(socket_report(
+        &fixture,
+        stop_of(&world, &fixture),
+        Some(world.new_hook())
+    ));
+    assert_eq!(
+        world.calls_naming(&format!("pane close {NEW_PANE}")).len(),
+        1,
+        "{}",
+        world.fresh.calls()
+    );
+    assert_eq!(stored(&fixture, Model::Sol).state, State::Asleep);
+}
+
+/// A Send while abc123's restart is owed queues and reaches no pane, nor
+/// does its old seat's Stop hand it over; once the restart has run at that
+/// Stop the queue is handed to the resumed seat, exactly once.
+#[test]
+fn restart_owed_before_drain() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    let old_hook = world.old_hook();
+    let from = bound_sender(&fixture);
+    set_working(&world, &fixture);
+    assert_eq!(restarted(&fixture), Response::RestartOwed(FLOW.into()));
+
+    let queued = send(&fixture, &from, "arrived while owed");
+    assert!(
+        matches!(
+            &queued,
+            Response::SendAccepted(acceptance)
+                if acceptance.visible_delivery_state == signal_flow::VisibleDeliveryState::Queued
+        ),
+        "{queued:?}"
+    );
+    assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1);
+    assert!(world.calls_naming("agent prompt").is_empty());
+
+    turn_ends(&world, &fixture);
+    assert!(socket_report(
+        &fixture,
+        stop_of(&world, &fixture),
+        Some(old_hook)
+    ));
+    restart_ran(&fixture, &world, &old);
+    assert_eq!(received(&world, &fixture, "arrived while owed"), 1);
+    let prompts = world.calls_naming("agent prompt");
+    assert!(!prompts.is_empty(), "{}", world.fresh.calls());
+    assert!(
+        prompts.iter().all(|line| !line.contains(OLD_PANE)),
+        "the old seat receives nothing: {}",
+        world.fresh.calls()
+    );
+    assert!(stored(&fixture, Model::Sol).queue.is_empty());
+    fixture.nexus.drain_awake(&address(Model::Sol));
+    assert_eq!(received(&world, &fixture, "arrived while owed"), 1);
+}
+
+/// A Nexus that dies while abc123's restart is owed: the Nexus reopened
+/// finds it Owed as it was written, closes and resumes nothing, hands the
+/// old seat nothing, and still waits for a real Stop; its seat's Stop then
+/// runs it.
+#[test]
+fn restart_owed_nexus_death_still_waits() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    let old_hook = world.old_hook();
+    let from = bound_sender(&fixture);
+    set_working(&world, &fixture);
+    assert_eq!(restarted(&fixture), Response::RestartOwed(FLOW.into()));
+    let owed = owed_record(&fixture, &world);
+    let _ = send(&fixture, &from, "queued before the death");
+
+    fixture.reopen_store();
+    fixture.nexus.recover_wakes();
+    assert_eq!(record(&fixture), Some(owed.clone()));
+    nothing_ran(&fixture, &world, &old);
+    assert!(world.calls_naming("agent prompt").is_empty());
+    assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1);
+    assert!(!socket_report(&fixture, stop_of(&world, &fixture), None));
+    assert_eq!(record(&fixture), Some(owed));
+
+    turn_ends(&world, &fixture);
+    assert!(socket_report(
+        &fixture,
+        stop_of(&world, &fixture),
+        Some(old_hook)
+    ));
+    restart_ran(&fixture, &world, &old);
+    assert_eq!(received(&world, &fixture, "queued before the death"), 1);
+}
+
+/// Inspect shows abc123's owed restart, Owed with the report position it
+/// was written at, and changes nothing.
+#[test]
+fn restart_inspect_shows_owed() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    set_working(&world, &fixture);
+    assert_eq!(restarted(&fixture), Response::RestartOwed(FLOW.into()));
+    let owed = owed_record(&fixture, &world);
+    let inspect = || {
+        let meta_signal_flow::Response::Inspected(inspected) = fixture
+            .nexus
+            .dispatch_meta(meta_signal_flow::Query::Inspect(address(Model::Sol)))
+        else {
+            panic!("the metaflow is inspected")
+        };
+        inspected.restart_record_option
+    };
+    assert_eq!(inspect(), Some(owed.clone()));
+    assert_eq!(inspect(), Some(owed.clone()));
+    assert_eq!(record(&fixture), Some(owed));
+    nothing_ran(&fixture, &world, &old);
+}
+
+/// abc123's metaflow is Asleep, and a restart is asked from outside: it is
+/// refused Unsupported, with no record written, nothing closed or resumed.
+/// The running-seat cutover claims no Asleep support.
+#[test]
+fn restart_asleep_outside_refused_unsupported() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec![], vec![]));
+
     assert_eq!(
         restarted(&fixture),
         Response::RestartRefused(RestartRefusal::Unsupported(FLOW.into()))
     );
-    unchanged(&fixture);
+    assert_eq!(record(&fixture), None);
+    assert!(world.calls_naming("pane close").is_empty());
+    assert!(world.resumes().is_empty());
+    assert!(world.calls_naming("workspace create").is_empty());
+    assert!(!ended(&old), "the harness still runs");
+    assert_eq!(route_pane(&fixture), OLD_PANE);
+    assert_eq!(stored(&fixture, Model::Sol).state, State::Asleep);
 }

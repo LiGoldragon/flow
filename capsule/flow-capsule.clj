@@ -1204,7 +1204,7 @@
             pane (sender-pane)
             before (stops-of flow-id)
             broken (flow-meta (broken-metaflows secondary))
-            low (flow-meta "Configure.Thresholds.[ { claude-haiku-5-5 1000 } ]")
+            low (flow-meta "Configure.Thresholds.[ { claude-haiku-5-5 1000 0 } ]")
             sent (flow (str "Send.{ " secondary " Wake Soft.Notice.«Answer with one word and stop. Tag rb1.» }") pane)
             rested (watch 120 #(> (stops-of flow-id) before))
             _ (Thread/sleep 8000)

@@ -917,18 +917,23 @@ impl ServesConnection for Connection {
             // and the settling waits on the harness.
             // The caller is attributed while it waits for its answer: a hook
             // exits once answered, and a seat a restart bound acts only on
-            // events its own harness's descendants report.
+            // events its own harness's descendants report. A restart owed
+            // runs at a Stop of the seat it was owed for, arriving after it.
             Query::Report(report) => {
-                use crate::restarting::FencesSeatEvents;
+                use crate::restarting::{FencesSeatEvents, RestartsFlows};
                 let (flow_id, event) = (report.flow_id.clone(), report.event.clone());
-                let acts = nexus.report_acts(&flow_id, self.peer.peer_process());
+                let caller = self.peer.peer_process();
+                let acts = nexus.report_acts(&flow_id, caller);
+                let owed = nexus.owed_to(&flow_id, caller);
                 let response = nexus.report(report);
                 self.peer.write_response(&response)?;
                 drop(self);
                 if response == Response::Reported {
                     if acts {
                         nexus.after_attributed_report(&flow_id, &event);
-                    } else {
+                    } else if !owed
+                        .is_some_and(|owed| nexus.restart_at_stop(&flow_id, &event, owed))
+                    {
                         eprintln!(
                             "flow-nexus: a report for flow {flow_id} is not its bound seat's; it acts on nothing"
                         );

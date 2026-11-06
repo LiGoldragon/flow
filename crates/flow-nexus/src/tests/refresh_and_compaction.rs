@@ -50,6 +50,7 @@ pub(super) fn seat_refreshing_at(fixture: &NexusFixture, refresh: i64) {
         .configure_change(ConfigurationChange::Thresholds(vec![ConfigureThreshold {
             model_name: CLAUDE_MODEL.into(),
             refresh,
+            warning: 0,
         }]))
         .expect("threshold configured");
 }
@@ -216,6 +217,7 @@ fn a_flow_s_context_is_judged_against_its_model_s_threshold() {
         .configure_change(ConfigurationChange::Thresholds(vec![ConfigureThreshold {
             model_name: "gpt-6.1-sol".into(),
             refresh: 150_000,
+            warning: 20,
         }]))
         .unwrap();
     assert_eq!(

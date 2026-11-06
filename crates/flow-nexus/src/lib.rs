@@ -1595,6 +1595,7 @@ mod tests {
     mod admission;
     mod configuring;
     mod counters;
+    mod curriculum;
     mod delivery;
     mod ending;
     mod heartbeat_production;

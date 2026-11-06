@@ -22,6 +22,21 @@ composed only after the old harness was closed, so a refused composition
   retried as any Failed record: once composition works, the same session
   resumes.
 
+## Curriculum 478c's schema
+
+Pins signal-flow 51.0.0 (9f159d9) and meta-signal-flow 64.0.0 (efc0bf5); the
+flake's Curriculum, which the capsule runs, is 478cbc5.
+
+- `ethos/curriculum.ethos` is Curriculum 478cbc5's schema byte for byte
+  (SHA-256 26011a94…48e28): its Outcome has five variants, the fifth
+  `Rejected.String`. Flow's earlier copy carried a sixth, `ModuleMissing`,
+  at that place, so it read 478c's `Rejected` as `ModuleMissing`.
+- A `Rejected` answer is `ContextRefusal.ComposerRejected.String`, the text
+  kept whole, as in `StartRejected.ContextRefused.ComposerRejected.«missing
+  module knowledge:absent»`; one naming a remembered flow's records missing
+  stays `RecordMissing`. A Restart whose resume is so refused still answers
+  `ResumeRefused.{ <flow> NotComposed }`, and logs the text.
+
 ## protos 0.33, datom-codec 0.33, signal 10.3
 
 Pins signal-flow 50.0.0 (8143240) and meta-signal-flow 63.0.0 (6fe04a7),

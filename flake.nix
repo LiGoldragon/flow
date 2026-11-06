@@ -7,9 +7,10 @@
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     crane.url = "github:ipetkov/crane";
     # The Curriculum whose schema Flow pins (crates/flow-nexus/ethos/
-    # curriculum.ethos): the capsule runs its own Curriculum Nexus from it.
+    # curriculum.ethos, 478cbc5's byte for byte): the capsule runs its own
+    # Curriculum Nexus from it.
     curriculum = {
-      url = "github:LiGoldragon/Curriculum/3f74f77e31c9018d340379b908109d7eb39e1fd0";
+      url = "github:LiGoldragon/Curriculum/478cbc51878921a0668278120aacca0031a72f92";
       flake = false;
     };
     # The public default remains the last unconfigured Flow artifact while
@@ -42,13 +43,16 @@
           ];
           craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
           # The Operation root's ethos source is read by flow-nexus's build
-          # script, which holds the committed generated module fresh.
+          # script, which holds the committed generated module fresh; the
+          # Curriculum frames a test reads are raw rkyv.
           src = pkgs.lib.cleanSourceWith {
             src = ./.;
             name = "source";
             filter =
               path: type:
-              (pkgs.lib.hasSuffix ".ethos" path) || (craneLib.filterCargoSources path type);
+              (pkgs.lib.hasSuffix ".ethos" path)
+              || (pkgs.lib.hasSuffix ".rkyv" path)
+              || (craneLib.filterCargoSources path type);
           };
           commonArgs = {
             inherit src;
@@ -684,6 +688,16 @@
           # and the Nexus.
           flow-send-guillemets-round-trip = context.exactWorkspaceTest
             "tests::send_admission::a_send_with_nested_and_escaped_guillemets_round_trips_through_the_cli_and_the_nexus";
+          # 0.53.1: Flow reads Curriculum 478c's schema; real 478c frames, and
+          # the 0.53.0 NotComposed incident against a socket Curriculum.
+          flow-curriculum-478c-rejected-frame = context.exactTest "flow-nexus"
+            "tests::curriculum::a_real_478c_rejected_frame_is_a_composer_rejection_carrying_its_text";
+          flow-curriculum-478c-startup-composed-frame = context.exactTest "flow-nexus"
+            "tests::curriculum::a_real_478c_startup_composed_frame_reads_and_verifies";
+          flow-restart-not-composed-refused-then-recovered = context.exactTest "flow-nexus"
+            "tests::restarting::restart_not_composed_refused_then_recovered";
+          flow-restart-not-composed-owner-stop = context.exactTest "flow-nexus"
+            "tests::restarting::restart_not_composed_owner_stop";
         }
       );
 

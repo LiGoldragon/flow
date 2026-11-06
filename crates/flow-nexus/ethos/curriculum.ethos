@@ -64,7 +64,6 @@ Library
             ResolvedSources.Vector<ResolvedModule>
             StartupComposed.StartupComposition
             RoleComposed.RoleComposition
-            ModuleMissing.ModuleIdentity
             Rejected.String ] ]
 []
 []

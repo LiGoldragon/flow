@@ -2040,3 +2040,637 @@ fn stop_and_retire_protected_from_outside_refused() {
     );
     assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Stopped);
 }
+// The 0.53.0 incident (b5a9's tests, brought into 0.53.1): seven resting
+// Claude seats Adopted by the new Nexus were Restarted; each old harness was
+// closed, then the resumed launch was not composed, because the Curriculum
+// running (0380, its main line) took only a Layer as a caller Address's
+// third word and 0.53.0 sent a Model. 0.53.1 composes before it closes, so
+// the same refusal closes nothing and writes nothing; and Flow reads
+// Curriculum's schema as 478c writes it, its fifth Outcome `Rejected`.
+
+/// The third words Curriculum's startup check takes: a Layer on its main
+/// line (0380, the live service), a Model on 3f74.
+const LAYER_WORDS: [&str; 4] = ["Primary", "Secondary", "Tertiary", "Quaternary"];
+const MODEL_WORDS: [&str; 8] = [
+    "Fable", "Opus", "Sonnet", "Haiku", "Astra", "Sol", "Luna", "Terra",
+];
+/// Curriculum's answer to a caller whose third word it does not take.
+const INVALID_ADDRESS: &str = "invalid metaflow address";
+/// The store of the new Nexus, beside the fixture's.
+const NEW_STORE: &str = "flow-0530.sema";
+
+/// A Curriculum Nexus on a Unix socket in the fixture directory, speaking
+/// the frames Flow's `CurriculumComposer` speaks: one big-endian u32
+/// length-prefixed rkyv `Query` in, one `Outcome` out, in 478c's schema. A
+/// caller whose third word passes its check is composed from the fixture's
+/// module bodies; any other is answered `Rejected` with `INVALID_ADDRESS`,
+/// as 0380 answered it, and a module it lacks `Rejected` with
+/// `missing module <identity>`, as 478c does. Every selection it is asked
+/// is kept.
+struct SocketCurriculum {
+    socket: std::path::PathBuf,
+    accepts_models: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    asked: std::sync::Arc<std::sync::Mutex<Vec<crate::generated::curriculum::StartupSelection>>>,
+    stopping: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    server: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SocketCurriculum {
+    /// Serving at `socket`, taking Layer words only, as 0380 does.
+    fn serving(socket: std::path::PathBuf) -> Self {
+        use std::sync::{Arc, Mutex, atomic::AtomicBool};
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("Curriculum socket");
+        let accepts_models = Arc::new(AtomicBool::new(false));
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let server = {
+            let (accepts_models, asked, stopping) =
+                (accepts_models.clone(), asked.clone(), stopping.clone());
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                use std::sync::atomic::Ordering;
+                for stream in listener.incoming() {
+                    if stopping.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let Ok(mut stream) = stream else { continue };
+                    let mut prefix = [0_u8; 4];
+                    if stream.read_exact(&mut prefix).is_err() {
+                        continue;
+                    }
+                    let mut frame = vec![0_u8; u32::from_be_bytes(prefix) as usize];
+                    if stream.read_exact(&mut frame).is_err() {
+                        continue;
+                    }
+                    let outcome =
+                        Self::answer(&frame, accepts_models.load(Ordering::SeqCst), &asked);
+                    let answer = rkyv::to_bytes::<rkyv::rancor::Error>(&outcome).unwrap();
+                    let _ = stream
+                        .write_all(&(answer.len() as u32).to_be_bytes())
+                        .and_then(|_| stream.write_all(&answer));
+                }
+            })
+        };
+        Self {
+            socket,
+            accepts_models,
+            asked,
+            stopping,
+            server: Some(server),
+        }
+    }
+
+    fn answer(
+        frame: &[u8],
+        accepts_models: bool,
+        asked: &std::sync::Mutex<Vec<crate::generated::curriculum::StartupSelection>>,
+    ) -> crate::generated::curriculum::Outcome {
+        use crate::context::{ComposesFlowContext, ContextRequest, FixtureComposer};
+        use crate::generated::curriculum::{Outcome, Query, Target};
+        let Ok(Query::ComposeStartup(selection)) =
+            rkyv::from_bytes::<Query, rkyv::rancor::Error>(frame)
+        else {
+            return Outcome::Rejected("unexpected query".into());
+        };
+        asked.lock().unwrap().push(selection.clone());
+        let words: &[&str] = if accepts_models {
+            &MODEL_WORDS
+        } else {
+            &LAYER_WORDS
+        };
+        if !words.contains(&selection.caller_metaflow.third_string.as_str()) {
+            return Outcome::Rejected(INVALID_ADDRESS.into());
+        }
+        let request = ContextRequest {
+            address: address(Model::Sol),
+            harness_kind: match selection.target {
+                Target::Codex => signal_flow::HarnessKind::Codex,
+                _ => signal_flow::HarnessKind::Claude,
+            },
+            system_modules: selection.system_modules,
+            user_modules: selection.user_modules,
+            remembered_flows: selection.flow_id_vector,
+        };
+        let bodies = FixtureComposer::from(
+            &[
+                ("spirit-core", "Spirit body."),
+                ("intent-flow", "Intent body."),
+                ("operation-main-flow", "Main flow body."),
+                ("knowledge-flow", "Knowledge body."),
+            ][..],
+        );
+        match bodies.compose_flow_context(&request) {
+            Ok(composition) => Outcome::StartupComposed(composition),
+            Err(signal_flow::ContextRefusal::ModuleMissing(Some(identity))) => {
+                Outcome::Rejected(format!("missing module {identity}"))
+            }
+            Err(refusal) => Outcome::Rejected(format!("{refusal:?}")),
+        }
+    }
+
+    /// From here on it takes Model words, as 3f74 does.
+    fn accept_models(&self) {
+        self.accepts_models
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The production composer, aimed at this socket.
+    fn composer(&self) -> crate::composition::LaunchComposer {
+        use crate::composition::OpensLaunchComposer;
+        use crate::context::OpensCurriculumComposer;
+        crate::composition::LaunchComposer::with_context(crate::context::ContextComposer(
+            std::sync::Arc::new(crate::context::CurriculumComposer::at(
+                self.socket.to_string_lossy().as_ref(),
+            )),
+        ))
+    }
+
+    /// Each caller Address asked, as its three words.
+    fn callers(&self) -> Vec<[String; 3]> {
+        self.asked
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|selection| {
+                let caller = &selection.caller_metaflow;
+                [
+                    caller.first_string.clone(),
+                    caller.second_string.clone(),
+                    caller.third_string.clone(),
+                ]
+            })
+            .collect()
+    }
+}
+
+impl Drop for SocketCurriculum {
+    fn drop(&mut self) {
+        self.stopping
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::os::unix::net::UnixStream::connect(&self.socket);
+        if let Some(server) = self.server.take() {
+            let _ = server.join();
+        }
+    }
+}
+
+/// What the restart must not change of the flow: its FlowId and native
+/// session, the model it actually runs, its transcript, how many flows the
+/// Nexus holds, the claims on disk and the seat birth it holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HeldIdentity {
+    flow_id: String,
+    session: String,
+    model: Option<String>,
+    transcript: Option<std::path::PathBuf>,
+    flows: usize,
+    claims: Vec<(String, Vec<u8>)>,
+    birth: Option<SeatBirth>,
+}
+
+fn held_identity(fixture: &NexusFixture, nexus: &crate::RunningNexus) -> HeldIdentity {
+    use crate::store::{ReadsFlowRoles, ReadsLaunchAttempt};
+    use crate::waking::ReadsClaudeDelivery;
+    let node = nexus.store.flow_node(FLOW).unwrap().expect("abc123 held");
+    let model = match nexus.store.role(FLOW) {
+        Ok(Some(role)) => Some(role.model_name),
+        _ => nexus
+            .store
+            .launch_requests_bound_to(FLOW)
+            .unwrap()
+            .pop()
+            .and_then(|request| nexus.store.composable_launch_profile(&request).unwrap())
+            .map(|profile| profile.model_name),
+    };
+    let mut claims: Vec<(String, Vec<u8>)> = fs::read_dir(fixture.directory.path().join("flows"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".flow-id"))
+        .map(|name| {
+            let bytes = fs::read(fixture.directory.path().join("flows").join(&name)).unwrap();
+            (name, bytes)
+        })
+        .collect();
+    claims.sort();
+    HeldIdentity {
+        flow_id: node.flow_id.clone(),
+        session: node.session_id.clone(),
+        model,
+        transcript: nexus.claude_transcript(&node),
+        flows: nexus.store.flow_nodes().unwrap().len(),
+        claims,
+        birth: nexus.store.seat_birth(FLOW).unwrap(),
+    }
+}
+
+/// The new Nexus's store closed and opened again at its path.
+fn reopen_new(fixture: &NexusFixture, nexus: &mut crate::RunningNexus) {
+    use crate::store::{OpensFlowStore, SetsNativeOwnerEnvironmentForTests};
+    let placeholder = FlowStore::open(&fixture.directory.path().join("new-placeholder.sema"))
+        .expect("placeholder store");
+    drop(std::mem::replace(&mut nexus.store, placeholder));
+    let mut reopened =
+        FlowStore::open(&fixture.directory.path().join(NEW_STORE)).expect("store reopens");
+    reopened.set_native_owner_environment_for_tests(crate::store::NativeOwnerEnvironment {
+        host_id: "isolated-test-host".into(),
+        boot_id: "isolated-test-boot".into(),
+    });
+    nexus.store = reopened;
+}
+
+/// The answer the live restarts got.
+fn not_composed() -> Response {
+    Response::RestartRefused(RestartRefusal::ResumeRefused(ResumeRefused_Data {
+        flow_id: FLOW.into(),
+        string: "NotComposed".into(),
+    }))
+}
+
+fn new_metaflow(nexus: &crate::RunningNexus) -> signal_flow::Metaflow {
+    use crate::store::metaflow::SleepsMetaflows;
+    nexus
+        .store
+        .metaflow(&address(Model::Sol))
+        .unwrap()
+        .expect("{ Mind flow Sol }")
+}
+
+/// The live cutover, up to the Restart: the old Nexus (the fixture's)
+/// launched abc123, Awake and resting in w1:p3; the new Nexus, its own
+/// store and its hooks at NEW_SOCKET, composing through the production
+/// composer against a socket Curriculum that takes only Layer words,
+/// Adopts that seat from the seat's own process.
+fn adopted_on_new(
+    fixture: &mut NexusFixture,
+) -> (RestartWorld, crate::RunningNexus, SocketCurriculum) {
+    use crate::sending::BindsSeats;
+    let world = fixture.restart_world(true);
+    FixtureExecutable {
+        path: fixture.directory.path().join("native-transcripts/flow-id"),
+    }
+    .install(IDEMPOTENT_FLOW_ID);
+    let curriculum = SocketCurriculum::serving(fixture.directory.path().join("curriculum.sock"));
+    let mut new = fixture.second_nexus(NEW_STORE, NEW_SOCKET);
+    new.composer = curriculum.composer();
+    assert_eq!(
+        new.adopt(
+            signal_flow::Adopt_Data {
+                address: address(Model::Sol),
+                native_session_id: world.seat.session.clone(),
+            },
+            Some(&world.old_harness()),
+        ),
+        Response::Adopted(FLOW.into())
+    );
+    (world, new, curriculum)
+}
+
+/// A restart the Curriculum will not compose is refused before anything is
+/// closed or written, and a retry recovers it once Curriculum takes Model
+/// words. Refused NotComposed: no record, before or after a store reopen;
+/// the old harness running in its pane, nothing closed, opened or typed;
+/// the FlowId, native session, actual model, transcript, claims and queue
+/// unchanged. A retry while still refused is refused alike and closes
+/// nothing. Once Model words are taken, a retry answers Restarted: the old
+/// pane closed once, `claude --resume <the same session>` with hooks naming
+/// only the new Nexus's socket, and the queue handed over once.
+#[test]
+fn restart_not_composed_refused_then_recovered() {
+    let mut fixture = NexusFixture::new();
+    let (world, mut new, curriculum) = adopted_on_new(&mut fixture);
+    let old = world.old_harness();
+    let before = held_identity(&fixture, &new);
+    assert_eq!(before.flow_id, FLOW);
+    assert_eq!(before.session, world.seat.session);
+    assert!(before.model.is_some() && before.transcript.is_some());
+    let mut queued = new_metaflow(&new);
+    queued.queue = vec![signal_flow::QueueEntry {
+        logical_delivery_id: "held-through-not-composed".into(),
+        sent_by: signal_flow::SentBy::Unknown,
+        delivery: flow_ethos::Delivery::Wake,
+        message: signal_flow::Message::Soft(signal_flow::Request::Order(
+            "held through NotComposed".into(),
+        )),
+    }];
+    new.store.seed_metaflow(queued);
+
+    assert_eq!(new.dispatch(Query::Restart(FLOW.into())), not_composed());
+    assert_eq!(
+        curriculum.callers(),
+        vec![["Mind".to_owned(), "flow".to_owned(), "Sol".to_owned()]],
+        "the caller names its Model"
+    );
+    let untouched = |world: &RestartWorld, fixture: &NexusFixture| {
+        for effect in [
+            "pane close",
+            "workspace create",
+            "agent start",
+            "agent prompt",
+            "pane run",
+        ] {
+            assert!(
+                world.calls_naming(effect).is_empty(),
+                "{effect}: {}",
+                world.fresh.calls()
+            );
+        }
+        assert!(world.fresh.user_turns(fixture).is_empty(), "nothing typed");
+        assert!(
+            FlowStore::process_is_live(&world.old_harness()),
+            "the old harness runs on"
+        );
+    };
+    assert_eq!(
+        new.store.restart_record(FLOW).unwrap(),
+        None,
+        "nothing written"
+    );
+    untouched(&world, &fixture);
+    assert_eq!(held_identity(&fixture, &new), before);
+    assert_eq!(new_metaflow(&new).queue.len(), 1);
+    assert_eq!(new_metaflow(&new).state, State::Awake(FLOW.into()));
+
+    // A Nexus that died here leaves its successor nothing to take up.
+    reopen_new(&fixture, &mut new);
+    assert_eq!(new.store.restart_record(FLOW).unwrap(), None);
+    assert_eq!(held_identity(&fixture, &new), before);
+    assert_eq!(new_metaflow(&new).queue.len(), 1);
+    untouched(&world, &fixture);
+
+    // A retry while Curriculum still refuses: refused alike, nothing closed.
+    assert_eq!(new.dispatch(Query::Restart(FLOW.into())), not_composed());
+    assert_eq!(new.store.restart_record(FLOW).unwrap(), None);
+    untouched(&world, &fixture);
+    assert_eq!(held_identity(&fixture, &new), before);
+    assert_eq!(new_metaflow(&new).queue.len(), 1);
+    assert_eq!(curriculum.callers().len(), 2);
+
+    // Curriculum takes Model words, as 3f74 and 478c do: the retry resumes.
+    curriculum.accept_models();
+    assert_eq!(
+        new.dispatch(Query::Restart(FLOW.into())),
+        Response::Restarted(FLOW.into())
+    );
+    assert_eq!(
+        world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
+        1,
+        "the old pane is closed once, by the restart that resumes"
+    );
+    assert!(ended(&old), "the old harness exited");
+    let resumes = world.resumes();
+    assert_eq!(resumes.len(), 1, "{}", world.fresh.calls());
+    let resume = &resumes[0];
+    assert!(
+        resume.contains(&format!("--resume {}", world.seat.session)),
+        "{resume}"
+    );
+    assert!(!resume.contains("--session-id"), "{resume}");
+    assert!(resume.contains(&format!("--pane {NEW_PANE}")), "{resume}");
+    assert!(resume.contains(NEW_SOCKET), "{resume}");
+    assert!(!resume.contains(OLD_SOCKET), "{resume}");
+    assert_eq!(
+        resume.matches("flow.sock").count(),
+        resume.matches(NEW_SOCKET).count(),
+        "every hook socket is the new Nexus's: {resume}"
+    );
+    assert_eq!(world.calls_naming("agent start").len(), 1);
+    assert_eq!(new.store.restart_record(FLOW).unwrap(), None);
+    assert_eq!(received(&world, &fixture, "held through NotComposed"), 1);
+    assert!(new_metaflow(&new).queue.is_empty());
+    new.drain_awake(&address(Model::Sol));
+    assert_eq!(received(&world, &fixture, "held through NotComposed"), 1);
+
+    let after = held_identity(&fixture, &new);
+    assert_eq!(after.flow_id, before.flow_id);
+    assert_eq!(after.session, before.session);
+    assert_eq!(after.model, before.model);
+    assert_eq!(after.transcript, before.transcript);
+    assert_eq!(after.flows, before.flows);
+    assert_eq!(after.claims, before.claims, "no new native identity");
+    let node = new.store.flow_node(FLOW).unwrap().unwrap();
+    assert_eq!(node.flow_lifecycle, FlowLifecycle::Active);
+    assert!(matches!(
+        &node.herdr_route_selection,
+        HerdrRouteSelection::Available(route) if route.herdr_pane_id == NEW_PANE
+    ));
+    assert_eq!(
+        after.birth.map(|birth| birth.herdr_route.herdr_pane_id),
+        Some(NEW_PANE.to_owned())
+    );
+    assert_eq!(new_metaflow(&new).state, State::Awake(FLOW.into()));
+}
+
+/// The owner's Stop after a restart refused NotComposed is an ordinary
+/// Stop, since the refusal left no record: the old pane closed once, the
+/// flow Stopped with its FlowId and session kept, its queue kept on its
+/// metaflow, nothing started or typed. A Restart of the stopped flow is
+/// Unsupported: only a live flow is restarted.
+#[test]
+fn restart_not_composed_owner_stop() {
+    let mut fixture = NexusFixture::new();
+    let (world, new, curriculum) = adopted_on_new(&mut fixture);
+    let old = world.old_harness();
+    let mut queued = new_metaflow(&new);
+    queued.queue = vec![signal_flow::QueueEntry {
+        logical_delivery_id: "kept-through-stop".into(),
+        sent_by: signal_flow::SentBy::Unknown,
+        delivery: flow_ethos::Delivery::Wake,
+        message: signal_flow::Message::Soft(signal_flow::Request::Order(
+            "kept through the Stop".into(),
+        )),
+    }];
+    new.store.seed_metaflow(queued);
+    assert_eq!(new.dispatch(Query::Restart(FLOW.into())), not_composed());
+    assert!(world.calls_naming("pane close").is_empty());
+    assert_eq!(new.store.restart_record(FLOW).unwrap(), None);
+
+    assert_eq!(
+        new.dispatch(Query::Stop(FLOW.into())),
+        Response::Stopped(FLOW.into())
+    );
+    assert_eq!(new.store.restart_record(FLOW).unwrap(), None);
+    let node = new.store.flow_node(FLOW).unwrap().unwrap();
+    assert_eq!(node.flow_lifecycle, FlowLifecycle::Stopped);
+    assert_eq!(node.session_id, world.seat.session);
+    assert_eq!(new_metaflow(&new).queue.len(), 1, "the queue is kept");
+    assert_eq!(
+        world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
+        1
+    );
+    assert!(ended(&old), "the old harness exited");
+    assert!(world.calls_naming("agent start").is_empty());
+    assert!(world.calls_naming("agent prompt").is_empty());
+    assert_eq!(received(&world, &fixture, "kept through the Stop"), 0);
+
+    curriculum.accept_models();
+    assert_eq!(
+        new.dispatch(Query::Restart(FLOW.into())),
+        Response::RestartRefused(RestartRefusal::Unsupported(FLOW.into()))
+    );
+    assert!(world.resumes().is_empty());
+}
+
+/// A resumed launch's composition, against a real Curriculum Nexus: for each seat named in the file `RESTART_PROOF_SEATS` (a line of
+/// `flow <tab> Aspect topic Model <tab> native model <tab> system modules
+/// <tab> user modules`), the launch profile Restart builds is composed
+/// through `perform(Compose)` with the production composer aimed at the
+/// socket `RESTART_PROOF_CURRICULUM_SOCKET`, and `RESTART_PROOF_EXPECT`
+/// (`refused` or `composed`) says what that Curriculum must answer. The raw
+/// answer frame to the same selection is printed and, when refused,
+/// compared byte for byte with the `Rejected` frame Flow reads it as.
+#[test]
+#[ignore = "needs a real Curriculum Nexus socket; run by hand"]
+fn restart_composition_against_curriculum_socket() {
+    use crate::composition::{OpensLaunchComposer, PlacesModuleByKind};
+    use crate::context::{ContextRequest, OpensCurriculumComposer, SelectsStartup};
+    use crate::generated::curriculum::{Outcome as CurriculumOutcome, Query as CurriculumQuery};
+    use crate::generated::operation::Failed_Data;
+    use std::io::{Read, Write};
+    let socket = std::env::var("RESTART_PROOF_CURRICULUM_SOCKET").expect("socket");
+    let expect = std::env::var("RESTART_PROOF_EXPECT").expect("refused or composed");
+    let seats = fs::read_to_string(std::env::var("RESTART_PROOF_SEATS").expect("seats")).unwrap();
+    let mut fixture = NexusFixture::new();
+    fixture.nexus.composer =
+        crate::composition::LaunchComposer::with_context(crate::context::ContextComposer(
+            std::sync::Arc::new(crate::context::CurriculumComposer::at(socket.as_str())),
+        ));
+    let words = |text: &str| {
+        text.split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let mut composed = 0;
+    for line in seats.lines().filter(|line| !line.trim().is_empty()) {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let [flow, caller, native, system, user] = fields[..] else {
+            panic!("seat line: {line}")
+        };
+        let caller = words(caller);
+        let address = Address {
+            aspect: match caller[0].as_str() {
+                "Psyche" => Aspect::Psyche,
+                "Mind" => Aspect::Mind,
+                _ => Aspect::Field,
+            },
+            topic: caller[1].clone(),
+            model: match caller[2].as_str() {
+                "Fable" => Model::Fable,
+                "Opus" => Model::Opus,
+                "Sonnet" => Model::Sonnet,
+                "Haiku" => Model::Haiku,
+                "Astra" => Model::Astra,
+                "Sol" => Model::Sol,
+                other => panic!("model {other}"),
+            },
+        };
+        // The profile `resumed_launch` builds from a declaration.
+        let profile = signal_flow::LaunchProfile {
+            launch_request_id: format!("restart-{flow}-1-proof"),
+            system_modules: words(system),
+            user_modules: words(user),
+            remembering: signal_flow::Remembering::Predecessors(0),
+            address: address.clone(),
+            model_name: native.to_owned(),
+            effort: <crate::RunningNexus as crate::sending::ChoosesEffort>::effort_of(&address)
+                .into(),
+            flow_id_option: None,
+            herdr_session_name: "default".into(),
+            leave_outs_option: None,
+            flow_kind: signal_flow::FlowKind::Regular,
+            tool_set: signal_flow::ToolSet::Default,
+            instruction_prompt: String::new(),
+        };
+        let outcome = fixture.nexus.perform(Operation::Compose(profile.clone()));
+        // The same selection, sent raw: the frame Curriculum answers.
+        let (system_modules, user_modules): (Vec<String>, Vec<String>) = profile
+            .system_modules
+            .iter()
+            .chain(&profile.user_modules)
+            .cloned()
+            .partition(|identity| identity.as_str().placed_in_system_prompt());
+        let selection = ContextRequest {
+            address: address.clone(),
+            harness_kind: signal_flow::HarnessKind::Claude,
+            system_modules,
+            user_modules,
+            remembered_flows: vec![],
+        }
+        .startup_selection();
+        let query = rkyv::to_bytes::<rkyv::rancor::Error>(&CurriculumQuery::ComposeStartup(
+            selection.clone(),
+        ))
+        .unwrap();
+        let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        stream
+            .write_all(&(query.len() as u32).to_be_bytes())
+            .unwrap();
+        stream.write_all(&query).unwrap();
+        let mut prefix = [0_u8; 4];
+        stream.read_exact(&mut prefix).unwrap();
+        let mut frame = vec![0_u8; u32::from_be_bytes(prefix) as usize];
+        stream.read_exact(&mut frame).unwrap();
+        let shown = match &outcome {
+            Outcome::Composed(launch) => format!(
+                "Composed: system prompt {} bytes, first prompt {} bytes, address {:?}",
+                launch.system_prompt.system_prompt_text.len(),
+                launch.first_prompt_payload.first_prompt_body.len(),
+                launch.launch_profile.address
+            ),
+            other => format!("{other:?}"),
+        };
+        eprintln!(
+            "seat {flow} caller {:?} system {:?} user {:?}\n  perform(Compose): {shown}\n  raw answer frame: {} bytes",
+            [
+                &selection.caller_metaflow.first_string,
+                &selection.caller_metaflow.second_string,
+                &selection.caller_metaflow.third_string,
+            ],
+            selection.system_modules,
+            selection.user_modules,
+            frame.len()
+        );
+        match expect.as_str() {
+            "refused" => {
+                let read = rkyv::from_bytes::<CurriculumOutcome, rkyv::rancor::Error>(&frame)
+                    .expect("Flow reads the frame");
+                let CurriculumOutcome::Rejected(text) = &read else {
+                    panic!("seat {flow}: {read:?}")
+                };
+                assert_eq!(
+                    outcome,
+                    Outcome::Failed(Failed_Data::ContextRefused(
+                        signal_flow::ContextRefusal::ComposerRejected(text.clone())
+                    )),
+                    "seat {flow}"
+                );
+                let flow_reads = rkyv::to_bytes::<rkyv::rancor::Error>(&read).unwrap();
+                assert_eq!(
+                    frame,
+                    flow_reads.to_vec(),
+                    "seat {flow}: the frame Flow reads"
+                );
+                eprintln!("  frame equals Flow's Outcome::Rejected({text:?})");
+            }
+            _ => {
+                let Outcome::Composed(launch) = &outcome else {
+                    panic!("seat {flow}: {outcome:?}")
+                };
+                assert_eq!(launch.launch_profile.address, address);
+                for module in profile.system_modules.iter().chain(&profile.user_modules) {
+                    let marker = format!("<!-- module: {module} -->");
+                    assert!(
+                        launch.system_prompt.system_prompt_text.contains(&marker)
+                            || launch
+                                .first_prompt_payload
+                                .first_prompt_body
+                                .contains(&marker),
+                        "seat {flow}: {module} composed"
+                    );
+                }
+                composed += 1;
+            }
+        }
+    }
+    eprintln!("expect {expect}: {composed} composed");
+}

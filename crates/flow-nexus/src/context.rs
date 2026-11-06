@@ -14,9 +14,12 @@
 //! The production composer is the Curriculum Nexus, asked over the socket
 //! the Nexus's configuration names (`CurriculumNexusPath`),
 //! with `ComposeStartup` from its schema, copied byte for byte into
-//! `ethos/curriculum.ethos` from Curriculum 91acf293 (schema SHA-256
+//! `ethos/curriculum.ethos` from Curriculum 478cbc5 (schema SHA-256
 //! 26011a94…48e28), whose selection names the flows a launch remembers
-//! and whose composition carries their raw records. Its answer names no
+//! and whose composition carries their raw records. Its Outcome has five
+//! variants, the fifth `Rejected` with Curriculum's own text, which Flow
+//! keeps whole in `ContextRefusal::ComposerRejected`, but for a remembered
+//! flow's records missing, `RecordMissing`. Its answer names no
 //! metaflow, so the metaflow check is Flow's own: the request carries the
 //! launch's Address, and the composed launch keeps it with the identities
 //! asked for it.
@@ -158,10 +161,6 @@ impl ComposesFlowContext for CurriculumComposer {
             input.context_request().startup_selection(),
         )) {
             Ok(CurriculumOutcome::StartupComposed(composition)) => Ok(composition),
-            Ok(CurriculumOutcome::ModuleMissing(module_identity)) => {
-                eprintln!("flow-nexus: Curriculum found no module: {module_identity}");
-                Err(ContextRefusal::ModuleMissing(Some(module_identity)))
-            }
             // Curriculum names a remembered flow whose records it could not
             // read "record missing".
             Ok(CurriculumOutcome::Rejected(reason)) if reason.starts_with("record missing") => {
@@ -170,11 +169,13 @@ impl ComposesFlowContext for CurriculumComposer {
             }
             Ok(CurriculumOutcome::Rejected(reason)) => {
                 eprintln!("flow-nexus: Curriculum rejected the context request: {reason}");
-                Err(ContextRefusal::ComposerRejected)
+                Err(ContextRefusal::ComposerRejected(reason))
             }
             Ok(_) => {
                 eprintln!("flow-nexus: Curriculum answered the context request with another reply");
-                Err(ContextRefusal::ComposerRejected)
+                Err(ContextRefusal::ComposerRejected(
+                    "Curriculum answered the context request with another reply".into(),
+                ))
             }
             Err(error) => {
                 eprintln!("flow-nexus: context composer unavailable: {error}");

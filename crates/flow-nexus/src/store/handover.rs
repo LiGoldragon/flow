@@ -197,16 +197,20 @@ impl HoldsHandovers for FlowStore {
         let Some(mut row) = self.handover_row(address)? else {
             return Ok(());
         };
-        let sections = std::mem::take(&mut row.current);
+        // The successor inherits the predecessor's content, while the
+        // predecessor snapshot remains immutable for archival.  Clone here
+        // rather than sharing any mutable representation across generations.
+        let sections = row.current.clone();
         let touch = std::mem::replace(&mut row.touch, Touch::Unknown);
         if !sections.is_empty() {
             row.closed.push(ClosedHandover {
                 generation: row.generation,
                 predecessor: predecessor.into(),
-                sections,
+                sections: sections.clone(),
                 touch,
             });
         }
+        row.current = sections;
         row.generation += 1;
         self.write_handover(row)
     }

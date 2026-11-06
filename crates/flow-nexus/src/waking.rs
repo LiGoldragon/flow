@@ -2808,6 +2808,23 @@ impl WakesInParts for RunningNexus {
         };
         let mut profile = seat.fresh_profile();
         profile.flow_id_option = Some(flow_id.to_owned());
+        // Handover is the final part of the successor's first prompt.  Read
+        // it from Memory exactly once; an unreadable row refuses composition
+        // rather than silently dropping owed context.
+        use crate::store::handover::HoldsHandovers;
+        let handover = self.store.handover_memory(&address).ok()?;
+        if let Some(handover) = handover.filter(|row| !row.current.is_empty()) {
+            let text = handover
+                .current
+                .iter()
+                .map(|section| format!("## {}\n{}\n{}", section.title, section.description, section.body))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            profile.instruction_prompt = match profile.instruction_prompt.is_empty() {
+                true => format!("Handover\n\n{text}"),
+                false => format!("{}\n\nHandover\n\n{text}", profile.instruction_prompt),
+            };
+        }
         Some(profile)
     }
 

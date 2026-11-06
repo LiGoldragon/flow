@@ -21,6 +21,7 @@ pub(crate) mod opened_thread;
 pub(crate) mod queue_delivery;
 pub mod reminder;
 pub(crate) mod repair;
+pub(crate) mod restart;
 pub(crate) mod send_call;
 pub(crate) mod send_outcome;
 pub(crate) mod send_server;
@@ -191,11 +192,14 @@ const RUNNING_TABLES: &[&str] = &[
     "flow_nexus_simplified_reply_bindings",
     "flow_nexus_logical_delivery_purposes",
     "flow_nexus_heartbeat_standings",
+    "flow_nexus_restarts",
+    "flow_nexus_seat_births",
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
 // identity and its identity record must both match before a path is resumed.
 // Flow Memory v3 begins with 0.52.0, which opens no earlier store.
+// Restart (0.53.0) adds one family, RestartRecord; 0.53.0 also opens no earlier store.
 pub(crate) const FLOW_SCHEMA_VERSION: u32 = 3;
 const FLOW_MEMORY_SCHEMA_VERSION: u64 = 2;
 const STATE_KEY: &str = "identity";
@@ -1472,6 +1476,8 @@ pub struct FlowStore {
     send_outcomes: SendOutcomeTables,
     logical_deliveries: LogicalDeliveryTables,
     heartbeat_standings: TableReference<StoredHeartbeatStanding>,
+    restarts: TableReference<restart::StoredRestart>,
+    seat_births: TableReference<crate::generated::memory::SeatBirth>,
     pub launch_changes: LaunchChanges,
 }
 
@@ -2166,6 +2172,10 @@ impl OpensFlowStore for FlowStore {
         let send_outcome_descriptors = SendOutcomeTables::descriptors();
         let logical_delivery_descriptors = LogicalDeliveryTables::descriptors();
         let heartbeat_standing_descriptor = StoredHeartbeatStanding::descriptor();
+        let restart_descriptor =
+            <FlowStore as restart::DescribesRestartTables>::restart_descriptor();
+        let seat_birth_descriptor =
+            <FlowStore as restart::DescribesRestartTables>::seat_birth_descriptor();
         let mut engine = Engine::open(
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
@@ -2214,7 +2224,9 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&logical_delivery_descriptors.events)
                 .with_family(&logical_delivery_descriptors.simplified_replies)
                 .with_family(&logical_delivery_descriptors.purposes)
-                .with_family(&heartbeat_standing_descriptor),
+                .with_family(&heartbeat_standing_descriptor)
+                .with_family(&restart_descriptor)
+                .with_family(&seat_birth_descriptor),
         )?;
         let flows = engine.register_table(flows_descriptor)?;
         let native_owner_proofs = engine.register_table(native_owner_proofs_descriptor)?;
@@ -2248,6 +2260,8 @@ impl OpensFlowStore for FlowStore {
         let logical_deliveries =
             LogicalDeliveryTables::register(&mut engine, logical_delivery_descriptors)?;
         let heartbeat_standings = engine.register_table(heartbeat_standing_descriptor)?;
+        let restarts = engine.register_table(restart_descriptor)?;
+        let seat_births = engine.register_table(seat_birth_descriptor)?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2280,6 +2294,8 @@ impl OpensFlowStore for FlowStore {
             send_outcomes,
             logical_deliveries,
             heartbeat_standings,
+            restarts,
+            seat_births,
             launch_changes: LaunchChanges::default(),
         };
 
@@ -2400,6 +2416,11 @@ impl OpensFlowStore for FlowStore {
         let logical_deliveries =
             LogicalDeliveryTables::register(&mut engine, LogicalDeliveryTables::descriptors())?;
         let heartbeat_standings = engine.register_table(StoredHeartbeatStanding::descriptor())?;
+        let restarts = engine
+            .register_table(<FlowStore as restart::DescribesRestartTables>::restart_descriptor())?;
+        let seat_births = engine.register_table(
+            <FlowStore as restart::DescribesRestartTables>::seat_birth_descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2432,6 +2453,8 @@ impl OpensFlowStore for FlowStore {
             send_outcomes,
             logical_deliveries,
             heartbeat_standings,
+            restarts,
+            seat_births,
             launch_changes: LaunchChanges::default(),
         };
         store.archive_legacy_queue()?;
@@ -2776,6 +2799,10 @@ impl AppliesFlowQuery for FlowStore {
             Query::Refresh(_) => Ok(Response::Refused(signal_flow::Refusal::Store(
                 "the store alone closes no pane".into(),
             ))),
+            // A restart closes and opens panes, which the store alone cannot.
+            Query::Restart(_) => Ok(Response::Refused(signal_flow::Refusal::Store(
+                "the store alone closes no pane".into(),
+            ))),
             Query::ResolveRecipient(flow_id) => self.resolve_recipient(&flow_id),
             Query::Stop(_) => Ok(Response::StopRejected(
                 signal_flow::StopRejection::PersistenceRefused,
@@ -2856,7 +2883,8 @@ impl ReservesPendingStart for FlowStore {
             | Query::DeliverAll(_)
             | Query::Launch(_)
             | Query::BindSeat(_)
-            | Query::Adopt(_) => Ok(None),
+            | Query::Adopt(_)
+            | Query::Restart(_) => Ok(None),
         }
     }
 }
@@ -4119,8 +4147,13 @@ impl RecordsFlowLifecycle for FlowStore {
         }
         flow.lifecycle = FlowLifecycle::Retired;
         // A flow that ends before its launch was confirmed gives back the
-        // Address it held; a confirmed one puts its metaflow to sleep.
-        let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
+        // Address it held; a confirmed one puts its metaflow to sleep. A
+        // restart record it holds goes in the same write.
+        let commit = restart::RecordsRestarts::restart_retracted(
+            self,
+            flow_id,
+            self.engine.begin_atomic_commit().mutate(self.flows, flow),
+        )?;
         self.engine
             .commit_atomic(self.ended_at_address(flow_id, commit)?)?;
         self.launch_changes.announce();
@@ -4534,6 +4567,8 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-logical-delivery-purpose",
                 "flow-nexus-logical-delivery-purpose-v2",
             ),
+            "flow_nexus_restarts" => (restart::RESTART_FAMILY, restart::RESTART_SCHEMA),
+            "flow_nexus_seat_births" => (restart::SEAT_BIRTH_FAMILY, restart::SEAT_BIRTH_SCHEMA),
             "flow_nexus_heartbeat_standings" => {
                 (HEARTBEAT_STANDING_FAMILY, HEARTBEAT_STANDING_SCHEMA)
             }

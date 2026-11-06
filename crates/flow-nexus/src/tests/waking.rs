@@ -1244,8 +1244,8 @@ fn an_ended_binding_holding_work_rests_asleep() {
 /// The Claude flow `abc123` Flow launched at the Mind flow Secondary, its
 /// launch of record kept, in pane w1:p3 of `fixture-session`.
 pub(super) struct LaunchedClaude {
-    profile: LaunchProfile,
-    session: String,
+    pub(super) profile: LaunchProfile,
+    pub(super) session: String,
 }
 
 /// The launched Claude flow abc123, Stopped: the flow a metaflow that
@@ -3278,7 +3278,7 @@ fn naming_refused() -> signal_flow::StartRejection {
 /// flow's answer to the Claude transcript; and a Codex app-server that
 /// opens one new thread, names it and reads its settings back.
 pub(super) struct FreshWorld {
-    state: std::path::PathBuf,
+    pub(super) state: std::path::PathBuf,
     codex_invocations: std::path::PathBuf,
 }
 
@@ -3326,8 +3326,23 @@ term=term-fresh; [ "$ws" = 7 ] || term="term-fresh-$ws"
 agent() {{
   harness=$(cat "$S/harness"); title=$(cat "$S/title" 2>/dev/null)
   session=''
-  [ "$harness" = claude ] && session=$(printf ',"agent_session":{{"source":"herdr:claude","agent":"claude","kind":"id","value":"%s"}}' "$(cat "$S/session")")
-  printf '{{"name":"%s","agent":"%s","agent_status":"idle","workspace_id":"w%s","pane_id":"%s","terminal_id":"%s","interactive_ready":true,"terminal_title_stripped":"%s"%s}}' "$(cat "$S/name")" "$harness" "$ws" "$pane" "$term" "$title" "$session"
+  reported=$(cat "$S/report-session" 2>/dev/null || cat "$S/session")
+  [ "$harness" = claude ] && session=$(printf ',"agent_session":{{"source":"herdr:claude","agent":"claude","kind":"id","value":"%s"}}' "$reported")
+  printf '{{"name":"%s","agent":"%s","agent_status":"idle","workspace_id":"w%s","tab_id":"w%s:t1","pane_id":"%s","terminal_id":"%s","interactive_ready":true,"terminal_title_stripped":"%s"%s}}' "$(cat "$S/name")" "$harness" "$ws" "$ws" "$pane" "$term" "$title" "$session"
+}}
+# A restart world also shows the seat a restart replaces (OLD_AGENT, its
+# harness OLD_PID in pane OLD_PANE) and lists the panes it made, so a pane
+# with no agent yet is shown; a pane it closes is gone.
+agents() {{
+  list=; [ -f "$S/old-agent" ] && list=$(cat "$S/old-agent")
+  [ -f "$S/harness" ] && list="${{list:+$list,}}$(agent)"
+  printf '%s' "$list"
+}}
+panes() {{
+  [ -f "$S/restart-world" ] && [ -f "$S/workspace" ] && [ ! -f "$S/closed-$ws" ] && printf '{{"pane_id":"%s","terminal_id":"%s"}}' "$pane" "$term"
+}}
+gone() {{
+  while [ -e "/proc/$1" ] && ! grep -q ') Z' "/proc/$1/stat" 2>/dev/null; do sleep 0.01; done
 }}
 case "$*" in
   *"workspace create"*)
@@ -3337,16 +3352,31 @@ case "$*" in
   *"pane run"*) sh -c "$6" > "$S/marker" ;;
   *"pane wait-output"*) line=$(grep -F FLOW_CLAUDE_ENV_READY_ "$S/marker"); printf '{{"result":{{"pane_id":"%s","matched_line":"%s"}}}}\n' "$pane" "$line" ;;
   *"agent start"*)
-    printf '%s' "$5" > "$S/name"; harness=codex; prev=
+    printf '%s' "$5" > "$S/name"; harness=codex; prev=; resumed=
     for a in "$@"; do
       case "$prev" in
         --session-id) harness=claude; printf '%s' "$a" > "$S/session" ;;
+        --resume) harness=claude; resumed=1; printf '%s' "$a" > "$S/session" ;;
         --name) printf '%s' "$a" > "$S/title" ;;
         resume) printf '%s' "$a" > "$S/session" ;;
       esac
       prev=$a
     done
+    # A resume HOLD_START holds is held until RELEASE_START, START_HELD
+    # telling the test it is held; RESUME_REFUSED refuses it.
+    if [ -n "$resumed" ] && [ -f "$S/hold-start" ]; then
+      : > "$S/start-held"
+      i=0; while [ ! -f "$S/release-start" ] && [ "$i" -lt 2000 ]; do sleep 0.01; i=$((i + 1)); done
+    fi
+    if [ -n "$resumed" ] && [ -f "$S/resume-refused" ]; then printf '%s\n' '{{"id":"cli:agent:start","error":{{"code":"agent_start_failed","message":"resume refused"}}}}'; exit 1; fi
     printf '%s' "$harness" > "$S/harness"
+    # A resumed Claude runs `--resume <session>` in the pane's foreground,
+    # marked as Herdr marks a pane's processes; its hook (HOOK_PID) is a
+    # child whose environment is scrubbed.
+    if [ -n "$resumed" ]; then
+      HERDR_PANE_ID="$pane" HERDR_SESSION=fixture-session sh -c 's=$(command -v sleep); env -i "$s" 120 & printf "%s" "$!" > "$0"; sleep 120; :' "$S/hook-pid" --resume "$(cat "$S/session")" < /dev/null > /dev/null 2>&1 &
+      printf '%s' "$!" > "$S/pid"
+    fi
     # The Codex TUI runs `resume <thread>` in the pane's foreground.
     if [ "$harness" = codex ]; then
       sh -c 'sleep 120; :' resume "$(cat "$S/session")" < /dev/null > /dev/null 2>&1 &
@@ -3371,14 +3401,25 @@ case "$*" in
     if [ -f "$S/turn-started" ] && [ ! -f "$S/turn-done" ]; then printf '%s\n' '{{"id":"cli:agent:wait","error":{{"code":"timeout","message":"timed out"}}}}'; exit 1; fi
     printf '%s\n' '{{"result":{{"status":"idle"}}}}' ;;
   *"agent get"*) printf '{{"result":{{"agent":%s}}}}\n' "$(agent)" ;;
-  *"api snapshot"*) a=; [ -f "$S/harness" ] && a=$(agent); printf '{{"id":"cli:api:snapshot","result":{{"snapshot":{{"agents":[%s],"protocol":20,"version":"0.8.2"}},"type":"session_snapshot"}}}}\n' "$a" ;;
+  *"api snapshot"*) if [ -f "$S/restart-world" ]; then printf '{{"id":"cli:api:snapshot","result":{{"snapshot":{{"agents":[%s],"panes":[%s],"protocol":20,"version":"0.8.2"}},"type":"session_snapshot"}}}}\n' "$(agents)" "$(panes)"; else a=; [ -f "$S/harness" ] && a=$(agent); printf '{{"id":"cli:api:snapshot","result":{{"snapshot":{{"agents":[%s],"protocol":20,"version":"0.8.2"}},"type":"session_snapshot"}}}}\n' "$a"; fi ;;
   *"pane rename "*) printf '%s' "$6" > "$S/label"; printf '%s\n' '{{"result":{{}}}}' ;;
   *"pane report-metadata "*) printf '%s' "$9" > "$S/display-agent"; printf '%s\n' '{{"result":{{}}}}' ;;
   *"pane get "*) printf '{{"result":{{"pane":{{"pane_id":"%s","terminal_id":"%s","label":"%s","display_agent":"%s"}}}}}}\n' "$pane" "$term" "$(cat "$S/label")" "$(cat "$S/display-agent")" ;;
   *"workspace rename "*) printf '%s' "$6" > "$S/workspace-label-$5"; printf '%s\n' '{{"result":{{}}}}' ;;
   *"workspace get "*) printf '{{"result":{{"workspace":{{"workspace_id":"%s","label":"%s"}}}}}}\n' "$5" "$(cat "$S/workspace-label-$5" 2>/dev/null)" ;;
-  *"pane process-info"*) printf '{{"result":{{"process_info":{{"pane_id":"%s","foreground_processes":[{{"pid":%s}}]}}}}}}\n' "$pane" "$(cat "$S/pid" 2>/dev/null || printf 1)" ;;
-  *"pane close"*) printf '%s\n' '{{"result":{{}}}}' ;;
+  *"pane process-info"*)
+    if [ -f "$S/old-pane" ] && [ "$6" = "$(cat "$S/old-pane")" ]; then
+      printf '{{"result":{{"process_info":{{"pane_id":"%s","foreground_processes":[{{"pid":%s}}]}}}}}}\n' "$6" "$(cat "$S/old-pid")"
+    else
+      printf '{{"result":{{"process_info":{{"pane_id":"%s","foreground_processes":[{{"pid":%s}}]}}}}}}\n' "$pane" "$(cat "$S/pid" 2>/dev/null || printf 1)"
+    fi ;;
+  *"pane close"*)
+    # CLOSE_REFUSED refuses every close. A restart world's close takes the
+    # pane and its harness down.
+    if [ -f "$S/close-refused" ]; then printf '%s\n' '{{"error":{{"code":"pane_close_failed","message":"refused"}}}}' >&2; exit 1; fi
+    if [ -f "$S/old-pane" ] && [ "$5" = "$(cat "$S/old-pane")" ]; then rm -f "$S/old-agent"; p=$(cat "$S/old-pid" 2>/dev/null); [ -n "$p" ] && kill "$p" 2>/dev/null && gone "$p"; fi
+    if [ -f "$S/restart-world" ] && [ "$5" = "$pane" ]; then rm -f "$S/harness"; : > "$S/closed-$ws"; p=$(cat "$S/pid" 2>/dev/null); [ -n "$p" ] && kill "$p" 2>/dev/null && gone "$p"; rm -f "$S/pid"; fi
+    printf '%s\n' '{{"result":{{}}}}' ;;
   *"agent read"*) printf '%s\n' '❯ ' ;;
   *"agent prompt"*)
     s=$(cat "$S/session"); t='{claude_root}/'"$s"'.jsonl'

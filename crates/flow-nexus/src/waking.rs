@@ -393,6 +393,8 @@ pub enum KeptAtStop {
     /// closed: a closed seat whose successor cannot compose would leave its
     /// Address with no flow. It stays Awake and is handed its queue.
     SuccessorUncomposable(Box<Outcome>),
+    /// A restart holds the flow: nothing is settled at a Stop of it.
+    Restarting,
 }
 
 /// Whether the seat was kept because its successor could not be placed,
@@ -1231,6 +1233,17 @@ impl MarksUndecided for RunningNexus {
 
 impl SleepsAndWakesSeats for RunningNexus {
     fn settle_stopped(&self, flow_id: &str) -> AtStop {
+        // A restart holds the Address: no drain, sleep or refresh of it.
+        if !matches!(
+            crate::store::restart::RecordsRestarts::restart_record(&self.store, flow_id),
+            Ok(None)
+        ) {
+            eprintln!(
+                "flow-nexus: flow {flow_id} kept at its Stop: {:?}",
+                KeptAtStop::Restarting
+            );
+            return AtStop::Kept(KeptAtStop::Restarting);
+        }
         let at_stop = self.settle_rested(flow_id);
         match &at_stop {
             AtStop::Kept(reason) if reason.successor_refused() => {
@@ -1276,6 +1289,10 @@ impl SleepsAndWakesSeats for RunningNexus {
             if metaflow.queue.is_empty()
                 || self.waking.is_waking(address)
                 || !matches!(self.store.address_hold(&flow_id), Ok(None))
+                || !matches!(
+                    crate::store::restart::RecordsRestarts::restart_record(&self.store, &flow_id),
+                    Ok(None)
+                )
             {
                 return;
             }
@@ -1390,6 +1407,9 @@ impl SleepsAndWakesSeats for RunningNexus {
 
     fn recover_wakes(&self) {
         self.recover_deliveries();
+        // A restart an earlier Nexus left is taken up first, so a seat it
+        // binds is handed its queue below.
+        crate::restarting::RestartsFlows::recover_restarts(self);
         // What an earlier Nexus left queued for an Awake seat is handed
         // over now, each address's whole queue as one payload.
         let awake = {
@@ -1557,6 +1577,15 @@ impl RefreshesMetaflows for RunningNexus {
             }
             Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
         };
+        // A restart holds the flow's Address as a refresh would.
+        if let flow_ethos::State::Awake(current) = &metaflow.state
+            && !matches!(
+                crate::store::restart::RecordsRestarts::restart_record(&self.store, current),
+                Ok(None)
+            )
+        {
+            return Response::RefreshRejected(RefreshRejection::Locked);
+        }
         let flow_ethos::State::Awake(flow_id) = metaflow.state.clone() else {
             return Response::RefreshRejected(RefreshRejection::NotAwake);
         };
@@ -1682,6 +1711,12 @@ impl RefreshesMetaflows for RunningNexus {
             let Some(lock) = self.waking.hold(&address) else {
                 return Response::ReplaceRejected(ReplaceRejection::Locked);
             };
+            // A restart holds the Address its predecessor runs at.
+            if let Ok(Some(_)) =
+                crate::store::restart::RecordsRestarts::restart_at(&self.store, &address)
+            {
+                return Response::ReplaceRejected(ReplaceRejection::Locked);
+            }
             // The successor is owed until it is confirmed, so a Nexus that
             // stops before then starts it at its next start.
             if let Some(predecessor) = profile.flow_id_option.clone()

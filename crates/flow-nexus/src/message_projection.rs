@@ -317,6 +317,7 @@ pub(crate) fn visible_inspection(
                 }
             })
             .collect(),
+        restart_record_option: value.restart_record_option,
     }
 }
 

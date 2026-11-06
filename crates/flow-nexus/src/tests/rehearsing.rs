@@ -80,6 +80,7 @@ impl RehearsalFixture for Fixture {
                 .then(|| "{ Mind core Sol abc123 }".into()),
             prompt_fd: (harness == &HarnessKind::Claude).then(|| "/proc/self/fd/17".into()),
             claude_session: (harness == &HarnessKind::Claude).then(|| "claude-session".into()),
+            claude_resume: None,
             codex_title: (harness == &HarnessKind::Codex)
                 .then(|| "tui.terminal_title=['thread-name']".into()),
             thread: (harness == &HarnessKind::Codex).then(|| "codex-thread".into()),

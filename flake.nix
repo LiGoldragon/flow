@@ -53,7 +53,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.52.0";
+            version = "0.53.0";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -575,6 +575,41 @@
             "tests::waking::a_launch_interrupted_with_its_first_call_pending_is_refused_archived_and_settled_at_restart";
           flow-launch-address-held-elsewhere-sends-nothing = context.exactTest "flow-nexus"
             "tests::waking::a_launch_whose_address_another_flow_holds_sends_nothing";
+          # Restart, slice 1: a Claude flow, Awake and resting, asked from outside.
+          flow-restart-awake-resting-claude-resumes-same-session = context.exactTest "flow-nexus"
+            "tests::restarting::restart_awake_resting_claude_resumes_same_session";
+          flow-restart-arrival-queued-delivered-once = context.exactTest "flow-nexus"
+            "tests::restarting::restart_arrival_queued_delivered_once";
+          flow-restart-old-session-end-fenced = context.exactTest "flow-nexus"
+            "tests::restarting::restart_old_session_end_fenced";
+          flow-restart-new-seat-real-exit-ends = context.exactTest "flow-nexus"
+            "tests::restarting::restart_new_seat_real_exit_ends";
+          flow-restart-resumed-hooks-report-to-live-nexus = context.exactTest "flow-nexus"
+            "tests::restarting::restart_resumed_hooks_report_to_live_nexus";
+          flow-restart-close-refused-flow-unchanged = context.exactTest "flow-nexus"
+            "tests::restarting::restart_close_refused_flow_unchanged";
+          flow-restart-resume-refused-custody-kept = context.exactTest "flow-nexus"
+            "tests::restarting::restart_resume_refused_custody_kept";
+          flow-restart-harness-already-dead = context.exactTest "flow-nexus"
+            "tests::restarting::restart_harness_already_dead";
+          flow-restart-unknown-flow = context.exactTest "flow-nexus"
+            "tests::restarting::restart_unknown_flow";
+          flow-restart-no-held-session = context.exactTest "flow-nexus"
+            "tests::restarting::restart_no_held_session";
+          flow-restart-transcript-absent = context.exactTest "flow-nexus"
+            "tests::restarting::restart_transcript_absent";
+          flow-restart-busy = context.exactTest "flow-nexus"
+            "tests::restarting::restart_busy";
+          flow-restart-bind-mismatch = context.exactTest "flow-nexus"
+            "tests::restarting::restart_bind_mismatch";
+          flow-restart-inspect-shows-record = context.exactTest "flow-nexus"
+            "tests::restarting::restart_inspect_shows_record";
+          flow-restart-nexus-death-each-phase = context.exactTest "flow-nexus"
+            "tests::restarting::restart_nexus_death_each_phase";
+          flow-restart-crash-around-bind-commit-delivers-once = context.exactTest "flow-nexus"
+            "tests::restarting::restart_crash_around_bind_commit_delivers_once";
+          flow-restart-interrupted-stop-needs-quiesced-spawn = context.exactTest "flow-nexus"
+            "tests::restarting::restart_interrupted_stop_needs_quiesced_spawn";
         }
       );
 

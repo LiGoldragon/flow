@@ -60,13 +60,23 @@
 ; queue only on its exact native receipt. Drain answers what it settled or
 ; handed over. Wake runs off the dispatch gate and takes it per step.
 ;
-; LaunchOutcome and Replacement are the Memory root's record types
-; (memory.ethos), named through the Nexus crate.
+; Restart's steps are operations too. Record.Restart writes a flow's
+; RestartRecord, the phase it names written before the effect it names;
+; Record.Rebound binds the resumed seat in one write: its route, its
+; SeatBirth, and the record removed. Resume starts Claude in the restart's
+; new pane on the session the flow already holds, `--resume`, with the
+; FlowId in its environment and no prompt. Discard closes a pane a restart
+; created whose resume did not bind, known by the pane and terminal Herdr
+; gave it, and answers Closed once Herdr shows it gone. While a restart
+; holds a flow, no end of it is recorded: Record.Exited fails Restarting.
+;
+; LaunchOutcome, Replacement and SeatBirth are the Memory root's record
+; types (memory.ethos), named through the Nexus crate.
 
 Operation
 [ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch Origin LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request QueueEntry LogicalDeliveryId ContextRefusal CompositionRefusal LeaveOutRefusal NativeSessionId HarnessSpawnRefusal NativeLaunchRefusal ]
-  meta_signal_flow:Root
-  flow_nexus:[ LaunchOutcome Replacement ] ]
+  meta_signal_flow:[ Root RestartRecord ]
+  flow_nexus:[ LaunchOutcome Replacement SeatBirth ] ]
 [ Compose.LaunchProfile
   Reserve.{ ComposedLaunch Origin }
   Record.[ Intent.NativeLaunchIntent
@@ -84,15 +94,19 @@ Operation
            Harness.{ FlowId Event }
            Context.{ FlowId Tokens.Integer }
            Asleep.{ Address FlowId }
-           Awoken.{ Address FlowId Delivered.Integer } ]
+           Awoken.{ Address FlowId Delivered.Integer }
+           Restart.RestartRecord
+           Rebound.SeatBirth ]
   Register.{ FlowNode Caller }
   Confirm.FlowId
   Open.{ ComposedLaunch Root }
   Spawn.PaneLaunch
+  Resume.PaneLaunch
   Bind.PaneLaunch
   Title.{ ComposedLaunch NativeLaunchBinding }
   Submit.{ ComposedLaunch PromptDeliveryIntent }
   Close.FlowNode
+  Discard.HerdrPaneBinding
   Release.FlowId
   Wake.Address
   Drain.Address ]
@@ -127,6 +141,7 @@ Operation
            ContextRefused.ContextRefusal
            LeaveOutRefused.LeaveOutRefusal
            SpawnRefused.HarnessSpawnRefusal
-           LaunchRefused.NativeLaunchRefusal ] ]
+           LaunchRefused.NativeLaunchRefusal
+           Restarting ] ]
 [ HarnessArguments.Vector<String>
   PaneLaunch.{ ComposedLaunch Root HerdrPaneBinding Option<FlowId> Option<NativeSessionId> HarnessArguments } ]

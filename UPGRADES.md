@@ -1,3 +1,23 @@
+# Flow 0.53.0
+
+Frozen 0.52.0 plus Restart. Pins signal-flow 46.0.0 and meta-signal-flow
+58.0.0.
+
+- `Restart.FlowId` closes a flow's harness and resumes the same native
+  session in a new pane: the FlowId, session, model and transcript stay. No
+  first prompt is typed. Answers `Restarted`, or a typed `RestartRefused`.
+- The intent is durable Memory, a new family `RestartRecord`, written before
+  each effect; while it stands the address is held and arrivals queue.
+  `Bound` commits the new binding and removes the record in one write; the
+  queue then drains through the existing delivery custody.
+- A late event from the old seat is fenced by the bound seat's birth
+  identity; the new seat's real exit ends the flow as before.
+- A spawn whose outcome a Nexus death left unproven is `Interrupted`, never
+  respawned; Stop clears it only once the spawn is proven quiet.
+- Inspect shows the record, read-only.
+
+0.53.0 opens no earlier store, as 0.52.0 does not; it starts from a new store.
+
 # Flow 0.52.0
 
 An Address names its Model: `Address.{ Aspect Topic Model }`,

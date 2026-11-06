@@ -206,6 +206,16 @@ impl DeliversMessages for RunningNexus {
                 return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused);
             }
         }
+        // A restart holds the flow: nothing is typed into a pane it is
+        // closing or opening.
+        match crate::store::restart::RecordsRestarts::restart_record(&self.store, &request.flow_id)
+        {
+            Ok(None) => {}
+            Ok(Some(_)) => return Response::DeliveryRejected(DeliveryRejection::RouteUnavailable),
+            Err(_) => {
+                return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused);
+            }
+        }
         let target = match self.delivery_target(&request.flow_id) {
             Ok(target) => target,
             Err(refusal) => return Response::DeliveryRejected(refusal.into()),

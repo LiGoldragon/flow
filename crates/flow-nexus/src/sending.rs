@@ -965,6 +965,13 @@ impl RunningNexus {
         let Some(peer) = peer else {
             return Response::Refused(Refusal::unidentified(Process { pid: 0, started: 0 }));
         };
+        // A restart holds the Address: no seat binds to it meanwhile.
+        if !matches!(
+            crate::store::restart::RecordsRestarts::restart_at(&self.store, &address),
+            Ok(None)
+        ) {
+            return Response::Refused(Refusal::Locked);
+        }
         let unidentified = || Response::Refused(Refusal::unidentified(peer.clone()));
         if !FlowStore::process_is_live(peer) {
             return unidentified();
@@ -1246,6 +1253,15 @@ impl CompletesDirectSends for RunningNexus {
         if !matches!(self.store.outstanding_delivery(address), Ok(None))
             || flow_id.as_ref().is_some_and(|flow_id| {
                 !matches!(self.store.address_hold(flow_id), Ok(None))
+                    // A restart holds the Address: the request queues for
+                    // the resumed seat.
+                    || !matches!(
+                        crate::store::restart::RecordsRestarts::restart_record(
+                            &self.store,
+                            flow_id
+                        ),
+                        Ok(None)
+                    )
                     || (!matches!(self.store.past_threshold(flow_id), Ok(false))
                         && !crate::waking::NotesRefreshRefusals::holds(
                             &self.refresh_refusals,

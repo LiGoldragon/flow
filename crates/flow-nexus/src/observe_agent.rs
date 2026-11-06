@@ -42,13 +42,29 @@ pub trait ObservesAgent {
 pub(crate) trait RecordsWitnessedExit {
     /// Records the flow Exited, under the dispatch gate, when it is still
     /// live; then wakes its metaflow when Flow's records show it due.
-    fn exited_as_witnessed(&self, flow_id: &str);
+    fn exited_as_witnessed(&self, flow_id: &str) {
+        self.exited_as_witnessed_by(flow_id, None);
+    }
+    /// As `exited_as_witnessed`, for an exit witnessed of `witness`: the
+    /// route and seat birth an Observe was opened on. It is recorded only
+    /// while the flow still runs there as that seat, and never while a
+    /// restart holds it.
+    fn exited_as_witnessed_by(
+        &self,
+        flow_id: &str,
+        witness: Option<&crate::restarting::SeatWitness>,
+    );
 }
 
 impl RecordsWitnessedExit for RunningNexus {
-    fn exited_as_witnessed(&self, flow_id: &str) {
+    fn exited_as_witnessed_by(
+        &self,
+        flow_id: &str,
+        witness: Option<&crate::restarting::SeatWitness>,
+    ) {
         use crate::generated::operation::{Operation, Outcome, Record_Data};
         use crate::performing::Performs;
+        use crate::restarting::FencesSeatEvents;
         use crate::store::metaflow::SleepsMetaflows;
         use crate::waking::SleepsAndWakesSeats;
         let address = {
@@ -58,6 +74,12 @@ impl RecordsWitnessedExit for RunningNexus {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if !matches!(self.store.flow_node(flow_id), Ok(Some(node)) if node.flow_lifecycle.is_live())
             {
+                return;
+            }
+            if !self.witness_holds(flow_id, witness) {
+                eprintln!(
+                    "flow-nexus: flow {flow_id} was seen gone where it no longer runs; no exit is recorded"
+                );
                 return;
             }
             let address = self
@@ -148,6 +170,12 @@ impl ObservesAgent for RunningNexus {
         let Some((_, route)) = self.observable(flow_id) else {
             return send(&AgentState::Gone.observed_of(flow_id));
         };
+        // What this subscription watches: a Gone it reads acts only while
+        // the flow still runs there, as the seat it was opened on.
+        let witness = {
+            use crate::restarting::FencesSeatEvents;
+            self.seat_witness(flow_id)
+        };
         let socket = self
             .herdr
             .session_socket(&route.herdr_session_name)
@@ -160,7 +188,7 @@ impl ObservesAgent for RunningNexus {
                 if let Some((node, _)) = self.observable(flow_id)
                     && matches!(self.herdr.pane_agent(&node), PaneAgent::Absent)
                 {
-                    self.exited_as_witnessed(flow_id);
+                    self.exited_as_witnessed_by(flow_id, witness.as_ref());
                 }
                 return send(&AgentState::Gone.observed_of(flow_id));
             };
@@ -173,7 +201,7 @@ impl ObservesAgent for RunningNexus {
             }
             send(&agent_state.clone().observed_of(flow_id))?;
             if agent_state == AgentState::Gone {
-                self.exited_as_witnessed(flow_id);
+                self.exited_as_witnessed_by(flow_id, witness.as_ref());
                 return Ok(());
             }
             last = agent_state;

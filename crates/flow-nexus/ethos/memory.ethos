@@ -2,13 +2,16 @@
 ; request settled, kept beside its attempt so LaunchStatus and
 ; Observe.Launch answer it without running the launch again, and a
 ; replacement under way, the successor's launch request and the predecessor
-; it reaps.
+; it reaps. SeatBirth is the seat a restart bound: the route it runs in and
+; the birth of its harness process, kept after the restart's record goes, so
+; an event of the seat it replaced is told from the seat's own.
 
 Memory
-[ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection ]
+[ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection FlowId HerdrRoute Process ]
   flow_nexus:[ LaunchedRecord ReplacedRecord ] ]
 [ LaunchOutcome.[ Started.LaunchedRecord
                   Replaced.ReplacedRecord
                   StartRejected.StartRejection
                   ReplaceRejected.ReplaceRejection ]
-  Replacement.{ LaunchRequestId Predecessor.String } ]
+  Replacement.{ LaunchRequestId Predecessor.String }
+  SeatBirth.{ FlowId HerdrRoute Process } ]

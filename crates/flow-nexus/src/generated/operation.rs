@@ -79,6 +79,8 @@ pub enum Record_Data {
     Context(Record_Data_Context_Data),
     Asleep(Record_Data_Asleep_Data),
     Awoken(Record_Data_Awoken_Data),
+    Restart(meta_signal_flow::RestartRecord),
+    Rebound(flow_nexus::SeatBirth),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -119,10 +121,12 @@ pub enum Operation {
     Confirm(signal_flow::FlowId),
     Open(Open_Data),
     Spawn(PaneLaunch),
+    Resume(PaneLaunch),
     Bind(PaneLaunch),
     Title(Title_Data),
     Submit(Submit_Data),
     Close(signal_flow::FlowNode),
+    Discard(signal_flow::HerdrPaneBinding),
     Release(signal_flow::FlowId),
     Wake(signal_flow::Address),
     Drain(signal_flow::Address),
@@ -154,6 +158,7 @@ pub enum Failed_Data {
     LeaveOutRefused(signal_flow::LeaveOutRefusal),
     SpawnRefused(signal_flow::HarnessSpawnRefusal),
     LaunchRefused(signal_flow::NativeLaunchRefusal),
+    Restarting,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

@@ -19,7 +19,7 @@ pub use generated::curriculum::{
     ContextProvenance, Outcome as CurriculumOutcome, Query as CurriculumQuery, StartupComposition,
     StartupSelection,
 };
-pub use generated::memory::{LaunchOutcome, Replacement};
+pub use generated::memory::{LaunchOutcome, Replacement, SeatBirth};
 pub use generated::operation::Outcome as OperationOutcome;
 pub use generated::starter::{LaunchedRecord, ReplacedRecord};
 pub use store::StoreError;
@@ -40,6 +40,7 @@ pub mod model;
 pub mod recovery;
 pub mod reminding;
 pub mod repairing;
+pub mod restarting;
 use metaflow::DispatchesMetaflowPeer;
 #[cfg(test)]
 mod fixture_executable;
@@ -243,6 +244,11 @@ impl Dispatches for RunningNexus {
                 use crate::waking::RefreshesMetaflows;
                 self.refresh(&address)
             }
+            // Off the gate: the restart takes it for each of its steps.
+            Query::Restart(flow_id) => {
+                use crate::restarting::RestartsFlows;
+                self.restart(&flow_id, &origin)
+            }
             Query::ResolveRecipient(flow_id) => {
                 match self.store.apply(Query::ResolveRecipient(flow_id)) {
                     Ok(Response::RecipientResolved(node)) => Response::RecipientResolved(
@@ -263,6 +269,21 @@ impl Dispatches for RunningNexus {
                         return Response::Refused(signal_flow::Refusal::Store(error.to_string()));
                     }
                 };
+                // A flow under a restart record is stopped as its restart
+                // stands: its FlowId, session and queue are kept.
+                {
+                    use crate::restarting::RestartsFlows;
+                    use crate::store::restart::RecordsRestarts;
+                    match self.store.restart_record(&flow_id) {
+                        Ok(None) => {}
+                        Ok(Some(record)) => return self.stop_restarting(record),
+                        Err(error) => {
+                            return Response::Refused(signal_flow::Refusal::Store(
+                                error.to_string(),
+                            ));
+                        }
+                    }
+                }
                 // A Retired seat is gone already, so there is nothing left
                 // for Stop to close: AlreadyStopped is what it answers.
                 if !node.flow_lifecycle.is_live() {
@@ -440,6 +461,30 @@ impl Dispatches for RunningNexus {
                     return meta_signal_flow::Response::RetireRejected(
                         meta_signal_flow::RetireRejection::AlreadyGone,
                     );
+                }
+                // A restart that may still start a harness, or is running,
+                // keeps its Address: only a Failed one is retired, and its
+                // record goes with the flow.
+                {
+                    use crate::store::restart::RecordsRestarts;
+                    match self.store.restart_record(&flow_id) {
+                        Ok(None) => {}
+                        Ok(Some(record))
+                            if matches!(
+                                record.restart_phase,
+                                meta_signal_flow::RestartPhase::Failed(_)
+                            ) => {}
+                        Ok(Some(_)) => {
+                            return meta_signal_flow::Response::RetireRejected(
+                                meta_signal_flow::RetireRejection::RestartUnresolved,
+                            );
+                        }
+                        Err(_) => {
+                            return meta_signal_flow::Response::RetireRejected(
+                                meta_signal_flow::RetireRejection::StoreRefused,
+                            );
+                        }
+                    }
                 }
                 {
                     use crate::store::metaflow::SleepsMetaflows;
@@ -870,13 +915,24 @@ impl ServesConnection for Connection {
             // What the report sets going runs after the hook has its answer
             // and the connection is closed: the harness waits on its hook,
             // and the settling waits on the harness.
+            // The caller is attributed while it waits for its answer: a hook
+            // exits once answered, and a seat a restart bound acts only on
+            // events its own harness's descendants report.
             Query::Report(report) => {
+                use crate::restarting::FencesSeatEvents;
                 let (flow_id, event) = (report.flow_id.clone(), report.event.clone());
+                let acts = nexus.report_acts(&flow_id, self.peer.peer_process());
                 let response = nexus.report(report);
                 self.peer.write_response(&response)?;
                 drop(self);
                 if response == Response::Reported {
-                    nexus.after_report(&flow_id, &event);
+                    if acts {
+                        nexus.after_attributed_report(&flow_id, &event);
+                    } else {
+                        eprintln!(
+                            "flow-nexus: a report for flow {flow_id} is not its bound seat's; it acts on nothing"
+                        );
+                    }
                 }
                 return Ok(());
             }
@@ -971,6 +1027,12 @@ impl ServesConnection for Connection {
                 nexus.dispatch_serially(query, origin)
             }
             query @ Query::Replace(_) => {
+                let origin = nexus.origin_of(self.peer.peer_process());
+                nexus.dispatch_serially(query, origin)
+            }
+            // A restart's origin is the calling process: a flow asking for
+            // its own restart is told apart from one asked from outside.
+            query @ Query::Restart(_) => {
                 let origin = nexus.origin_of(self.peer.peer_process());
                 nexus.dispatch_serially(query, origin)
             }
@@ -1304,7 +1366,7 @@ trait DispatchesSerially {
 
 impl DispatchesSerially for RunningNexus {
     fn dispatch_serially(&self, query: Query, origin: Origin) -> Response {
-        if let Query::Refresh(_) | Query::Replace(_) = &query {
+        if let Query::Refresh(_) | Query::Replace(_) | Query::Restart(_) = &query {
             return self.dispatch_from(query, origin);
         }
         let response = {
@@ -1452,6 +1514,7 @@ mod tests {
     mod reminding;
     mod repairing;
     mod reservation;
+    mod restarting;
     mod seat_binding;
     mod send_admission;
     mod send_tool;

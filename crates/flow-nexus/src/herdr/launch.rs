@@ -97,6 +97,50 @@ enum ClaudeSession {
     /// The Codex thread Flow opened through the app-server, which the TUI
     /// attaches to: `resume <thread>`.
     Attached(String),
+    /// The session a restarted Claude flow already holds: `--resume`.
+    Resumed(String),
+}
+
+/// Starts a restarted Claude flow's harness in the restart's new pane as
+/// the native session the flow already holds: `--resume <session>` where a
+/// launch passes `--session-id`, with the flow's FlowId exported into the
+/// pane as at launch, the launch's title, settings and hook, and no
+/// positional prompt. That a resume keeps the session's id is Claude Code's
+/// own claim; Bind checks the pane reports it.
+pub(crate) trait ResumesClaudeHarness {
+    fn resume_configured_claude_harness(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        flow_id: &str,
+        native_session_id: &str,
+        harness_arguments: &[String],
+    ) -> Result<(), SpawnFailure>;
+}
+
+impl ResumesClaudeHarness for HerdrCli {
+    fn resume_configured_claude_harness(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        flow_id: &str,
+        native_session_id: &str,
+        harness_arguments: &[String],
+    ) -> Result<(), SpawnFailure> {
+        if launch.harness_kind != HarnessKind::Claude {
+            return Err("only a Claude harness is resumed in a pane".into());
+        }
+        if flow_id.is_empty() || native_session_id.is_empty() {
+            return Err("a resumed harness needs its FlowId and native session".into());
+        }
+        self.spawn_native_harness(
+            launch,
+            pane,
+            Some(flow_id),
+            ClaudeSession::Resumed(native_session_id.to_owned()),
+            harness_arguments,
+        )
+    }
 }
 
 /// The one Herdr `agent start` every launch runs.
@@ -1918,6 +1962,10 @@ impl ConstructsHarnessCommand for HerdrCli {
                 arguments.push("--session-id".into());
                 arguments.push(session);
             }
+            if let Some(session) = resources.claude_resume {
+                arguments.push("--resume".into());
+                arguments.push(session);
+            }
         }
         arguments.push("--model".into());
         arguments.push(launch.launch_profile.model_name.clone());
@@ -2036,13 +2084,23 @@ impl SpawnsNativeHarness for HerdrCli {
             prompt_fd,
             claude_session: match &session {
                 ClaudeSession::Chosen(session) => Some(session.clone()),
-                ClaudeSession::Unchosen | ClaudeSession::Attached(_) => None,
+                ClaudeSession::Unchosen
+                | ClaudeSession::Attached(_)
+                | ClaudeSession::Resumed(_) => None,
+            },
+            claude_resume: match &session {
+                ClaudeSession::Resumed(session) => Some(session.clone()),
+                ClaudeSession::Unchosen | ClaudeSession::Attached(_) | ClaudeSession::Chosen(_) => {
+                    None
+                }
             },
             codex_title: (launch.harness_kind == HarnessKind::Codex)
                 .then(|| CODEX_TERMINAL_TITLE.into()),
             thread: match &session {
                 ClaudeSession::Attached(thread) => Some(thread.clone()),
-                ClaudeSession::Chosen(_) | ClaudeSession::Unchosen => None,
+                ClaudeSession::Chosen(_) | ClaudeSession::Unchosen | ClaudeSession::Resumed(_) => {
+                    None
+                }
             },
         };
         let command = self

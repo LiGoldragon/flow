@@ -43,8 +43,13 @@ pub trait RecordsReports {
     /// flow's context size is written, and its resting seat is handed its
     /// oldest queued request or sleeps when nothing waits for it (see
     /// `waking`). Runs after the
-    /// hook has its answer, so the harness never waits on it.
+    /// hook has its answer, so the harness never waits on it. A report no
+    /// caller stands behind acts only for a flow no restart bound or holds
+    /// (see `restarting`).
     fn after_report(&self, flow_id: &FlowId, event: &Event);
+    /// What a report sets going once its caller was attributed to the
+    /// flow's bound seat.
+    fn after_attributed_report(&self, flow_id: &FlowId, event: &Event);
     fn read_events(&self, flow_id: FlowId) -> meta_signal_flow::Response;
     /// The owner's resolution of one Uncertain hand-over, recorded with the
     /// requesting peer, the reason and the time. Never run by Flow itself.
@@ -84,6 +89,17 @@ impl RecordsReports for RunningNexus {
     }
 
     fn after_report(&self, flow_id: &FlowId, event: &Event) {
+        use crate::restarting::FencesSeatEvents;
+        if self.report_acts(flow_id, None) {
+            self.after_attributed_report(flow_id, event);
+        } else {
+            eprintln!(
+                "flow-nexus: a report for flow {flow_id} has no caller of its bound seat; it acts on nothing"
+            );
+        }
+    }
+
+    fn after_attributed_report(&self, flow_id: &FlowId, event: &Event) {
         if let Event::Started(Some(session)) = event {
             self.follow_cleared_session(flow_id, session);
         }

@@ -614,6 +614,12 @@
           # the custody a new Nexus Adopted and Restarted.
           flow-restart-cutover-two-nexus = context.exactTest "flow-nexus"
             "tests::restarting::restart_cutover_two_nexus";
+          # The 0.53.0 incident: a restart Curriculum would not compose is
+          # Failed durably, and a retry recovers it once Curriculum composes.
+          flow-restart-not-composed-failed-then-recovered = context.exactTest "flow-nexus"
+            "tests::restarting::restart_not_composed_failed_then_recovered";
+          flow-restart-not-composed-owner-stop = context.exactTest "flow-nexus"
+            "tests::restarting::restart_not_composed_owner_stop";
         }
       );
 

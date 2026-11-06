@@ -227,9 +227,7 @@ mod tests {
         HandoverArchiveRequest {
             repository: repository.to_owned(),
             address: Address {
-                aspect: Aspect::Mind,
-                topic: "core".into(),
-                layer: signal_flow::Layer::Primary,
+                model: signal_flow::Model::Sol,
             },
             model: "Model".into(),
             flow_id: "abc123".into(),

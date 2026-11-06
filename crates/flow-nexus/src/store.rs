@@ -1729,6 +1729,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
         let delivery_configuration = engine.register_table(delivery_configuration_descriptor)?;
         let meta_configuration_tables = MetaConfigurationTables {
+            handover: engine.register_table(<handover_configuration::StoredHandoverConfiguration as handover_configuration::DescribesHandoverConfiguration>::descriptor())?,
             nexus: engine.register_table(meta_nexus_descriptor)?,
             models: engine.register_table(meta_models_descriptor)?,
             thresholds: engine.register_table(meta_thresholds_descriptor)?,

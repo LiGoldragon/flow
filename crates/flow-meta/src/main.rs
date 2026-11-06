@@ -307,6 +307,9 @@ mod tests {
             default_minutes: 30,
             heartbeat: None,
             protected_addresses: vec![],
+            handover_policies: meta_signal_flow::HandoverPoliciesConfiguration::Unconfigured,
+            handover_archive: meta_signal_flow::HandoverArchiveConfiguration::Unconfigured,
+            handover_count: meta_signal_flow::HandoverCountConfiguration::Unconfigured,
             counters: meta_signal_flow::ConfigureCounters {
                 logical_delivery: 1,
                 queue_attempt: 3,

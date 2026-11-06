@@ -1,6 +1,6 @@
 //! Durable current and closed handover generations.
 
-use super::{FlowStore, StoreError};
+use super::{FlowStore, StoreError, ReadsFlowMemory};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,

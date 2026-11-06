@@ -404,14 +404,12 @@ impl Dispatches for RunningNexus {
     }
 
     fn handover_caller(&self, asker: &protecting::Asker) -> Result<signal_flow::Address, signal_flow::HandoverRefusal> {
+        use protecting::ChecksAsker;
         let signal_flow::Origin::Flow(origin) = asker.origin() else {
             return Err(signal_flow::HandoverRefusal::UnknownCaller);
         };
-        self.store
-            .flow_node(&origin.flow_id)
-            .map_err(|error| signal_flow::HandoverRefusal::Store(error.to_string()))?
-            .map(|node| node.address)
-            .ok_or(signal_flow::HandoverRefusal::UnknownCaller)
+        let _ = self.store.flow_node(&origin.flow_id).map_err(|error| signal_flow::HandoverRefusal::Store(error.to_string()))?;
+        Err(signal_flow::HandoverRefusal::UnknownCaller)
     }
 
     fn keep_handover(&self, request: signal_flow::Keep_Data, asker: protecting::Asker) -> Response {

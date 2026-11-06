@@ -17,7 +17,7 @@ pub(super) const HANDOVER_SCHEMA: &str = "flow-nexus-handover-v1";
 pub struct HandoverMemory {
     pub address: Address,
     pub current: Vec<Section>,
-    pub touch: Touch,
+    pub touch: Option<Touch>,
     pub generation: i64,
     pub closed: Vec<ClosedHandover>,
 }
@@ -28,7 +28,7 @@ pub struct ClosedHandover {
     pub generation: i64,
     pub predecessor: String,
     pub sections: Vec<Section>,
-    pub touch: Touch,
+    pub touch: Option<Touch>,
 }
 
 impl EngineRecord for HandoverMemory {
@@ -144,7 +144,7 @@ impl HoldsHandovers for FlowStore {
             .unwrap_or_else(|| HandoverMemory {
                 address: address.clone(),
                 current: Vec::new(),
-                touch: Touch::Unknown,
+                touch: None,
                 generation: 0,
                 closed: Vec::new(),
             });
@@ -157,7 +157,7 @@ impl HoldsHandovers for FlowStore {
         } else {
             row.current.push(section);
         }
-        row.touch = touch.clone();
+        row.touch = Some(touch.clone());
         self.write_handover(row).map_err(store_refusal)?;
         Ok(touch)
     }
@@ -176,7 +176,7 @@ impl HoldsHandovers for FlowStore {
             .unwrap_or_else(|| HandoverMemory {
                 address: address.clone(),
                 current: Vec::new(),
-                touch: Touch::Unknown,
+                touch: None,
                 generation: 0,
                 closed: Vec::new(),
             });
@@ -184,7 +184,7 @@ impl HoldsHandovers for FlowStore {
             return Err(HandoverRefusal::MissingTitle);
         }
         row.current.retain(|section| section.title != title);
-        row.touch = touch.clone();
+        row.touch = Some(touch.clone());
         self.write_handover(row).map_err(store_refusal)?;
         Ok(touch)
     }
@@ -201,7 +201,7 @@ impl HoldsHandovers for FlowStore {
         // predecessor snapshot remains immutable for archival.  Clone here
         // rather than sharing any mutable representation across generations.
         let sections = row.current.clone();
-        let touch = std::mem::replace(&mut row.touch, Touch::Unknown);
+        let touch = std::mem::replace(&mut row.touch, None);
         if !sections.is_empty() {
             row.closed.push(ClosedHandover {
                 generation: row.generation,

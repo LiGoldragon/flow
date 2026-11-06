@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(
             failures[3].as_ref().map(|(_, text)| text.as_str()),
             Some(
-                "Failure: the task of 10 minutes, Review the fix, from Mind core Tertiary to Field core Secondary has no Done after 4 reminders."
+                "Failure: the task of 10 minutes, Review the fix, from Psyche flow Tertiary to Field core Secondary has no Done after 4 reminders."
             )
         );
         assert!(

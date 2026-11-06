@@ -3,6 +3,7 @@
 //! a materialized view used for sender-filtered reconnect snapshots.
 
 use super::metaflow::SleepsMetaflows;
+use super::queue_delivery::{AccountsQueueDelivery, ReadsQueueDelivery};
 use super::reminder::RecordsReminders;
 use super::*;
 use crate::generated::send_tool::{
@@ -802,19 +803,27 @@ impl RecordsLogicalDeliveries for FlowStore {
         let Some(mut stored) = self.stored_metaflow(address)? else {
             return Err(StoreError::StateInvariant);
         };
+        // An entry already handed to a native attempt keeps the evidence
+        // that attempt carries; only entries not yet handed over change.
+        let handed_over = self
+            .outstanding_for(address)?
+            .map(|attempt| attempt.request_id);
+        let mut commit = self.engine.begin_atomic_commit();
         let mut changed = false;
         for entry in &mut stored.metaflow.queue {
-            if entry.delivery != flow_ethos::Delivery::Wake {
-                entry.delivery = flow_ethos::Delivery::Wake;
-                changed = true;
+            if entry.delivery == flow_ethos::Delivery::Wake
+                || handed_over.as_deref() == Some(entry.logical_delivery_id.as_str())
+            {
+                continue;
             }
+            let before = entry.clone();
+            entry.delivery = flow_ethos::Delivery::Wake;
+            commit = self.follow_queue_entry(address, &before, entry, commit)?;
+            changed = true;
         }
         if changed {
-            self.engine.commit_atomic(
-                self.engine
-                    .begin_atomic_commit()
-                    .mutate(self.metaflows, stored),
-            )?;
+            self.engine
+                .commit_atomic(commit.mutate(self.metaflows, stored))?;
             self.launch_changes.announce();
         }
         Ok(())

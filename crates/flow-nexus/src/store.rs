@@ -2288,6 +2288,7 @@ impl OpensFlowStore for FlowStore {
         // runtime adapter is constructed by RunningNexus.
         store.state()?;
         store.archive_legacy_queue()?;
+        store.align_followed_requests()?;
         store.seed_missing_queued_deliveries()?;
         store
             .configuration_snapshot()?
@@ -2435,6 +2436,7 @@ impl OpensFlowStore for FlowStore {
             launch_changes: LaunchChanges::default(),
         };
         store.archive_legacy_queue()?;
+        store.align_followed_requests()?;
         store.seed_missing_queued_deliveries()?;
         if store
             .engine

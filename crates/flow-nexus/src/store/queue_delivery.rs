@@ -333,6 +333,22 @@ pub trait AccountsQueueDelivery {
         commit: AtomicCommit,
     ) -> AtomicCommit;
 
+    /// A queue entry whose delivery policy changes in place carries its
+    /// retained request evidence with it, in the caller's commit, so every
+    /// later comparison of request, attempt and queue head stays exact.
+    fn follow_queue_entry(
+        &self,
+        address: &Address,
+        before: &flow_ethos::QueueEntry,
+        after: &flow_ethos::QueueEntry,
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError>;
+
+    /// On open, aligns a retained request with its queue entry where the
+    /// two differ only in delivery policy. Identity, order, request state
+    /// and every attempt are kept as they are.
+    fn align_followed_requests(&self) -> Result<(), StoreError>;
+
     /// Quarantine pre-logical-identity queue data before any native I/O.
     /// Original request and attempt records are kept, never reclassified
     /// as delivered or absent and never correlated by matching bodies.
@@ -449,7 +465,7 @@ pub trait AccountsQueueDelivery {
     ) -> Result<Result<(), WithdrawRejected_Data>, StoreError>;
 }
 
-trait ReadsQueueDelivery {
+pub(crate) trait ReadsQueueDelivery {
     fn delivery_attempts(&self) -> Result<Vec<QueueDeliveryAttempt>, StoreError>;
     fn outstanding_for(
         &self,
@@ -530,6 +546,83 @@ impl AccountsQueueDelivery for FlowStore {
                 state: RequestState::Queued,
             },
         )
+    }
+
+    fn follow_queue_entry(
+        &self,
+        address: &Address,
+        before: &flow_ethos::QueueEntry,
+        after: &flow_ethos::QueueEntry,
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.queue_delivery.requests,
+            RecordKey::new(before.logical_delivery_id.clone()),
+        ))?;
+        let before_evidence = QueueEvidence::Logical(before.clone());
+        let after_evidence = QueueEvidence::Logical(after.clone());
+        match rows.records() {
+            [] => Ok(commit),
+            [request]
+                if request.address == *address && request.queue_evidence == after_evidence =>
+            {
+                Ok(commit)
+            }
+            [request]
+                if request.address == *address && request.queue_evidence == before_evidence =>
+            {
+                let mut followed = request.clone();
+                followed.queue_evidence = after_evidence;
+                Ok(commit.mutate(self.queue_delivery.requests, followed))
+            }
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn align_followed_requests(&self) -> Result<(), StoreError> {
+        let attempts = self.delivery_attempts()?;
+        let mut commit = self.engine.begin_atomic_commit();
+        let mut changed = false;
+        for metaflow in self.list_metaflows()? {
+            for entry in &metaflow.queue {
+                let rows = self.engine.match_records(QueryPlan::key(
+                    self.queue_delivery.requests,
+                    RecordKey::new(entry.logical_delivery_id.clone()),
+                ))?;
+                let [request] = rows.records() else {
+                    continue;
+                };
+                let QueueEvidence::Logical(retained) = &request.queue_evidence else {
+                    continue;
+                };
+                let mut as_queued = retained.clone();
+                as_queued.delivery = entry.delivery.clone();
+                if request.address != metaflow.address || retained == entry || &as_queued != entry {
+                    continue;
+                }
+                // Only a request still waiting for its hand-over is aligned.
+                // A parked request, or an entry any unfinished attempt was
+                // handed, may already be native input and keeps its record.
+                if !matches!(request.state, RequestState::Queued | RequestState::Unsent)
+                    || attempts.iter().any(|attempt| {
+                        !attempt.phase.is_finished()
+                            && matches!(&attempt.queue_evidence,
+                                QueueEvidence::Logical(handed)
+                                    if handed.logical_delivery_id == entry.logical_delivery_id)
+                    })
+                {
+                    continue;
+                }
+                let mut aligned = request.clone();
+                aligned.queue_evidence = QueueEvidence::Logical(entry.clone());
+                commit = commit.mutate(self.queue_delivery.requests, aligned);
+                changed = true;
+            }
+        }
+        if changed {
+            self.engine.commit_atomic(commit)?;
+        }
+        Ok(())
     }
 
     fn archive_legacy_queue(&self) -> Result<(), StoreError> {
@@ -2586,5 +2679,343 @@ mod tests {
                 .unwrap(),
             Err(Rejected::AlreadyResolved(absent))
         );
+    }
+
+    fn admit(store: &FlowStore, entry: QueueEntry) {
+        let commit =
+            store.assert_logical_request(&address(), entry, store.engine.begin_atomic_commit());
+        store.engine.commit_atomic(commit).unwrap();
+    }
+
+    fn admit_queue(store: &FlowStore) {
+        admit(store, queued("first"));
+        admit(store, queued("second"));
+    }
+
+    fn woken(entry: QueueEntry) -> QueueEntry {
+        QueueEntry {
+            delivery: flow_ethos::Delivery::Wake,
+            ..entry
+        }
+    }
+
+    fn request_rows(store: &FlowStore, id: &str) -> Vec<StoredDeliveryRequest> {
+        store
+            .engine
+            .match_records(QueryPlan::key(
+                store.queue_delivery.requests,
+                RecordKey::new(id.to_owned()),
+            ))
+            .unwrap()
+            .records()
+            .to_vec()
+    }
+
+    // What DeliverAll did before the repair: the queue changes alone and
+    // the retained request evidence keeps the old delivery policy.
+    fn wake_queue_without_its_evidence(store: &FlowStore) {
+        let mut stored = store.stored_metaflow(&address()).unwrap().unwrap();
+        for entry in &mut stored.metaflow.queue {
+            entry.delivery = flow_ethos::Delivery::Wake;
+        }
+        store
+            .engine
+            .commit_atomic(
+                store
+                    .engine
+                    .begin_atomic_commit()
+                    .mutate(store.metaflows, stored),
+            )
+            .unwrap();
+    }
+
+    fn prepare_codex(store: &FlowStore) -> Result<PrepareQueueDelivery, StoreError> {
+        store.prepare_oldest_delivery(
+            &address(),
+            "flow-delivery",
+            "thread-7",
+            HarnessKind::Codex,
+            NativeHistoryAnchor::CodexTurns(None),
+        )
+    }
+
+    #[test]
+    fn deliver_all_carries_retained_evidence_so_the_oldest_still_prepares() {
+        let (_fixture, store) = Fixture::new();
+        admit_queue(&store);
+        store.force_queue_wake(&address()).unwrap();
+        assert_eq!(
+            store.metaflow(&address()).unwrap().unwrap().queue,
+            vec![woken(queued("first")), woken(queued("second"))]
+        );
+        for body in ["first", "second"] {
+            let rows = request_rows(&store, &format!("logical-{body}"));
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].queue_evidence,
+                QueueEvidence::Logical(woken(queued(body)))
+            );
+            assert_eq!(rows[0].state, RequestState::Queued);
+        }
+        let Ok(PrepareQueueDelivery::Prepared(attempt)) = prepare_codex(&store) else {
+            panic!("the oldest request prepares after DeliverAll")
+        };
+        assert_eq!(attempt.request_id, "logical-first");
+        assert_eq!(
+            attempt.queue_evidence,
+            QueueEvidence::Logical(woken(queued("first")))
+        );
+    }
+
+    #[test]
+    fn a_stale_wake_mismatch_is_refused_then_aligned_on_open_without_new_input() {
+        let (fixture, store) = Fixture::new();
+        admit_queue(&store);
+        wake_queue_without_its_evidence(&store);
+        // The deployed failure: the head is Wake, the retained request Queue.
+        assert!(matches!(
+            prepare_codex(&store),
+            Err(StoreError::StateInvariant)
+        ));
+        assert!(store.delivery_attempts().unwrap().is_empty());
+        drop(store);
+
+        let reopened = fixture.reopen();
+        // Opening aligns evidence and hands nothing over.
+        assert!(reopened.delivery_attempts().unwrap().is_empty());
+        assert_eq!(
+            reopened.metaflow(&address()).unwrap().unwrap().queue,
+            vec![woken(queued("first")), woken(queued("second"))]
+        );
+        for body in ["first", "second"] {
+            let rows = request_rows(&reopened, &format!("logical-{body}"));
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].request_id, format!("logical-{body}"));
+            assert_eq!(rows[0].address, address());
+            assert_eq!(rows[0].state, RequestState::Queued);
+            assert_eq!(
+                rows[0].queue_evidence,
+                QueueEvidence::Logical(woken(queued(body)))
+            );
+        }
+        let Ok(PrepareQueueDelivery::Prepared(attempt)) = prepare_codex(&reopened) else {
+            panic!("the aligned oldest request prepares once")
+        };
+        assert_eq!(attempt.request_id, "logical-first");
+        assert!(matches!(
+            prepare_codex(&reopened),
+            Ok(PrepareQueueDelivery::Outstanding(_))
+        ));
+        assert_eq!(reopened.delivery_attempts().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_mismatch_beyond_delivery_policy_stays_refused_and_unchanged() {
+        let (fixture, store) = Fixture::new();
+        let mut other_body = queued("first");
+        other_body.message = flow_ethos::Message::Soft(Request::Order("changed".into()));
+        let mut other_sender = queued("second");
+        other_sender.sent_by = SentBy::Sender(Address {
+            aspect: Aspect::Field,
+            topic: "core".into(),
+            model: Model::Opus,
+        });
+        admit(&store, other_body.clone());
+        admit(&store, other_sender.clone());
+        wake_queue_without_its_evidence(&store);
+        drop(store);
+
+        let reopened = fixture.reopen();
+        assert_eq!(
+            request_rows(&reopened, "logical-first")[0].queue_evidence,
+            QueueEvidence::Logical(other_body)
+        );
+        assert_eq!(
+            request_rows(&reopened, "logical-second")[0].queue_evidence,
+            QueueEvidence::Logical(other_sender)
+        );
+        assert!(matches!(
+            prepare_codex(&reopened),
+            Err(StoreError::StateInvariant)
+        ));
+        assert!(reopened.delivery_attempts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_request_at_another_address_is_not_aligned() {
+        let (fixture, store) = Fixture::new();
+        let elsewhere = Address {
+            aspect: Aspect::Field,
+            topic: "elsewhere".into(),
+            model: Model::Sol,
+        };
+        let commit = store.assert_logical_request(
+            &elsewhere,
+            queued("first"),
+            store.engine.begin_atomic_commit(),
+        );
+        store.engine.commit_atomic(commit).unwrap();
+        admit(&store, queued("second"));
+        wake_queue_without_its_evidence(&store);
+        drop(store);
+
+        let reopened = fixture.reopen();
+        let rows = request_rows(&reopened, "logical-first");
+        assert_eq!(rows[0].address, elsewhere);
+        assert_eq!(
+            rows[0].queue_evidence,
+            QueueEvidence::Logical(queued("first"))
+        );
+        assert!(matches!(
+            prepare_codex(&reopened),
+            Err(StoreError::StateInvariant)
+        ));
+    }
+
+    #[test]
+    fn deliver_all_leaves_an_outstanding_attempt_and_its_evidence_unchanged() {
+        let (_fixture, store) = Fixture::new();
+        admit_queue(&store);
+        let Ok(PrepareQueueDelivery::Prepared(prepared)) = prepare_codex(&store) else {
+            panic!("the oldest request prepared")
+        };
+        store.force_queue_wake(&address()).unwrap();
+        assert_eq!(
+            store.metaflow(&address()).unwrap().unwrap().queue,
+            vec![queued("first"), woken(queued("second"))]
+        );
+        assert_eq!(
+            request_rows(&store, "logical-first")[0].queue_evidence,
+            QueueEvidence::Logical(queued("first"))
+        );
+        assert_eq!(
+            store
+                .queue_delivery_attempt(&prepared.attempt_id)
+                .unwrap()
+                .unwrap()
+                .queue_evidence,
+            QueueEvidence::Logical(queued("first"))
+        );
+        // The in-flight hand-over still settles on its exact receipt.
+        let exact = receipt(&prepared);
+        assert!(
+            store
+                .record_delivery_receipt(&prepared.attempt_id, exact)
+                .unwrap()
+        );
+        assert!(
+            store
+                .settle_recorded_delivery(&prepared.attempt_id)
+                .unwrap()
+        );
+        assert_eq!(
+            store.metaflow(&address()).unwrap().unwrap().queue,
+            vec![woken(queued("second"))]
+        );
+    }
+
+    #[test]
+    fn deliver_all_keeps_an_uncertain_attempt_uncertain_and_never_reauthorizes_it() {
+        let (fixture, store) = Fixture::new();
+        admit_queue(&store);
+        let uncertain = prepare_claude(&store);
+        store.force_queue_wake(&address()).unwrap();
+        assert_eq!(
+            store.metaflow(&address()).unwrap().unwrap().queue[0],
+            queued("first")
+        );
+        let kept = store
+            .queue_delivery_attempt(&uncertain.attempt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.phase, uncertain_phase(&store, &uncertain.attempt_id));
+        assert_eq!(kept.queue_evidence, QueueEvidence::Logical(queued("first")));
+        assert!(matches!(
+            prepare_codex(&store),
+            Ok(PrepareQueueDelivery::Outstanding(_))
+        ));
+        drop(store);
+
+        let reopened = fixture.reopen();
+        assert_eq!(
+            request_rows(&reopened, "logical-first")[0].queue_evidence,
+            QueueEvidence::Logical(queued("first"))
+        );
+        assert!(matches!(
+            reopened
+                .queue_delivery_attempt(&uncertain.attempt_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            QueueDeliveryPhase::Uncertain(_)
+        ));
+        assert!(matches!(
+            prepare_codex(&reopened),
+            Ok(PrepareQueueDelivery::Outstanding(_))
+        ));
+        assert_eq!(reopened.delivery_attempts().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_diagnosed_shape_a_parked_uncertain_attempt_and_a_stale_wake_head() {
+        let (fixture, store) = Fixture::new();
+        admit_queue(&store);
+        let parked = prepare_claude(&store);
+        assert!(store.park_uncertain_delivery(&parked.attempt_id).unwrap());
+        wake_queue_without_its_evidence(&store);
+        // As deployed: nothing outstanding, the head refused.
+        assert!(store.outstanding_for(&address()).unwrap().is_none());
+        assert!(matches!(
+            prepare_codex(&store),
+            Err(StoreError::StateInvariant)
+        ));
+        drop(store);
+
+        let reopened = fixture.reopen();
+        assert_eq!(
+            request_rows(&reopened, "logical-first")[0].state,
+            RequestState::Parked
+        );
+        assert_eq!(
+            request_rows(&reopened, "logical-first")[0].queue_evidence,
+            QueueEvidence::Logical(queued("first"))
+        );
+        assert_eq!(
+            request_rows(&reopened, "logical-second")[0].queue_evidence,
+            QueueEvidence::Logical(woken(queued("second")))
+        );
+        let Ok(PrepareQueueDelivery::Prepared(next)) = prepare_codex(&reopened) else {
+            panic!("the aligned head prepares")
+        };
+        assert_eq!(next.request_id, "logical-second");
+        // The parked attempt keeps its uncertainty and is never handed again.
+        assert!(matches!(
+            reopened
+                .queue_delivery_attempt(&parked.attempt_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            QueueDeliveryPhase::Uncertain(_)
+        ));
+        assert_eq!(
+            reopened
+                .delivery_attempts()
+                .unwrap()
+                .iter()
+                .filter(|attempt| attempt.request_id == "logical-first")
+                .count(),
+            1
+        );
+        assert_eq!(reopened.delivery_attempts().unwrap().len(), 2);
+    }
+
+    fn uncertain_phase(store: &FlowStore, attempt_id: &str) -> QueueDeliveryPhase {
+        let phase = store
+            .queue_delivery_attempt(attempt_id)
+            .unwrap()
+            .unwrap()
+            .phase;
+        assert!(matches!(phase, QueueDeliveryPhase::Uncertain(_)));
+        phase
     }
 }

@@ -55,6 +55,7 @@ mod executable_default_configuration {
 }
 pub(crate) mod harness_command;
 pub mod heartbeat;
+pub mod handover_archive;
 pub mod herdr;
 pub mod launching;
 pub mod observe_agent;

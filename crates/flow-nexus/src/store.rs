@@ -2907,6 +2907,9 @@ impl AppliesFlowQuery for FlowStore {
             Query::Launch(_) => Ok(Response::StartRejected(
                 StartRejection::LaunchPersistenceRefused,
             )),
+            Query::Keep(_) | Query::Drop(_) | Query::Glance(_) | Query::Read(_) => Ok(Response::Refused(
+                signal_flow::Refusal::Store("handover requires running Nexus caller".into()),
+            )),
             Query::Current(address) => self.current_metaflow(&address),
             Query::Metaflows => self.list_metaflows().map(Response::Listed),
             Query::Replace(_) => Ok(Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
@@ -2964,7 +2967,11 @@ impl ReservesPendingStart for FlowStore {
             | Query::Launch(_)
             | Query::BindSeat(_)
             | Query::Adopt(_)
-            | Query::Restart(_) => Ok(None),
+            | Query::Restart(_)
+            | Query::Keep(_)
+            | Query::Drop(_)
+            | Query::Glance(_)
+            | Query::Read(_) => Ok(None),
         }
     }
 }

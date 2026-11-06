@@ -271,6 +271,10 @@ impl Dispatches for RunningNexus {
                 use crate::restarting::RestartsFlows;
                 self.restart(&flow_id, &asker)
             }
+            Query::Keep(request) => self.keep_handover(request, asker),
+            Query::Drop(request) => self.drop_handover(request, asker),
+            Query::Glance(address) => self.glance_handover(address),
+            Query::Read(address) => self.read_handover(address),
             Query::ResolveRecipient(flow_id) => {
                 match self.store.apply(Query::ResolveRecipient(flow_id)) {
                     Ok(Response::RecipientResolved(node)) => Response::RecipientResolved(
@@ -392,6 +396,47 @@ impl Dispatches for RunningNexus {
                 )
             }
         }
+    }
+
+    fn handover_caller(&self, asker: &protecting::Asker) -> Result<signal_flow::Address, signal_flow::HandoverRefusal> {
+        let signal_flow::Origin::Flow(origin) = asker.origin() else {
+            return Err(signal_flow::HandoverRefusal::UnknownCaller);
+        };
+        self.store
+            .flow_node(&origin.flow_id)
+            .map_err(|error| signal_flow::HandoverRefusal::Store(error.to_string()))?
+            .map(|node| node.address)
+            .ok_or(signal_flow::HandoverRefusal::UnknownCaller)
+    }
+
+    fn keep_handover(&self, request: signal_flow::Keep_Data, asker: protecting::Asker) -> Response {
+        use crate::store::handover::HoldsHandovers;
+        let caller = match self.handover_caller(&asker) { Ok(value) => value, Err(error) => return Response::KeepRefused(error) };
+        let title = request.section.title.clone();
+        match self.store.keep_handover(&request.address, &caller, request.section, signal_flow::Touch::Unknown) {
+            Ok(touch) => Response::Kept(signal_flow::Kept_Data { address: request.address, title, touch }),
+            Err(error) => Response::KeepRefused(error),
+        }
+    }
+
+    fn drop_handover(&self, request: signal_flow::Drop_Data, asker: protecting::Asker) -> Response {
+        use crate::store::handover::HoldsHandovers;
+        let caller = match self.handover_caller(&asker) { Ok(value) => value, Err(error) => return Response::DropRefused(error) };
+        let title = request.title.clone();
+        match self.store.drop_handover(&request.address, &caller, title, signal_flow::Touch::Unknown) {
+            Ok(touch) => Response::Dropped(signal_flow::Dropped_Data { address: request.address, title: request.title, touch }),
+            Err(error) => Response::DropRefused(error),
+        }
+    }
+
+    fn glance_handover(&self, address: signal_flow::Address) -> Response {
+        use crate::store::handover::HoldsHandovers;
+        match self.store.handover_headings(&address) { Ok(value) => Response::Glanced(value), Err(error) => Response::GlanceRefused(signal_flow::HandoverRefusal::Store(error.to_string())) }
+    }
+
+    fn read_handover(&self, address: signal_flow::Address) -> Response {
+        use crate::store::handover::HoldsHandovers;
+        match self.store.handover(&address) { Ok(value) => Response::Handover(value), Err(error) => Response::ReadRefused(signal_flow::HandoverRefusal::Store(error.to_string())) }
     }
 
     fn dispatch_meta_from(

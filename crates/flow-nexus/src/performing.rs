@@ -8,7 +8,7 @@ use crate::RunningNexus;
 use crate::codex::{
     AccountsOpenedThread, OpensCodexThread, SelectsCodexEndpoint, SubmitsBoundCodexPart,
 };
-use crate::composition::{ComposesLaunch, CompositionError, HarnessedProfile};
+use crate::composition::{ComposesInRoot, CompositionError, HarnessedProfile};
 use crate::generated::operation::{
     Failed_Data, Open_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Asleep_Data,
     Record_Data_Awoken_Data, Record_Data_Context_Data, Record_Data_Harness_Data,
@@ -248,13 +248,21 @@ impl Performs for RunningNexus {
                         Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
                     }
                 };
-                match self.composer.compose(
+                // A successor's handover is read under the root its flow runs
+                // in. A launch that names no predecessor needs none, and a root
+                // the launch itself refuses later is not this step's refusal.
+                let launch_root = profile
+                    .flow_id_option
+                    .as_ref()
+                    .and_then(|_| self.launch_root(&profile.address).ok());
+                match self.composer.compose_in_root(
                     HarnessedProfile {
                         remembered_flows,
                         harness_kind,
                         launch_profile: profile,
                     },
                     default,
+                    launch_root.as_deref().map(std::path::Path::new),
                 ) {
                     Ok(launch) => Outcome::Composed(launch),
                     Err(CompositionError::LeaveOut(refusal)) => {

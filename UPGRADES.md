@@ -80,6 +80,37 @@ the store 0.53.0 wrote: every other family as it was, that one registered
 empty, so nothing is protected until it is declared. A 0.53.0 Nexus refuses
 a store 0.53.1 has opened.
 
+## A successor is given its predecessor's handover
+
+A successor flow of a refresh, and a flow a waking starts after a
+predecessor, is given the predecessor's handover file,
+`flows/<predecessor FlowId>/handover.md`, resolved against the launch root
+the flow runs in (the metaflow's declared root, else the Nexus's source
+root). The file is placed whole, byte for byte, as the last bytes of the
+successor's first prompt: after the brief, after a blank line.
+
+- A refresh's successor (a Refresh, a Replace, a Launch to an Awake
+  metaflow, the automatic refreshes) names the flow it replaces as its
+  predecessor. A waking names the metaflow's last flow, and its launch
+  profile now carries that flow in `flow_id_option`, as the Replace's does;
+  its system prompt gains the `Predecessor:` line. The metaflow is Asleep
+  then, so the predecessor takes no part in taking the Address.
+- A predecessor that left no file, or an empty one, leaves the prompt as it
+  was. A file Flow cannot read (a permission refusal, not UTF-8, not a
+  file) is logged, `flow-nexus: launch <id> goes on without the handover of
+  <flow>: <reason>`, and the launch goes on without it; it is not refused.
+- A Restart resumes the same session and has no first prompt: it names no
+  predecessor and is given none. A simplified flow with no first message is
+  given none either, since the handover alone would be a context-only turn.
+- A message too large for one part keeps the handover as a piece of its
+  own, in the last part; one larger than a part refuses `ModuleTooLarge`
+  as any module does.
+- The source is one typed value in the composition:
+  `composition::LaunchComposer` holds an `Arc<dyn handover::YieldsHandover>`,
+  `handover::HandoverFile` by default, and
+  `OpensLaunchComposer::with_handover_source` replaces it. The composer
+  places whatever the source yields; where the text lives is the source's.
+
 # Flow 0.53.0
 
 Frozen 0.52.0 plus Restart. Pins signal-flow 46.0.0 and meta-signal-flow

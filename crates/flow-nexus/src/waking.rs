@@ -2618,11 +2618,15 @@ impl WakesInParts for RunningNexus {
             tool_set: fresh.tool_set,
             prompt: text.with_purpose(&fresh.purpose),
         };
-        self.start_unbound(seat.fresh_profile())
-            .map(|flow_id| FreshStarted {
-                flow_id,
-                launch_request_id,
-            })
+        // The metaflow's last flow is the predecessor this wake succeeds, and
+        // its handover is given to the new flow. The metaflow is Asleep, so
+        // the predecessor takes no part in taking its Address.
+        let mut profile = seat.fresh_profile();
+        profile.flow_id_option = metaflow.past.last().cloned();
+        self.start_unbound(profile).map(|flow_id| FreshStarted {
+            flow_id,
+            launch_request_id,
+        })
     }
 
     fn last_launch_profile(&self, flow_id: &str) -> Option<LaunchProfile> {

@@ -397,10 +397,10 @@
   [] (bound-pane (inspect secondary)))
 
 (defn send [delivery message pane]
-  (flow (str "Send.{ Address." quaternary " " delivery " " message " }") pane))
+  (flow (str "Send.{ " quaternary " " delivery " " message " }") pane))
 
 (defn send-to [addr delivery message pane]
-  (flow (str "Send.{ Address." addr " " delivery " " message " }") pane))
+  (flow (str "Send.{ " addr " " delivery " " message " }") pane))
 
 (declare nexus nexus-log start-nexus!)
 
@@ -534,7 +534,7 @@
             old (str (watch 60 #(awake-flow quaternary)))
             old-pane (bound-pane (inspect quaternary))
             refresh (flow-process (str "Refresh." quaternary) @driver-pane)
-            sending (flow-process (str "Send.{ Address." quaternary " Wake Soft.Order.«" brief " Tag s5b.» }") (sender-pane))
+            sending (flow-process (str "Send.{ " quaternary " Wake Soft.Order.«" brief " Tag s5b.» }") (sender-pane))
             refresh-reply (str/trim (:out @refresh))
             send-reply (str/trim (:out @sending))
             old-text (pane-text old-pane)
@@ -1177,7 +1177,7 @@
 (def waking-seat tertiary-address)
 
 (def night-scenarios
-  [["13 OnDemand seat whose successor cannot compose is kept, told and handed its queue"
+  [["13 OnDemand seat whose successor cannot compose is kept and handed its queue, and no flow is told"
     (fn []
       (let [_ (flow (str "Launch.{ " tertiary-address " Predecessors.0 «Run the shell command sleep 30, then answer with one word and stop. Tag ra1.» }"))
             flow-id (str (watch 90 #(awake-flow tertiary-address)))
@@ -1188,14 +1188,14 @@
             kept (= (str (awake-flow tertiary-address)) flow-id)
             open (contains? (pane-ids) pane)
             kept-line (some #(when (and (str/includes? % flow-id) (str/includes? % "kept at its Stop")) %) (str/split-lines (log-text)))
-            told (pane-holds (sender-pane) (str "(flow " flow-id ") was refused") 60)
+            untold (not (pane-holds (sender-pane) (str "(flow " flow-id ") was refused") 60))
             queued (send-to tertiary-address "Queue" "Soft.Notice.«Answer with one word and stop. Tag ra2.»" (sender-pane))
             handed (pane-holds pane "Tag ra2" 90)
             restored (restore-configuration!)]
         {:reply (str "Configure broken: " broken " / Send Tag ra2: " queued " / restore: " restored)
-         :pass (boolean (and (str/starts-with? broken "Configured.") rested kept open kept-line told handed))
+         :pass (boolean (and (str/starts-with? broken "Configured.") rested kept open kept-line untold handed))
          :watched (str "Sonnet flow " flow-id " rested " rested "; still Awake " kept ", pane " pane (if open " open" " closed")
-                       "; log: " kept-line "; its Up, the Opus, shows the refusal " (boolean told)
+                       "; log: " kept-line "; the sender's pane shows no refusal " untold
                        "; Tag ra2 typed into the kept seat " (boolean handed))}))]
 
    ["14 Maintained seat whose successor cannot compose is kept and handed its queue"
@@ -1205,12 +1205,12 @@
             before (stops-of flow-id)
             broken (flow-meta (broken-metaflows secondary))
             low (flow-meta "Configure.Thresholds.[ { claude-haiku-5-5 1000 } ]")
-            sent (flow (str "Send.{ Address." secondary " Wake Soft.Notice.«Answer with one word and stop. Tag rb1.» }") pane)
+            sent (flow (str "Send.{ " secondary " Wake Soft.Notice.«Answer with one word and stop. Tag rb1.» }") pane)
             rested (watch 120 #(> (stops-of flow-id) before))
             _ (Thread/sleep 8000)
             kept (= (str (awake-flow secondary)) flow-id)
             kept-line (some #(when (and (str/includes? % flow-id) (str/includes? % "RefreshLaunchRefused")) %) (str/split-lines (log-text)))
-            queued (flow (str "Send.{ Address." secondary " Queue Soft.Notice.«Answer with one word and stop. Tag rb2.» }") pane)
+            queued (flow (str "Send.{ " secondary " Queue Soft.Notice.«Answer with one word and stop. Tag rb2.» }") pane)
             handed (pane-holds pane "Tag rb2" 90)
             restored (restore-configuration!)]
         {:reply (str "Send Tag rb1: " sent " / Send Tag rb2: " queued " / restore: " restored)
@@ -1246,7 +1246,7 @@
             _ (fs/delete-if-exists meta-socket)
             _ (start-nexus! @nexus-log)
             reminded (transcript-holds secondary (str "Reminder 1 of 4: task " id) 150)
-            done (flow (str "Send.{ Address." secondary " Queue Soft.Done.{ " id " «closed» } }") pane)
+            done (flow (str "Send.{ " secondary " Queue Soft.Done.{ " id " «closed» } }") pane)
             ;; The Task was queued at an asleep seat that nothing wakes here:
             ;; its entry is withdrawn, so no later scenario finds it queued.
             queued (some #{id} (queued-ids (:datom (metaflows)) quaternary))
@@ -1265,11 +1265,11 @@
    ["17 Task reminded at its minutes; Done closes it; Done again refused"
     (fn []
       (let [pane (sender-pane)
-            sent (flow (str "Send.{ Address." quaternary " Wake Soft.Task.{ 1 «Answer with one word and stop. Tag re1.» } }") pane)
+            sent (flow (str "Send.{ " quaternary " Wake Soft.Task.{ 1 «Answer with one word and stop. Tag re1.» } }") pane)
             id (some-> (read-datom sent) body items first str)
             reminded (transcript-holds secondary (str "Reminder 1 of 4: task " id) 150)
-            done (flow (str "Send.{ Address." secondary " Queue Soft.Done.{ " id " «closed» } }") pane)
-            again (flow (str "Send.{ Address." secondary " Queue Soft.Done.{ " id " «again» } }") pane)
+            done (flow (str "Send.{ " secondary " Queue Soft.Done.{ " id " «closed» } }") pane)
+            again (flow (str "Send.{ " secondary " Queue Soft.Done.{ " id " «again» } }") pane)
             deadline (when id (admitted-deadline (log-text) id))
             stamp (when id (first (reminder-stamps secondary (str "Reminder 1 of 4: task " id))))
             lag (when (and deadline stamp) (reminder-lag deadline stamp))

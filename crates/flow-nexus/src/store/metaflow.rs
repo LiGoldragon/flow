@@ -2,12 +2,11 @@
 //! the serial dispatcher holds exclusion across authorization and mutation.
 use super::logical_delivery::{RecordsLogicalDeliveries, VerifiedDeliveryLock};
 use super::*;
-use crate::model_family::RanksInFamily;
 use crate::sending::AdmitsSendPayload;
 use crate::sending::RefusesUnidentified;
 use signal_flow::{
-    Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, Recipient, Refusal, SentBy,
-    StartRejection, Unknown_Data,
+    Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, Refusal, SentBy, StartRejection,
+    Unknown_Data,
 };
 
 /// Materializes working state for a configured Address, never policy.
@@ -209,19 +208,7 @@ impl MutatesMetaflows for FlowStore {
             MetaflowState::Asleep => return Ok(Response::Refused(Refusal::Asleep)),
             MetaflowState::Awake(_) => {}
         }
-        let address = match request.recipient {
-            Recipient::Address(address) => address,
-            Recipient::Up => {
-                let Some(model) = request.sender.model.above() else {
-                    return Ok(Response::Refused(Refusal::NoneAbove));
-                };
-                Address {
-                    aspect: request.sender.aspect.clone(),
-                    topic: request.sender.topic.clone(),
-                    model,
-                }
-            }
-        };
+        let address = request.recipient;
         if !self.prepare_declared_metaflow(&address)? {
             return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
                 address,
@@ -611,43 +598,6 @@ impl ForgetsEndedBindings for FlowStore {
     }
 }
 
-/// One metaflow row written back in its own atomic commit.
-/// Queues a request Flow itself raises for a metaflow it holds.
-#[cfg(test)]
-pub(crate) trait QueuesFlowRequest {
-    /// Appends the request to the metaflow's queue; false when Flow holds
-    /// no such metaflow.
-    fn queue_flow_request(
-        &self,
-        address: &Address,
-        request: flow_ethos::QueueEntry,
-    ) -> Result<bool, StoreError>;
-}
-
-#[cfg(test)]
-impl QueuesFlowRequest for FlowStore {
-    fn queue_flow_request(
-        &self,
-        address: &Address,
-        request: flow_ethos::QueueEntry,
-    ) -> Result<bool, StoreError> {
-        if self.stored_metaflow(address)?.is_none() {
-            return Ok(false);
-        }
-        let response = self.accept_logical_delivery(
-            address,
-            request.sent_by,
-            request.delivery,
-            request.message,
-            None,
-        )?;
-        Ok(matches!(
-            response,
-            signal_flow::PrivateSendResponse::SendAccepted(_)
-        ))
-    }
-}
-
 /// Seeds a metaflow row directly, for tests of what reads and moves it.
 #[cfg(test)]
 pub(crate) trait SeedsMetaflow {
@@ -832,7 +782,7 @@ mod tests {
         });
         let request = Lock_Data {
             sender: fixture.message.clone(),
-            recipient: Recipient::Address(target.clone()),
+            recipient: target.clone(),
         };
         let Response::Locked(lock) = fixture.store.lock_metaflow(request.clone(), 100).unwrap()
         else {
@@ -925,7 +875,7 @@ mod tests {
         );
         let request = Lock_Data {
             sender: fixture.message.clone(),
-            recipient: Recipient::Address(fixture.message.clone()),
+            recipient: fixture.message.clone(),
         };
         assert!(matches!(
             fixture.store.lock_metaflow(request.clone(), 10).unwrap(),

@@ -4,10 +4,6 @@
 
 use super::metaflow::SleepsMetaflows;
 use super::reminder::RecordsReminders;
-use super::send_v31::DeliverySnapshotV31;
-use super::send_v32::DeliverySnapshotV32;
-use super::send_v34::DeliverySnapshotV34;
-use super::send_v41::DeliverySnapshotV41;
 use super::*;
 use crate::generated::send_tool::{
     Accepted_Data, SendCall, SendOutcome as ToolSendOutcome, SendRefusal as ToolSendRefusal,
@@ -41,26 +37,6 @@ impl EngineRecord for LogicalDeliveryPurpose {
         RecordKey::new(self.logical_delivery_id.clone())
     }
 }
-
-impl super::model_address::DefinedBeforeModel for LogicalDeliveryPurpose {
-    fn version_before_model() -> MemoryVersion {
-        MemoryVersion::new(1)
-    }
-
-    fn schema_hash_before_model() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-logical-delivery-purpose-v1")
-    }
-}
-
-crate::upgrades_before_model!(LogicalDeliveryPurpose);
-
-impl super::model_address::RemodelsAddresses for LogicalDeliveryPurpose {
-    fn remodel(&mut self) {
-        self.address.remodel();
-    }
-}
-
-impl super::model_address::KeptBeforeModel for LogicalDeliveryPurpose {}
 
 impl MemoryDefinition for LogicalDeliveryPurpose {
     fn memory_version() -> MemoryVersion {
@@ -123,143 +99,12 @@ impl EngineRecord for CurrentLogicalDelivery {
     }
 }
 
-impl super::model_address::DefinedBeforeModel for CurrentLogicalDelivery {
-    fn version_before_model() -> MemoryVersion {
-        MemoryVersion::new(5)
-    }
-
-    fn schema_hash_before_model() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-logical-delivery-current-v5")
-    }
-}
-
-crate::upgrades_before_model!(CurrentLogicalDelivery);
-
-impl super::model_address::RemodelsAddresses for CurrentLogicalDelivery {
-    fn remodel(&mut self) {
-        self.snapshot.remodel();
-    }
-}
-
-impl super::model_address::KeptBeforeModel for CurrentLogicalDelivery {}
-
 impl MemoryDefinition for CurrentLogicalDelivery {
     fn memory_version() -> MemoryVersion {
         MemoryVersion::new(6)
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(CURRENT_SCHEMA)
-    }
-}
-
-/// The Flow 0.41 current row, before Refusal gained the correlation outcomes.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CurrentLogicalDeliveryV4 {
-    pub snapshot: DeliverySnapshotV41,
-}
-impl EngineRecord for CurrentLogicalDeliveryV4 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.snapshot.logical_delivery_id.clone())
-    }
-}
-impl MemoryDefinition for CurrentLogicalDeliveryV4 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
-    }
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-logical-delivery-current-v4")
-    }
-}
-impl UpgradeFrom<CurrentLogicalDeliveryV4> for CurrentLogicalDelivery {
-    type Refusal = std::convert::Infallible;
-    fn upgrade_from(previous: CurrentLogicalDeliveryV4) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            snapshot: previous.snapshot.into(),
-        })
-    }
-}
-
-/// A delivery's current snapshot as signal-flow 34 archived it, read only by the
-/// v3-to-v4 upgrade.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CurrentLogicalDeliveryV3 {
-    pub snapshot: DeliverySnapshotV34,
-}
-impl EngineRecord for CurrentLogicalDeliveryV3 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.snapshot.logical_delivery_id.clone())
-    }
-}
-impl MemoryDefinition for CurrentLogicalDeliveryV3 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
-    }
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-logical-delivery-current-v3")
-    }
-}
-impl UpgradeFrom<CurrentLogicalDeliveryV3> for CurrentLogicalDelivery {
-    type Refusal = std::convert::Infallible;
-    fn upgrade_from(previous: CurrentLogicalDeliveryV3) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            snapshot: previous.snapshot.into(),
-        })
-    }
-}
-
-/// A delivery's current snapshot as signal-flow 32 archived it, read only
-/// by the v2-to-v4 upgrade.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CurrentLogicalDeliveryV2 {
-    pub snapshot: DeliverySnapshotV32,
-}
-impl EngineRecord for CurrentLogicalDeliveryV2 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.snapshot.logical_delivery_id.clone())
-    }
-}
-impl MemoryDefinition for CurrentLogicalDeliveryV2 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(2)
-    }
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-logical-delivery-current-v2")
-    }
-}
-impl UpgradeFrom<CurrentLogicalDeliveryV2> for CurrentLogicalDelivery {
-    type Refusal = std::convert::Infallible;
-    fn upgrade_from(previous: CurrentLogicalDeliveryV2) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            snapshot: previous.snapshot.into(),
-        })
-    }
-}
-
-/// A delivery's current snapshot as signal-flow 31 archived it, read only
-/// by the v1-to-v4 upgrade.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CurrentLogicalDeliveryV1 {
-    pub snapshot: DeliverySnapshotV31,
-}
-impl EngineRecord for CurrentLogicalDeliveryV1 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.snapshot.logical_delivery_id.clone())
-    }
-}
-impl MemoryDefinition for CurrentLogicalDeliveryV1 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
-    }
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-logical-delivery-current-v1")
-    }
-}
-impl UpgradeFrom<CurrentLogicalDeliveryV1> for CurrentLogicalDelivery {
-    type Refusal = std::convert::Infallible;
-    fn upgrade_from(previous: CurrentLogicalDeliveryV1) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            snapshot: previous.snapshot.into(),
-        })
     }
 }
 
@@ -273,143 +118,12 @@ impl EngineRecord for LogicalDeliveryEvent {
     }
 }
 
-impl super::model_address::DefinedBeforeModel for LogicalDeliveryEvent {
-    fn version_before_model() -> MemoryVersion {
-        MemoryVersion::new(5)
-    }
-
-    fn schema_hash_before_model() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-logical-delivery-event-v5")
-    }
-}
-
-crate::upgrades_before_model!(LogicalDeliveryEvent);
-
-impl super::model_address::RemodelsAddresses for LogicalDeliveryEvent {
-    fn remodel(&mut self) {
-        self.snapshot.remodel();
-    }
-}
-
-impl super::model_address::KeptBeforeModel for LogicalDeliveryEvent {}
-
 impl MemoryDefinition for LogicalDeliveryEvent {
     fn memory_version() -> MemoryVersion {
         MemoryVersion::new(6)
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(EVENT_SCHEMA)
-    }
-}
-
-/// The Flow 0.41 event row, before Refusal gained the correlation outcomes.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LogicalDeliveryEventV4 {
-    pub snapshot: DeliverySnapshotV41,
-}
-impl EngineRecord for LogicalDeliveryEventV4 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(format!("{:020}", self.snapshot.delivery_cursor))
-    }
-}
-impl MemoryDefinition for LogicalDeliveryEventV4 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
-    }
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-logical-delivery-event-v4")
-    }
-}
-impl UpgradeFrom<LogicalDeliveryEventV4> for LogicalDeliveryEvent {
-    type Refusal = std::convert::Infallible;
-    fn upgrade_from(previous: LogicalDeliveryEventV4) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            snapshot: previous.snapshot.into(),
-        })
-    }
-}
-
-/// A delivery's lifecycle event as signal-flow 34 archived it, read only by the
-/// v3-to-v4 upgrade.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LogicalDeliveryEventV3 {
-    pub snapshot: DeliverySnapshotV34,
-}
-impl EngineRecord for LogicalDeliveryEventV3 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(format!("{:020}", self.snapshot.delivery_cursor))
-    }
-}
-impl MemoryDefinition for LogicalDeliveryEventV3 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
-    }
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-logical-delivery-event-v3")
-    }
-}
-impl UpgradeFrom<LogicalDeliveryEventV3> for LogicalDeliveryEvent {
-    type Refusal = std::convert::Infallible;
-    fn upgrade_from(previous: LogicalDeliveryEventV3) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            snapshot: previous.snapshot.into(),
-        })
-    }
-}
-
-/// A delivery's lifecycle event as signal-flow 32 archived it, read only by
-/// the v2-to-v4 upgrade.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LogicalDeliveryEventV2 {
-    pub snapshot: DeliverySnapshotV32,
-}
-impl EngineRecord for LogicalDeliveryEventV2 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(format!("{:020}", self.snapshot.delivery_cursor))
-    }
-}
-impl MemoryDefinition for LogicalDeliveryEventV2 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(2)
-    }
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-logical-delivery-event-v2")
-    }
-}
-impl UpgradeFrom<LogicalDeliveryEventV2> for LogicalDeliveryEvent {
-    type Refusal = std::convert::Infallible;
-    fn upgrade_from(previous: LogicalDeliveryEventV2) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            snapshot: previous.snapshot.into(),
-        })
-    }
-}
-
-/// A delivery's lifecycle event as signal-flow 31 archived it, read only by
-/// the v1-to-v4 upgrade.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LogicalDeliveryEventV1 {
-    pub snapshot: DeliverySnapshotV31,
-}
-impl EngineRecord for LogicalDeliveryEventV1 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(format!("{:020}", self.snapshot.delivery_cursor))
-    }
-}
-impl MemoryDefinition for LogicalDeliveryEventV1 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
-    }
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-logical-delivery-event-v1")
-    }
-}
-impl UpgradeFrom<LogicalDeliveryEventV1> for LogicalDeliveryEvent {
-    type Refusal = std::convert::Infallible;
-    fn upgrade_from(previous: LogicalDeliveryEventV1) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            snapshot: previous.snapshot.into(),
-        })
     }
 }
 
@@ -441,27 +155,6 @@ impl EngineRecord for SimplifiedReplyBinding {
     }
 }
 
-impl super::model_address::DefinedBeforeModel for SimplifiedReplyBinding {
-    fn version_before_model() -> MemoryVersion {
-        MemoryVersion::new(1)
-    }
-
-    fn schema_hash_before_model() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-simplified-reply-binding-v1")
-    }
-}
-
-crate::upgrades_before_model!(SimplifiedReplyBinding);
-
-impl super::model_address::RemodelsAddresses for SimplifiedReplyBinding {
-    fn remodel(&mut self) {
-        self.source.remodel();
-        self.recipient.remodel();
-    }
-}
-
-impl super::model_address::KeptBeforeModel for SimplifiedReplyBinding {}
-
 impl MemoryDefinition for SimplifiedReplyBinding {
     fn memory_version() -> MemoryVersion {
         MemoryVersion::new(2)
@@ -486,101 +179,6 @@ pub(crate) struct LogicalDeliveryDescriptors {
     pub(crate) simplified_replies: TableDescriptor<SimplifiedReplyBinding>,
     pub(crate) purposes: TableDescriptor<LogicalDeliveryPurpose>,
 }
-/// Each family upgrades from the newest predecessor its stored identity
-/// names: v4 (0.41), then v3 (0.40.4 to 0.40.10), v2, then v1. A predecessor whose
-/// identity is not the stored one is refused at admission, and the next is
-/// tried.
-trait UpgradesLogicalDeliveryFamilies {
-    fn upgraded_current(
-        engine: &mut Engine,
-        descriptor: TableDescriptor<CurrentLogicalDelivery>,
-    ) -> Result<TableReference<CurrentLogicalDelivery>, StoreError> {
-        let refused = |failure: &dyn std::fmt::Debug| {
-            StoreError::LogicalDeliveryUpgrade(format!("current deliveries: {failure:?}"))
-        };
-        match engine
-            .upgrade_table::<CurrentLogicalDeliveryV4, CurrentLogicalDelivery>(descriptor.clone())
-        {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => return Err(refused(&failure)),
-        }
-        match engine
-            .upgrade_table::<CurrentLogicalDeliveryV3, CurrentLogicalDelivery>(descriptor.clone())
-        {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => return Err(refused(&failure)),
-        }
-        match engine
-            .upgrade_table::<CurrentLogicalDeliveryV2, CurrentLogicalDelivery>(descriptor.clone())
-        {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => return Err(refused(&failure)),
-        }
-        match engine.upgrade_table::<CurrentLogicalDeliveryV1, CurrentLogicalDelivery>(descriptor) {
-            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure) => Err(refused(&failure)),
-        }
-    }
-    fn upgraded_events(
-        engine: &mut Engine,
-        descriptor: TableDescriptor<LogicalDeliveryEvent>,
-    ) -> Result<TableReference<LogicalDeliveryEvent>, StoreError> {
-        let refused = |failure: &dyn std::fmt::Debug| {
-            StoreError::LogicalDeliveryUpgrade(format!("delivery events: {failure:?}"))
-        };
-        match engine
-            .upgrade_table::<LogicalDeliveryEventV4, LogicalDeliveryEvent>(descriptor.clone())
-        {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => return Err(refused(&failure)),
-        }
-        match engine
-            .upgrade_table::<LogicalDeliveryEventV3, LogicalDeliveryEvent>(descriptor.clone())
-        {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => return Err(refused(&failure)),
-        }
-        match engine
-            .upgrade_table::<LogicalDeliveryEventV2, LogicalDeliveryEvent>(descriptor.clone())
-        {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => return Err(refused(&failure)),
-        }
-        match engine.upgrade_table::<LogicalDeliveryEventV1, LogicalDeliveryEvent>(descriptor) {
-            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure) => Err(refused(&failure)),
-        }
-    }
-}
-impl UpgradesLogicalDeliveryFamilies for LogicalDeliveryTables {}
 pub(crate) trait DeclaresLogicalDeliveryTables {
     fn descriptors() -> LogicalDeliveryDescriptors;
     fn register(
@@ -600,34 +198,22 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
                 CURRENT_TABLE_NAME,
                 FamilyName::new("flow-nexus-logical-delivery-current"),
                 CurrentLogicalDelivery::schema_hash(),
-            )
-            .with_predecessor::<CurrentLogicalDeliveryV1>()
-            .with_predecessor::<CurrentLogicalDeliveryV2>()
-            .with_predecessor::<CurrentLogicalDeliveryV3>()
-            .with_predecessor::<CurrentLogicalDeliveryV4>()
-            .with_predecessor::<super::model_address::BeforeModel<CurrentLogicalDelivery>>(),
+            ),
             events: TableDescriptor::new(
                 EVENT_TABLE_NAME,
                 FamilyName::new("flow-nexus-logical-delivery-event"),
                 LogicalDeliveryEvent::schema_hash(),
-            )
-            .with_predecessor::<LogicalDeliveryEventV1>()
-            .with_predecessor::<LogicalDeliveryEventV2>()
-            .with_predecessor::<LogicalDeliveryEventV3>()
-            .with_predecessor::<LogicalDeliveryEventV4>()
-            .with_predecessor::<super::model_address::BeforeModel<LogicalDeliveryEvent>>(),
+            ),
             simplified_replies: TableDescriptor::new(
                 SIMPLIFIED_REPLY_TABLE_NAME,
                 FamilyName::new("flow-nexus-simplified-reply-binding"),
                 SimplifiedReplyBinding::schema_hash(),
-            )
-            .with_predecessor::<super::model_address::BeforeModel<SimplifiedReplyBinding>>(),
+            ),
             purposes: TableDescriptor::new(
                 PURPOSE_TABLE_NAME,
                 FamilyName::new("flow-nexus-logical-delivery-purpose"),
                 LogicalDeliveryPurpose::schema_hash(),
-            )
-            .with_predecessor::<super::model_address::BeforeModel<LogicalDeliveryPurpose>>(),
+            ),
         }
     }
     fn register(
@@ -636,20 +222,10 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
     ) -> Result<LogicalDeliveryTables, StoreError> {
         Ok(LogicalDeliveryTables {
             counter: engine.register_table(descriptors.counter)?,
-            current: engine.upgraded_before_model(descriptors.current, |engine, descriptor| {
-                Self::upgraded_current(engine, descriptor)
-            })?,
-            events: engine.upgraded_before_model(descriptors.events, |engine, descriptor| {
-                Self::upgraded_events(engine, descriptor)
-            })?,
-            simplified_replies: engine
-                .upgraded_before_model(descriptors.simplified_replies, |engine, descriptor| {
-                    Ok(engine.register_table(descriptor)?)
-                })?,
-            purposes: engine
-                .upgraded_before_model(descriptors.purposes, |engine, descriptor| {
-                    Ok(engine.register_table(descriptor)?)
-                })?,
+            current: engine.register_table(descriptors.current)?,
+            events: engine.register_table(descriptors.events)?,
+            simplified_replies: engine.register_table(descriptors.simplified_replies)?,
+            purposes: engine.register_table(descriptors.purposes)?,
             write_gate: Mutex::new(()),
         })
     }
@@ -1872,75 +1448,5 @@ impl super::counters::CountsIds for LogicalDeliveryIds<'_> {
         } else {
             commit.assert(self.0.logical_deliveries.counter, row)
         })
-    }
-}
-
-#[cfg(test)]
-mod upgrade_tests {
-    use super::{
-        CurrentLogicalDelivery, CurrentLogicalDeliveryV4, LogicalDeliveryEvent,
-        LogicalDeliveryEventV4,
-    };
-    use crate::store::send_v41::{DeliverySnapshotV41, DeliveryStateV41, RefusalV41};
-    use sema_engine::{Decision, UpgradeFrom};
-    use signal_flow::{Address, Aspect, DeliveryState, Model, Refusal, SentBy};
-
-    fn archived_snapshot() -> DeliverySnapshotV41 {
-        DeliverySnapshotV41 {
-            delivery_cursor: 41,
-            logical_delivery_id: "logical-delivery-v41".into(),
-            sent_by: SentBy::Sender(Address {
-                aspect: Aspect::Psyche,
-                topic: "core".into(),
-                model: Model::Opus,
-            }),
-            address: Address {
-                aspect: Aspect::Mind,
-                topic: "flow".into(),
-                model: Model::Luna,
-            },
-            delivery_state: DeliveryStateV41::Failed(RefusalV41::Direct(
-                "v41 direct refusal".into(),
-            )),
-        }
-    }
-
-    fn assert_field_for_field(snapshot: &signal_flow::DeliverySnapshot) {
-        assert_eq!(snapshot.delivery_cursor, 41);
-        assert_eq!(snapshot.logical_delivery_id, "logical-delivery-v41");
-        assert_eq!(
-            snapshot.sent_by,
-            SentBy::Sender(Address {
-                aspect: Aspect::Psyche,
-                topic: "core".into(),
-                model: Model::Opus,
-            })
-        );
-        assert_eq!(
-            snapshot.address,
-            Address {
-                aspect: Aspect::Mind,
-                topic: "flow".into(),
-                model: Model::Luna,
-            }
-        );
-        assert_eq!(
-            snapshot.delivery_state,
-            DeliveryState::Failed(Refusal::Direct("v41 direct refusal".into()))
-        );
-    }
-
-    #[test]
-    fn v4_current_and_event_upgrade_to_v5_field_for_field() {
-        let archived = archived_snapshot();
-        let Decision::Ready(current) =
-            CurrentLogicalDelivery::upgrade_from(CurrentLogicalDeliveryV4 {
-                snapshot: archived.clone(),
-            });
-        let Decision::Ready(event) =
-            LogicalDeliveryEvent::upgrade_from(LogicalDeliveryEventV4 { snapshot: archived });
-        assert_field_for_field(&current.snapshot);
-        assert_field_for_field(&event.snapshot);
-        assert_eq!(current.snapshot, event.snapshot);
     }
 }

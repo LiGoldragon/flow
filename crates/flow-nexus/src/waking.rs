@@ -85,7 +85,6 @@ use crate::generated::starter::ProfilesFreshSeat;
 use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes};
 use crate::launching::LaunchesFlows;
-use crate::model_family::RanksInFamily;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
 use crate::store::NamesConfiguredModel;
@@ -109,7 +108,7 @@ use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
 use signal_flow::{
     Address, AgentState, Event, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
-    Metaflow, Model, NativePrompt, NativeStop, Origin, PowerLevel, QueueEntry, Response,
+    Metaflow, NativePrompt, NativeStop, Origin, QueueEntry, Response,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -120,11 +119,6 @@ pub trait WakePolicy {
     /// or Done. Working, Blocked or unreadable is not resting.
     fn rests_at(agent_state: &AgentState) -> bool {
         matches!(agent_state, AgentState::Idle | AgentState::Done)
-    }
-
-    /// The power a fresh seat is registered with, by its model's rank.
-    fn power_of(model: &Model) -> PowerLevel {
-        model.power()
     }
 }
 
@@ -420,16 +414,16 @@ impl JudgesSuccessorRefusal for KeptAtStop {
 }
 
 /// The flows owed a successor whose successor was refused. Each is handed
-/// its queue meanwhile, though past its threshold, and its refusal is told
-/// once, until a successor stands.
+/// its queue meanwhile, though past its threshold, until a successor
+/// stands.
 #[derive(Debug, Default)]
 pub struct RefreshRefusals {
     flows: Mutex<HashSet<FlowId>>,
 }
 
 pub trait NotesRefreshRefusals {
-    /// Notes the flow's successor refused; true the first time.
-    fn note(&self, flow_id: &str) -> bool;
+    /// Notes the flow's successor refused.
+    fn note(&self, flow_id: &str);
     /// Whether the flow's successor stands refused.
     fn holds(&self, flow_id: &str) -> bool;
     /// Forgets the flow: its successor stands, or it has ended.
@@ -437,11 +431,11 @@ pub trait NotesRefreshRefusals {
 }
 
 impl NotesRefreshRefusals for RefreshRefusals {
-    fn note(&self, flow_id: &str) -> bool {
+    fn note(&self, flow_id: &str) {
         self.flows
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(flow_id.to_owned())
+            .insert(flow_id.to_owned());
     }
 
     fn holds(&self, flow_id: &str) -> bool {
@@ -572,111 +566,6 @@ pub trait PerformsWakeAndDrain {
     fn drain_all(&self, address: Address) -> Outcome;
 }
 
-/// Short term, the Secondary starts first: a caller's new Primary whose
-/// Secondary of the same aspect and topic is not Awake has that Secondary
-/// started by Flow itself, OnDemand or Maintained, from its declaration, and
-/// the Primary's launch goes on once the Secondary is confirmed. A Secondary
-/// with no declaration is not started, and the Primary is then refused
-/// NoSecondary by its admission.
-pub(crate) trait StartsSecondaryFirst {
-    /// Runs off the dispatch gate, taking it per step as a wake does.
-    /// Refuses only when the declared Secondary could not be started.
-    fn secondary_first(&self, profile: &LaunchProfile) -> Result<(), signal_flow::StartRejection>;
-}
-
-impl StartsSecondaryFirst for RunningNexus {
-    fn secondary_first(&self, profile: &LaunchProfile) -> Result<(), signal_flow::StartRejection> {
-        use crate::launching::NamesTopic;
-        use crate::store::ReadsLaunchAttempt;
-        use crate::store::metaflow::TakesLaunchAddress;
-        use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
-        let address = &profile.address;
-        if !address.model.is_first()
-            || profile.flow_id_option.is_some()
-            || !address.topic.as_str().is_camel_case_topic()
-        {
-            return Ok(());
-        }
-        let secondary = Address {
-            aspect: address.aspect.clone(),
-            topic: address.topic.clone(),
-            model: address.model.second(),
-        };
-        let Some(lease) = self.waking.hold(&secondary) else {
-            // A wake of the Secondary already runs; the Primary's admission
-            // reads what it came to.
-            return Ok(());
-        };
-        let metaflow = {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let new_launch = matches!(
-                self.store.launch_attempt(&profile.launch_request_id),
-                Ok(None)
-            );
-            let owed = matches!(self.store.successor_intent(address), Ok(Some(_)));
-            if !new_launch || owed {
-                return Ok(());
-            }
-            if !matches!(self.store.metaflow_declaration(&secondary), Ok(Some(_))) {
-                return Ok(());
-            }
-            self.rest_ended_awake(&secondary);
-            match self.store.metaflow(&secondary) {
-                Ok(Some(metaflow)) => match &metaflow.state {
-                    flow_ethos::State::Awake(flow_id)
-                        if matches!(self.store.flow_is_live(flow_id), Ok(true)) =>
-                    {
-                        return Ok(());
-                    }
-                    _ => metaflow,
-                },
-                Ok(None) => Metaflow {
-                    address: secondary.clone(),
-                    state: flow_ethos::State::Asleep,
-                    past: vec![],
-                    queue: vec![],
-                },
-                Err(_) => return Err(signal_flow::StartRejection::LaunchPersistenceRefused),
-            }
-        };
-        let WakePlan::Fresh(fresh) = self.wake_plan(&metaflow) else {
-            return Err(signal_flow::StartRejection::NoSecondary);
-        };
-        let started = self.start_fresh(&metaflow, fresh, "").map_err(|failure| {
-            eprintln!(
-                "flow-nexus: the Secondary of {:?} {} did not start: {failure:?}",
-                secondary.aspect, secondary.topic
-            );
-            signal_flow::StartRejection::NoSecondary
-        })?;
-        let flow_id = started.flow_id;
-        {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if self.perform(Operation::Record(Record_Data::Awoken(
-                Record_Data_Awoken_Data {
-                    address: secondary.clone(),
-                    flow_id: flow_id.clone(),
-                    delivered: 0,
-                },
-            ))) != Outcome::Recorded
-            {
-                return Err(signal_flow::StartRejection::LaunchPersistenceRefused);
-            }
-        }
-        // Work queued for the Secondary is handed to it, as to any woken
-        // flow.
-        self.drain_woken(&secondary, lease);
-        self.settle_stops_at_confirmation();
-        Ok(())
-    }
-}
-
 /// Why a flow the Nexus starts itself did not start: its start was refused
 /// for a reason, or it failed before or after the start was asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -801,11 +690,11 @@ trait WakesInParts {
     /// once its successor composes.
     fn successor_composes(&self, flow_id: &str, metaflow: &Metaflow) -> Result<(), KeptAtStop>;
     /// A seat kept because its successor was refused: notes it, so it is
-    /// handed its queue though past its threshold; tells the refusal once,
-    /// as a Notice to the metaflow's Up (Psyche core Secondary for a
-    /// Primary); and hands it what is queued now, as its rest's drain
-    /// would. Takes the dispatch gate; the caller holds none.
-    fn successor_refused(&self, flow_id: &str, reason: &KeptAtStop);
+    /// handed its queue though past its threshold, and hands it what is
+    /// queued now, as its rest's drain would. The refusal is told to no
+    /// flow: it stands as Flow recorded it. Takes the dispatch gate; the
+    /// caller holds none.
+    fn successor_refused(&self, flow_id: &str);
 }
 
 pub(crate) trait ReadsClaudeDelivery {
@@ -1346,7 +1235,7 @@ impl SleepsAndWakesSeats for RunningNexus {
         match &at_stop {
             AtStop::Kept(reason) if reason.successor_refused() => {
                 eprintln!("flow-nexus: flow {flow_id} kept at its Stop: {reason:?}");
-                self.successor_refused(flow_id, reason);
+                self.successor_refused(flow_id);
             }
             AtStop::Kept(reason) => {
                 eprintln!("flow-nexus: flow {flow_id} kept at its Stop: {reason:?}");
@@ -2891,47 +2780,12 @@ impl WakesInParts for RunningNexus {
         }
     }
 
-    fn successor_refused(&self, flow_id: &str, reason: &KeptAtStop) {
+    fn successor_refused(&self, flow_id: &str) {
         let address = match self.store.metaflow_awake_as(flow_id) {
             Ok(Some(metaflow)) => metaflow.address,
             _ => return,
         };
-        if self.refresh_refusals.note(flow_id) {
-            let up = match address.model.above() {
-                Some(model) => Address {
-                    model,
-                    ..address.clone()
-                },
-                None => Address {
-                    aspect: signal_flow::Aspect::Psyche,
-                    topic: "core".into(),
-                    model: Model::Opus,
-                },
-            };
-            let notice = format!(
-                "Flow: the successor of {:?} {} {:?} (flow {flow_id}) was refused: {reason:?}. Flow {flow_id} stays its flow and is handed its queue; its successor is tried again at its next rest.",
-                address.aspect, address.topic, address.model
-            );
-            let told = {
-                let _turn = self
-                    .dispatch_gate
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                self.store.accept_logical_delivery(
-                    &up,
-                    signal_flow::SentBy::Flow,
-                    flow_ethos::Delivery::Wake,
-                    signal_flow::Message::Soft(signal_flow::Request::Notice(notice)),
-                    None,
-                )
-            };
-            match told {
-                Ok(signal_flow::PrivateSendResponse::SendAccepted(_)) => self.wake_due(up),
-                _answer => eprintln!(
-                    "flow-nexus: the refused successor of flow {flow_id} was not told to {up:?}"
-                ),
-            }
-        }
+        self.refresh_refusals.note(flow_id);
         // The seat rests now: what is queued is handed to it here, as its
         // turn's end would, under the gate.
         let _turn = self

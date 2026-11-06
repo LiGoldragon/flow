@@ -16,9 +16,8 @@ use meta_signal_flow::{
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, Decision, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryUpgrades,
-    MemoryVersion, QueryPlan, RecordKey, Retraction, SchemaHash, TableDescriptor, TableName,
-    TableReference, UpgradeFrom, UpgradeOutcome,
+    Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,
+    RecordKey, Retraction, SchemaHash, TableDescriptor, TableName, TableReference,
 };
 use signal_flow::HarnessKind;
 
@@ -89,8 +88,8 @@ impl SettlesInterruptedLease for PaneLease {
     }
 }
 
-/// The delivery half of the meta Configuration, kept in its own record so a
-/// store written before it existed reads unchanged and is seeded on open.
+/// The delivery half of the meta Configuration, kept in its own record and
+/// seeded on open.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryConfiguration {
     pub harness_profile_vector: Vec<HarnessProfile>,
@@ -104,40 +103,6 @@ impl MemoryDefinition for DeliveryConfiguration {
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-delivery-configuration-v2")
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(super) struct DeliveryConfigurationV1 {
-    pub(super) harness_profile_vector: Vec<HarnessProfile>,
-    pub(super) meta_aspects: MetaAspects,
-    pub(super) message_nexus_path: MessageNexusPath,
-}
-
-impl EngineRecord for DeliveryConfigurationV1 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(DELIVERY_CONFIGURATION_KEY)
-    }
-}
-
-impl MemoryDefinition for DeliveryConfigurationV1 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
-    }
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-delivery-configuration-v1")
-    }
-}
-
-impl UpgradeFrom<DeliveryConfigurationV1> for DeliveryConfiguration {
-    type Refusal = std::convert::Infallible;
-    fn upgrade_from(previous: DeliveryConfigurationV1) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            harness_profile_vector: previous.harness_profile_vector,
-            meta_aspects: previous.meta_aspects,
-            message_nexus_path_option: (!previous.message_nexus_path.is_empty())
-                .then_some(previous.message_nexus_path),
-        })
     }
 }
 
@@ -227,24 +192,11 @@ impl RegistersDeliveryTables for DeliveryTables {
                 FamilyName::new("flow-nexus-pane-lease"),
                 SchemaHash::for_label("flow-nexus-pane-lease-v1"),
             ))?,
-            configuration: match engine
-                .upgrade_table::<DeliveryConfigurationV1, DeliveryConfiguration>(
-                    TableDescriptor::new(
-                        DELIVERY_CONFIGURATION_TABLE_NAME,
-                        FamilyName::new("flow-nexus-delivery-configuration"),
-                        DeliveryConfiguration::schema_hash(),
-                    )
-                    .with_predecessor::<DeliveryConfigurationV1>(),
-                ) {
-                UpgradeOutcome::Upgraded(receipt) => receipt.table(),
-                UpgradeOutcome::AlreadyCurrent(table) => table,
-                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-                UpgradeOutcome::Failed(failure) => {
-                    return Err(StoreError::DeliveryConfigurationUpgrade(format!(
-                        "{failure:?}"
-                    )));
-                }
-            },
+            configuration: engine.register_table(TableDescriptor::new(
+                DELIVERY_CONFIGURATION_TABLE_NAME,
+                FamilyName::new("flow-nexus-delivery-configuration"),
+                DeliveryConfiguration::schema_hash(),
+            ))?,
         })
     }
 }
@@ -412,37 +364,5 @@ impl RecordsDeliveries for FlowStore {
             ))?;
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod upgrade_tests {
-    use super::{DeliveryConfiguration, DeliveryConfigurationV1};
-    use sema_engine::{Decision, UpgradeFrom};
-
-    #[test]
-    fn v1_named_message_endpoint_is_preserved() {
-        let Decision::Ready(upgraded) =
-            DeliveryConfiguration::upgrade_from(DeliveryConfigurationV1 {
-                harness_profile_vector: Vec::new(),
-                meta_aspects: vec![signal_flow::Aspect::Psyche],
-                message_nexus_path: "/run/message.sock".into(),
-            });
-        assert_eq!(
-            upgraded.message_nexus_path_option.as_deref(),
-            Some("/run/message.sock")
-        );
-        assert_eq!(upgraded.meta_aspects, [signal_flow::Aspect::Psyche]);
-    }
-
-    #[test]
-    fn v1_empty_message_endpoint_becomes_absent() {
-        let Decision::Ready(upgraded) =
-            DeliveryConfiguration::upgrade_from(DeliveryConfigurationV1 {
-                harness_profile_vector: Vec::new(),
-                meta_aspects: Vec::new(),
-                message_nexus_path: String::new(),
-            });
-        assert!(upgraded.message_nexus_path_option.is_none());
     }
 }

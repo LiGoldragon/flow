@@ -129,12 +129,12 @@ on the sockets of more than one session, a pane ID that changes on the way
 up, or no Herdr server names no pane. The registry must hold exactly one routable
 flow on that session and pane, and the live snapshot must still show its
 binding (pane, terminal, harness); otherwise the reply is `CallerUnknown`.
-The answer is the flow's role, `Caller.{ FlowId FlowAspect PowerLevel
-ModelName }`, kept as its own record when MetaBindExisting binds a flow or a
-Start registers one. The optional FlowId in the request is the caller's claim:
-a different one is refused as `CallerMismatch`, which carries the true Caller.
-A store written before roles were kept adopts them when it opens, from the
-binding launch's profile or from the flow type MetaBindExisting wrote. A
+The answer is the flow's role, `Caller.{ FlowId Aspect ModelName }`, kept
+as its own record when MetaBindExisting binds a flow or a Start registers
+one. The optional FlowId in the request is the caller's claim: a different
+one is refused as `CallerMismatch`, which carries the true Caller. A binding
+whose aspect is not its Address's, or whose model is not the native model
+configured for its Address's Model, is refused `RoleMismatch`. A
 MetaBindExisting of a flow already held records its role only when the stored
 flow is that binding (thread, harness, Herdr session, pane and terminal) and
 has no other role; it writes nothing else, and any other binding is refused as
@@ -382,10 +382,7 @@ true only when queued.
 
 A metaflow continues as its declaration's `Continuity.[ OnDemand
 Maintained ]` names; a metaflow no declaration names is OnDemand. A
-metaflow is Maintained by its exact Address, never by its Model: a
-declaration archived before Continuity opens Maintained at the core
-seats of the first three ranks of each aspect and at { Psyche core
-Haiku }, and OnDemand at every other Address. When a seat's turn ends
+metaflow is Maintained by its exact Address, never by its Model. When a seat's turn ends
 and it rests with nothing queued, an OnDemand seat sleeps: its harness and
 pane are closed under the pane's lease (a Claude seat only once Herdr shows
 it Idle or Done, so background agents are not ended) and its flow recorded
@@ -471,6 +468,15 @@ revalidates the full session against `state.json`, the daemon roster,
 rendezvous and control sockets, process liveness, permission fields, and
 terminal lifecycle states before returning `Ready`.
 
+Flow Memory v3 begins with 0.52.0, and no open upgrades a store. A store an
+earlier Flow wrote, of an earlier Memory version, is refused `EarlierMemory`,
+typed, before anything is written, and stays byte for byte as it was; a store
+holding any family under an identity other than this Flow's current one, an
+earlier Flow's family or a later Flow's, is refused `UnrecognizedMemory`
+naming it. The first running open of a configuration-only store adds the
+running families on a staged copy beside it, which replaces the store by one
+rename only once the whole open has succeeded.
+
 Fresh stores persist default sockets, source root, and Codex endpoints. Meta
 `Configure` declares one configuration family whole (`Nexus`, `Models`,
 `Thresholds`, `LeaveOuts`, `SendServers`, `Metaflows`, `Investigation`),
@@ -487,15 +493,9 @@ per Model): a Start or Replace naming another is refused
 and a fresh wake takes that model. A launch a caller asks for (Start, Replace,
 Launch) is admitted before anything of it is written: a topic that is not
 an uncapitalized camelCase identifier is refused `TopicRefused.Topic`,
-carrying the topic as written, never lowered; and, short term, a Fable or Astra is
-not started without the Opus or Sol of its aspect and topic, and that seat starts first: before
-a new Fable or Astra launch, off the dispatch gate, Flow starts the declared
-second model of its family, of its aspect and topic, itself when it is not Awake, OnDemand or
-Maintained, records it Awake once confirmed and hands it its queue; the
-launch is refused `NoSecondary` only when that seat has no
-declaration, or its start was refused. A first-rank launch that replaces a flow, a successor a Maintained
-metaflow is owed, a wake Flow starts itself, and a request already
-attempted continue a metaflow already admitted. Configure refuses an
+carrying the topic as written, never lowered. No model ranks above another:
+a launch waits for no other model's seat, and nothing starts before it. A
+request already attempted continues the launch already admitted. Configure refuses an
 Address with such a topic `ConfigureRejected.TopicRefused`, a Send
 whose recipient Address names one is refused `Refused.TopicRefused`
 before anything is queued, and a Codex send tool call whose target names

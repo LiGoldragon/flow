@@ -23,7 +23,7 @@
 
 use crate::RunningNexus;
 use crate::generated::operation::{Operation, Outcome, Record_Data, Record_Data_Context_Data};
-use crate::model_family::RanksInFamily;
+use crate::model::RunsModel;
 use crate::performing::Performs;
 use crate::store::compaction::{Compaction, Investigation, RecordsCompactions};
 use crate::store::context::RecordsContextSize;

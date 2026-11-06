@@ -11,7 +11,7 @@ The wire contracts are independent repositories:
 
 - `signal-flow` defines `Start`, `Refresh`, `Stop`,
   `List`, `ResolveRecipient` for Message Nexus routing, `ResolveCaller`,
-  which names the flow, aspect, power and model of the process that calls,
+  which names the flow, aspect and model of the process that calls,
   and `Observe.Agent`, a flow's Herdr agent state on open and on each change.
   Nothing on the ordinary socket writes into a pane.
 - `meta-signal-flow` defines `Configure`, reset-credit consumption, `Retire`,
@@ -133,8 +133,7 @@ instruction. The Nexus
 derives the rest: the origin from the calling process, as Identify reads a
 caller (the one flow bound in its Herdr pane, with that flow's native
 session, or `Unbound` for any other caller, which is recorded and not
-refused); the power from the rank of the Address's Model; the harness from the model,
-Codex when a configured Codex endpoint serves it and Claude otherwise. Once the seat's native binding is witnessed and its flow
+refused); and the harness from the model, Codex when a configured Codex endpoint serves it and Claude otherwise. Once the seat's native binding is witnessed and its flow
 registered, before its first prompt, the launch records that Address's
 metaflow Awake as the launched flow, so the seat's first tool call is
 identified and sends through Message; confirmation keeps it, so the seat,
@@ -148,10 +147,9 @@ names, answers `StartRejected.AddressAwake`. A metaflow is Awake or Asleep:
 a topic never dies. A wake whose start is refused leaves its queue as it
 was, each waiting request's delivery `Retryable.WakeRefused` with the
 refusal, so its sender's `ObserveSends` shows why; the next waking request
-tries the start again. A Fable or Astra starts after the Opus or Sol of its aspect and topic: a
-Start of a Fable or Astra whose Opus or Sol metaflow (the same aspect and topic) is
-not recorded, Awake or Asleep, answers `StartRejected.NoSecondary` before
-anything is written. Profile producers should use the
+tries the start again. No model ranks above another: a Start is admitted by
+its own Address alone, waits for no other model's seat, and starts nothing
+before itself. Profile producers should use the
 generated `signal-flow` Datom types rather than assembling positional text.
 The old `flow start ...`, `flow restart ...`, and `flow resolve ...` argument
 forms are rejected.

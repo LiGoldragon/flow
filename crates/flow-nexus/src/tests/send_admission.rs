@@ -62,7 +62,7 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
     use crate::sending::SendsRequests;
     use crate::store::FlowStore;
     use crate::store::metaflow::SeedsMetaflow;
-    use signal_flow::{Message, Metaflow, Recipient, Response, SendRequest};
+    use signal_flow::{Message, Metaflow, Response, SendRequest};
     let fixture = NexusFixture::new();
     bind_existing_caller(&fixture, "a001", "pane-1");
     fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
@@ -81,7 +81,7 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
     let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
     let answer = fixture.nexus.send_request(
         SendRequest {
-            recipient: Recipient::Address(target.clone()),
+            recipient: target.clone(),
             sendable_message: super::sendable_message(Message::MiddleAbrupt(Request::Order(
                 "wake when configured".into(),
             ))),
@@ -116,7 +116,7 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
     };
     let answer = fixture.nexus.send_request(
         SendRequest {
-            recipient: Recipient::Address(unknown.clone()),
+            recipient: unknown.clone(),
             sendable_message: signal_flow::SendableMessage::HardAbrupt(
                 signal_flow::SendableRequest::Notice("no hidden queue".into()),
             ),
@@ -133,7 +133,7 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
     assert!(fixture.nexus.store.metaflow(&unknown).unwrap().is_none());
     let queued = fixture.nexus.send_request(
         SendRequest {
-            recipient: Recipient::Address(target.clone()),
+            recipient: target.clone(),
             sendable_message: signal_flow::SendableMessage::Soft(
                 signal_flow::SendableRequest::Notice("explicit durable queue".into()),
             ),
@@ -167,7 +167,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
     use crate::sending::SendsRequests;
     use crate::store::FlowStore;
     use crate::store::metaflow::SeedsMetaflow;
-    use signal_flow::{Message, Metaflow, Recipient, Response, SendRequest};
+    use signal_flow::{Message, Metaflow, Response, SendRequest};
     use std::io::Write;
     use std::time::{Duration, Instant};
     for (hard, duplicate, privileged) in [
@@ -246,7 +246,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                             topic: "core".into(),
                             model: Model::Sol,
                         },
-                        recipient: Recipient::Address(target.clone()),
+                        recipient: target.clone(),
                     }),
                     Some(&message_peer),
                 )
@@ -264,7 +264,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         } else {
             let answer = fixture.nexus.send_request(
                 SendRequest {
-                    recipient: Recipient::Address(target.clone()),
+                    recipient: target.clone(),
                     sendable_message: super::sendable_message(message),
                 },
                 Some(&peer),
@@ -462,7 +462,7 @@ fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
     use crate::store::metaflow::{SeedsMetaflow, TakesLaunchAddress};
     use signal_flow::{
         EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
-        HerdrRouteSelection, Origin, PowerLevel,
+        HerdrRouteSelection, Origin,
     };
 
     // The flow CLI is built in the profile directory this test executable
@@ -514,7 +514,6 @@ fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
             signal_flow::Caller {
                 flow_id: "5e4de7".into(),
                 aspect: Aspect::Field,
-                power_level: PowerLevel::UltraLow,
                 model_name: "haiku".into(),
             },
         )
@@ -571,11 +570,11 @@ fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     };
     assert_eq!(
-        flow("Send.{ Address.{ Mind flow Sol } Soft.Task.{ 0 «Draft the proposal.» } }"),
+        flow("Send.{ { Mind flow Sol } Soft.Task.{ 0 «Draft the proposal.» } }"),
         "SendRefused.MinutesRefused.Zero"
     );
     assert_eq!(
-        flow("Send.{ Address.{ Mind flow Sol } Soft.Task.{ -5 «Draft the proposal.» } }"),
+        flow("Send.{ { Mind flow Sol } Soft.Task.{ -5 «Draft the proposal.» } }"),
         "SendRefused.MinutesRefused.Negative"
     );
     assert!(
@@ -591,7 +590,7 @@ fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
     );
     // The same CLI and Nexus admit a Task whose Minutes stand.
     assert!(
-        flow("Send.{ Address.{ Mind flow Sol } Soft.Task.{ 30 «Draft the proposal.» } }")
+        flow("Send.{ { Mind flow Sol } Soft.Task.{ 30 «Draft the proposal.» } }")
             .starts_with("SendAccepted."),
     );
 }

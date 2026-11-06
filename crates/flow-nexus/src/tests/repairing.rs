@@ -25,7 +25,7 @@ use meta_signal_flow::{
 };
 use signal_flow::{
     Address, Aspect, DeliveryState, HarnessKind, HerdrRoute, HerdrRouteSelection, Lock_Data,
-    Message, Metaflow, Model, QueueEntry, Recipient, Request, Response, SentBy,
+    Message, Metaflow, Model, QueueEntry, Request, Response, SentBy,
 };
 use std::fs;
 
@@ -158,7 +158,7 @@ fn inspect_answers_the_metaflow_whole() {
         .lock_metaflow(
             Lock_Data {
                 sender,
-                recipient: Recipient::Address(seat_address()),
+                recipient: seat_address(),
             },
             1_790_000_000,
         )

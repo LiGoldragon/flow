@@ -19,8 +19,7 @@ use meta_signal_flow::{
 };
 use signal_flow::{
     Address, Aspect, Bind_Data, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin,
-    HarnessKind, HerdrRoute, HerdrRouteSelection, Lock_Data, Model, Origin, Process, Recipient,
-    Response,
+    HarnessKind, HerdrRoute, HerdrRouteSelection, Lock_Data, Model, Origin, Process, Response,
 };
 use std::collections::BTreeSet;
 
@@ -198,7 +197,7 @@ impl ConfiguredStore {
                 .lock_metaflow(
                     Lock_Data {
                         sender: Self::message(),
-                        recipient: Recipient::Address(Self::message()),
+                        recipient: Self::message(),
                     },
                     100,
                 )

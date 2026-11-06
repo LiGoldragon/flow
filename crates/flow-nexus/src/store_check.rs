@@ -1,10 +1,10 @@
 //! Whether this Flow opens a store, judged before a deploy activates it.
 //!
-//! Flow's store refuses a Flow older than the identities it holds, so a
-//! deploy that activates such a Flow leaves the Nexus refusing its store
-//! at every start. The check opens a private copy of the store as the
-//! Nexus would, upgrades included, and never touches the store a running
-//! Nexus holds. A copy taken while the Nexus wrote may be torn; a refusal
+//! Flow's store refuses a Flow other than the one whose identities it
+//! holds, an earlier Flow's store and a later Flow's alike, so a deploy that
+//! activates such a Flow leaves the Nexus refusing its store at every start.
+//! The check opens a private copy of the store as the Nexus would, and never
+//! touches the store a running Nexus holds. A copy taken while the Nexus wrote may be torn; a refusal
 //! that is not the store's identity is judged once more on a fresh copy.
 
 use crate::generated::startup::{ChecksStore, StoreCheck, StoreCheckRequest, StoreRefusal};
@@ -67,6 +67,9 @@ impl OpensCopy for Path {
                 CopyOpen::Opened
             }
             Err(StoreError::UnrecognizedMemory { reason, .. }) => CopyOpen::Unrecognized(reason),
+            Err(error @ StoreError::EarlierMemory { .. }) => {
+                CopyOpen::Unrecognized(error.to_string())
+            }
             Err(error) => CopyOpen::Failed(error.to_string()),
         }
     }
@@ -184,7 +187,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = configured_store(directory.path());
         {
-            let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(2))).unwrap();
+            let mut engine = Engine::open(EngineOpen::new(
+                &path,
+                SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION),
+            ))
+            .unwrap();
             engine
                 .register_table(TableDescriptor::<LaterRow>::new(
                     TableName::new("flow_nexus_from_a_later_flow"),
@@ -200,6 +207,36 @@ mod tests {
         assert_eq!(refusal.path, path.to_string_lossy());
         assert!(
             refusal.reason.contains("flow_nexus_from_a_later_flow"),
+            "{}",
+            refusal.reason
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    /// A store an earlier Flow wrote, Flow Memory v2, is refused as an
+    /// earlier Flow's, and left untouched.
+    #[test]
+    fn a_store_an_earlier_flow_wrote_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = configured_store(directory.path());
+        {
+            let database = redb::Database::open(&path).unwrap();
+            let write = database.begin_write().unwrap();
+            {
+                let mut meta = write
+                    .open_table(redb::TableDefinition::<&str, u64>::new("__sema_meta"))
+                    .unwrap();
+                meta.insert("schema_version", 2).unwrap();
+            }
+            write.commit().unwrap();
+        }
+        let before = fs::read(&path).unwrap();
+        let StoreCheck::Refused(refusal) = request(&path).check() else {
+            panic!("an earlier store is refused")
+        };
+        assert_eq!(refusal.path, path.to_string_lossy());
+        assert!(
+            refusal.reason.contains("earlier Flow's Memory v2"),
             "{}",
             refusal.reason
         );

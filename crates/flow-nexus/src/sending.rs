@@ -30,7 +30,7 @@ use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::herdr::launch::ConstructsHarnessCommand;
 use crate::launching::ReadsHarnessArguments;
 use crate::metaflow::IdentifiesPeerProcess;
-use crate::model_family::RanksInFamily;
+use crate::model::RunsModel;
 use crate::performing::Performs;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
@@ -46,14 +46,14 @@ use crate::store::{
 };
 use crate::waking::{
     HoldsWakingMetaflows, PerformsWakeAndDrain, ReconcilesQueueDelivery, RestsEndedAwake,
-    SleepsAndWakesSeats, WakePolicy,
+    SleepsAndWakesSeats,
 };
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, Caller, HarnessKind, HerdrRoute, LaunchProfile, LaunchRequest, Message,
-    PrivateSendResponse, Process, Recipient, Refusal, Request, Response, SendPayloadSize,
-    SendRequest, SendableMessage, SentBy, StartRejection, Unknown_Data,
+    PrivateSendResponse, Process, Refusal, Request, Response, SendPayloadSize, SendRequest,
+    SendableMessage, SentBy, StartRejection, Unknown_Data,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -208,16 +208,7 @@ impl SendsRequests for RunningNexus {
             .as_ref()
             .and_then(|result| result.as_ref().ok())
             .cloned();
-        let recipient = match &send.recipient {
-            Recipient::Address(address) => Some(address.clone()),
-            Recipient::Up => sender.as_ref().and_then(|sender| {
-                sender.model.above().map(|model| Address {
-                    aspect: sender.aspect.clone(),
-                    topic: sender.topic.clone(),
-                    model,
-                })
-            }),
-        };
+        let recipient = Some(send.recipient.clone());
         let mut answer = (|| -> SendAnswer {
             let _turn = self
                 .dispatch_gate
@@ -225,11 +216,11 @@ impl SendsRequests for RunningNexus {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             // The recipient's topic is input, checked before anything else:
             // an uncapitalized camelCase identifier, kept as written.
-            if let Recipient::Address(address) = &send.recipient {
+            {
                 use crate::launching::NamesTopic;
-                if !address.topic.as_str().is_camel_case_topic() {
+                if !send.recipient.topic.as_str().is_camel_case_topic() {
                     return PrivateSendResponse::Refused(Refusal::TopicRefused(
-                        address.topic.clone(),
+                        send.recipient.topic.clone(),
                     ))
                     .into();
                 }
@@ -271,17 +262,7 @@ impl SendsRequests for RunningNexus {
             } else {
                 flow_ethos::Delivery::Queue
             };
-            let recipient = match send.recipient {
-                Recipient::Address(address) => address,
-                Recipient::Up => match sender.model.above() {
-                    Some(model) => Address {
-                        aspect: sender.aspect.clone(),
-                        topic: sender.topic.clone(),
-                        model,
-                    },
-                    None => return PrivateSendResponse::Refused(Refusal::NoneAbove).into(),
-                },
-            };
+            let recipient = send.recipient.clone();
             let message = match self.store.resolve_sendable_message(
                 &sender,
                 &recipient,
@@ -1109,7 +1090,6 @@ impl RunningNexus {
         let binding = meta_signal_flow::FlowBinding {
             flow_id: flow_id.clone(),
             aspect: address.aspect.clone(),
-            power_level: Self::power_of(&address.model),
             model_name: model_name.clone(),
             harness_kind: harness_kind.clone(),
             native_session_id: native_session_id.clone(),
@@ -1124,7 +1104,6 @@ impl RunningNexus {
         let role = Caller {
             flow_id: flow_id.clone(),
             aspect: address.aspect.clone(),
-            power_level: Self::power_of(&address.model),
             model_name,
         };
         match self.verified_seat_node(&seat.herdr_session_name, &address, &binding) {

@@ -4,14 +4,10 @@
 //! A Task is an order with its minutes, kept under the id Flow answered its
 //! send with. When its minutes lapse with no Done naming it, its sender is
 //! reminded, then again every interval, `TASK_REMINDERS` reminders in all;
-//! the last is copied to the second model of the sender's family as a failure. A Done naming
-//! the task closes it.
-//!
-//! The rows live in their own table, so a store written before reminders
-//! opens with the table added and holding none.
+//! with the last, the sender is told the task's failure. A Done naming the
+//! task closes it.
 
 use super::{FlowStore, StoreError};
-use crate::model_family::RanksInFamily;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,
@@ -92,27 +88,6 @@ impl MemoryDefinition for Reminder {
     }
 }
 
-impl super::model_address::DefinedBeforeModel for Reminder {
-    fn version_before_model() -> MemoryVersion {
-        MemoryVersion::new(2)
-    }
-
-    fn schema_hash_before_model() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-reminder-v2")
-    }
-}
-
-crate::upgrades_before_model!(Reminder);
-
-impl super::model_address::RemodelsAddresses for Reminder {
-    fn remodel(&mut self) {
-        self.address.remodel();
-        self.recipient.remodel();
-    }
-}
-
-impl super::model_address::KeptBeforeModel for Reminder {}
-
 pub(super) trait DescribesReminderTable {
     fn descriptor() -> TableDescriptor<Reminder>;
 }
@@ -124,19 +99,18 @@ impl DescribesReminderTable for Reminder {
             FamilyName::new(REMINDER_FAMILY),
             SchemaHash::for_label(REMINDER_SCHEMA),
         )
-        .with_predecessor::<super::model_address::BeforeModel<Reminder>>()
     }
 }
 
-/// One reminder due now: what to queue, for whom, and the failure copy.
+/// One reminder due now: what to queue, for whom, and on a task's last
+/// reminder the failure its sender is told.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DueReminder {
+    /// The task's sender, as Flow recorded it when it admitted the task.
     pub address: Address,
     pub notice: String,
-    /// The second model of the sender's family (Opus or Sol) in its aspect
-    /// and topic, and the failure it is told, on a task's last reminder,
-    /// when the sender is not that seat itself.
-    pub failure: Option<(Address, String)>,
+    /// On a task's last reminder, the failure its sender is told.
+    pub failure: Option<String>,
 }
 
 /// The reminder's next state once one is sent at `now`.
@@ -155,21 +129,13 @@ impl AdvancesReminder for Reminder {
             self.recipient.named(),
             self.minutes * sent,
         );
-        let secondary = Address {
-            aspect: self.address.aspect.clone(),
-            topic: self.address.topic.clone(),
-            model: self.address.model.second(),
-        };
-        let failure = (last && secondary != self.address).then(|| {
-            (
-                secondary,
-                format!(
-                    "Failure: the task of {} minutes, {}, from {} to {} has no Done after {TASK_REMINDERS} reminders.",
-                    self.minutes,
-                    task_words,
-                    self.address.named(),
-                    self.recipient.named(),
-                ),
+        let failure = last.then(|| {
+            format!(
+                "Failure: the task of {} minutes, {}, from {} to {} has no Done after {TASK_REMINDERS} reminders.",
+                self.minutes,
+                task_words,
+                self.address.named(),
+                self.recipient.named(),
             )
         });
         let next = Reminder {
@@ -261,7 +227,6 @@ impl RecordsReminders for FlowStore {
 #[cfg(test)]
 mod tests {
     use super::{AdvancesReminder, RecordsReminders, Reminder, TASK_REMINDERS};
-    use crate::store::message_v41::RequestV41;
     use crate::store::{FlowStore, OpensFlowStore};
     use signal_flow::{Address, Aspect, Model};
 
@@ -273,51 +238,8 @@ mod tests {
         }
     }
 
-    /// Request as Flow 0.40.4 archived it, before Task and Done.
-    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-    enum RequestBeforeTasks {
-        Order(String),
-        Question(String),
-        Psyche(signal_flow::Said),
-        Psyches(Vec<signal_flow::Said>),
-        Result(String),
-        Notice(String),
-    }
-
     #[test]
-    fn a_request_archived_before_tasks_reads_unchanged() {
-        for (old, new) in [
-            (
-                RequestBeforeTasks::Order("deploy".into()),
-                signal_flow::Request::Order("deploy".into()),
-            ),
-            (
-                RequestBeforeTasks::Psyche(signal_flow::Said {
-                    context: "c".into(),
-                    verbatim: "v".into(),
-                }),
-                signal_flow::Request::Psyche(signal_flow::Said {
-                    context: "c".into(),
-                    verbatim: "v".into(),
-                }),
-            ),
-            (
-                RequestBeforeTasks::Notice("n".into()),
-                signal_flow::Request::Notice("n".into()),
-            ),
-        ] {
-            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&old).unwrap();
-            let old = rkyv::from_bytes::<RequestV41, rkyv::rancor::Error>(&bytes).unwrap();
-            assert_eq!(signal_flow::Request::from(old), new);
-        }
-        assert_eq!(
-            std::mem::size_of::<rkyv::Archived<RequestBeforeTasks>>(),
-            std::mem::size_of::<rkyv::Archived<RequestV41>>()
-        );
-    }
-
-    #[test]
-    fn a_task_is_reminded_four_times_the_last_copied_to_the_secondary() {
+    fn a_task_is_reminded_four_times_and_its_sender_told_its_failure_with_the_last() {
         let mut reminder = Reminder {
             key: "logical-delivery-1".into(),
             address: address(Model::Sonnet),
@@ -345,10 +267,6 @@ mod tests {
         assert_eq!(reminder.due, None);
         assert!(failures[..3].iter().all(Option::is_none));
         assert_eq!(
-            failures[3].as_ref().map(|(to, _)| to.clone()),
-            Some(address(Model::Opus))
-        );
-        assert_eq!(
             notices[0],
             "Reminder 1 of 4: the task of 10 minutes, Review the fix, to Field core Sol has no Done after 10 minutes."
         );
@@ -358,7 +276,7 @@ mod tests {
                 .all(|text| !text.contains("logical-delivery-1"))
         );
         assert_eq!(
-            failures[3].as_ref().map(|(_, text)| text.as_str()),
+            failures[3].as_deref(),
             Some(
                 "Failure: the task of 10 minutes, Review the fix, from Psyche flow Sonnet to Field core Sol has no Done after 4 reminders."
             )
@@ -366,7 +284,7 @@ mod tests {
         assert!(
             failures[3]
                 .as_ref()
-                .is_some_and(|(_, text)| !text.contains("logical-delivery-1"))
+                .is_some_and(|text| !text.contains("logical-delivery-1"))
         );
     }
 

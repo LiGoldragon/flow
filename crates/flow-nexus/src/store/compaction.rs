@@ -4,9 +4,6 @@
 //! investigation Flow raised for it. A compaction already recorded raises
 //! nothing again, so a transcript read twice, or read again after a Nexus
 //! restart, warns once.
-//!
-//! The rows live in their own table, so a store written before compactions
-//! were kept opens with the table added and holding none.
 
 use super::{FlowStore, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -60,26 +57,6 @@ impl MemoryDefinition for Compaction {
     }
 }
 
-impl super::model_address::DefinedBeforeModel for Compaction {
-    fn version_before_model() -> MemoryVersion {
-        MemoryVersion::new(1)
-    }
-
-    fn schema_hash_before_model() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-compaction-v1")
-    }
-}
-
-crate::upgrades_before_model!(Compaction);
-
-impl super::model_address::RemodelsAddresses for Compaction {
-    fn remodel(&mut self) {
-        self.address.remodel();
-    }
-}
-
-impl super::model_address::KeptBeforeModel for Compaction {}
-
 pub trait KeysCompaction {
     fn key(flow_id: &str, boundary: &str) -> String;
 }
@@ -101,7 +78,6 @@ impl DescribesCompactionTable for Compaction {
             FamilyName::new(COMPACTION_FAMILY),
             SchemaHash::for_label(COMPACTION_SCHEMA),
         )
-        .with_predecessor::<super::model_address::BeforeModel<Compaction>>()
     }
 }
 

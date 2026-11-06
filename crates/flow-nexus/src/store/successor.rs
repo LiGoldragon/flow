@@ -8,20 +8,13 @@
 //! flow takes the metaflow's Address, which is the successor's
 //! confirmation, so a Nexus that dies between the two finds the intent at
 //! its next start and starts the successor then.
-//!
-//! The rows live in their own table, so a store written before successors
-//! were owed opens with the table added and holding none. A row archived
-//! before a successor could be owed for an ordered Refresh or a Replace
-//! opens unchanged, its cause a refresh's or an exit's.
 
-use super::model_address::RemodelsFamilies;
 use super::{FlowStore, ReadsFlowMemory, StoreError};
 use meta_signal_flow::Continuity;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    AtomicCommit, Decision, Engine, EngineRecord, FamilyName, MemoryDefinition, MemoryUpgrades,
-    MemoryVersion, QueryPlan, RecordKey, SchemaHash, TableDescriptor, TableName, TableReference,
-    UpgradeFrom, UpgradeOutcome,
+    AtomicCommit, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey,
+    SchemaHash, TableDescriptor, TableName,
 };
 use signal_flow::Address;
 
@@ -63,30 +56,6 @@ impl EngineRecord for SuccessorIntent {
     }
 }
 
-impl super::model_address::DefinedBeforeModel for SuccessorIntent {
-    fn version_before_model() -> MemoryVersion {
-        MemoryVersion::new(2)
-    }
-
-    fn schema_hash_before_model() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-successor-intent-v2")
-    }
-}
-
-crate::upgrades_before_model!(SuccessorIntent);
-
-impl super::model_address::RemodelsAddresses for SuccessorIntent {
-    fn remodel(&mut self) {
-        self.address.remodel();
-    }
-}
-
-impl super::model_address::KeptBeforeModel for SuccessorIntent {
-    fn key_before_model(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key_before_model(&self.address))
-    }
-}
-
 impl MemoryDefinition for SuccessorIntent {
     fn memory_version() -> MemoryVersion {
         MemoryVersion::new(3)
@@ -94,56 +63,6 @@ impl MemoryDefinition for SuccessorIntent {
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(SUCCESSOR_INTENT_SCHEMA)
-    }
-}
-
-/// Why a successor was owed, as Flow kept it before an ordered Refresh and
-/// a Replace owed theirs. It is read only by the v1-to-v2 upgrade.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(super) enum SuccessionCauseV1 {
-    Refresh,
-    Exit,
-}
-
-/// A successor owed, as Flow kept it before an ordered Refresh and a
-/// Replace owed theirs.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(super) struct SuccessorIntentV1 {
-    pub(super) address: Address,
-    pub(super) predecessor: String,
-    pub(super) cause: SuccessionCauseV1,
-    pub(super) launch_request_id: String,
-}
-
-impl EngineRecord for SuccessorIntentV1 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key_before_model(&self.address))
-    }
-}
-
-impl MemoryDefinition for SuccessorIntentV1 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-successor-intent-v1")
-    }
-}
-
-impl UpgradeFrom<SuccessorIntentV1> for SuccessorIntent {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: SuccessorIntentV1) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            address: previous.address,
-            predecessor: previous.predecessor,
-            cause: match previous.cause {
-                SuccessionCauseV1::Refresh => SuccessionCause::Refresh,
-                SuccessionCauseV1::Exit => SuccessionCause::Exit,
-            },
-            launch_request_id: previous.launch_request_id,
-        })
     }
 }
 
@@ -158,34 +77,6 @@ impl DescribesSuccessorIntentTable for SuccessorIntent {
             FamilyName::new(SUCCESSOR_INTENT_FAMILY),
             SchemaHash::for_label(SUCCESSOR_INTENT_SCHEMA),
         )
-        .with_predecessor::<SuccessorIntentV1>()
-        .with_predecessor::<super::model_address::BeforeModel<SuccessorIntent>>()
-    }
-}
-
-/// Opens the successor table, upgrading a v1 family.
-pub(super) trait UpgradesSuccessorIntents {
-    fn upgraded_successor_intents(
-        &mut self,
-        descriptor: TableDescriptor<SuccessorIntent>,
-    ) -> Result<TableReference<SuccessorIntent>, StoreError>;
-}
-
-impl UpgradesSuccessorIntents for Engine {
-    fn upgraded_successor_intents(
-        &mut self,
-        descriptor: TableDescriptor<SuccessorIntent>,
-    ) -> Result<TableReference<SuccessorIntent>, StoreError> {
-        self.upgraded_before_model(descriptor, |engine, descriptor| {
-            match engine.upgrade_table::<SuccessorIntentV1, SuccessorIntent>(descriptor) {
-                UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-                UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-                UpgradeOutcome::Failed(failure) => {
-                    Err(StoreError::SuccessorUpgrade(format!("{failure:?}")))
-                }
-            }
-        })
     }
 }
 

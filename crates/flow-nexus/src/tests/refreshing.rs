@@ -30,8 +30,8 @@ use flow_ethos::State;
 use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, Continuity};
 use signal_flow::{
     Address, FlowLifecycle, HerdrRouteSelection, Message, Metaflow, Model, Origin, Query,
-    Recipient, RefreshRejection, Refreshed, Refusal, ReplaceRejection, Request, Response,
-    SendRequest, SentBy, Unknown_Data,
+    RefreshRejection, Refreshed, Refusal, ReplaceRejection, Request, Response, SendRequest, SentBy,
+    Unknown_Data,
 };
 use std::fs;
 use std::time::Duration;
@@ -374,7 +374,7 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
         let sending = scope.spawn(move || {
             let answer = nexus.send_request(
                 SendRequest {
-                    recipient: Recipient::Address(seat_address()),
+                    recipient: seat_address(),
                     sendable_message: super::sendable_message(Message::MiddleAbrupt(
                         request.clone(),
                     )),
@@ -694,7 +694,7 @@ fn an_abrupt_send_to_a_held_metaflow_is_queued_never_refused_busy() {
         .expect("the holder takes the metaflow");
     let sent = fixture.nexus.send_request(
         SendRequest {
-            recipient: Recipient::Address(seat_address()),
+            recipient: seat_address(),
             sendable_message: super::sendable_message(Message::HardAbrupt(request.clone())),
         },
         Some(&peer),
@@ -799,7 +799,7 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
             let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
             let sent = fixture.nexus.send_request(
                 SendRequest {
-                    recipient: Recipient::Address(seat_address()),
+                    recipient: seat_address(),
                     sendable_message: super::sendable_message(abrupt(Request::Order(
                         "Arrived while busy.".into(),
                     ))),

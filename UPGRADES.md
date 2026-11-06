@@ -2,36 +2,33 @@
 
 An Address names its Model: `Address.{ Aspect Topic Model }`,
 `Model.[ Fable Opus Sonnet Haiku Astra Sol Luna Terra ]`, in place of its
-Layer; any model stands in any aspect. Pins signal-flow 44.0.0 (a2e9145) and
-meta-signal-flow 56.0.0 (f0dab8f).
+Layer; any model stands in any aspect. No model ranks above another. Pins
+signal-flow 45.0.0 (9abc022) and meta-signal-flow 57.0.0 (31e3979).
 
-- `Up` is the model before the sender's in its family: Opus to Fable,
-  Sonnet to Opus, Haiku to Sonnet, Sol to Astra, Luna to Sol, Terra to Luna;
-  Fable and Astra have none above, `NoneAbove`.
-- A launch's power is its Model's rank: High, Medium, Low, UltraLow. A Fable
-  or Astra waits for the Opus or Sol of its aspect and topic, as a Primary
-  waited for its Secondary (`NoSecondary`). A task's last reminder failure
-  goes to the second model of the sender's family. Effort is unchanged:
-  low for Terra, medium for every other Model.
+- A recipient is the Address a Send names: `Send.{ { Mind core Sol }
+  Soft.Order.«…» }`. `Up` is gone, and with it `NoneAbove` and `NoLayer`; no
+  route is inferred from the sender's model.
+- A launch carries no power: `PowerLevel` leaves `Caller`, `FlowBinding` and
+  the launch. A seat is bound only when its aspect is its Address's and its
+  model is the native model configured for its Address's Model; otherwise
+  `RoleMismatch`.
+- No Start waits for another model's seat, and nothing starts first:
+  `NoSecondary` is gone.
+- A task's reminders, and with the last its failure, go to the sender Flow
+  recorded when it admitted the task.
+- A successor whose start is refused keeps its predecessor, its typed
+  refusal standing as before; no flow is sent a notice of it.
+- Effort is unchanged: low for Terra, medium for every other Model.
 - `Configure.Models` holds one native model per Model, in every aspect:
   `{ Sol gpt-6.1-sol }`.
 - The send tool's target names `model` in place of `layer`. A title is
   `{ <Aspect> <Topic> <Model> <FlowId> }`.
 
-On first open every Address-bearing family moves up one version: metaflows,
-processes, locks, launch attempts, address holds, successor intents,
-reminders, compactions, heartbeat standings, send calls, send outcomes,
-current and event logical deliveries, simplified reply bindings, delivery
-purposes, queue requests and attempts, and the investigation, harness
-flags, heartbeat, leave-out and metaflow configuration families. An archived
-Layer is read as the Model of its rank in its aspect's family: Psyche's
-Primary to Quaternary as Fable to Haiku, Mind's and Field's as Astra to
-Terra. Each row keyed by an Address moves to its Model's key. The model
-family moves from v2 to v3: each Layer and aspect's native model becomes
-its Model's, and two aspects whose Layer names one Model with different
-native models refuse the upgrade. Older formats upgrade through the same
-open. The open is staged; take an immutable Memory snapshot first. Earlier
-Flow versions do not recognize the upgraded families.
+0.52.0 opens no earlier store. Its Memory is Flow Memory v3: a store any
+earlier Flow wrote is refused `EarlierMemory` before anything is written, and
+stays byte for byte as it was; a store holding a family under an earlier or a
+later identity is refused `UnrecognizedMemory`. No family is upgraded on open.
+0.52.0 starts from a new store; moving flows into it is a later release.
 
 Live addresses move: `{ Psyche core Primary }` is `{ Psyche core Fable }`,
 `{ Mind core Primary }` is `{ Mind core Astra }`,

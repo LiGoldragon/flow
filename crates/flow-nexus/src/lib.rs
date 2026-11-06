@@ -12,7 +12,6 @@ use crate::codex::SelectsCodexEndpoint;
 use crate::herdr::ConfiguresHerdrCli;
 use crate::herdr::ReadsHerdrPanes;
 use crate::store::AnnouncesLaunchChanges;
-use crate::waking::StartsSecondaryFirst;
 pub use caller::CallerProcess;
 pub use composition::CompositionError;
 pub use context::VerifiedContext;
@@ -37,7 +36,7 @@ pub mod delivery;
 pub mod lean;
 pub(crate) mod message_projection;
 mod metaflow;
-pub mod model_family;
+pub mod model;
 pub mod recovery;
 pub mod reminding;
 pub mod repairing;
@@ -164,17 +163,14 @@ pub trait Dispatches {
 
 impl Dispatches for RunningNexus {
     /// A query no calling process stands behind, taken as a connection
-    /// takes it: a new Primary's Secondary is started first, off the gate.
+    /// takes it.
     fn dispatch(&self, query: Query) -> Response {
         match query {
             Query::Start(profile) => {
                 if let Err(rejection) = self.harness_arguments(&profile.address) {
                     return Response::StartRejected(rejection);
                 }
-                match self.secondary_first(&profile) {
-                    Ok(()) => self.dispatch_from(Query::Start(profile), Origin::Unbound),
-                    Err(rejection) => Response::StartRejected(rejection),
-                }
+                self.dispatch_from(Query::Start(profile), Origin::Unbound)
             }
             Query::Launch(launch) => match self.declared_launch(launch, None) {
                 Ok(query) => self.dispatch(query),
@@ -193,7 +189,7 @@ impl Dispatches for RunningNexus {
                     return settled;
                 }
                 // A caller's new launch is admitted before anything of it is
-                // written: a camelCase topic, and a Primary's Secondary Awake.
+                // written: a camelCase topic.
                 match self.admission_refusal(&profile) {
                     Ok(None) => {}
                     Ok(Some(rejection)) => return Response::StartRejected(rejection),
@@ -539,7 +535,6 @@ impl Dispatches for RunningNexus {
                         let role = signal_flow::Caller {
                             flow_id: flow_id.clone(),
                             aspect: binding.aspect.clone(),
-                            power_level: binding.power_level.clone(),
                             model_name: binding.model_name.clone(),
                         };
                         match self
@@ -708,8 +703,8 @@ impl OpensRunningNexus for RunningNexus {
         }
         // The configured opener checks the typed store path read-only first,
         // reads the committed snapshot, and only then registers runtime tables.
-        // It never seeds defaults or settles work; it drops the retired
-        // tables and upgrades the flows and outcomes from their 0.34 shape.
+        // It never seeds defaults or settles work, and refuses a store an
+        // earlier Flow wrote.
         let store = FlowStore::open_configured(store_path)?;
         let snapshot = store
             .configuration_snapshot()?
@@ -965,23 +960,15 @@ impl ServesConnection for Connection {
                     nexus.declared_launch(launch, self.process.as_ref())
                 };
                 match declared {
-                    Ok(Query::Start(profile)) => match nexus.secondary_first(&profile) {
-                        Ok(()) => nexus.dispatch_serially(Query::Start(profile), origin),
-                        Err(rejection) => Response::StartRejected(rejection),
-                    },
                     Ok(query) => nexus.dispatch_serially(query, origin),
                     Err(refusal) => *refusal,
                 }
             }
             // A launch's origin is the calling process, as Identify reads
             // it: its pane's bound flow and that flow's native session.
-            // A new Primary's Secondary starts first, off the gate.
-            Query::Start(profile) => {
+            query @ Query::Start(_) => {
                 let origin = nexus.origin_of(self.peer.peer_process());
-                match nexus.secondary_first(&profile) {
-                    Ok(()) => nexus.dispatch_serially(Query::Start(profile), origin),
-                    Err(rejection) => Response::StartRejected(rejection),
-                }
+                nexus.dispatch_serially(query, origin)
             }
             query @ Query::Replace(_) => {
                 let origin = nexus.origin_of(self.peer.peer_process());
@@ -1462,12 +1449,13 @@ mod tests {
     mod refresh_and_compaction;
     mod refreshing;
     mod rehearsing;
+    mod reminding;
     mod repairing;
     mod reservation;
     mod seat_binding;
-    mod secondary;
     mod send_admission;
     mod send_tool;
+    mod start_admission;
     mod submission;
     mod waking;
 
@@ -1541,9 +1529,8 @@ mod tests {
         Aspect, Caller, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
         HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchAttemptPhase, LaunchProfile,
         LaunchStatusOutcome, Model, NativeLaunchBinding, NativeLaunchIntent,
-        NativeTranscriptAbsence, NativeTranscriptBoundary, Origin, PowerLevel,
-        PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement, Response,
-        StartRejection,
+        NativeTranscriptAbsence, NativeTranscriptBoundary, Origin, PromptDeliveryIntent,
+        PromptDeliveryResult, Query, RegistrationAcknowledgement, Response, StartRejection,
     };
     use std::{
         collections::BTreeSet,
@@ -1605,11 +1592,11 @@ mod tests {
         use meta_signal_flow::OrdinarySendOutcome;
         let fixture = NexusFixture::new();
         let send = signal_flow::SendRequest {
-            recipient: signal_flow::Recipient::Address(signal_flow::Address {
+            recipient: signal_flow::Address {
                 aspect: Aspect::Psyche,
                 topic: "core".into(),
                 model: signal_flow::Model::Opus,
-            }),
+            },
             sendable_message: signal_flow::SendableMessage::Soft(
                 signal_flow::SendableRequest::Notice("ledger witness".into()),
             ),
@@ -1822,7 +1809,6 @@ mod tests {
         meta_signal_flow::FlowBinding {
             flow_id: flow_id.into(),
             aspect: Aspect::Mind,
-            power_level: PowerLevel::Medium,
             model_name: "gpt-sol".into(),
             harness_kind: HarnessKind::Codex,
             native_session_id: "01a0b22ce24f7452994064490878680f".into(),
@@ -1978,12 +1964,7 @@ mod tests {
         let address = signal_flow::Address {
             aspect: binding.aspect.clone(),
             topic: "core".into(),
-            model: match binding.power_level {
-                signal_flow::PowerLevel::High => signal_flow::Model::Astra,
-                signal_flow::PowerLevel::Medium => signal_flow::Model::Sol,
-                signal_flow::PowerLevel::Low => signal_flow::Model::Luna,
-                signal_flow::PowerLevel::UltraLow => signal_flow::Model::Terra,
-            },
+            model: signal_flow::Model::Sol,
         };
         let meta_signal_flow::Response::BoundExisting(bound) = fixture.nexus.dispatch_meta_from(
             meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
@@ -3156,7 +3137,6 @@ mod tests {
         let previous_role = Caller {
             flow_id: previous.flow_id.clone(),
             aspect: Aspect::Mind,
-            power_level: PowerLevel::Medium,
             model_name: "gpt-sol".into(),
         };
         fixture
@@ -3332,49 +3312,75 @@ mod tests {
         ));
     }
 
+    /// A binding is refused RoleMismatch, writing nothing, when its seat's
+    /// identity does not match its Address: its model is not the native
+    /// model configured for the Address's Model, or its aspect is not the
+    /// Address's. No power or rank is read.
     #[test]
     fn adoption_refuses_an_address_whose_role_does_not_match_without_partial_rows() {
         use crate::store::ManagesMetaflowState;
-        let fixture = NexusFixture::new();
-        let socket_path = fixture.directory.path().join("herdr-role-mismatch.sock");
-        let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
-        let binding = existing_binding("a007", "pane-1");
-        let response = with_bound_world(&fixture, &[&binding], || {
-            fixture.nexus.dispatch_meta_from(
-                meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
-                    flow_container: flow_container(&socket_path),
-                    address: signal_flow::Address {
-                        aspect: Aspect::Mind,
-                        topic: "message".into(),
-                        model: Model::Astra,
-                    },
-                    flow_binding: binding.clone(),
-                }),
-                Some(adoption_resolver()),
-            )
-        });
-        assert!(matches!(
-            response,
-            meta_signal_flow::Response::BoundExisting(meta_signal_flow::BoundExisting {
-                flow_binding_result: meta_signal_flow::FlowBindingResult::Refused(
-                    meta_signal_flow::RefusedFlowBinding {
-                        flow_binding_refusal_reason:
-                            meta_signal_flow::FlowBindingRefusalReason::RoleMismatch,
+        for (case, address) in [
+            (
+                "the binding's model is not the one configured for Astra",
+                signal_flow::Address {
+                    aspect: Aspect::Mind,
+                    topic: "message".into(),
+                    model: Model::Astra,
+                },
+            ),
+            (
+                "the binding's aspect is not the Address's",
+                signal_flow::Address {
+                    aspect: Aspect::Field,
+                    topic: "message".into(),
+                    model: Model::Sol,
+                },
+            ),
+        ] {
+            let fixture = NexusFixture::new();
+            configure_existing_binding_model(&fixture);
+            let socket_path = fixture.directory.path().join("herdr-role-mismatch.sock");
+            let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
+            let binding = existing_binding("a007", "pane-1");
+            let response = with_bound_world(&fixture, &[&binding], || {
+                fixture.nexus.dispatch_meta_from(
+                    meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
+                        flow_container: flow_container(&socket_path),
+                        address,
+                        flow_binding: binding.clone(),
+                    }),
+                    Some(adoption_resolver()),
+                )
+            });
+            assert!(
+                matches!(
+                    response,
+                    meta_signal_flow::Response::BoundExisting(meta_signal_flow::BoundExisting {
+                        flow_binding_result: meta_signal_flow::FlowBindingResult::Refused(
+                            meta_signal_flow::RefusedFlowBinding {
+                                flow_binding_refusal_reason:
+                                    meta_signal_flow::FlowBindingRefusalReason::RoleMismatch,
+                                ..
+                            }
+                        ),
                         ..
-                    }
+                    })
                 ),
-                ..
-            })
-        ));
-        assert!(matches!(
-            fixture
-                .nexus
-                .dispatch(Query::ResolveRecipient("a007".into())),
-            Response::RecipientResolutionRejected(
-                signal_flow::RecipientResolutionRejection::UnknownFlow
-            )
-        ));
-        assert!(fixture.nexus.store.list_metaflows().unwrap().is_empty());
+                "{case}: {response:?}"
+            );
+            assert!(matches!(
+                fixture
+                    .nexus
+                    .dispatch(Query::ResolveRecipient("a007".into())),
+                Response::RecipientResolutionRejected(
+                    signal_flow::RecipientResolutionRejection::UnknownFlow
+                )
+            ));
+            assert!(
+                fixture.nexus.store.list_metaflows().unwrap().is_empty(),
+                "{case}"
+            );
+        }
     }
 
     /// A Codex pane as Herdr 0.8.2 reports a rested imported Codex flow: done,
@@ -3515,12 +3521,7 @@ mod tests {
                         address: signal_flow::Address {
                             aspect: binding.aspect.clone(),
                             topic: "core".into(),
-                            model: match binding.power_level {
-                                PowerLevel::High => Model::Astra,
-                                PowerLevel::Medium => Model::Sol,
-                                PowerLevel::Low => Model::Luna,
-                                PowerLevel::UltraLow => Model::Terra,
-                            },
+                            model: signal_flow::Model::Sol,
                         },
                         flow_binding: binding,
                     }),
@@ -3564,7 +3565,6 @@ mod tests {
         let role = Caller {
             flow_id: "908786".into(),
             aspect: Aspect::Mind,
-            power_level: PowerLevel::Medium,
             model_name: "gpt-sol".into(),
         };
         for _ in 0..2 {
@@ -3616,7 +3616,7 @@ mod tests {
             binding_of_registered_row(&fixture)
         )));
         let mut other_role = binding_of_registered_row(&fixture);
-        other_role.power_level = PowerLevel::High;
+        other_role.model_name = "gpt-astra".into();
         let refused_role = rebind(&fixture, other_role);
         assert!(
             matches!(
@@ -3637,8 +3637,8 @@ mod tests {
                 .store
                 .role("908786")
                 .expect("role read")
-                .map(|role| role.power_level),
-            Some(PowerLevel::Medium)
+                .map(|role| role.model_name),
+            Some("gpt-sol".to_owned())
         );
         assert_eq!(listed(&fixture), before);
     }
@@ -4506,9 +4506,6 @@ mod tests {
                     signal_flow::Caller {
                         flow_id: self.binding.flow_id.clone(),
                         aspect: self.profile.address.aspect.clone(),
-                        power_level: <RunningNexus as crate::waking::WakePolicy>::power_of(
-                            &self.profile.address.model,
-                        ),
                         model_name: self.profile.model_name.clone(),
                     },
                 )
@@ -5097,12 +5094,7 @@ mod tests {
                     address: signal_flow::Address {
                         aspect: binding.aspect.clone(),
                         topic: "core".into(),
-                        model: match binding.power_level {
-                            PowerLevel::High => Model::Astra,
-                            PowerLevel::Medium => Model::Sol,
-                            PowerLevel::Low => Model::Luna,
-                            PowerLevel::UltraLow => Model::Terra,
-                        },
+                        model: signal_flow::Model::Sol,
                     },
                     flow_binding: binding,
                 }),
@@ -5137,7 +5129,6 @@ mod tests {
         Caller {
             flow_id: "a001".into(),
             aspect: Aspect::Mind,
-            power_level: PowerLevel::Medium,
             model_name: "gpt-sol".into(),
         }
     }
@@ -5284,9 +5275,8 @@ mod tests {
 
     /// A flow sends through Flow from the process it runs: the sender is
     /// the metaflow Awake as the flow bound in the caller's pane, the request
-    /// is queued under it, Up names the model above, a Send leaving the
-    /// routes between aspects is refused, and a process in no bound pane
-    /// sends nothing.
+    /// is queued under it, a recipient is the Address the Send names, and a
+    /// process in no bound pane sends nothing.
     #[test]
     fn a_send_is_authenticated_and_primary_coordination_is_refused() {
         use crate::sending::SendsRequests;
@@ -5340,24 +5330,20 @@ mod tests {
         };
         let order = Request::Order("Review the drain fix".into());
         assert!(matches!(
-            send(Recipient::Address(sibling.clone()), order.clone(), &peer),
+            send(sibling.clone(), order.clone(), &peer),
+            Response::SendAccepted(_)
+        ));
+        assert!(matches!(
+            send(field.clone(), Request::Notice("released".into()), &peer),
+            Response::SendAccepted(_)
+        ));
+        assert!(matches!(
+            send(elsewhere, order.clone(), &peer),
             Response::SendAccepted(_)
         ));
         assert!(matches!(
             send(
-                Recipient::Address(field.clone()),
-                Request::Notice("released".into()),
-                &peer
-            ),
-            Response::SendAccepted(_)
-        ));
-        assert!(matches!(
-            send(Recipient::Address(elsewhere), order.clone(), &peer),
-            Response::SendAccepted(_)
-        ));
-        assert!(matches!(
-            send(
-                Recipient::Up,
+                address(Aspect::Mind, "core", Model::Astra),
                 Request::Result(flow_ethos::ResultPayload::Answered(
                     flow_ethos::ResultPayload_Answered_Data {
                         answerable: flow_ethos::Answerable::Order("not an open order".into()),
@@ -5387,7 +5373,7 @@ mod tests {
         let stranger =
             FlowStore::process_identity_for_pid(stranger.0.id()).expect("stranger identity");
         assert!(matches!(
-            send(Recipient::Address(sibling), order, &stranger),
+            send(sibling, order, &stranger),
             Response::SendRefused(signal_flow::VisibleRefusal::Unidentified(_))
         ));
     }
@@ -5874,54 +5860,5 @@ mod tests {
         });
         assert_eq!(ours.peer_process(), own);
         assert_eq!(theirs.peer_process(), own);
-    }
-
-    #[test]
-    fn a_nexus_over_earlier_launch_attempt_rows_opens_and_answers() {
-        let rows = crate::store::EarlierLaunchAttemptRows {
-            bound_flow_id: "launched-earlier".into(),
-        };
-        let fixture = NexusFixture::with_store(|path| rows.seed(path));
-        assert_eq!(fixture.nexus.store.opening_settlements.len(), 3);
-        use crate::store::ReadsFlowRows as _;
-        assert_eq!(
-            fixture
-                .nexus
-                .store
-                .flow_node("launched-earlier")
-                .expect("Flow row read")
-                .expect("earlier Flow row")
-                .flow_id,
-            "launched-earlier"
-        );
-        // Every earlier row is kept aside: none answers as an attempt.
-        for request in [
-            crate::store::EarlierLaunchAttemptRows::EARLIER_REQUEST,
-            crate::store::EarlierLaunchAttemptRows::BEFORE_ADDRESS_REQUEST,
-            crate::store::EarlierLaunchAttemptRows::UNREADABLE_REQUEST,
-        ] {
-            assert_eq!(
-                fixture.nexus.dispatch(Query::LaunchStatus(request.into())),
-                Response::LaunchStatusRejected(
-                    signal_flow::LaunchStatusRejection::UnknownLaunchRequest
-                )
-            );
-        }
-        // The 0.34 row is carried and answers.
-        assert!(matches!(
-            fixture.nexus.dispatch(Query::LaunchStatus(
-                crate::store::EarlierLaunchAttemptRows::ZERO_THIRTY_FOUR_REQUEST.into()
-            )),
-            Response::LaunchInspected(inspection)
-                if inspection.launch_attempt.launch_request_id
-                    == crate::store::EarlierLaunchAttemptRows::ZERO_THIRTY_FOUR_REQUEST
-        ));
-        // The flow the earlier launch bound keeps the role it named.
-        assert_eq!(
-            crate::store::ReadsFlowRoles::role(&fixture.nexus.store, "launched-earlier")
-                .unwrap()
-                .map(|role| role.aspect),
-            Some(Aspect::Psyche)
-        );
     }
 }

@@ -6,8 +6,7 @@
 //! Each step is Done only once it succeeded, so a start that finds a step
 //! Pending resumes it, whatever the launch's settlement. The row is written
 //! before the launch is settled, keyed by the launch request, in its own
-//! table, so a store written before it opens with the table added and holds
-//! none.
+//! table.
 
 use super::*;
 

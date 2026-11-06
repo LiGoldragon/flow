@@ -1,7 +1,6 @@
 //! What MetaBindExisting checks of a container and each flow it binds
 //! before any binding reaches the store.
 
-use crate::model_family::RanksInFamily;
 use crate::{
     RunningNexus,
     store::{NamesConfiguredModel, ReadsFlowRows},
@@ -136,10 +135,7 @@ impl VerifiesAdoptedSeat for RunningNexus {
         address: &Address,
         binding: &FlowBinding,
     ) -> Result<FlowNode, FlowBindingRefusalReason> {
-        if !binding.is_well_formed()
-            || binding.aspect != address.aspect
-            || binding.power_level != address.model.power()
-        {
+        if !binding.is_well_formed() || binding.aspect != address.aspect {
             return Err(FlowBindingRefusalReason::RoleMismatch);
         }
         if !binding.process_identity.is_live_process() {

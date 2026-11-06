@@ -30,7 +30,7 @@ pub use crate::generated::starter::{
     ExchangesCurriculumFrames, OpensCurriculumComposer, ProvenanceListing, ReadsVerifiedContext,
     SelectsStartup, StartupComposing, Textual, VerifiesContext,
 };
-use crate::model_family::RanksInFamily;
+use crate::model::RunsModel;
 use sha2::{Digest, Sha256};
 use signal_flow::{Address, Aspect, ContextRefusal, HarnessKind};
 use std::{

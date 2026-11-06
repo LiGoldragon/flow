@@ -160,33 +160,39 @@ mod tests {
                 .map(|Invocation { query, .. }| query)
         }
     }
-    use signal_flow::{Query, Recipient, Response, SendableMessage, SendableRequest};
+    use signal_flow::{Address, Aspect, Model, Query, Response, SendableMessage, SendableRequest};
 
     #[test]
     fn send_priority_and_deliver_all_are_typed() {
         let client = FlowClient;
         let Query::Send(send) = client
-            .parse_query(
-                ["Send.{ Address.{ Mind core Sol } Soft.Order.«Review.» }".into()].into_iter(),
-            )
+            .parse_query(["Send.{ { Mind core Sol } Soft.Order.«Review.» }".into()].into_iter())
             .expect("current Send parses")
         else {
             panic!("fixture must remain a Send")
         };
-        assert!(matches!(send.recipient, Recipient::Address(_)));
+        assert_eq!(
+            send.recipient,
+            Address {
+                aspect: Aspect::Mind,
+                topic: "core".into(),
+                model: Model::Sol,
+            }
+        );
         assert_eq!(
             send.sendable_message,
             SendableMessage::Soft(SendableRequest::Order("Review.".into()))
         );
-        let Query::Send(queued) = client
-            .parse_query(
-                ["Send.{ Up Soft.Result.{ Order.«Review.» «Ready.» } }".into()].into_iter(),
-            )
-            .expect("Send parses")
-        else {
-            panic!("fixture must remain a Send")
-        };
-        assert_eq!(queued.recipient, Recipient::Up);
+        // A recipient is an Address: no route relative to the sender.
+        for relative in [
+            "Send.{ Up Soft.Result.{ Order.«Review.» «Ready.» } }",
+            "Send.{ Address.{ Mind core Sol } Soft.Order.«Review.» }",
+        ] {
+            assert!(
+                client.parse_query([relative.into()].into_iter()).is_err(),
+                "must reject {relative}"
+            );
+        }
         assert!(matches!(
             client
                 .parse_query(["DeliverAll.{ Mind core Sol }".into()].into_iter())
@@ -206,18 +212,17 @@ mod tests {
             "Soft.Psyches.[ { «context» «verbatim» } ]",
         ] {
             let explicit = client
-                .parse_query([format!("Send.{{ Up {message} }}")].into_iter())
+                .parse_query([format!("Send.{{ {{ Psyche core Opus }} {message} }}")].into_iter())
                 .expect("Send parses");
             assert!(matches!(explicit, Query::Send(_)));
         }
         for invalid in [
             "Send.{}",
-            "Send.{ Up }",
-            "Send.{ Up Soft.Order.«Review.» extra }",
-            "Send.{ Up Unknown Soft.Order.«Review.» }",
-            "Send.{ Up Soft.Order.«Review.» extra }",
+            "Send.{ { Psyche core Opus } }",
+            "Send.{ { Psyche core Opus } Soft.Order.«Review.» extra }",
+            "Send.{ { Psyche core Opus } Unknown Soft.Order.«Review.» }",
             "Send.{ Unknown Soft.Order.«Review.» }",
-            "Send.[ Up Soft.Order.«Review.» ]",
+            "Send.[ { Psyche core Opus } Soft.Order.«Review.» ]",
         ] {
             assert!(
                 client.parse_query([invalid.into()].into_iter()).is_err(),
@@ -394,11 +399,8 @@ mod tests {
         );
         let Query::Send(send) = client
             .parse_query(
-                [
-                    "Send.{ Address.{ Mind core Sol } Soft.Task.{ 30 «Check the capsule run.» } }"
-                        .into(),
-                ]
-                .into_iter(),
+                ["Send.{ { Mind core Sol } Soft.Task.{ 30 «Check the capsule run.» } }".into()]
+                    .into_iter(),
             )
             .expect("a Task reads")
         else {
@@ -410,8 +412,8 @@ mod tests {
         assert_eq!(task.minutes, 30);
         assert_eq!(task.string, "Check the capsule run.");
         for text in [
-            "Send.{ Up Soft.Task.{ soon «Check the capsule run.» } }",
-            "Send.{ Up Soft.Task.{ 9223372036854775808 «Check the capsule run.» } }",
+            "Send.{ { Mind core Sol } Soft.Task.{ soon «Check the capsule run.» } }",
+            "Send.{ { Mind core Sol } Soft.Task.{ 9223372036854775808 «Check the capsule run.» } }",
         ] {
             assert!(
                 client.parse_query([text.into()].into_iter()).is_err(),

@@ -21,7 +21,7 @@ use meta_signal_flow::{
     ConfigurationChange, ConfigureMetaflow, ConfigureModel, ConfigureThreshold, Continuity,
 };
 use signal_flow::{
-    Address, Aspect, Caller, FlowLifecycle, Message, Metaflow, Model, PowerLevel, Request, SentBy,
+    Address, Aspect, Caller, FlowLifecycle, Message, Metaflow, Model, Request, SentBy,
 };
 use std::fs;
 use std::io::Write;
@@ -42,7 +42,6 @@ pub(super) fn seat_refreshing_at(fixture: &NexusFixture, refresh: i64) {
     fixture.nexus.store.seed_role(Caller {
         flow_id: CLAUDE_SEAT.into(),
         aspect: Aspect::Mind,
-        power_level: PowerLevel::Medium,
         model_name: CLAUDE_MODEL.into(),
     });
     fixture
@@ -323,7 +322,7 @@ fn a_seat_past_its_threshold_shown_working_is_refreshed_at_its_stop() {
 
 /// An OnDemand seat resting past its threshold whose successor cannot be
 /// composed is not closed: its Address keeps its flow, which is handed what
-/// is queued for it, and the refusal is told once to the metaflow's Up.
+/// is queued for it, and the refusal is told to no flow.
 #[test]
 fn a_seat_whose_successor_cannot_compose_stays_and_is_handed_its_queue() {
     let fixture = NexusFixture::new();
@@ -336,16 +335,27 @@ fn a_seat_whose_successor_cannot_compose_stays_and_is_handed_its_queue() {
     seat_refreshing_at(&fixture, 200_000);
     // No declaration and no launch of the seat's names a successor.
     seat_metaflow(&fixture, vec![Request::Order("Still yours.".into())]);
-    let up = signal_flow::Address {
-        model: Model::Astra,
-        ..seat_address()
-    };
-    fixture.nexus.store.seed_metaflow(Metaflow {
-        address: up.clone(),
-        state: State::Asleep,
-        past: vec![],
-        queue: vec![],
-    });
+    // The Astra of the seat's aspect and topic, and the Psyche core Opus
+    // a refused successor was once told to, are held: neither is told.
+    let held = [
+        signal_flow::Address {
+            model: Model::Astra,
+            ..seat_address()
+        },
+        signal_flow::Address {
+            aspect: Aspect::Psyche,
+            topic: "core".into(),
+            model: Model::Opus,
+        },
+    ];
+    for address in &held {
+        fixture.nexus.store.seed_metaflow(Metaflow {
+            address: address.clone(),
+            state: State::Asleep,
+            past: vec![],
+            queue: vec![],
+        });
+    }
 
     fixture
         .nexus
@@ -362,18 +372,20 @@ fn a_seat_whose_successor_cannot_compose_stays_and_is_handed_its_queue() {
         seat_metaflow_now(&fixture).state,
         State::Awake(CLAUDE_SEAT.into())
     );
-    let told = fixture
-        .nexus
-        .store
-        .metaflow(&up)
-        .unwrap()
-        .expect("the Up metaflow")
-        .queue;
-    assert_eq!(told.len(), 1, "the refusal is told once");
-    assert!(matches!(
-        &told[0].message,
-        Message::Soft(Request::Notice(notice)) if notice.contains(CLAUDE_SEAT)
-    ));
+    // The refusal is told to no flow: no message is queued anywhere, and
+    // only the seat's own metaflow and the two held are Flow's.
+    let metaflows = crate::store::ManagesMetaflowState::list_metaflows(&fixture.nexus.store)
+        .expect("metaflows list");
+    assert_eq!(metaflows.len(), 3, "{metaflows:?}");
+    for address in &held {
+        let metaflow = fixture
+            .nexus
+            .store
+            .metaflow(address)
+            .unwrap()
+            .expect("the held metaflow");
+        assert!(metaflow.queue.is_empty(), "{address:?} is told nothing");
+    }
 }
 
 /// An idle OnDemand seat with nothing queued closes its harness either way:

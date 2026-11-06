@@ -1,8 +1,7 @@
 //! What Flow remembers of each flow's harness: the events its hooks
 //! reported, in the order Flow recorded them, one row per flow keyed by its
 //! FlowId (the vision's Memory `Flow.{ FlowId Voice State Vector<Event> }`,
-//! the events half). The row lives in its own table, so a store written
-//! before events existed opens unchanged and its flows simply hold none.
+//! the events half).
 //!
 //! An event is recorded only for a flow Flow holds: a FlowId with no flow
 //! row is refused, never adopted (ruling 12 of flow f1c841). Flow holds a
@@ -10,19 +9,14 @@
 //! starts and so before it is registered: Reserve writes the flow's empty
 //! events row, and that row is what lets the harness's first `Started`
 //! land.
-//!
-//! A Stop recorded before Flow 0.35.19 carried no native identity: it is
-//! upgraded to `Stopped.{ None None }`, which is kept as it was seen and
-//! never taken for the flow's own turn end.
 
 use super::{FlowStore, ReadsFlowStore, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, Decision, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryUpgrades,
-    MemoryVersion, QueryPlan, RecordKey, Retraction, SchemaHash, TableDescriptor, TableName,
-    TableReference, UpgradeFrom, UpgradeOutcome,
+    Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,
+    RecordKey, Retraction, SchemaHash, TableDescriptor, TableName, TableReference,
 };
-use signal_flow::{Event, NativeStop};
+use signal_flow::Event;
 use std::sync::Mutex;
 
 pub(super) const FLOW_EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_flow_events");
@@ -52,181 +46,6 @@ impl MemoryDefinition for FlowEvents {
     }
 }
 
-/// One flow's events as Flow kept them before a session's end, a cleared
-/// session and the session a start names were events, signal-flow 31's. It
-/// is read only by the v3-to-v4 upgrade.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FlowEventsV3 {
-    pub flow_id: String,
-    pub event_vector: Vec<EventV3>,
-}
-
-impl EngineRecord for FlowEventsV3 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.flow_id.clone())
-    }
-}
-
-impl MemoryDefinition for FlowEventsV3 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-flow-events-v3")
-    }
-}
-
-/// A harness event as signal-flow 31.0.0 archived it, before `Ended` and
-/// `Cleared`, its `Started` naming no session. A start it kept is upgraded
-/// to `Started.None`.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub enum EventV3 {
-    Started,
-    ToolUsed(String),
-    Stopped(NativeStop),
-    PromptSubmitted(signal_flow::NativePrompt),
-}
-
-impl From<EventV3> for Event {
-    fn from(event: EventV3) -> Self {
-        match event {
-            EventV3::Started => Event::Started(None),
-            EventV3::ToolUsed(tool) => Event::ToolUsed(tool),
-            EventV3::Stopped(stop) => Event::Stopped(stop),
-            EventV3::PromptSubmitted(prompt) => Event::PromptSubmitted(prompt),
-        }
-    }
-}
-
-impl UpgradeFrom<FlowEventsV3> for FlowEvents {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: FlowEventsV3) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            flow_id: previous.flow_id,
-            event_vector: previous.event_vector.into_iter().map(Event::from).collect(),
-        })
-    }
-}
-
-/// A harness event as signal-flow 20.0.0 archived it: a Stop without the
-/// native identity its hook was given.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub enum EventBeforeIdentity {
-    Started,
-    ToolUsed(String),
-    Stopped,
-}
-
-/// One flow's events as Flow kept them before 0.35.19. It is read only by
-/// the v1-to-v2 upgrade.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FlowEventsV1 {
-    pub flow_id: String,
-    pub event_vector: Vec<EventBeforeIdentity>,
-}
-
-impl EngineRecord for FlowEventsV1 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.flow_id.clone())
-    }
-}
-
-impl MemoryDefinition for FlowEventsV1 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-flow-events-v1")
-    }
-}
-
-/// The signal-flow 9 event archive immediately before Stop began carrying
-/// Claude's final assistant message.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FlowEventsV2 {
-    pub flow_id: String,
-    pub event_vector: Vec<EventV2>,
-}
-impl EngineRecord for FlowEventsV2 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.flow_id.clone())
-    }
-}
-impl MemoryDefinition for FlowEventsV2 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(2)
-    }
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-flow-events-v2")
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub enum EventV2 {
-    Started,
-    ToolUsed(String),
-    Stopped(NativeStopV2),
-    PromptSubmitted(signal_flow::NativePrompt),
-}
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct NativeStopV2 {
-    pub native_session_id_option: Option<String>,
-    pub transcript_path_option: Option<String>,
-}
-
-impl From<EventV2> for Event {
-    fn from(event: EventV2) -> Self {
-        match event {
-            EventV2::Started => Event::Started(None),
-            EventV2::ToolUsed(tool) => Event::ToolUsed(tool),
-            EventV2::PromptSubmitted(prompt) => Event::PromptSubmitted(prompt),
-            EventV2::Stopped(stop) => Event::Stopped(NativeStop {
-                native_session_id_option: stop.native_session_id_option,
-                transcript_path_option: stop.transcript_path_option,
-                last_assistant_message_option: None,
-            }),
-        }
-    }
-}
-
-impl UpgradeFrom<FlowEventsV2> for FlowEvents {
-    type Refusal = std::convert::Infallible;
-    fn upgrade_from(previous: FlowEventsV2) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            flow_id: previous.flow_id,
-            event_vector: previous.event_vector.into_iter().map(Event::from).collect(),
-        })
-    }
-}
-
-impl From<EventBeforeIdentity> for Event {
-    fn from(event: EventBeforeIdentity) -> Self {
-        match event {
-            EventBeforeIdentity::Started => Event::Started(None),
-            EventBeforeIdentity::ToolUsed(tool) => Event::ToolUsed(tool),
-            EventBeforeIdentity::Stopped => Event::Stopped(NativeStop {
-                native_session_id_option: None,
-                transcript_path_option: None,
-                last_assistant_message_option: None,
-            }),
-        }
-    }
-}
-
-impl UpgradeFrom<FlowEventsV1> for FlowEvents {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: FlowEventsV1) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            flow_id: previous.flow_id,
-            event_vector: previous.event_vector.into_iter().map(Event::from).collect(),
-        })
-    }
-}
-
 pub(super) trait DescribesEventTable {
     fn descriptor() -> TableDescriptor<FlowEvents>;
 }
@@ -238,9 +57,6 @@ impl DescribesEventTable for FlowEvents {
             FamilyName::new(FLOW_EVENT_FAMILY),
             SchemaHash::for_label(FLOW_EVENT_SCHEMA),
         )
-        .with_predecessor::<FlowEventsV1>()
-        .with_predecessor::<FlowEventsV2>()
-        .with_predecessor::<FlowEventsV3>()
     }
 }
 
@@ -258,51 +74,7 @@ pub trait RegistersEventTables: Sized {
 
 impl RegistersEventTables for EventTables {
     fn register(engine: &mut sema_engine::Engine) -> Result<Self, StoreError> {
-        let descriptor = <FlowEvents as DescribesEventTable>::descriptor();
-        let from_v2 = descriptor.clone();
-        let from_v1 = descriptor.clone();
-        // A v3 family upgrades from v3; one refused at admission names an
-        // older family, tried next.
-        match engine.upgrade_table::<FlowEventsV3, FlowEvents>(descriptor) {
-            UpgradeOutcome::Upgraded(receipt) => {
-                return Ok(Self {
-                    events: receipt.table(),
-                    append_gate: Mutex::new(()),
-                });
-            }
-            UpgradeOutcome::AlreadyCurrent(events) => {
-                return Ok(Self {
-                    events,
-                    append_gate: Mutex::new(()),
-                });
-            }
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::EventUpgrade(format!("{failure:?}")));
-            }
-        }
-        let events = match engine.upgrade_table::<FlowEventsV2, FlowEvents>(from_v2) {
-            UpgradeOutcome::Upgraded(receipt) => receipt.table(),
-            UpgradeOutcome::AlreadyCurrent(table) => table,
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission =>
-            {
-                match engine.upgrade_table::<FlowEventsV1, FlowEvents>(from_v1) {
-                    UpgradeOutcome::Upgraded(receipt) => receipt.table(),
-                    UpgradeOutcome::AlreadyCurrent(table) => table,
-                    UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-                    UpgradeOutcome::Failed(failure) => {
-                        return Err(StoreError::EventUpgrade(format!("{failure:?}")));
-                    }
-                }
-            }
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::EventUpgrade(format!("{failure:?}")));
-            }
-        };
+        let events = engine.register_table(<FlowEvents as DescribesEventTable>::descriptor())?;
         Ok(Self {
             events,
             append_gate: Mutex::new(()),
@@ -432,11 +204,8 @@ impl RecordsHarnessEvents for FlowStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        EventRecording, EventV2, FlowEvents, FlowEventsV2, NativeStopV2, RecordsHarnessEvents,
-    };
+    use super::{EventRecording, RecordsHarnessEvents};
     use crate::store::{FlowStore, OpensFlowStore, RegistersFlowIdentity};
-    use sema_engine::{Decision, UpgradeFrom};
     use signal_flow::{
         EndpointSelection, Event, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
         HerdrRouteSelection, Origin,
@@ -480,45 +249,6 @@ mod tests {
             Event::Cleared(Some("c0ffee00-0000-4000-8000-000000000001".into())),
             Event::Started(Some("c0ffee00-0000-4000-8000-000000000002".into())),
         ]
-    }
-
-    #[test]
-    fn v2_event_upgrade_preserves_order_and_every_event_with_empty_new_stop_field() {
-        let old_stop = NativeStopV2 {
-            native_session_id_option: Some("session".into()),
-            transcript_path_option: Some("/tmp/session.jsonl".into()),
-        };
-        let prompt = signal_flow::NativePrompt {
-            native_session_id_option: Some("session".into()),
-            prompt_id_option: Some("prompt-1".into()),
-            prompt_sha256: "sha256".into(),
-        };
-        let upgraded = match FlowEvents::upgrade_from(FlowEventsV2 {
-            flow_id: "flow".into(),
-            event_vector: vec![
-                EventV2::Started,
-                EventV2::ToolUsed("Bash".into()),
-                EventV2::PromptSubmitted(prompt.clone()),
-                EventV2::Stopped(old_stop.clone()),
-            ],
-        }) {
-            Decision::Ready(upgraded) => upgraded,
-            Decision::Refused(never) => match never {},
-        };
-        assert_eq!(upgraded.flow_id, "flow");
-        assert_eq!(
-            upgraded.event_vector,
-            vec![
-                Event::Started(None),
-                Event::ToolUsed("Bash".into()),
-                Event::PromptSubmitted(prompt),
-                Event::Stopped(signal_flow::NativeStop {
-                    native_session_id_option: old_stop.native_session_id_option,
-                    transcript_path_option: old_stop.transcript_path_option,
-                    last_assistant_message_option: None,
-                }),
-            ]
-        );
     }
 
     /// The events are the flow's Memory: kept in report order, kept across

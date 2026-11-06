@@ -2,8 +2,7 @@
 //! attached. A remote-resumed Codex TUI never reports its session to Herdr,
 //! so a launch recovered after its harness start binds to this thread, the
 //! recognized pane and the flow's claim. The row is keyed by the launch
-//! request, written once, in its own table, so a store written before it
-//! opens with the table added and holds none.
+//! request, written once, in its own table.
 //!
 //! The row is written after the thread opens and before its first turn is
 //! started, so it is also the thread's authority while its launch runs: a

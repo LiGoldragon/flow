@@ -32,7 +32,7 @@ use flow_ethos::{Delivery, State};
 use signal_flow::{
     Address, Aspect, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
     HerdrRoute, HerdrRouteSelection, LaunchProfile, Message, Metaflow, Model, NativeLaunchBinding,
-    NativeLaunchIntent, Origin, PowerLevel, QueueEntry, Request, SentBy,
+    NativeLaunchIntent, Origin, QueueEntry, Request, SentBy,
 };
 use std::fs;
 
@@ -1737,7 +1737,7 @@ fn a_simplified_reply_wait_returns_each_durable_acceptance_without_native_input(
     use crate::sending::SendsRequests;
     use crate::store::logical_delivery::SimplifiedReplyBinding;
     use crate::store::{FlowStore, ReadsFlowMemory};
-    use signal_flow::{DeliveryState, Recipient, Response, SendRequest};
+    use signal_flow::{DeliveryState, Response, SendRequest};
 
     let fixture = NexusFixture::new();
     super::bind_existing_caller(&fixture, "a001", "pane-1");
@@ -1782,7 +1782,7 @@ fn a_simplified_reply_wait_returns_each_durable_acceptance_without_native_input(
     let send = |body: &str| {
         fixture.nexus.send_request(
             SendRequest {
-                recipient: Recipient::Address(at.clone()),
+                recipient: at.clone(),
                 sendable_message: super::sendable_message(Message::Soft(Request::Order(
                     body.into(),
                 ))),
@@ -1831,7 +1831,7 @@ fn a_simplified_reply_wait_returns_each_durable_acceptance_without_native_input(
 fn a_held_address_accepts_while_an_independent_recipient_dispatches() {
     use crate::sending::SendsRequests;
     use crate::store::{FlowStore, ReadsFlowMemory};
-    use signal_flow::{Recipient, Response, SendRequest};
+    use signal_flow::{Response, SendRequest};
 
     let fixture = NexusFixture::new();
     super::bind_existing_caller(&fixture, "a001", "pane-1");
@@ -1863,7 +1863,7 @@ fn a_held_address_accepts_while_an_independent_recipient_dispatches() {
     let lease = fixture.nexus.waking.hold(&held).expect("address held");
     let first = fixture.nexus.send_request(
         SendRequest {
-            recipient: Recipient::Address(held.clone()),
+            recipient: held.clone(),
             sendable_message: super::sendable_message(Message::MiddleAbrupt(Request::Order(
                 "held admission".into(),
             ))),
@@ -2288,7 +2288,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     use crate::store::metaflow::TakesLaunchAddress;
     use crate::store::send_outcome::RecordsSendOutcomes;
     use crate::store::{FlowStore, ReadsFlowMemory};
-    use signal_flow::{Deliver_Data, Lock_Data, Recipient, Response};
+    use signal_flow::{Deliver_Data, Lock_Data, Response};
 
     let mut fixture = NexusFixture::new();
     ended_claude(&fixture);
@@ -2326,7 +2326,6 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
             signal_flow::Caller {
                 flow_id: "5e4de7".into(),
                 aspect: Aspect::Field,
-                power_level: PowerLevel::UltraLow,
                 model_name: "haiku".into(),
             },
         )
@@ -2398,7 +2397,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         .dispatch_metaflow_peer(
             signal_flow::Query::Lock(Lock_Data {
                 sender: sender_address.clone(),
-                recipient: Recipient::Address(at.clone()),
+                recipient: at.clone(),
             }),
             Some(&message),
         )
@@ -2461,7 +2460,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         .dispatch_metaflow_peer(
             signal_flow::Query::Lock(Lock_Data {
                 sender: sender_address.clone(),
-                recipient: Recipient::Address(at.clone()),
+                recipient: at.clone(),
             }),
             Some(&message),
         )
@@ -2515,7 +2514,7 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
     use crate::store::{FlowStore, ReadsFlowMemory};
     use signal_flow::{
         Caller, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
-        HerdrRouteSelection, Origin, PowerLevel, Response,
+        HerdrRouteSelection, Origin, Response,
     };
 
     let fixture = NexusFixture::new();
@@ -2550,7 +2549,6 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
             Caller {
                 flow_id: "deliver-all-sender".into(),
                 aspect: Aspect::Field,
-                power_level: PowerLevel::UltraLow,
                 model_name: "haiku".into(),
             },
         )
@@ -2763,7 +2761,6 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
             signal_flow::Caller {
                 flow_id: "41fa34".into(),
                 aspect: Aspect::Mind,
-                power_level: PowerLevel::Low,
                 model_name: "gpt-6.1-luna".into(),
             },
         )
@@ -2880,7 +2877,7 @@ fn launched_unanswered(fixture: &NexusFixture, launch_request_id: &str) -> super
 fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
     use crate::metaflow::DispatchesMetaflowPeer;
     use crate::store::{FlowStore, ReadsFlowMemory, ReadsLaunchAttempt};
-    use signal_flow::{Deliver_Data, LaunchAttemptPhase, Lock_Data, Recipient, Response};
+    use signal_flow::{Deliver_Data, LaunchAttemptPhase, Lock_Data, Response};
 
     let fixture = NexusFixture::new();
     let (_message_child, message) = message_peer(&fixture);
@@ -2919,7 +2916,7 @@ fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
         .dispatch_metaflow_peer(
             signal_flow::Query::Lock(Lock_Data {
                 sender: sender_address.clone(),
-                recipient: Recipient::Address(at.clone()),
+                recipient: at.clone(),
             }),
             Some(&message),
         )
@@ -5143,7 +5140,7 @@ fn sender_holding_a_lock(fixture: &NexusFixture) -> Address {
         .lock_metaflow(
             signal_flow::Lock_Data {
                 sender: address(Model::Sol),
-                recipient: signal_flow::Recipient::Address(recipient.clone()),
+                recipient: recipient.clone(),
             },
             now,
         )
@@ -5394,12 +5391,12 @@ fn a_nexus_start_forgets_a_successor_already_given_and_wakes_one_owed() {
     );
 }
 
-/// The Secondary starts first: a Start of { Mind flow Astra } whose
-/// declared Secondary sleeps has Flow start that Secondary fresh, confirmed
-/// and Awake, before the Primary's own launch goes on; the Primary is not
-/// refused NoSecondary.
+/// Nothing starts first: a Start of { Mind flow Astra } whose declared
+/// { Mind flow Sol } sleeps is the Astra's launch alone, whatever it comes
+/// to. The Sol metaflow stays Asleep as it was, and no seat is started for
+/// it.
 #[test]
-fn a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first() {
+fn a_start_starts_no_other_models_seat_first() {
     use crate::Dispatches;
     let mut fixture = NexusFixture::new();
     ended_claude(&fixture);
@@ -5424,7 +5421,7 @@ fn a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first() {
                 records: vec![],
             },
         ]))
-        .expect("the Secondary is declared");
+        .expect("the Sol metaflow is declared");
     let mut primary = crate::composition::tests::fixture_profile();
     primary.launch_request_id = "primary-request".into();
     primary.address = address(Model::Astra);
@@ -5433,23 +5430,21 @@ fn a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first() {
 
     let response = fixture.nexus.dispatch(signal_flow::Query::Start(primary));
 
-    assert_ne!(
-        response,
-        signal_flow::Response::StartRejected(signal_flow::StartRejection::NoSecondary),
-        "{}",
+    assert!(
+        !matches!(response, signal_flow::Response::Started(_)),
+        "the Astra's own launch, not a Sol's, answers: {response:?}"
+    );
+    assert_eq!(
+        stored(&fixture, Model::Sol),
+        metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]),
+        "the Sol metaflow is left as it was"
+    );
+    assert_eq!(
+        world.claude_starts(),
+        0,
+        "no seat starts for the Sol: {}",
         world.calls()
     );
-    let secondary = stored(&fixture, Model::Sol);
-    let State::Awake(flow_id) = &secondary.state else {
-        panic!(
-            "the Secondary started first: {secondary:?}; {}",
-            world.calls()
-        );
-    };
-    assert_ne!(flow_id, "abc123", "a fresh Secondary");
-    let node = fixture.nexus.store.flow_node(flow_id).unwrap().unwrap();
-    assert_eq!(node.flow_lifecycle, FlowLifecycle::Active, "confirmed");
-    assert!(world.claude_starts() >= 1, "{}", world.calls());
 }
 
 /// A Claude flow's own SessionEnd, reported by its hook, is its exit as an

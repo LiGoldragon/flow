@@ -10,22 +10,27 @@
 //! that proof recorded, and only then may the request be handed over again.
 
 use super::logical_delivery::RecordsLogicalDeliveries;
-use super::message_v41::QueueEvidenceV41;
 use super::*;
+#[cfg(test)]
 use flow_ethos::Request;
+#[cfg(test)]
+use meta_signal_flow::QueueEvidence_Legacy_Data;
 use meta_signal_flow::{
-    AbsenceProof, QueueDelivery, QueueDeliveryStanding, QueueEvidence, QueueEvidence_Legacy_Data,
-    QueueResolutionOutcome, QueueResolutionRecord, ResolveQueueDeliveryRejection, Undecided,
-    WithdrawRejected_Data,
+    AbsenceProof, QueueDelivery, QueueDeliveryStanding, QueueEvidence, QueueResolutionOutcome,
+    QueueResolutionRecord, ResolveQueueDeliveryRejection, Undecided, WithdrawRejected_Data,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::AtomicCommit;
-use signal_flow::{Address, DeliveryState, HarnessKind, NativeReceipt, RetryCause, SentBy};
+#[cfg(test)]
+use signal_flow::SentBy;
+use signal_flow::{Address, DeliveryState, HarnessKind, NativeReceipt, RetryCause};
 
+#[cfg(test)]
 trait CarriesLegacySender {
     fn with_legacy_sender(self, sent_by: SentBy) -> QueueEvidence;
 }
 
+#[cfg(test)]
 impl CarriesLegacySender for Request {
     fn with_legacy_sender(self, sent_by: SentBy) -> QueueEvidence {
         QueueEvidence::Legacy(QueueEvidence_Legacy_Data {
@@ -35,14 +40,6 @@ impl CarriesLegacySender for Request {
     }
 }
 
-impl CarriesLegacySender for super::message_v41::RequestV41 {
-    fn with_legacy_sender(self, sent_by: SentBy) -> QueueEvidence {
-        QueueEvidence::Legacy(QueueEvidence_Legacy_Data {
-            sent_by,
-            request: self.into(),
-        })
-    }
-}
 trait CommitsAttemptState {
     fn commit_attempt_state(
         &self,
@@ -106,27 +103,6 @@ enum RequestState {
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum RequestStateV4 {
-    Queued,
-    Settled,
-    Unsent,
-}
-
-trait UpgradesRequestState {
-    fn upgrade(self) -> RequestState;
-}
-
-impl UpgradesRequestState for RequestStateV4 {
-    fn upgrade(self) -> RequestState {
-        match self {
-            Self::Queued => RequestState::Queued,
-            Self::Settled => RequestState::Settled,
-            Self::Unsent => RequestState::Unsent,
-        }
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredDeliveryRequest {
     request_id: String,
     address: Address,
@@ -140,27 +116,6 @@ impl EngineRecord for StoredDeliveryRequest {
     }
 }
 
-impl super::model_address::DefinedBeforeModel for StoredDeliveryRequest {
-    fn version_before_model() -> MemoryVersion {
-        MemoryVersion::new(6)
-    }
-
-    fn schema_hash_before_model() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-queue-delivery-request-v6")
-    }
-}
-
-crate::upgrades_before_model!(StoredDeliveryRequest);
-
-impl super::model_address::RemodelsAddresses for StoredDeliveryRequest {
-    fn remodel(&mut self) {
-        self.address.remodel();
-        self.queue_evidence.remodel();
-    }
-}
-
-impl super::model_address::KeptBeforeModel for StoredDeliveryRequest {}
-
 impl MemoryDefinition for StoredDeliveryRequest {
     fn memory_version() -> MemoryVersion {
         MemoryVersion::new(7)
@@ -168,158 +123,6 @@ impl MemoryDefinition for StoredDeliveryRequest {
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-queue-delivery-request-v7")
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredDeliveryRequestV5 {
-    request_id: String,
-    address: Address,
-    queue_evidence: QueueEvidenceV41,
-    state: RequestState,
-}
-
-impl EngineRecord for StoredDeliveryRequestV5 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.request_id.clone())
-    }
-}
-
-impl MemoryDefinition for StoredDeliveryRequestV5 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(5)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-queue-delivery-request-v5")
-    }
-}
-
-impl UpgradeFrom<StoredDeliveryRequestV5> for StoredDeliveryRequest {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: StoredDeliveryRequestV5) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            request_id: previous.request_id,
-            address: previous.address,
-            queue_evidence: previous.queue_evidence.into(),
-            state: previous.state,
-        })
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredDeliveryRequestV4 {
-    request_id: String,
-    address: Address,
-    queue_evidence: QueueEvidenceV41,
-    state: RequestStateV4,
-}
-
-impl EngineRecord for StoredDeliveryRequestV4 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.request_id.clone())
-    }
-}
-
-impl MemoryDefinition for StoredDeliveryRequestV4 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-queue-delivery-request-v4")
-    }
-}
-
-impl UpgradeFrom<StoredDeliveryRequestV4> for StoredDeliveryRequest {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: StoredDeliveryRequestV4) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            request_id: previous.request_id,
-            address: previous.address,
-            queue_evidence: previous.queue_evidence.into(),
-            state: previous.state.upgrade(),
-        })
-    }
-}
-
-/// A delivery request as Flow 0.35.17 to 0.37.2 kept it, before `SentBy`
-/// named Flow. The variant is appended, so its bytes read as the current
-/// request; the v2-to-v3 upgrade moves it unchanged.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredDeliveryRequestV2 {
-    request_id: String,
-    address: Address,
-    queued: super::QueuedRequestBeforeFlow,
-    state: RequestStateV4,
-}
-
-impl EngineRecord for StoredDeliveryRequestV2 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.request_id.clone())
-    }
-}
-
-impl MemoryDefinition for StoredDeliveryRequestV2 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(2)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-queue-delivery-request-v2")
-    }
-}
-
-impl UpgradeFrom<StoredDeliveryRequestV2> for StoredDeliveryRequest {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: StoredDeliveryRequestV2) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            request_id: previous.request_id,
-            address: previous.address,
-            queue_evidence: Request::from(previous.queued.request).with_legacy_sender(
-                match previous.queued.sent_by {
-                    super::SentByBeforeFlow::Sender(sender) => SentBy::Sender(sender),
-                    super::SentByBeforeFlow::Unknown => SentBy::Unknown,
-                },
-            ),
-            state: previous.state.upgrade(),
-        })
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredDeliveryRequestV3 {
-    request_id: String,
-    address: Address,
-    queued: super::QueuedRequestBeforeLogicalId,
-    state: RequestStateV4,
-}
-impl EngineRecord for StoredDeliveryRequestV3 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.request_id.clone())
-    }
-}
-impl MemoryDefinition for StoredDeliveryRequestV3 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
-    }
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-queue-delivery-request-v3")
-    }
-}
-impl UpgradeFrom<StoredDeliveryRequestV3> for StoredDeliveryRequest {
-    type Refusal = std::convert::Infallible;
-    fn upgrade_from(previous: StoredDeliveryRequestV3) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            request_id: previous.request_id,
-            address: previous.address,
-            queue_evidence: Request::from(previous.queued.request)
-                .with_legacy_sender(previous.queued.sent_by),
-            state: previous.state.upgrade(),
-        })
     }
 }
 
@@ -434,27 +237,6 @@ impl EngineRecord for QueueDeliveryAttempt {
     }
 }
 
-impl super::model_address::DefinedBeforeModel for QueueDeliveryAttempt {
-    fn version_before_model() -> MemoryVersion {
-        MemoryVersion::new(7)
-    }
-
-    fn schema_hash_before_model() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v7")
-    }
-}
-
-crate::upgrades_before_model!(QueueDeliveryAttempt);
-
-impl super::model_address::RemodelsAddresses for QueueDeliveryAttempt {
-    fn remodel(&mut self) {
-        self.address.remodel();
-        self.queue_evidence.remodel();
-    }
-}
-
-impl super::model_address::KeptBeforeModel for QueueDeliveryAttempt {}
-
 impl MemoryDefinition for QueueDeliveryAttempt {
     fn memory_version() -> MemoryVersion {
         MemoryVersion::new(8)
@@ -462,157 +244,6 @@ impl MemoryDefinition for QueueDeliveryAttempt {
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v8")
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct QueueDeliveryAttemptV6 {
-    request_id: String,
-    attempt_id: String,
-    native_request_id: u64,
-    flow_id: String,
-    thread_id: String,
-    harness_kind: HarnessKind,
-    history_anchor: NativeHistoryAnchor,
-    address: Address,
-    queue_evidence: QueueEvidenceV41,
-    phase: QueueDeliveryPhase,
-}
-
-impl EngineRecord for QueueDeliveryAttemptV6 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.attempt_id.clone())
-    }
-}
-
-impl MemoryDefinition for QueueDeliveryAttemptV6 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(6)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v6")
-    }
-}
-
-impl UpgradeFrom<QueueDeliveryAttemptV6> for QueueDeliveryAttempt {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: QueueDeliveryAttemptV6) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            request_id: previous.request_id,
-            attempt_id: previous.attempt_id,
-            native_request_id: previous.native_request_id,
-            flow_id: previous.flow_id,
-            thread_id: previous.thread_id,
-            harness_kind: previous.harness_kind,
-            history_anchor: previous.history_anchor,
-            address: previous.address,
-            queue_evidence: previous.queue_evidence.into(),
-            phase: previous.phase,
-        })
-    }
-}
-
-/// A delivery attempt as Flow 0.35.17 to 0.37.2 kept it, before `SentBy`
-/// named Flow. The variant is appended, so its bytes read as the current
-/// attempt; the v4-to-v5 upgrade moves it unchanged.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct QueueDeliveryAttemptV4 {
-    request_id: String,
-    attempt_id: String,
-    native_request_id: u64,
-    flow_id: String,
-    thread_id: String,
-    harness_kind: HarnessKind,
-    history_anchor: NativeHistoryAnchor,
-    address: Address,
-    queued: super::QueuedRequestBeforeFlow,
-    phase: QueueDeliveryPhase,
-}
-
-impl EngineRecord for QueueDeliveryAttemptV4 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.attempt_id.clone())
-    }
-}
-
-impl MemoryDefinition for QueueDeliveryAttemptV4 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v4")
-    }
-}
-
-impl UpgradeFrom<QueueDeliveryAttemptV4> for QueueDeliveryAttempt {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: QueueDeliveryAttemptV4) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            request_id: previous.request_id,
-            attempt_id: previous.attempt_id,
-            native_request_id: previous.native_request_id,
-            flow_id: previous.flow_id,
-            thread_id: previous.thread_id,
-            harness_kind: previous.harness_kind,
-            history_anchor: previous.history_anchor,
-            address: previous.address,
-            queue_evidence: Request::from(previous.queued.request).with_legacy_sender(
-                match previous.queued.sent_by {
-                    super::SentByBeforeFlow::Sender(sender) => SentBy::Sender(sender),
-                    super::SentByBeforeFlow::Unknown => SentBy::Unknown,
-                },
-            ),
-            phase: previous.phase,
-        })
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct QueueDeliveryAttemptV5 {
-    request_id: String,
-    attempt_id: String,
-    native_request_id: u64,
-    flow_id: String,
-    thread_id: String,
-    harness_kind: HarnessKind,
-    history_anchor: NativeHistoryAnchor,
-    address: Address,
-    queued: super::QueuedRequestBeforeLogicalId,
-    phase: QueueDeliveryPhase,
-}
-impl EngineRecord for QueueDeliveryAttemptV5 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.attempt_id.clone())
-    }
-}
-impl MemoryDefinition for QueueDeliveryAttemptV5 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(5)
-    }
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v5")
-    }
-}
-impl UpgradeFrom<QueueDeliveryAttemptV5> for QueueDeliveryAttempt {
-    type Refusal = std::convert::Infallible;
-    fn upgrade_from(previous: QueueDeliveryAttemptV5) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            request_id: previous.request_id,
-            attempt_id: previous.attempt_id,
-            native_request_id: previous.native_request_id,
-            flow_id: previous.flow_id,
-            thread_id: previous.thread_id,
-            harness_kind: previous.harness_kind,
-            history_anchor: previous.history_anchor,
-            address: previous.address,
-            queue_evidence: Request::from(previous.queued.request)
-                .with_legacy_sender(previous.queued.sent_by),
-            phase: previous.phase,
-        })
     }
 }
 
@@ -643,99 +274,6 @@ pub(crate) trait DeclaresQueueDeliveryTables: Sized {
         engine: &mut Engine,
         descriptors: QueueDeliveryDescriptors,
     ) -> Result<Self, StoreError>;
-    /// A store before 0.38.0 keeps v2 requests: each is carried unchanged.
-    fn upgraded_requests(
-        engine: &mut Engine,
-        descriptor: TableDescriptor<StoredDeliveryRequest>,
-    ) -> Result<TableReference<StoredDeliveryRequest>, StoreError> {
-        let from_v4 = descriptor.clone();
-        match engine
-            .upgrade_table::<StoredDeliveryRequestV5, StoredDeliveryRequest>(descriptor.clone())
-        {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::QueueDeliveryUpgrade(format!("{failure:?}")));
-            }
-        }
-        match engine
-            .upgrade_table::<StoredDeliveryRequestV4, StoredDeliveryRequest>(descriptor.clone())
-        {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::QueueDeliveryUpgrade(format!("{failure:?}")));
-            }
-        }
-        let from_v2 = from_v4;
-        match engine.upgrade_table::<StoredDeliveryRequestV3, StoredDeliveryRequest>(descriptor) {
-            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission =>
-            {
-                match engine
-                    .upgrade_table::<StoredDeliveryRequestV2, StoredDeliveryRequest>(from_v2)
-                {
-                    UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-                    UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-                    UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-                    UpgradeOutcome::Failed(failure) => {
-                        Err(StoreError::QueueDeliveryUpgrade(format!("{failure:?}")))
-                    }
-                }
-            }
-            UpgradeOutcome::Failed(failure) => {
-                Err(StoreError::QueueDeliveryUpgrade(format!("{failure:?}")))
-            }
-        }
-    }
-    /// A store before 0.38.0 keeps v4 attempts: each is carried unchanged.
-    fn upgraded_attempts(
-        engine: &mut Engine,
-        descriptor: TableDescriptor<QueueDeliveryAttempt>,
-    ) -> Result<TableReference<QueueDeliveryAttempt>, StoreError> {
-        let from_v5 = descriptor.clone();
-        match engine.upgrade_table::<QueueDeliveryAttemptV6, QueueDeliveryAttempt>(descriptor) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::QueueDeliveryUpgrade(format!("{failure:?}")));
-            }
-        }
-        let from_v4 = from_v5.clone();
-        match engine.upgrade_table::<QueueDeliveryAttemptV5, QueueDeliveryAttempt>(from_v5) {
-            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission =>
-            {
-                match engine.upgrade_table::<QueueDeliveryAttemptV4, QueueDeliveryAttempt>(from_v4)
-                {
-                    UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-                    UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-                    UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-                    UpgradeOutcome::Failed(failure) => {
-                        Err(StoreError::QueueDeliveryUpgrade(format!("{failure:?}")))
-                    }
-                }
-            }
-            UpgradeOutcome::Failed(failure) => {
-                Err(StoreError::QueueDeliveryUpgrade(format!("{failure:?}")))
-            }
-        }
-    }
 }
 
 impl DeclaresQueueDeliveryTables for QueueDeliveryTables {
@@ -750,21 +288,12 @@ impl DeclaresQueueDeliveryTables for QueueDeliveryTables {
                 DELIVERY_REQUEST_TABLE_NAME,
                 FamilyName::new("flow-nexus-queue-delivery-request"),
                 StoredDeliveryRequest::schema_hash(),
-            )
-            .with_predecessor::<StoredDeliveryRequestV5>()
-            .with_predecessor::<StoredDeliveryRequestV2>()
-            .with_predecessor::<StoredDeliveryRequestV3>()
-            .with_predecessor::<StoredDeliveryRequestV4>()
-            .with_predecessor::<super::model_address::BeforeModel<StoredDeliveryRequest>>(),
+            ),
             TableDescriptor::new(
                 DELIVERY_ATTEMPT_TABLE_NAME,
                 FamilyName::new("flow-nexus-queue-delivery-attempt"),
                 QueueDeliveryAttempt::schema_hash(),
-            )
-            .with_predecessor::<QueueDeliveryAttemptV6>()
-            .with_predecessor::<QueueDeliveryAttemptV4>()
-            .with_predecessor::<QueueDeliveryAttemptV5>()
-            .with_predecessor::<super::model_address::BeforeModel<QueueDeliveryAttempt>>(),
+            ),
         )
     }
 
@@ -774,12 +303,8 @@ impl DeclaresQueueDeliveryTables for QueueDeliveryTables {
     ) -> Result<Self, StoreError> {
         Ok(Self {
             counter: engine.register_table(descriptors.0)?,
-            requests: engine.upgraded_before_model(descriptors.1, |engine, descriptor| {
-                Self::upgraded_requests(engine, descriptor)
-            })?,
-            attempts: engine.upgraded_before_model(descriptors.2, |engine, descriptor| {
-                Self::upgraded_attempts(engine, descriptor)
-            })?,
+            requests: engine.register_table(descriptors.1)?,
+            attempts: engine.register_table(descriptors.2)?,
         })
     }
 }
@@ -1869,7 +1394,7 @@ impl FlowStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::metaflow::QueuesFlowRequest;
+
     use crate::store::metaflow::SeedsMetaflow;
     use crate::store::metaflow::SleepsMetaflows;
     use flow_defaults::DefaultConfiguration;
@@ -1895,42 +1420,6 @@ mod tests {
             delivery: flow_ethos::Delivery::Queue,
             message: flow_ethos::Message::Soft(Request::Order(body.into())),
         }
-    }
-
-    fn before_flow(entry: &QueueEntry) -> super::super::QueuedRequestBeforeFlow {
-        let sent_by = match &entry.sent_by {
-            SentBy::Sender(sender) => super::super::SentByBeforeFlow::Sender(sender.clone()),
-            SentBy::Unknown | SentBy::Flow => super::super::SentByBeforeFlow::Unknown,
-        };
-        let request = match &entry.message {
-            flow_ethos::Message::Soft(request)
-            | flow_ethos::Message::MiddleAbrupt(request)
-            | flow_ethos::Message::HardAbrupt(request) => match request {
-                Request::Order(value) => {
-                    super::super::message_v41::RequestV41::Order(value.clone())
-                }
-                Request::Question(value) => {
-                    super::super::message_v41::RequestV41::Question(value.clone())
-                }
-                Request::Psyche(value) => {
-                    super::super::message_v41::RequestV41::Psyche(value.clone())
-                }
-                Request::Psyches(value) => {
-                    super::super::message_v41::RequestV41::Psyches(value.clone())
-                }
-                Request::Notice(value) => {
-                    super::super::message_v41::RequestV41::Notice(value.clone())
-                }
-                Request::Task(value) => super::super::message_v41::RequestV41::Task(
-                    super::super::message_v41::TaskV41 {
-                        minutes: value.minutes,
-                        string: value.string.clone(),
-                    },
-                ),
-                _ => panic!("the v41 fixture carries a v41 request"),
-            },
-        };
-        super::super::QueuedRequestBeforeFlow { sent_by, request }
     }
 
     fn defaults(directory: &Path) -> DefaultConfiguration {
@@ -3096,234 +2585,6 @@ mod tests {
                 )
                 .unwrap(),
             Err(Rejected::AlreadyResolved(absent))
-        );
-    }
-
-    /// A store Flow 0.37.2 left, its metaflow at v3 and its queue
-    /// deliveries at v2 and v4, opens with every row carried unchanged
-    /// under the identities that admit a Flow sender.
-    #[test]
-    fn a_store_before_flow_senders_opens_with_its_queue_carried() {
-        let (fixture, store) = Fixture::new();
-        let PrepareQueueDelivery::Prepared(prepared) = store
-            .prepare_oldest_delivery(
-                &address(),
-                "flow-delivery",
-                "thread-7",
-                HarnessKind::Claude,
-                NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
-                    device: 1,
-                    inode: 2,
-                    offset: 3,
-                }),
-            )
-            .unwrap()
-        else {
-            panic!("oldest request prepared")
-        };
-        let metaflow = store.metaflow(&address()).unwrap().expect("seeded");
-        let mut migrated_metaflow = metaflow.clone();
-        for (index, entry) in migrated_metaflow.queue.iter_mut().enumerate() {
-            entry.logical_delivery_id = format!(
-                "legacy:{}:{index:016x}",
-                FlowStore::address_record_key_before_model(&migrated_metaflow.address)
-            );
-        }
-        let requests = store
-            .engine
-            .match_records(QueryPlan::all(store.queue_delivery.requests))
-            .unwrap()
-            .records()
-            .to_vec();
-        assert_eq!(requests.len(), 1);
-        drop(store);
-
-        let tables = [
-            "flow_nexus_metaflows",
-            "flow_nexus_queue_delivery_requests",
-            "flow_nexus_queue_delivery_attempts",
-        ];
-        let database = redb::Database::open(&fixture.path).expect("store opens directly");
-        let write = database.begin_write().expect("catalog transaction starts");
-        {
-            let mut catalog = write
-                .open_table(super::super::SEMA_CATALOG_TABLE)
-                .expect("catalog opens");
-            for table in tables {
-                catalog.remove(table).expect("family removes");
-            }
-        }
-        for table in tables {
-            write
-                .delete_table(redb::TableDefinition::<&str, &[u8]>::new(table))
-                .expect("rows drop");
-        }
-        write.commit().expect("catalog commits");
-        drop(database);
-        {
-            let mut engine = Engine::open(EngineOpen::new(&fixture.path, SchemaVersion::new(1)))
-                .expect("0.37.2 store opens");
-            let metaflows = engine
-                .register_table(TableDescriptor::new(
-                    TableName::new("flow_nexus_metaflows"),
-                    FamilyName::new("flow-nexus-metaflow"),
-                    SchemaHash::for_label("flow-nexus-metaflow-v3"),
-                ))
-                .expect("v3 metaflow family registers");
-            engine
-                .assert(Assertion::new(
-                    metaflows,
-                    super::super::StoredMetaflowV3 {
-                        metaflow: super::super::MetaflowBeforeFlow {
-                            address: metaflow.address.clone(),
-                            state: metaflow.state.clone(),
-                            past: metaflow.past.clone(),
-                            queue: metaflow.queue.iter().map(before_flow).collect(),
-                        },
-                    },
-                ))
-                .expect("v3 metaflow persists");
-            let old_requests = engine
-                .register_table(TableDescriptor::new(
-                    DELIVERY_REQUEST_TABLE_NAME,
-                    FamilyName::new("flow-nexus-queue-delivery-request"),
-                    SchemaHash::for_label("flow-nexus-queue-delivery-request-v2"),
-                ))
-                .expect("v2 request family registers");
-            for request in &requests {
-                engine
-                    .assert(Assertion::new(
-                        old_requests,
-                        StoredDeliveryRequestV2 {
-                            request_id: request.request_id.clone(),
-                            address: request.address.clone(),
-                            queued: match &request.queue_evidence {
-                                QueueEvidence::Logical(entry) => before_flow(entry),
-                                QueueEvidence::Legacy(_) => unreachable!(),
-                            },
-                            state: match request.state {
-                                RequestState::Queued => RequestStateV4::Queued,
-                                RequestState::Settled => RequestStateV4::Settled,
-                                RequestState::Unsent => RequestStateV4::Unsent,
-                                RequestState::Parked => {
-                                    unreachable!("old fixture has no parked row")
-                                }
-                            },
-                        },
-                    ))
-                    .expect("v2 request persists");
-            }
-            let old_attempts = engine
-                .register_table(TableDescriptor::new(
-                    DELIVERY_ATTEMPT_TABLE_NAME,
-                    FamilyName::new("flow-nexus-queue-delivery-attempt"),
-                    SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v4"),
-                ))
-                .expect("v4 attempt family registers");
-            engine
-                .assert(Assertion::new(
-                    old_attempts,
-                    QueueDeliveryAttemptV4 {
-                        request_id: prepared.request_id.clone(),
-                        attempt_id: prepared.attempt_id.clone(),
-                        native_request_id: prepared.native_request_id,
-                        flow_id: prepared.flow_id.clone(),
-                        thread_id: prepared.thread_id.clone(),
-                        harness_kind: prepared.harness_kind.clone(),
-                        history_anchor: prepared.history_anchor.clone(),
-                        address: prepared.address.clone(),
-                        queued: match &prepared.queue_evidence {
-                            QueueEvidence::Logical(entry) => before_flow(entry),
-                            QueueEvidence::Legacy(_) => unreachable!(),
-                        },
-                        phase: prepared.phase.clone(),
-                    },
-                ))
-                .expect("v4 attempt persists");
-        }
-
-        let reopened = fixture.reopen();
-        let archive = reopened.observe_legacy_archive().unwrap();
-        for entry in &migrated_metaflow.queue {
-            assert!(
-                archive
-                    .iter()
-                    .any(|record| record.address == migrated_metaflow.address
-                        && record.queue_evidence == QueueEvidence::Logical(entry.clone()))
-            );
-        }
-        migrated_metaflow.queue.clear();
-        assert_eq!(
-            reopened.metaflow(&address()).unwrap(),
-            Some(migrated_metaflow)
-        );
-        // Carried as it was; the open makes a receipt-less attempt Uncertain.
-        let QueueEvidence::Logical(old_entry) = &prepared.queue_evidence else {
-            unreachable!()
-        };
-        let old_entry = before_flow(old_entry);
-        let mut migrated_attempt = prepared.clone();
-        // Archiving preserves the original attempt phase and native anchor:
-        // no native replay, false receipt or false absence is synthesized.
-        migrated_attempt.phase = prepared.phase.clone();
-        migrated_attempt.queue_evidence = flow_ethos::Request::from(old_entry.request)
-            .with_legacy_sender(match old_entry.sent_by {
-                super::super::SentByBeforeFlow::Sender(sender) => SentBy::Sender(sender),
-                super::super::SentByBeforeFlow::Unknown => SentBy::Unknown,
-            });
-        let mut migrated_requests = requests.clone();
-        for request in &mut migrated_requests {
-            let QueueEvidence::Logical(entry) = &request.queue_evidence else {
-                unreachable!()
-            };
-            let legacy = before_flow(entry);
-            request.state = RequestState::Parked;
-            request.queue_evidence = flow_ethos::Request::from(legacy.request).with_legacy_sender(
-                match legacy.sent_by {
-                    super::super::SentByBeforeFlow::Sender(sender) => SentBy::Sender(sender),
-                    super::super::SentByBeforeFlow::Unknown => SentBy::Unknown,
-                },
-            );
-        }
-        assert_eq!(
-            reopened
-                .queue_delivery_attempt(&prepared.attempt_id)
-                .unwrap(),
-            Some(migrated_attempt)
-        );
-        let archived_requests = reopened
-            .engine
-            .match_records(QueryPlan::all(reopened.queue_delivery.requests))
-            .unwrap();
-        for original in &migrated_requests {
-            assert!(archived_requests.records().contains(original));
-        }
-        // A request Flow raised is kept, and kept across an open.
-        let raised = QueueEntry {
-            logical_delivery_id: "flow-raised".into(),
-            sent_by: SentBy::Flow,
-            delivery: flow_ethos::Delivery::Queue,
-            message: flow_ethos::Message::Soft(Request::Order("investigate".into())),
-        };
-        assert!(
-            reopened
-                .queue_flow_request(&address(), raised.clone())
-                .unwrap()
-        );
-        drop(reopened);
-        let queue = fixture
-            .reopen()
-            .metaflow(&address())
-            .unwrap()
-            .unwrap()
-            .queue;
-        assert_eq!(
-            queue.last().map(|entry| &entry.sent_by),
-            Some(&SentBy::Flow)
-        );
-        assert_eq!(
-            queue.last().map(|entry| &entry.message),
-            Some(&raised.message)
         );
     }
 }

@@ -5,9 +5,6 @@
 //! per flow, keyed by its FlowId, rewritten at each reading. It is judged
 //! against the refresh threshold of the flow's model: a flow at or past it
 //! is given no new message and is replaced as it goes idle.
-//!
-//! The row lives in its own table, so a store written before context sizes
-//! were kept opens with the table added and its flows simply have none.
 
 use super::{FlowStore, ManagesMetaflowState, ReadsFlowRoles, ReadsLaunchAttempt, StoreError};
 use meta_signal_flow::{CompactionRefusal, ContextBelowThreshold};

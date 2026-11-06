@@ -93,7 +93,6 @@ impl NexusFixture {
         self.nexus.store.seed_role(signal_flow::Caller {
             flow_id: "908786".into(),
             aspect: signal_flow::Aspect::Psyche,
-            power_level: signal_flow::PowerLevel::Medium,
             model_name: "claude-opus-5-5".into(),
         });
         self.nexus.store.seed_metaflow(signal_flow::Metaflow {

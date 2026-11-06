@@ -9,7 +9,10 @@ Library
   Topic.String
   ; The design type is Blake3.Bytes<32>; 16.0 uses a 64-hex-character string.
   Blake3.String
-  Layer.[ Primary Secondary Tertiary Quaternary ]
+  ; An address names its model. Two families, each ordered from the dearest:
+  ; Fable Opus Sonnet Haiku, and Astra Sol Luna Terra. Up is the model
+  ; before the sender's in its family.
+  Model.[ Fable Opus Sonnet Haiku Astra Sol Luna Terra ]
   Subaspect.[ Vision Intent Knowledge Operation Trial Compensation ]
   ; Define the component types once. Source refers to these declarations;
   ; inlining Path.String inside Source would redeclare Path globally.
@@ -46,7 +49,7 @@ Library
   ; The selected request kind and routing policy are common to every
   ; consumer of Flow messages.
   Aspect.[ Psyche Mind Field ]
-  Address.{ Aspect Topic Layer }
+  Address.{ Aspect Topic Model }
   Recipient.[ Address Up ]
   ; Who a queued request is from: the Address Flow resolved for its sender
   ; (the Lock's Sender of a Deliver, the thread's metaflow of a send-tool

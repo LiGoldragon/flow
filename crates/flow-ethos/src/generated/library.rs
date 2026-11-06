@@ -8,11 +8,15 @@ pub type Blake3 = String;
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub enum Layer {
-    Primary,
-    Secondary,
-    Tertiary,
-    Quaternary,
+pub enum Model {
+    Fable,
+    Opus,
+    Sonnet,
+    Haiku,
+    Astra,
+    Sol,
+    Luna,
+    Terra,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -140,7 +144,7 @@ pub enum Aspect {
 pub struct Address {
     pub aspect: Aspect,
     pub topic: Topic,
-    pub layer: Layer,
+    pub model: Model,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

@@ -1094,7 +1094,23 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
         // The answer reaches the app-server; the model's turn then ends.
         // The record and the queue are what Flow witnesses here; the
         // rollout shows the tool's output.
-        std::thread::sleep(Duration::from_secs(20));
+        // The target is woken and its queue handed over: that is the
+        // observable end of the answered call.
+        let poll_deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let woken = nexus
+                .store
+                .metaflow(&asleep_target())
+                .expect("metaflow readable")
+                .expect("metaflow held");
+            if matches!(&woken.state, State::Awake(flow_id) if flow_id != "abc123")
+                && woken.queue.is_empty()
+            {
+                break;
+            }
+            assert!(Instant::now() < poll_deadline, "the target was never woken");
+            std::thread::sleep(Duration::from_millis(100));
+        }
         stop.send(ResponderSignal::Stop).unwrap();
         responder.join().expect("responder stops");
     });

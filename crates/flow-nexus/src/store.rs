@@ -458,17 +458,31 @@ pub(crate) struct NativeOwnerEnvironment {
     pub(crate) boot_id: String,
 }
 
-trait ReadsNativeOwnerEnvironment {
+trait ReadsNativeOwnerEnvironment: Send + Sync {
     fn native_owner_environment(&self) -> Option<NativeOwnerEnvironment>;
+}
+
+/// The host and boot the running system reports.
+struct SystemNativeOwnerEnvironment;
+
+/// A fixed host and boot, for a store a test opens away from the system's.
+#[cfg(test)]
+struct FixedNativeOwnerEnvironment(NativeOwnerEnvironment);
+
+#[cfg(test)]
+impl ReadsNativeOwnerEnvironment for FixedNativeOwnerEnvironment {
+    fn native_owner_environment(&self) -> Option<NativeOwnerEnvironment> {
+        Some(self.0.clone())
+    }
 }
 
 trait ReadsSystemNativeOwnerEnvironment {
     fn system() -> Option<NativeOwnerEnvironment>;
 }
 
-impl ReadsNativeOwnerEnvironment for NativeOwnerEnvironment {
+impl ReadsNativeOwnerEnvironment for SystemNativeOwnerEnvironment {
     fn native_owner_environment(&self) -> Option<NativeOwnerEnvironment> {
-        Self::system()
+        NativeOwnerEnvironment::system()
     }
 }
 
@@ -634,9 +648,8 @@ impl ReadsNativeOwnerProof for FlowStore {
 
 impl ReadsNativeOwnerEnvironment for FlowStore {
     fn native_owner_environment(&self) -> Option<NativeOwnerEnvironment> {
-        self.native_owner_environment_override
-            .clone()
-            .or_else(NativeOwnerEnvironment::system)
+        self.native_owner_environment_reader
+            .native_owner_environment()
     }
 }
 
@@ -4112,7 +4125,7 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
 
 pub struct FlowStore {
     engine: Engine,
-    native_owner_environment_override: Option<NativeOwnerEnvironment>,
+    native_owner_environment_reader: Arc<dyn ReadsNativeOwnerEnvironment>,
     flows: TableReference<FlowRecord>,
     native_owner_proofs: TableReference<NativeOwnerProofRecord>,
     state: TableReference<FlowStoreState>,
@@ -4198,7 +4211,7 @@ pub(crate) trait SetsNativeOwnerEnvironmentForTests {
 #[cfg(test)]
 impl SetsNativeOwnerEnvironmentForTests for FlowStore {
     fn set_native_owner_environment_for_tests(&mut self, environment: NativeOwnerEnvironment) {
-        self.native_owner_environment_override = Some(environment);
+        self.native_owner_environment_reader = Arc::new(FixedNativeOwnerEnvironment(environment));
     }
 }
 
@@ -4987,7 +5000,7 @@ impl OpensFlowStore for FlowStore {
         let heartbeat_standings = engine.register_table(heartbeat_standing_descriptor)?;
         let store = Self {
             engine,
-            native_owner_environment_override: None,
+            native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
             flows,
             native_owner_proofs,
             state,
@@ -5177,7 +5190,7 @@ impl OpensFlowStore for FlowStore {
         let heartbeat_standings = engine.register_table(StoredHeartbeatStanding::descriptor())?;
         let store = Self {
             engine,
-            native_owner_environment_override: None,
+            native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
             flows,
             native_owner_proofs,
             state,

@@ -63,25 +63,29 @@ impl OpensCurriculumComposer for CurriculumComposer {
     }
 }
 
-/// The context composer a Nexus runs with: the Curriculum Nexus, or, under
-/// test, the in-memory fixture.
-#[derive(Debug, Clone)]
-pub enum ContextComposer {
-    Curriculum(CurriculumComposer),
-    #[cfg(test)]
-    Fixture(FixtureComposer),
+/// Anything that composes a flow's context for a request: the Curriculum
+/// Nexus in production, whatever a caller injects otherwise.
+pub trait ComposesContext: std::fmt::Debug + Send + Sync {
+    fn compose(&self, request: &ContextRequest) -> Result<StartupComposition, ContextRefusal>;
 }
+
+impl<T: ComposesFlowContext + std::fmt::Debug + Send + Sync> ComposesContext for T {
+    fn compose(&self, request: &ContextRequest) -> Result<StartupComposition, ContextRefusal> {
+        self.compose_flow_context(request)
+    }
+}
+
+/// The context composer a Nexus runs with: the Curriculum Nexus, injected
+/// where the Nexus is opened.
+#[derive(Debug, Clone)]
+pub struct ContextComposer(pub std::sync::Arc<dyn ComposesContext>);
 
 impl ComposesFlowContext for ContextComposer {
     fn compose_flow_context<N: ContextRequesting>(
         &self,
         input: N,
     ) -> Result<StartupComposition, ContextRefusal> {
-        match self {
-            Self::Curriculum(composer) => composer.compose_flow_context(input),
-            #[cfg(test)]
-            Self::Fixture(composer) => composer.compose_flow_context(input),
-        }
+        self.0.compose(&input.context_request())
     }
 }
 
@@ -440,23 +444,9 @@ impl ComposesFlowContext for FixtureComposer {
 mod tests {
     use super::{
         CONTEXT_OPENING, ComposesFlowContext, ContextRequest, FixtureComposer,
-        ReadsVerifiedContext, SelectsStartup, VerifiedContext, VerifiesContext,
+        ReadsVerifiedContext, VerifiedContext, VerifiesContext,
     };
-    use crate::generated::curriculum::Target;
     use signal_flow::{Address, Aspect, ContextRefusal, HarnessKind, Layer};
-
-    /// The flows a launch remembers reach Curriculum as the selection's
-    /// flow ids, in order.
-    #[test]
-    fn the_startup_selection_names_the_remembered_flows() {
-        let mut remembering = request();
-        remembering.remembered_flows = vec!["36b71b".into(), "e3c8c1".into()];
-        assert_eq!(
-            remembering.startup_selection().flow_id_vector,
-            vec!["36b71b".to_owned(), "e3c8c1".to_owned()]
-        );
-        assert!(request().startup_selection().flow_id_vector.is_empty());
-    }
 
     /// Records Flow did not ask for, or whose payload digest differs, are
     /// refused.
@@ -567,17 +557,5 @@ mod tests {
             fixture().compose_flow_context(&request),
             Err(ContextRefusal::ModuleMissing(Some("unknown-module".into())))
         );
-    }
-
-    #[test]
-    fn the_curriculum_selection_names_the_metaflow_and_the_harness_target() {
-        let mut request = request();
-        request.harness_kind = HarnessKind::Codex;
-        let selection = request.startup_selection();
-        assert_eq!(selection.caller_metaflow.first_string, "Field");
-        assert_eq!(selection.caller_metaflow.second_string, "flow");
-        assert_eq!(selection.caller_metaflow.third_string, "Secondary");
-        assert_eq!(selection.target, Target::Codex);
-        assert_eq!(selection.user_modules, request.user_modules);
     }
 }

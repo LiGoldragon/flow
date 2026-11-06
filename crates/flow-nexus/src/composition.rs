@@ -721,7 +721,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn fixture_composer() -> LaunchComposer {
-        LaunchComposer::with_context(crate::context::ContextComposer::Fixture(
+        LaunchComposer::with_context(crate::context::ContextComposer(std::sync::Arc::new(
             FixtureComposer::from(
                 &[
                     ("spirit-core", "Spirit body."),
@@ -730,19 +730,19 @@ pub(crate) mod tests {
                     ("knowledge-flow", "Knowledge body."),
                 ][..],
             ),
-        ))
+        )))
     }
 
     fn fixture_composer_with_presentation(prompt: Option<String>) -> LaunchComposer {
         LaunchComposer::with_presentation_prompt(
-            crate::context::ContextComposer::Fixture(FixtureComposer::from(
+            crate::context::ContextComposer(std::sync::Arc::new(FixtureComposer::from(
                 &[
                     ("spirit-core", "Spirit body."),
                     ("intent-flow", "Intent body."),
                     ("operation-main-flow", "Main flow body."),
                     ("knowledge-flow", "Knowledge body."),
                 ][..],
-            )),
+            ))),
             prompt,
         )
     }
@@ -768,8 +768,9 @@ pub(crate) mod tests {
         context
             .records
             .insert("e3c8c1".into(), "## Notion\nA crazy idea.\n".into());
-        let composer =
-            LaunchComposer::with_context(crate::context::ContextComposer::Fixture(context));
+        let composer = LaunchComposer::with_context(crate::context::ContextComposer(
+            std::sync::Arc::new(context),
+        ));
         let composed = composer
             .compose(
                 HarnessedProfile {
@@ -910,9 +911,9 @@ pub(crate) mod tests {
             .map(|(name, body)| (*name, body.as_str()))
             .collect::<Vec<_>>();
         (
-            LaunchComposer::with_context(crate::context::ContextComposer::Fixture(
+            LaunchComposer::with_context(crate::context::ContextComposer(std::sync::Arc::new(
                 FixtureComposer::from(&held[..]),
-            )),
+            ))),
             names,
         )
     }
@@ -1306,8 +1307,9 @@ pub(crate) mod tests {
                 ("operation-main-flow", "Main flow body."),
             ][..],
         );
-        let composer =
-            LaunchComposer::with_context(crate::context::ContextComposer::Fixture(context));
+        let composer = LaunchComposer::with_context(crate::context::ContextComposer(
+            std::sync::Arc::new(context),
+        ));
         let mut profile = fixture_profile();
         profile.system_modules = vec![
             "spirit:core".into(),
@@ -1352,14 +1354,14 @@ pub(crate) mod tests {
     #[test]
     fn a_system_prompt_past_one_argument_is_composed_whole() {
         let large_intent = "b".repeat(140_000);
-        let composer = LaunchComposer::with_context(crate::context::ContextComposer::Fixture(
-            FixtureComposer::from(
+        let composer = LaunchComposer::with_context(crate::context::ContextComposer(
+            std::sync::Arc::new(FixtureComposer::from(
                 &[
                     ("spirit-core", "Spirit body."),
                     ("intent-large", large_intent.as_str()),
                     ("knowledge-small", "Knowledge body."),
                 ][..],
-            ),
+            )),
         ));
         let mut profile = fixture_profile();
         profile.system_modules = vec!["spirit-core".into(), "intent-large".into()];
@@ -1459,23 +1461,6 @@ pub(crate) mod tests {
                 Some("unknown-module".into())
             )))
         );
-    }
-
-    #[test]
-    fn a_tampered_part_is_not_canonical() {
-        let mut composed = fixture_composer()
-            .compose(
-                crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
-                    harness_kind: HarnessKind::Codex,
-                    launch_profile: fixture_profile(),
-                },
-                Vec::<signal_flow::LeaveOut>::new(),
-            )
-            .unwrap();
-        composed.first_prompt_payload.prompt_part_vector[0]
-            .prompt_part_text
-            .push('x');
     }
 
     #[test]

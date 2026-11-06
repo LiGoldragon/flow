@@ -11,7 +11,7 @@ use signal_flow::{Address, PrivateSendResponse, Process};
 pub(super) const COUNTER_FAMILY: &str = "flow-nexus-send-outcome-counter";
 pub(super) const COUNTER_SCHEMA: &str = "flow-nexus-send-outcome-counter-v1";
 pub(super) const OUTCOME_FAMILY: &str = "flow-nexus-send-outcome";
-pub(super) const OUTCOME_SCHEMA: &str = "flow-nexus-send-outcome-v6";
+pub(super) const OUTCOME_SCHEMA: &str = "flow-nexus-send-outcome-v7";
 
 const COUNTER_KEY: &str = "counter";
 const SEND_OUTCOME_COUNTER_TABLE_NAME: TableName =
@@ -50,9 +50,29 @@ impl EngineRecord for StoredSendOutcome {
     }
 }
 
+impl super::model_address::DefinedBeforeModel for StoredSendOutcome {
+    fn version_before_model() -> MemoryVersion {
+        MemoryVersion::new(6)
+    }
+
+    fn schema_hash_before_model() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-send-outcome-v6")
+    }
+}
+
+crate::upgrades_before_model!(StoredSendOutcome);
+
+impl super::model_address::RemodelsAddresses for StoredSendOutcome {
+    fn remodel(&mut self) {
+        self.record.remodel();
+    }
+}
+
+impl super::model_address::KeptBeforeModel for StoredSendOutcome {}
+
 impl MemoryDefinition for StoredSendOutcome {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(6)
+        MemoryVersion::new(7)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -410,7 +430,8 @@ impl DeclaresSendOutcomeTables for SendOutcomeTables {
             .with_predecessor::<StoredSendOutcomeV2>()
             .with_predecessor::<StoredSendOutcomeV3>()
             .with_predecessor::<StoredSendOutcomeV4>()
-            .with_predecessor::<StoredSendOutcomeV5>(),
+            .with_predecessor::<StoredSendOutcomeV5>()
+            .with_predecessor::<super::model_address::BeforeModel<StoredSendOutcome>>(),
         }
     }
 
@@ -422,7 +443,10 @@ impl DeclaresSendOutcomeTables for SendOutcomeTables {
             counter: engine.register_table(descriptors.counter)?,
             // A v4 family upgrades from v4, a v3 family from v3; one refused at admission is a v2
             // family, then a v1 family, each upgraded from its own shape.
-            outcomes: engine.upgraded_outcomes(descriptors.outcomes)?,
+            outcomes: engine
+                .upgraded_before_model(descriptors.outcomes, |engine, descriptor| {
+                    engine.upgraded_outcomes(descriptor)
+                })?,
             write_gate: Mutex::new(()),
         })
     }
@@ -742,7 +766,7 @@ mod tests {
                         send_failure_reason: SendFailureReasonV31::RecipientBusy(Address {
                             aspect: signal_flow::Aspect::Psyche,
                             topic: "core".into(),
-                            layer: signal_flow::Layer::Secondary,
+                            model: signal_flow::Model::Opus,
                         }),
                     }),
                 ),
@@ -798,7 +822,7 @@ mod tests {
             OrdinarySendOutcome::Failed(signal_flow::SendFailure {
                 logical_delivery_id_option: None,
                 send_failure_reason: signal_flow::SendFailureReason::NotSent(
-                    "recipient busy { Psyche core Secondary }".into()
+                    "recipient busy { Psyche core Opus }".into()
                 ),
             })
         );
@@ -860,7 +884,7 @@ mod tests {
                         send_failure_reason: SendFailureReasonV32::RecipientBusy(Address {
                             aspect: signal_flow::Aspect::Psyche,
                             topic: "core".into(),
-                            layer: signal_flow::Layer::Secondary,
+                            model: signal_flow::Model::Opus,
                         }),
                     }),
                 ),
@@ -916,7 +940,7 @@ mod tests {
             OrdinarySendOutcome::Failed(signal_flow::SendFailure {
                 logical_delivery_id_option: None,
                 send_failure_reason: signal_flow::SendFailureReason::NotSent(
-                    "recipient busy { Psyche core Secondary }".into()
+                    "recipient busy { Psyche core Opus }".into()
                 ),
             })
         );

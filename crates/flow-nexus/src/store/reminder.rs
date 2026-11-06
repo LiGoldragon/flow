@@ -4,23 +4,24 @@
 //! A Task is an order with its minutes, kept under the id Flow answered its
 //! send with. When its minutes lapse with no Done naming it, its sender is
 //! reminded, then again every interval, `TASK_REMINDERS` reminders in all;
-//! the last is copied to the sender's Secondary as a failure. A Done naming
+//! the last is copied to the second model of the sender's family as a failure. A Done naming
 //! the task closes it.
 //!
 //! The rows live in their own table, so a store written before reminders
 //! opens with the table added and holding none.
 
 use super::{FlowStore, StoreError};
+use crate::model_family::RanksInFamily;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey, Retraction,
-    SchemaHash, TableDescriptor, TableName,
+    Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,
+    RecordKey, Retraction, SchemaHash, TableDescriptor, TableName,
 };
 use signal_flow::Address;
 
 pub(super) const REMINDER_TABLE_NAME: TableName = TableName::new("flow_nexus_reminders");
 pub(super) const REMINDER_FAMILY: &str = "flow-nexus-reminder";
-pub(super) const REMINDER_SCHEMA: &str = "flow-nexus-reminder-v2";
+pub(super) const REMINDER_SCHEMA: &str = "flow-nexus-reminder-v3";
 
 /// How many reminders an unanswered task gets: the first at its deadline,
 /// then one every interval. Ruled 2026-10-29: the first firing and three
@@ -81,6 +82,37 @@ impl EngineRecord for Reminder {
     }
 }
 
+impl MemoryDefinition for Reminder {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(3)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(REMINDER_SCHEMA)
+    }
+}
+
+impl super::model_address::DefinedBeforeModel for Reminder {
+    fn version_before_model() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash_before_model() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-reminder-v2")
+    }
+}
+
+crate::upgrades_before_model!(Reminder);
+
+impl super::model_address::RemodelsAddresses for Reminder {
+    fn remodel(&mut self) {
+        self.address.remodel();
+        self.recipient.remodel();
+    }
+}
+
+impl super::model_address::KeptBeforeModel for Reminder {}
+
 pub(super) trait DescribesReminderTable {
     fn descriptor() -> TableDescriptor<Reminder>;
 }
@@ -92,6 +124,7 @@ impl DescribesReminderTable for Reminder {
             FamilyName::new(REMINDER_FAMILY),
             SchemaHash::for_label(REMINDER_SCHEMA),
         )
+        .with_predecessor::<super::model_address::BeforeModel<Reminder>>()
     }
 }
 
@@ -100,8 +133,9 @@ impl DescribesReminderTable for Reminder {
 pub struct DueReminder {
     pub address: Address,
     pub notice: String,
-    /// The sender's Secondary and the failure it is told, on a task's last
-    /// reminder, when the sender is not that Secondary itself.
+    /// The second model of the sender's family (Opus or Sol) in its aspect
+    /// and topic, and the failure it is told, on a task's last reminder,
+    /// when the sender is not that seat itself.
     pub failure: Option<(Address, String)>,
 }
 
@@ -124,7 +158,7 @@ impl AdvancesReminder for Reminder {
         let secondary = Address {
             aspect: self.address.aspect.clone(),
             topic: self.address.topic.clone(),
-            layer: signal_flow::Layer::Secondary,
+            model: self.address.model.second(),
         };
         let failure = (last && secondary != self.address).then(|| {
             (
@@ -154,14 +188,14 @@ impl AdvancesReminder for Reminder {
     }
 }
 
-/// An Address as a reader writes it: `Field core Secondary`.
+/// An Address as a reader writes it: `Field core Sol`.
 pub trait NamesAddress {
     fn named(&self) -> String;
 }
 
 impl NamesAddress for Address {
     fn named(&self) -> String {
-        format!("{:?} {} {:?}", self.aspect, self.topic, self.layer)
+        format!("{:?} {} {:?}", self.aspect, self.topic, self.model)
     }
 }
 
@@ -229,13 +263,13 @@ mod tests {
     use super::{AdvancesReminder, RecordsReminders, Reminder, TASK_REMINDERS};
     use crate::store::message_v41::RequestV41;
     use crate::store::{FlowStore, OpensFlowStore};
-    use signal_flow::{Address, Aspect, Layer};
+    use signal_flow::{Address, Aspect, Model};
 
-    fn address(layer: Layer) -> Address {
+    fn address(model: Model) -> Address {
         Address {
             aspect: Aspect::Psyche,
             topic: "flow".into(),
-            layer,
+            model,
         }
     }
 
@@ -286,11 +320,11 @@ mod tests {
     fn a_task_is_reminded_four_times_the_last_copied_to_the_secondary() {
         let mut reminder = Reminder {
             key: "logical-delivery-1".into(),
-            address: address(Layer::Tertiary),
+            address: address(Model::Sonnet),
             recipient: Address {
                 aspect: Aspect::Field,
                 topic: "core".into(),
-                layer: Layer::Secondary,
+                model: Model::Sol,
             },
             minutes: 10,
             due: Some(600),
@@ -301,7 +335,7 @@ mod tests {
         let mut now = 600;
         for _ in 0..TASK_REMINDERS {
             let (due, next) = reminder.advanced("Review the fix", now);
-            assert_eq!(due.address, address(Layer::Tertiary));
+            assert_eq!(due.address, address(Model::Sonnet));
             notices.push(due.notice);
             failures.push(due.failure.clone());
             reminder = next.expect("a task stays open for its Done");
@@ -312,11 +346,11 @@ mod tests {
         assert!(failures[..3].iter().all(Option::is_none));
         assert_eq!(
             failures[3].as_ref().map(|(to, _)| to.clone()),
-            Some(address(Layer::Secondary))
+            Some(address(Model::Opus))
         );
         assert_eq!(
             notices[0],
-            "Reminder 1 of 4: the task of 10 minutes, Review the fix, to Field core Secondary has no Done after 10 minutes."
+            "Reminder 1 of 4: the task of 10 minutes, Review the fix, to Field core Sol has no Done after 10 minutes."
         );
         assert!(
             notices
@@ -326,7 +360,7 @@ mod tests {
         assert_eq!(
             failures[3].as_ref().map(|(_, text)| text.as_str()),
             Some(
-                "Failure: the task of 10 minutes, Review the fix, from Psyche flow Tertiary to Field core Secondary has no Done after 4 reminders."
+                "Failure: the task of 10 minutes, Review the fix, from Psyche flow Sonnet to Field core Sol has no Done after 4 reminders."
             )
         );
         assert!(
@@ -342,8 +376,8 @@ mod tests {
         let path = directory.path().join("flow.sema");
         let reminder = Reminder {
             key: "logical-delivery-1".into(),
-            address: address(Layer::Secondary),
-            recipient: address(Layer::Tertiary),
+            address: address(Model::Opus),
+            recipient: address(Model::Sonnet),
             minutes: 10,
             due: Some(5),
             sent: 0,

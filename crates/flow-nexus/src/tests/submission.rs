@@ -565,7 +565,7 @@ fn a_native_input_matching_a_letter_shaped_prompt_is_submitted_again_never_retra
             .visible_input(&signal_flow::Address {
                 aspect: signal_flow::Aspect::Psyche,
                 topic: "flow".into(),
-                layer: signal_flow::Layer::Secondary,
+                model: signal_flow::Model::Opus,
             }),
         ]),
     });

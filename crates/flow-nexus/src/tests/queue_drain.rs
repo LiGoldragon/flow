@@ -29,7 +29,7 @@ use meta_signal_flow::{
     VisibleResolveQueueDeliveryRejected,
 };
 use signal_flow::{
-    Address, Aspect, Event, Layer, Message, Metaflow, NativePrompt, NativeStop, QueueEntry,
+    Address, Aspect, Event, Message, Metaflow, Model, NativePrompt, NativeStop, QueueEntry,
     Report_Data, Request, Response, SentBy,
 };
 
@@ -48,7 +48,7 @@ fn from_core(body: &str) -> TestRequest {
         sent_by: SentBy::Sender(Address {
             aspect: Aspect::Psyche,
             topic: "core".into(),
-            layer: Layer::Secondary,
+            model: Model::Opus,
         }),
         request: Request::Order(body.into()),
         delivery: flow_ethos::Delivery::Wake,
@@ -61,7 +61,7 @@ fn queue_payload(requests: &[TestRequest]) -> String {
         .iter()
         .map(queue_entry)
         .collect::<Vec<_>>()
-        .prompt_text(&address(Layer::Secondary))
+        .prompt_text(&address(Model::Sol))
 }
 
 fn queue_entry(request: &TestRequest) -> QueueEntry {
@@ -77,7 +77,7 @@ fn queue_entry(request: &TestRequest) -> QueueEntry {
 fn seat(fixture: &NexusFixture, queue: Vec<TestRequest>) {
     claude_seat(fixture, 40_000);
     fixture.nexus.store.seed_metaflow(Metaflow {
-        address: address(Layer::Secondary),
+        address: address(Model::Sol),
         state: State::Awake(CLAUDE_SEAT.into()),
         past: vec![],
         queue: queue
@@ -121,7 +121,7 @@ fn submitted(session: &str, prompt_id: &str, text: &str) -> Event {
 }
 
 fn queue(fixture: &NexusFixture) -> Vec<TestRequest> {
-    stored(fixture, Layer::Secondary)
+    stored(fixture, Model::Sol)
         .queue
         .into_iter()
         .map(|entry| TestRequest {
@@ -145,7 +145,7 @@ fn standings(fixture: &NexusFixture) -> Vec<VisibleQueueDeliveryStanding> {
     match fixture
         .nexus
         .dispatch_meta(meta_signal_flow::Query::ReadQueueDeliveries(address(
-            Layer::Secondary,
+            Model::Sol,
         ))) {
         meta_signal_flow::Response::QueueDeliveriesRead(read) => read
             .visible_queue_delivery_vector
@@ -159,7 +159,7 @@ fn standings(fixture: &NexusFixture) -> Vec<VisibleQueueDeliveryStanding> {
 #[test]
 fn logical_delivery_snapshots_are_sender_filtered_replayable_and_idempotent() {
     let fixture = NexusFixture::new();
-    let target = address(Layer::Secondary);
+    let target = address(Model::Sol);
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: target.clone(),
         state: State::Asleep,
@@ -169,12 +169,12 @@ fn logical_delivery_snapshots_are_sender_filtered_replayable_and_idempotent() {
     let sender = Address {
         aspect: Aspect::Psyche,
         topic: "core".into(),
-        layer: Layer::Secondary,
+        model: Model::Opus,
     };
     let other_sender = Address {
         aspect: Aspect::Mind,
         topic: "core".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     };
     let signal_flow::PrivateSendResponse::SendAccepted(accepted) = fixture
         .nexus
@@ -270,11 +270,11 @@ fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
         fixture
             .typed()
             .unwrap_or_default()
-            .contains("Sender.{ Psyche core Secondary }")
+            .contains("Sender.{ Psyche core Opus }")
     );
     assert_eq!(queue(&fixture), vec![], "both in one payload");
     assert_eq!(
-        stored(&fixture, Layer::Secondary).state,
+        stored(&fixture, Model::Sol).state,
         State::Awake(CLAUDE_SEAT.into())
     );
 }
@@ -352,7 +352,7 @@ fn two_queued_claude_requests_go_in_one_payload_and_settle_on_its_receipt() {
     }
     assert!(standings(&fixture).is_empty());
     assert!(matches!(
-        fixture.nexus.drain_all(address(Layer::Secondary)),
+        fixture.nexus.drain_all(address(Model::Sol)),
         Outcome::Drained(_)
     ));
     assert_eq!(typed_count(&fixture, "first-request-body"), 1, "no replay");
@@ -537,7 +537,7 @@ fn a_claude_turn_end_recorded_before_confirmation_is_honoured_at_it() {
     claude_seat(&fixture, 40_000);
     // Not yet confirmed: no metaflow is Awake as the seat.
     fixture.nexus.store.seed_metaflow(Metaflow {
-        address: address(Layer::Secondary),
+        address: address(Model::Sol),
         state: State::Asleep,
         past: vec![],
         queue: vec![queue_entry(&first)],
@@ -549,7 +549,7 @@ fn a_claude_turn_end_recorded_before_confirmation_is_honoured_at_it() {
 
     // Confirmation records it Awake and notes its recorded turn end.
     fixture.nexus.store.seed_metaflow(Metaflow {
-        address: address(Layer::Secondary),
+        address: address(Model::Sol),
         state: State::Awake(CLAUDE_SEAT.into()),
         past: vec![],
         queue: vec![queue_entry(&first)],
@@ -576,7 +576,7 @@ fn a_foreign_stop_before_confirmation_is_not_a_turn_end() {
     let first = from_core("first-request-body");
     claude_seat(&fixture, 40_000);
     fixture.nexus.store.seed_metaflow(Metaflow {
-        address: address(Layer::Secondary),
+        address: address(Model::Sol),
         state: State::Awake(CLAUDE_SEAT.into()),
         past: vec![],
         queue: vec![queue_entry(&first)],
@@ -620,7 +620,7 @@ fn attempt_id(fixture: &NexusFixture) -> String {
     fixture
         .nexus
         .store
-        .test_outstanding_queue_attempt_id(&address(Layer::Secondary))
+        .test_outstanding_queue_attempt_id(&address(Model::Sol))
 }
 
 fn resolve(

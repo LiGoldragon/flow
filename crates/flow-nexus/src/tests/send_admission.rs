@@ -1,13 +1,13 @@
 use crate::sending::{AdmitsSendPayload, MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
 use crate::store::ReadsFlowMemory;
 use crate::store::metaflow::SleepsMetaflows;
-use flow_ethos::{Address, Aspect, Layer, Request};
+use flow_ethos::{Address, Aspect, Model, Request};
 
 fn sender() -> Address {
     Address {
         aspect: Aspect::Mind,
         topic: "send-admission-test".into(),
-        layer: Layer::Primary,
+        model: Model::Astra,
     }
 }
 
@@ -69,7 +69,7 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
     let target = Address {
         aspect: Aspect::Mind,
         topic: "directTarget".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     };
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: target.clone(),
@@ -194,7 +194,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         let target = Address {
             aspect: Aspect::Mind,
             topic: "flow".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         fixture.nexus.store.seed_metaflow(Metaflow {
             address: target.clone(),
@@ -244,7 +244,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                         sender: Address {
                             aspect: Aspect::Mind,
                             topic: "core".into(),
-                            layer: Layer::Secondary,
+                            model: Model::Sol,
                         },
                         recipient: Recipient::Address(target.clone()),
                     }),
@@ -336,7 +336,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
     let target = Address {
         aspect: Aspect::Mind,
         topic: "newConfiguredDirect".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     };
     assert!(fixture.nexus.direct_send_lease(&target).is_err());
     assert!(fixture.nexus.store.metaflow(&target).unwrap().is_none());
@@ -356,8 +356,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
             meta_signal_flow::ConfigureModel {
-                layer: Layer::Secondary,
-                aspect: Aspect::Mind,
+                model: Model::Sol,
                 native: "gpt-6-sol".into(),
             },
         ]))
@@ -394,7 +393,7 @@ fn a_task_is_admitted_only_with_minutes_above_zero_and_a_reachable_deadline() {
     let target = Address {
         aspect: Aspect::Mind,
         topic: "minutesTarget".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     };
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: target.clone(),
@@ -489,7 +488,7 @@ fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
     let sender_address = Address {
         aspect: Aspect::Field,
         topic: "flow".into(),
-        layer: Layer::Quaternary,
+        model: Model::Terra,
     };
     fixture
         .nexus
@@ -543,9 +542,9 @@ fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
     }
     .install(&script.replace(r#""agents":[]"#, &format!(r#""agents":[{sender_agent}]"#)));
     // The recipient: Mind flow Secondary, Asleep.
-    let recipient = address(Layer::Secondary);
+    let recipient = address(Model::Sol);
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         flow_ethos::State::Asleep,
         vec!["abc123"],
         vec![],
@@ -572,11 +571,11 @@ fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     };
     assert_eq!(
-        flow("Send.{ Address.{ Mind flow Secondary } Soft.Task.{ 0 «Draft the proposal.» } }"),
+        flow("Send.{ Address.{ Mind flow Sol } Soft.Task.{ 0 «Draft the proposal.» } }"),
         "SendRefused.MinutesRefused.Zero"
     );
     assert_eq!(
-        flow("Send.{ Address.{ Mind flow Secondary } Soft.Task.{ -5 «Draft the proposal.» } }"),
+        flow("Send.{ Address.{ Mind flow Sol } Soft.Task.{ -5 «Draft the proposal.» } }"),
         "SendRefused.MinutesRefused.Negative"
     );
     assert!(
@@ -592,7 +591,7 @@ fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
     );
     // The same CLI and Nexus admit a Task whose Minutes stand.
     assert!(
-        flow("Send.{ Address.{ Mind flow Secondary } Soft.Task.{ 30 «Draft the proposal.» } }")
+        flow("Send.{ Address.{ Mind flow Sol } Soft.Task.{ 30 «Draft the proposal.» } }")
             .starts_with("SendAccepted."),
     );
 }

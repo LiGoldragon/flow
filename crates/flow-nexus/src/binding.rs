@@ -1,6 +1,7 @@
 //! What MetaBindExisting checks of a container and each flow it binds
 //! before any binding reaches the store.
 
+use crate::model_family::RanksInFamily;
 use crate::{
     RunningNexus,
     store::{NamesConfiguredModel, ReadsFlowRows},
@@ -11,7 +12,6 @@ use meta_signal_flow::{
 };
 use signal_flow::{
     Address, EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, Origin,
-    PowerLevel,
 };
 use std::{
     fs,
@@ -138,13 +138,7 @@ impl VerifiesAdoptedSeat for RunningNexus {
     ) -> Result<FlowNode, FlowBindingRefusalReason> {
         if !binding.is_well_formed()
             || binding.aspect != address.aspect
-            || binding.power_level
-                != match address.layer {
-                    signal_flow::Layer::Primary => PowerLevel::High,
-                    signal_flow::Layer::Secondary => PowerLevel::Medium,
-                    signal_flow::Layer::Tertiary => PowerLevel::Low,
-                    signal_flow::Layer::Quaternary => PowerLevel::UltraLow,
-                }
+            || binding.power_level != address.model.power()
         {
             return Err(FlowBindingRefusalReason::RoleMismatch);
         }

@@ -11,14 +11,14 @@
 use super::{FlowStore, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey, SchemaHash,
-    TableDescriptor, TableName,
+    Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,
+    RecordKey, SchemaHash, TableDescriptor, TableName,
 };
 use signal_flow::Address;
 
 pub(super) const COMPACTION_TABLE_NAME: TableName = TableName::new("flow_nexus_compactions");
 pub(super) const COMPACTION_FAMILY: &str = "flow-nexus-compaction";
-pub(super) const COMPACTION_SCHEMA: &str = "flow-nexus-compaction-v1";
+pub(super) const COMPACTION_SCHEMA: &str = "flow-nexus-compaction-v2";
 
 /// What Flow did with the warning a compaction raised.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -50,6 +50,36 @@ impl EngineRecord for Compaction {
     }
 }
 
+impl MemoryDefinition for Compaction {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(COMPACTION_SCHEMA)
+    }
+}
+
+impl super::model_address::DefinedBeforeModel for Compaction {
+    fn version_before_model() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash_before_model() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-compaction-v1")
+    }
+}
+
+crate::upgrades_before_model!(Compaction);
+
+impl super::model_address::RemodelsAddresses for Compaction {
+    fn remodel(&mut self) {
+        self.address.remodel();
+    }
+}
+
+impl super::model_address::KeptBeforeModel for Compaction {}
+
 pub trait KeysCompaction {
     fn key(flow_id: &str, boundary: &str) -> String;
 }
@@ -71,6 +101,7 @@ impl DescribesCompactionTable for Compaction {
             FamilyName::new(COMPACTION_FAMILY),
             SchemaHash::for_label(COMPACTION_SCHEMA),
         )
+        .with_predecessor::<super::model_address::BeforeModel<Compaction>>()
     }
 }
 

@@ -17,6 +17,7 @@ pub(crate) mod logical_delivery;
 pub(crate) mod message_v41;
 pub(crate) mod metaflow;
 pub(crate) mod metaflow_declaration;
+pub(crate) mod model_address;
 pub(crate) mod nexus_configuration;
 pub(crate) mod opened_thread;
 pub(crate) mod queue_delivery;
@@ -56,12 +57,14 @@ use std::{
     sync::{Arc, Condvar, Mutex},
 };
 
+use crate::model_family::{NamesModelOfLayer, RanksInFamily};
 use message_v41::{MetaflowV41, RequestV41};
 use meta_signal_flow::{
     ConfigurationChange, ConfigurationSnapshot, ConfigureCounters, ConfigureHarnessFlags,
     ConfigureLeaveOut, ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureOutcome,
     ConfigureSendServer, ConfigureThreshold, CountersRefusal, HeartbeatConfig,
 };
+use model_address::{LayerBeforeModel, NamesLayer, RemodelsFamilies};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, Decision, Engine, EngineOpen, EngineRecord, FamilyName, KeyedMutation,
@@ -75,7 +78,7 @@ use signal_flow::{
     Address, Aspect, Caller, CallerResolutionRejection, ComposedLaunch, EndpointSelection,
     FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding, HerdrRoute,
     HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
-    LaunchProfile, Launched, Layer, LeaveOut, Lock, Metaflow, NativeLaunchBinding,
+    LaunchProfile, Launched, LeaveOut, Lock, Metaflow, Model, NativeLaunchBinding,
     NativeLaunchIntent, NativeTranscriptBoundary, Origin, PowerLevel, Process,
     PromptDeliveryIntent, PromptDeliveryResult, Query, RecipientResolutionRejection,
     RegistrationAcknowledgement, Remembering, ReplaceRejection, Replaced, Response, RouteReadiness,
@@ -113,7 +116,7 @@ const META_INVESTIGATION_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_investigation_configuration");
 const META_INVESTIGATION_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-investigation-configuration";
 const META_INVESTIGATION_CONFIGURATION_SCHEMA: &str =
-    "flow-nexus-meta-investigation-configuration-v1";
+    "flow-nexus-meta-investigation-configuration-v2";
 const META_DEFAULT_MINUTES_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_default_minutes_configuration");
 const META_DEFAULT_MINUTES_CONFIGURATION_FAMILY: &str =
@@ -124,14 +127,14 @@ const META_HARNESS_FLAGS_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_harness_flags_configuration");
 const META_HARNESS_FLAGS_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-harness-flags-configuration";
 const META_HARNESS_FLAGS_CONFIGURATION_SCHEMA: &str =
-    "flow-nexus-meta-harness-flags-configuration-v1";
+    "flow-nexus-meta-harness-flags-configuration-v2";
 const META_HEARTBEAT_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_heartbeat_configuration");
 const META_HEARTBEAT_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-heartbeat-configuration";
-const META_HEARTBEAT_CONFIGURATION_SCHEMA: &str = "flow-nexus-meta-heartbeat-configuration-v1";
+const META_HEARTBEAT_CONFIGURATION_SCHEMA: &str = "flow-nexus-meta-heartbeat-configuration-v2";
 const HEARTBEAT_STANDING_TABLE_NAME: TableName = TableName::new("flow_nexus_heartbeat_standings");
 const HEARTBEAT_STANDING_FAMILY: &str = "flow-nexus-heartbeat-standing";
-const HEARTBEAT_STANDING_SCHEMA: &str = "flow-nexus-heartbeat-standing-v1";
+const HEARTBEAT_STANDING_SCHEMA: &str = "flow-nexus-heartbeat-standing-v2";
 /// The default Minutes a new Memory holds until Configure declares one:
 /// the Minutes Flow gives a request that carries none of its own.
 pub(crate) const SEEDED_DEFAULT_MINUTES: i64 = 30;
@@ -669,11 +672,37 @@ impl EngineRecord for StoredMetaflow {
 
 impl MemoryDefinition for StoredMetaflow {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(6)
+        MemoryVersion::new(7)
     }
 
     fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-metaflow-v7")
+    }
+}
+
+impl model_address::DefinedBeforeModel for StoredMetaflow {
+    fn version_before_model() -> MemoryVersion {
+        MemoryVersion::new(6)
+    }
+
+    fn schema_hash_before_model() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-metaflow-v6")
+    }
+}
+
+crate::upgrades_before_model!(StoredMetaflow);
+
+impl model_address::RemodelsAddresses for StoredMetaflow {
+    fn remodel(&mut self) {
+        self.metaflow.remodel();
+    }
+}
+
+impl model_address::KeptBeforeModel for StoredMetaflow {
+    fn key_before_model(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key_before_model(
+            &self.metaflow.address,
+        ))
     }
 }
 
@@ -687,7 +716,9 @@ pub(crate) struct StoredMetaflowV5 {
 
 impl EngineRecord for StoredMetaflowV5 {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+        RecordKey::new(FlowStore::address_record_key_before_model(
+            &self.metaflow.address,
+        ))
     }
 }
 
@@ -752,7 +783,7 @@ impl LogicalQueueConvertible for Vec<QueuedRequestBeforeLogicalId> {
             .map(|(index, old)| flow_ethos::QueueEntry {
                 logical_delivery_id: format!(
                     "legacy:{}:{index:016x}",
-                    FlowStore::address_record_key(address)
+                    FlowStore::address_record_key_before_model(address)
                 ),
                 sent_by: old.sent_by,
                 delivery: flow_ethos::Delivery::Queue,
@@ -808,7 +839,9 @@ pub(crate) struct StoredMetaflowV3 {
 
 impl EngineRecord for StoredMetaflowV3 {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+        RecordKey::new(FlowStore::address_record_key_before_model(
+            &self.metaflow.address,
+        ))
     }
 }
 
@@ -838,7 +871,9 @@ pub(crate) struct StoredMetaflowV4 {
 }
 impl EngineRecord for StoredMetaflowV4 {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+        RecordKey::new(FlowStore::address_record_key_before_model(
+            &self.metaflow.address,
+        ))
     }
 }
 impl MemoryDefinition for StoredMetaflowV4 {
@@ -939,7 +974,9 @@ pub(crate) struct StoredMetaflowV1 {
 
 impl EngineRecord for StoredMetaflowV1 {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+        RecordKey::new(FlowStore::address_record_key_before_model(
+            &self.metaflow.address,
+        ))
     }
 }
 
@@ -970,7 +1007,9 @@ pub(crate) struct StoredMetaflowV2 {
 
 impl EngineRecord for StoredMetaflowV2 {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+        RecordKey::new(FlowStore::address_record_key_before_model(
+            &self.metaflow.address,
+        ))
     }
 }
 
@@ -1008,6 +1047,40 @@ impl EngineRecord for StoredMetaflowProcess {
     }
 }
 
+impl MemoryDefinition for StoredMetaflowProcess {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-metaflow-process-v2")
+    }
+}
+
+impl model_address::DefinedBeforeModel for StoredMetaflowProcess {
+    fn version_before_model() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash_before_model() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-metaflow-process-v1")
+    }
+}
+
+crate::upgrades_before_model!(StoredMetaflowProcess);
+
+impl model_address::RemodelsAddresses for StoredMetaflowProcess {
+    fn remodel(&mut self) {
+        self.address.remodel();
+    }
+}
+
+impl model_address::KeptBeforeModel for StoredMetaflowProcess {
+    fn key_before_model(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key_before_model(&self.address))
+    }
+}
+
 /// At most one lock is held for a recipient address.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredMetaflowLock {
@@ -1020,7 +1093,43 @@ impl EngineRecord for StoredMetaflowLock {
     }
 }
 
-/// The model one layer and aspect runs, keyed by both.
+impl MemoryDefinition for StoredMetaflowLock {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-metaflow-lock-v2")
+    }
+}
+
+impl model_address::DefinedBeforeModel for StoredMetaflowLock {
+    fn version_before_model() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash_before_model() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-metaflow-lock-v1")
+    }
+}
+
+crate::upgrades_before_model!(StoredMetaflowLock);
+
+impl model_address::RemodelsAddresses for StoredMetaflowLock {
+    fn remodel(&mut self) {
+        self.lock.remodel();
+    }
+}
+
+impl model_address::KeptBeforeModel for StoredMetaflowLock {
+    fn key_before_model(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key_before_model(
+            &self.lock.address,
+        ))
+    }
+}
+
+/// The native model one Model runs, keyed by the Model.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredMetaModelConfiguration {
     model: ConfigureModel,
@@ -1028,14 +1137,46 @@ pub(crate) struct StoredMetaModelConfiguration {
 
 impl EngineRecord for StoredMetaModelConfiguration {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::model_record_key(
-            &self.model.layer,
-            &self.model.aspect,
-        ))
+        RecordKey::new(FlowStore::model_record_key(&self.model.model))
     }
 }
 
 impl MemoryDefinition for StoredMetaModelConfiguration {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(3)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-meta-model-configuration-v3")
+    }
+}
+
+/// The native model one Layer and aspect ran, as Flow kept it from
+/// 0.35.19 until 0.52.0, keyed by both. It is read only by the v2-to-v3
+/// upgrade of the model family.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelOfLayerAndAspect {
+    layer: LayerBeforeModel,
+    aspect: Aspect,
+    native: String,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredMetaModelConfigurationV2 {
+    model: ModelOfLayerAndAspect,
+}
+
+impl EngineRecord for StoredMetaModelConfigurationV2 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(format!(
+            "{}:{}",
+            self.model.layer.word(),
+            FlowStore::aspect_key(&self.model.aspect)
+        ))
+    }
+}
+
+impl MemoryDefinition for StoredMetaModelConfigurationV2 {
     fn memory_version() -> MemoryVersion {
         MemoryVersion::new(2)
     }
@@ -1045,12 +1186,32 @@ impl MemoryDefinition for StoredMetaModelConfiguration {
     }
 }
 
+/// A Layer and aspect's native model is the Model of that rank in the
+/// aspect's family.
+impl UpgradeFrom<StoredMetaModelConfigurationV2> for StoredMetaModelConfiguration {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: StoredMetaModelConfigurationV2) -> Decision<Self, Self::Refusal> {
+        let ModelOfLayerAndAspect {
+            layer,
+            aspect,
+            native,
+        } = previous.model;
+        Decision::Ready(Self {
+            model: ConfigureModel {
+                model: layer.model_in(&aspect),
+                native,
+            },
+        })
+    }
+}
+
 /// A layer's model as Flow kept it before 0.35.19, keyed by its Layer
-/// alone and naming no aspect. It is read only by the v1-to-v2 upgrade of
+/// alone and naming no aspect. It is read only by the v1-to-v3 upgrade of
 /// the model family.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModelBeforeAspect {
-    layer: Layer,
+    layer: LayerBeforeModel,
     native: String,
 }
 
@@ -1061,7 +1222,7 @@ pub(crate) struct StoredMetaModelConfigurationV1 {
 
 impl EngineRecord for StoredMetaModelConfigurationV1 {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::layer_key(&self.model.layer))
+        RecordKey::new(self.model.layer.word())
     }
 }
 
@@ -1077,8 +1238,8 @@ impl MemoryDefinition for StoredMetaModelConfigurationV1 {
 
 /// A layer's one model was the Psyche seat's: before 0.35.19 every
 /// configured model was a Claude model and only Psyche runs on Claude. Each
-/// is carried whole as that layer's Psyche model; Mind and Field have no
-/// model until one is declared for them.
+/// is carried whole as the Claude Model of that layer's rank; Mind and
+/// Field have no model until one is declared for them.
 impl UpgradeFrom<StoredMetaModelConfigurationV1> for StoredMetaModelConfiguration {
     type Refusal = std::convert::Infallible;
 
@@ -1086,8 +1247,7 @@ impl UpgradeFrom<StoredMetaModelConfigurationV1> for StoredMetaModelConfiguratio
         let ModelBeforeAspect { layer, native } = previous.model;
         Decision::Ready(Self {
             model: ConfigureModel {
-                layer,
-                aspect: Aspect::Psyche,
+                model: layer.model_in(&Aspect::Psyche),
                 native,
             },
         })
@@ -1106,6 +1266,7 @@ impl DescribesModelTable for StoredMetaModelConfiguration {
             FamilyName::new("flow-nexus-meta-model-configuration"),
             StoredMetaModelConfiguration::schema_hash(),
         )
+        .with_predecessor::<StoredMetaModelConfigurationV2>()
         .with_predecessor::<StoredMetaModelConfigurationV1>()
     }
 }
@@ -1148,6 +1309,36 @@ impl EngineRecord for StoredMetaInvestigationConfiguration {
     }
 }
 
+impl MemoryDefinition for StoredMetaInvestigationConfiguration {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(META_INVESTIGATION_CONFIGURATION_SCHEMA)
+    }
+}
+
+impl model_address::DefinedBeforeModel for StoredMetaInvestigationConfiguration {
+    fn version_before_model() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash_before_model() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-meta-investigation-configuration-v1")
+    }
+}
+
+crate::upgrades_before_model!(StoredMetaInvestigationConfiguration);
+
+impl model_address::RemodelsAddresses for StoredMetaInvestigationConfiguration {
+    fn remodel(&mut self) {
+        self.investigation.remodel();
+    }
+}
+
+impl model_address::KeptBeforeModel for StoredMetaInvestigationConfiguration {}
+
 trait DescribesInvestigationTable {
     fn descriptor() -> TableDescriptor<StoredMetaInvestigationConfiguration>;
 }
@@ -1159,6 +1350,7 @@ impl DescribesInvestigationTable for StoredMetaInvestigationConfiguration {
             FamilyName::new(META_INVESTIGATION_CONFIGURATION_FAMILY),
             SchemaHash::for_label(META_INVESTIGATION_CONFIGURATION_SCHEMA),
         )
+        .with_predecessor::<model_address::BeforeModel<Self>>()
     }
 }
 
@@ -1201,9 +1393,35 @@ impl EngineRecord for StoredMetaHarnessFlagsConfiguration {
     }
 }
 
+impl model_address::DefinedBeforeModel for StoredMetaHarnessFlagsConfiguration {
+    fn version_before_model() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash_before_model() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-meta-harness-flags-configuration-v1")
+    }
+}
+
+crate::upgrades_before_model!(StoredMetaHarnessFlagsConfiguration);
+
+impl model_address::RemodelsAddresses for StoredMetaHarnessFlagsConfiguration {
+    fn remodel(&mut self) {
+        self.configured.remodel();
+    }
+}
+
+impl model_address::KeptBeforeModel for StoredMetaHarnessFlagsConfiguration {
+    fn key_before_model(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key_before_model(
+            &self.configured.address,
+        ))
+    }
+}
+
 impl MemoryDefinition for StoredMetaHarnessFlagsConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
+        MemoryVersion::new(2)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -1222,6 +1440,7 @@ impl DescribesHarnessFlagsTable for StoredMetaHarnessFlagsConfiguration {
             FamilyName::new(META_HARNESS_FLAGS_CONFIGURATION_FAMILY),
             Self::schema_hash(),
         )
+        .with_predecessor::<model_address::BeforeModel<Self>>()
     }
 }
 
@@ -1237,6 +1456,36 @@ impl EngineRecord for StoredMetaHeartbeatConfiguration {
     }
 }
 
+impl MemoryDefinition for StoredMetaHeartbeatConfiguration {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(META_HEARTBEAT_CONFIGURATION_SCHEMA)
+    }
+}
+
+impl model_address::DefinedBeforeModel for StoredMetaHeartbeatConfiguration {
+    fn version_before_model() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash_before_model() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-meta-heartbeat-configuration-v1")
+    }
+}
+
+crate::upgrades_before_model!(StoredMetaHeartbeatConfiguration);
+
+impl model_address::RemodelsAddresses for StoredMetaHeartbeatConfiguration {
+    fn remodel(&mut self) {
+        self.heartbeat.remodel();
+    }
+}
+
+impl model_address::KeptBeforeModel for StoredMetaHeartbeatConfiguration {}
+
 trait DescribesHeartbeatTable {
     fn descriptor() -> TableDescriptor<StoredMetaHeartbeatConfiguration>;
 }
@@ -1248,6 +1497,7 @@ impl DescribesHeartbeatTable for StoredMetaHeartbeatConfiguration {
             FamilyName::new(META_HEARTBEAT_CONFIGURATION_FAMILY),
             SchemaHash::for_label(META_HEARTBEAT_CONFIGURATION_SCHEMA),
         )
+        .with_predecessor::<model_address::BeforeModel<Self>>()
     }
 }
 
@@ -1281,9 +1531,34 @@ impl EngineRecord for StoredHeartbeatStanding {
         RecordKey::new(FlowStore::address_record_key(&self.address))
     }
 }
+
+impl model_address::DefinedBeforeModel for StoredHeartbeatStanding {
+    fn version_before_model() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash_before_model() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-heartbeat-standing-v1")
+    }
+}
+
+crate::upgrades_before_model!(StoredHeartbeatStanding);
+
+impl model_address::RemodelsAddresses for StoredHeartbeatStanding {
+    fn remodel(&mut self) {
+        self.address.remodel();
+    }
+}
+
+impl model_address::KeptBeforeModel for StoredHeartbeatStanding {
+    fn key_before_model(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key_before_model(&self.address))
+    }
+}
+
 impl MemoryDefinition for StoredHeartbeatStanding {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
+        MemoryVersion::new(2)
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(HEARTBEAT_STANDING_SCHEMA)
@@ -1299,6 +1574,7 @@ impl DescribesHeartbeatStandingTable for StoredHeartbeatStanding {
             FamilyName::new(HEARTBEAT_STANDING_FAMILY),
             Self::schema_hash(),
         )
+        .with_predecessor::<model_address::BeforeModel<Self>>()
     }
 }
 
@@ -1318,13 +1594,40 @@ impl EngineRecord for StoredMetaLeaveOutConfiguration {
     }
 }
 
-impl MemoryDefinition for StoredMetaLeaveOutConfiguration {
-    fn memory_version() -> MemoryVersion {
+impl model_address::DefinedBeforeModel for StoredMetaLeaveOutConfiguration {
+    fn version_before_model() -> MemoryVersion {
         MemoryVersion::new(2)
     }
 
-    fn schema_hash() -> SchemaHash {
+    fn schema_hash_before_model() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v2")
+    }
+}
+
+crate::upgrades_before_model!(StoredMetaLeaveOutConfiguration);
+
+impl model_address::RemodelsAddresses for StoredMetaLeaveOutConfiguration {
+    fn remodel(&mut self) {
+        self.leave_out.remodel();
+    }
+}
+
+impl model_address::KeptBeforeModel for StoredMetaLeaveOutConfiguration {
+    fn key_before_model(&self) -> RecordKey {
+        RecordKey::new(FlowStore::leave_out_record_key_before_model(
+            &self.leave_out.address,
+            &self.leave_out.harness_kind,
+        ))
+    }
+}
+
+impl MemoryDefinition for StoredMetaLeaveOutConfiguration {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(3)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v3")
     }
 }
 
@@ -1344,20 +1647,22 @@ pub(crate) struct StoredMetaLeaveOutConfigurationV1 {
 
 impl EngineRecord for StoredMetaLeaveOutConfigurationV1 {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.leave_out.address))
+        RecordKey::new(FlowStore::address_record_key_before_model(
+            &self.leave_out.address,
+        ))
     }
 }
 
-/// The model a seat runs is the one configured for its Address's layer and
-/// aspect, named exactly; nothing else is launched.
+/// The native model a seat runs is the one configured for its Address's
+/// Model, named exactly; nothing else is launched.
 pub(crate) trait NamesConfiguredModel {
-    /// The model configured for the Address's layer and aspect, if any.
+    /// The native model configured for the Address's Model, if any.
     fn configured_model(&self, address: &Address) -> Result<Option<String>, StoreError>;
 }
 
 impl NamesConfiguredModel for FlowStore {
     fn configured_model(&self, address: &Address) -> Result<Option<String>, StoreError> {
-        let key = RecordKey::new(FlowStore::model_record_key(&address.layer, &address.aspect));
+        let key = RecordKey::new(FlowStore::model_record_key(&address.model));
         Ok(self
             .engine
             .match_records(QueryPlan::key(self.meta_configuration_tables.models, key))?
@@ -1689,13 +1994,33 @@ impl EngineRecord for StoredLaunchAttempt {
     }
 }
 
-impl MemoryDefinition for StoredLaunchAttempt {
-    fn memory_version() -> MemoryVersion {
+impl model_address::DefinedBeforeModel for StoredLaunchAttempt {
+    fn version_before_model() -> MemoryVersion {
         MemoryVersion::new(4)
     }
 
-    fn schema_hash() -> SchemaHash {
+    fn schema_hash_before_model() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-launch-attempt-v4")
+    }
+}
+
+crate::upgrades_before_model!(StoredLaunchAttempt);
+
+impl model_address::RemodelsAddresses for StoredLaunchAttempt {
+    fn remodel(&mut self) {
+        self.attempt.remodel();
+    }
+}
+
+impl model_address::KeptBeforeModel for StoredLaunchAttempt {}
+
+impl MemoryDefinition for StoredLaunchAttempt {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(5)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-launch-attempt-v5")
     }
 }
 
@@ -3526,6 +3851,8 @@ pub enum StoreError {
     LogicalDeliveryUpgrade(String),
     #[error("the model family could not be upgraded: {0}")]
     ModelUpgrade(String),
+    #[error("an Address-bearing family could not be upgraded to model addresses: {0}")]
+    ModelAddressUpgrade(String),
     #[error("the Nexus configuration family could not be upgraded: {0}")]
     NexusUpgrade(String),
     #[error("the delivery configuration family could not be upgraded: {0}")]
@@ -3594,8 +3921,10 @@ trait UpgradesFlowFamilies {
         &mut self,
         descriptor: TableDescriptor<StoredMetaflow>,
     ) -> Result<TableReference<StoredMetaflow>, StoreError>;
-    /// A store before 0.35.19 keeps one model per Layer; each is carried as
-    /// that layer's Psyche model and re-keyed by its Layer and Aspect.
+    /// A store before 0.35.19 keeps one model per Layer, and before 0.52.0
+    /// one per Layer and Aspect; each is carried as the Model of its
+    /// Layer's rank in its aspect's family (Psyche for the first) and
+    /// re-keyed by that Model.
     fn upgraded_models(
         &mut self,
         descriptor: TableDescriptor<StoredMetaModelConfiguration>,
@@ -3649,38 +3978,84 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<StoredMetaModelConfiguration>,
     ) -> Result<TableReference<StoredMetaModelConfiguration>, StoreError> {
-        let table = match self
-            .upgrade_table::<StoredMetaModelConfigurationV1, StoredMetaModelConfiguration>(
+        let before_aspect = TableDescriptor::<StoredMetaModelConfigurationV1>::new(
+            META_MODEL_CONFIGURATION_TABLE_NAME,
+            FamilyName::new("flow-nexus-meta-model-configuration"),
+            StoredMetaModelConfigurationV1::schema_hash(),
+        )
+        .family_identity();
+        let held_before_aspect = self
+            .catalog()
+            .family_identity(&META_MODEL_CONFIGURATION_TABLE_NAME)
+            == Some(&before_aspect);
+        let upgrade = if held_before_aspect {
+            self.upgrade_table::<StoredMetaModelConfigurationV1, StoredMetaModelConfiguration>(
                 descriptor,
-            ) {
+            )
+        } else {
+            self.upgrade_table::<StoredMetaModelConfigurationV2, StoredMetaModelConfiguration>(
+                descriptor,
+            )
+        };
+        let table = match upgrade {
             UpgradeOutcome::Upgraded(receipt) => receipt.table(),
-            UpgradeOutcome::AlreadyCurrent(table) => table,
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
             UpgradeOutcome::Failed(failure) => {
                 return Err(StoreError::ModelUpgrade(format!("{failure:?}")));
             }
         };
-        // The upgrade carries each row under the key it was stored by. A
-        // row still under its Layer alone moves to its Layer and Aspect in
-        // one commit. The open runs on a staged copy, so the store never
-        // holds the upgrade without the move.
+        // The upgrade carries each row under the key it was stored by: its
+        // Layer alone before 0.35.19, its Layer and aspect before 0.52.0.
+        // Each moves to its Model in one commit; two aspects whose Layer
+        // named one Model must have named one native model. The open runs
+        // on a staged copy, so the store never holds the upgrade without
+        // the move.
         let mut commit = self.begin_atomic_commit();
-        let mut moved = false;
-        for row in self.match_records(QueryPlan::all(table))?.records() {
-            let layer_key = RecordKey::new(FlowStore::layer_key(&row.model.layer));
-            if self
-                .match_records(QueryPlan::key(table, layer_key.clone()))?
-                .records()
-                .is_empty()
-            {
-                continue;
+        let mut kept: Vec<StoredMetaModelConfiguration> = Vec::new();
+        for layer in [
+            LayerBeforeModel::Primary,
+            LayerBeforeModel::Secondary,
+            LayerBeforeModel::Tertiary,
+            LayerBeforeModel::Quaternary,
+        ] {
+            let mut keys = vec![layer.word().to_owned()];
+            for aspect in [Aspect::Psyche, Aspect::Mind, Aspect::Field] {
+                keys.push(format!(
+                    "{}:{}",
+                    layer.word(),
+                    FlowStore::aspect_key(&aspect)
+                ));
             }
-            commit = commit.retract(table, layer_key).assert(table, row.clone());
-            moved = true;
+            for key in keys {
+                let key = RecordKey::new(key);
+                if let Some(row) = self
+                    .match_records(QueryPlan::key(table, key.clone()))?
+                    .records()
+                    .first()
+                    .cloned()
+                {
+                    commit = commit.retract(table, key);
+                    match kept.iter().find(|held| held.model.model == row.model.model) {
+                        Some(held) if held.model.native != row.model.native => {
+                            return Err(StoreError::ModelUpgrade(format!(
+                                "{:?} is configured both {} and {}",
+                                row.model.model, held.model.native, row.model.native
+                            )));
+                        }
+                        Some(_) => {}
+                        None => kept.push(row),
+                    }
+                }
+            }
         }
-        if moved {
-            self.commit_atomic(commit)?;
+        if kept.is_empty() {
+            return Ok(table);
         }
+        for row in kept {
+            commit = commit.assert(table, row);
+        }
+        self.commit_atomic(commit)?;
         Ok(table)
     }
 
@@ -3688,238 +4063,255 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<StoredMetaLeaveOutConfiguration>,
     ) -> Result<TableReference<StoredMetaLeaveOutConfiguration>, StoreError> {
-        let table = match self
-            .upgrade_table::<StoredMetaLeaveOutConfigurationV1, StoredMetaLeaveOutConfiguration>(
-                descriptor,
-            ) {
-            UpgradeOutcome::Upgraded(receipt) => receipt.table(),
-            UpgradeOutcome::AlreadyCurrent(table) => table,
-            UpgradeOutcome::Refused(refusal) => {
-                return Err(StoreError::LeaveOutUpgrade {
-                    entry: refusal.key().to_owned_string(),
-                    reason: refusal.reason().clone(),
-                });
+        self.upgraded_before_model(descriptor, |engine, descriptor| {
+            let table = match engine
+                .upgrade_table::<StoredMetaLeaveOutConfigurationV1, StoredMetaLeaveOutConfiguration>(
+                    descriptor,
+                ) {
+                UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+                UpgradeOutcome::AlreadyCurrent(table) => table,
+                UpgradeOutcome::Refused(refusal) => {
+                    return Err(StoreError::LeaveOutUpgrade {
+                        entry: refusal.key().to_owned_string(),
+                        reason: refusal.reason().clone(),
+                    });
+                }
+                UpgradeOutcome::Failed(failure) => {
+                    return Err(StoreError::LeaveOutUpgradeFailed(format!("{failure:?}")));
+                }
+            };
+            // The upgrade carries each row under the key it was stored by. A
+            // row still under its Address alone moves to its Address and
+            // harness in one commit. The open runs on a staged copy, so the
+            // store never holds the upgrade without the move.
+            let mut commit = engine.begin_atomic_commit();
+            let mut moved = false;
+            for row in engine.match_records(QueryPlan::all(table))?.records() {
+                let address_key = RecordKey::new(FlowStore::address_record_key_before_model(
+                    &row.leave_out.address,
+                ));
+                if engine
+                    .match_records(QueryPlan::key(table, address_key.clone()))?
+                    .records()
+                    .is_empty()
+                {
+                    continue;
+                }
+                // A row kept under its Address alone was archived before
+                // 0.52.0: its Addresses are read as Models as it moves.
+                let mut remodelled = row.clone();
+                model_address::RemodelsAddresses::remodel(&mut remodelled);
+                commit = commit
+                    .retract(table, address_key)
+                    .assert(table, remodelled);
+                moved = true;
             }
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::LeaveOutUpgradeFailed(format!("{failure:?}")));
+            if moved {
+                engine.commit_atomic(commit)?;
             }
-        };
-        // The upgrade carries each row under the key it was stored by. A
-        // row still under its Address alone moves to its Address and
-        // harness in one commit. The open runs on a staged copy, so the
-        // store never holds the upgrade without the move.
-        let mut commit = self.begin_atomic_commit();
-        let mut moved = false;
-        for row in self.match_records(QueryPlan::all(table))?.records() {
-            let address_key = RecordKey::new(FlowStore::address_record_key(&row.leave_out.address));
-            if self
-                .match_records(QueryPlan::key(table, address_key.clone()))?
-                .records()
-                .is_empty()
-            {
-                continue;
-            }
-            commit = commit
-                .retract(table, address_key)
-                .assert(table, row.clone());
-            moved = true;
-        }
-        if moved {
-            self.commit_atomic(commit)?;
-        }
-        Ok(table)
+            Ok(table)
+        })
     }
 
     fn upgraded_metaflows(
         &mut self,
         descriptor: TableDescriptor<StoredMetaflow>,
     ) -> Result<TableReference<StoredMetaflow>, StoreError> {
-        let from_v4 = descriptor.clone();
-        match self.upgrade_table::<StoredMetaflowV5, StoredMetaflow>(descriptor) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
-            }
-        }
-        // v4 predates stable queue identities; older families are tried only
-        // after each newer archived shape declines admission.
-        let from_v3 = from_v4.clone();
-        let from_v2 = from_v4.clone();
-        let from_v1 = from_v4.clone();
-        match self.upgrade_table::<StoredMetaflowV4, StoredMetaflow>(from_v4) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
-            }
-        }
-        // The newest edge is tried first and an admission refusal writes
-        // nothing; legacy rows are converted only by their matching mirror.
-        match self.upgrade_table::<StoredMetaflowV3, StoredMetaflow>(from_v3) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
-            }
-        }
-        match self.upgrade_table::<StoredMetaflowV2, StoredMetaflow>(from_v2) {
-            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission =>
-            {
-                match self.upgrade_table::<StoredMetaflowV1, StoredMetaflow>(from_v1) {
-                    UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-                    UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-                    UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-                    UpgradeOutcome::Failed(failure) => {
-                        Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
-                    }
+        self.upgraded_before_model(descriptor, |engine, descriptor| {
+            let from_v4 = descriptor.clone();
+            match engine.upgrade_table::<StoredMetaflowV5, StoredMetaflow>(descriptor) {
+                UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+                UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure)
+                    if failure.phase() == sema_engine::StoragePhase::Admission => {}
+                UpgradeOutcome::Failed(failure) => {
+                    return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
                 }
             }
-            UpgradeOutcome::Failed(failure) => {
-                Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
+            // v4 predates stable queue identities; older families are tried only
+            // after each newer archived shape declines admission.
+            let from_v3 = from_v4.clone();
+            let from_v2 = from_v4.clone();
+            let from_v1 = from_v4.clone();
+            match engine.upgrade_table::<StoredMetaflowV4, StoredMetaflow>(from_v4) {
+                UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+                UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure)
+                    if failure.phase() == sema_engine::StoragePhase::Admission => {}
+                UpgradeOutcome::Failed(failure) => {
+                    return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
+                }
             }
-        }
+            // The newest edge is tried first and an admission refusal writes
+            // nothing; legacy rows are converted only by their matching mirror.
+            match engine.upgrade_table::<StoredMetaflowV3, StoredMetaflow>(from_v3) {
+                UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+                UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure)
+                    if failure.phase() == sema_engine::StoragePhase::Admission => {}
+                UpgradeOutcome::Failed(failure) => {
+                    return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
+                }
+            }
+            match engine.upgrade_table::<StoredMetaflowV2, StoredMetaflow>(from_v2) {
+                UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure)
+                    if failure.phase() == sema_engine::StoragePhase::Admission =>
+                {
+                    match engine.upgrade_table::<StoredMetaflowV1, StoredMetaflow>(from_v1) {
+                        UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                        UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                        UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                        UpgradeOutcome::Failed(failure) => {
+                            Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
+                        }
+                    }
+                }
+                UpgradeOutcome::Failed(failure) => {
+                    Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
+                }
+            }
+        })
     }
 
     fn upgraded_address_holds(
         &mut self,
         descriptor: TableDescriptor<address_hold::AddressHold>,
     ) -> Result<TableReference<address_hold::AddressHold>, StoreError> {
-        let from_v3 = descriptor.clone();
-        match self
-            .upgrade_table::<address_hold::AddressHoldV4, address_hold::AddressHold>(descriptor)
-        {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
-            }
-        }
-        let from_v2 = from_v3.clone();
-        let from_v1 = from_v3.clone();
-        match self.upgrade_table::<address_hold::AddressHoldV3, address_hold::AddressHold>(from_v3)
-        {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
-            }
-        }
-        match self.upgrade_table::<address_hold::AddressHoldV2, address_hold::AddressHold>(from_v2)
-        {
-            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission =>
+        self.upgraded_before_model(descriptor, |engine, descriptor| {
+            let from_v3 = descriptor.clone();
+            match engine
+                .upgrade_table::<address_hold::AddressHoldV4, address_hold::AddressHold>(descriptor)
             {
-                match self.upgrade_table::<address_hold::AddressHoldV1, address_hold::AddressHold>(
-                    from_v1,
-                ) {
-                    UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-                    UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-                    UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-                    UpgradeOutcome::Failed(failure) => {
-                        Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
-                    }
+                UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+                UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure)
+                    if failure.phase() == sema_engine::StoragePhase::Admission => {}
+                UpgradeOutcome::Failed(failure) => {
+                    return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
                 }
             }
-            UpgradeOutcome::Failed(failure) => {
-                Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
+            let from_v2 = from_v3.clone();
+            let from_v1 = from_v3.clone();
+            match engine
+                .upgrade_table::<address_hold::AddressHoldV3, address_hold::AddressHold>(from_v3)
+            {
+                UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+                UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure)
+                    if failure.phase() == sema_engine::StoragePhase::Admission => {}
+                UpgradeOutcome::Failed(failure) => {
+                    return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
+                }
             }
-        }
+            match engine
+                .upgrade_table::<address_hold::AddressHoldV2, address_hold::AddressHold>(from_v2)
+            {
+                UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure)
+                    if failure.phase() == sema_engine::StoragePhase::Admission =>
+                {
+                    match engine
+                        .upgrade_table::<address_hold::AddressHoldV1, address_hold::AddressHold>(
+                            from_v1,
+                        ) {
+                        UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                        UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                        UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                        UpgradeOutcome::Failed(failure) => {
+                            Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
+                        }
+                    }
+                }
+                UpgradeOutcome::Failed(failure) => {
+                    Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
+                }
+            }
+        })
     }
 
     fn upgraded_send_calls(
         &mut self,
         descriptor: TableDescriptor<crate::generated::send_tool::SendCall>,
     ) -> Result<TableReference<crate::generated::send_tool::SendCall>, StoreError> {
-        // A v5 family upgrades from v5; one refused at admission names an
-        // older family, tried next.
-        match self.upgrade_table::<send_call::SendCallV5, crate::generated::send_tool::SendCall>(
-            descriptor.clone(),
-        ) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::SendCallUpgrade(format!("{failure:?}")));
-            }
-        }
-        match self.upgrade_table::<send_call::SendCallV4, crate::generated::send_tool::SendCall>(
-            descriptor.clone(),
-        ) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::SendCallUpgrade(format!("{failure:?}")));
-            }
-        }
-        match self.upgrade_table::<send_call::SendCallV3, crate::generated::send_tool::SendCall>(
-            descriptor.clone(),
-        ) {
-            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission =>
-            {
-                match self.upgrade_table::<send_call::SendCallV2, crate::generated::send_tool::SendCall>(descriptor.clone()) {
-            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-            UpgradeOutcome::Refused(refusal) => Err(StoreError::SendCallUpgrade(format!(
-                "call {:?} was refused for an ended recipient, which no longer exists",
-                refusal.key()
-            ))),
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission =>
-            {
-                match self
-                    .upgrade_table::<send_call::SendCallV1, crate::generated::send_tool::SendCall>(
-                        descriptor,
-                    ) {
-                    UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-                    UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-                    UpgradeOutcome::Refused(refusal) => Err(StoreError::SendCallUpgrade(format!(
-                        "call {:?} was refused for an ended recipient, which no longer exists",
-                        refusal.key()
-                    ))),
-                    UpgradeOutcome::Failed(failure) => {
-                        Err(StoreError::SendCallUpgrade(format!("{failure:?}")))
-                    }
+        self.upgraded_before_model(descriptor, |engine, descriptor| {
+            // A v5 family upgrades from v5; one refused at admission names an
+            // older family, tried next.
+            match engine.upgrade_table::<send_call::SendCallV5, crate::generated::send_tool::SendCall>(
+                descriptor.clone(),
+            ) {
+                UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+                UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure)
+                    if failure.phase() == sema_engine::StoragePhase::Admission => {}
+                UpgradeOutcome::Failed(failure) => {
+                    return Err(StoreError::SendCallUpgrade(format!("{failure:?}")));
                 }
             }
-                    UpgradeOutcome::Failed(failure) => {
-                        Err(StoreError::SendCallUpgrade(format!("{failure:?}")))
-                    }
+            match engine.upgrade_table::<send_call::SendCallV4, crate::generated::send_tool::SendCall>(
+                descriptor.clone(),
+            ) {
+                UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+                UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure)
+                    if failure.phase() == sema_engine::StoragePhase::Admission => {}
+                UpgradeOutcome::Failed(failure) => {
+                    return Err(StoreError::SendCallUpgrade(format!("{failure:?}")));
                 }
             }
-            UpgradeOutcome::Failed(failure) => Err(StoreError::SendCallUpgrade(format!("{failure:?}"))),
-        }
+            match engine.upgrade_table::<send_call::SendCallV3, crate::generated::send_tool::SendCall>(
+                descriptor.clone(),
+            ) {
+                UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure)
+                    if failure.phase() == sema_engine::StoragePhase::Admission =>
+                {
+                    match engine.upgrade_table::<send_call::SendCallV2, crate::generated::send_tool::SendCall>(descriptor.clone()) {
+                UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                UpgradeOutcome::Refused(refusal) => Err(StoreError::SendCallUpgrade(format!(
+                    "call {:?} was refused for an ended recipient, which no longer exists",
+                    refusal.key()
+                ))),
+                UpgradeOutcome::Failed(failure)
+                    if failure.phase() == sema_engine::StoragePhase::Admission =>
+                {
+                    match engine
+                        .upgrade_table::<send_call::SendCallV1, crate::generated::send_tool::SendCall>(
+                            descriptor,
+                        ) {
+                        UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                        UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                        UpgradeOutcome::Refused(refusal) => Err(StoreError::SendCallUpgrade(format!(
+                            "call {:?} was refused for an ended recipient, which no longer exists",
+                            refusal.key()
+                        ))),
+                        UpgradeOutcome::Failed(failure) => {
+                            Err(StoreError::SendCallUpgrade(format!("{failure:?}")))
+                        }
+                    }
+                }
+                        UpgradeOutcome::Failed(failure) => {
+                            Err(StoreError::SendCallUpgrade(format!("{failure:?}")))
+                        }
+                    }
+                }
+                UpgradeOutcome::Failed(failure) => Err(StoreError::SendCallUpgrade(format!("{failure:?}"))),
+            }
+        })
     }
 
     fn upgraded_flows(
@@ -4021,6 +4413,13 @@ impl UpgradesFlowFamilies for Engine {
         ),
         StoreError,
     > {
+        let held = self.held_before_model(&descriptor);
+        let before_model = TableDescriptor::<model_address::BeforeModel<StoredLaunchAttempt>>::new(
+            FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
+            FamilyName::new("flow-nexus-launch-attempt"),
+            <StoredLaunchAttempt as model_address::DefinedBeforeModel>::schema_hash_before_model(),
+        )
+        .family_identity();
         let predecessor = TableDescriptor::<StoredLaunchAttemptV1>::new(
             FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
             FamilyName::new("flow-nexus-launch-attempt"),
@@ -4059,6 +4458,10 @@ impl UpgradesFlowFamilies for Engine {
             self.upgrade_table::<StoredLaunchAttemptV1, StoredLaunchAttempt>(descriptor)
         } else if family.as_ref() == Some(&second_predecessor) {
             self.upgrade_table::<StoredLaunchAttemptV2, StoredLaunchAttempt>(descriptor)
+        } else if family.as_ref() == Some(&before_model) {
+            self.upgrade_table::<model_address::BeforeModel<StoredLaunchAttempt>, StoredLaunchAttempt>(
+                descriptor,
+            )
         } else {
             debug_assert!(
                 family.is_none()
@@ -4076,6 +4479,9 @@ impl UpgradesFlowFamilies for Engine {
                 return Err(StoreError::LaunchAttemptUpgrade(format!("{failure:?}")));
             }
         };
+        if held {
+            self.remodel_family(table)?;
+        }
         Ok((table, settlements))
     }
 }
@@ -4110,12 +4516,18 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
                 <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor(),
             )?,
             investigation: engine
-                .register_table(StoredMetaInvestigationConfiguration::descriptor())?,
+                .upgraded_before_model(StoredMetaInvestigationConfiguration::descriptor(), |engine, descriptor| {
+                Ok(engine.register_table(descriptor)?)
+            })?,
             default_minutes: engine
                 .register_table(StoredMetaDefaultMinutesConfiguration::descriptor())?,
             harness_flags: engine
-                .register_table(StoredMetaHarnessFlagsConfiguration::descriptor())?,
-            heartbeat: engine.register_table(StoredMetaHeartbeatConfiguration::descriptor())?,
+                .upgraded_before_model(StoredMetaHarnessFlagsConfiguration::descriptor(), |engine, descriptor| {
+                Ok(engine.register_table(descriptor)?)
+            })?,
+            heartbeat: engine.upgraded_before_model(StoredMetaHeartbeatConfiguration::descriptor(), |engine, descriptor| {
+                Ok(engine.register_table(descriptor)?)
+            })?,
             metaflows: engine.upgraded_metaflow_declarations(
                 <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor(),
             )?,
@@ -4373,10 +4785,19 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             thresholds: engine.register_table(meta_thresholds_descriptor)?,
             leave_outs: engine.upgraded_leave_out_defaults(meta_leave_outs_descriptor)?,
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
-            investigation: engine.register_table(meta_investigation_descriptor)?,
+            investigation: engine
+                .upgraded_before_model(meta_investigation_descriptor, |engine, descriptor| {
+                    Ok(engine.register_table(descriptor)?)
+                })?,
             default_minutes: engine.register_table(meta_default_minutes_descriptor)?,
-            harness_flags: engine.register_table(meta_harness_flags_descriptor)?,
-            heartbeat: engine.register_table(meta_heartbeat_descriptor)?,
+            harness_flags: engine
+                .upgraded_before_model(meta_harness_flags_descriptor, |engine, descriptor| {
+                    Ok(engine.register_table(descriptor)?)
+                })?,
+            heartbeat: engine
+                .upgraded_before_model(meta_heartbeat_descriptor, |engine, descriptor| {
+                    Ok(engine.register_table(descriptor)?)
+                })?,
             metaflows: engine.upgraded_metaflow_declarations(meta_metaflows_descriptor)?,
         };
         if !recognized {
@@ -4796,6 +5217,7 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-metaflow"),
             StoredMetaflow::schema_hash(),
         )
+        .with_predecessor::<model_address::BeforeModel<StoredMetaflow>>()
         .with_predecessor::<StoredMetaflowV5>()
         .with_predecessor::<StoredMetaflowV1>()
         .with_predecessor::<StoredMetaflowV2>()
@@ -4804,13 +5226,15 @@ impl OpensFlowStore for FlowStore {
         let metaflow_processes_descriptor = TableDescriptor::<StoredMetaflowProcess>::new(
             METAFLOW_PROCESS_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow-process"),
-            SchemaHash::for_label("flow-nexus-metaflow-process-v1"),
-        );
+            StoredMetaflowProcess::schema_hash(),
+        )
+        .with_predecessor::<model_address::BeforeModel<StoredMetaflowProcess>>();
         let metaflow_locks_descriptor = TableDescriptor::<StoredMetaflowLock>::new(
             METAFLOW_LOCK_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow-lock"),
-            SchemaHash::for_label("flow-nexus-metaflow-lock-v1"),
-        );
+            StoredMetaflowLock::schema_hash(),
+        )
+        .with_predecessor::<model_address::BeforeModel<StoredMetaflowLock>>();
         let configuration_descriptor = TableDescriptor::<FlowStoreConfiguration>::new(
             FLOW_CONFIGURATION_TABLE_NAME,
             FamilyName::new("flow-nexus-configuration"),
@@ -4833,7 +5257,8 @@ impl OpensFlowStore for FlowStore {
         )
         .with_predecessor::<StoredLaunchAttemptV1>()
         .with_predecessor::<StoredLaunchAttemptV2>()
-        .with_predecessor::<StoredLaunchAttemptV3>();
+        .with_predecessor::<StoredLaunchAttemptV3>()
+        .with_predecessor::<model_address::BeforeModel<StoredLaunchAttempt>>();
         let launch_panes_descriptor = TableDescriptor::<StoredLaunchPane>::new(
             FLOW_LAUNCH_PANE_TABLE_NAME,
             FamilyName::new("flow-nexus-launch-pane"),
@@ -4964,8 +5389,14 @@ impl OpensFlowStore for FlowStore {
         let native_owner_proofs = engine.register_table(native_owner_proofs_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
         let metaflows = engine.upgraded_metaflows(metaflows_descriptor)?;
-        let metaflow_processes = engine.register_table(metaflow_processes_descriptor)?;
-        let metaflow_locks = engine.register_table(metaflow_locks_descriptor)?;
+        let metaflow_processes = engine
+            .upgraded_before_model(metaflow_processes_descriptor, |engine, descriptor| {
+                Ok(engine.register_table(descriptor)?)
+            })?;
+        let metaflow_locks = engine
+            .upgraded_before_model(metaflow_locks_descriptor, |engine, descriptor| {
+                Ok(engine.register_table(descriptor)?)
+            })?;
         let configuration = engine.register_table(configuration_descriptor)?;
         let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
         let herdr_routes = engine.register_table(herdr_routes_descriptor)?;
@@ -4986,8 +5417,14 @@ impl OpensFlowStore for FlowStore {
         let opened_threads = engine.register_table(opened_threads_descriptor)?;
         let send_calls = engine.upgraded_send_calls(send_calls_descriptor)?;
         let launch_cleanups = engine.register_table(launch_cleanups_descriptor)?;
-        let compactions = engine.register_table(compactions_descriptor)?;
-        let reminders = engine.register_table(reminders_descriptor)?;
+        let compactions = engine
+            .upgraded_before_model(compactions_descriptor, |engine, descriptor| {
+                Ok(engine.register_table(descriptor)?)
+            })?;
+        let reminders = engine
+            .upgraded_before_model(reminders_descriptor, |engine, descriptor| {
+                Ok(engine.register_table(descriptor)?)
+            })?;
         let successor_intents = successor::UpgradesSuccessorIntents::upgraded_successor_intents(
             &mut engine,
             successor_intents_descriptor,
@@ -4997,7 +5434,10 @@ impl OpensFlowStore for FlowStore {
         let send_outcomes = SendOutcomeTables::register(&mut engine, send_outcome_descriptors)?;
         let logical_deliveries =
             LogicalDeliveryTables::register(&mut engine, logical_delivery_descriptors)?;
-        let heartbeat_standings = engine.register_table(heartbeat_standing_descriptor)?;
+        let heartbeat_standings = engine
+            .upgraded_before_model(heartbeat_standing_descriptor, |engine, descriptor| {
+                Ok(engine.register_table(descriptor)?)
+            })?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -5075,22 +5515,31 @@ impl OpensFlowStore for FlowStore {
                 FamilyName::new("flow-nexus-metaflow"),
                 StoredMetaflow::schema_hash(),
             )
+            .with_predecessor::<model_address::BeforeModel<StoredMetaflow>>()
             .with_predecessor::<StoredMetaflowV5>()
             .with_predecessor::<StoredMetaflowV1>()
             .with_predecessor::<StoredMetaflowV2>()
             .with_predecessor::<StoredMetaflowV3>()
             .with_predecessor::<StoredMetaflowV4>(),
         )?;
-        let metaflow_processes = engine.register_table(TableDescriptor::new(
-            METAFLOW_PROCESS_TABLE_NAME,
-            FamilyName::new("flow-nexus-metaflow-process"),
-            SchemaHash::for_label("flow-nexus-metaflow-process-v1"),
-        ))?;
-        let metaflow_locks = engine.register_table(TableDescriptor::new(
-            METAFLOW_LOCK_TABLE_NAME,
-            FamilyName::new("flow-nexus-metaflow-lock"),
-            SchemaHash::for_label("flow-nexus-metaflow-lock-v1"),
-        ))?;
+        let metaflow_processes = engine.upgraded_before_model(
+            TableDescriptor::<StoredMetaflowProcess>::new(
+                METAFLOW_PROCESS_TABLE_NAME,
+                FamilyName::new("flow-nexus-metaflow-process"),
+                StoredMetaflowProcess::schema_hash(),
+            )
+            .with_predecessor::<model_address::BeforeModel<StoredMetaflowProcess>>(),
+            |engine, descriptor| Ok(engine.register_table(descriptor)?),
+        )?;
+        let metaflow_locks = engine.upgraded_before_model(
+            TableDescriptor::<StoredMetaflowLock>::new(
+                METAFLOW_LOCK_TABLE_NAME,
+                FamilyName::new("flow-nexus-metaflow-lock"),
+                StoredMetaflowLock::schema_hash(),
+            )
+            .with_predecessor::<model_address::BeforeModel<StoredMetaflowLock>>(),
+            |engine, descriptor| Ok(engine.register_table(descriptor)?),
+        )?;
         let configuration = engine.register_table(TableDescriptor::new(
             FLOW_CONFIGURATION_TABLE_NAME,
             FamilyName::new("flow-nexus-configuration"),
@@ -5148,7 +5597,8 @@ impl OpensFlowStore for FlowStore {
             )
             .with_predecessor::<StoredLaunchAttemptV1>()
             .with_predecessor::<StoredLaunchAttemptV2>()
-            .with_predecessor::<StoredLaunchAttemptV3>(),
+            .with_predecessor::<StoredLaunchAttemptV3>()
+            .with_predecessor::<model_address::BeforeModel<StoredLaunchAttempt>>(),
             quarantined_launch_attempts,
         )?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
@@ -5171,11 +5621,13 @@ impl OpensFlowStore for FlowStore {
         let launch_cleanups = engine.register_table(
             <launch_cleanup::LaunchCleanup as launch_cleanup::DescribesLaunchCleanupTable>::descriptor(),
         )?;
-        let compactions = engine.register_table(
+        let compactions = engine.upgraded_before_model(
             <compaction::Compaction as compaction::DescribesCompactionTable>::descriptor(),
+            |engine, descriptor| Ok(engine.register_table(descriptor)?),
         )?;
-        let reminders = engine.register_table(
+        let reminders = engine.upgraded_before_model(
             <reminder::Reminder as reminder::DescribesReminderTable>::descriptor(),
+            |engine, descriptor| Ok(engine.register_table(descriptor)?),
         )?;
         let successor_intents = successor::UpgradesSuccessorIntents::upgraded_successor_intents(
             &mut engine,
@@ -5187,7 +5639,10 @@ impl OpensFlowStore for FlowStore {
             SendOutcomeTables::register(&mut engine, SendOutcomeTables::descriptors())?;
         let logical_deliveries =
             LogicalDeliveryTables::register(&mut engine, LogicalDeliveryTables::descriptors())?;
-        let heartbeat_standings = engine.register_table(StoredHeartbeatStanding::descriptor())?;
+        let heartbeat_standings = engine.upgraded_before_model(
+            StoredHeartbeatStanding::descriptor(),
+            |engine, descriptor| Ok(engine.register_table(descriptor)?),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -6009,7 +6464,7 @@ impl AdoptsLegacyRoles for FlowStore {
                         flow_id: flow.flow_id.clone(),
                         aspect: attempt.launch_profile.address.aspect.clone(),
                         power_level: <crate::RunningNexus as crate::waking::WakePolicy>::power_of(
-                            &attempt.launch_profile.address.layer,
+                            &attempt.launch_profile.address.model,
                         ),
                         model_name: attempt.launch_profile.model_name.clone(),
                     })
@@ -6095,12 +6550,7 @@ impl RegistersExistingFlow for FlowStore {
         if role.flow_id != flow_node.flow_id || role.aspect != address.aspect {
             return Ok(ExistingSeatAdoption::Refused(Refusal::RoleMismatch));
         }
-        let expected_power = match address.layer {
-            Layer::Primary => PowerLevel::High,
-            Layer::Secondary => PowerLevel::Medium,
-            Layer::Tertiary => PowerLevel::Low,
-            Layer::Quaternary => PowerLevel::UltraLow,
-        };
+        let expected_power = address.model.power();
         if role.power_level != expected_power
             || self.configured_model(&address)?.as_deref() != Some(role.model_name.as_str())
         {
@@ -7573,7 +8023,7 @@ impl EarlierLaunchAttemptRows {
                 address: Address {
                     aspect: Aspect::Mind,
                     topic: "flow".into(),
-                    layer: Layer::Secondary,
+                    model: Model::Sol,
                 },
                 power_level: PowerLevel::Medium,
                 harness_kind: HarnessKind::Codex,
@@ -7760,47 +8210,64 @@ impl RestoresZeroThirtyFourFamily for StoredLaunchAttemptV1 {
 
 /// Store identity, catalogue validation and committed-record operations.
 pub(crate) trait ReadsFlowMemory {
-    fn layer_key(layer: &Layer) -> &'static str {
-        match layer {
-            Layer::Primary => "Primary",
-            Layer::Secondary => "Secondary",
-            Layer::Tertiary => "Tertiary",
-            Layer::Quaternary => "Quaternary",
-        }
-    }
-
-    /// A configured model's key: its layer and aspect.
-    fn model_record_key(layer: &Layer, aspect: &Aspect) -> String {
-        let aspect = match aspect {
+    fn aspect_key(aspect: &Aspect) -> &'static str {
+        match aspect {
             Aspect::Psyche => "Psyche",
             Aspect::Mind => "Mind",
             Aspect::Field => "Field",
-        };
-        format!("{}:{aspect}", FlowStore::layer_key(layer))
+        }
+    }
+
+    /// A configured model's key: its Model.
+    fn model_record_key(model: &Model) -> String {
+        model.name().to_owned()
     }
 
     /// A leave-out default's key: its Address's key, then its harness.
     fn leave_out_record_key(address: &Address, harness_kind: &HarnessKind) -> String {
-        let harness = match harness_kind {
+        format!(
+            "{}:{}",
+            FlowStore::address_record_key(address),
+            FlowStore::harness_key(harness_kind)
+        )
+    }
+
+    /// A leave-out default's key as Flow kept it before 0.52.0.
+    fn leave_out_record_key_before_model(address: &Address, harness_kind: &HarnessKind) -> String {
+        format!(
+            "{}:{}",
+            FlowStore::address_record_key_before_model(address),
+            FlowStore::harness_key(harness_kind)
+        )
+    }
+
+    fn harness_key(harness_kind: &HarnessKind) -> &'static str {
+        match harness_kind {
             HarnessKind::Claude => "Claude",
             HarnessKind::Codex => "Codex",
-        };
-        format!("{}:{harness}", FlowStore::address_record_key(address))
+        }
     }
 
     fn address_record_key(address: &Address) -> String {
-        let aspect = match &address.aspect {
-            Aspect::Psyche => "Psyche",
-            Aspect::Mind => "Mind",
-            Aspect::Field => "Field",
-        };
-        let layer = match &address.layer {
-            Layer::Primary => "Primary",
-            Layer::Secondary => "Secondary",
-            Layer::Tertiary => "Tertiary",
-            Layer::Quaternary => "Quaternary",
-        };
-        format!("{aspect}:{}:{}:{layer}", address.topic.len(), address.topic)
+        format!(
+            "{}:{}:{}:{}",
+            FlowStore::aspect_key(&address.aspect),
+            address.topic.len(),
+            address.topic,
+            address.model.name()
+        )
+    }
+
+    /// The key Flow kept an Address's record under before 0.52.0, read from
+    /// the Address as it was archived then: its model a Layer's rank.
+    fn address_record_key_before_model(address: &Address) -> String {
+        format!(
+            "{}:{}:{}:{}",
+            FlowStore::aspect_key(&address.aspect),
+            address.topic.len(),
+            address.topic,
+            address.layer_word()
+        )
     }
 
     fn process_start(pid: i64) -> Option<(i64, i64)> {
@@ -7884,13 +8351,13 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-quarantined-launch-attempt",
                 "flow-nexus-quarantined-launch-attempt-v1",
             ),
-            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v6"),
+            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v7"),
             "flow_nexus_metaflow_processes" => (
                 "flow-nexus-metaflow-process",
-                "flow-nexus-metaflow-process-v1",
+                "flow-nexus-metaflow-process-v2",
             ),
             "flow_nexus_metaflow_locks" => {
-                ("flow-nexus-metaflow-lock", "flow-nexus-metaflow-lock-v1")
+                ("flow-nexus-metaflow-lock", "flow-nexus-metaflow-lock-v2")
             }
             "flow_nexus_deliveries" => ("flow-nexus-delivery", "flow-nexus-delivery-v1"),
             "flow_nexus_pane_leases" => ("flow-nexus-pane-lease", "flow-nexus-pane-lease-v1"),
@@ -7950,11 +8417,11 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_simplified_reply_bindings" => (
                 "flow-nexus-simplified-reply-binding",
-                "flow-nexus-simplified-reply-binding-v1",
+                "flow-nexus-simplified-reply-binding-v2",
             ),
             "flow_nexus_logical_delivery_purposes" => (
                 "flow-nexus-logical-delivery-purpose",
-                "flow-nexus-logical-delivery-purpose-v1",
+                "flow-nexus-logical-delivery-purpose-v2",
             ),
             "flow_nexus_heartbeat_standings" => {
                 (HEARTBEAT_STANDING_FAMILY, HEARTBEAT_STANDING_SCHEMA)
@@ -8009,11 +8476,11 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_queue_delivery_requests" => (
                 "flow-nexus-queue-delivery-request",
-                "flow-nexus-queue-delivery-request-v6",
+                "flow-nexus-queue-delivery-request-v7",
             ),
             "flow_nexus_queue_delivery_attempts" => (
                 "flow-nexus-queue-delivery-attempt",
-                "flow-nexus-queue-delivery-attempt-v7",
+                "flow-nexus-queue-delivery-attempt-v8",
             ),
             _ => return None,
         };
@@ -8023,6 +8490,103 @@ pub(crate) trait ReadsFlowMemory {
     /// A family registration this Flow opens: its current identity, a
     /// predecessor of a family the open upgrades, or a retired table the
     /// open drops.
+    /// The identity each Address-bearing family carried in a store Flow 0.51
+    /// wrote, which 0.52.0 upgrades on open.
+    fn flow_family_identity_before_model(table_name: &str) -> Option<(&'static str, SchemaHash)> {
+        use model_address::DefinedBeforeModel;
+        Some(match table_name {
+            "flow_nexus_metaflows" => (
+                "flow-nexus-metaflow",
+                StoredMetaflow::schema_hash_before_model(),
+            ),
+            "flow_nexus_metaflow_processes" => (
+                "flow-nexus-metaflow-process",
+                StoredMetaflowProcess::schema_hash_before_model(),
+            ),
+            "flow_nexus_metaflow_locks" => (
+                "flow-nexus-metaflow-lock",
+                StoredMetaflowLock::schema_hash_before_model(),
+            ),
+            "flow_nexus_launch_attempts" => (
+                "flow-nexus-launch-attempt",
+                StoredLaunchAttempt::schema_hash_before_model(),
+            ),
+            "flow_nexus_meta_investigation_configuration" => (
+                META_INVESTIGATION_CONFIGURATION_FAMILY,
+                StoredMetaInvestigationConfiguration::schema_hash_before_model(),
+            ),
+            "flow_nexus_meta_harness_flags_configuration" => (
+                META_HARNESS_FLAGS_CONFIGURATION_FAMILY,
+                StoredMetaHarnessFlagsConfiguration::schema_hash_before_model(),
+            ),
+            "flow_nexus_meta_heartbeat_configuration" => (
+                META_HEARTBEAT_CONFIGURATION_FAMILY,
+                StoredMetaHeartbeatConfiguration::schema_hash_before_model(),
+            ),
+            "flow_nexus_heartbeat_standings" => (
+                HEARTBEAT_STANDING_FAMILY,
+                StoredHeartbeatStanding::schema_hash_before_model(),
+            ),
+            "flow_nexus_meta_leave_out_configuration" => (
+                "flow-nexus-meta-leave-out-configuration",
+                StoredMetaLeaveOutConfiguration::schema_hash_before_model(),
+            ),
+            "flow_nexus_meta_metaflow_configuration" => (
+                metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
+                metaflow_declaration::StoredMetaMetaflowConfiguration::schema_hash_before_model(),
+            ),
+            "flow_nexus_compactions" => (
+                compaction::COMPACTION_FAMILY,
+                compaction::Compaction::schema_hash_before_model(),
+            ),
+            "flow_nexus_reminders" => (
+                reminder::REMINDER_FAMILY,
+                reminder::Reminder::schema_hash_before_model(),
+            ),
+            "flow_nexus_successor_intents" => (
+                successor::SUCCESSOR_INTENT_FAMILY,
+                successor::SuccessorIntent::schema_hash_before_model(),
+            ),
+            "flow_nexus_address_holds" => (
+                address_hold::ADDRESS_HOLD_FAMILY,
+                address_hold::AddressHold::schema_hash_before_model(),
+            ),
+            "flow_nexus_send_calls" => (
+                send_call::SEND_CALL_FAMILY,
+                crate::generated::send_tool::SendCall::schema_hash_before_model(),
+            ),
+            "flow_nexus_send_outcomes" => (
+                send_outcome::OUTCOME_FAMILY,
+                send_outcome::StoredSendOutcome::schema_hash_before_model(),
+            ),
+            "flow_nexus_logical_delivery_current" => (
+                "flow-nexus-logical-delivery-current",
+                logical_delivery::CurrentLogicalDelivery::schema_hash_before_model(),
+            ),
+            "flow_nexus_logical_delivery_events" => (
+                "flow-nexus-logical-delivery-event",
+                logical_delivery::LogicalDeliveryEvent::schema_hash_before_model(),
+            ),
+            "flow_nexus_simplified_reply_bindings" => (
+                "flow-nexus-simplified-reply-binding",
+                logical_delivery::SimplifiedReplyBinding::schema_hash_before_model(),
+            ),
+            "flow_nexus_logical_delivery_purposes" => (
+                "flow-nexus-logical-delivery-purpose",
+                logical_delivery::LogicalDeliveryPurpose::schema_hash_before_model(),
+            ),
+            "flow_nexus_queue_delivery_requests" => (
+                "flow-nexus-queue-delivery-request",
+                queue_delivery::StoredDeliveryRequest::schema_hash_before_model(),
+            ),
+            "flow_nexus_queue_delivery_attempts" => (
+                "flow-nexus-queue-delivery-attempt",
+                queue_delivery::QueueDeliveryAttempt::schema_hash_before_model(),
+            ),
+            _ => return None,
+        })
+    }
+
     fn is_current_flow_registration(table_key: &str, registration: &TableRegistration) -> bool {
         let identity = registration.identity();
         let matches = |family: &str, schema_hash: SchemaHash| {
@@ -8123,10 +8687,16 @@ pub(crate) trait ReadsFlowMemory {
                 ("flow-nexus-metaflow", StoredMetaflowV4::schema_hash()),
                 ("flow-nexus-metaflow", StoredMetaflowV5::schema_hash()),
             ],
-            "flow_nexus_meta_model_configuration" => &[(
-                "flow-nexus-meta-model-configuration",
-                StoredMetaModelConfigurationV1::schema_hash(),
-            )],
+            "flow_nexus_meta_model_configuration" => &[
+                (
+                    "flow-nexus-meta-model-configuration",
+                    StoredMetaModelConfigurationV1::schema_hash(),
+                ),
+                (
+                    "flow-nexus-meta-model-configuration",
+                    StoredMetaModelConfigurationV2::schema_hash(),
+                ),
+            ],
             "flow_nexus_meta_nexus_configuration" => &[
                 (
                     nexus_configuration::META_NEXUS_CONFIGURATION_FAMILY,
@@ -8278,6 +8848,8 @@ pub(crate) trait ReadsFlowMemory {
             || predecessors
                 .iter()
                 .any(|(family, schema_hash)| matches(family, *schema_hash))
+            || FlowStore::flow_family_identity_before_model(table_key)
+                .is_some_and(|(family, schema_hash)| matches(family, schema_hash))
             || RETIRED_TABLES.iter().any(|(table, family, schema)| {
                 *table == table_key && matches(family, SchemaHash::for_label(schema))
             })
@@ -8548,7 +9120,7 @@ pub(crate) trait ReadsFlowMemory {
             .iter()
             .map(|stored| stored.model.clone())
             .collect::<Vec<_>>();
-        models.sort_by_key(|model| FlowStore::model_record_key(&model.layer, &model.aspect));
+        models.sort_by_key(|model| FlowStore::model_record_key(&model.model));
         let mut thresholds = thresholds_rows
             .records()
             .iter()
@@ -8884,6 +9456,7 @@ impl ReadsFlowMemory for FlowStore {}
 #[cfg(test)]
 mod tests {
     use super::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
+    use crate::model_family::NamesModelOfLayer;
     use crate::store::logical_delivery::{RecordsLogicalDeliveries, SimplifiedReplyBinding};
     use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
     use crate::store::queue_delivery::AccountsQueueDelivery;
@@ -8895,13 +9468,13 @@ mod tests {
     fn heartbeat_admission_atomically_advances_and_survives_reopen() {
         use super::{StoredHeartbeatStanding, TracksHeartbeat};
         use crate::heartbeat::DeliveryPurpose;
-        use signal_flow::{Address, Aspect, Layer, Message, Metaflow, Request, SentBy};
+        use signal_flow::{Address, Aspect, Message, Metaflow, Model, Request, SentBy};
         let fixture = StoreFixture::new();
         let store = fixture.store();
         let recipient = Address {
             aspect: Aspect::Field,
             topic: "heartbeatTest".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         store.seed_metaflow(Metaflow {
             address: recipient.clone(),
@@ -9047,7 +9620,7 @@ mod tests {
         let address = Address {
             aspect: Aspect::Psyche,
             topic: "judgment".into(),
-            layer: Layer::Primary,
+            model: Model::Fable,
         };
         engine
             .assert(Assertion::new(
@@ -9116,7 +9689,7 @@ mod tests {
         let address = Address {
             aspect: Aspect::Mind,
             topic: "workspaceMigration".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         engine
             .assert(Assertion::new(
@@ -9218,12 +9791,12 @@ mod tests {
         let core = Address {
             aspect: Aspect::Mind,
             topic: "core".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         let elsewhere = Address {
             aspect: Aspect::Mind,
             topic: "flow".into(),
-            layer: Layer::Primary,
+            model: Model::Astra,
         };
         let snapshot = DeliverySnapshotV31 {
             delivery_cursor: 7,
@@ -9473,12 +10046,12 @@ mod tests {
         let core = Address {
             aspect: Aspect::Mind,
             topic: "core".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         let elsewhere = Address {
             aspect: Aspect::Mind,
             topic: "flow".into(),
-            layer: Layer::Primary,
+            model: Model::Astra,
         };
         let snapshots = [
             DeliverySnapshotV34 {
@@ -9567,7 +10140,7 @@ mod tests {
     #[test]
     fn simplified_reply_requires_consumed_input_and_queues_once_to_its_sender() {
         use signal_flow::{
-            Address, Aspect, DeliveryState, Layer, Message, Metaflow, NativeReceipt, Request,
+            Address, Aspect, DeliveryState, Message, Metaflow, Model, NativeReceipt, Request,
             SentBy,
         };
         let fixture = StoreFixture::new();
@@ -9575,12 +10148,12 @@ mod tests {
         let source = Address {
             aspect: Aspect::Mind,
             topic: "judgment".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         let recipient = Address {
             aspect: Aspect::Psyche,
             topic: "core".into(),
-            layer: Layer::Secondary,
+            model: Model::Opus,
         };
         for address in [&source, &recipient] {
             store.seed_metaflow(Metaflow {
@@ -9702,7 +10275,7 @@ mod tests {
         let second_sender = Address {
             aspect: Aspect::Field,
             topic: "review".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         store.seed_metaflow(Metaflow {
             address: second_sender.clone(),
@@ -9780,7 +10353,7 @@ mod tests {
     #[test]
     fn core_presentation_is_queued_as_is_once_and_secondary_gets_only_a_notice() {
         use signal_flow::{
-            Address, Aspect, DeliveryState, Layer, Message, Metaflow, NativeReceipt, Request,
+            Address, Aspect, DeliveryState, Message, Metaflow, Model, NativeReceipt, Request,
             SentBy,
         };
         let fixture = StoreFixture::new();
@@ -9788,17 +10361,17 @@ mod tests {
         let source = Address {
             aspect: Aspect::Psyche,
             topic: "core".into(),
-            layer: Layer::Primary,
+            model: Model::Fable,
         };
         let sender = Address {
             aspect: Aspect::Psyche,
             topic: "core".into(),
-            layer: Layer::Secondary,
+            model: Model::Opus,
         };
         let book = Address {
             aspect: Aspect::Psyche,
             topic: "book".into(),
-            layer: Layer::Tertiary,
+            model: Model::Sonnet,
         };
         for address in [&source, &sender, &book] {
             store.seed_metaflow(Metaflow {
@@ -10041,8 +10614,7 @@ mod tests {
         store
             .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
                 meta_signal_flow::ConfigureModel {
-                    layer: Layer::Secondary,
-                    aspect: Aspect::Mind,
+                    model: Model::Sol,
                     native: "gpt-sol".into(),
                 },
             ]))
@@ -10066,7 +10638,7 @@ mod tests {
         let address = Address {
             aspect: Aspect::Mind,
             topic: "core".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         let route = |flow_id: &str| signal_flow::FlowNode {
             flow_id: flow_id.into(),
@@ -10194,7 +10766,7 @@ mod tests {
     use signal_flow::{
         Address, Aspect, BindingRefusal, Caller, ComposedLaunch, FirstPromptPayload, FlowOrigin,
         HarnessKind, HerdrPaneBinding, LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile,
-        Layer, NativeLaunchBinding, NativeLaunchIntent, NativeTargetReceipt,
+        Model, NativeLaunchBinding, NativeLaunchIntent, NativeTargetReceipt,
         NativeTranscriptAbsence, NativeTranscriptBoundary, NativeTranscriptCursor, Origin,
         PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement,
         ReplaceRejection, Response, StartRejection, StopRejection, TargetReceiptRequest,
@@ -10221,7 +10793,7 @@ mod tests {
 
         /// Replaces the store's model family with its v1 shape, one model
         /// per Layer under that Layer alone, as 0.35.11 and earlier kept it.
-        fn seed_v1_models(&self, schema: u32, models: &[(signal_flow::Layer, &str)]) {
+        fn seed_v1_models(&self, schema: u32, models: &[(super::LayerBeforeModel, &str)]) {
             let database = redb::Database::open(self.path()).expect("store opens directly");
             let write = database.begin_write().expect("catalog transaction starts");
             {
@@ -10456,7 +11028,7 @@ mod tests {
                 address: signal_flow::Address {
                     aspect: Aspect::Field,
                     topic: "flow".into(),
-                    layer: signal_flow::Layer::Secondary,
+                    model: signal_flow::Model::Sol,
                 },
                 model_name: "fixture-model".into(),
                 effort: "medium".into(),
@@ -12391,7 +12963,7 @@ mod tests {
     fn a_0_34_launch_attempt_row_is_carried_with_what_it_named_kept() {
         use super::{
             Address, ContextBeforeModules, EarlierLaunchAttemptRows, LaunchAttempt, LaunchContext,
-            LaunchSource, Layer, NativeSkill, OriginClue,
+            LaunchSource, Model, NativeSkill, OriginClue,
         };
         let fixture = StoreFixture::new();
         let path = fixture.directory.path().join("flow.sema");
@@ -12441,7 +13013,7 @@ mod tests {
                 address: Address {
                     aspect: Aspect::Mind,
                     topic: "flow".into(),
-                    layer: Layer::Secondary,
+                    model: Model::Sol,
                 },
                 model_name: "gpt-sol".into(),
                 effort: "medium".into(),
@@ -12696,13 +13268,13 @@ mod tests {
     #[test]
     fn a_v1_metaflow_queue_upgrades_with_its_senders_unknown() {
         use super::ManagesMetaflowState;
-        use signal_flow::{Address, Layer, Request};
+        use signal_flow::{Address, Model, Request};
         let fixture = StoreFixture::new();
         drop(fixture.store());
         let address = Address {
             aspect: Aspect::Mind,
             topic: "flow".into(),
-            layer: Layer::Tertiary,
+            model: Model::Luna,
         };
         let database = redb::Database::open(fixture.path()).expect("store opens directly");
         let write = database.begin_write().expect("catalog transaction starts");
@@ -12763,7 +13335,7 @@ mod tests {
             flow_ethos::QueueEntry {
                 logical_delivery_id: format!(
                     "legacy:{}:{:016x}",
-                    FlowStore::address_record_key(&address),
+                    FlowStore::address_record_key_before_model(&address),
                     0
                 ),
                 sent_by: flow_ethos::SentBy::Unknown,
@@ -12773,7 +13345,7 @@ mod tests {
             flow_ethos::QueueEntry {
                 logical_delivery_id: format!(
                     "legacy:{}:{:016x}",
-                    FlowStore::address_record_key(&address),
+                    FlowStore::address_record_key_before_model(&address),
                     1
                 ),
                 sent_by: flow_ethos::SentBy::Unknown,
@@ -12794,13 +13366,13 @@ mod tests {
     #[test]
     fn a_v2_ended_metaflow_upgrades_asleep() {
         use super::ManagesMetaflowState;
-        use signal_flow::{Address, Layer, Request};
+        use signal_flow::{Address, Model, Request};
         let fixture = StoreFixture::new();
         drop(fixture.store());
-        let at = |layer| Address {
+        let at = |model| Address {
             aspect: Aspect::Mind,
             topic: "flow".into(),
-            layer,
+            model,
         };
         let database = redb::Database::open(fixture.path()).expect("store opens directly");
         let write = database.begin_write().expect("catalog transaction starts");
@@ -12833,19 +13405,18 @@ mod tests {
                     SchemaHash::for_label("flow-nexus-metaflow-v2"),
                 ))
                 .expect("v2 metaflow family registers");
-            for (layer, state) in [
-                (Layer::Tertiary, super::StateBeforeIdle::Ended),
-                (
-                    Layer::Secondary,
-                    super::StateBeforeIdle::Awake("b2b2b2".into()),
-                ),
+            // Archived before 0.52.0: a Layer's rank, read as the Claude
+            // model of that rank.
+            for (model, state) in [
+                (Model::Sonnet, super::StateBeforeIdle::Ended),
+                (Model::Opus, super::StateBeforeIdle::Awake("b2b2b2".into())),
             ] {
                 engine
                     .assert(Assertion::new(
                         metaflows,
                         super::StoredMetaflowV2 {
                             metaflow: super::MetaflowBeforeIdle {
-                                address: at(layer),
+                                address: at(model),
                                 state,
                                 past: vec!["a1a1a1".into()],
                                 queue: queued.clone(),
@@ -12858,22 +13429,22 @@ mod tests {
 
         let store = fixture.store();
         let metaflows = store.list_metaflows().unwrap();
-        let carried = |layer: Layer| {
-            let address = at(layer);
+        let carried = |model: Model| {
+            let address = at(model);
             metaflows
                 .iter()
                 .find(|metaflow| metaflow.address == address)
                 .cloned()
                 .expect("the metaflow is carried")
         };
-        let idle = carried(Layer::Tertiary);
+        let idle = carried(Model::Luna);
         assert_eq!(idle.state, flow_ethos::State::Asleep);
         assert_eq!(idle.past, vec!["a1a1a1".to_owned()]);
         assert!(idle.queue.is_empty());
         let archive = store.observe_legacy_archive().unwrap();
         let archived = archive
             .iter()
-            .find(|record| record.address == at(Layer::Tertiary))
+            .find(|record| record.address == at(Model::Luna))
             .expect("legacy queue is archived");
         let meta_signal_flow::QueueEvidence::Logical(entry) = &archived.queue_evidence else {
             panic!("the full migrated queue slot is kept")
@@ -12884,7 +13455,7 @@ mod tests {
             flow_ethos::Message::Soft(Request::Order("kept".into()))
         );
         assert_eq!(
-            carried(Layer::Secondary).state,
+            carried(Model::Sol).state,
             flow_ethos::State::Awake("b2b2b2".into())
         );
     }
@@ -13792,22 +14363,222 @@ mod tests {
         );
     }
 
+    /// A store Flow 0.51 wrote names each Address's Layer. Opening it
+    /// upgrades every Address-bearing family: each Address names the Model
+    /// of its Layer's rank in its aspect's family (Claude in Psyche, OpenAI
+    /// in Mind and Field), each row keyed by an Address moves to its
+    /// Model's key, and the native model configured for a Layer and aspect
+    /// becomes that Model's. A second open changes nothing.
+    #[test]
+    fn a_0_51_store_opens_with_every_address_naming_its_model() {
+        use super::metaflow::SleepsMetaflows;
+        use super::model_address::{BeforeModel, NamesLayer};
+        use super::{ManagesMetaflowState, NamesConfiguredModel};
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        drop(fixture.configured_store());
+        // As 0.51 archived them: a Layer's rank, read as the Claude model of
+        // that rank.
+        let mind_secondary = Address {
+            aspect: Aspect::Mind,
+            topic: "flow".into(),
+            model: Model::Opus,
+        };
+        let psyche_primary = Address {
+            aspect: Aspect::Psyche,
+            topic: "core".into(),
+            model: Model::Fable,
+        };
+        let entry = flow_ethos::QueueEntry {
+            logical_delivery_id: "logical-0-51".into(),
+            sent_by: flow_ethos::SentBy::Sender(psyche_primary.clone()),
+            delivery: flow_ethos::Delivery::Queue,
+            message: flow_ethos::Message::Soft(flow_ethos::Request::Order("kept".into())),
+        };
+        let families = [
+            "flow_nexus_metaflows",
+            "flow_nexus_metaflow_locks",
+            "flow_nexus_meta_model_configuration",
+        ];
+        let database = redb::Database::open(fixture.path()).expect("store opens directly");
+        let write = database.begin_write().expect("catalog transaction starts");
+        {
+            let mut catalog = write
+                .open_table(super::SEMA_CATALOG_TABLE)
+                .expect("catalog opens");
+            for family in families {
+                catalog.remove(family).expect("family removes");
+            }
+        }
+        for family in families {
+            let _ = write.delete_table(redb::TableDefinition::<&str, &[u8]>::new(family));
+        }
+        write.commit().expect("catalog commits");
+        drop(database);
+        {
+            let mut engine = Engine::open(EngineOpen::new(
+                fixture.path(),
+                SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
+            ))
+            .expect("0.51 store opens");
+            let metaflows = engine
+                .register_table(TableDescriptor::<BeforeModel<super::StoredMetaflow>>::new(
+                    TableName::new("flow_nexus_metaflows"),
+                    FamilyName::new("flow-nexus-metaflow"),
+                    SchemaHash::for_label("flow-nexus-metaflow-v6"),
+                ))
+                .expect("0.51 metaflow family registers");
+            engine
+                .assert(Assertion::new(
+                    metaflows,
+                    BeforeModel {
+                        row: super::StoredMetaflow {
+                            metaflow: signal_flow::Metaflow {
+                                address: mind_secondary.clone(),
+                                state: flow_ethos::State::Asleep,
+                                past: vec!["a1a1a1".into()],
+                                queue: vec![entry.clone()],
+                            },
+                        },
+                    },
+                ))
+                .expect("0.51 metaflow persists");
+            let locks = engine
+                .register_table(
+                    TableDescriptor::<BeforeModel<super::StoredMetaflowLock>>::new(
+                        TableName::new("flow_nexus_metaflow_locks"),
+                        FamilyName::new("flow-nexus-metaflow-lock"),
+                        SchemaHash::for_label("flow-nexus-metaflow-lock-v1"),
+                    ),
+                )
+                .expect("0.51 lock family registers");
+            engine
+                .assert(Assertion::new(
+                    locks,
+                    BeforeModel {
+                        row: super::StoredMetaflowLock {
+                            lock: flow_ethos::Lock {
+                                sender: psyche_primary.clone(),
+                                address: mind_secondary.clone(),
+                                until: 1_790_000_000,
+                            },
+                        },
+                    },
+                ))
+                .expect("0.51 lock persists");
+            let models = engine
+                .register_table(
+                    TableDescriptor::<super::StoredMetaModelConfigurationV2>::new(
+                        TableName::new("flow_nexus_meta_model_configuration"),
+                        FamilyName::new("flow-nexus-meta-model-configuration"),
+                        SchemaHash::for_label("flow-nexus-meta-model-configuration-v2"),
+                    ),
+                )
+                .expect("0.51 model family registers");
+            for (layer, aspect, native) in [
+                (
+                    super::LayerBeforeModel::Primary,
+                    Aspect::Psyche,
+                    "claude-fable-5-1",
+                ),
+                (
+                    super::LayerBeforeModel::Secondary,
+                    Aspect::Mind,
+                    "gpt-6.1-sol",
+                ),
+                (
+                    super::LayerBeforeModel::Secondary,
+                    Aspect::Field,
+                    "gpt-6.1-sol",
+                ),
+            ] {
+                engine
+                    .assert(Assertion::new(
+                        models,
+                        super::StoredMetaModelConfigurationV2 {
+                            model: super::ModelOfLayerAndAspect {
+                                layer,
+                                aspect,
+                                native: native.into(),
+                            },
+                        },
+                    ))
+                    .expect("0.51 model persists");
+            }
+        }
+        let mind_sol = Address {
+            model: Model::Sol,
+            ..mind_secondary.clone()
+        };
+        for reopening in 0..2 {
+            let store = fixture.configured_store();
+            let metaflow = store
+                .metaflow(&mind_sol)
+                .expect("metaflow reads")
+                .expect("the 0.51 metaflow names its Model");
+            assert_eq!(metaflow.past, vec!["a1a1a1".to_owned()]);
+            assert_eq!(
+                metaflow.queue,
+                vec![entry.clone()],
+                "a Psyche sender names Fable (open {reopening})"
+            );
+            assert_eq!(
+                store.metaflow(&mind_secondary).expect("metaflow reads"),
+                None,
+                "no row stays under the Claude reading of a Mind Layer (open {reopening})"
+            );
+            let lock = store
+                .stored_metaflow_lock(&mind_sol)
+                .expect("lock reads")
+                .expect("the lock moves to its Model's key");
+            assert_eq!(lock.lock.address, mind_sol);
+            assert_eq!(lock.lock.sender, psyche_primary);
+            assert_eq!(
+                store.configured_model(&mind_sol).expect("model reads"),
+                Some("gpt-6.1-sol".to_owned())
+            );
+            assert_eq!(
+                store
+                    .configured_model(&psyche_primary)
+                    .expect("model reads"),
+                Some("claude-fable-5-1".to_owned())
+            );
+            assert_eq!(
+                store
+                    .configuration_snapshot()
+                    .expect("snapshot reads")
+                    .expect("store configured")
+                    .models,
+                vec![
+                    meta_signal_flow::ConfigureModel {
+                        model: super::LayerBeforeModel::Primary.model_in(&Aspect::Psyche),
+                        native: "claude-fable-5-1".into(),
+                    },
+                    meta_signal_flow::ConfigureModel {
+                        model: Model::Sol,
+                        native: "gpt-6.1-sol".into(),
+                    },
+                ]
+            );
+        }
+    }
+
     /// The models the production store held at 0.35.11, one per Layer.
-    fn production_models() -> Vec<(signal_flow::Layer, &'static str)> {
-        use signal_flow::Layer;
+    fn production_models() -> Vec<(super::LayerBeforeModel, &'static str)> {
+        use super::LayerBeforeModel;
         vec![
-            (Layer::Primary, "claude-fable-5-1"),
-            (Layer::Quaternary, "claude-haiku-5-5"),
-            (Layer::Secondary, "claude-opus-5-5"),
-            (Layer::Tertiary, "claude-sonnet-5-5"),
+            (LayerBeforeModel::Primary, "claude-fable-5-1"),
+            (LayerBeforeModel::Quaternary, "claude-haiku-5-5"),
+            (LayerBeforeModel::Secondary, "claude-opus-5-5"),
+            (LayerBeforeModel::Tertiary, "claude-sonnet-5-5"),
         ]
     }
 
     /// A store before 0.35.19 keeps one model per Layer, every one a
-    /// Claude model. Opening carries each whole as that layer's Psyche
-    /// model, keyed by its Layer and Aspect: declaring the same rows again
-    /// changes nothing, Mind and Field have no model, and a second open
-    /// reads the same rows.
+    /// Claude model. Opening carries each whole as the Claude Model of that
+    /// layer's rank, keyed by the Model: declaring the same rows again
+    /// changes nothing, the OpenAI Models have no native model, and a
+    /// second open reads the same rows.
     #[test]
     fn production_models_upgrade_each_as_its_layers_psyche_model() {
         use super::{ManagesMetaflowState, NamesConfiguredModel};
@@ -13816,11 +14587,11 @@ mod tests {
         drop(fixture.store());
         let models = production_models();
         fixture.seed_v1_models(1, &models);
+        use super::model_address::NamesLayer;
         let expected = models
             .iter()
             .map(|(layer, native)| meta_signal_flow::ConfigureModel {
-                layer: layer.clone(),
-                aspect: Aspect::Psyche,
+                model: layer.model_in(&Aspect::Psyche),
                 native: (*native).into(),
             })
             .collect::<Vec<_>>();
@@ -13828,16 +14599,21 @@ mod tests {
             let store = fixture.store();
             for (layer, native) in &models {
                 for aspect in [Aspect::Psyche, Aspect::Mind, Aspect::Field] {
-                    let address = Address {
-                        aspect: aspect.clone(),
-                        topic: "flow".into(),
-                        layer: layer.clone(),
-                    };
-                    assert_eq!(
-                        store.configured_model(&address).expect("model reads"),
-                        (aspect == Aspect::Psyche).then(|| (*native).to_owned()),
-                        "{aspect:?} {layer:?} (open {reopening})"
-                    );
+                    for (model, configured) in [
+                        (layer.model_in(&Aspect::Psyche), Some((*native).to_owned())),
+                        (layer.model_in(&Aspect::Mind), None),
+                    ] {
+                        let address = Address {
+                            aspect: aspect.clone(),
+                            topic: "flow".into(),
+                            model: model.clone(),
+                        };
+                        assert_eq!(
+                            store.configured_model(&address).expect("model reads"),
+                            configured,
+                            "{aspect:?} {model:?} (open {reopening})"
+                        );
+                    }
                 }
             }
             assert_eq!(
@@ -13847,7 +14623,7 @@ mod tests {
                     ))
                     .expect("declaration commits"),
                 meta_signal_flow::ConfigureOutcome::Unchanged,
-                "every carried row, and no other, is under its Layer and Aspect (open {reopening})"
+                "every carried row, and no other, is under its Model (open {reopening})"
             );
         }
     }
@@ -13993,8 +14769,7 @@ mod tests {
             models
                 .iter()
                 .map(|(layer, native)| meta_signal_flow::ConfigureModel {
-                    layer: layer.clone(),
-                    aspect: Aspect::Psyche,
+                    model: super::model_address::NamesLayer::model_in(layer, &Aspect::Psyche),
                     native: (*native).into(),
                 })
                 .collect::<Vec<_>>()
@@ -14011,7 +14786,7 @@ mod tests {
     /// under its Address alone: every Claude metaflow's twelve, every Codex
     /// metaflow's six.
     fn production_leave_out_defaults() -> Vec<(signal_flow::Address, Vec<signal_flow::LeaveOut>)> {
-        use signal_flow::{Address, Layer, LeaveOut};
+        use signal_flow::{Address, LeaveOut, Model};
         let claude = vec![
             LeaveOut::ClaudeAiConnectors,
             LeaveOut::ExplorePlanAgents,
@@ -14034,36 +14809,38 @@ mod tests {
             LeaveOut::CodexPermissions,
             LeaveOut::CodexDeveloperInstructions,
         ];
+        // Each Address as it was archived: its model a Layer's rank, read
+        // as the Claude model of that rank.
         [
-            (Aspect::Field, "illustrator", Layer::Tertiary, &claude),
-            (Aspect::Field, "core", Layer::Primary, &codex),
-            (Aspect::Field, "publisher", Layer::Quaternary, &claude),
-            (Aspect::Mind, "prototyping", Layer::Primary, &codex),
-            (Aspect::Mind, "prototyping", Layer::Secondary, &codex),
-            (Aspect::Mind, "core", Layer::Primary, &codex),
-            (Aspect::Mind, "core", Layer::Secondary, &codex),
-            (Aspect::Psyche, "communication", Layer::Primary, &claude),
-            (Aspect::Psyche, "communication", Layer::Secondary, &claude),
-            (Aspect::Psyche, "core", Layer::Primary, &claude),
-            (Aspect::Psyche, "core", Layer::Secondary, &claude),
-            (Aspect::Psyche, "core", Layer::Tertiary, &claude),
-            (Aspect::Psyche, "flow", Layer::Primary, &claude),
-            (Aspect::Psyche, "flow", Layer::Secondary, &claude),
-            (Aspect::Psyche, "ethos", Layer::Primary, &claude),
-            (Aspect::Psyche, "ethos", Layer::Secondary, &claude),
-            (Aspect::Psyche, "nexus", Layer::Secondary, &claude),
-            (Aspect::Psyche, "spirit", Layer::Primary, &claude),
-            (Aspect::Psyche, "spirit", Layer::Secondary, &claude),
-            (Aspect::Psyche, "chronos", Layer::Primary, &claude),
-            (Aspect::Psyche, "chronos", Layer::Secondary, &claude),
+            (Aspect::Field, "illustrator", Model::Sonnet, &claude),
+            (Aspect::Field, "core", Model::Fable, &codex),
+            (Aspect::Field, "publisher", Model::Haiku, &claude),
+            (Aspect::Mind, "prototyping", Model::Fable, &codex),
+            (Aspect::Mind, "prototyping", Model::Opus, &codex),
+            (Aspect::Mind, "core", Model::Fable, &codex),
+            (Aspect::Mind, "core", Model::Opus, &codex),
+            (Aspect::Psyche, "communication", Model::Fable, &claude),
+            (Aspect::Psyche, "communication", Model::Opus, &claude),
+            (Aspect::Psyche, "core", Model::Fable, &claude),
+            (Aspect::Psyche, "core", Model::Opus, &claude),
+            (Aspect::Psyche, "core", Model::Sonnet, &claude),
+            (Aspect::Psyche, "flow", Model::Fable, &claude),
+            (Aspect::Psyche, "flow", Model::Opus, &claude),
+            (Aspect::Psyche, "ethos", Model::Fable, &claude),
+            (Aspect::Psyche, "ethos", Model::Opus, &claude),
+            (Aspect::Psyche, "nexus", Model::Opus, &claude),
+            (Aspect::Psyche, "spirit", Model::Fable, &claude),
+            (Aspect::Psyche, "spirit", Model::Opus, &claude),
+            (Aspect::Psyche, "chronos", Model::Fable, &claude),
+            (Aspect::Psyche, "chronos", Model::Opus, &claude),
         ]
         .into_iter()
-        .map(|(aspect, topic, layer, leave_outs)| {
+        .map(|(aspect, topic, model, leave_outs)| {
             (
                 Address {
                     aspect,
                     topic: topic.into(),
-                    layer,
+                    model,
                 },
                 leave_outs.clone(),
             )
@@ -14088,7 +14865,7 @@ mod tests {
             .iter()
             .map(
                 |(address, leave_outs)| meta_signal_flow::ConfigureLeaveOut {
-                    address: address.clone(),
+                    address: address.of_layer(),
                     harness_kind: leave_outs[0].harness(),
                     leave_outs: leave_outs.clone(),
                 },
@@ -14163,11 +14940,9 @@ mod tests {
             .default_leave_outs;
         assert_eq!(carried.len(), defaults.len());
         for (address, leave_outs) in &defaults {
-            assert!(
-                carried
-                    .iter()
-                    .any(|entry| entry.address == *address && entry.leave_outs == *leave_outs)
-            );
+            assert!(carried.iter().any(
+                |entry| entry.address == address.of_layer() && entry.leave_outs == *leave_outs
+            ));
         }
         drop(configuration);
         use super::ManagesMetaflowState;
@@ -14175,7 +14950,7 @@ mod tests {
         let (address, leave_outs) = &defaults[1];
         assert_eq!(
             store
-                .default_leave_outs(address, &HarnessKind::Codex)
+                .default_leave_outs(&address.of_layer(), &HarnessKind::Codex)
                 .expect("default reads"),
             *leave_outs
         );
@@ -14188,7 +14963,7 @@ mod tests {
     /// either.
     #[test]
     fn a_v1_leave_out_default_mixing_harnesses_refuses_the_upgrade_by_its_entry() {
-        use signal_flow::{Address, Layer, LeaveOut};
+        use signal_flow::{Address, LeaveOut, Model};
         for (leave_outs, reason) in [
             (
                 vec![LeaveOut::ClaudeMd, LeaveOut::CodexAgentsMd],
@@ -14202,7 +14977,7 @@ mod tests {
             let mixed = Address {
                 aspect: Aspect::Psyche,
                 topic: "flow".into(),
-                layer: Layer::Secondary,
+                model: Model::Opus,
             };
             let mut defaults = production_leave_out_defaults();
             defaults.retain(|(address, _)| *address != mixed);
@@ -14217,7 +14992,7 @@ mod tests {
                 super::StoreError::LeaveOutUpgrade { entry, reason } => (entry, reason),
                 other => panic!("not a leave-out refusal: {other}"),
             };
-            let expected = (FlowStore::address_record_key(&mixed), reason);
+            let expected = (FlowStore::address_record_key_before_model(&mixed), reason);
             for configuration_only in [false, true] {
                 let refused = if configuration_only {
                     ConfigurationOnlyStore::open(&fixture.path()).map(drop)
@@ -14305,7 +15080,7 @@ mod tests {
                 .configured_model(&signal_flow::Address {
                     aspect: Aspect::Psyche,
                     topic: "flow".into(),
-                    layer: layer.clone(),
+                    model: super::model_address::NamesLayer::model_in(layer, &Aspect::Psyche),
                 })
                 .expect("model reads"),
             Some((*native).to_owned())
@@ -14398,7 +15173,7 @@ mod tests {
                 let address = Address {
                     aspect: Aspect::Psyche,
                     topic: "flow".into(),
-                    layer: layer.clone(),
+                    model: super::model_address::NamesLayer::model_in(layer, &Aspect::Psyche),
                 };
                 assert_eq!(
                     store.configured_model(&address).expect("model reads"),
@@ -14409,7 +15184,7 @@ mod tests {
             for (address, leave_outs) in &defaults {
                 assert_eq!(
                     store
-                        .default_leave_outs(address, &leave_outs[0].harness())
+                        .default_leave_outs(&address.of_layer(), &leave_outs[0].harness())
                         .expect("default reads"),
                     *leave_outs,
                     "{address:?} (open {reopening})"
@@ -14508,11 +15283,14 @@ mod tests {
                 );
             }
             assert!(
-                snapshot
-                    .models
-                    .iter()
-                    .all(|model| model.aspect == Aspect::Psyche),
-                "every carried model is a Psyche model"
+                snapshot.models.iter().all(|model| matches!(
+                    model.model,
+                    signal_flow::Model::Fable
+                        | signal_flow::Model::Opus
+                        | signal_flow::Model::Sonnet
+                        | signal_flow::Model::Haiku
+                )),
+                "every carried model is a Claude Model"
             );
             assert!(snapshot.send_servers.is_empty());
             let flows = store.flow_nodes().expect("flow nodes read");
@@ -14567,7 +15345,7 @@ mod v3_attempts {
     use sema_engine::{
         Assertion, Engine, EngineOpen, FamilyName, SchemaVersion, TableDescriptor, TableName,
     };
-    use signal_flow::{Address, Aspect, LaunchAttemptPhase, Layer, Origin, Remembering};
+    use signal_flow::{Address, Aspect, LaunchAttemptPhase, Model, Origin, Remembering};
 
     fn v3_attempt(request: &str, remembered: Vec<RememberedFlow>) -> StoredLaunchAttemptV3 {
         StoredLaunchAttemptV3 {
@@ -14580,7 +15358,7 @@ mod v3_attempts {
                     address: Address {
                         aspect: Aspect::Mind,
                         topic: "flow".into(),
-                        layer: Layer::Secondary,
+                        model: Model::Sol,
                     },
                     model_name: "gpt-6-sol".into(),
                     effort: "medium".into(),

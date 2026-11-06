@@ -19,7 +19,7 @@ use meta_signal_flow::{
 };
 use signal_flow::{
     Address, Aspect, Bind_Data, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin,
-    HarnessKind, HerdrRoute, HerdrRouteSelection, Layer, Lock_Data, Origin, Process, Recipient,
+    HarnessKind, HerdrRoute, HerdrRouteSelection, Lock_Data, Model, Origin, Process, Recipient,
     Response,
 };
 use std::collections::BTreeSet;
@@ -47,7 +47,7 @@ fn harness_flags_are_per_metaflow_persistent_and_absent_by_default() {
     let address = Address {
         aspect: Aspect::Field,
         topic: "flagsTest".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     };
     assert!(
         nexus
@@ -106,7 +106,7 @@ fn heartbeat_configuration_requires_a_positive_period_and_unique_recipients() {
     let recipient = Address {
         aspect: Aspect::Field,
         topic: "heartbeatTest".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     };
     assert_eq!(
         configure(
@@ -161,8 +161,7 @@ impl ConfiguredStore {
         for change in [
             ConfigurationChange::Nexus(Self::nexus(&defaults, &[TERRA, SOL, LUNA], 30)),
             ConfigurationChange::Models(vec![ConfigureModel {
-                layer: Layer::Primary,
-                aspect: Aspect::Mind,
+                model: Model::Astra,
                 native: "gpt-6-astra".into(),
             }]),
             ConfigurationChange::Thresholds(vec![ConfigureThreshold {
@@ -241,7 +240,7 @@ impl ConfiguredStore {
         Address {
             aspect: Aspect::Field,
             topic: "message".into(),
-            layer: Layer::Primary,
+            model: Model::Astra,
         }
     }
 
@@ -321,7 +320,7 @@ fn quaternary_field() -> Address {
     Address {
         aspect: Aspect::Field,
         topic: "flow".into(),
-        layer: Layer::Quaternary,
+        model: Model::Terra,
     }
 }
 
@@ -379,8 +378,7 @@ fn a_refused_declaration_changes_nothing() {
     );
     // One key named twice is not a family.
     let model = |native: &str| ConfigureModel {
-        layer: Layer::Secondary,
-        aspect: Aspect::Psyche,
+        model: Model::Sol,
         native: native.into(),
     };
     assert_eq!(
@@ -404,23 +402,19 @@ fn each_family_is_its_last_declaration() {
     let nexus = fixture.open();
     let nexus_before = snapshot(&nexus).nexus;
 
-    // In the order the snapshot reads them, by layer then aspect name; one
-    // layer holds a model for each aspect.
+    // In the order the snapshot reads them, by Model name.
     let models = vec![
         ConfigureModel {
-            layer: Layer::Quaternary,
-            aspect: Aspect::Psyche,
+            model: Model::Haiku,
             native: "claude-haiku-5-5".into(),
         },
         ConfigureModel {
-            layer: Layer::Secondary,
-            aspect: Aspect::Mind,
-            native: SOL.into(),
+            model: Model::Opus,
+            native: "claude-opus-5-5".into(),
         },
         ConfigureModel {
-            layer: Layer::Secondary,
-            aspect: Aspect::Psyche,
-            native: "claude-opus-5-5".into(),
+            model: Model::Sol,
+            native: SOL.into(),
         },
     ];
     assert_eq!(

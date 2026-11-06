@@ -52,7 +52,7 @@ use crate::{HoldsStopRequest, RunningNexus, store::AnnouncesLaunchChanges};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
-use signal_flow::{Address, Aspect, HarnessKind, Layer, Message, Request};
+use signal_flow::{Address, Aspect, HarnessKind, Message, Model, Request};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::mpsc,
@@ -82,12 +82,12 @@ impl DeclaresSendTool for SendTool {
                         "properties": {
                             "aspect": { "type": "string", "enum": ["Psyche", "Mind", "Field"] },
                             "topic": { "type": "string", "minLength": 1 },
-                            "layer": {
+                            "model": {
                                 "type": "string",
-                                "enum": ["Primary", "Secondary", "Tertiary", "Quaternary"]
+                                "enum": ["Fable", "Opus", "Sonnet", "Haiku", "Astra", "Sol", "Luna", "Terra"]
                             }
                         },
-                        "required": ["aspect", "topic", "layer"],
+                        "required": ["aspect", "topic", "model"],
                         "additionalProperties": false
                     },
                     "priority": {
@@ -186,7 +186,7 @@ impl JournalsSendInvocations for RunningNexus {
 /// the schema does not name reads as nothing.
 trait ReadsSendFields {
     fn aspect(value: &serde_json::Value) -> Option<Aspect>;
-    fn layer(value: &serde_json::Value) -> Option<Layer>;
+    fn model(value: &serde_json::Value) -> Option<Model>;
     fn priority(value: &serde_json::Value) -> Option<SendPriority>;
     fn kind(value: &serde_json::Value) -> Option<SendKind>;
     fn only_fields(value: &serde_json::Value, fields: &[&str]) -> bool;
@@ -202,12 +202,16 @@ impl ReadsSendFields for ToolCall {
         }
     }
 
-    fn layer(value: &serde_json::Value) -> Option<Layer> {
+    fn model(value: &serde_json::Value) -> Option<Model> {
         match value.as_str()? {
-            "Primary" => Some(Layer::Primary),
-            "Secondary" => Some(Layer::Secondary),
-            "Tertiary" => Some(Layer::Tertiary),
-            "Quaternary" => Some(Layer::Quaternary),
+            "Fable" => Some(Model::Fable),
+            "Opus" => Some(Model::Opus),
+            "Sonnet" => Some(Model::Sonnet),
+            "Haiku" => Some(Model::Haiku),
+            "Astra" => Some(Model::Astra),
+            "Sol" => Some(Model::Sol),
+            "Luna" => Some(Model::Luna),
+            "Terra" => Some(Model::Terra),
             _ => None,
         }
     }
@@ -245,7 +249,7 @@ impl ReadsSendArguments for ToolCall {
             return None;
         }
         let target = arguments.get("target")?;
-        if !Self::only_fields(target, &["aspect", "topic", "layer"]) {
+        if !Self::only_fields(target, &["aspect", "topic", "model"]) {
             return None;
         }
         let topic = target
@@ -260,7 +264,7 @@ impl ReadsSendArguments for ToolCall {
             target: Address {
                 aspect: Self::aspect(target.get("aspect")?)?,
                 topic: topic.to_owned(),
-                layer: Self::layer(target.get("layer")?)?,
+                model: Self::model(target.get("model")?)?,
             },
             send_priority: Self::priority(arguments.get("priority")?)?,
             send_kind: Self::kind(arguments.get("kind")?)?,

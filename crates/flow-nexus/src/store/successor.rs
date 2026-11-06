@@ -14,6 +14,7 @@
 //! before a successor could be owed for an ordered Refresh or a Replace
 //! opens unchanged, its cause a refresh's or an exit's.
 
+use super::model_address::RemodelsFamilies;
 use super::{FlowStore, ReadsFlowMemory, StoreError};
 use meta_signal_flow::Continuity;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -27,7 +28,7 @@ use signal_flow::Address;
 pub(super) const SUCCESSOR_INTENT_TABLE_NAME: TableName =
     TableName::new("flow_nexus_successor_intents");
 pub(super) const SUCCESSOR_INTENT_FAMILY: &str = "flow-nexus-successor-intent";
-pub(super) const SUCCESSOR_INTENT_SCHEMA: &str = "flow-nexus-successor-intent-v2";
+pub(super) const SUCCESSOR_INTENT_SCHEMA: &str = "flow-nexus-successor-intent-v3";
 
 /// Why a Maintained metaflow is owed its successor.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -62,9 +63,33 @@ impl EngineRecord for SuccessorIntent {
     }
 }
 
+impl super::model_address::DefinedBeforeModel for SuccessorIntent {
+    fn version_before_model() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash_before_model() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-successor-intent-v2")
+    }
+}
+
+crate::upgrades_before_model!(SuccessorIntent);
+
+impl super::model_address::RemodelsAddresses for SuccessorIntent {
+    fn remodel(&mut self) {
+        self.address.remodel();
+    }
+}
+
+impl super::model_address::KeptBeforeModel for SuccessorIntent {
+    fn key_before_model(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key_before_model(&self.address))
+    }
+}
+
 impl MemoryDefinition for SuccessorIntent {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(2)
+        MemoryVersion::new(3)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -92,7 +117,7 @@ pub(super) struct SuccessorIntentV1 {
 
 impl EngineRecord for SuccessorIntentV1 {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.address))
+        RecordKey::new(FlowStore::address_record_key_before_model(&self.address))
     }
 }
 
@@ -134,6 +159,7 @@ impl DescribesSuccessorIntentTable for SuccessorIntent {
             SchemaHash::for_label(SUCCESSOR_INTENT_SCHEMA),
         )
         .with_predecessor::<SuccessorIntentV1>()
+        .with_predecessor::<super::model_address::BeforeModel<SuccessorIntent>>()
     }
 }
 
@@ -150,14 +176,16 @@ impl UpgradesSuccessorIntents for Engine {
         &mut self,
         descriptor: TableDescriptor<SuccessorIntent>,
     ) -> Result<TableReference<SuccessorIntent>, StoreError> {
-        match self.upgrade_table::<SuccessorIntentV1, SuccessorIntent>(descriptor) {
-            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure) => {
-                Err(StoreError::SuccessorUpgrade(format!("{failure:?}")))
+        self.upgraded_before_model(descriptor, |engine, descriptor| {
+            match engine.upgrade_table::<SuccessorIntentV1, SuccessorIntent>(descriptor) {
+                UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure) => {
+                    Err(StoreError::SuccessorUpgrade(format!("{failure:?}")))
+                }
             }
-        }
+        })
     }
 }
 

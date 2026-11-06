@@ -24,8 +24,8 @@ const COUNTER_KEY: &str = "counter";
 const COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_counter");
 const CURRENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_current");
 const EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_events");
-pub(super) const CURRENT_SCHEMA: &str = "flow-nexus-logical-delivery-current-v5";
-pub(super) const EVENT_SCHEMA: &str = "flow-nexus-logical-delivery-event-v5";
+pub(super) const CURRENT_SCHEMA: &str = "flow-nexus-logical-delivery-current-v6";
+pub(super) const EVENT_SCHEMA: &str = "flow-nexus-logical-delivery-event-v6";
 const SIMPLIFIED_REPLY_TABLE_NAME: TableName =
     TableName::new("flow_nexus_simplified_reply_bindings");
 const PURPOSE_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_purposes");
@@ -41,12 +41,33 @@ impl EngineRecord for LogicalDeliveryPurpose {
         RecordKey::new(self.logical_delivery_id.clone())
     }
 }
-impl MemoryDefinition for LogicalDeliveryPurpose {
-    fn memory_version() -> MemoryVersion {
+
+impl super::model_address::DefinedBeforeModel for LogicalDeliveryPurpose {
+    fn version_before_model() -> MemoryVersion {
         MemoryVersion::new(1)
     }
-    fn schema_hash() -> SchemaHash {
+
+    fn schema_hash_before_model() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-logical-delivery-purpose-v1")
+    }
+}
+
+crate::upgrades_before_model!(LogicalDeliveryPurpose);
+
+impl super::model_address::RemodelsAddresses for LogicalDeliveryPurpose {
+    fn remodel(&mut self) {
+        self.address.remodel();
+    }
+}
+
+impl super::model_address::KeptBeforeModel for LogicalDeliveryPurpose {}
+
+impl MemoryDefinition for LogicalDeliveryPurpose {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-logical-delivery-purpose-v2")
     }
 }
 
@@ -58,7 +79,7 @@ impl CorePresentationRoute for Address {
     fn is_core_presentation(&self) -> bool {
         self.aspect == signal_flow::Aspect::Psyche
             && self.topic == "core"
-            && self.layer == signal_flow::Layer::Primary
+            && self.model == signal_flow::Model::Fable
     }
 }
 
@@ -101,9 +122,30 @@ impl EngineRecord for CurrentLogicalDelivery {
         RecordKey::new(self.snapshot.logical_delivery_id.clone())
     }
 }
+
+impl super::model_address::DefinedBeforeModel for CurrentLogicalDelivery {
+    fn version_before_model() -> MemoryVersion {
+        MemoryVersion::new(5)
+    }
+
+    fn schema_hash_before_model() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-logical-delivery-current-v5")
+    }
+}
+
+crate::upgrades_before_model!(CurrentLogicalDelivery);
+
+impl super::model_address::RemodelsAddresses for CurrentLogicalDelivery {
+    fn remodel(&mut self) {
+        self.snapshot.remodel();
+    }
+}
+
+impl super::model_address::KeptBeforeModel for CurrentLogicalDelivery {}
+
 impl MemoryDefinition for CurrentLogicalDelivery {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(5)
+        MemoryVersion::new(6)
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(CURRENT_SCHEMA)
@@ -230,9 +272,30 @@ impl EngineRecord for LogicalDeliveryEvent {
         RecordKey::new(format!("{:020}", self.snapshot.delivery_cursor))
     }
 }
+
+impl super::model_address::DefinedBeforeModel for LogicalDeliveryEvent {
+    fn version_before_model() -> MemoryVersion {
+        MemoryVersion::new(5)
+    }
+
+    fn schema_hash_before_model() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-logical-delivery-event-v5")
+    }
+}
+
+crate::upgrades_before_model!(LogicalDeliveryEvent);
+
+impl super::model_address::RemodelsAddresses for LogicalDeliveryEvent {
+    fn remodel(&mut self) {
+        self.snapshot.remodel();
+    }
+}
+
+impl super::model_address::KeptBeforeModel for LogicalDeliveryEvent {}
+
 impl MemoryDefinition for LogicalDeliveryEvent {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(5)
+        MemoryVersion::new(6)
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(EVENT_SCHEMA)
@@ -377,12 +440,34 @@ impl EngineRecord for SimplifiedReplyBinding {
         RecordKey::new(self.flow_id.clone())
     }
 }
-impl MemoryDefinition for SimplifiedReplyBinding {
-    fn memory_version() -> MemoryVersion {
+
+impl super::model_address::DefinedBeforeModel for SimplifiedReplyBinding {
+    fn version_before_model() -> MemoryVersion {
         MemoryVersion::new(1)
     }
-    fn schema_hash() -> SchemaHash {
+
+    fn schema_hash_before_model() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-simplified-reply-binding-v1")
+    }
+}
+
+crate::upgrades_before_model!(SimplifiedReplyBinding);
+
+impl super::model_address::RemodelsAddresses for SimplifiedReplyBinding {
+    fn remodel(&mut self) {
+        self.source.remodel();
+        self.recipient.remodel();
+    }
+}
+
+impl super::model_address::KeptBeforeModel for SimplifiedReplyBinding {}
+
+impl MemoryDefinition for SimplifiedReplyBinding {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-simplified-reply-binding-v2")
     }
 }
 
@@ -519,7 +604,8 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
             .with_predecessor::<CurrentLogicalDeliveryV1>()
             .with_predecessor::<CurrentLogicalDeliveryV2>()
             .with_predecessor::<CurrentLogicalDeliveryV3>()
-            .with_predecessor::<CurrentLogicalDeliveryV4>(),
+            .with_predecessor::<CurrentLogicalDeliveryV4>()
+            .with_predecessor::<super::model_address::BeforeModel<CurrentLogicalDelivery>>(),
             events: TableDescriptor::new(
                 EVENT_TABLE_NAME,
                 FamilyName::new("flow-nexus-logical-delivery-event"),
@@ -528,17 +614,20 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
             .with_predecessor::<LogicalDeliveryEventV1>()
             .with_predecessor::<LogicalDeliveryEventV2>()
             .with_predecessor::<LogicalDeliveryEventV3>()
-            .with_predecessor::<LogicalDeliveryEventV4>(),
+            .with_predecessor::<LogicalDeliveryEventV4>()
+            .with_predecessor::<super::model_address::BeforeModel<LogicalDeliveryEvent>>(),
             simplified_replies: TableDescriptor::new(
                 SIMPLIFIED_REPLY_TABLE_NAME,
                 FamilyName::new("flow-nexus-simplified-reply-binding"),
                 SimplifiedReplyBinding::schema_hash(),
-            ),
+            )
+            .with_predecessor::<super::model_address::BeforeModel<SimplifiedReplyBinding>>(),
             purposes: TableDescriptor::new(
                 PURPOSE_TABLE_NAME,
                 FamilyName::new("flow-nexus-logical-delivery-purpose"),
                 LogicalDeliveryPurpose::schema_hash(),
-            ),
+            )
+            .with_predecessor::<super::model_address::BeforeModel<LogicalDeliveryPurpose>>(),
         }
     }
     fn register(
@@ -547,10 +636,20 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
     ) -> Result<LogicalDeliveryTables, StoreError> {
         Ok(LogicalDeliveryTables {
             counter: engine.register_table(descriptors.counter)?,
-            current: Self::upgraded_current(engine, descriptors.current)?,
-            events: Self::upgraded_events(engine, descriptors.events)?,
-            simplified_replies: engine.register_table(descriptors.simplified_replies)?,
-            purposes: engine.register_table(descriptors.purposes)?,
+            current: engine.upgraded_before_model(descriptors.current, |engine, descriptor| {
+                Self::upgraded_current(engine, descriptor)
+            })?,
+            events: engine.upgraded_before_model(descriptors.events, |engine, descriptor| {
+                Self::upgraded_events(engine, descriptor)
+            })?,
+            simplified_replies: engine
+                .upgraded_before_model(descriptors.simplified_replies, |engine, descriptor| {
+                    Ok(engine.register_table(descriptor)?)
+                })?,
+            purposes: engine
+                .upgraded_before_model(descriptors.purposes, |engine, descriptor| {
+                    Ok(engine.register_table(descriptor)?)
+                })?,
             write_gate: Mutex::new(()),
         })
     }
@@ -906,7 +1005,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             Address {
                 aspect: signal_flow::Aspect::Psyche,
                 topic: "book".into(),
-                layer: signal_flow::Layer::Tertiary,
+                model: signal_flow::Model::Sonnet,
             }
         } else {
             binding.recipient.clone()
@@ -1784,7 +1883,7 @@ mod upgrade_tests {
     };
     use crate::store::send_v41::{DeliverySnapshotV41, DeliveryStateV41, RefusalV41};
     use sema_engine::{Decision, UpgradeFrom};
-    use signal_flow::{Address, Aspect, DeliveryState, Layer, Refusal, SentBy};
+    use signal_flow::{Address, Aspect, DeliveryState, Model, Refusal, SentBy};
 
     fn archived_snapshot() -> DeliverySnapshotV41 {
         DeliverySnapshotV41 {
@@ -1793,12 +1892,12 @@ mod upgrade_tests {
             sent_by: SentBy::Sender(Address {
                 aspect: Aspect::Psyche,
                 topic: "core".into(),
-                layer: Layer::Secondary,
+                model: Model::Opus,
             }),
             address: Address {
                 aspect: Aspect::Mind,
                 topic: "flow".into(),
-                layer: Layer::Tertiary,
+                model: Model::Luna,
             },
             delivery_state: DeliveryStateV41::Failed(RefusalV41::Direct(
                 "v41 direct refusal".into(),
@@ -1814,7 +1913,7 @@ mod upgrade_tests {
             SentBy::Sender(Address {
                 aspect: Aspect::Psyche,
                 topic: "core".into(),
-                layer: Layer::Secondary,
+                model: Model::Opus,
             })
         );
         assert_eq!(
@@ -1822,7 +1921,7 @@ mod upgrade_tests {
             Address {
                 aspect: Aspect::Mind,
                 topic: "flow".into(),
-                layer: Layer::Tertiary,
+                model: Model::Luna,
             }
         );
         assert_eq!(

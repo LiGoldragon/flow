@@ -8,7 +8,9 @@
 //! otherwise, whatever an earlier shape said; one archived before it named
 //! its purpose and records opens with none.
 
+use super::model_address::RemodelsFamilies;
 use super::{FlowStore, ReadsFlowMemory, StoreError};
+use crate::model_family::NamesModelOfLayer;
 use meta_signal_flow::{ConfigureMetaflow, Continuity};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -16,14 +18,14 @@ use sema_engine::{
     QueryPlan, RecordKey, SchemaHash, TableDescriptor, TableName, TableReference, UpgradeFrom,
     UpgradeOutcome,
 };
-use signal_flow::{Address, Aspect, Layer};
+use signal_flow::{Address, Aspect};
 
 pub(super) const META_METAFLOW_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_metaflow_configuration");
 pub(super) const META_METAFLOW_CONFIGURATION_FAMILY: &str =
     "flow-nexus-meta-metaflow-configuration";
 pub(super) const META_METAFLOW_CONFIGURATION_SCHEMA: &str =
-    "flow-nexus-meta-metaflow-configuration-v5";
+    "flow-nexus-meta-metaflow-configuration-v6";
 
 /// One declared metaflow, keyed by its Address.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -37,9 +39,35 @@ impl EngineRecord for StoredMetaMetaflowConfiguration {
     }
 }
 
+impl super::model_address::DefinedBeforeModel for StoredMetaMetaflowConfiguration {
+    fn version_before_model() -> MemoryVersion {
+        MemoryVersion::new(5)
+    }
+
+    fn schema_hash_before_model() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v5")
+    }
+}
+
+crate::upgrades_before_model!(StoredMetaMetaflowConfiguration);
+
+impl super::model_address::RemodelsAddresses for StoredMetaMetaflowConfiguration {
+    fn remodel(&mut self) {
+        self.metaflow.remodel();
+    }
+}
+
+impl super::model_address::KeptBeforeModel for StoredMetaMetaflowConfiguration {
+    fn key_before_model(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key_before_model(
+            &self.metaflow.address,
+        ))
+    }
+}
+
 impl MemoryDefinition for StoredMetaMetaflowConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(5)
+        MemoryVersion::new(6)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -67,7 +95,9 @@ pub(super) struct StoredMetaMetaflowConfigurationV4 {
 
 impl EngineRecord for StoredMetaMetaflowConfigurationV4 {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+        RecordKey::new(FlowStore::address_record_key_before_model(
+            &self.metaflow.address,
+        ))
     }
 }
 
@@ -103,9 +133,10 @@ impl UpgradeFrom<StoredMetaMetaflowConfigurationV4> for StoredMetaMetaflowConfig
 }
 
 /// How a declaration archived before Continuity continues: Maintained at
-/// exactly these Addresses, the core Primary, Secondary and Tertiary of
-/// each aspect and the Psyche core Quaternary, and OnDemand at every other.
-/// A metaflow is Maintained by its exact Address, never by its layer.
+/// exactly the core of each aspect at the first three ranks of its family
+/// and the Psyche core at the fourth, and OnDemand at every other. The
+/// Address is read as Flow archived it then, its model a Layer's rank.
+/// A metaflow is Maintained by its exact Address, never by its Model.
 pub(crate) trait DefaultsContinuity {
     fn default_continuity(&self) -> Continuity;
 }
@@ -113,19 +144,7 @@ pub(crate) trait DefaultsContinuity {
 impl DefaultsContinuity for Address {
     fn default_continuity(&self) -> Continuity {
         let maintained = self.topic == "core"
-            && matches!(
-                (&self.aspect, &self.layer),
-                (Aspect::Psyche, Layer::Primary)
-                    | (Aspect::Psyche, Layer::Secondary)
-                    | (Aspect::Psyche, Layer::Tertiary)
-                    | (Aspect::Psyche, Layer::Quaternary)
-                    | (Aspect::Mind, Layer::Primary)
-                    | (Aspect::Mind, Layer::Secondary)
-                    | (Aspect::Mind, Layer::Tertiary)
-                    | (Aspect::Field, Layer::Primary)
-                    | (Aspect::Field, Layer::Secondary)
-                    | (Aspect::Field, Layer::Tertiary)
-            );
+            && (self.aspect == Aspect::Psyche || self.layer_word() != "Quaternary");
         if maintained {
             Continuity::Maintained
         } else {
@@ -163,7 +182,9 @@ pub(super) struct StoredMetaMetaflowConfigurationV3 {
 
 impl EngineRecord for StoredMetaMetaflowConfigurationV3 {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+        RecordKey::new(FlowStore::address_record_key_before_model(
+            &self.metaflow.address,
+        ))
     }
 }
 
@@ -215,7 +236,9 @@ pub(super) struct StoredMetaMetaflowConfigurationV2 {
 
 impl EngineRecord for StoredMetaMetaflowConfigurationV2 {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+        RecordKey::new(FlowStore::address_record_key_before_model(
+            &self.metaflow.address,
+        ))
     }
 }
 
@@ -265,7 +288,9 @@ pub(super) struct StoredMetaMetaflowConfigurationV1 {
 
 impl EngineRecord for StoredMetaMetaflowConfigurationV1 {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+        RecordKey::new(FlowStore::address_record_key_before_model(
+            &self.metaflow.address,
+        ))
     }
 }
 
@@ -315,6 +340,7 @@ impl DescribesMetaflowDeclarationTable for StoredMetaMetaflowConfiguration {
         .with_predecessor::<StoredMetaMetaflowConfigurationV2>()
         .with_predecessor::<StoredMetaMetaflowConfigurationV3>()
         .with_predecessor::<StoredMetaMetaflowConfigurationV4>()
+        .with_predecessor::<super::model_address::BeforeModel<StoredMetaMetaflowConfiguration>>()
     }
 }
 
@@ -330,61 +356,63 @@ impl UpgradesMetaflowDeclarations for Engine {
         &mut self,
         descriptor: TableDescriptor<StoredMetaMetaflowConfiguration>,
     ) -> Result<TableReference<StoredMetaMetaflowConfiguration>, StoreError> {
-        // Try each historical shape newest first. An admission failure means
-        // the stored family has another predecessor's identity.
-        let from_v3 = descriptor.clone();
-        let from_v2 = descriptor.clone();
-        let from_v1 = descriptor.clone();
-        match self
-            .upgrade_table::<StoredMetaMetaflowConfigurationV4, StoredMetaMetaflowConfiguration>(
-                descriptor,
-            ) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
+        self.upgraded_before_model(descriptor, |engine, descriptor| {
+            // Try each historical shape newest first. An admission failure means
+            // the stored family has another predecessor's identity.
+            let from_v3 = descriptor.clone();
+            let from_v2 = descriptor.clone();
+            let from_v1 = descriptor.clone();
+            match engine
+                .upgrade_table::<StoredMetaMetaflowConfigurationV4, StoredMetaMetaflowConfiguration>(
+                    descriptor,
+                ) {
+                UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+                UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure)
+                    if failure.phase() == sema_engine::StoragePhase::Admission => {}
+                UpgradeOutcome::Failed(failure) => {
+                    return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
+                }
             }
-        }
-        match self
-            .upgrade_table::<StoredMetaMetaflowConfigurationV3, StoredMetaMetaflowConfiguration>(
-                from_v3,
-            ) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
+            match engine
+                .upgrade_table::<StoredMetaMetaflowConfigurationV3, StoredMetaMetaflowConfiguration>(
+                    from_v3,
+                ) {
+                UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+                UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure)
+                    if failure.phase() == sema_engine::StoragePhase::Admission => {}
+                UpgradeOutcome::Failed(failure) => {
+                    return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
+                }
             }
-        }
-        match self
-            .upgrade_table::<StoredMetaMetaflowConfigurationV2, StoredMetaMetaflowConfiguration>(
-                from_v2,
-            ) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
+            match engine
+                .upgrade_table::<StoredMetaMetaflowConfigurationV2, StoredMetaMetaflowConfiguration>(
+                    from_v2,
+                ) {
+                UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+                UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure)
+                    if failure.phase() == sema_engine::StoragePhase::Admission => {}
+                UpgradeOutcome::Failed(failure) => {
+                    return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
+                }
             }
-        }
-        match self
-            .upgrade_table::<StoredMetaMetaflowConfigurationV1, StoredMetaMetaflowConfiguration>(
-                from_v1,
-            ) {
-            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure) => {
-                Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
+            match engine
+                .upgrade_table::<StoredMetaMetaflowConfigurationV1, StoredMetaMetaflowConfiguration>(
+                    from_v1,
+                ) {
+                UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure) => {
+                    Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
+                }
             }
-        }
+        })
     }
 }
 
@@ -428,39 +456,39 @@ mod tests {
     };
     use meta_signal_flow::Continuity;
     use sema_engine::{Decision, UpgradeFrom};
-    use signal_flow::{Address, Aspect, FlowKind, Layer, ToolSet};
+    use signal_flow::{Address, Aspect, FlowKind, Model, ToolSet};
 
-    fn at(aspect: Aspect, topic: &str, layer: Layer) -> Address {
+    fn at(aspect: Aspect, topic: &str, model: Model) -> Address {
         Address {
             aspect,
             topic: topic.into(),
-            layer,
+            model,
         }
     }
 
     /// The Addresses a declaration archived before Continuity opens
     /// Maintained at, and some it opens OnDemand at: the same layers under
-    /// another topic or aspect, so Maintained is never read off a layer.
+    /// another topic or aspect, so Maintained is never read off a rank.
     fn expected_continuities() -> Vec<(Address, Continuity)> {
         use Aspect::{Field, Mind, Psyche};
         use Continuity::{Maintained, OnDemand};
-        use Layer::{Primary, Quaternary, Secondary, Tertiary};
+        use Model::{Fable, Haiku, Opus, Sonnet};
         vec![
-            (at(Psyche, "core", Primary), Maintained),
-            (at(Psyche, "core", Secondary), Maintained),
-            (at(Psyche, "core", Tertiary), Maintained),
-            (at(Psyche, "core", Quaternary), Maintained),
-            (at(Mind, "core", Primary), Maintained),
-            (at(Mind, "core", Secondary), Maintained),
-            (at(Mind, "core", Tertiary), Maintained),
-            (at(Field, "core", Primary), Maintained),
-            (at(Field, "core", Secondary), Maintained),
-            (at(Field, "core", Tertiary), Maintained),
-            (at(Mind, "core", Quaternary), OnDemand),
-            (at(Field, "core", Quaternary), OnDemand),
-            (at(Psyche, "flow", Primary), OnDemand),
-            (at(Mind, "flow", Secondary), OnDemand),
-            (at(Field, "coreWork", Primary), OnDemand),
+            (at(Psyche, "core", Fable), Maintained),
+            (at(Psyche, "core", Opus), Maintained),
+            (at(Psyche, "core", Sonnet), Maintained),
+            (at(Psyche, "core", Haiku), Maintained),
+            (at(Mind, "core", Fable), Maintained),
+            (at(Mind, "core", Opus), Maintained),
+            (at(Mind, "core", Sonnet), Maintained),
+            (at(Field, "core", Fable), Maintained),
+            (at(Field, "core", Opus), Maintained),
+            (at(Field, "core", Sonnet), Maintained),
+            (at(Mind, "core", Haiku), OnDemand),
+            (at(Field, "core", Haiku), OnDemand),
+            (at(Psyche, "flow", Fable), OnDemand),
+            (at(Mind, "flow", Opus), OnDemand),
+            (at(Field, "coreWork", Fable), OnDemand),
         ]
     }
 
@@ -471,7 +499,7 @@ mod tests {
                 address: Address {
                     aspect: Aspect::Psyche,
                     topic: "book".into(),
-                    layer: Layer::Tertiary,
+                    model: Model::Sonnet,
                 },
                 system_modules: vec!["spirit-core".into()],
                 user_modules: vec!["vision-book".into()],
@@ -539,7 +567,7 @@ mod tests {
 
     #[test]
     fn v4_declaration_upgrade_preserves_declaration_and_defaults_workspace() {
-        let address = at(Aspect::Mind, "workspace", Layer::Secondary);
+        let address = at(Aspect::Mind, "workspace", Model::Sol);
         let previous = StoredMetaMetaflowConfigurationV4 {
             metaflow: ConfigureMetaflowV4 {
                 address: address.clone(),

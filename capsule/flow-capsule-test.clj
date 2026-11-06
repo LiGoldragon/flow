@@ -52,10 +52,10 @@
 ;; entry its own id, sender and priority, oldest first; the flow's first
 ;; turn holds it after the context it is composed into.
 (let [turn (str "Purpose of the seat.\n\n"
-                "[ { logical-delivery-00000000000000000007 Sender.{ Psyche test Secondary } Soft.Notice.«First of two. Tag w1.» }"
+                "[ { logical-delivery-00000000000000000007 Sender.{ Psyche test Opus } Soft.Notice.«First of two. Tag w1.» }"
                 " { logical-delivery-00000000000000000009 Flow Soft.Order.«Second of two. Tag w2.» } ]")]
   (check "a waking reads as one vector of its entries, oldest first"
-         (= [{:id "logical-delivery-00000000000000000007" :sender "Sender Psyche test Secondary" :priority "Soft"}
+         (= [{:id "logical-delivery-00000000000000000007" :sender "Sender Psyche test Opus" :priority "Soft"}
              {:id "logical-delivery-00000000000000000009" :sender "Flow" :priority "Soft"}]
             (flow-capsule/waking-entries turn)))
   (check "a turn holding no waking reads no entries"
@@ -125,17 +125,17 @@
           (flow-capsule/split-replay "Configure.Nexus.{ a }\n\nConfigure.Metaflows.[ { «two\nlines» } ]\n")))
 
 ;; The takeover's declarations: every seat it keeps Awake is Maintained, a
-;; Codex Secondary and an asleep OnDemand Primary are declared, and the old
+;; Codex Sol and an asleep OnDemand Fable are declared, and the old
 ;; Nexus is not given DefaultMinutes, which it does not know; the replay to
 ;; the new Nexus is the same declarations with it.
 (let [lines ["Configure.Nexus.{ /src 60 }"
-             "Configure.Models.[ { Secondary Psyche haiku } { Quaternary Mind luna } ]"
+             "Configure.Models.[ { Opus haiku } { Terra luna } ]"
              "Configure.DefaultMinutes.30"
-             "Configure.LeaveOuts.[ { { Mind test Quaternary } Codex [ CodexAgentsMd ] } ]"
-             (str "Configure.Metaflows.[ { { Psyche test Secondary } None [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] }"
-                  " { { Psyche test Tertiary } None [ spirit:core ] [] Regular Default OnDemand «» [] }"
-                  " { { Psyche test Quaternary } None [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] }"
-                  " { { Mind test Quaternary } None [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] } ]")]
+             "Configure.LeaveOuts.[ { { Mind test Terra } Codex [ CodexAgentsMd ] } ]"
+             (str "Configure.Metaflows.[ { { Psyche test Opus } None [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] }"
+                  " { { Psyche test Sonnet } None [ spirit:core ] [] Regular Default OnDemand «» [] }"
+                  " { { Psyche test Haiku } None [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] }"
+                  " { { Mind test Terra } None [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] } ]")]
       {:keys [old replay]} (flow-capsule/takeover-configuration lines)
       metaflows (first (filter #(clojure.string/starts-with? % "Configure.Metaflows.") old))]
   (check "the old Nexus is not given DefaultMinutes"
@@ -148,18 +148,18 @@
               (clojure.string/includes?
                (first (filter #(clojure.string/starts-with? % "Configure.Metaflows.") replay))
                "} None [")))
-  (check "no kept seat is OnDemand but the asleep Primary"
+  (check "no kept seat is OnDemand but the asleep Fable"
          (= 1 (count (re-seq #"OnDemand" metaflows))))
-  (check "the asleep Primary is declared OnDemand"
-         (clojure.string/includes? metaflows "{ { Psyche test Primary } [ spirit:core intent:models ] [] Regular Default OnDemand «» [] }"))
-  (check "a Codex Secondary is declared Maintained"
-         (clojure.string/includes? metaflows "{ { Mind test Secondary } [ spirit:core intent:models ] [] Simplified Explicit.[] Maintained «» [] }"))
-  (check "the Codex Secondary runs the Codex Quaternary's model"
+  (check "the asleep Fable is declared OnDemand"
+         (clojure.string/includes? metaflows "{ { Psyche test Fable } [ spirit:core intent:models ] [] Regular Default OnDemand «» [] }"))
+  (check "a Codex Sol is declared Maintained"
+         (clojure.string/includes? metaflows "{ { Mind test Sol } [ spirit:core intent:models ] [] Simplified Explicit.[] Maintained «» [] }"))
+  (check "the Codex Sol runs the Codex Terra's model"
          (clojure.string/includes? (first (filter #(clojure.string/starts-with? % "Configure.Models.") old))
-                                   "{ Secondary Mind luna }"))
-  (check "the Codex Secondary leaves out what the Codex Quaternary does"
+                                   "{ Sol luna }"))
+  (check "the Codex Sol leaves out what the Codex Terra does"
          (clojure.string/includes? (first (filter #(clojure.string/starts-with? % "Configure.LeaveOuts.") old))
-                                   "{ { Mind test Secondary } Codex [ CodexAgentsMd ] }")))
+                                   "{ { Mind test Sol } Codex [ CodexAgentsMd ] }")))
 
 ;; Ids: the three families the counters seed, read from any reply text.
 (let [text (str "SendOutcomes.[ { send-outcome-000000000000056e logical-delivery-00000000000000014574 } ]"
@@ -212,19 +212,19 @@
 ;; them: one per labelled seat pane, the trackers' stand-ins first, then the
 ;; rest in pane order; a pane with no seat label is not typed to.
 (let [panes [{:pane_id "w1:p1" :label "capsule-driver"}
-             {:pane_id "w2:p1" :label "{ Psyche test Secondary 0a1b2c }"}
-             {:pane_id "w3:p1" :label "{ Psyche test Quaternary 3d4e5f }"}
-             {:pane_id "w4:p1" :label "{ Mind test Secondary 6a7b8c }"}
-             {:pane_id "w5:p1" :label "{ Mind test Quaternary 9d0e1f }"}]
-      lines (flow-capsule/rebind-lines panes flow-package #(clojure.string/ends-with? % "Quaternary"))]
+             {:pane_id "w2:p1" :label "{ Psyche test Opus 0a1b2c }"}
+             {:pane_id "w3:p1" :label "{ Psyche test Haiku 3d4e5f }"}
+             {:pane_id "w4:p1" :label "{ Mind test Sol 6a7b8c }"}
+             {:pane_id "w5:p1" :label "{ Mind test Terra 9d0e1f }"}]
+      lines (flow-capsule/rebind-lines panes flow-package #(or (clojure.string/ends-with? % "Haiku") (clojure.string/ends-with? % "Terra")))]
   (check "the trackers' stand-ins come first, then the rest in pane order"
          (= ["w3:p1" "w5:p1" "w2:p1" "w4:p1"] (map :pane lines)))
   (check "each line names its pane's FlowId and Address"
-         (= {:pane "w2:p1" :flow-id "0a1b2c" :address "{ Psyche test Secondary }"}
+         (= {:pane "w2:p1" :flow-id "0a1b2c" :address "{ Psyche test Opus }"}
             (dissoc (nth lines 2) :line)))
   (check "the typed line carries the Rust-composed invocation to the new client"
          (= (str "! " flow-package "/bin/flow '{ " flow-capsule/ordinary-socket
-                 " BindSeat.{ Psyche test Secondary } }'")
+                 " BindSeat.{ Psyche test Opus } }'")
             (:line (nth lines 2))))
   (let [{:keys [exit err]}
         (flow-capsule/run {} (str flow-package "/bin/flow")
@@ -236,16 +236,16 @@
 ;; changed, went Asleep or is gone is a changed seat.
 (let [before (flow-capsule/awake-seats
               (flow-capsule/read-datom
-               "Listed.[ { { Psyche test Secondary } Awake.0a1b2c [] [] } { { Psyche test Quaternary } Awake.3d4e5f [] [] } { { Psyche test Primary } Asleep [] [] } ]"))
+               "Listed.[ { { Psyche test Opus } Awake.0a1b2c [] [] } { { Psyche test Haiku } Awake.3d4e5f [] [] } { { Psyche test Fable } Asleep [] [] } ]"))
       after (flow-capsule/awake-seats
              (flow-capsule/read-datom
-              "Listed.[ { { Psyche test Secondary } Awake.0a1b2c [] [] } { { Psyche test Quaternary } Awake.777777 [] [] } { { Psyche test Primary } Asleep [] [] } ]"))]
+              "Listed.[ { { Psyche test Opus } Awake.0a1b2c [] [] } { { Psyche test Haiku } Awake.777777 [] [] } { { Psyche test Fable } Asleep [] [] } ]"))]
   (check "the Awake seats read by Address"
-         (= {"{ Psyche test Secondary }" "0a1b2c" "{ Psyche test Quaternary }" "3d4e5f"} before))
+         (= {"{ Psyche test Opus }" "0a1b2c" "{ Psyche test Haiku }" "3d4e5f"} before))
   (check "a seat under another FlowId is changed"
-         (= ["{ Psyche test Quaternary }"] (flow-capsule/changed-seats before after)))
+         (= ["{ Psyche test Haiku }"] (flow-capsule/changed-seats before after)))
   (check "a seat gone Asleep is changed"
-         (= ["{ Psyche test Secondary }"] (flow-capsule/changed-seats {"{ Psyche test Secondary }" "0a1b2c"} {}))))
+         (= ["{ Psyche test Opus }"] (flow-capsule/changed-seats {"{ Psyche test Opus }" "0a1b2c"} {}))))
 
 ;; The window, from the hand stop: ready, end, each pane's type-to-Bound
 ;; time, and the extrapolation to the night's seat count plus the readback.
@@ -260,10 +260,10 @@
 ;; first; a full Nexus on the private socket then takes Counters, the lower
 ;; one and the Configuration read while no delivery row exists; the rest of
 ;; the replay follows configuration-only, in the file's order.
-(let [replay ["Configure.Models.[ { Secondary Psyche haiku } ]"
+(let [replay ["Configure.Models.[ { Opus haiku } ]"
               "Configure.Nexus.{ /src 60 }"
               "Configure.DefaultMinutes.30"
-              "Configure.Metaflows.[ { { Psyche test Secondary } None [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] } ]"]
+              "Configure.Metaflows.[ { { Psyche test Opus } None [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] } ]"]
       plan (flow-capsule/seed-plan replay "Configure.Counters.{ 3 2 1 }" "Configure.Counters.{ 2 1 0 }")
       steps (map (juxt :via :datom) plan)]
   (check "the seed declares the Nexus first, through a configuration-only Nexus"
@@ -272,9 +272,9 @@
          (= [[:running "Configure.Counters.{ 3 2 1 }"] [:running "Configure.Counters.{ 2 1 0 }"] [:running "Configuration"]]
             (take 3 (rest steps))))
   (check "the rest of the replay follows configuration-only, in the file's order"
-         (= [[:configure-only "Configure.Models.[ { Secondary Psyche haiku } ]"]
+         (= [[:configure-only "Configure.Models.[ { Opus haiku } ]"]
              [:configure-only "Configure.DefaultMinutes.30"]
-             [:configure-only "Configure.Metaflows.[ { { Psyche test Secondary } None [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] } ]"]]
+             [:configure-only "Configure.Metaflows.[ { { Psyche test Opus } None [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] } ]"]]
             (drop 4 steps)))
   (check "no Counters goes to a configuration-only Nexus"
          (not-any? (fn [[via datom]] (and (= via :configure-only) (str/starts-with? datom "Configure.Counters."))) steps))
@@ -303,7 +303,7 @@
        (= "logical-delivery-00000000000000000009"
           (flow-capsule/accepted-id "SendAccepted.{ logical-delivery-00000000000000000009 9 Queued }")))
 (check "a refused Send has no id"
-       (nil? (flow-capsule/accepted-id "Refused.Unknown.Address.{ Psyche test Primary }")))
+       (nil? (flow-capsule/accepted-id "Refused.Unknown.Address.{ Psyche test Fable }")))
 (check "a queue holds an id only where the id is written"
        (and (flow-capsule/holds-id? "Deliveries.[ { logical-delivery-00000000000000000009 } ]"
                                     "logical-delivery-00000000000000000009")
@@ -313,26 +313,26 @@
 
 ;; A seat's queue, read by id from a Listed reply.
 (let [listed (flow-capsule/read-datom
-              (str "Listed.[ { { Psyche test Quaternary } Asleep [] [ { logical-delivery-00000000000000000030 Sender.{ Psyche test Secondary } Queue Soft.Task.{ 1 «a» } } ] }"
-                   " { { Psyche test Tertiary } Asleep [] [] } ]"))]
+              (str "Listed.[ { { Psyche test Haiku } Asleep [] [ { logical-delivery-00000000000000000030 Sender.{ Psyche test Opus } Queue Soft.Task.{ 1 «a» } } ] }"
+                   " { { Psyche test Sonnet } Asleep [] [] } ]"))]
   (check "a seat's queued ids read from Listed"
-         (= ["logical-delivery-00000000000000000030"] (flow-capsule/queued-ids listed "{ Psyche test Quaternary }")))
+         (= ["logical-delivery-00000000000000000030"] (flow-capsule/queued-ids listed "{ Psyche test Haiku }")))
   (check "an empty queue reads no ids"
-         (= [] (flow-capsule/queued-ids listed "{ Psyche test Tertiary }"))))
+         (= [] (flow-capsule/queued-ids listed "{ Psyche test Sonnet }"))))
 
 ;; The queued Notice lives in the Metaflows queue (Listed), not in the delivery
 ;; queue (ReadQueueDeliveries lists only attempts). It is witnessed there by
 ;; its id, before the stop and after each rollback.
 (defn check-try [what f] (check what (try (boolean (f)) (catch Throwable _ false))))
 
-(let [listed (str "Listed.[ { { Psyche test Primary } Asleep [ 5912d9 ] [ { logical-delivery-00000000000000000001 Sender.{ Psyche test Secondary } Queue Soft.Notice.«Held» } ] }"
-                  " { { Psyche test Tertiary } Awake.429d70 [] [] } ]")
+(let [listed (str "Listed.[ { { Psyche test Fable } Asleep [ 5912d9 ] [ { logical-delivery-00000000000000000001 Sender.{ Psyche test Opus } Queue Soft.Notice.«Held» } ] }"
+                  " { { Psyche test Sonnet } Awake.429d70 [] [] } ]")
       id "logical-delivery-00000000000000000001"
-      primary "{ Psyche test Primary }"]
+      primary "{ Psyche test Fable }"]
   (check-try "the Notice is found in the Metaflows queue of its Address"
              #(flow-capsule/notice-queued? listed primary id))
   (check-try "the Notice is not found at another Address"
-             #(not (flow-capsule/notice-queued? listed "{ Psyche test Tertiary }" id)))
+             #(not (flow-capsule/notice-queued? listed "{ Psyche test Sonnet }" id)))
   (check-try "a blank or missing id is never found"
              #(not (or (flow-capsule/notice-queued? listed primary "") (flow-capsule/notice-queued? listed primary nil))))
   (check-try "an empty Metaflows holds no Notice"
@@ -341,9 +341,9 @@
 ;; A logical delivery's state is read from the sender's own ObserveSends first
 ;; frame (SendsObserved, one DeliverySnapshot per delivery), not from
 ;; ReadQueueDeliveries, which lists only unsettled attempts.
-(let [observed (str "SendsObserved.{ 9 [ { 1 logical-delivery-00000000000000000001 Sender.{ Psyche test Secondary } { Psyche test Primary } Queued }"
-                    " { 8 logical-delivery-00000000000000000022 Sender.{ Psyche test Secondary } { Psyche test Tertiary } Uncertain }"
-                    " { 9 logical-delivery-00000000000000000023 Sender.{ Psyche test Secondary } { Psyche test Tertiary } Delivered.«receipt» } ] }")]
+(let [observed (str "SendsObserved.{ 9 [ { 1 logical-delivery-00000000000000000001 Sender.{ Psyche test Opus } { Psyche test Fable } Queued }"
+                    " { 8 logical-delivery-00000000000000000022 Sender.{ Psyche test Opus } { Psyche test Sonnet } Uncertain }"
+                    " { 9 logical-delivery-00000000000000000023 Sender.{ Psyche test Opus } { Psyche test Sonnet } Delivered.«receipt» } ] }")]
   (check-try "each logical delivery's state is read from SendsObserved"
              #(= {"logical-delivery-00000000000000000001" "Queued"
                   "logical-delivery-00000000000000000022" "Uncertain"
@@ -371,12 +371,12 @@
 
 ;; Scenario 20 needs a seat that takes its whole queue on a wake: a Regular
 ;; OnDemand seat (a Simplified seat takes its oldest alone).
-(let [metaflows (str "Configure.Metaflows.[ { { Psyche test Tertiary } None [ spirit:core ] [] Regular Default OnDemand «» [] }"
-                     " { { Psyche test Quaternary } None [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] } ]")]
+(let [metaflows (str "Configure.Metaflows.[ { { Psyche test Sonnet } None [ spirit:core ] [] Regular Default OnDemand «» [] }"
+                     " { { Psyche test Haiku } None [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] } ]")]
   (check "a seat's declaration reads its FlowKind and wake policy"
-         (= ["Regular" "OnDemand"] (flow-capsule/seat-declaration metaflows "{ Psyche test Tertiary }")))
+         (= ["Regular" "OnDemand"] (flow-capsule/seat-declaration metaflows "{ Psyche test Sonnet }")))
   (check "a Simplified seat reads as Simplified"
-         (= ["Simplified" "OnDemand"] (flow-capsule/seat-declaration metaflows "{ Psyche test Quaternary }"))))
+         (= ["Simplified" "OnDemand"] (flow-capsule/seat-declaration metaflows "{ Psyche test Haiku }"))))
 ;; and configure.datom declares scenario 20's seat so, where the file is
 ;; beside this one (the Nix check holds each file alone, so there it is not).
 (let [datoms (fs/file (fs/parent (fs/canonicalize *file*)) "configure.datom")]

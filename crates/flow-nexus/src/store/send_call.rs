@@ -32,7 +32,7 @@ use signal_flow::{Address, HarnessKind, SendPayloadSize};
 
 pub(super) const SEND_CALL_TABLE_NAME: TableName = TableName::new("flow_nexus_send_calls");
 pub(super) const SEND_CALL_FAMILY: &str = "flow-nexus-send-call";
-pub(super) const SEND_CALL_SCHEMA: &str = "flow-nexus-send-call-v6";
+pub(super) const SEND_CALL_SCHEMA: &str = "flow-nexus-send-call-v7";
 
 /// The record key of a call: each part prefixed by its length, so no two
 /// keys of different parts read alike.
@@ -60,9 +60,29 @@ impl EngineRecord for SendCall {
     }
 }
 
+impl super::model_address::DefinedBeforeModel for SendCall {
+    fn version_before_model() -> MemoryVersion {
+        MemoryVersion::new(6)
+    }
+
+    fn schema_hash_before_model() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-send-call-v6")
+    }
+}
+
+crate::upgrades_before_model!(SendCall);
+
+impl super::model_address::RemodelsAddresses for SendCall {
+    fn remodel(&mut self) {
+        self.send_outcome.remodel();
+    }
+}
+
+impl super::model_address::KeptBeforeModel for SendCall {}
+
 impl MemoryDefinition for SendCall {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(6)
+        MemoryVersion::new(7)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -512,6 +532,7 @@ impl DescribesSendCallTable for SendCall {
         .with_predecessor::<SendCallV2>()
         .with_predecessor::<SendCallV4>()
         .with_predecessor::<SendCallV5>()
+        .with_predecessor::<super::model_address::BeforeModel<SendCall>>()
     }
 }
 
@@ -731,7 +752,7 @@ mod tests {
         let target = Target {
             aspect: signal_flow::Aspect::Mind,
             topic: "target".into(),
-            layer: signal_flow::Layer::Primary,
+            model: signal_flow::Model::Astra,
         };
         seed_v3(
             &path,
@@ -742,7 +763,7 @@ mod tests {
                     sender: signal_flow::Address {
                         aspect: signal_flow::Aspect::Psyche,
                         topic: "sender".into(),
-                        layer: signal_flow::Layer::Secondary,
+                        model: signal_flow::Model::Opus,
                     },
                     target: target.clone(),
                 }),
@@ -759,7 +780,7 @@ mod tests {
                 sender: signal_flow::Address {
                     aspect: signal_flow::Aspect::Psyche,
                     topic: "sender".into(),
-                    layer: signal_flow::Layer::Secondary,
+                    model: signal_flow::Model::Opus,
                 },
                 target,
             })
@@ -811,7 +832,7 @@ mod tests {
                     signal_flow::Address {
                         aspect: signal_flow::Aspect::Mind,
                         topic: "flow".into(),
-                        layer: signal_flow::Layer::Secondary,
+                        model: signal_flow::Model::Sol,
                     },
                 )),
             }],

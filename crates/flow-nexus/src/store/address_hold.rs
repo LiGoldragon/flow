@@ -32,7 +32,7 @@ use signal_flow::{Address, LaunchProfile, Metaflow, StartRejection};
 
 pub(super) const ADDRESS_HOLD_TABLE_NAME: TableName = TableName::new("flow_nexus_address_holds");
 pub(super) const ADDRESS_HOLD_FAMILY: &str = "flow-nexus-address-hold";
-pub(super) const ADDRESS_HOLD_SCHEMA: &str = "flow-nexus-address-hold-v5";
+pub(super) const ADDRESS_HOLD_SCHEMA: &str = "flow-nexus-address-hold-v6";
 
 /// The Address a launched flow holds, and the metaflow it found there.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -48,13 +48,34 @@ impl EngineRecord for AddressHold {
     }
 }
 
-impl MemoryDefinition for AddressHold {
-    fn memory_version() -> MemoryVersion {
+impl super::model_address::DefinedBeforeModel for AddressHold {
+    fn version_before_model() -> MemoryVersion {
         MemoryVersion::new(5)
     }
 
-    fn schema_hash() -> SchemaHash {
+    fn schema_hash_before_model() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-address-hold-v5")
+    }
+}
+
+crate::upgrades_before_model!(AddressHold);
+
+impl super::model_address::RemodelsAddresses for AddressHold {
+    fn remodel(&mut self) {
+        self.address.remodel();
+        self.found.remodel();
+    }
+}
+
+impl super::model_address::KeptBeforeModel for AddressHold {}
+
+impl MemoryDefinition for AddressHold {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(6)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(ADDRESS_HOLD_SCHEMA)
     }
 }
 
@@ -223,6 +244,7 @@ impl DescribesAddressHoldTable for AddressHold {
         .with_predecessor::<AddressHoldV1>()
         .with_predecessor::<AddressHoldV2>()
         .with_predecessor::<AddressHoldV3>()
+        .with_predecessor::<super::model_address::BeforeModel<AddressHold>>()
     }
 }
 

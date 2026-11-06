@@ -26,7 +26,7 @@ use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
 use signal_flow::{
     Address, Aspect, ComposedLaunch, CompositionRefusal, ContextRefusal, FirstPromptPayload,
-    HarnessKind, LaunchProfile, Layer, LeaveOut, LeaveOutRefusal, PromptPart, QueueEntry,
+    HarnessKind, LaunchProfile, LeaveOut, LeaveOutRefusal, Model, PromptPart, QueueEntry,
     SystemPrompt, TargetReceiptRequest,
 };
 use std::collections::HashSet;
@@ -71,7 +71,7 @@ impl ComposesPresentationRole for LaunchComposer {
     fn presentation_prompt(&self, address: &Address) -> Result<Option<String>, CompositionError> {
         if address.aspect != Aspect::Psyche
             || address.topic != "core"
-            || address.layer != Layer::Primary
+            || address.model != Model::Fable
         {
             return Ok(None);
         }
@@ -607,8 +607,8 @@ impl RendersQueuedWork for [QueueEntry] {
 }
 
 /// Everything a fresh wake knows of the flow it starts, all of it read from
-/// the meta configuration and the metaflow's last flow: its Address, the
-/// layer's Model, the module identities and leave-outs the last launch
+/// the meta configuration and the metaflow's last flow: its Address, its
+/// Model's native model, the module identities and leave-outs the last launch
 /// named, the Herdr session its last flow ran in, and the queued work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FreshSeat {
@@ -693,8 +693,8 @@ pub(crate) mod tests {
     };
     use crate::context::FixtureComposer;
     use signal_flow::{
-        Address, Aspect, CompositionRefusal, ContextRefusal, HarnessKind, LaunchProfile, Layer,
-        LeaveOut, Remembering,
+        Address, Aspect, CompositionRefusal, ContextRefusal, HarnessKind, LaunchProfile, LeaveOut,
+        Model, Remembering,
     };
 
     /// A launch profile and a composer holding its modules, for tests.
@@ -706,7 +706,7 @@ pub(crate) mod tests {
             address: Address {
                 aspect: Aspect::Field,
                 topic: "flow".into(),
-                layer: Layer::Secondary,
+                model: Model::Sol,
             },
             model_name: "gpt-6-astra".into(),
             effort: "medium".into(),
@@ -845,7 +845,7 @@ pub(crate) mod tests {
         let address = Address {
             aspect: Aspect::Psyche,
             topic: "core".into(),
-            layer: Layer::Primary,
+            model: Model::Fable,
         };
         let exact = "  Exact role line\nsecond line\n  ".to_owned();
         assert_eq!(
@@ -872,7 +872,7 @@ pub(crate) mod tests {
                 .presentation_prompt(&Address {
                     aspect: Aspect::Field,
                     topic: "core".into(),
-                    layer: Layer::Primary,
+                    model: Model::Astra,
                 })
                 .unwrap(),
             None
@@ -882,7 +882,7 @@ pub(crate) mod tests {
                 .presentation_prompt(&Address {
                     aspect: Aspect::Psyche,
                     topic: "core".into(),
-                    layer: Layer::Primary,
+                    model: Model::Fable,
                 })
                 .unwrap(),
             None
@@ -961,7 +961,7 @@ pub(crate) mod tests {
         let system = &composed.system_prompt.system_prompt_text;
         assert!(system.contains("<!-- module: spirit-core -->\nSpirit body.\n"));
         assert!(system.ends_with(
-            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
+            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
         ));
         assert!(!system.contains("Knowledge body."));
         let body = &composed.first_prompt_payload.first_prompt_body;
@@ -984,7 +984,7 @@ pub(crate) mod tests {
         let carried = composed.carrying_flow_id("a1b2c3");
         let system = &carried.system_prompt.system_prompt_text;
         assert!(system.ends_with(
-            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
+            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
         ));
         assert_eq!(carried.first_prompt_payload, composed.first_prompt_payload);
         // A launch with no predecessor and no memory gains the section.
@@ -1005,7 +1005,7 @@ pub(crate) mod tests {
         assert!(
             bare.system_prompt
                 .system_prompt_text
-                .ends_with("<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\n")
+                .ends_with("<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\n")
         );
         assert!(!system.contains("This flow belongs to metaflow"));
     }
@@ -1073,7 +1073,7 @@ pub(crate) mod tests {
             "Carry the bounded task."
         )));
         assert!(composed.system_prompt.system_prompt_text.contains(
-            "Metaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
+            "Metaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
         ));
         assert!(!body.contains("Role: Field Medium"));
         assert!(!body.contains('$'));
@@ -1086,18 +1086,22 @@ pub(crate) mod tests {
             (Aspect::Mind, "Mind"),
             (Aspect::Field, "Field"),
         ] {
-            for (layer, layer_name) in [
-                (Layer::Primary, "Primary"),
-                (Layer::Secondary, "Secondary"),
-                (Layer::Tertiary, "Tertiary"),
-                (Layer::Quaternary, "Quaternary"),
+            for (model, model_name) in [
+                (Model::Fable, "Fable"),
+                (Model::Opus, "Opus"),
+                (Model::Sonnet, "Sonnet"),
+                (Model::Haiku, "Haiku"),
+                (Model::Astra, "Astra"),
+                (Model::Sol, "Sol"),
+                (Model::Luna, "Luna"),
+                (Model::Terra, "Terra"),
             ] {
                 for harness_kind in [HarnessKind::Claude, HarnessKind::Codex] {
                     let mut profile = fixture_profile();
                     profile.address = Address {
                         aspect: aspect.clone(),
                         topic: "coreTopic".into(),
-                        layer: layer.clone(),
+                        model: model.clone(),
                     };
                     let composed = fixture_composer()
                         .compose(
@@ -1110,7 +1114,7 @@ pub(crate) mod tests {
                         )
                         .unwrap();
                     let identity = format!(
-                        "Metaflow: {{ {aspect_name} coreTopic {layer_name} }}\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
+                        "Metaflow: {{ {aspect_name} coreTopic {model_name} }}\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
                     );
                     assert!(
                         composed
@@ -1393,7 +1397,7 @@ pub(crate) mod tests {
             [order].prompt_text(&signal_flow::Address {
                 aspect: signal_flow::Aspect::Psyche,
                 topic: "flow".into(),
-                layer: signal_flow::Layer::Secondary
+                model: signal_flow::Model::Opus
             }),
             "[ { Notification Soft.Order.investigate } ]"
         );

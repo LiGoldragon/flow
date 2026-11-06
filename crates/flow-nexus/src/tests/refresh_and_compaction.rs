@@ -21,7 +21,7 @@ use meta_signal_flow::{
     ConfigurationChange, ConfigureMetaflow, ConfigureModel, ConfigureThreshold, Continuity,
 };
 use signal_flow::{
-    Address, Aspect, Caller, FlowLifecycle, Layer, Message, Metaflow, PowerLevel, Request, SentBy,
+    Address, Aspect, Caller, FlowLifecycle, Message, Metaflow, Model, PowerLevel, Request, SentBy,
 };
 use std::fs;
 use std::io::Write;
@@ -32,7 +32,7 @@ fn seat_address() -> Address {
     Address {
         aspect: Aspect::Mind,
         topic: "flow".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     }
 }
 
@@ -101,7 +101,7 @@ fn closed(fixture: &NexusFixture) -> bool {
 pub(super) const SUCCESSOR_REQUEST: &str = "refresh-c1a0de";
 
 /// Declares the seat's metaflow, continuing as `continuity`, and the model
-/// its layer and aspect run.
+/// its model and aspect run.
 pub(super) fn declare_seat(
     fixture: &NexusFixture,
     continuity: Continuity,
@@ -126,8 +126,7 @@ pub(super) fn declare_seat(
         .nexus
         .store
         .configure_change(ConfigurationChange::Models(vec![ConfigureModel {
-            layer: Layer::Secondary,
-            aspect: Aspect::Mind,
+            model: Model::Sol,
             native: "fixture-model".into(),
         }]))
         .expect("successor model configured");
@@ -338,7 +337,7 @@ fn a_seat_whose_successor_cannot_compose_stays_and_is_handed_its_queue() {
     // No declaration and no launch of the seat's names a successor.
     seat_metaflow(&fixture, vec![Request::Order("Still yours.".into())]);
     let up = signal_flow::Address {
-        layer: Layer::Primary,
+        model: Model::Astra,
         ..seat_address()
     };
     fixture.nexus.store.seed_metaflow(Metaflow {

@@ -140,7 +140,7 @@ impl RecordsReports for RunningNexus {
                         SimplifiedAnswer::NoneOwed => {}
                         SimplifiedAnswer::Queued { recipient, .. } => eprintln!(
                             "flow-nexus: simplified answer of {flow_id} queued to {:?} {} {:?}",
-                            recipient.aspect, recipient.topic, recipient.layer
+                            recipient.aspect, recipient.topic, recipient.model
                         ),
                         SimplifiedAnswer::InputUnreceived { .. } => eprintln!(
                             "flow-nexus: simplified answer of {flow_id} not queued at its Stop: its input is not yet Delivered; {later}"

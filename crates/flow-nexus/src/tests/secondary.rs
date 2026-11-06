@@ -8,7 +8,7 @@
 use super::model::{configure, seat};
 use super::{NexusFixture, pane_unopened};
 use crate::Dispatches;
-use signal_flow::{Aspect, Layer, Query, Response, StartRejection};
+use signal_flow::{Aspect, Model, Query, Response, StartRejection};
 use std::fs;
 
 #[test]
@@ -16,13 +16,8 @@ fn a_secondary_start_needs_no_other_seat() {
     let fixture = NexusFixture::new();
     fixture.claims_flow_ids();
     let _ = fs::remove_file(&fixture.snapshot_program);
-    configure(&fixture, &[(Layer::Secondary, Aspect::Mind, "gpt-6-sol")]);
-    let secondary = seat(
-        Aspect::Mind,
-        Layer::Secondary,
-        "gpt-6-sol",
-        "secondary-request",
-    );
+    configure(&fixture, &[(Model::Sol, "gpt-6-sol")]);
+    let secondary = seat(Aspect::Mind, Model::Sol, "gpt-6-sol", "secondary-request");
     assert_eq!(
         fixture.nexus.dispatch(Query::Start(secondary)),
         Response::StartRejected(pane_unopened())
@@ -36,7 +31,7 @@ fn awake_secondary(fixture: &NexusFixture, topic: &str) {
         address: signal_flow::Address {
             aspect: Aspect::Mind,
             topic: topic.into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         },
         state: flow_ethos::State::Awake(super::waking::CLAUDE_SEAT.into()),
         past: vec![],
@@ -44,7 +39,7 @@ fn awake_secondary(fixture: &NexusFixture, topic: &str) {
     });
 }
 
-/// A Start of { Mind topics Primary } whose Secondary has no declaration is
+/// A Start of { Mind topics Astra } whose Secondary has no declaration is
 /// refused NoSecondary before anything is written or opened while that
 /// Secondary is absent or Asleep:
 /// another topic's Secondary or another aspect's does not count. Once that
@@ -56,9 +51,9 @@ fn a_primary_start_is_refused_until_its_secondary_is_awake() {
     let fixture = NexusFixture::new();
     fixture.claims_flow_ids();
     let _ = fs::remove_file(&fixture.snapshot_program);
-    configure(&fixture, &[(Layer::Primary, Aspect::Mind, "gpt-6-sol")]);
+    configure(&fixture, &[(Model::Astra, "gpt-6-sol")]);
     awake_secondary(&fixture, "other");
-    let mut primary = seat(Aspect::Mind, Layer::Primary, "gpt-6-sol", "primary-request");
+    let mut primary = seat(Aspect::Mind, Model::Astra, "gpt-6-sol", "primary-request");
     primary.address.topic = "topics".into();
     for secondary in [None, Some(flow_ethos::State::Asleep)] {
         if let Some(state) = secondary {
@@ -66,7 +61,7 @@ fn a_primary_start_is_refused_until_its_secondary_is_awake() {
                 address: signal_flow::Address {
                     aspect: Aspect::Mind,
                     topic: "topics".into(),
-                    layer: Layer::Secondary,
+                    model: Model::Sol,
                 },
                 state,
                 past: vec![],
@@ -113,7 +108,7 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
     let fixture = NexusFixture::new();
     fixture.claims_flow_ids();
     let _ = fs::remove_file(&fixture.snapshot_program);
-    configure(&fixture, &[(Layer::Secondary, Aspect::Mind, "gpt-6-sol")]);
+    configure(&fixture, &[(Model::Sol, "gpt-6-sol")]);
     for topic in [
         "PrimaryCommitting",
         "primary-committing",
@@ -121,7 +116,7 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
         "",
         "9lives",
     ] {
-        let mut start = seat(Aspect::Mind, Layer::Secondary, "gpt-6-sol", "topic-request");
+        let mut start = seat(Aspect::Mind, Model::Sol, "gpt-6-sol", "topic-request");
         start.address.topic = topic.into();
         assert_eq!(
             fixture.nexus.dispatch(Query::Start(start)),
@@ -137,7 +132,7 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
             address: signal_flow::Address {
                 aspect: Aspect::Mind,
                 topic: topic.into(),
-                layer: Layer::Secondary,
+                model: Model::Sol,
             },
             system_modules: vec!["spirit-core".into()],
             user_modules: vec![],
@@ -159,7 +154,7 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
             "{topic:?}"
         );
     }
-    let mut kept = seat(Aspect::Mind, Layer::Secondary, "gpt-6-sol", "kept-request");
+    let mut kept = seat(Aspect::Mind, Model::Sol, "gpt-6-sol", "kept-request");
     kept.address.topic = "primaryCommitting".into();
     assert_eq!(
         fixture.nexus.dispatch(Query::Start(kept)),
@@ -187,7 +182,7 @@ fn a_send_to_a_bad_topic_is_topic_refused() {
         let recipient = Address {
             aspect: Aspect::Mind,
             topic: topic.into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         let sent = fixture.nexus.send_request(
             SendRequest {
@@ -235,12 +230,12 @@ fn launch_with_a_bad_topic_is_topic_refused() {
     let fixture = NexusFixture::new();
     fixture.claims_flow_ids();
     let _ = fs::remove_file(&fixture.snapshot_program);
-    configure(&fixture, &[(Layer::Secondary, Aspect::Mind, "gpt-6-sol")]);
+    configure(&fixture, &[(Model::Sol, "gpt-6-sol")]);
     let response = fixture.nexus.dispatch(Query::Launch(LaunchRequest {
         address: Address {
             aspect: Aspect::Mind,
             topic: "PrimaryCommitting".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         },
         remembering: Remembering::Predecessors(0),
         instruction_prompt: String::new(),

@@ -29,7 +29,7 @@ use flow_ethos::Delivery;
 use flow_ethos::State;
 use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, Continuity};
 use signal_flow::{
-    Address, FlowLifecycle, HerdrRouteSelection, Layer, Message, Metaflow, Origin, Query,
+    Address, FlowLifecycle, HerdrRouteSelection, Message, Metaflow, Model, Origin, Query,
     Recipient, RefreshRejection, Refreshed, Refusal, ReplaceRejection, Request, Response,
     SendRequest, SentBy, Unknown_Data,
 };
@@ -48,7 +48,7 @@ impl Drop for ReleasesFixtureOnDrop {
 }
 
 fn seat_address() -> Address {
-    address(Layer::Secondary)
+    address(Model::Sol)
 }
 
 /// The seat's metaflow is declared OnDemand, with modules the fixture
@@ -198,14 +198,14 @@ fn a_refresh_of_a_metaflow_not_awake_is_refused_not_awake() {
     );
     assert_eq!(stored(&fixture), asleep, "nothing is written");
 
-    let declared = address(Layer::Tertiary);
+    let declared = address(Model::Luna);
     declare(&fixture, declared.clone());
     assert_eq!(
         fixture.nexus.dispatch(Query::Refresh(declared)),
         Response::RefreshRejected(RefreshRejection::NotAwake)
     );
 
-    let unknown = address(Layer::Quaternary);
+    let unknown = address(Model::Terra);
     assert_eq!(
         fixture.nexus.dispatch(Query::Refresh(unknown.clone())),
         Response::Refused(Refusal::Unknown(Unknown_Data::Address(unknown)))
@@ -286,7 +286,7 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
     let sender_address = Address {
         aspect: signal_flow::Aspect::Mind,
         topic: "sender".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     };
     let peer = FlowStore::process_identity_for_pid(std::process::id()).unwrap();
     assert_eq!(
@@ -843,7 +843,7 @@ fn a_send_to_a_primary_is_accepted_from_a_primary_and_from_a_secondary() {
     let primary = |topic: &str| Address {
         aspect: signal_flow::Aspect::Mind,
         topic: topic.into(),
-        layer: Layer::Primary,
+        model: Model::Astra,
     };
     let target = primary("flow");
     fixture.nexus.store.seed_metaflow(Metaflow {
@@ -1006,7 +1006,7 @@ fn a_successor_that_cannot_start_answers_refresh_s_own_rejection() {
         )),
     }];
     fixture.nexus.store.seed_metaflow(waking);
-    // Declared, with no model configured for its layer and aspect.
+    // Declared, with no model configured for its model and aspect.
     declare(&fixture, seat_address());
     assert_eq!(
         fixture.nexus.dispatch(Query::Refresh(seat_address())),

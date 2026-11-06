@@ -8,7 +8,7 @@ use crate::herdr::launch::ConstructsHarnessCommand;
 use crate::store::{ManagesMetaflowState, ReadsFlowRows, ReadsLaunchAttempt};
 use signal_flow::{
     Address, Aspect, ComposedLaunch, FirstPromptPayload, HarnessFlagsRefusal, HarnessKind,
-    LaunchProfile, Layer, Remembering, SystemPrompt, TargetReceiptRequest, ToolSet,
+    LaunchProfile, Model, Remembering, SystemPrompt, TargetReceiptRequest, ToolSet,
 };
 
 trait RehearsalFixture {
@@ -33,7 +33,7 @@ impl RehearsalFixture for Fixture {
             address: Address {
                 aspect: Aspect::Mind,
                 topic: "core".into(),
-                layer: Layer::Secondary,
+                model: Model::Sol,
             },
             model_name: model.into(),
             effort: "medium".into(),
@@ -77,7 +77,7 @@ impl RehearsalFixture for Fixture {
             claude_settings: (harness == &HarnessKind::Claude)
                 .then(|| "{\"permissions\":{}}".into()),
             claude_title: (harness == &HarnessKind::Claude)
-                .then(|| "{ Mind core Secondary abc123 }".into()),
+                .then(|| "{ Mind core Sol abc123 }".into()),
             prompt_fd: (harness == &HarnessKind::Claude).then(|| "/proc/self/fd/17".into()),
             claude_session: (harness == &HarnessKind::Claude).then(|| "claude-session".into()),
             codex_title: (harness == &HarnessKind::Codex)
@@ -212,7 +212,7 @@ fn production_rehearse_success_and_refusal_create_nothing() {
     let address = Address {
         aspect: Aspect::Field,
         topic: "rehearseTest".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     };
     let declaration = meta_signal_flow::ConfigureMetaflow {
         address: address.clone(),
@@ -228,8 +228,7 @@ fn production_rehearse_success_and_refusal_create_nothing() {
     for change in [
         meta_signal_flow::ConfigurationChange::Metaflows(vec![declaration]),
         meta_signal_flow::ConfigurationChange::Models(vec![meta_signal_flow::ConfigureModel {
-            layer: Layer::Secondary,
-            aspect: Aspect::Field,
+            model: Model::Sol,
             native: "fixture-model".into(),
         }]),
         meta_signal_flow::ConfigurationChange::HarnessFlags(vec![

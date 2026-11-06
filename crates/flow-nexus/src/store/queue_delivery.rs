@@ -140,13 +140,34 @@ impl EngineRecord for StoredDeliveryRequest {
     }
 }
 
-impl MemoryDefinition for StoredDeliveryRequest {
-    fn memory_version() -> MemoryVersion {
+impl super::model_address::DefinedBeforeModel for StoredDeliveryRequest {
+    fn version_before_model() -> MemoryVersion {
         MemoryVersion::new(6)
     }
 
-    fn schema_hash() -> SchemaHash {
+    fn schema_hash_before_model() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-queue-delivery-request-v6")
+    }
+}
+
+crate::upgrades_before_model!(StoredDeliveryRequest);
+
+impl super::model_address::RemodelsAddresses for StoredDeliveryRequest {
+    fn remodel(&mut self) {
+        self.address.remodel();
+        self.queue_evidence.remodel();
+    }
+}
+
+impl super::model_address::KeptBeforeModel for StoredDeliveryRequest {}
+
+impl MemoryDefinition for StoredDeliveryRequest {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(7)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-queue-delivery-request-v7")
     }
 }
 
@@ -413,13 +434,34 @@ impl EngineRecord for QueueDeliveryAttempt {
     }
 }
 
-impl MemoryDefinition for QueueDeliveryAttempt {
-    fn memory_version() -> MemoryVersion {
+impl super::model_address::DefinedBeforeModel for QueueDeliveryAttempt {
+    fn version_before_model() -> MemoryVersion {
         MemoryVersion::new(7)
     }
 
-    fn schema_hash() -> SchemaHash {
+    fn schema_hash_before_model() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v7")
+    }
+}
+
+crate::upgrades_before_model!(QueueDeliveryAttempt);
+
+impl super::model_address::RemodelsAddresses for QueueDeliveryAttempt {
+    fn remodel(&mut self) {
+        self.address.remodel();
+        self.queue_evidence.remodel();
+    }
+}
+
+impl super::model_address::KeptBeforeModel for QueueDeliveryAttempt {}
+
+impl MemoryDefinition for QueueDeliveryAttempt {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(8)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v8")
     }
 }
 
@@ -712,7 +754,8 @@ impl DeclaresQueueDeliveryTables for QueueDeliveryTables {
             .with_predecessor::<StoredDeliveryRequestV5>()
             .with_predecessor::<StoredDeliveryRequestV2>()
             .with_predecessor::<StoredDeliveryRequestV3>()
-            .with_predecessor::<StoredDeliveryRequestV4>(),
+            .with_predecessor::<StoredDeliveryRequestV4>()
+            .with_predecessor::<super::model_address::BeforeModel<StoredDeliveryRequest>>(),
             TableDescriptor::new(
                 DELIVERY_ATTEMPT_TABLE_NAME,
                 FamilyName::new("flow-nexus-queue-delivery-attempt"),
@@ -720,7 +763,8 @@ impl DeclaresQueueDeliveryTables for QueueDeliveryTables {
             )
             .with_predecessor::<QueueDeliveryAttemptV6>()
             .with_predecessor::<QueueDeliveryAttemptV4>()
-            .with_predecessor::<QueueDeliveryAttemptV5>(),
+            .with_predecessor::<QueueDeliveryAttemptV5>()
+            .with_predecessor::<super::model_address::BeforeModel<QueueDeliveryAttempt>>(),
         )
     }
 
@@ -730,8 +774,12 @@ impl DeclaresQueueDeliveryTables for QueueDeliveryTables {
     ) -> Result<Self, StoreError> {
         Ok(Self {
             counter: engine.register_table(descriptors.0)?,
-            requests: Self::upgraded_requests(engine, descriptors.1)?,
-            attempts: Self::upgraded_attempts(engine, descriptors.2)?,
+            requests: engine.upgraded_before_model(descriptors.1, |engine, descriptor| {
+                Self::upgraded_requests(engine, descriptor)
+            })?,
+            attempts: engine.upgraded_before_model(descriptors.2, |engine, descriptor| {
+                Self::upgraded_attempts(engine, descriptor)
+            })?,
         })
     }
 }
@@ -1825,14 +1873,14 @@ mod tests {
     use crate::store::metaflow::SeedsMetaflow;
     use crate::store::metaflow::SleepsMetaflows;
     use flow_defaults::DefaultConfiguration;
-    use flow_ethos::{Aspect, Layer, Metaflow, QueueEntry, Request, SentBy, State};
+    use flow_ethos::{Aspect, Metaflow, Model, QueueEntry, Request, SentBy, State};
     use std::path::{Path, PathBuf};
 
     fn address() -> Address {
         Address {
             aspect: Aspect::Mind,
             topic: "delivery-accounting".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         }
     }
 
@@ -1842,7 +1890,7 @@ mod tests {
             sent_by: SentBy::Sender(Address {
                 aspect: Aspect::Psyche,
                 topic: "core".into(),
-                layer: Layer::Secondary,
+                model: Model::Opus,
             }),
             delivery: flow_ethos::Delivery::Queue,
             message: flow_ethos::Message::Soft(Request::Order(body.into())),
@@ -3078,7 +3126,7 @@ mod tests {
         for (index, entry) in migrated_metaflow.queue.iter_mut().enumerate() {
             entry.logical_delivery_id = format!(
                 "legacy:{}:{index:016x}",
-                FlowStore::address_record_key(&migrated_metaflow.address)
+                FlowStore::address_record_key_before_model(&migrated_metaflow.address)
             );
         }
         let requests = store

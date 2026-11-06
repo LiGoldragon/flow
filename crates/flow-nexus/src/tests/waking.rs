@@ -1,4 +1,4 @@
-//! Wake and drain against the fixture Herdr: an idle seat of any layer and
+//! Wake and drain against the fixture Herdr: an idle seat of any model and
 //! either harness keeps its pane and stays Awake, and work queued for it is
 //! handed into that pane; a seat whose pane is gone is Asleep, and a queued
 //! request wakes a fresh flow composed from the metaflow's last launch;
@@ -31,7 +31,7 @@ use crate::waking::{
 use flow_ethos::{Delivery, State};
 use signal_flow::{
     Address, Aspect, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
-    HerdrRoute, HerdrRouteSelection, LaunchProfile, Layer, Message, Metaflow, NativeLaunchBinding,
+    HerdrRoute, HerdrRouteSelection, LaunchProfile, Message, Metaflow, Model, NativeLaunchBinding,
     NativeLaunchIntent, Origin, PowerLevel, QueueEntry, Request, SentBy,
 };
 use std::fs;
@@ -46,22 +46,22 @@ fn a_wake_refusal_notice_keeps_the_missing_module_identity() {
     );
 }
 
-pub(super) fn address(layer: Layer) -> Address {
+pub(super) fn address(model: Model) -> Address {
     Address {
         aspect: Aspect::Mind,
         topic: "flow".into(),
-        layer,
+        model,
     }
 }
 
 pub(super) fn metaflow(
-    layer: Layer,
+    model: Model,
     state: State,
     past: Vec<&str>,
     queue: Vec<Request>,
 ) -> Metaflow {
     Metaflow {
-        address: address(layer),
+        address: address(model),
         state,
         past: past.into_iter().map(String::from).collect(),
         queue: queue.unsent(),
@@ -133,11 +133,11 @@ pub(super) fn maintain(fixture: &NexusFixture, address: Address) {
         .expect("metaflow declared Maintained");
 }
 
-pub(super) fn stored(fixture: &NexusFixture, layer: Layer) -> Metaflow {
+pub(super) fn stored(fixture: &NexusFixture, model: Model) -> Metaflow {
     fixture
         .nexus
         .store
-        .metaflow(&address(layer))
+        .metaflow(&address(model))
         .expect("metaflow readable")
         .expect("metaflow held")
 }
@@ -233,13 +233,13 @@ pub(super) fn claude_stop(fixture: &NexusFixture) -> signal_flow::Event {
     })
 }
 
-/// An idle Maintained Claude flow of any layer keeps its pane and stays
+/// An idle Maintained Claude flow of any model keeps its pane and stays
 /// Awake: its Stop writes its context size and, with nothing queued, leaves
 /// the seat as it is.
 #[test]
 fn an_idle_maintained_claude_flow_keeps_its_pane_and_stays_awake() {
     use crate::store::NamesLiveFlow;
-    for layer in [Layer::Primary, Layer::Secondary, Layer::Tertiary] {
+    for model in [Model::Astra, Model::Sol, Model::Luna] {
         let fixture = NexusFixture::new();
         fixture.accept_pane_operations(
             vec![claude_agent(&fixture)],
@@ -247,12 +247,12 @@ fn an_idle_maintained_claude_flow_keeps_its_pane_and_stays_awake() {
         );
         claude_seat(&fixture, 151_000);
         fixture.nexus.store.seed_metaflow(metaflow(
-            layer.clone(),
+            model.clone(),
             State::Awake(CLAUDE_SEAT.into()),
             vec![],
             vec![],
         ));
-        maintain(&fixture, address(layer.clone()));
+        maintain(&fixture, address(model.clone()));
 
         fixture
             .nexus
@@ -264,8 +264,8 @@ fn an_idle_maintained_claude_flow_keeps_its_pane_and_stays_awake() {
             Some(151_000),
             "the context size is written at the Stop"
         );
-        assert!(!closes(&fixture), "{layer:?}: the idle seat keeps its pane");
-        let kept = stored(&fixture, layer.clone());
+        assert!(!closes(&fixture), "{model:?}: the idle seat keeps its pane");
+        let kept = stored(&fixture, model.clone());
         assert_eq!(kept.state, State::Awake(CLAUDE_SEAT.into()));
         assert!(kept.past.is_empty());
         let node = fixture
@@ -291,12 +291,12 @@ fn an_idle_maintained_codex_flow_keeps_its_pane_and_stays_awake() {
     );
     fixture.register_with(FlowLifecycle::Active);
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake("908786".into()),
         vec![],
         vec![],
     ));
-    maintain(&fixture, address(Layer::Secondary));
+    maintain(&fixture, address(Model::Sol));
     assert_eq!(
         fixture.nexus.settle_stopped("908786"),
         AtStop::Kept(KeptAtStop::ThreadNotResting)
@@ -308,7 +308,7 @@ fn an_idle_maintained_codex_flow_keeps_its_pane_and_stays_awake() {
         .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]);
     assert_eq!(fixture.nexus.settle_stopped("908786"), AtStop::Idle);
     assert!(!closes(&fixture), "the idle seat keeps its pane");
-    let kept = stored(&fixture, Layer::Secondary);
+    let kept = stored(&fixture, Model::Sol);
     assert_eq!(kept.state, State::Awake("908786".into()));
     assert!(kept.past.is_empty());
     let node = fixture
@@ -340,7 +340,7 @@ fn an_idle_on_demand_claude_flow_closes_its_harness_and_keeps_its_address() {
         vec!["spirit-core".into(), "intent-flow".into()],
     );
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake(CLAUDE_SEAT.into()),
         vec![],
         vec![],
@@ -348,11 +348,11 @@ fn an_idle_on_demand_claude_flow_closes_its_harness_and_keeps_its_address() {
 
     assert_eq!(
         fixture.nexus.settle_stopped(CLAUDE_SEAT),
-        AtStop::Slept(address(Layer::Secondary))
+        AtStop::Slept(address(Model::Sol))
     );
     assert!(closes(&fixture), "the idle seat's harness is closed");
     assert!(fixture.typed().is_none(), "nothing is typed");
-    let slept = stored(&fixture, Layer::Secondary);
+    let slept = stored(&fixture, Model::Sol);
     assert_eq!(slept.state, State::Asleep);
     assert_eq!(slept.past, vec![CLAUDE_SEAT.to_owned()]);
     let node = fixture
@@ -387,7 +387,7 @@ fn an_idle_on_demand_codex_flow_closes_its_harness() {
         vec!["spirit-core".into(), "intent-flow".into()],
     );
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake("908786".into()),
         vec![],
         vec![],
@@ -407,7 +407,7 @@ fn an_idle_on_demand_codex_flow_closes_its_harness() {
         "{at_stop:?}"
     );
     assert!(closes(&fixture), "the idle seat's harness is closed");
-    let slept = stored(&fixture, Layer::Secondary);
+    let slept = stored(&fixture, Model::Sol);
     assert_eq!(slept.state, State::Asleep);
     assert_eq!(slept.past, vec!["908786".to_owned()]);
 }
@@ -425,26 +425,26 @@ fn a_request_to_an_idle_awake_claude_flow_is_delivered_into_its_pane() {
     claude_seat(&fixture, 40_000);
     append_main_rows(&fixture, &[end_turn("idle-turn")]);
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake(CLAUDE_SEAT.into()),
         vec![],
         vec![],
     ));
-    maintain(&fixture, address(Layer::Secondary));
+    maintain(&fixture, address(Model::Sol));
     assert_eq!(fixture.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
     assert!(fixture.typed().is_none(), "nothing typed while idle");
 
-    let mut idle = stored(&fixture, Layer::Secondary);
+    let mut idle = stored(&fixture, Model::Sol);
     idle.queue
         .push(Request::Order("Read the new ruling.".into()).unsent());
     fixture.nexus.store.seed_metaflow(idle);
-    fixture.nexus.wake_due(address(Layer::Secondary));
+    fixture.nexus.wake_due(address(Model::Sol));
 
     let typed = fixture.typed().expect("typed into the live pane");
     assert!(typed.contains("Read the new ruling."), "{typed}");
     assert!(!closes(&fixture));
     assert_eq!(
-        stored(&fixture, Layer::Secondary).state,
+        stored(&fixture, Model::Sol).state,
         State::Awake(CLAUDE_SEAT.into()),
         "the same flow, still Awake"
     );
@@ -466,24 +466,24 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
     claude_seat(&fixture, 40_000);
     append_main_rows(&fixture, &[end_turn("idle-turn")]);
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake(CLAUDE_SEAT.into()),
         vec![],
         vec![],
     ));
-    maintain(&fixture, address(Layer::Secondary));
+    maintain(&fixture, address(Model::Sol));
     assert_eq!(fixture.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
 
-    let from = |aspect: Aspect, layer: Layer| {
+    let from = |aspect: Aspect, model: Model| {
         SentBy::Sender(Address {
             aspect,
             topic: "flow".into(),
-            layer,
+            model,
         })
     };
     let task = QueueEntry {
         logical_delivery_id: "logical-delivery-00000000000000000001".into(),
-        sent_by: from(Aspect::Psyche, Layer::Primary),
+        sent_by: from(Aspect::Psyche, Model::Astra),
         delivery: flow_ethos::Delivery::Wake,
         message: Message::MiddleAbrupt(Request::Task(flow_ethos::AnswerableTask {
             minutes: 30,
@@ -501,7 +501,7 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
     };
     let done = QueueEntry {
         logical_delivery_id: "logical-delivery-00000000000000000003".into(),
-        sent_by: from(Aspect::Mind, Layer::Secondary),
+        sent_by: from(Aspect::Mind, Model::Sol),
         delivery: flow_ethos::Delivery::Wake,
         message: Message::Soft(Request::Done(flow_ethos::DonePayload::Historical(
             flow_ethos::Historical_Data {
@@ -511,10 +511,10 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
         ))),
     };
     let cohort = vec![task, reminder, done];
-    let mut idle = stored(&fixture, Layer::Secondary);
+    let mut idle = stored(&fixture, Model::Sol);
     idle.queue = cohort.clone();
     fixture.nexus.store.seed_metaflow(idle);
-    fixture.nexus.wake_due(address(Layer::Secondary));
+    fixture.nexus.wake_due(address(Model::Sol));
 
     let typed = fixture.typed().expect("typed into the live pane");
     let mut budget = datom_codec::Budget {
@@ -529,12 +529,12 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
     use crate::message_projection::ProjectsQueueEntry;
     let expected = cohort
         .iter()
-        .map(|entry| entry.visible_input(&address(Layer::Secondary)))
+        .map(|entry| entry.visible_input(&address(Model::Sol)))
         .collect::<Vec<_>>();
     assert_eq!(inputs, expected, "{typed}");
     assert_eq!(
         typed,
-        cohort.prompt_text(&address(Layer::Secondary)),
+        cohort.prompt_text(&address(Model::Sol)),
         "the receipt text is what was typed"
     );
 }
@@ -546,9 +546,9 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
 #[test]
 fn a_flow_whose_pane_is_gone_is_asleep_and_wakes_fresh() {
     let mut fixture = NexusFixture::new();
-    let at = address(Layer::Secondary);
+    let at = address(Model::Sol);
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake("abc123".into()),
         vec![],
         vec![],
@@ -556,14 +556,14 @@ fn a_flow_whose_pane_is_gone_is_asleep_and_wakes_fresh() {
     // Live in Flow's records; the fixture Herdr lists no agent: its pane is
     // gone.
     let seat = launched_claude_ended_by(&fixture, |_| true);
-    let mut awake = stored(&fixture, Layer::Secondary);
+    let mut awake = stored(&fixture, Model::Sol);
     assert_eq!(awake.state, State::Awake("abc123".into()));
     let queue = vec![Request::Order("Carry on.".into())];
     awake.queue = queue.clone().unsent();
     fixture.nexus.store.seed_metaflow(awake);
 
     fixture.nexus.drain_awake(&at);
-    let asleep = stored(&fixture, Layer::Secondary);
+    let asleep = stored(&fixture, Model::Sol);
     assert_eq!(asleep.state, State::Asleep);
     assert_eq!(asleep.past, vec!["abc123".to_owned()]);
     assert_eq!(
@@ -580,7 +580,7 @@ fn a_flow_whose_pane_is_gone_is_asleep_and_wakes_fresh() {
 
     let world = fixture.fresh_claude_world();
     fixture.nexus.wake_due(at);
-    let woken = stored(&fixture, Layer::Secondary);
+    let woken = stored(&fixture, Model::Sol);
     let State::Awake(flow_id) = &woken.state else {
         panic!("woken fresh: {woken:?}; Herdr calls: {}", world.calls());
     };
@@ -593,7 +593,7 @@ fn a_flow_whose_pane_is_gone_is_asleep_and_wakes_fresh() {
     );
 }
 
-/// An Order queued for an Asleep Primary wakes it as it wakes any layer:
+/// An Order queued for an Asleep Primary wakes it as it wakes any model:
 /// a fresh flow on the Primary's configured model, on a new native
 /// session. The queued Order is its accepted first prompt. Its Secondary is
 /// recorded as every Primary starts.
@@ -601,16 +601,14 @@ fn a_flow_whose_pane_is_gone_is_asleep_and_wakes_fresh() {
 fn an_order_wakes_an_asleep_primary_fresh() {
     let mut fixture = NexusFixture::new();
     let seat = ended_claude(&fixture);
-    let at = address(Layer::Primary);
+    let at = address(Model::Astra);
     let queue = vec![Request::Order("Carry the design on.".into())];
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["5ec0d0"], vec![]));
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
-        State::Asleep,
-        vec!["5ec0d0"],
-        vec![],
-    ));
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Primary,
+        Model::Astra,
         State::Asleep,
         vec!["abc123"],
         queue.clone(),
@@ -621,17 +619,16 @@ fn an_order_wakes_an_asleep_primary_fresh() {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
             meta_signal_flow::ConfigureModel {
-                layer: Layer::Primary,
-                aspect: Aspect::Mind,
+                model: Model::Astra,
                 native: "claude-fixture".into(),
             },
         ]))
         .expect("the Primary's model configured");
-    assert!(fixture.nexus.wake_is_due(&stored(&fixture, Layer::Primary)));
+    assert!(fixture.nexus.wake_is_due(&stored(&fixture, Model::Astra)));
 
     fixture.nexus.wake_due(at.clone());
 
-    let woken = stored(&fixture, Layer::Primary);
+    let woken = stored(&fixture, Model::Astra);
     let State::Awake(flow_id) = &woken.state else {
         panic!(
             "the Primary wakes: {woken:?}; Herdr calls: {}",
@@ -660,7 +657,7 @@ fn a_resting_seat_with_work_queued_is_handed_the_oldest_request_and_stays_awake(
     );
     claude_seat(&fixture, 40_000);
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake(CLAUDE_SEAT.into()),
         vec![],
         vec![
@@ -673,7 +670,7 @@ fn a_resting_seat_with_work_queued_is_handed_the_oldest_request_and_stays_awake(
         fixture.nexus.settle_stopped(CLAUDE_SEAT),
         AtStop::Drained(_)
     ));
-    let kept = stored(&fixture, Layer::Secondary);
+    let kept = stored(&fixture, Model::Sol);
     assert_eq!(kept.state, State::Awake(CLAUDE_SEAT.into()));
     assert!(
         kept.queue.is_empty(),
@@ -702,17 +699,17 @@ fn explicit_delivery_hands_over_every_queued_request_in_order() {
     let first = Request::Notice("first".into()).unsent();
     let second = Request::Result(flow_ethos::ResultPayload::Historical("second".into())).unsent();
     fixture.nexus.store.seed_metaflow(Metaflow {
-        address: address(Layer::Secondary),
+        address: address(Model::Sol),
         state: State::Awake(CLAUDE_SEAT.into()),
         past: vec![],
         queue: vec![first.clone(), second.clone()],
     });
 
     assert_eq!(
-        fixture.nexus.drain_all(address(Layer::Secondary)),
+        fixture.nexus.drain_all(address(Model::Sol)),
         Outcome::Drained(vec![first, second])
     );
-    assert!(stored(&fixture, Layer::Secondary).queue.is_empty());
+    assert!(stored(&fixture, Model::Sol).queue.is_empty());
 }
 
 /// A Claude agent Herdr shows Working, as its screen reads while its main
@@ -753,7 +750,7 @@ fn a_flow_that_stopped_while_working_or_awaited_is_kept() {
     );
     claude_seat(&working, 40_000);
     working.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake(CLAUDE_SEAT.into()),
         vec![],
         vec![],
@@ -771,7 +768,7 @@ fn a_flow_that_stopped_while_working_or_awaited_is_kept() {
     append_main_rows(&working, &[end_turn("main-ended")]);
     assert_eq!(working.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
     assert_eq!(
-        stored(&working, Layer::Secondary).state,
+        stored(&working, Model::Sol).state,
         State::Awake(CLAUDE_SEAT.into())
     );
     assert!(!closes(&working));
@@ -784,12 +781,12 @@ fn a_flow_that_stopped_while_working_or_awaited_is_kept() {
     );
     waking.register_with(FlowLifecycle::Active);
     waking.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake("908786".into()),
         vec![],
         vec![],
     ));
-    let _lease = waking.nexus.waking.hold(&address(Layer::Secondary));
+    let _lease = waking.nexus.waking.hold(&address(Model::Sol));
     assert_eq!(
         waking.nexus.settle_stopped("908786"),
         AtStop::Kept(KeptAtStop::Waking)
@@ -805,20 +802,15 @@ fn abrupt_priority_makes_a_wake_due_at_every_layer() {
     assert!(!RunningNexus::rests_at(&signal_flow::AgentState::Working));
 
     let fixture = NexusFixture::new();
-    for layer in [
-        Layer::Primary,
-        Layer::Secondary,
-        Layer::Tertiary,
-        Layer::Quaternary,
-    ] {
+    for model in [Model::Astra, Model::Sol, Model::Luna, Model::Terra] {
         assert!(
             fixture.nexus.wake_is_due(&metaflow(
-                layer.clone(),
+                model.clone(),
                 State::Asleep,
                 vec![],
                 vec![Request::Notice("fyi".into())],
             )),
-            "queued work can be explicitly woken at {layer:?}"
+            "queued work can be explicitly woken at {model:?}"
         );
     }
 }
@@ -827,9 +819,9 @@ fn abrupt_priority_makes_a_wake_due_at_every_layer() {
 fn the_store_sleeps_and_awakens_removing_only_the_confirmed_startup_batch() {
     let fixture = NexusFixture::new();
     let store = &fixture.nexus.store;
-    let at = address(Layer::Tertiary);
+    let at = address(Model::Luna);
     store.seed_metaflow(metaflow(
-        Layer::Tertiary,
+        Model::Luna,
         State::Awake("aaaaaa".into()),
         vec![],
         vec![],
@@ -906,14 +898,14 @@ fn the_store_sleeps_and_awakens_removing_only_the_confirmed_startup_batch() {
 fn a_wake_receipt_settles_its_logical_prefix_atomically_and_preserves_the_suffix() {
     let fixture = NexusFixture::new();
     let store = &fixture.nexus.store;
-    let at = address(Layer::Tertiary);
+    let at = address(Model::Luna);
     store.seed_metaflow(metaflow(
-        Layer::Tertiary,
+        Model::Luna,
         State::Awake("bbbbbb".into()),
         vec![],
         vec![],
     ));
-    let sender = address(Layer::Quaternary);
+    let sender = address(Model::Terra);
     for body in ["A", "B", "C"] {
         let accepted = store
             .accept_logical_delivery(
@@ -1051,7 +1043,7 @@ fn last_launch_context() -> WakePlan {
 /// Retired wakes as a new flow composed from that flow's launch.
 #[test]
 fn every_wake_composes_a_fresh_flow_from_the_last_launch_whatever_its_end() {
-    let asleep = metaflow(Layer::Secondary, State::Asleep, vec!["abc123"], vec![]);
+    let asleep = metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]);
     let stopped = NexusFixture::new();
     ended_claude(&stopped);
     assert_eq!(stopped.nexus.wake_plan(&asleep), last_launch_context());
@@ -1074,12 +1066,9 @@ fn a_fresh_wake_composes_modules_and_queued_work_in_the_first_prompt() {
         Request::Order("first".into()),
         Request::Question("second".into()),
     ];
-    let text = queue
-        .to_vec()
-        .unsent()
-        .prompt_text(&address(Layer::Secondary));
+    let text = queue.to_vec().unsent().prompt_text(&address(Model::Sol));
     let seat = FreshSeat {
-        address: address(Layer::Secondary),
+        address: address(Model::Sol),
         launch_request_id: "wake-0-1".into(),
         model_name: "claude-fixture".into(),
         effort: "medium".into(),
@@ -1092,7 +1081,7 @@ fn a_fresh_wake_composes_modules_and_queued_work_in_the_first_prompt() {
         prompt: text.clone(),
     };
     let profile = seat.fresh_profile();
-    assert_eq!(profile.address, address(Layer::Secondary));
+    assert_eq!(profile.address, address(Model::Sol));
     assert_eq!(profile.instruction_prompt, text);
     assert_eq!(profile.user_modules, seat.user_modules);
     let composed = fixture
@@ -1132,18 +1121,15 @@ fn an_asleep_seat_no_launch_of_record_names_is_unplaceable() {
     fixture.set_agents(vec![fixture.current_agent()]);
     fixture.register_with(FlowLifecycle::Active);
     assert_eq!(
-        fixture.nexus.wake_plan(&metaflow(
-            Layer::Secondary,
-            State::Asleep,
-            vec!["908786"],
-            vec![],
-        )),
+        fixture
+            .nexus
+            .wake_plan(&metaflow(Model::Sol, State::Asleep, vec!["908786"], vec![],)),
         WakePlan::Unplaceable
     );
     assert_eq!(
         fixture
             .nexus
-            .wake_plan(&metaflow(Layer::Secondary, State::Asleep, vec![], vec![])),
+            .wake_plan(&metaflow(Model::Sol, State::Asleep, vec![], vec![])),
         WakePlan::Unplaceable
     );
 }
@@ -1210,22 +1196,18 @@ fn current(fixture: &NexusFixture, address: Address) -> signal_flow::Response {
 fn an_address_held_only_through_an_ended_binding_is_forgotten() {
     let fixture = NexusFixture::new();
     let peer = BoundPeer::spawn();
-    peer.bind(&fixture, address(Layer::Secondary));
+    peer.bind(&fixture, address(Model::Sol));
     assert!(matches!(
-        current(&fixture, address(Layer::Secondary)),
+        current(&fixture, address(Model::Sol)),
         signal_flow::Response::Current(signal_flow::Current_Data::Awake(_))
     ));
     peer.end();
     assert_eq!(
-        current(&fixture, address(Layer::Secondary)),
+        current(&fixture, address(Model::Sol)),
         signal_flow::Response::Current(signal_flow::Current_Data::Unknown)
     );
     assert_eq!(
-        fixture
-            .nexus
-            .store
-            .metaflow(&address(Layer::Secondary))
-            .unwrap(),
+        fixture.nexus.store.metaflow(&address(Model::Sol)).unwrap(),
         None
     );
 }
@@ -1236,24 +1218,24 @@ fn an_address_held_only_through_an_ended_binding_is_forgotten() {
 fn an_ended_binding_holding_work_rests_asleep() {
     let fixture = NexusFixture::new();
     let peer = BoundPeer::spawn();
-    peer.bind(&fixture, address(Layer::Secondary));
+    peer.bind(&fixture, address(Model::Sol));
     let mut bound = fixture
         .nexus
         .store
-        .metaflow(&address(Layer::Secondary))
+        .metaflow(&address(Model::Sol))
         .unwrap()
         .expect("bound metaflow");
     bound.queue = vec![Request::Order("Kept.".into()).unsent()];
     fixture.nexus.store.seed_metaflow(bound);
     peer.end();
     assert_eq!(
-        current(&fixture, address(Layer::Secondary)),
+        current(&fixture, address(Model::Sol)),
         signal_flow::Response::Current(signal_flow::Current_Data::Asleep)
     );
     let rested = fixture
         .nexus
         .store
-        .metaflow(&address(Layer::Secondary))
+        .metaflow(&address(Model::Sol))
         .unwrap()
         .expect("rested metaflow");
     assert_eq!(rested.queue, vec![Request::Order("Kept.".into()).unsent()]);
@@ -1316,7 +1298,7 @@ fn launched_claude_ended_by_with(
         address: signal_flow::Address {
             aspect: Aspect::Mind,
             topic: "flow".into(),
-            layer: signal_flow::Layer::Secondary,
+            model: signal_flow::Model::Sol,
         },
         model_name: "claude-fixture".into(),
         effort: "medium".into(),
@@ -1454,7 +1436,7 @@ fn launched_claude_ended_by_with(
 }
 
 /// The fresh world a wake of the Mind flow Secondary runs in, with its
-/// layer's Claude model configured and FlowIds claimed as `flow-id claude`
+/// model's Claude model configured and FlowIds claimed as `flow-id claude`
 /// claims them.
 pub(super) trait WakesFreshClaude {
     fn fresh_claude_world(&mut self) -> FreshWorld;
@@ -1527,14 +1509,14 @@ impl ReadsFreshWorld for FreshWorld {
 fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
     let mut fixture = NexusFixture::new();
     let seat = ended_claude(&fixture);
-    let at = address(Layer::Secondary);
+    let at = address(Model::Sol);
     let queue = vec![
         Request::Order("A".into()),
         Request::Notice("B".into()),
         Request::Question("C".into()),
     ];
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Asleep,
         vec!["abc123"],
         queue.clone(),
@@ -1554,7 +1536,7 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
     };
     assert_ne!(flow_id, "abc123", "a new flow, never the one that slept");
     // D arrives while the wake holds the metaflow.
-    let mut woken = stored(&fixture, Layer::Secondary);
+    let mut woken = stored(&fixture, Model::Sol);
     assert!(
         woken.queue.is_empty(),
         "the startup batch left on acceptance"
@@ -1575,7 +1557,7 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
         world.calls()
     );
     assert!(!world.calls().contains(&seat.session), "{}", world.calls());
-    let woken = stored(&fixture, Layer::Secondary);
+    let woken = stored(&fixture, Model::Sol);
     assert_eq!(woken.state, State::Awake(flow_id.clone()));
     assert_eq!(woken.past, vec!["abc123".to_owned()]);
     assert!(
@@ -1610,18 +1592,16 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
 fn a_simplified_wake_sends_the_first_abrupt_request_without_an_empty_turn() {
     let mut fixture = NexusFixture::new();
     ended_simplified_claude(&fixture);
-    let at = address(Layer::Secondary);
+    let at = address(Model::Sol);
     let sender = Address {
         aspect: Aspect::Psyche,
         topic: "core".into(),
-        layer: Layer::Secondary,
+        model: Model::Opus,
     };
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
-        State::Asleep,
-        vec!["abc123"],
-        vec![],
-    ));
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: sender.clone(),
         state: State::Asleep,
@@ -1648,7 +1628,7 @@ fn a_simplified_wake_sends_the_first_abrupt_request_without_an_empty_turn() {
 
     // The woken OnDemand seat answers its one request and, with nothing
     // queued, sleeps at its rest: its flow is the metaflow's last.
-    let woken = stored(&fixture, Layer::Secondary);
+    let woken = stored(&fixture, Model::Sol);
     let flow_id = match &woken.state {
         State::Awake(flow_id) => flow_id.clone(),
         State::Asleep => match woken.past.last() {
@@ -1683,18 +1663,16 @@ fn a_simplified_wake_sends_the_first_abrupt_request_without_an_empty_turn() {
 fn a_simplified_startup_leaves_its_second_request_ordered() {
     let mut fixture = NexusFixture::new();
     ended_simplified_claude(&fixture);
-    let at = address(Layer::Secondary);
+    let at = address(Model::Sol);
     let sender = Address {
         aspect: Aspect::Psyche,
         topic: "core".into(),
-        layer: Layer::Secondary,
+        model: Model::Opus,
     };
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
-        State::Asleep,
-        vec!["abc123"],
-        vec![],
-    ));
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: sender.clone(),
         state: State::Asleep,
@@ -1724,7 +1702,7 @@ fn a_simplified_startup_leaves_its_second_request_ordered() {
 
     fixture.nexus.wake_due(at.clone());
 
-    let seat = stored(&fixture, Layer::Secondary);
+    let seat = stored(&fixture, Model::Sol);
     let State::Awake(flow_id) = seat.state else {
         panic!("the simplified seat is awake; {}", world.calls())
     };
@@ -1764,7 +1742,7 @@ fn a_simplified_reply_wait_returns_each_durable_acceptance_without_native_input(
     let fixture = NexusFixture::new();
     super::bind_existing_caller(&fixture, "a001", "pane-1");
     let launched = active_simplified_claude(&fixture);
-    let at = address(Layer::Secondary);
+    let at = address(Model::Sol);
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: at.clone(),
         state: State::Awake("abc123".into()),
@@ -1794,7 +1772,7 @@ fn a_simplified_reply_wait_returns_each_durable_acceptance_without_native_input(
             recipient: Address {
                 aspect: Aspect::Mind,
                 topic: "core".into(),
-                layer: Layer::Secondary,
+                model: Model::Sol,
             },
             completed: false,
         })
@@ -1857,14 +1835,14 @@ fn a_held_address_accepts_while_an_independent_recipient_dispatches() {
 
     let fixture = NexusFixture::new();
     super::bind_existing_caller(&fixture, "a001", "pane-1");
-    let held = address(Layer::Secondary);
+    let held = address(Model::Sol);
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: held.clone(),
         state: State::Asleep,
         past: vec![],
         queue: vec![],
     });
-    let mut independent = address(Layer::Secondary);
+    let mut independent = address(Model::Sol);
     independent.topic = "independent".into();
     claude_seat(&fixture, 40_000);
     fixture.nexus.store.seed_metaflow(Metaflow {
@@ -1898,13 +1876,13 @@ fn a_held_address_accepts_while_an_independent_recipient_dispatches() {
         first.response
     );
     assert!(first.pending.is_some());
-    assert_eq!(stored(&fixture, Layer::Secondary).queue.len(), 1);
+    assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1);
     fixture
         .nexus
         .store
         .accept_logical_delivery(
             &independent,
-            SentBy::Sender(address(Layer::Tertiary)),
+            SentBy::Sender(address(Model::Luna)),
             Delivery::Wake,
             Message::Soft(Request::Order("independent dispatch".into())),
             None,
@@ -1927,19 +1905,17 @@ fn a_held_address_accepts_while_an_independent_recipient_dispatches() {
 #[test]
 fn a_wake_that_cannot_start_puts_the_work_back_and_stays_asleep() {
     let fixture = NexusFixture::new();
-    let at = address(Layer::Secondary);
+    let at = address(Model::Sol);
     let queue = vec![Request::Order("A".into())];
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
-        State::Asleep,
-        vec![],
-        queue.clone(),
-    ));
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec![], queue.clone()));
     assert!(matches!(
         fixture.nexus.perform(Operation::Wake(at.clone())),
         Outcome::Failed(_)
     ));
-    let asleep = stored(&fixture, Layer::Secondary);
+    let asleep = stored(&fixture, Model::Sol);
     assert_eq!(asleep.state, State::Asleep);
     assert_eq!(asleep.queue, queue.clone().unsent());
 }
@@ -1948,7 +1924,7 @@ fn a_wake_that_cannot_start_puts_the_work_back_and_stays_asleep() {
 /// Nexus wakes the seat at its start, once, as a fresh flow, and the work
 /// remains queued until native history receipts it. A
 /// metaflow holding only a Result is not due; a Primary holding an Order is
-/// due as any layer is, and with no launch of record to compose from it
+/// due as any model is, and with no launch of record to compose from it
 /// keeps its work queued.
 #[test]
 fn a_nexus_start_wakes_a_seat_whose_wake_did_not_finish() {
@@ -1956,14 +1932,14 @@ fn a_nexus_start_wakes_a_seat_whose_wake_did_not_finish() {
     ended_claude(&fixture);
     let queue = vec![Request::Notice("B".into()), Request::Order("A".into())];
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Asleep,
         vec!["abc123"],
         queue.clone(),
     ));
     // Only a Result is queued for this one: nothing wakes it.
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Tertiary,
+        Model::Luna,
         State::Asleep,
         vec![],
         vec![Request::Result(flow_ethos::ResultPayload::Historical(
@@ -1972,7 +1948,7 @@ fn a_nexus_start_wakes_a_seat_whose_wake_did_not_finish() {
     ));
     // An Order queued for a Primary no launch names.
     let primary = metaflow(
-        Layer::Primary,
+        Model::Astra,
         State::Asleep,
         vec![],
         vec![Request::Order("p".into())],
@@ -1985,7 +1961,7 @@ fn a_nexus_start_wakes_a_seat_whose_wake_did_not_finish() {
     // A second pass, as a second start would make, finds nothing due.
     fixture.nexus.recover_wakes();
 
-    let woken = stored(&fixture, Layer::Secondary);
+    let woken = stored(&fixture, Model::Sol);
     let State::Awake(flow_id) = &woken.state else {
         panic!("the seat wakes: {woken:?}; Herdr calls: {}", world.calls());
     };
@@ -1995,8 +1971,8 @@ fn a_nexus_start_wakes_a_seat_whose_wake_did_not_finish() {
         "the recovered wake's batch was accepted"
     );
     assert_eq!(world.claude_starts(), 1, "woken once: {}", world.calls());
-    assert_eq!(stored(&fixture, Layer::Tertiary).state, State::Asleep);
-    let primary = stored(&fixture, Layer::Primary);
+    assert_eq!(stored(&fixture, Model::Luna).state, State::Asleep);
+    let primary = stored(&fixture, Model::Astra);
     assert_eq!(primary.state, State::Asleep);
     assert_eq!(primary.queue, vec![Request::Order("p".into())].unsent());
 }
@@ -2007,10 +1983,10 @@ fn a_nexus_start_wakes_a_seat_whose_wake_did_not_finish() {
 fn a_wake_is_refused_while_a_pane_already_runs_the_session() {
     let fixture = NexusFixture::new();
     let seat = ended_claude(&fixture);
-    let at = address(Layer::Secondary);
+    let at = address(Model::Sol);
     let queue = vec![Request::Order("A".into())];
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Asleep,
         vec!["abc123"],
         queue.clone(),
@@ -2030,7 +2006,7 @@ fn a_wake_is_refused_while_a_pane_already_runs_the_session() {
         fixture.nexus.perform(Operation::Wake(at.clone())),
         Outcome::Failed(crate::generated::operation::Failed_Data::ConflictingBinding)
     );
-    let asleep = stored(&fixture, Layer::Secondary);
+    let asleep = stored(&fixture, Model::Sol);
     assert_eq!(asleep.state, State::Asleep);
     assert_eq!(asleep.queue, queue.clone().unsent());
 }
@@ -2051,7 +2027,7 @@ fn codex_left_running(fixture: &NexusFixture) {
         .record_stopped("908786")
         .expect("Codex seat recorded Stopped");
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Asleep,
         vec!["908786"],
         vec![Request::Order("A".into())],
@@ -2068,12 +2044,10 @@ fn a_wake_is_refused_while_a_remote_resumed_codex_tui_runs_the_thread() {
     codex_left_running(&fixture);
     fixture.set_agents(vec![fixture.settled_agent()]);
     assert_eq!(
-        fixture
-            .nexus
-            .perform(Operation::Wake(address(Layer::Secondary))),
+        fixture.nexus.perform(Operation::Wake(address(Model::Sol))),
         Outcome::Failed(crate::generated::operation::Failed_Data::ConflictingBinding)
     );
-    let asleep = stored(&fixture, Layer::Secondary);
+    let asleep = stored(&fixture, Model::Sol);
     assert_eq!(asleep.state, State::Asleep);
     assert_eq!(asleep.queue, vec![Request::Order("A".into())].unsent());
 }
@@ -2092,12 +2066,10 @@ fn a_recorded_codex_pane_reporting_another_thread_does_not_hold_the_flow() {
     });
     fixture.set_agents(vec![other]);
     assert_eq!(
-        fixture
-            .nexus
-            .perform(Operation::Wake(address(Layer::Secondary))),
+        fixture.nexus.perform(Operation::Wake(address(Model::Sol))),
         Outcome::Failed(crate::generated::operation::Failed_Data::HerdrRefused)
     );
-    assert_eq!(stored(&fixture, Layer::Secondary).state, State::Asleep);
+    assert_eq!(stored(&fixture, Model::Sol).state, State::Asleep);
 }
 
 /// The pane check itself: a Codex flow is held by its recorded pane's
@@ -2176,7 +2148,7 @@ fn a_launch_takes_its_address_by_binds_rules() {
     use signal_flow::StartRejection;
     let fixture = NexusFixture::new();
     let store = &fixture.nexus.store;
-    let at = address(Layer::Tertiary);
+    let at = address(Model::Luna);
     let taken = |predecessor: Option<&str>, flow_id: &str| match store
         .address_taking(&at, flow_id, predecessor, 0)
         .unwrap()
@@ -2189,13 +2161,13 @@ fn a_launch_takes_its_address_by_binds_rules() {
     assert_eq!(taken(None, "aaaaaa"), Ok(()));
     assert!(store.awaken_metaflow(&at, "aaaaaa", 0).unwrap());
     assert_eq!(
-        stored(&fixture, Layer::Tertiary).state,
+        stored(&fixture, Model::Luna).state,
         State::Awake("aaaaaa".into())
     );
 
     // Awake as a flow with no live row: taken over, the old flow Past.
     assert!(store.awaken_metaflow(&at, "bbbbbb", 0).unwrap());
-    let over = stored(&fixture, Layer::Tertiary);
+    let over = stored(&fixture, Model::Luna);
     assert_eq!(over.state, State::Awake("bbbbbb".into()));
     assert_eq!(over.past, vec!["aaaaaa".to_owned()]);
 
@@ -2204,7 +2176,7 @@ fn a_launch_takes_its_address_by_binds_rules() {
         .register_flow(fixture.node())
         .expect("live flow registered");
     store.seed_metaflow(metaflow(
-        Layer::Tertiary,
+        Model::Luna,
         State::Awake("908786".into()),
         vec![],
         vec![],
@@ -2220,14 +2192,14 @@ fn a_launch_takes_its_address_by_binds_rules() {
 
     // Asleep: taken; a flow taking it is never also in its Past.
     store.seed_metaflow(metaflow(
-        Layer::Tertiary,
+        Model::Luna,
         State::Asleep,
         vec!["dddddd"],
         vec![Request::Order("A".into())],
     ));
     assert!(!store.awaken_metaflow(&at, "dddddd", 1).unwrap());
     assert!(store.awaken_metaflow(&at, "dddddd", 0).unwrap());
-    let taken_by = stored(&fixture, Layer::Tertiary);
+    let taken_by = stored(&fixture, Model::Luna);
     assert_eq!(taken_by.state, State::Awake("dddddd".into()));
     assert!(taken_by.past.is_empty());
     assert_eq!(taken_by.queue, vec![Request::Order("A".into())].unsent());
@@ -2278,7 +2250,7 @@ pub(super) fn message_peer(fixture: &NexusFixture) -> (super::MarkedProcess, sig
     let message_address = Address {
         aspect: Aspect::Field,
         topic: "message".into(),
-        layer: Layer::Primary,
+        model: Model::Astra,
     };
     assert!(matches!(
         fixture
@@ -2327,7 +2299,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     let sender_address = Address {
         aspect: Aspect::Field,
         topic: "flow".into(),
-        layer: Layer::Quaternary,
+        model: Model::Terra,
     };
     let sender_route = HerdrRoute {
         herdr_session_name: "messaging-build".into(),
@@ -2411,7 +2383,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     ));
 
     // The seat the Order is for: Asleep, or left Awake as its Stopped flow.
-    let at = address(Layer::Secondary);
+    let at = address(Model::Sol);
     let past = if recipient == State::Asleep {
         vec!["abc123"]
     } else {
@@ -2420,7 +2392,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     fixture
         .nexus
         .store
-        .seed_metaflow(metaflow(Layer::Secondary, recipient, past, vec![]));
+        .seed_metaflow(metaflow(Model::Sol, recipient, past, vec![]));
     let Response::Locked(lock) = fixture
         .nexus
         .dispatch_metaflow_peer(
@@ -2509,7 +2481,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     let signal_flow::PrivateSendResponse::Sent(receipt) = answer.private_response else {
         panic!("delivery answers from the successor's exact receipt")
     };
-    let woken = stored(&fixture, Layer::Secondary);
+    let woken = stored(&fixture, Model::Sol);
     let State::Awake(flow_id) = &woken.state else {
         panic!(
             "the Order wakes the seat: {woken:?}; Herdr calls: {}",
@@ -2530,7 +2502,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     assert!(
         turns
             .iter()
-            .any(|turn| turn.contains(&[sent.clone()].prompt_text(&address(Layer::Secondary)))),
+            .any(|turn| turn.contains(&[sent.clone()].prompt_text(&address(Model::Sol)))),
         "{turns:?}"
     );
 }
@@ -2551,7 +2523,7 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
     let sender_address = Address {
         aspect: Aspect::Field,
         topic: "flow".into(),
-        layer: Layer::Quaternary,
+        model: Model::Terra,
     };
     let route = HerdrRoute {
         herdr_session_name: "messaging-build".into(),
@@ -2614,11 +2586,11 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
         Response::Identified(sender_address),
     );
 
-    let empty = address(Layer::Secondary);
+    let empty = address(Model::Sol);
     fixture
         .nexus
         .store
-        .seed_metaflow(metaflow(Layer::Secondary, State::Asleep, vec![], vec![]));
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec![], vec![]));
     assert_eq!(
         fixture
             .nexus
@@ -2631,10 +2603,10 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
 
     // With no launch record the sleeping seat cannot be woken. DeliverAll
     // must preserve its queued work and report that it remains queued.
-    let queued = address(Layer::Tertiary);
+    let queued = address(Model::Luna);
     let request = Request::Order("retain this request".into());
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Tertiary,
+        Model::Luna,
         State::Asleep,
         vec![],
         vec![request.clone()],
@@ -2768,7 +2740,7 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
     let sender_address = Address {
         aspect: Aspect::Mind,
         topic: "flow".into(),
-        layer: Layer::Tertiary,
+        model: Model::Luna,
     };
     let registration = fixture
         .nexus
@@ -2935,9 +2907,9 @@ fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
             .response,
         Response::Identified(sender_address.clone())
     );
-    let at = address(Layer::Secondary);
+    let at = address(Model::Sol);
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake("abc123".into()),
         vec![],
         vec![],
@@ -2966,7 +2938,7 @@ fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
     let signal_flow::PrivateSendResponse::SendAccepted(accepted) = response.private_response else {
         panic!("the identified sender's message is admitted")
     };
-    let metaflow = stored(&fixture, Layer::Secondary);
+    let metaflow = stored(&fixture, Model::Sol);
     let [entry] = metaflow.queue.as_slice() else {
         panic!("one logical entry is retained")
     };
@@ -2988,16 +2960,16 @@ fn an_unconfirmed_launch_that_fails_or_ends_leaves_no_awake_registration() {
     let fixture = NexusFixture::new();
     // An Address that was Asleep: refused, it is Asleep again.
     let mut asleep = fixture.staged_launch("asleep-request", None);
-    asleep.profile.address = address(Layer::Secondary);
-    asleep.composed.launch_profile.address = address(Layer::Secondary);
+    asleep.profile.address = address(Model::Sol);
+    asleep.composed.launch_profile.address = address(Model::Sol);
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Asleep,
         vec!["abc123"],
         vec![Request::Order("A".into())],
     ));
     asleep.stage_to_ambiguity(&fixture.nexus);
-    let held = stored(&fixture, Layer::Secondary);
+    let held = stored(&fixture, Model::Sol);
     assert_eq!(held.state, State::Awake("908786".into()));
     assert_eq!(held.past, vec!["abc123".to_owned()]);
     let mut queued = held.clone();
@@ -3011,9 +2983,9 @@ fn an_unconfirmed_launch_that_fails_or_ends_leaves_no_awake_registration() {
         Response::StartRejected(naming_refused())
     );
     assert_eq!(
-        stored(&fixture, Layer::Secondary),
+        stored(&fixture, Model::Sol),
         metaflow(
-            Layer::Secondary,
+            Model::Sol,
             State::Asleep,
             vec!["abc123"],
             vec![Request::Order("A".into()), Request::Notice("B".into())],
@@ -3088,16 +3060,16 @@ fn a_seat_herdr_shows_working_at_its_stop_is_idle_once_herdr_shows_it_done() {
     let log = herdr_working_until_waited(&fixture, &released);
     claude_seat(&fixture, 40_000);
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake(CLAUDE_SEAT.into()),
         vec![],
         vec![],
     ));
-    maintain(&fixture, address(Layer::Secondary));
+    maintain(&fixture, address(Model::Sol));
 
     assert_eq!(fixture.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
     assert_eq!(
-        stored(&fixture, Layer::Secondary).state,
+        stored(&fixture, Model::Sol).state,
         State::Awake(CLAUDE_SEAT.into())
     );
     let calls = fs::read_to_string(log).unwrap();
@@ -3127,7 +3099,7 @@ fn a_stop_that_leaves_its_seat_names_why() {
         AtStop::Kept(KeptAtStop::NotAwake)
     );
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake(CLAUDE_SEAT.into()),
         vec![],
         vec![],
@@ -3140,7 +3112,7 @@ fn a_stop_that_leaves_its_seat_names_why() {
         }))
     ));
     assert_eq!(
-        stored(&fixture, Layer::Secondary).state,
+        stored(&fixture, Model::Sol).state,
         State::Awake(CLAUDE_SEAT.into())
     );
 }
@@ -3161,7 +3133,7 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
     let log = herdr_working_until_waited(fixture, &released);
     claude_seat(fixture, 40_000);
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake(CLAUDE_SEAT.into()),
         vec![],
         vec![],
@@ -3219,13 +3191,13 @@ fn the_stop_of_a_confirmed_seat_leaves_its_metaflow_asleep_to_wake_fresh() {
     use crate::store::metaflow::TakesLaunchAddress;
     let fixture = NexusFixture::new();
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake("abc123".into()),
         vec![],
         vec![],
     ));
     let launched = ended_claude(&fixture);
-    let slept = stored(&fixture, Layer::Secondary);
+    let slept = stored(&fixture, Model::Sol);
     assert_eq!(slept.state, State::Asleep);
     assert_eq!(slept.past, vec!["abc123".to_owned()]);
     assert_eq!(fixture.nexus.wake_plan(&slept), last_launch_context());
@@ -3244,7 +3216,7 @@ fn the_stop_of_a_confirmed_seat_leaves_its_metaflow_asleep_to_wake_fresh() {
 fn a_retired_seat_sleeps_its_metaflow_and_its_order_wakes_it_fresh() {
     let fixture = NexusFixture::new();
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake("abc123".into()),
         vec![],
         vec![],
@@ -3252,7 +3224,7 @@ fn a_retired_seat_sleeps_its_metaflow_and_its_order_wakes_it_fresh() {
     launched_claude_ended_by(&fixture, |store| {
         store.record_active("abc123").unwrap() && store.record_retired("abc123").unwrap()
     });
-    let mut retired = stored(&fixture, Layer::Secondary);
+    let mut retired = stored(&fixture, Model::Sol);
     assert_eq!(retired.state, State::Asleep);
     assert_eq!(retired.past, vec!["abc123".to_owned()]);
     retired
@@ -3271,23 +3243,23 @@ fn a_nexus_start_puts_every_metaflow_left_awake_as_an_ended_flow_to_sleep() {
     let fixture = NexusFixture::new();
     ended_claude(&fixture);
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake("abc123".into()),
         vec![],
         vec![],
     ));
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Tertiary,
+        Model::Luna,
         State::Awake("flow-0000000000000001".into()),
         vec![],
         vec![],
     ));
     fixture.nexus.recover_wakes();
-    let rested = stored(&fixture, Layer::Secondary);
+    let rested = stored(&fixture, Model::Sol);
     assert_eq!(rested.state, State::Asleep);
     assert_eq!(rested.past, vec!["abc123".to_owned()]);
     assert_eq!(
-        stored(&fixture, Layer::Tertiary).state,
+        stored(&fixture, Model::Luna).state,
         State::Awake("flow-0000000000000001".into())
     );
 }
@@ -3561,7 +3533,7 @@ esac
 
 fn configure_secondary_model(fixture: &NexusFixture, native: &str) {
     use crate::store::SeedsConfiguration;
-    // A wake reads its layer's model from the committed configuration,
+    // A wake reads its model's model from the committed configuration,
     // which exists once the Nexus family is declared.
     let settings = crate::store::DefaultConfiguration {
         home: fixture.directory.path().join("home"),
@@ -3592,8 +3564,7 @@ fn configure_secondary_model(fixture: &NexusFixture, native: &str) {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
             meta_signal_flow::ConfigureModel {
-                layer: Layer::Secondary,
-                aspect: Aspect::Mind,
+                model: Model::Sol,
                 native: native.into(),
             },
         ]))
@@ -3618,7 +3589,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         launch_request_id: "old-codex-request".into(),
         system_modules: vec!["spirit-core".into(), "intent-flow".into()],
         user_modules: vec!["operation-main-flow".into()],
-        address: address(Layer::Secondary),
+        address: address(Model::Sol),
         model_name: "fixture-model".into(),
         effort: "medium".into(),
         flow_kind: signal_flow::FlowKind::Regular,
@@ -3704,13 +3675,13 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
     let old_bytes = fs::read(&old_rollout).unwrap();
     let queue = vec![Request::Order("A".into())];
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Asleep,
         vec![old.flow_id.as_str()],
         queue.clone(),
     ));
     configure_secondary_model(&fixture, "fixture-model");
-    let at = address(Layer::Secondary);
+    let at = address(Model::Sol);
 
     // The fresh seat the wake composes, and so the first turn the new thread
     // holds, and the title it is named with.
@@ -3725,10 +3696,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         leave_outs_option: None,
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
-        prompt: queue
-            .clone()
-            .unsent()
-            .prompt_text(&address(Layer::Secondary)),
+        prompt: queue.clone().unsent().prompt_text(&address(Model::Sol)),
     }
     .fresh_profile();
     let title = fresh.native_title(FRESH_CODEX_FLOW).unwrap();
@@ -3780,7 +3748,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         fs::read_to_string(&world.codex_invocations).ok()
     );
 
-    let woken = stored(&fixture, Layer::Secondary);
+    let woken = stored(&fixture, Model::Sol);
     assert_eq!(woken.state, State::Awake(FRESH_CODEX_FLOW.into()));
     assert!(woken.queue.is_empty());
     assert_eq!(woken.past, vec![old.flow_id.clone()]);
@@ -3824,12 +3792,12 @@ fn a_sleeping_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it() {
     let seat = ended_claude(&fixture);
     let queue = vec![Request::Order("A".into())];
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Asleep,
         vec!["abc123"],
         queue.clone(),
     ));
-    let at = address(Layer::Secondary);
+    let at = address(Model::Sol);
     let world = fixture.fresh_claude_world();
 
     let Outcome::Woken(flow_id) = fixture.nexus.perform(Operation::Wake(at.clone())) else {
@@ -3839,7 +3807,7 @@ fn a_sleeping_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it() {
         );
     };
     assert_ne!(flow_id, "abc123");
-    let woken = stored(&fixture, Layer::Secondary);
+    let woken = stored(&fixture, Model::Sol);
     assert_eq!(woken.state, State::Awake(flow_id.clone()));
     assert!(woken.queue.is_empty());
     let new_node = fixture.nexus.store.flow_node(&flow_id).unwrap().unwrap();
@@ -3859,7 +3827,7 @@ fn a_sleeping_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it() {
     assert!(!calls.contains(&seat.session), "{calls}");
 }
 
-/// A layer Model declared as a Claude alias is not an exact native model: a
+/// A model Model declared as a Claude alias is not an exact native model: a
 /// fresh wake from it is refused `InexactModel` before any pane is opened,
 /// so no native session receives the queued work, and the work stays queued
 /// with the metaflow Asleep. Declared as the full name, the same wake starts and
@@ -3870,13 +3838,13 @@ fn a_fresh_wake_from_a_claude_alias_opens_nothing_and_keeps_its_work() {
     ended_claude(&fixture);
     fixture.claims_flow_ids();
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Asleep,
         vec!["abc123"],
         vec![Request::Order("A".into())],
     ));
     configure_secondary_model(&fixture, "haiku");
-    let at = address(Layer::Secondary);
+    let at = address(Model::Sol);
     let world = fixture.fresh_world("unused");
 
     assert_eq!(
@@ -3887,7 +3855,7 @@ fn a_fresh_wake_from_a_claude_alias_opens_nothing_and_keeps_its_work() {
             )
         )
     );
-    let asleep = stored(&fixture, Layer::Secondary);
+    let asleep = stored(&fixture, Model::Sol);
     assert_eq!(asleep.state, State::Asleep);
     assert_eq!(asleep.past, vec!["abc123".to_owned()]);
     assert_eq!(asleep.queue.len(), 1);
@@ -3901,7 +3869,7 @@ fn a_fresh_wake_from_a_claude_alias_opens_nothing_and_keeps_its_work() {
             fs::read_to_string(world.state.join("calls")).unwrap_or_default()
         );
     };
-    let woken = stored(&fixture, Layer::Secondary);
+    let woken = stored(&fixture, Model::Sol);
     assert_eq!(woken.state, State::Awake(flow_id));
     assert!(woken.queue.is_empty());
 }
@@ -3915,18 +3883,16 @@ fn a_refused_wake_keeps_its_queue_and_each_delivery_names_why() {
     let mut fixture = NexusFixture::new();
     ended_claude(&fixture);
     fixture.claims_flow_ids();
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
-        State::Asleep,
-        vec!["abc123"],
-        vec![],
-    ));
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
     configure_secondary_model(&fixture, "haiku");
-    let at = address(Layer::Secondary);
+    let at = address(Model::Sol);
     let sender = Address {
         aspect: Aspect::Psyche,
         topic: "core".into(),
-        layer: Layer::Secondary,
+        model: Model::Opus,
     };
     let accepted: Vec<_> = ["A", "B"]
         .into_iter()
@@ -3960,7 +3926,7 @@ fn a_refused_wake_keeps_its_queue_and_each_delivery_names_why() {
             )
         )
     );
-    let asleep = stored(&fixture, Layer::Secondary);
+    let asleep = stored(&fixture, Model::Sol);
     assert_eq!(asleep.state, State::Asleep);
     assert_eq!(
         asleep
@@ -4006,7 +3972,7 @@ fn a_refused_wake_keeps_its_queue_and_each_delivery_names_why() {
             fs::read_to_string(world.state.join("calls")).unwrap_or_default()
         );
     };
-    let woken = stored(&fixture, Layer::Secondary);
+    let woken = stored(&fixture, Model::Sol);
     assert_eq!(woken.state, State::Awake(flow_id));
     assert!(
         woken.queue.is_empty(),
@@ -4019,13 +3985,11 @@ fn a_missing_module_wake_keeps_its_identity_in_the_caller_outcome_and_queue_stat
     let fixture = NexusFixture::new();
     ended_claude(&fixture);
     fixture.claims_flow_ids();
-    let at = address(Layer::Secondary);
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
-        State::Asleep,
-        vec!["abc123"],
-        vec![],
-    ));
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
     configure_secondary_model(&fixture, "claude-fixture");
     fixture
         .nexus
@@ -4047,7 +4011,7 @@ fn a_missing_module_wake_keeps_its_identity_in_the_caller_outcome_and_queue_stat
     let sender = Address {
         aspect: Aspect::Psyche,
         topic: "core".into(),
-        layer: Layer::Secondary,
+        model: Model::Opus,
     };
     let signal_flow::PrivateSendResponse::SendAccepted(accepted) = fixture
         .nexus
@@ -4086,11 +4050,10 @@ fn a_missing_module_wake_keeps_its_identity_in_the_caller_outcome_and_queue_stat
     );
 }
 
-/// A fresh wake takes the model configured for its seat's layer and
-/// aspect, never another aspect's model of the same layer: a Mind Secondary
-/// whose layer has only a Psyche model opens nothing and keeps its work
-/// queued Asleep; once Mind's Secondary model is declared beside Psyche's,
-/// the same wake launches on Mind's.
+/// A fresh wake takes the native model configured for its seat's Model,
+/// never another Model's: a Mind Sol seat while only Opus has a native
+/// model opens nothing and keeps its work queued Asleep; once Sol's native
+/// model is declared beside Opus's, the same wake launches on Sol's.
 #[test]
 fn a_fresh_wake_takes_the_model_of_its_layer_and_aspect() {
     use crate::store::ReadsLaunchAttempt as _;
@@ -4098,30 +4061,29 @@ fn a_fresh_wake_takes_the_model_of_its_layer_and_aspect() {
     ended_claude(&fixture);
     fixture.claims_flow_ids();
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Asleep,
         vec!["abc123"],
         vec![Request::Order("A".into())],
     ));
     configure_secondary_model(&fixture, "claude-fixture");
-    let models = |fixture: &NexusFixture, declared: &[(Aspect, &str)]| {
+    let models = |fixture: &NexusFixture, declared: &[(Model, &str)]| {
         fixture
             .nexus
             .store
             .configure_change(meta_signal_flow::ConfigurationChange::Models(
                 declared
                     .iter()
-                    .map(|(aspect, native)| meta_signal_flow::ConfigureModel {
-                        layer: Layer::Secondary,
-                        aspect: aspect.clone(),
+                    .map(|(model, native)| meta_signal_flow::ConfigureModel {
+                        model: model.clone(),
                         native: (*native).into(),
                     })
                     .collect(),
             ))
             .expect("models configured");
     };
-    models(&fixture, &[(Aspect::Psyche, "claude-fixture")]);
-    let at = address(Layer::Secondary);
+    models(&fixture, &[(Model::Opus, "claude-fixture")]);
+    let at = address(Model::Sol);
     assert_eq!(at.aspect, Aspect::Mind);
     let world = fixture.fresh_world("unused");
 
@@ -4133,7 +4095,7 @@ fn a_fresh_wake_takes_the_model_of_its_layer_and_aspect() {
             )
         )
     );
-    let asleep = stored(&fixture, Layer::Secondary);
+    let asleep = stored(&fixture, Model::Sol);
     assert_eq!(asleep.state, State::Asleep);
     assert_eq!(asleep.queue.len(), 1);
     let calls = fs::read_to_string(world.state.join("calls")).unwrap_or_default();
@@ -4142,17 +4104,17 @@ fn a_fresh_wake_takes_the_model_of_its_layer_and_aspect() {
     models(
         &fixture,
         &[
-            (Aspect::Psyche, "claude-other"),
-            (Aspect::Mind, "claude-fixture"),
+            (Model::Opus, "claude-other"),
+            (Model::Sol, "claude-fixture"),
         ],
     );
     let Outcome::Woken(flow_id) = fixture.nexus.perform(Operation::Wake(at.clone())) else {
         panic!(
-            "Mind's Secondary model wakes the seat; Herdr calls: {}",
+            "Sol's native model wakes the seat; Herdr calls: {}",
             fs::read_to_string(world.state.join("calls")).unwrap_or_default()
         );
     };
-    let woken = stored(&fixture, Layer::Secondary);
+    let woken = stored(&fixture, Model::Sol);
     assert_eq!(woken.state, State::Awake(flow_id.clone()));
     assert!(woken.queue.is_empty());
     let launched = fixture
@@ -4211,7 +4173,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
             address: Address {
                 aspect: Aspect::Field,
                 topic: "sendProof".into(),
-                layer: Layer::Tertiary,
+                model: Model::Luna,
             },
             model_name: "fixture-model".into(),
             effort: "medium".into(),
@@ -4248,13 +4210,11 @@ impl SetsUpFirstTurnSend for NexusFixture {
             .store
             .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
                 meta_signal_flow::ConfigureModel {
-                    layer: Layer::Secondary,
-                    aspect: Aspect::Mind,
+                    model: Model::Sol,
                     native: "claude-fixture".into(),
                 },
                 meta_signal_flow::ConfigureModel {
-                    layer: Layer::Tertiary,
-                    aspect: Aspect::Field,
+                    model: Model::Luna,
                     native: "fixture-model".into(),
                 },
             ]))
@@ -4292,7 +4252,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
                     "target": {
                         "aspect": "Mind",
                         "topic": recipient.topic,
-                        "layer": format!("{:?}", recipient.layer)
+                        "model": format!("{:?}", recipient.model)
                     },
                     "priority": "MiddleAbrupt",
                     "kind": "Order",
@@ -4452,11 +4412,11 @@ fn a_codex_first_turn_starts_after_the_tui_attached_and_a_long_turn_refuses_noth
     use crate::DispatchesSerially;
     let mut fixture = NexusFixture::new();
     ended_claude(&fixture);
-    let recipient = address(Layer::Secondary);
+    let recipient = address(Model::Sol);
     fixture
         .nexus
         .store
-        .seed_metaflow(metaflow(Layer::Secondary, State::Asleep, vec![], vec![]));
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec![], vec![]));
     let setup = fixture.first_turn_send(recipient);
     // The turn calls nothing and never ends.
     fs::remove_file(setup.world.state.join("first-call")).unwrap();
@@ -4485,11 +4445,11 @@ fn a_refused_codex_start_archives_its_idle_thread_and_starts_no_turn() {
     use crate::DispatchesSerially;
     use crate::store::send_call::KeepsSendCalls;
     let mut fixture = NexusFixture::new();
-    let recipient = address(Layer::Primary);
+    let recipient = address(Model::Astra);
     fixture
         .nexus
         .store
-        .seed_metaflow(metaflow(Layer::Primary, State::Asleep, vec![], vec![]));
+        .seed_metaflow(metaflow(Model::Astra, State::Asleep, vec![], vec![]));
     let setup = fixture.first_turn_send(recipient.clone());
     fs::write(setup.world.state.join("start-refused"), "").unwrap();
     fs::remove_file(setup.world.state.join("first-call")).unwrap();
@@ -4538,7 +4498,7 @@ fn a_refused_codex_start_archives_its_idle_thread_and_starts_no_turn() {
         fixture.nexus.store.send_call(&first_call_key()).unwrap(),
         None
     );
-    assert!(stored(&fixture, Layer::Primary).queue.is_empty());
+    assert!(stored(&fixture, Model::Astra).queue.is_empty());
     // After the refusal the thread is no launch's: a call now is refused.
     assert_eq!(
         fixture.nexus.store.thread_sender(FRESH_THREAD).unwrap(),
@@ -4553,11 +4513,11 @@ fn a_refused_codex_start_archives_its_idle_thread_and_starts_no_turn() {
 fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
     use crate::store::RecordsCreatedLaunchPane;
     use crate::store::opened_thread::RecordsOpenedThreads;
-    let recipient = address(Layer::Secondary);
+    let recipient = address(Model::Sol);
     fixture
         .nexus
         .store
-        .seed_metaflow(metaflow(Layer::Secondary, State::Asleep, vec![], vec![]));
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec![], vec![]));
     let setup = fixture.first_turn_send(recipient);
     let composed = fixture
         .nexus
@@ -4688,7 +4648,7 @@ fn a_launch_interrupted_with_its_first_call_pending_is_refused_archived_and_sett
         }),
         "{archived:?}"
     );
-    assert!(stored(&fixture, Layer::Secondary).queue.is_empty());
+    assert!(stored(&fixture, Model::Sol).queue.is_empty());
     assert_eq!(
         fixture.nexus.store.send_call(&first_call_key()).unwrap(),
         None
@@ -5010,7 +4970,7 @@ fn an_interrupted_launch_whose_cleanup_fails_is_settled_and_its_cleanup_resumed(
             .any(|message| message.to_string().contains("ThreadUnowned")),
         "{replayed:?}"
     );
-    assert!(stored(&fixture, Layer::Secondary).queue.is_empty());
+    assert!(stored(&fixture, Model::Sol).queue.is_empty());
     let archived = state.join("restart-record-6").client_messages();
     assert!(
         archived.iter().any(|message| {
@@ -5063,7 +5023,7 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
             "target": {
                 "aspect": "Mind",
                 "topic": recipient.topic,
-            "layer": format!("{:?}", recipient.layer)
+            "model": format!("{:?}", recipient.model)
             },
             "priority": "MiddleAbrupt",
             "kind": "Order",
@@ -5083,7 +5043,7 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
     };
     assert_eq!(accepted.sender, setup.sender.address);
     let logical_delivery_id = accepted.send_acceptance.logical_delivery_id.clone();
-    assert_eq!(stored(&fixture, Layer::Secondary).queue.len(), 1);
+    assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1);
 
     // The Nexus exits: the store as it lies on disk opens in a new one.
     let app_server = fixture.nexus.codex_endpoints.stable.client_path.clone();
@@ -5114,7 +5074,7 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
             .map(|call| call.send_outcome),
         Some(committed.clone())
     );
-    let target = stored(&restarted, Layer::Secondary);
+    let target = stored(&restarted, Model::Sol);
     assert_eq!(target.queue.len(), 1, "exactly one enqueue");
     assert_eq!(
         target.queue[0].sent_by,
@@ -5132,8 +5092,8 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
     );
 }
 
-/// The sender seat c1a0de, Awake at { Mind flow Secondary }, holding a
-/// lock on { Mind flow Primary }.
+/// The sender seat c1a0de, Awake at { Mind flow Sol }, holding a
+/// lock on { Mind flow Astra }.
 fn sender_holding_a_lock(fixture: &NexusFixture) -> Address {
     use crate::store::SeedsConfiguration;
     use crate::store::metaflow::MutatesMetaflows;
@@ -5163,16 +5123,16 @@ fn sender_holding_a_lock(fixture: &NexusFixture) -> Address {
         .expect("Nexus configured");
     claude_seat(fixture, 40_000);
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake(CLAUDE_SEAT.into()),
         vec![],
         vec![],
     ));
-    let recipient = address(Layer::Primary);
+    let recipient = address(Model::Astra);
     fixture
         .nexus
         .store
-        .seed_metaflow(metaflow(Layer::Primary, State::Asleep, vec![], vec![]));
+        .seed_metaflow(metaflow(Model::Astra, State::Asleep, vec![], vec![]));
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -5182,7 +5142,7 @@ fn sender_holding_a_lock(fixture: &NexusFixture) -> Address {
         .store
         .lock_metaflow(
             signal_flow::Lock_Data {
-                sender: address(Layer::Secondary),
+                sender: address(Model::Sol),
                 recipient: signal_flow::Recipient::Address(recipient.clone()),
             },
             now,
@@ -5230,7 +5190,7 @@ fn a_terminal_sender_retracts_its_locks() {
                 .is_none(),
             "{end:?}: the ended sender's lock is retracted"
         );
-        assert_eq!(stored(&fixture, Layer::Secondary).state, State::Asleep);
+        assert_eq!(stored(&fixture, Model::Sol).state, State::Asleep);
     }
 }
 
@@ -5273,13 +5233,13 @@ fn a_maintained_metaflow_ended_by_an_exit_is_owed_a_successor() {
         let fixture = NexusFixture::new();
         claude_seat(&fixture, 40_000);
         fixture.nexus.store.seed_metaflow(metaflow(
-            Layer::Secondary,
+            Model::Sol,
             State::Awake(CLAUDE_SEAT.into()),
             vec![],
             vec![],
         ));
         if maintained {
-            maintain(&fixture, address(Layer::Secondary));
+            maintain(&fixture, address(Model::Sol));
         }
         assert_eq!(
             fixture
@@ -5290,9 +5250,9 @@ fn a_maintained_metaflow_ended_by_an_exit_is_owed_a_successor() {
         let intent = fixture
             .nexus
             .store
-            .successor_intent(&address(Layer::Secondary))
+            .successor_intent(&address(Model::Sol))
             .unwrap();
-        let asleep = stored(&fixture, Layer::Secondary);
+        let asleep = stored(&fixture, Model::Sol);
         assert_eq!(asleep.state, State::Asleep);
         if maintained {
             let intent = intent.expect("a successor is owed");
@@ -5318,12 +5278,12 @@ fn a_maintained_metaflow_stopped_deliberately_is_owed_no_successor() {
     let fixture = NexusFixture::new();
     claude_seat(&fixture, 40_000);
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake(CLAUDE_SEAT.into()),
         vec![],
         vec![],
     ));
-    maintain(&fixture, address(Layer::Secondary));
+    maintain(&fixture, address(Model::Sol));
     for end in [
         Record_Data::Stopped(CLAUDE_SEAT.into()),
         Record_Data::Retired(CLAUDE_SEAT.into()),
@@ -5334,7 +5294,7 @@ fn a_maintained_metaflow_stopped_deliberately_is_owed_no_successor() {
         fixture
             .nexus
             .store
-            .successor_intent(&address(Layer::Secondary))
+            .successor_intent(&address(Model::Sol))
             .unwrap(),
         None
     );
@@ -5349,13 +5309,13 @@ fn a_launch_remembers_its_metaflow_s_last_flows_to_its_depth_or_those_it_names()
     use signal_flow::Remembering;
     let fixture = NexusFixture::new();
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake("c3c3c3".into()),
         vec!["a1a1a1", "b2b2b2"],
         vec![],
     ));
     let mut profile = crate::composition::tests::fixture_profile();
-    profile.address = address(Layer::Secondary);
+    profile.address = address(Model::Sol);
     profile.launch_request_id = "remember-request".into();
     for (remembering, expected) in [
         (Remembering::Predecessors(0), vec![]),
@@ -5384,7 +5344,7 @@ fn a_nexus_start_forgets_a_successor_already_given_and_wakes_one_owed() {
     let fixture = NexusFixture::new();
     claude_seat(&fixture, 40_000);
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake(CLAUDE_SEAT.into()),
         vec!["abc123"],
         vec![],
@@ -5393,14 +5353,14 @@ fn a_nexus_start_forgets_a_successor_already_given_and_wakes_one_owed() {
         .nexus
         .store
         .owe_successor(SuccessorIntent {
-            address: address(Layer::Secondary),
+            address: address(Model::Sol),
             predecessor: "abc123".into(),
             cause: SuccessionCause::Exit,
             launch_request_id: String::new(),
         })
         .unwrap();
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Primary,
+        Model::Astra,
         State::Asleep,
         vec!["def456"],
         vec![],
@@ -5409,7 +5369,7 @@ fn a_nexus_start_forgets_a_successor_already_given_and_wakes_one_owed() {
         .nexus
         .store
         .owe_successor(SuccessorIntent {
-            address: address(Layer::Primary),
+            address: address(Model::Astra),
             predecessor: "def456".into(),
             cause: SuccessionCause::Exit,
             launch_request_id: String::new(),
@@ -5422,19 +5382,19 @@ fn a_nexus_start_forgets_a_successor_already_given_and_wakes_one_owed() {
         fixture
             .nexus
             .store
-            .successor_intent(&address(Layer::Secondary))
+            .successor_intent(&address(Model::Sol))
             .unwrap(),
         None,
         "the successor Awake as another flow was given"
     );
-    let owed = stored(&fixture, Layer::Primary);
+    let owed = stored(&fixture, Model::Astra);
     assert!(
         fixture.nexus.wake_is_due(&owed),
         "the Asleep metaflow is still owed its successor: {owed:?}"
     );
 }
 
-/// The Secondary starts first: a Start of { Mind flow Primary } whose
+/// The Secondary starts first: a Start of { Mind flow Astra } whose
 /// declared Secondary sleeps has Flow start that Secondary fresh, confirmed
 /// and Awake, before the Primary's own launch goes on; the Primary is not
 /// refused NoSecondary.
@@ -5443,12 +5403,10 @@ fn a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first() {
     use crate::Dispatches;
     let mut fixture = NexusFixture::new();
     ended_claude(&fixture);
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
-        State::Asleep,
-        vec!["abc123"],
-        vec![],
-    ));
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
     let world = fixture.fresh_claude_world();
     fixture
         .nexus
@@ -5456,7 +5414,7 @@ fn a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first() {
         .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
             meta_signal_flow::ConfigureMetaflow {
                 root_option: None,
-                address: address(Layer::Secondary),
+                address: address(Model::Sol),
                 system_modules: vec!["spirit-core".into(), "intent-flow".into()],
                 user_modules: vec!["operation-main-flow".into()],
                 flow_kind: signal_flow::FlowKind::Regular,
@@ -5469,7 +5427,7 @@ fn a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first() {
         .expect("the Secondary is declared");
     let mut primary = crate::composition::tests::fixture_profile();
     primary.launch_request_id = "primary-request".into();
-    primary.address = address(Layer::Primary);
+    primary.address = address(Model::Astra);
     primary.flow_id_option = None;
     primary.remembering = signal_flow::Remembering::Predecessors(0);
 
@@ -5481,7 +5439,7 @@ fn a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first() {
         "{}",
         world.calls()
     );
-    let secondary = stored(&fixture, Layer::Secondary);
+    let secondary = stored(&fixture, Model::Sol);
     let State::Awake(flow_id) = &secondary.state else {
         panic!(
             "the Secondary started first: {secondary:?}; {}",
@@ -5506,12 +5464,12 @@ fn a_reported_session_end_exits_the_flow_and_owes_a_maintained_successor() {
         let fixture = NexusFixture::new();
         claude_seat(&fixture, 40_000);
         fixture.nexus.store.seed_metaflow(metaflow(
-            Layer::Secondary,
+            Model::Sol,
             State::Awake(CLAUDE_SEAT.into()),
             vec![],
             vec![],
         ));
-        maintain(&fixture, address(Layer::Secondary));
+        maintain(&fixture, address(Model::Sol));
 
         fixture.nexus.after_report(
             &CLAUDE_SEAT.to_owned(),
@@ -5522,11 +5480,11 @@ fn a_reported_session_end_exits_the_flow_and_owes_a_maintained_successor() {
         let intent = fixture
             .nexus
             .store
-            .successor_intent(&address(Layer::Secondary))
+            .successor_intent(&address(Model::Sol))
             .unwrap();
         if ends {
             assert_eq!(node.flow_lifecycle, FlowLifecycle::Exited);
-            assert_eq!(stored(&fixture, Layer::Secondary).state, State::Asleep);
+            assert_eq!(stored(&fixture, Model::Sol).state, State::Asleep);
             assert_eq!(
                 intent.expect("a successor is owed").predecessor,
                 CLAUDE_SEAT
@@ -5547,18 +5505,16 @@ fn start_sequence_takes_up_an_owed_successor() {
     use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
     let mut fixture = NexusFixture::new();
     ended_claude(&fixture);
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
-        State::Asleep,
-        vec!["abc123"],
-        vec![],
-    ));
-    maintain(&fixture, address(Layer::Secondary));
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    maintain(&fixture, address(Model::Sol));
     fixture
         .nexus
         .store
         .owe_successor(SuccessorIntent {
-            address: address(Layer::Secondary),
+            address: address(Model::Sol),
             predecessor: "abc123".into(),
             cause: SuccessionCause::Exit,
             launch_request_id: String::new(),
@@ -5569,7 +5525,7 @@ fn start_sequence_takes_up_an_owed_successor() {
     fixture.nexus.reconcile_interrupted_launches();
     fixture.nexus.recover_wakes();
 
-    let started = stored(&fixture, Layer::Secondary);
+    let started = stored(&fixture, Model::Sol);
     assert!(
         matches!(started.state, State::Awake(_)),
         "{started:?}; {}",
@@ -5585,18 +5541,16 @@ fn recover_wakes_takes_up_an_owed_successor() {
     use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
     let mut fixture = NexusFixture::new();
     ended_claude(&fixture);
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
-        State::Asleep,
-        vec!["abc123"],
-        vec![],
-    ));
-    maintain(&fixture, address(Layer::Secondary));
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    maintain(&fixture, address(Model::Sol));
     fixture
         .nexus
         .store
         .owe_successor(SuccessorIntent {
-            address: address(Layer::Secondary),
+            address: address(Model::Sol),
             predecessor: "abc123".into(),
             cause: SuccessionCause::Exit,
             launch_request_id: String::new(),
@@ -5606,7 +5560,7 @@ fn recover_wakes_takes_up_an_owed_successor() {
 
     fixture.nexus.recover_wakes();
 
-    let started = stored(&fixture, Layer::Secondary);
+    let started = stored(&fixture, Model::Sol);
     assert!(
         matches!(started.state, State::Awake(_)),
         "{started:?}; {}",
@@ -5623,12 +5577,12 @@ fn reported_session_end_starts_a_maintained_successor() {
     let mut fixture = NexusFixture::new();
     let seat = launched_claude_ended_by(&fixture, |_| true);
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         State::Awake("abc123".into()),
         vec![],
         vec![],
     ));
-    maintain(&fixture, address(Layer::Secondary));
+    maintain(&fixture, address(Model::Sol));
     let world = fixture.fresh_claude_world();
 
     fixture.nexus.after_report(
@@ -5636,7 +5590,7 @@ fn reported_session_end_starts_a_maintained_successor() {
         &signal_flow::Event::Ended(Some(seat.session.clone())),
     );
 
-    let woken = stored(&fixture, Layer::Secondary);
+    let woken = stored(&fixture, Model::Sol);
     let State::Awake(flow_id) = &woken.state else {
         panic!("the successor starts: {woken:?}; {}", world.calls());
     };
@@ -5646,7 +5600,7 @@ fn reported_session_end_starts_a_maintained_successor() {
         fixture
             .nexus
             .store
-            .successor_intent(&address(Layer::Secondary))
+            .successor_intent(&address(Model::Sol))
             .unwrap(),
         None,
         "the owed successor is given"
@@ -5664,10 +5618,10 @@ fn a_metaflow_put_asleep_for_an_ended_flow_retracts_its_sender_locks() {
         fixture
             .nexus
             .store
-            .sleep_metaflow(&address(Layer::Secondary), CLAUDE_SEAT)
+            .sleep_metaflow(&address(Model::Sol), CLAUDE_SEAT)
             .unwrap()
     );
-    assert_eq!(stored(&fixture, Layer::Secondary).state, State::Asleep);
+    assert_eq!(stored(&fixture, Model::Sol).state, State::Asleep);
     assert!(
         fixture
             .nexus

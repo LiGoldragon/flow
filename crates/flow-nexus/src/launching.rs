@@ -13,6 +13,7 @@ use crate::generated::starter::CarriesFlowId;
 use crate::harness_command::ParsesHarnessFlags;
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::{ChecksComposedLaunch, ObservesNativeLaunchBinding};
+use crate::model_family::RanksInFamily;
 use crate::performing::ClassifiesNativeLaunchFailure;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
@@ -149,7 +150,7 @@ impl AdmitsLaunch for RunningNexus {
         if !address.topic.as_str().is_camel_case_topic() {
             return Ok(Some(StartRejection::TopicRefused(address.topic.clone())));
         }
-        if address.layer != signal_flow::Layer::Primary
+        if !address.model.is_first()
             || profile.flow_id_option.is_some()
             || self.store.successor_intent(address)?.is_some()
         {
@@ -158,7 +159,7 @@ impl AdmitsLaunch for RunningNexus {
         let secondary = signal_flow::Address {
             aspect: address.aspect.clone(),
             topic: address.topic.clone(),
-            layer: signal_flow::Layer::Secondary,
+            model: address.model.second(),
         };
         let awake = match self.store.metaflow(&secondary)? {
             Some(metaflow) => match metaflow.state {
@@ -538,7 +539,7 @@ impl LaunchesFlows for RunningNexus {
         let caller = signal_flow::Caller {
             flow_id: binding.flow_id.clone(),
             aspect: launch.launch_profile.address.aspect.clone(),
-            power_level: Self::power_of(&launch.launch_profile.address.layer),
+            power_level: Self::power_of(&launch.launch_profile.address.model),
             model_name: launch.launch_profile.model_name.clone(),
         };
         let registered = match self.perform(Operation::Register(Register_Data {

@@ -382,10 +382,10 @@ true only when queued.
 
 A metaflow continues as its declaration's `Continuity.[ OnDemand
 Maintained ]` names; a metaflow no declaration names is OnDemand. A
-metaflow is Maintained by its exact Address, never by its layer: a
+metaflow is Maintained by its exact Address, never by its Model: a
 declaration archived before Continuity opens Maintained at the core
-Primary, Secondary and Tertiary of each aspect and at { Psyche core
-Quaternary }, and OnDemand at every other Address. When a seat's turn ends
+seats of the first three ranks of each aspect and at { Psyche core
+Haiku }, and OnDemand at every other Address. When a seat's turn ends
 and it rests with nothing queued, an OnDemand seat sleeps: its harness and
 pane are closed under the pane's lease (a Claude seat only once Herdr shows
 it Idle or Done, so background agents are not ended) and its flow recorded
@@ -412,7 +412,7 @@ Every lock a metaflow holds as a sender is retracted in the write that ends
 its flow, Stopped, Exited or Retired, so a recipient is never held by a
 sender that has ended.
 Whether a target wakes is read from Flow's records, never carried with the
-answer. A metaflow of any layer is due a wake when it is Asleep and holds an
+answer. A metaflow of any Model is due a wake when it is Asleep and holds an
 Order, a Question or the living's words. After every commit that queues a request, from a send-tool call
 or a Deliver, and after a replayed call is answered from its record, the
 target's Awake seat is read first: a seat whose pane Herdr shows gone has
@@ -454,7 +454,7 @@ the metaflow a send-tool call is attributed to. A request queued before Flow
 kept senders reads `Unknown`; no address is supplied for it. A request Flow
 raised itself (a landing's work and report, a compaction's investigation)
 reads `Flow`. A woken or drained flow reads each queued request as its
-datom, sender first: `{ Sender.{ Mind flow Tertiary } Order.«Run the tier
+datom, sender first: `{ Sender.{ Mind flow Luna } Order.«Run the tier
 tests.» }`, `{ Flow Order.«…» }`.
 
 This establishes which metaflow a call is attributed to, from Flow's records
@@ -481,19 +481,19 @@ the model its native transcript records with the model it named, string for
 string, so a launch names only an exact native model: a Codex model a
 configured endpoint lists, or a Claude full name, `claude-` then lowercase
 letters, digits and hyphens; any other model is not composed. A seat runs
-the model configured for its Address's layer and aspect (`Models` holds one
-per Layer and Aspect): a Start or Replace naming another is refused
+the native model configured for its Address's Model (`Models` holds one
+per Model): a Start or Replace naming another is refused
 `ModelRefused` before the Nexus writes, claims, composes or opens anything,
 and a fresh wake takes that model. A launch a caller asks for (Start, Replace,
 Launch) is admitted before anything of it is written: a topic that is not
 an uncapitalized camelCase identifier is refused `TopicRefused.Topic`,
-carrying the topic as written, never lowered; and, short term, a Primary is
-not started without its Secondary, and the Secondary starts first: before
-a new Primary's launch, off the dispatch gate, Flow starts the declared
-Secondary of its aspect and topic itself when it is not Awake, OnDemand or
+carrying the topic as written, never lowered; and, short term, a Fable or Astra is
+not started without the Opus or Sol of its aspect and topic, and that seat starts first: before
+a new Fable or Astra launch, off the dispatch gate, Flow starts the declared
+second model of its family, of its aspect and topic, itself when it is not Awake, OnDemand or
 Maintained, records it Awake once confirmed and hands it its queue; the
-Primary is refused `NoSecondary` only when that Secondary has no
-declaration, or its start was refused. A Primary that replaces a flow, a successor a Maintained
+launch is refused `NoSecondary` only when that seat has no
+declaration, or its start was refused. A first-rank launch that replaces a flow, a successor a Maintained
 metaflow is owed, a wake Flow starts itself, and a request already
 attempted continue a metaflow already admitted. Configure refuses an
 Address with such a topic `ConfigureRejected.TopicRefused`, a Send
@@ -543,10 +543,10 @@ ended while background agents run shows Working and closing it would end
 them.
 
 Each changed module file, `<type>/<subject>.md`, is queued as an Order to
-Mind `<subject>` Secondary, or to Mind core Secondary when no such metaflow
+Mind `<subject>` Sol, or to Mind core Sol when no such metaflow
 is recorded, carrying the commit, its subject, the path and the changed
 lines. A change with neither metaflow recorded fails the step and nothing
-of the landing is queued, so a retry queues each change once. The landing's report is queued to Psyche core Secondary: a Result
+of the landing is queued, so a retry queues each change once. The landing's report is queued to Psyche core Opus: a Result
 once deploy, retrain and implement are witnessed, an Order when a step
 failed. Both are queued in the commit that records them on the landing.
 Every request the pipeline queues is sent by `Flow`.
@@ -582,6 +582,6 @@ investigation as its brief, or, when the seat is Awake or waking, queued
 for it. A seat with no declaration is refused, and the compaction records
 why. Its sender is `Flow`. The investigation names the flow, its metaflow and its
 transcript or thread, and asks for the finding to go to Psyche core
-Secondary. A transcript first read in a Nexus's run raises only compactions
+Opus. A transcript first read in a Nexus's run raises only compactions
 made from ten minutes before the Nexus started, so a deploy raises none made
 before it.

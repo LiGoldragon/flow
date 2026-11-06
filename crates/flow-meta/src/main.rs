@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn a_family_declaration_is_one_inline_datom_carrying_the_whole_family() {
         let client = FlowMetaClient;
-        let datom = "Configure.LeaveOuts.[ { { Field core Primary } Codex [ CodexAgentsMd CodexSkillListing ] } { { Psyche flow Secondary } Claude [ SkillTool ClaudeMd ] } ]";
+        let datom = "Configure.LeaveOuts.[ { { Field core Astra } Codex [ CodexAgentsMd CodexSkillListing ] } { { Psyche flow Opus } Claude [ SkillTool ClaudeMd ] } ]";
         let query = client
             .parse_query([datom.to_owned()].into_iter())
             .expect("LeaveOuts declaration parses");
@@ -191,8 +191,10 @@ mod tests {
         assert!(
             client
                 .parse_query(
-                    ["Configure.LeaveOuts.[ { { Psyche flow Secondary } [ SkillTool ClaudeMd ] } ]"
-                        .to_owned()]
+                    [
+                        "Configure.LeaveOuts.[ { { Psyche flow Opus } [ SkillTool ClaudeMd ] } ]"
+                            .to_owned()
+                    ]
                     .into_iter()
                 )
                 .is_err()
@@ -211,7 +213,7 @@ mod tests {
         let client = FlowMetaClient;
         assert!(
             client
-                .parse_query(["Refresh.{ Mind flow Secondary }".to_owned()].into_iter())
+                .parse_query(["Refresh.{ Mind flow Sol }".to_owned()].into_iter())
                 .is_err()
         );
     }
@@ -240,7 +242,7 @@ mod tests {
     fn thirty_one_printed_metaflows_roundtrip_without_head_whitespace() {
         use super::ParsesMetaDatom;
         use meta_signal_flow::{ConfigurationSnapshot, ConfigureMetaflow, Response};
-        use signal_flow::{Address, Aspect, FlowKind, Layer, ToolSet};
+        use signal_flow::{Address, Aspect, FlowKind, Model, ToolSet};
         let endpoint = || meta_signal_flow::CodexEndpoint {
             client_path: "/opt/codex".into(),
             home: "/tmp/codex".into(),
@@ -253,7 +255,7 @@ mod tests {
                 address: Address {
                     aspect: Aspect::Mind,
                     topic: format!("printer{index}"),
-                    layer: Layer::Secondary,
+                    model: Model::Sol,
                 },
                 system_modules: vec!["spirit-core".into()],
                 user_modules: vec![],

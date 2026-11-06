@@ -2,6 +2,7 @@
 //! the serial dispatcher holds exclusion across authorization and mutation.
 use super::logical_delivery::{RecordsLogicalDeliveries, VerifiedDeliveryLock};
 use super::*;
+use crate::model_family::RanksInFamily;
 use crate::sending::AdmitsSendPayload;
 use crate::sending::RefusesUnidentified;
 use signal_flow::{
@@ -95,7 +96,7 @@ impl MutatesMetaflows for FlowStore {
         let address = Address {
             aspect: Aspect::Field,
             topic: "message".into(),
-            layer: Layer::Primary,
+            model: Model::Astra,
         };
         Ok(
             FlowStore::process_is_live(peer)
@@ -117,7 +118,7 @@ impl MutatesMetaflows for FlowStore {
             == (Address {
                 aspect: Aspect::Field,
                 topic: "message".into(),
-                layer: Layer::Primary,
+                model: Model::Astra,
             })
         {
             let Some(configuration) = self.configuration_snapshot()? else {
@@ -211,16 +212,13 @@ impl MutatesMetaflows for FlowStore {
         let address = match request.recipient {
             Recipient::Address(address) => address,
             Recipient::Up => {
-                let layer = match request.sender.layer {
-                    Layer::Primary => return Ok(Response::Refused(Refusal::NoneAbove)),
-                    Layer::Secondary => Layer::Primary,
-                    Layer::Tertiary => Layer::Secondary,
-                    Layer::Quaternary => Layer::Tertiary,
+                let Some(model) = request.sender.model.above() else {
+                    return Ok(Response::Refused(Refusal::NoneAbove));
                 };
                 Address {
                     aspect: request.sender.aspect.clone(),
                     topic: request.sender.topic.clone(),
-                    layer,
+                    model,
                 }
             }
         };
@@ -765,7 +763,7 @@ mod tests {
                 message: Address {
                     aspect: Aspect::Field,
                     topic: "message".into(),
-                    layer: Layer::Primary,
+                    model: Model::Astra,
                 },
             }
         }
@@ -823,7 +821,7 @@ mod tests {
         );
         assert!(fixture.store.message_peer(&fixture.peer).unwrap());
         let target = Address {
-            layer: Layer::Secondary,
+            model: Model::Sol,
             ..fixture.message.clone()
         };
         fixture.store.seed_metaflow(Metaflow {

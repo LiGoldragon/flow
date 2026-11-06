@@ -12,7 +12,7 @@ use crate::reporting::RecordsReports;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use flow_ethos::State;
-use signal_flow::{Event, FlowLifecycle, Layer, Metaflow, Report_Data, Response};
+use signal_flow::{Event, FlowLifecycle, Metaflow, Model, Report_Data, Response};
 use std::fs;
 
 /// The session the harness goes on in after /clear.
@@ -44,7 +44,7 @@ fn state(fixture: &NexusFixture) -> State {
     fixture
         .nexus
         .store
-        .metaflow(&address(Layer::Secondary))
+        .metaflow(&address(Model::Sol))
         .unwrap()
         .expect("metaflow held")
         .state
@@ -75,7 +75,7 @@ fn awake_seat(fixture: &NexusFixture) {
     );
     claude_seat(fixture, 40_000);
     fixture.nexus.store.seed_metaflow(Metaflow {
-        address: address(Layer::Secondary),
+        address: address(Model::Sol),
         state: State::Awake(CLAUDE_SEAT.into()),
         past: vec![],
         queue: vec![],
@@ -110,7 +110,7 @@ fn declare_secondary(fixture: &NexusFixture, continuity: meta_signal_flow::Conti
         .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
             meta_signal_flow::ConfigureMetaflow {
                 root_option: None,
-                address: address(Layer::Secondary),
+                address: address(Model::Sol),
                 system_modules: vec!["spirit:core".into(), "intent:flow".into()],
                 user_modules: vec![],
                 flow_kind: signal_flow::FlowKind::Regular,
@@ -172,7 +172,7 @@ fn a_flow_whose_session_ended_has_its_pane_closed() {
         fixture
             .nexus
             .store
-            .metaflow(&address(Layer::Secondary))
+            .metaflow(&address(Model::Sol))
             .unwrap()
             .expect("metaflow held")
             .state,

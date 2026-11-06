@@ -37,6 +37,7 @@ pub mod delivery;
 pub mod lean;
 pub(crate) mod message_projection;
 mod metaflow;
+pub mod model_family;
 pub mod recovery;
 pub mod reminding;
 pub mod repairing;
@@ -1539,7 +1540,7 @@ mod tests {
     use signal_flow::{
         Aspect, Caller, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
         HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchAttemptPhase, LaunchProfile,
-        LaunchStatusOutcome, Layer, NativeLaunchBinding, NativeLaunchIntent,
+        LaunchStatusOutcome, Model, NativeLaunchBinding, NativeLaunchIntent,
         NativeTranscriptAbsence, NativeTranscriptBoundary, Origin, PowerLevel,
         PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement, Response,
         StartRejection,
@@ -1571,7 +1572,7 @@ mod tests {
         let address = signal_flow::Address {
             aspect: Aspect::Psyche,
             topic: "retiredTest".into(),
-            layer: signal_flow::Layer::Quaternary,
+            model: signal_flow::Model::Haiku,
         };
         let history = signal_flow::Metaflow {
             address: address.clone(),
@@ -1607,7 +1608,7 @@ mod tests {
             recipient: signal_flow::Recipient::Address(signal_flow::Address {
                 aspect: Aspect::Psyche,
                 topic: "core".into(),
-                layer: signal_flow::Layer::Secondary,
+                model: signal_flow::Model::Opus,
             }),
             sendable_message: signal_flow::SendableMessage::Soft(
                 signal_flow::SendableRequest::Notice("ledger witness".into()),
@@ -1845,8 +1846,7 @@ mod tests {
             .store
             .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
                 meta_signal_flow::ConfigureModel {
-                    layer: Layer::Secondary,
-                    aspect: Aspect::Mind,
+                    model: Model::Sol,
                     native: "gpt-sol".into(),
                 },
             ]))
@@ -1978,11 +1978,11 @@ mod tests {
         let address = signal_flow::Address {
             aspect: binding.aspect.clone(),
             topic: "core".into(),
-            layer: match binding.power_level {
-                signal_flow::PowerLevel::High => signal_flow::Layer::Primary,
-                signal_flow::PowerLevel::Medium => signal_flow::Layer::Secondary,
-                signal_flow::PowerLevel::Low => signal_flow::Layer::Tertiary,
-                signal_flow::PowerLevel::UltraLow => signal_flow::Layer::Quaternary,
+            model: match binding.power_level {
+                signal_flow::PowerLevel::High => signal_flow::Model::Astra,
+                signal_flow::PowerLevel::Medium => signal_flow::Model::Sol,
+                signal_flow::PowerLevel::Low => signal_flow::Model::Luna,
+                signal_flow::PowerLevel::UltraLow => signal_flow::Model::Terra,
             },
         };
         let meta_signal_flow::Response::BoundExisting(bound) = fixture.nexus.dispatch_meta_from(
@@ -2952,7 +2952,7 @@ mod tests {
         let address = signal_flow::Address {
             aspect: Aspect::Mind,
             topic: "message".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
 
         let response = with_bound_world(&fixture, &[&accepted.clone()], || {
@@ -3013,7 +3013,7 @@ mod tests {
                         address: signal_flow::Address {
                             aspect: Aspect::Mind,
                             topic: "message".into(),
-                            layer: Layer::Secondary,
+                            model: Model::Sol,
                         },
                         flow_binding: existing_binding("a002", "pane-1"),
                     }
@@ -3041,7 +3041,7 @@ mod tests {
         let address = signal_flow::Address {
             aspect: Aspect::Mind,
             topic: "message".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         let response = with_bound_world(&fixture, &[&binding], || {
             fixture.nexus.dispatch_meta_from(
@@ -3091,7 +3091,7 @@ mod tests {
                     address: signal_flow::Address {
                         aspect: Aspect::Mind,
                         topic: "core".into(),
-                        layer: Layer::Secondary,
+                        model: Model::Sol,
                     },
                     flow_binding: binding.clone(),
                 }),
@@ -3123,7 +3123,7 @@ mod tests {
                     address: signal_flow::Address {
                         aspect: Aspect::Mind,
                         topic: "core".into(),
-                        layer: Layer::Secondary,
+                        model: Model::Sol,
                     },
                     flow_binding: accepted.clone(),
                 }),
@@ -3147,7 +3147,7 @@ mod tests {
         let address = signal_flow::Address {
             aspect: Aspect::Mind,
             topic: "message".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         let mut previous = fixture.node();
         previous.flow_id = "historical-owner".into();
@@ -3173,7 +3173,7 @@ mod tests {
                 sent_by: signal_flow::SentBy::Sender(signal_flow::Address {
                     aspect: Aspect::Field,
                     topic: "core".into(),
-                    layer: Layer::Tertiary,
+                    model: Model::Luna,
                 }),
                 delivery: flow_ethos::Delivery::Queue,
                 message: signal_flow::Message::Soft(signal_flow::Request::Order(
@@ -3232,14 +3232,14 @@ mod tests {
         let address = signal_flow::Address {
             aspect: binding.aspect.clone(),
             topic: "core".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         let original_queue = vec![signal_flow::QueueEntry {
             logical_delivery_id: "retained-logical-id".into(),
             sent_by: signal_flow::SentBy::Sender(signal_flow::Address {
                 aspect: Aspect::Field,
                 topic: "core".into(),
-                layer: Layer::Tertiary,
+                model: Model::Luna,
             }),
             delivery: flow_ethos::Delivery::Queue,
             message: signal_flow::Message::Soft(signal_flow::Request::Order("leave queued".into())),
@@ -3275,7 +3275,7 @@ mod tests {
         let address = signal_flow::Address {
             aspect: Aspect::Mind,
             topic: "core".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         let incumbent = existing_binding("a005", "pane-incumbent");
         let incumbent_result = with_bound_world(&fixture, &[&incumbent], || {
@@ -3346,7 +3346,7 @@ mod tests {
                     address: signal_flow::Address {
                         aspect: Aspect::Mind,
                         topic: "message".into(),
-                        layer: Layer::Primary,
+                        model: Model::Astra,
                     },
                     flow_binding: binding.clone(),
                 }),
@@ -3515,11 +3515,11 @@ mod tests {
                         address: signal_flow::Address {
                             aspect: binding.aspect.clone(),
                             topic: "core".into(),
-                            layer: match binding.power_level {
-                                PowerLevel::High => Layer::Primary,
-                                PowerLevel::Medium => Layer::Secondary,
-                                PowerLevel::Low => Layer::Tertiary,
-                                PowerLevel::UltraLow => Layer::Quaternary,
+                            model: match binding.power_level {
+                                PowerLevel::High => Model::Astra,
+                                PowerLevel::Medium => Model::Sol,
+                                PowerLevel::Low => Model::Luna,
+                                PowerLevel::UltraLow => Model::Terra,
                             },
                         },
                         flow_binding: binding,
@@ -3806,12 +3806,12 @@ mod tests {
         let sender = signal_flow::Address {
             aspect: Aspect::Field,
             topic: "core".into(),
-            layer: Layer::Tertiary,
+            model: Model::Luna,
         };
         let recipient = signal_flow::Address {
             aspect: Aspect::Mind,
             topic: "message".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
             address: recipient.clone(),
@@ -4128,8 +4128,8 @@ mod tests {
     const STAGED_SESSION: &str = "01a0b22c-e24f-7452-9940-64490878680f";
 
     impl NexusFixture {
-        /// Declares the model a profile names as the one model configured,
-        /// for its Address's layer and aspect, as a running Nexus's
+        /// Declares the model a profile names as the one native model
+        /// configured for its Address's Model, as a running Nexus's
         /// configuration would before such a Start.
         fn configure_model_of(&self, profile: &LaunchProfile) {
             use crate::store::ManagesMetaflowState as _;
@@ -4137,8 +4137,7 @@ mod tests {
                 .store
                 .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
                     meta_signal_flow::ConfigureModel {
-                        layer: profile.address.layer.clone(),
-                        aspect: profile.address.aspect.clone(),
+                        model: profile.address.model.clone(),
                         native: profile.model_name.clone(),
                     },
                 ]))
@@ -4161,7 +4160,7 @@ mod tests {
                 address: signal_flow::Address {
                     aspect: Aspect::Field,
                     topic: launch_request_id.replace('-', ""),
-                    layer: signal_flow::Layer::Secondary,
+                    model: signal_flow::Model::Sol,
                 },
                 model_name: "fixture-model".into(),
                 effort: "medium".into(),
@@ -4508,7 +4507,7 @@ mod tests {
                         flow_id: self.binding.flow_id.clone(),
                         aspect: self.profile.address.aspect.clone(),
                         power_level: <RunningNexus as crate::waking::WakePolicy>::power_of(
-                            &self.profile.address.layer,
+                            &self.profile.address.model,
                         ),
                         model_name: self.profile.model_name.clone(),
                     },
@@ -5098,11 +5097,11 @@ mod tests {
                     address: signal_flow::Address {
                         aspect: binding.aspect.clone(),
                         topic: "core".into(),
-                        layer: match binding.power_level {
-                            PowerLevel::High => Layer::Primary,
-                            PowerLevel::Medium => Layer::Secondary,
-                            PowerLevel::Low => Layer::Tertiary,
-                            PowerLevel::UltraLow => Layer::Quaternary,
+                        model: match binding.power_level {
+                            PowerLevel::High => Model::Astra,
+                            PowerLevel::Medium => Model::Sol,
+                            PowerLevel::Low => Model::Luna,
+                            PowerLevel::UltraLow => Model::Terra,
                         },
                     },
                     flow_binding: binding,
@@ -5285,7 +5284,7 @@ mod tests {
 
     /// A flow sends through Flow from the process it runs: the sender is
     /// the metaflow Awake as the flow bound in the caller's pane, the request
-    /// is queued under it, Up names the layer above, a Send leaving the
+    /// is queued under it, Up names the model above, a Send leaving the
     /// routes between aspects is refused, and a process in no bound pane
     /// sends nothing.
     #[test]
@@ -5294,27 +5293,27 @@ mod tests {
         use crate::store::ReadsFlowMemory;
         use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
         use signal_flow::{
-            Address, Layer, Message, Metaflow, QueueEntry, Recipient, Request, SendRequest, SentBy,
+            Address, Message, Metaflow, Model, QueueEntry, Recipient, Request, SendRequest, SentBy,
         };
         let fixture = NexusFixture::new();
         bind_existing_caller(&fixture, "a001", "pane-1");
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
-        let address = |aspect: Aspect, topic: &str, layer: Layer| Address {
+        let address = |aspect: Aspect, topic: &str, model: Model| Address {
             aspect,
             topic: topic.into(),
-            layer,
+            model,
         };
-        let sender = address(Aspect::Mind, "core", Layer::Secondary);
-        let sibling = address(Aspect::Mind, "flow", Layer::Secondary);
-        let field = address(Aspect::Field, "core", Layer::Secondary);
-        let elsewhere = address(Aspect::Psyche, "flow", Layer::Secondary);
+        let sender = address(Aspect::Mind, "core", Model::Sol);
+        let sibling = address(Aspect::Mind, "flow", Model::Sol);
+        let field = address(Aspect::Field, "core", Model::Sol);
+        let elsewhere = address(Aspect::Psyche, "flow", Model::Sol);
         for (held, state) in [
             (sender.clone(), flow_ethos::State::Awake("a001".into())),
             (sibling.clone(), flow_ethos::State::Asleep),
             (field.clone(), flow_ethos::State::Asleep),
             (elsewhere.clone(), flow_ethos::State::Asleep),
             (
-                address(Aspect::Mind, "core", Layer::Primary),
+                address(Aspect::Mind, "core", Model::Astra),
                 flow_ethos::State::Asleep,
             ),
         ] {
@@ -5402,7 +5401,7 @@ mod tests {
         use crate::store::metaflow::SeedsMetaflow;
         use flow_ethos::{Answerable, ResultPayload, State};
         use signal_flow::{
-            Address, DeliveryState, Layer, Message, NativeReceipt, PrivateSendResponse, Refusal,
+            Address, DeliveryState, Message, Model, NativeReceipt, PrivateSendResponse, Refusal,
             SendableMessage, SendableRequest, SentBy,
         };
 
@@ -5410,7 +5409,7 @@ mod tests {
         let at = |topic: &str| Address {
             aspect: Aspect::Mind,
             topic: topic.into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         let sender = at("sender");
         let recipient = at("recipient");
@@ -5515,7 +5514,7 @@ mod tests {
         use crate::store::metaflow::SeedsMetaflow;
         use flow_ethos::{Answerable, AnswerableTask, DonePayload, State};
         use signal_flow::{
-            Address, DeliveryState, Layer, Message, NativeReceipt, PrivateSendResponse, Refusal,
+            Address, DeliveryState, Message, Model, NativeReceipt, PrivateSendResponse, Refusal,
             SendableMessage, SendableRequest, SentBy,
         };
 
@@ -5523,7 +5522,7 @@ mod tests {
         let at = |topic: &str| Address {
             aspect: Aspect::Mind,
             topic: topic.into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         let sender = at("taskSender");
         let recipient = at("taskRecipient");
@@ -5630,18 +5629,18 @@ mod tests {
     }
 
     /// A Launch starts from the metaflow's declaration in Flow's
-    /// configuration, at its layer's configured model and effort; an
+    /// configuration, at its Model's configured native model and effort; an
     /// undeclared Address is refused before anything launches.
     #[test]
     fn a_launch_is_composed_from_the_declaration_or_refused_undeclared() {
         use crate::sending::LaunchesDeclared;
         use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, ConfigureModel};
-        use signal_flow::{Address, LaunchRequest, Layer};
+        use signal_flow::{Address, LaunchRequest, Model};
         let fixture = NexusFixture::new();
         let declared = Address {
             aspect: Aspect::Field,
             topic: "publisher".into(),
-            layer: Layer::Quaternary,
+            model: Model::Terra,
         };
         assert!(matches!(
             fixture
@@ -5666,8 +5665,7 @@ mod tests {
                 .nexus
                 .dispatch_meta(meta_signal_flow::Query::Configure(
                     ConfigurationChange::Models(vec![ConfigureModel {
-                        layer: Layer::Quaternary,
-                        aspect: Aspect::Field,
+                        model: Model::Terra,
                         native: "gpt-6-luna".into(),
                     }])
                 )),
@@ -5703,7 +5701,7 @@ mod tests {
             fixture.nexus.dispatch(Query::Launch(launch(Address {
                 aspect: Aspect::Mind,
                 topic: "nowhere".into(),
-                layer: Layer::Secondary,
+                model: Model::Sol,
             }))),
             Response::StartRejected(StartRejection::Undeclared)
         );

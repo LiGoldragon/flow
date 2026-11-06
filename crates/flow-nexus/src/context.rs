@@ -30,8 +30,9 @@ pub use crate::generated::starter::{
     ExchangesCurriculumFrames, OpensCurriculumComposer, ProvenanceListing, ReadsVerifiedContext,
     SelectsStartup, StartupComposing, Textual, VerifiesContext,
 };
+use crate::model_family::RanksInFamily;
 use sha2::{Digest, Sha256};
-use signal_flow::{Address, Aspect, ContextRefusal, HarnessKind, Layer};
+use signal_flow::{Address, Aspect, ContextRefusal, HarnessKind};
 use std::{
     io::{Read, Write},
     os::unix::net::UnixStream,
@@ -100,13 +101,7 @@ impl SelectsStartup for ContextRequest {
                 }
                 .into(),
                 second_string: self.address.topic.clone(),
-                third_string: match self.address.layer {
-                    Layer::Primary => "Primary",
-                    Layer::Secondary => "Secondary",
-                    Layer::Tertiary => "Tertiary",
-                    Layer::Quaternary => "Quaternary",
-                }
-                .into(),
+                third_string: self.address.model.name().into(),
             },
             target: match self.harness_kind {
                 HarnessKind::Claude => Target::Claude,
@@ -446,7 +441,7 @@ mod tests {
         CONTEXT_OPENING, ComposesFlowContext, ContextRequest, FixtureComposer,
         ReadsVerifiedContext, VerifiedContext, VerifiesContext,
     };
-    use signal_flow::{Address, Aspect, ContextRefusal, HarnessKind, Layer};
+    use signal_flow::{Address, Aspect, ContextRefusal, HarnessKind, Model};
 
     /// Records Flow did not ask for, or whose payload digest differs, are
     /// refused.
@@ -477,7 +472,7 @@ mod tests {
             address: Address {
                 aspect: Aspect::Field,
                 topic: "flow".into(),
-                layer: Layer::Secondary,
+                model: Model::Sol,
             },
             harness_kind: HarnessKind::Claude,
             system_modules: vec!["spirit-core".into(), "intent-flow".into()],

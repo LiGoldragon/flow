@@ -30,6 +30,7 @@ use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::herdr::launch::ConstructsHarnessCommand;
 use crate::launching::ReadsHarnessArguments;
 use crate::metaflow::IdentifiesPeerProcess;
+use crate::model_family::RanksInFamily;
 use crate::performing::Performs;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
@@ -50,7 +51,7 @@ use crate::waking::{
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
-    Address, Aspect, Caller, HarnessKind, HerdrRoute, LaunchProfile, LaunchRequest, Layer, Message,
+    Address, Caller, HarnessKind, HerdrRoute, LaunchProfile, LaunchRequest, Message,
     PrivateSendResponse, Process, Recipient, Refusal, Request, Response, SendPayloadSize,
     SendRequest, SendableMessage, SentBy, StartRejection, Unknown_Data,
 };
@@ -161,22 +162,6 @@ impl MintsId for str {
     }
 }
 
-/// The layer above, in the same aspect and topic.
-pub trait NamesLayerAbove {
-    fn above(&self) -> Option<Layer>;
-}
-
-impl NamesLayerAbove for Layer {
-    fn above(&self) -> Option<Layer> {
-        match self {
-            Layer::Primary => None,
-            Layer::Secondary => Some(Layer::Primary),
-            Layer::Tertiary => Some(Layer::Secondary),
-            Layer::Quaternary => Some(Layer::Tertiary),
-        }
-    }
-}
-
 /// What a Send answers.
 pub struct PendingSend {
     pub address: Address,
@@ -226,10 +211,10 @@ impl SendsRequests for RunningNexus {
         let recipient = match &send.recipient {
             Recipient::Address(address) => Some(address.clone()),
             Recipient::Up => sender.as_ref().and_then(|sender| {
-                sender.layer.above().map(|layer| Address {
+                sender.model.above().map(|model| Address {
                     aspect: sender.aspect.clone(),
                     topic: sender.topic.clone(),
-                    layer,
+                    model,
                 })
             }),
         };
@@ -288,11 +273,11 @@ impl SendsRequests for RunningNexus {
             };
             let recipient = match send.recipient {
                 Recipient::Address(address) => address,
-                Recipient::Up => match sender.layer.above() {
-                    Some(layer) => Address {
+                Recipient::Up => match sender.model.above() {
+                    Some(model) => Address {
                         aspect: sender.aspect.clone(),
                         topic: sender.topic.clone(),
-                        layer,
+                        model,
                     },
                     None => return PrivateSendResponse::Refused(Refusal::NoneAbove).into(),
                 },
@@ -469,14 +454,10 @@ impl SendsRequests for RunningNexus {
     }
 }
 
-/// The effort a seat of one Address runs at: medium everywhere, low for an
-/// OpenAI Quaternary.
+/// The effort a seat of one Address runs at: its model's.
 pub trait ChoosesEffort {
     fn effort_of(address: &Address) -> &'static str {
-        match (&address.layer, &address.aspect) {
-            (Layer::Quaternary, Aspect::Mind | Aspect::Field) => "low",
-            _ => "medium",
-        }
+        address.model.effort()
     }
 }
 
@@ -1128,7 +1109,7 @@ impl RunningNexus {
         let binding = meta_signal_flow::FlowBinding {
             flow_id: flow_id.clone(),
             aspect: address.aspect.clone(),
-            power_level: Self::power_of(&address.layer),
+            power_level: Self::power_of(&address.model),
             model_name: model_name.clone(),
             harness_kind: harness_kind.clone(),
             native_session_id: native_session_id.clone(),
@@ -1143,7 +1124,7 @@ impl RunningNexus {
         let role = Caller {
             flow_id: flow_id.clone(),
             aspect: address.aspect.clone(),
-            power_level: Self::power_of(&address.layer),
+            power_level: Self::power_of(&address.model),
             model_name,
         };
         match self.verified_seat_node(&seat.herdr_session_name, &address, &binding) {

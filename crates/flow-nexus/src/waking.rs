@@ -2762,7 +2762,17 @@ impl WakesInParts for RunningNexus {
         };
         self.settle_owed(&address, &response);
         match response {
-            Response::Replaced(_) => AtStop::Refreshed(address),
+            Response::Replaced(_) => {
+                use crate::store::handover::HoldsHandovers;
+                if self
+                    .store
+                    .close_handover_for_successor(&address, flow_id)
+                    .is_err()
+                {
+                    return AtStop::Kept(KeptAtStop::StoreUnreadable);
+                }
+                AtStop::Refreshed(address)
+            }
             response => AtStop::Kept(KeptAtStop::RefreshLaunchRefused(Box::new(response))),
         }
     }

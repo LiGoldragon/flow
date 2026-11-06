@@ -16,7 +16,8 @@
 //! queued later for an Awake seat known resting, by the same evidence, is
 //! handed over at once.
 //!
-//! A seat past its model's refresh threshold is replaced at its rest. A
+//! A seat past its model's refresh threshold is replaced at its Stop,
+//! whatever Herdr shows of its pane: the Stop is the idle fact. A
 //! Maintained metaflow, or one holding work that wakes it, is owed its
 //! successor: the intent is recorded, the successor is started and
 //! confirmed through Replace, and only then is the predecessor recorded
@@ -350,7 +351,7 @@ pub enum AtStop {
     Slept(Address),
     /// The seat rested with work queued: the oldest request was typed in.
     Drained(QueueEntry),
-    /// The seat was due a refresh and rested, its last measured context past
+    /// The seat was due a refresh and stopped, its last measured context past
     /// its model's refresh threshold. A Maintained metaflow, or one holding
     /// work that wakes it, had its successor started and confirmed first,
     /// then the predecessor recorded Stopped and its pane closed in the
@@ -3043,6 +3044,11 @@ impl WakesInParts for RunningNexus {
 
     fn settle_rested(&self, flow_id: &str) -> AtStop {
         self.record_context_at_stop(flow_id);
+        // A seat past its model's refresh threshold is ended at its Stop
+        // rather than handed work; it is told nothing and writes no handover.
+        // Its Stop is the idle fact: whatever Herdr shows of its pane, Working
+        // included, neither waits for nor holds its refresh.
+        let refresh_due = matches!(self.store.past_threshold(flow_id), Ok(true));
         // A Codex seat's rest is its app-server's, and a Claude seat whose
         // transcript records its main turn's end_turn has ended its turn
         // whatever its screen shows (background agents keep Herdr at
@@ -3050,7 +3056,8 @@ impl WakesInParts for RunningNexus {
         // still on screen, and Herdr reads its state from the screen: the
         // seat is given a bounded wait to show resting before the gate is
         // taken.
-        if let Ok(Some(node)) = self.store.flow_node(flow_id)
+        if !refresh_due
+            && let Ok(Some(node)) = self.store.flow_node(flow_id)
             && let HerdrRouteSelection::Available(route) =
                 &self.herdr.refresh_route(node).herdr_route_selection
         {
@@ -3086,9 +3093,6 @@ impl WakesInParts for RunningNexus {
             Ok(None) => return AtStop::Kept(KeptAtStop::UnknownFlow),
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
-        // A seat past its model's refresh threshold is ended at its rest
-        // rather than handed work; it is told nothing and writes no handover.
-        let refresh_due = matches!(self.store.past_threshold(flow_id), Ok(true));
         let continuity = match self.store.continuity(&address) {
             Ok(continuity) => continuity,
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
@@ -3109,18 +3113,14 @@ impl WakesInParts for RunningNexus {
                 }
                 true
             }
+            // A Claude seat due a refresh is closed at its Stop.
+            HarnessKind::Claude if refresh_due => true,
             HarnessKind::Claude => {
                 let pane_agent = self.herdr.pane_agent(&node);
                 let native_resting = matches!(
                     &pane_agent,
                     PaneAgent::Present { agent_state, .. } if Self::rests_at(agent_state)
                 );
-                // Closing a seat ends whatever runs in it: one whose main
-                // turn ended while its background agents run shows Working,
-                // and is refreshed only once Herdr shows it resting.
-                if refresh_due && !native_resting {
-                    return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
-                }
                 let claude_main_ready = self.claude_main_turn_ended(&node)
                     && matches!(
                         self.delivery_target(flow_id)
@@ -3153,9 +3153,6 @@ impl WakesInParts for RunningNexus {
                 drop(refreshing);
                 self.wake_deferred();
                 return refreshed;
-            }
-            if !closable {
-                return AtStop::Kept(KeptAtStop::NotResting(self.herdr.pane_agent(&node)));
             }
             if let HerdrRouteSelection::Unavailable = &node.herdr_route_selection {
                 return AtStop::Kept(KeptAtStop::RefreshUnrouted);

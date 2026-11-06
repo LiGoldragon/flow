@@ -1,3 +1,11 @@
+# Flow 0.51.2
+
+A flow past its model's refresh threshold is refreshed when its Stop hook
+reports, whatever Herdr shows of its pane. 0.51 held the refresh while Herdr
+showed the pane Working, so a busy flow, its background agents keeping the
+screen Working, was never refreshed. The Stop hook is the idle fact; Herdr's
+pane state neither waits for nor gates a refresh. No Memory family changes.
+
 # Flow 0.51.0
 
 An admitted Send whose native receipt remains uncertain answers with its same

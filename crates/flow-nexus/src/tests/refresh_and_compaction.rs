@@ -288,6 +288,40 @@ fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_fl
     );
 }
 
+/// A seat past its threshold is refreshed at its Stop hook though Herdr
+/// shows its pane Working and its transcript shows no ended turn: the Stop
+/// is the idle fact, and Herdr's pane state never holds a refresh.
+#[test]
+fn a_seat_past_its_threshold_shown_working_is_refreshed_at_its_stop() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![{
+            let mut agent = claude_agent(&fixture);
+            agent["agent_status"] = serde_json::Value::String("working".into());
+            agent
+        }],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 230_000);
+    seat_refreshing_at(&fixture, 200_000);
+    declare_seat(
+        &fixture,
+        Continuity::OnDemand,
+        vec!["spirit-core".into(), "intent-flow".into()],
+    );
+    seat_metaflow(&fixture, vec![]);
+
+    fixture
+        .nexus
+        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+
+    assert!(closed(&fixture), "the working seat's pane is closed");
+    assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
+    let metaflow = seat_metaflow_now(&fixture);
+    assert_eq!(metaflow.state, State::Asleep);
+    assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
+}
+
 /// An OnDemand seat resting past its threshold whose successor cannot be
 /// composed is not closed: its Address keeps its flow, which is handed what
 /// is queued for it, and the refusal is told once to the metaflow's Up.

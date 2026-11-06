@@ -228,6 +228,8 @@ mod tests {
             repository: repository.to_owned(),
             address: Address {
                 model: signal_flow::Model::Sol,
+                aspect: Aspect::Mind,
+                topic: "core".into(),
             },
             model: "Model".into(),
             flow_id: "abc123".into(),

@@ -1,7 +1,7 @@
 //! The meta Nexus family: the one declared `ConfigureNexus`, the sockets and
 //! endpoints a Nexus serves and reaches.
 
-use meta_signal_flow::{ConfigureNexus, HandoverArchiveConfiguration, HandoverCountConfiguration, HandoverPoliciesConfiguration};
+use meta_signal_flow::ConfigureNexus;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, RecordKey, SchemaHash,
@@ -15,9 +15,6 @@ pub(super) const META_NEXUS_CONFIGURATION_SCHEMA: &str = "flow-nexus-meta-nexus-
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredMetaNexusConfiguration {
     pub(crate) nexus: ConfigureNexus,
-    pub(crate) handover_policies: HandoverPoliciesConfiguration,
-    pub(crate) handover_archive: HandoverArchiveConfiguration,
-    pub(crate) handover_count: HandoverCountConfiguration,
 }
 
 impl EngineRecord for StoredMetaNexusConfiguration {
@@ -28,11 +25,11 @@ impl EngineRecord for StoredMetaNexusConfiguration {
 
 impl MemoryDefinition for StoredMetaNexusConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(5)
+        MemoryVersion::new(4)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-meta-nexus-configuration-v5")
+        SchemaHash::for_label(META_NEXUS_CONFIGURATION_SCHEMA)
     }
 }
 

@@ -237,10 +237,10 @@ impl DiscardsCreatedPane for HerdrCli {
 trait RestartsInSteps {
     /// The checks, then Closing written; a retry of a Failed restart is
     /// written Closing again, so its old harness is reconciled first.
-    fn begun(&self, flow_id: &str, origin: &Origin) -> Result<RestartRecord, Response>;
+    fn begun(&self, flow_id: &str, origin: &Origin) -> Result<RestartRecord, Box<Response>>;
     /// The old pane closed, or found gone, and its harness proven exited:
     /// Closed written. Anything else is Failed.
-    fn closed_old(&self, record: RestartRecord) -> Result<RestartRecord, Response>;
+    fn closed_old(&self, record: RestartRecord) -> Result<RestartRecord, Box<Response>>;
     /// From Closed: composed, Opening written, the pane opened and recorded
     /// Spawning, the harness resumed and bound off the gate, then bound or
     /// abandoned under it.
@@ -330,19 +330,21 @@ impl RefusesStoreForRestart for StoreError {
 }
 
 impl RestartsInSteps for RunningNexus {
-    fn begun(&self, flow_id: &str, origin: &Origin) -> Result<RestartRecord, Response> {
+    fn begun(&self, flow_id: &str, origin: &Origin) -> Result<RestartRecord, Box<Response>> {
         use crate::store::NamesConfiguredModel;
         use crate::store::address_hold::HoldsLaunchAddress;
         use crate::store::metaflow::SleepsMetaflows;
         use crate::store::queue_delivery::AccountsQueueDelivery;
         use crate::waking::{HoldsWakingMetaflows, ReadsClaudeDelivery, WakePolicy};
         let refused = |refusal: fn(String) -> RestartRefusal| {
-            Err(Response::RestartRefused(refusal(flow_id.to_owned())))
+            Err(Box::new(Response::RestartRefused(refusal(
+                flow_id.to_owned(),
+            ))))
         };
         let node = match self.store.flow_node(flow_id) {
             Ok(Some(node)) => node,
             Ok(None) => return refused(RestartRefusal::UnknownFlow),
-            Err(error) => return Err(error.refused()),
+            Err(error) => return Err(Box::new(error.refused())),
         };
         // A flow asking for its own restart is owed one at its Stop, which
         // this slice does not serve.
@@ -362,14 +364,14 @@ impl RestartsInSteps for RunningNexus {
                         if self.written(&retried) {
                             Ok(retried)
                         } else {
-                            Err(StoreError::StateInvariant.refused())
+                            Err(Box::new(StoreError::StateInvariant.refused()))
                         }
                     }
                     RestartPhase::Interrupted(_) => refused(RestartRefusal::Interrupted),
                     _ => refused(RestartRefusal::Busy),
                 };
             }
-            Err(error) => return Err(error.refused()),
+            Err(error) => return Err(Box::new(error.refused())),
         }
         // Asleep, Past, Codex: other slices.
         if !node.flow_lifecycle.is_live() || node.harness_kind != HarnessKind::Claude {
@@ -384,7 +386,7 @@ impl RestartsInSteps for RunningNexus {
         let address = match self.store.metaflow_awake_as(flow_id) {
             Ok(Some(metaflow)) => metaflow.address,
             Ok(None) => return refused(RestartRefusal::Unsupported),
-            Err(error) => return Err(error.refused()),
+            Err(error) => return Err(Box::new(error.refused())),
         };
         if self.waking.is_waking(&address)
             || !matches!(self.store.address_hold(flow_id), Ok(None))
@@ -401,11 +403,11 @@ impl RestartsInSteps for RunningNexus {
         ) {
             (Some(actual), Ok(Some(configured))) if actual == configured => {}
             _ => {
-                return Err(Response::RestartRefused(RestartRefusal::ResumeRefused(
-                    ResumeRefused_Data {
+                return Err(Box::new(Response::RestartRefused(
+                    RestartRefusal::ResumeRefused(ResumeRefused_Data {
                         flow_id: flow_id.to_owned(),
                         string: "ModelDiffers".into(),
-                    },
+                    }),
                 )));
             }
         }
@@ -443,15 +445,15 @@ impl RestartsInSteps for RunningNexus {
             attempts: 1,
         };
         if !self.written(&record) {
-            return Err(StoreError::StateInvariant.refused());
+            return Err(Box::new(StoreError::StateInvariant.refused()));
         }
         Ok(record)
     }
 
-    fn closed_old(&self, record: RestartRecord) -> Result<RestartRecord, Response> {
+    fn closed_old(&self, record: RestartRecord) -> Result<RestartRecord, Box<Response>> {
         use crate::delivery::lease::LeasesPanes;
         let Some(old) = self.seat_node(&record, record.old_seat.herdr_route.clone()) else {
-            return Err(self.failed(record, RestartFailure::CloseUnproven));
+            return Err(Box::new(self.failed(record, RestartFailure::CloseUnproven)));
         };
         match self.herdr.pane_ownership(&old) {
             PaneOwnership::Owned | PaneOwnership::Bare => {
@@ -460,15 +462,15 @@ impl RestartsInSteps for RunningNexus {
                     self.perform(Operation::Close(old.clone()))
                 };
                 if closed != Outcome::Closed {
-                    return Err(self.failed(record, RestartFailure::CloseRefused));
+                    return Err(Box::new(self.failed(record, RestartFailure::CloseRefused)));
                 }
             }
             PaneOwnership::Absent => {}
             PaneOwnership::Unknown => {
-                return Err(self.failed(record, RestartFailure::CloseRefused));
+                return Err(Box::new(self.failed(record, RestartFailure::CloseRefused)));
             }
             PaneOwnership::Foreign | PaneOwnership::Unproven | PaneOwnership::Unidentified => {
-                return Err(self.failed(record, RestartFailure::CloseUnproven));
+                return Err(Box::new(self.failed(record, RestartFailure::CloseUnproven)));
             }
         }
         // Closed only by positive identity: the pane gone, no pane holding
@@ -484,14 +486,14 @@ impl RestartsInSteps for RunningNexus {
                 .as_ref()
                 .is_none_or(ProvesExit::has_exited);
         if !gone {
-            return Err(self.failed(record, RestartFailure::CloseUnproven));
+            return Err(Box::new(self.failed(record, RestartFailure::CloseUnproven)));
         }
         let closed = RestartRecord {
             restart_phase: RestartPhase::Closed,
             ..record
         };
         if !self.written(&closed) {
-            return Err(StoreError::StateInvariant.refused());
+            return Err(Box::new(StoreError::StateInvariant.refused()));
         }
         Ok(closed)
     }
@@ -868,7 +870,7 @@ impl RestartsFlows for RunningNexus {
         };
         let response = match closed {
             Ok(closed) => self.resumed(closed),
-            Err(response) => return response,
+            Err(response) => return *response,
         };
         // The queue that waited goes through the ordinary delivery custody.
         if let Response::Restarted(_) = &response
@@ -901,7 +903,7 @@ impl RestartsFlows for RunningNexus {
                     };
                     match closed {
                         Ok(closed) => self.resumed(closed),
-                        Err(response) => response,
+                        Err(response) => *response,
                     }
                 }
                 RestartPhase::Closed => self.resumed(record),

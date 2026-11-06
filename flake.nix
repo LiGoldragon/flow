@@ -610,6 +610,10 @@
             "tests::restarting::restart_crash_around_bind_commit_delivers_once";
           flow-restart-interrupted-stop-needs-quiesced-spawn = context.exactTest "flow-nexus"
             "tests::restarting::restart_interrupted_stop_needs_quiesced_spawn";
+          # The cutover with both Nexuses live: the old side cannot take or end
+          # the custody a new Nexus Adopted and Restarted.
+          flow-restart-cutover-two-nexus = context.exactTest "flow-nexus"
+            "tests::restarting::restart_cutover_two_nexus";
         }
       );
 

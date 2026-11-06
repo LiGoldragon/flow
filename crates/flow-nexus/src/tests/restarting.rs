@@ -13,6 +13,7 @@ use super::waking::{
 };
 use crate::Dispatches;
 use crate::caller::{CallerPane, CallerProcess, LocatesCallerPane, ReadsProcess};
+use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::memory::SeatBirth;
 use crate::generated::operation::{Operation, Outcome, Record_Data};
 use crate::performing::Performs;
@@ -1171,4 +1172,368 @@ fn restart_interrupted_stop_needs_quiesced_spawn() {
         "the interrupted spawn's harness is stopped"
     );
     assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+}
+
+/// Where the old Nexus's hooks report: the place an adopted seat's hooks
+/// were written for, the fixture Herdr's default.
+const OLD_SOCKET: &str = "/fixture/run/flow-next/flow/flow.sock";
+/// Where the new Nexus serves its hooks, as its store configures it.
+const NEW_SOCKET: &str = "/fixture/run/flow-0530/flow/flow.sock";
+
+/// A second Nexus beside the fixture's: its own store at `store` in the
+/// fixture directory, its own hook socket, and the one fixture Herdr, its
+/// flows root and its native transcripts shared with the first.
+trait OpensSecondNexus {
+    fn second_nexus(&self, store: &str, ordinary_socket: &str) -> crate::RunningNexus;
+}
+
+impl OpensSecondNexus for NexusFixture {
+    fn second_nexus(&self, store: &str, ordinary_socket: &str) -> crate::RunningNexus {
+        use crate::composition::OpensLaunchComposer;
+        use crate::herdr::ConfiguresHerdrCli;
+        use crate::store::{
+            ConfiguresFlowStore, ManagesMetaflowState, OpensFlowStore, SeedsConfiguration,
+            SetsNativeOwnerEnvironmentForTests,
+        };
+        let root = self.directory.path();
+        let mut opened = FlowStore::open(&root.join(store)).expect("second store");
+        let mut runtime = opened.runtime_configuration().expect("runtime");
+        runtime.source_root = root.to_string_lossy().into_owned();
+        opened.configure_runtime(runtime).expect("source root");
+        opened.set_native_owner_environment_for_tests(crate::store::NativeOwnerEnvironment {
+            host_id: "isolated-test-host".into(),
+            boot_id: "isolated-test-boot".into(),
+        });
+        let settings = crate::store::DefaultConfiguration {
+            home: root.join("home"),
+            runtime_directory: root.join("runtime"),
+        }
+        .configuration();
+        opened
+            .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
+                meta_signal_flow::ConfigureNexus {
+                    source_root: root.to_string_lossy().into_owned(),
+                    stable_codex: settings.stable_codex,
+                    next_codex: settings.next_codex,
+                    harness_profiles: settings.harness_profile_vector,
+                    meta_aspects: settings.meta_aspects,
+                    message_nexus_path_option: Some(settings.message_nexus_path.clone()),
+                    message_nexus_binary_option: Some("/fixture/message-nexus".into()),
+                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
+                    lease: 30,
+                    presentation_prompt_option: None,
+                },
+            ))
+            .expect("Nexus configured");
+        opened
+            .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
+                meta_signal_flow::ConfigureModel {
+                    model: Model::Sol,
+                    native: "claude-fixture".into(),
+                },
+            ]))
+            .expect("model configured");
+        opened
+            .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
+                meta_signal_flow::ConfigureMetaflow {
+                    root_option: None,
+                    address: address(Model::Sol),
+                    system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+                    user_modules: vec!["operation-main-flow".into()],
+                    flow_kind: signal_flow::FlowKind::Regular,
+                    tool_set: signal_flow::ToolSet::Default,
+                    continuity: meta_signal_flow::Continuity::Maintained,
+                    purpose: String::new(),
+                    records: vec![],
+                },
+            ]))
+            .expect("metaflow declared");
+        crate::RunningNexus {
+            store: opened,
+            codex_endpoints: self.nexus.codex_endpoints.clone(),
+            herdr: crate::herdr::HerdrCli::at(self.snapshot_program.clone(), root.join("flows"))
+                .with_codex_endpoints(self.nexus.codex_endpoints.clone())
+                .with_ordinary_socket(Path::new(ordinary_socket)),
+            composer: crate::composition::LaunchComposer::with_context(
+                crate::context::ContextComposer(std::sync::Arc::new(
+                    crate::context::FixtureComposer::from(
+                        &[
+                            ("spirit-core", "Spirit body."),
+                            ("intent-flow", "Intent body."),
+                            ("operation-main-flow", "Main flow body."),
+                            ("knowledge-flow", "Knowledge body."),
+                        ][..],
+                    ),
+                )),
+            ),
+            dispatch_gate: std::sync::Mutex::new(()),
+            pane_leases: crate::delivery::lease::PaneLeases::default(),
+            waking: crate::waking::WakingMetaflows::default(),
+            stopped_at_confirmation: crate::waking::StoppedAtConfirmation::default(),
+            refresh_refusals: crate::waking::RefreshRefusals::default(),
+            stopping: crate::Stopping::default(),
+            launch_calls: crate::send_tool::LaunchCalls::default(),
+            codex_turns: crate::codex_turns::CodexTurns::default(),
+            compactions: crate::compacting::CompactionWatch::default(),
+        }
+    }
+}
+
+/// `flow-id claude` as it claims a session already claimed: the claim
+/// whose identity is the session's answers its alias; a session never
+/// claimed gets a new claim, its alias the identity's first six.
+const IDEMPOTENT_FLOW_ID: &str = r#"#!/bin/sh
+[ "$1" = claude ] && [ "$2" = --flows-root ] && [ "$4" = --parent-session ] || exit 2
+identity=$(printf '%s' "$5" | tr -d -)
+for claim in "$3"/.*.flow-id; do
+  if grep -qx "identity=$identity" "$claim" 2>/dev/null; then sed -n 's/^alias=//p' "$claim"; exit 0; fi
+done
+alias=$(printf '%s' "$identity" | cut -c1-6)
+: > "$3/.$alias.flow-id.lock"
+mkdir -p "$3/$alias"
+printf 'version=1\nharness=claude\nidentity=%s\nalias=%s\nuuid-version=uuid-v5\n' "$identity" "$alias" > "$3/.$alias.flow-id"
+printf '%s\n' "$alias"
+"#;
+
+/// A report served by `nexus`'s ordinary socket from `caller`: recorded,
+/// then acted on only when `nexus` attributes it.
+fn reported_to(nexus: &crate::RunningNexus, event: Event, caller: Option<CallerProcess>) -> bool {
+    let acts = nexus.report_acts(FLOW, caller);
+    assert_eq!(
+        nexus.report(Report_Data {
+            flow_id: FLOW.into(),
+            event: event.clone(),
+        }),
+        Response::Reported
+    );
+    if acts {
+        nexus.after_attributed_report(&FLOW.to_owned(), &event);
+    }
+    acts
+}
+
+/// The cutover, with both Nexuses live. The old Nexus (the fixture's, its
+/// hooks at OLD_SOCKET) launched abc123 in w1:p3, Awake and Maintained. A
+/// new Nexus, its own store and its hooks at NEW_SOCKET, Adopts that running
+/// seat from the seat's own process and then Restarts it. The old Nexus
+/// then gets everything the old seat and its own automatic behavior give
+/// it, holding a message queued for abc123: the old hook's late Stop and
+/// SessionEnd, which it acts on, recording the exit and owing its
+/// Maintained metaflow a successor; an Observe's Gone of w1:p3; a further
+/// maintained wake and drain. Every wake of the old side is refused while
+/// the resumed session runs, so it launches nothing and keeps what it
+/// holds; its Herdr calls are reads only. The new Nexus gets the old
+/// hook's reports and an Observe's Gone of the adopted seat; none acts.
+/// Through all of it the new custody stands: abc123 Active in w7:p1 on the
+/// same session and claim, Awake, its seat birth unchanged, no restart,
+/// exit or successor recorded; and the resumed seat's hooks, aimed at
+/// NEW_SOCKET only, act on the new Nexus.
+#[test]
+fn restart_cutover_two_nexus() {
+    use crate::sending::BindsSeats;
+    use crate::store::metaflow::SleepsMetaflows;
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    maintain(&fixture, address(Model::Sol));
+    FixtureExecutable {
+        path: fixture.directory.path().join("native-transcripts/flow-id"),
+    }
+    .install(IDEMPOTENT_FLOW_ID);
+    let claim = fixture.directory.path().join("flows/.abc123.flow-id");
+    let claimed = fs::read(&claim).unwrap();
+    let old_hook = world.old_hook();
+    let old_witness = fixture.nexus.seat_witness(FLOW).expect("old witness");
+    let new = fixture.second_nexus("flow-0530.sema", NEW_SOCKET);
+    let new_node =
+        |nexus: &crate::RunningNexus| nexus.store.flow_node(FLOW).unwrap().expect("abc123 held");
+
+    // The new Nexus adopts the running seat from the seat's own process.
+    assert_eq!(
+        new.adopt(
+            signal_flow::Adopt_Data {
+                address: address(Model::Sol),
+                native_session_id: world.seat.session.clone(),
+            },
+            Some(&world.old_harness()),
+        ),
+        Response::Adopted(FLOW.into())
+    );
+    assert_eq!(new_node(&new).session_id, world.seat.session);
+    assert_eq!(
+        new.store
+            .metaflow(&address(Model::Sol))
+            .unwrap()
+            .unwrap()
+            .state,
+        State::Awake(FLOW.into())
+    );
+    let adopted_witness = new.seat_witness(FLOW).expect("adopted witness");
+    assert_eq!(adopted_witness.route.herdr_pane_id, OLD_PANE);
+
+    // And restarts it: the same session resumed in w7:p1, its hooks aimed
+    // at the new Nexus alone.
+    assert_eq!(
+        new.dispatch(Query::Restart(FLOW.into())),
+        Response::Restarted(FLOW.into())
+    );
+    let resumes = world.resumes();
+    assert_eq!(resumes.len(), 1, "{}", world.fresh.calls());
+    assert!(
+        resumes[0].contains(&format!("--resume {}", world.seat.session)),
+        "{}",
+        resumes[0]
+    );
+    assert!(resumes[0].contains(&format!("--pane {NEW_PANE}")));
+    assert!(resumes[0].contains(NEW_SOCKET), "{}", resumes[0]);
+    assert!(!resumes[0].contains(OLD_SOCKET), "{}", resumes[0]);
+    let bound = new_node(&new);
+    assert_eq!(bound.session_id, world.seat.session);
+    assert_eq!(bound.flow_lifecycle, FlowLifecycle::Active);
+    let birth = new.store.seat_birth(FLOW).unwrap().expect("birth");
+    assert_eq!(birth.herdr_route.herdr_pane_id, NEW_PANE);
+    let new_hook = world.new_hook();
+    let resumed =
+        FlowStore::process_identity_for_pid(pid_in(&world.fresh.state.join("pid"))).unwrap();
+    assert_eq!(birth.process, resumed);
+
+    // The resumed seat's hook reaches the new Nexus and acts: its Stop
+    // hands the new seat what was queued for it there.
+    let mut queued = new.store.metaflow(&address(Model::Sol)).unwrap().unwrap();
+    queued.queue = vec![signal_flow::QueueEntry {
+        logical_delivery_id: "cutover-queued".into(),
+        sent_by: signal_flow::SentBy::Unknown,
+        delivery: flow_ethos::Delivery::Wake,
+        message: signal_flow::Message::Soft(signal_flow::Request::Order(
+            "for the resumed seat".into(),
+        )),
+    }];
+    new.store.seed_metaflow(queued);
+    assert!(reported_to(&new, stop_of(&world, &fixture), Some(new_hook)));
+    assert_eq!(received(&world, &fixture, "for the resumed seat"), 1);
+
+    // A message the old Nexus holds for abc123, queued there during the
+    // cutover.
+    let mut held = stored(&fixture, Model::Sol);
+    held.queue = vec![signal_flow::QueueEntry {
+        logical_delivery_id: "held-by-the-old-nexus".into(),
+        sent_by: signal_flow::SentBy::Unknown,
+        delivery: flow_ethos::Delivery::Wake,
+        message: signal_flow::Message::Soft(signal_flow::Request::Order(
+            "queued at the old Nexus".into(),
+        )),
+    }];
+    fixture.nexus.store.seed_metaflow(held);
+
+    // From here every Herdr call is the old side's, or the new Nexus
+    // reading.
+    let before_old = world.fresh.calls().lines().count();
+
+    // The old hook's late reports reach the old Nexus, which holds abc123
+    // in w1:p3 with no restart of its own and acts on them: the Stop, then
+    // the SessionEnd, which records the exit and wakes the Maintained
+    // metaflow's successor; then an Observe's Gone of w1:p3, and a further
+    // maintained wake and drain.
+    assert!(reported_to(
+        &fixture.nexus,
+        stop_of(&world, &fixture),
+        Some(old_hook)
+    ));
+    assert!(reported_to(
+        &fixture.nexus,
+        Event::Ended(Some(world.seat.session.clone())),
+        Some(old_hook)
+    ));
+    {
+        use crate::observe_agent::RecordsWitnessedExit;
+        fixture
+            .nexus
+            .exited_as_witnessed_by(FLOW, Some(&old_witness));
+    }
+    fixture.nexus.wake_due(address(Model::Sol));
+    fixture.nexus.drain_awake(&address(Model::Sol));
+    assert_eq!(
+        node(&fixture).flow_lifecycle,
+        FlowLifecycle::Exited,
+        "the old Nexus recorded the old seat's exit"
+    );
+    // Its Maintained metaflow owes a successor, and every wake of it is
+    // refused while the resumed session runs in Herdr: nothing is launched,
+    // and what it holds stays with it.
+    let old_metaflow = stored(&fixture, Model::Sol);
+    assert_eq!(old_metaflow.state, State::Asleep);
+    assert_eq!(old_metaflow.queue.len(), 1);
+    assert!(matches!(
+        fixture.nexus.store.successor_intent(&address(Model::Sol)),
+        Ok(Some(intent)) if intent.predecessor == FLOW
+    ));
+
+    // The same old reports reach the new Nexus, and an Observe's Gone of
+    // the seat it adopted: none acts.
+    assert!(!reported_to(
+        &new,
+        Event::Ended(Some(world.seat.session.clone())),
+        Some(old_hook)
+    ));
+    assert!(!reported_to(
+        &new,
+        Event::Ended(Some(world.seat.session.clone())),
+        None
+    ));
+    {
+        use crate::observe_agent::RecordsWitnessedExit;
+        new.exited_as_witnessed_by(FLOW, Some(&adopted_witness));
+    }
+
+    // Nothing the old side did touched the new seat.
+    let calls = world.fresh.calls();
+    let old_side: Vec<&str> = calls.lines().skip(before_old).collect();
+    eprintln!("old side's Herdr calls:\n{}", old_side.join("\n"));
+    for line in &old_side {
+        assert!(!line.contains(NEW_PANE), "the old side named w7:p1: {line}");
+        assert!(
+            !line.contains(&world.seat.session),
+            "the old side named the resumed session: {line}"
+        );
+        assert!(!line.contains("--resume"), "{line}");
+        for effect in [
+            "pane close",
+            "workspace create",
+            "agent start",
+            "agent prompt",
+            "pane run",
+        ] {
+            assert!(
+                !line.contains(effect),
+                "the old side acted on Herdr: {line}"
+            );
+        }
+    }
+    assert_eq!(received(&world, &fixture, "queued at the old Nexus"), 0);
+    assert_eq!(received(&world, &fixture, "for the resumed seat"), 1);
+    assert_eq!(fs::read(&claim).unwrap(), claimed, "the claim stands");
+    assert!(FlowStore::process_is_live(&resumed), "the new seat runs on");
+
+    // The new custody stands, and the new seat's hooks still act there.
+    let after = new_node(&new);
+    assert_eq!(after.session_id, world.seat.session);
+    assert_eq!(after.flow_lifecycle, FlowLifecycle::Active);
+    assert!(matches!(
+        &after.herdr_route_selection,
+        HerdrRouteSelection::Available(route) if route.herdr_pane_id == NEW_PANE
+    ));
+    assert_eq!(
+        new.store
+            .metaflow(&address(Model::Sol))
+            .unwrap()
+            .unwrap()
+            .state,
+        State::Awake(FLOW.into())
+    );
+    assert_eq!(new.store.restart_record(FLOW).unwrap(), None);
+    assert_eq!(
+        new.store.successor_intent(&address(Model::Sol)).unwrap(),
+        None
+    );
+    assert_eq!(new.store.seat_birth(FLOW).unwrap(), Some(birth));
+    assert!(new.report_acts(FLOW, Some(new_hook)));
 }

@@ -13,8 +13,8 @@ default = []
 datom = ["dep:datom-codec", "dep:protos"]
 
 [dependencies]
-datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "eabead48b31e8d4f429d7fb156dd18548bbd79c1", optional = true }
-protos = { git = "https://github.com/LiGoldragon/protos", rev = "3c7ade34010cec6cec153ae694ee335f7fea0193", optional = true }
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "eabead4", optional = true }
+protos = { git = "https://github.com/LiGoldragon/protos", rev = "3c7ade3", optional = true }
 rkyv.workspace = true
 
 [build-dependencies]

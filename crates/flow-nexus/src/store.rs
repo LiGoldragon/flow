@@ -1458,7 +1458,6 @@ pub enum StoreError {
 }
 
 pub(crate) struct MetaConfigurationTables {
-    handover: TableReference<handover_configuration::StoredHandoverConfiguration>,
     nexus: TableReference<StoredMetaNexusConfiguration>,
     models: TableReference<StoredMetaModelConfiguration>,
     thresholds: TableReference<StoredMetaThresholdConfiguration>,
@@ -1479,7 +1478,6 @@ trait RegistersMetaConfigurationTables: Sized {
 impl RegistersMetaConfigurationTables for MetaConfigurationTables {
     fn register(engine: &mut Engine) -> Result<Self, StoreError> {
         Ok(Self {
-            handover: engine.register_table(<handover_configuration::StoredHandoverConfiguration as handover_configuration::DescribesHandoverConfiguration>::descriptor())?,
             nexus: engine.register_table(StoredMetaNexusConfiguration::descriptor())?,
             models: engine.register_table(StoredMetaModelConfiguration::descriptor())?,
             thresholds: engine.register_table(StoredMetaThresholdConfiguration::descriptor())?,
@@ -4941,7 +4939,6 @@ pub(crate) trait ReadsFlowMemory {
         tables: &MetaConfigurationTables,
     ) -> Result<Option<ConfiguredFamilies>, StoreError> {
         let nexus_rows = engine.match_records(QueryPlan::all(tables.nexus))?;
-        let handover_rows = engine.match_records(QueryPlan::all(tables.handover))?;
         let marker = nexus_rows.database_marker();
         let nexus = match nexus_rows.records() {
             [] => None,
@@ -4960,7 +4957,6 @@ pub(crate) trait ReadsFlowMemory {
         let heartbeat_rows = engine.match_records(QueryPlan::all(tables.heartbeat))?;
         let protected_address_rows =
             engine.match_records(QueryPlan::all(tables.protected_addresses))?;
-        let handover = handover_rows.records().first().cloned().unwrap_or_else(handover_configuration::unconfigured);
         let metaflow_rows = engine.match_records(QueryPlan::all(tables.metaflows))?;
         if models_rows.database_marker() != marker
             || metaflow_rows.database_marker() != marker
@@ -5055,9 +5051,9 @@ pub(crate) trait ReadsFlowMemory {
             configured_harness_flags,
             heartbeat,
             protected_addresses,
-            handover_policies: handover.policies,
-            handover_archive: handover.archive,
-            handover_count: handover.count,
+            handover_policies: meta_signal_flow::HandoverPoliciesConfiguration::Unconfigured,
+            handover_archive: meta_signal_flow::HandoverArchiveConfiguration::Unconfigured,
+            handover_count: meta_signal_flow::HandoverCountConfiguration::Unconfigured,
         }))
     }
 
@@ -5165,20 +5161,6 @@ pub(crate) trait ReadsFlowMemory {
             return Err(StoreError::TopicRefused(refused.topic.clone()));
         }
         match change {
-            ConfigurationChange::HandoverPolicies(policies) => {
-                if policies.iter().enumerate().any(|(i,p)| p.warning_share_left > 100 || p.every_minutes <= 0 || policies[..i].iter().any(|q| q.model_name == p.model_name)) { return Err(StoreError::DuplicateConfigurationEntry); }
-                let old = engine.match_records(QueryPlan::all(tables.handover))?.records().first().cloned().unwrap_or_else(handover_configuration::unconfigured);
-                FlowStore::replace_configuration_family(engine,tables.handover,vec![handover_configuration::StoredHandoverConfiguration { policies: meta_signal_flow::HandoverPoliciesConfiguration::Configured(policies), archive: old.archive, count: old.count }])
-            }
-            ConfigurationChange::HandoverArchive(path) => {
-                let old = engine.match_records(QueryPlan::all(tables.handover))?.records().first().cloned().unwrap_or_else(handover_configuration::unconfigured);
-                FlowStore::replace_configuration_family(engine,tables.handover,vec![handover_configuration::StoredHandoverConfiguration { policies: old.policies, archive: meta_signal_flow::HandoverArchiveConfiguration::Configured(path), count: old.count }])
-            }
-            ConfigurationChange::HandoverCount(count) => {
-                if count < 0 { return Err(StoreError::DuplicateConfigurationEntry); }
-                let old = engine.match_records(QueryPlan::all(tables.handover))?.records().first().cloned().unwrap_or_else(handover_configuration::unconfigured);
-                FlowStore::replace_configuration_family(engine,tables.handover,vec![handover_configuration::StoredHandoverConfiguration { policies: old.policies, archive: old.archive, count: meta_signal_flow::HandoverCountConfiguration::Configured(count) }])
-            }
             ConfigurationChange::Nexus(nexus) => {
                 if nexus
                     .stable_codex

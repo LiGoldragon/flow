@@ -3,7 +3,7 @@
 //! a materialized view used for sender-filtered reconnect snapshots.
 
 use super::metaflow::SleepsMetaflows;
-use super::queue_delivery::{AccountsQueueDelivery, ReadsQueueDelivery};
+use super::queue_delivery::AccountsQueueDelivery;
 use super::reminder::RecordsReminders;
 use super::*;
 use crate::generated::send_tool::{
@@ -806,7 +806,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         // An entry already handed to a native attempt keeps the evidence
         // that attempt carries; only entries not yet handed over change.
         let handed_over = self
-            .outstanding_for(address)?
+            .outstanding_delivery(address)?
             .map(|attempt| attempt.request_id);
         let mut commit = self.engine.begin_atomic_commit();
         let mut changed = false;

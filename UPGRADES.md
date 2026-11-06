@@ -15,6 +15,13 @@ Frozen 0.52.0 plus Restart. Pins signal-flow 46.0.0 and meta-signal-flow
 - A spawn whose outcome a Nexus death left unproven is `Interrupted`, never
   respawned; Stop clears it only once the spawn is proven quiet.
 - Inspect shows the record, read-only.
+- A seat adopted into this Nexus, its hooks still aimed at the socket of the
+  Nexus that launched it, is restarted as any resting Claude seat is: the
+  same FlowId and native session, resumed with its hooks aimed at this
+  Nexus, so its reports reach this Nexus and the old seat's are fenced.
+- A working seat, and a flow asking for its own restart, stay refused
+  `Unsupported`: the wire has no `RestartOwed` answer and no `Owed` phase
+  yet. Nothing is recorded, closed or resumed for them.
 
 0.53.0 opens no earlier store, as 0.52.0 does not; it starts from a new store.
 

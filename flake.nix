@@ -610,6 +610,12 @@
             "tests::restarting::restart_crash_around_bind_commit_delivers_once";
           flow-restart-interrupted-stop-needs-quiesced-spawn = context.exactTest "flow-nexus"
             "tests::restarting::restart_interrupted_stop_needs_quiesced_spawn";
+          # Restart, the cutover: an adopted seat is restarted hooked to this
+          # Nexus; a working seat and a flow's own restart stay refused.
+          flow-restart-adopted-seat-resumes-hooked-to-this-nexus = context.exactTest "flow-nexus"
+            "tests::restarting::restart_adopted_seat_resumes_hooked_to_this_nexus";
+          flow-restart-owed-cases-refused-unsupported = context.exactTest "flow-nexus"
+            "tests::restarting::restart_owed_cases_refused_unsupported";
         }
       );
 

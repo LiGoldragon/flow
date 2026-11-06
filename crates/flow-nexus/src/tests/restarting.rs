@@ -1172,3 +1172,320 @@ fn restart_interrupted_stop_needs_quiesced_spawn() {
     );
     assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
 }
+
+/// The adopted seat's native session, which another Nexus chose, and the
+/// FlowId `flow-id` claims for it.
+const ADOPTED_SESSION: &str = "5e55a0d0-1b2c-5d3e-8f40-a1b2c3d4e5f6";
+const ADOPTED: &str = "5e55a0";
+/// The socket the adopted seat's hooks were configured with by the Nexus
+/// that launched it.
+const OLD_SOCKET: &str = "/run/old-place/flow/flow.sock";
+
+/// A Claude seat another Nexus launched, resting in w1:p3 with its hooks
+/// aimed at that Nexus's socket, and `{ Mind flow Sol }` declared on demand
+/// here; nothing of it is known to this Nexus yet. Answers the world and
+/// the old harness, a shell whose argv names the session and the old
+/// socket, marked as Herdr marks a pane's processes, with a hook child
+/// whose environment is scrubbed.
+fn adopted_world(fixture: &mut NexusFixture) -> (FreshWorld, Process) {
+    use crate::store::ManagesMetaflowState;
+    let fresh = fixture.fresh_claude_world();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
+            meta_signal_flow::ConfigureMetaflow {
+                root_option: None,
+                address: address(Model::Sol),
+                system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+                user_modules: vec!["operation-main-flow".into()],
+                flow_kind: signal_flow::FlowKind::Regular,
+                tool_set: signal_flow::ToolSet::Default,
+                continuity: meta_signal_flow::Continuity::OnDemand,
+                purpose: String::new(),
+                records: vec![],
+            },
+        ]))
+        .expect("metaflow declared");
+    fs::write(fresh.state.join("restart-world"), "").unwrap();
+    let transcript = fixture
+        .directory
+        .path()
+        .join("native-transcripts/claude/-home-li-primary")
+        .join(format!("{ADOPTED_SESSION}.jsonl"));
+    fs::write(
+        transcript,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "sessionId": ADOPTED_SESSION,
+                "uuid": "adopted-end-turn",
+                "message": { "stop_reason": "end_turn" }
+            })
+        ),
+    )
+    .unwrap();
+    let hook = fresh.state.join("old-hook-pid");
+    let settings = serde_json::json!({
+        "hooks": { "Stop": [ { "hooks": [ {
+            "type": "command",
+            "command": format!("flow-hook --socket {OLD_SOCKET}")
+        } ] } ] }
+    })
+    .to_string();
+    let mut harness = std::process::Command::new("sh")
+        .args(["-c", HARNESS])
+        .arg(&hook)
+        .args([
+            "claude",
+            "--session-id",
+            ADOPTED_SESSION,
+            "--settings",
+            &settings,
+        ])
+        .env("HERDR_PANE_ID", OLD_PANE)
+        .env("HERDR_SESSION", "fixture-session")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("old harness");
+    let pid = harness.id();
+    fs::write(fresh.state.join("old-pid"), pid.to_string()).unwrap();
+    // Reaped as soon as its pane is closed.
+    std::thread::spawn(move || harness.wait());
+    fs::write(fresh.state.join("old-pane"), OLD_PANE).unwrap();
+    fs::write(
+        fresh.state.join("old-agent"),
+        serde_json::json!({
+            "name": "old-nexus-agent",
+            "agent": "claude",
+            "agent_status": "idle",
+            "workspace_id": "w1",
+            "tab_id": "w1:t1",
+            "pane_id": OLD_PANE,
+            "terminal_id": "term-old",
+            "interactive_ready": true,
+            "agent_session": {
+                "source": "herdr:claude", "agent": "claude",
+                "kind": "id", "value": ADOPTED_SESSION,
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    await_path(&hook);
+    let process = FlowStore::process_identity_for_pid(pid).expect("old harness running");
+    (fresh, process)
+}
+
+/// Adopt then Restart, the cutover: a Claude seat another Nexus launched,
+/// its hooks aimed at that Nexus's socket, is adopted here and restarted
+/// from outside. The resumed seat is the same FlowId on the same native
+/// session, `claude --resume` with its hooks aimed at this Nexus's socket and
+/// not the old one; its hook's Stop reaches this Nexus, acts, and hands it
+/// the queue, while a late Stop of the old seat's hook acts on nothing.
+#[test]
+fn restart_adopted_seat_resumes_hooked_to_this_nexus() {
+    use crate::sending::BindsSeats;
+    use crate::store::ReadsLaunchAttempt;
+    let mut fixture = NexusFixture::new();
+    let (fresh, old) = adopted_world(&mut fixture);
+    assert!(
+        fs::read_to_string(format!("/proc/{}/cmdline", old.pid))
+            .unwrap()
+            .contains(OLD_SOCKET),
+        "the adopted seat's hooks aim at the old socket"
+    );
+    assert_eq!(
+        fixture.nexus.adopt(
+            signal_flow::Adopt_Data {
+                address: address(Model::Sol),
+                native_session_id: ADOPTED_SESSION.into(),
+            },
+            Some(&old),
+        ),
+        Response::Adopted(ADOPTED.into())
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .launch_requests_bound_to(ADOPTED)
+            .unwrap(),
+        Vec::<String>::new(),
+        "this Nexus never launched it"
+    );
+    let old_hook = CallerProcess {
+        process_id: pid_in(&fresh.state.join("old-hook-pid")),
+    };
+
+    assert_eq!(
+        fixture.nexus.dispatch(Query::Restart(ADOPTED.into())),
+        Response::Restarted(ADOPTED.into())
+    );
+
+    let resumes: Vec<String> = fresh
+        .calls()
+        .lines()
+        .filter(|line| line.contains("agent start") && line.contains("--resume"))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(resumes.len(), 1, "{}", fresh.calls());
+    let resume = &resumes[0];
+    assert!(resume.contains(&format!("--pane {NEW_PANE}")), "{resume}");
+    assert!(
+        resume.contains(&format!("--resume {ADOPTED_SESSION}")),
+        "{resume}"
+    );
+    assert!(
+        resume.contains("/fixture/run/flow-next/flow/flow.sock"),
+        "the resumed hooks report to this Nexus: {resume}"
+    );
+    assert!(!resume.contains(OLD_SOCKET), "{resume}");
+    assert!(
+        resume.contains(&format!("--name {{ Mind flow Sol {ADOPTED} }}")),
+        "{resume}"
+    );
+    assert!(ended(&old), "the adopted harness exited");
+    let after = fixture
+        .nexus
+        .store
+        .flow_node(ADOPTED)
+        .unwrap()
+        .expect("the adopted flow");
+    assert_eq!(after.session_id, ADOPTED_SESSION);
+    assert_eq!(after.flow_lifecycle, FlowLifecycle::Active);
+    let HerdrRouteSelection::Available(route) = after.herdr_route_selection else {
+        panic!("the resumed seat is routed")
+    };
+    assert_eq!(route.herdr_pane_id, NEW_PANE);
+    assert_eq!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(ADOPTED.into())
+    );
+    assert_eq!(fixture.nexus.store.restart_record(ADOPTED).unwrap(), None);
+
+    let mut queued = stored(&fixture, Model::Sol);
+    queued.queue = vec![signal_flow::QueueEntry {
+        logical_delivery_id: "after-adopted-restart".into(),
+        sent_by: signal_flow::SentBy::Unknown,
+        delivery: flow_ethos::Delivery::Wake,
+        message: signal_flow::Message::Soft(signal_flow::Request::Order(
+            "for the resumed adopted seat".into(),
+        )),
+    }];
+    fixture.nexus.store.seed_metaflow(queued);
+    let stop = Event::Stopped(NativeStop {
+        native_session_id_option: Some(ADOPTED_SESSION.into()),
+        transcript_path_option: Some(
+            fixture
+                .directory
+                .path()
+                .join("native-transcripts/claude/-home-li-primary")
+                .join(format!("{ADOPTED_SESSION}.jsonl"))
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        last_assistant_message_option: None,
+    });
+    let reported = |caller: Option<CallerProcess>| {
+        let acts = fixture.nexus.report_acts(ADOPTED, caller);
+        assert_eq!(
+            fixture.nexus.report(Report_Data {
+                flow_id: ADOPTED.into(),
+                event: stop.clone(),
+            }),
+            Response::Reported
+        );
+        if acts {
+            fixture
+                .nexus
+                .after_attributed_report(&ADOPTED.to_owned(), &stop);
+        }
+        acts
+    };
+    let delivered = || {
+        fresh
+            .user_turns(&fixture)
+            .iter()
+            .filter(|turn| turn.contains("for the resumed adopted seat"))
+            .count()
+    };
+    assert!(!reported(Some(old_hook)), "the old seat's hook is fenced");
+    assert_eq!(delivered(), 0);
+    let new_hook = CallerProcess {
+        process_id: pid_in(&fresh.state.join("hook-pid")),
+    };
+    assert!(reported(Some(new_hook)), "the resumed seat's hook acts");
+    assert_eq!(delivered(), 1);
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .seat_birth(ADOPTED)
+            .unwrap()
+            .map(|birth| birth.process),
+        FlowStore::process_identity_for_pid(pid_in(&fresh.state.join("pid")))
+    );
+}
+
+/// What stays refused in this slice, because the wire has no answer for
+/// it: a seat working, asked from outside, and a flow asking for its own
+/// restart are each refused Unsupported, with no record written, nothing
+/// closed, nothing resumed, and the flow as it was in its pane.
+#[test]
+fn restart_owed_cases_refused_unsupported() {
+    use crate::restarting::RestartsFlows;
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    let unchanged = |fixture: &NexusFixture| {
+        assert_eq!(record(fixture), None);
+        assert!(world.calls_naming("pane close").is_empty());
+        assert!(world.resumes().is_empty());
+        assert!(!ended(&old), "the harness still runs");
+        assert_eq!(route_pane(fixture), OLD_PANE);
+        assert_eq!(node(fixture).flow_lifecycle, FlowLifecycle::Active);
+    };
+
+    let own = signal_flow::Origin::Flow(signal_flow::FlowOrigin {
+        flow_id: FLOW.into(),
+        session_id: world.seat.session.clone(),
+    });
+    assert_eq!(
+        fixture.nexus.restart(FLOW, &own),
+        Response::RestartRefused(RestartRefusal::Unsupported(FLOW.into()))
+    );
+    unchanged(&fixture);
+
+    // A turn runs: its prompt is the transcript's last main-thread row,
+    // and Herdr shows the agent working.
+    let transcript = fixture
+        .directory
+        .path()
+        .join("native-transcripts/claude/-home-li-primary")
+        .join(format!("{}.jsonl", world.seat.session));
+    let mut rows = fs::read_to_string(&transcript).unwrap();
+    rows.push_str(&format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "user",
+            "sessionId": world.seat.session,
+            "uuid": "a-turn-runs",
+            "message": { "content": "work" }
+        })
+    ));
+    fs::write(&transcript, rows).unwrap();
+    let agent_path = world.fresh.state.join("old-agent");
+    let mut agent: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&agent_path).unwrap()).unwrap();
+    agent["agent_status"] = "working".into();
+    fs::write(&agent_path, agent.to_string()).unwrap();
+    assert_eq!(
+        restarted(&fixture),
+        Response::RestartRefused(RestartRefusal::Unsupported(FLOW.into()))
+    );
+    unchanged(&fixture);
+}

@@ -55,6 +55,7 @@ use meta_signal_flow::{
     ConfigurationChange, ConfigurationSnapshot, ConfigureCounters, ConfigureHarnessFlags,
     ConfigureLeaveOut, ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureOutcome,
     ConfigureSendServer, ConfigureThreshold, CountersRefusal, HeartbeatConfig,
+    HandoverArchiveConfiguration, HandoverCountConfiguration, HandoverPoliciesConfiguration,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -1602,6 +1603,9 @@ pub struct ConfiguredFamilies {
     pub configured_harness_flags: Vec<ConfigureHarnessFlags>,
     pub heartbeat: Option<HeartbeatConfig>,
     pub protected_addresses: Vec<Address>,
+    pub handover_policies: HandoverPoliciesConfiguration,
+    pub handover_archive: HandoverArchiveConfiguration,
+    pub handover_count: HandoverCountConfiguration,
 }
 
 pub trait CompletesSnapshot {
@@ -1623,6 +1627,9 @@ impl CompletesSnapshot for ConfiguredFamilies {
             configured_harness_flags: self.configured_harness_flags,
             heartbeat: self.heartbeat,
             protected_addresses: self.protected_addresses,
+            handover_policies: self.handover_policies,
+            handover_archive: self.handover_archive,
+            handover_count: self.handover_count,
             counters,
         }
     }
@@ -4927,13 +4934,12 @@ pub(crate) trait ReadsFlowMemory {
     ) -> Result<Option<ConfiguredFamilies>, StoreError> {
         let nexus_rows = engine.match_records(QueryPlan::all(tables.nexus))?;
         let marker = nexus_rows.database_marker();
-        let nexus = match nexus_rows.records() {
+        let nexus_record = match nexus_rows.records() {
             [] => None,
-            [stored] if stored.record_key() == RecordKey::new("nexus") => {
-                Some(stored.nexus.clone())
-            }
+            [stored] if stored.record_key() == RecordKey::new("nexus") => Some(stored.clone()),
             _ => return Err(StoreError::StateInvariant),
         };
+        let nexus = nexus_record.as_ref().map(|stored| stored.nexus.clone());
         let models_rows = engine.match_records(QueryPlan::all(tables.models))?;
         let thresholds_rows = engine.match_records(QueryPlan::all(tables.thresholds))?;
         let leave_out_rows = engine.match_records(QueryPlan::all(tables.leave_outs))?;
@@ -4959,9 +4965,10 @@ pub(crate) trait ReadsFlowMemory {
         {
             return Err(StoreError::ConfigurationReadViewChanged);
         }
-        let Some(nexus) = nexus else {
+        let Some(nexus_record) = nexus_record else {
             return Ok(None);
         };
+        let nexus = nexus_record.nexus;
         let mut models = models_rows
             .records()
             .iter()
@@ -5038,6 +5045,9 @@ pub(crate) trait ReadsFlowMemory {
             configured_harness_flags,
             heartbeat,
             protected_addresses,
+            handover_policies: nexus_record.handover_policies,
+            handover_archive: nexus_record.handover_archive,
+            handover_count: nexus_record.handover_count,
         }))
     }
 
@@ -5157,8 +5167,47 @@ pub(crate) trait ReadsFlowMemory {
                 FlowStore::replace_configuration_family(
                     engine,
                     tables.nexus,
-                    vec![StoredMetaNexusConfiguration { nexus }],
+                    vec![StoredMetaNexusConfiguration {
+                        nexus,
+                        handover_policies: meta_signal_flow::HandoverPoliciesConfiguration::Unconfigured,
+                        handover_archive: meta_signal_flow::HandoverArchiveConfiguration::Unconfigured,
+                        handover_count: meta_signal_flow::HandoverCountConfiguration::Unconfigured,
+                    }],
                 )
+            }
+            ConfigurationChange::HandoverPolicies(policies) => {
+                if policies.iter().enumerate().any(|(i, p)| {
+                    p.warning_share_left < 0 || p.warning_share_left > 100 || p.every_minutes <= 0
+                        || policies[..i].iter().any(|prior| prior.model_name == p.model_name)
+                }) {
+                    return Err(StoreError::DuplicateConfigurationEntry);
+                }
+                let rows = engine.match_records(QueryPlan::all(tables.nexus))?;
+                let Some(current) = rows.records().first() else { return Err(StoreError::StateInvariant); };
+                FlowStore::replace_configuration_family(engine, tables.nexus, vec![StoredMetaNexusConfiguration {
+                    nexus: current.nexus.clone(),
+                    handover_policies: meta_signal_flow::HandoverPoliciesConfiguration::Configured(policies),
+                    handover_archive: current.handover_archive.clone(),
+                    handover_count: current.handover_count.clone(),
+                }])
+            }
+            ConfigurationChange::HandoverArchive(path) => {
+                if path.is_empty() { return Err(StoreError::DuplicateConfigurationEntry); }
+                let rows = engine.match_records(QueryPlan::all(tables.nexus))?;
+                let Some(current) = rows.records().first() else { return Err(StoreError::StateInvariant); };
+                FlowStore::replace_configuration_family(engine, tables.nexus, vec![StoredMetaNexusConfiguration {
+                    nexus: current.nexus.clone(), handover_policies: current.handover_policies.clone(),
+                    handover_archive: meta_signal_flow::HandoverArchiveConfiguration::Configured(path), handover_count: current.handover_count.clone(),
+                }])
+            }
+            ConfigurationChange::HandoverCount(count) => {
+                if count < 0 { return Err(StoreError::InvalidHeartbeatPeriod); }
+                let rows = engine.match_records(QueryPlan::all(tables.nexus))?;
+                let Some(current) = rows.records().first() else { return Err(StoreError::StateInvariant); };
+                FlowStore::replace_configuration_family(engine, tables.nexus, vec![StoredMetaNexusConfiguration {
+                    nexus: current.nexus.clone(), handover_policies: current.handover_policies.clone(), handover_archive: current.handover_archive.clone(),
+                    handover_count: meta_signal_flow::HandoverCountConfiguration::Configured(count),
+                }])
             }
             ConfigurationChange::Models(models) => FlowStore::replace_configuration_family(
                 engine,

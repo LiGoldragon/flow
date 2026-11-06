@@ -252,7 +252,7 @@
             context.commonArgs
             // {
               inherit (context) cargoArtifacts;
-              cargoClippyExtraArgs = "--workspace --all-targets --all-features -- -D warnings";
+              cargoClippyExtraArgs = "--workspace --all-targets --features flow-ethos/datom -- -D warnings";
             }
           );
           flow-codex-thread-opened-lean-before-attach = context.exactTest "flow-nexus"

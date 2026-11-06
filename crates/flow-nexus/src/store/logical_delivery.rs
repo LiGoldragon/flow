@@ -245,10 +245,6 @@ pub(crate) trait RecordsLogicalDeliveries {
         recipient: &Address,
         message: signal_flow::SendableMessage,
     ) -> Result<Result<Message, Refusal>, StoreError>;
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Preserve the existing atomic tool-admission boundary during the delivery repair; its inputs remain individually typed."
-    )]
     fn accept_tool_send(
         &self,
         key: &ToolCallKey,

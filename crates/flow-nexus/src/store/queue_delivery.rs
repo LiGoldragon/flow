@@ -465,7 +465,7 @@ pub trait AccountsQueueDelivery {
     ) -> Result<Result<(), WithdrawRejected_Data>, StoreError>;
 }
 
-pub(crate) trait ReadsQueueDelivery {
+trait ReadsQueueDelivery {
     fn delivery_attempts(&self) -> Result<Vec<QueueDeliveryAttempt>, StoreError>;
     fn outstanding_for(
         &self,

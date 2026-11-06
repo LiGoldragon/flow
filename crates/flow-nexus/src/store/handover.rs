@@ -63,6 +63,9 @@ impl DescribesHandoverTable for HandoverMemory {
 
 /// The Memory operations required by the runtime handover path.
 pub trait HoldsHandovers {
+    /// Reads the complete Memory row. `None` means no handover has ever been
+    /// written; `Some(Unknown)` means a successful write had no measurement.
+    fn handover_memory(&self, address: &Address) -> Result<Option<HandoverMemory>, StoreError>;
     fn handover(&self, address: &Address) -> Result<Vec<Section>, StoreError>;
     fn keep_handover(
         &self,
@@ -102,6 +105,10 @@ impl RegistersHandoverTable for FlowStore {
 }
 
 impl HoldsHandovers for FlowStore {
+    fn handover_memory(&self, address: &Address) -> Result<Option<HandoverMemory>, StoreError> {
+        self.handover_row(address)
+    }
+
     fn handover(&self, address: &Address) -> Result<Vec<Section>, StoreError> {
         Ok(self
             .handover_row(address)?
@@ -190,15 +197,16 @@ impl HoldsHandovers for FlowStore {
         let Some(mut row) = self.handover_row(address)? else {
             return Ok(());
         };
-        if row.current.is_empty() {
-            return Ok(());
+        let sections = std::mem::take(&mut row.current);
+        let touch = std::mem::replace(&mut row.touch, Touch::Unknown);
+        if !sections.is_empty() {
+            row.closed.push(ClosedHandover {
+                generation: row.generation,
+                predecessor: predecessor.into(),
+                sections,
+                touch,
+            });
         }
-        row.closed.push(ClosedHandover {
-            generation: row.generation,
-            predecessor: predecessor.into(),
-            sections: std::mem::take(&mut row.current),
-            touch: std::mem::replace(&mut row.touch, Touch::Unknown),
-        });
         row.generation += 1;
         self.write_handover(row)
     }

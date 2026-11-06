@@ -660,6 +660,22 @@
             "tests::restarting::restart_crash_after_closing_composition_refused_old_harness_untouched";
           flow-restart-failed-not-composed-by-0530-retry-resumes-same-session = context.exactTest "flow-nexus"
             "tests::restarting::restart_failed_not_composed_by_0530_retry_resumes_same_session";
+          # 0.53.1: a resume that fails after the close reopens the same
+          # session by itself, once, once nothing holds the session.
+          flow-restart-spawn-refused-once-reopens-same-session = context.exactTest "flow-nexus"
+            "tests::restarting::restart_spawn_refused_once_reopens_same_session";
+          flow-restart-bind-mismatch-once-reopens-same-session = context.exactTest "flow-nexus"
+            "tests::restarting::restart_bind_mismatch_once_reopens_same_session";
+          flow-restart-failure-every-time-spends-bound-custody-kept = context.exactTest "flow-nexus"
+            "tests::restarting::restart_failure_every_time_spends_bound_custody_kept";
+          flow-restart-start-in-flight-not-respawned = context.exactTest "flow-nexus"
+            "tests::restarting::restart_start_in_flight_not_respawned";
+          flow-restart-nexus-crash-after-post-close-failure-recovers = context.exactTest "flow-nexus"
+            "tests::restarting::restart_nexus_crash_after_post_close_failure_recovers";
+          flow-restart-owner-stop-during-bound = context.exactTest "flow-nexus"
+            "tests::restarting::restart_owner_stop_during_bound";
+          flow-restart-failed-before-close-taken-up-once-old-harness-gone = context.exactTest "flow-nexus"
+            "tests::restarting::restart_failed_before_close_taken_up_once_old_harness_gone";
           # The cutover with both Nexuses live: the old side cannot take or end
           # the custody a new Nexus Adopted and Restarted.
           flow-restart-cutover-two-nexus = context.exactTest "flow-nexus"

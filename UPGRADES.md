@@ -22,6 +22,41 @@ composed only after the old harness was closed, so a refused composition
   retried as any Failed record: once composition works, the same session
   resumes.
 
+## A failed resume reopens by itself
+
+A resume that fails after the old harness is closed (the spawn refused, the
+seat not bound, the session reported wrong) no longer leaves the flow with
+no harness until the owner retries. Once its pane is discarded and the
+record written Failed, the restart reopens the same session by itself,
+`claude --resume <session>` with the launch it already composed.
+
+- It reopens only once the seat is proven quiescent, under the gate: the
+  record still the Failed one written, the old pane gone, no pane of the old
+  route's or the resume's Herdr session holding the session, the old
+  harness exited, and the harness the failed pane showed, if Flow saw one,
+  exited (given 3 seconds after the discard). Closed is written with the run
+  counted, then Opening, Spawning and the bind as in any restart.
+- A pane Herdr does not show closed is Interrupted, as before: a start may
+  be in flight there, and nothing is respawned from an observed absence.
+- The bound is a constant, `AUTOMATIC_REOPENS` = 1, in
+  `crates/flow-nexus/src/restarting.rs`: a restart reopens by itself while
+  its Attempts number no more than 1, so its first run gets one reopen.
+  Every run counts, the owner's retries included, so a retry of a Failed
+  restart (Attempts 2 or more) gets none. A configured bound needs a
+  configuration family of its own (a ruling); none is added.
+- The bound spent, the record is Failed as before: the session, the queue
+  and the Address held, `RestartRefused.ResumeRefused` answered, an owner
+  retry and the owner's Stop as before. Stopped is never reopened. A Stop
+  while a reopen's spawn runs answers `Restarting`, as during any restart
+  step.
+- At its start a Nexus takes up a Failed record under the same bound and
+  proof, composing its launch again: a Nexus that died after a failure past
+  the close reopens the flow by itself. A Failed record from before the
+  close (0.53.0's `CloseRefused` or `CloseUnproven`) is taken up only once
+  Herdr shows its old pane gone and its harness exited; until then it is
+  left as it is, only reads reaching Herdr.
+- A Working seat is still refused `RestartRefused.Unsupported`, unchanged.
+
 ## Curriculum 478c's schema
 
 Pins signal-flow 51.0.0 (9f159d9) and meta-signal-flow 64.0.0 (efc0bf5); the

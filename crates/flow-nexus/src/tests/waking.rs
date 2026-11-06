@@ -3369,6 +3369,19 @@ case "$*" in
       i=0; while [ ! -f "$S/release-start" ] && [ "$i" -lt 2000 ]; do sleep 0.01; i=$((i + 1)); done
     fi
     if [ -n "$resumed" ] && [ -f "$S/resume-refused" ]; then printf '%s\n' '{{"id":"cli:agent:start","error":{{"code":"agent_start_failed","message":"resume refused"}}}}'; exit 1; fi
+    # RESUME_REFUSED_ONCE refuses the next resume only.
+    if [ -n "$resumed" ] && [ -f "$S/resume-refused-once" ]; then rm -f "$S/resume-refused-once"; printf '%s\n' '{{"id":"cli:agent:start","error":{{"code":"agent_start_failed","message":"resume refused once"}}}}'; exit 1; fi
+    # REPORT_SESSION_ONCE is the session the next resumed pane reports; a
+    # later one reports its own.
+    if [ -n "$resumed" ] && [ -f "$S/reported-once" ]; then rm -f "$S/reported-once" "$S/report-session"; fi
+    if [ -n "$resumed" ] && [ -f "$S/report-session-once" ]; then mv "$S/report-session-once" "$S/report-session"; : > "$S/reported-once"; fi
+    # A resume started while an earlier resumed harness, or the old one,
+    # still runs is written to OVERLAP.
+    if [ -n "$resumed" ]; then
+      for p in $(cat "$S/resumed-pids" "$S/old-pid" 2>/dev/null); do
+        if [ -e "/proc/$p" ] && ! grep -q ') Z' "/proc/$p/stat" 2>/dev/null; then printf '%s\n' "$p" >> "$S/overlap"; fi
+      done
+    fi
     printf '%s' "$harness" > "$S/harness"
     # A resumed Claude runs `--resume <session>` in the pane's foreground,
     # marked as Herdr marks a pane's processes; its hook (HOOK_PID) is a
@@ -3376,6 +3389,7 @@ case "$*" in
     if [ -n "$resumed" ]; then
       HERDR_PANE_ID="$pane" HERDR_SESSION=fixture-session sh -c 's=$(command -v sleep); env -i "$s" 120 & printf "%s" "$!" > "$0"; sleep 120; :' "$S/hook-pid" --resume "$(cat "$S/session")" < /dev/null > /dev/null 2>&1 &
       printf '%s' "$!" > "$S/pid"
+      printf '%s\n' "$!" >> "$S/resumed-pids"
     fi
     # The Codex TUI runs `resume <thread>` in the pane's foreground.
     if [ "$harness" = codex ]; then

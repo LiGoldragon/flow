@@ -12,6 +12,7 @@ pub(crate) mod counters;
 mod created_pane;
 pub mod delivery;
 pub mod events;
+pub(crate) mod handover;
 pub(crate) mod launch_cleanup;
 pub(crate) mod logical_delivery;
 pub(crate) mod metaflow;
@@ -1528,6 +1529,7 @@ pub struct FlowStore {
     heartbeat_standings: TableReference<StoredHeartbeatStanding>,
     restarts: TableReference<restart::StoredRestart>,
     seat_births: TableReference<crate::generated::memory::SeatBirth>,
+    handovers: TableReference<handover::HandoverMemory>,
     pub launch_changes: LaunchChanges,
 }
 
@@ -2283,7 +2285,8 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&logical_delivery_descriptors.purposes)
                 .with_family(&heartbeat_standing_descriptor)
                 .with_family(&restart_descriptor)
-                .with_family(&seat_birth_descriptor),
+                .with_family(&seat_birth_descriptor)
+                .with_family(&<handover::HandoverMemory as handover::DescribesHandoverTable>::descriptor()),
         )?;
         let flows = engine.register_table(flows_descriptor)?;
         let native_owner_proofs = engine.register_table(native_owner_proofs_descriptor)?;
@@ -2319,6 +2322,7 @@ impl OpensFlowStore for FlowStore {
         let heartbeat_standings = engine.register_table(heartbeat_standing_descriptor)?;
         let restarts = engine.register_table(restart_descriptor)?;
         let seat_births = engine.register_table(seat_birth_descriptor)?;
+        let handovers = <FlowStore as handover::RegistersHandoverTable>::register_handover_table(&mut engine)?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2353,6 +2357,7 @@ impl OpensFlowStore for FlowStore {
             heartbeat_standings,
             restarts,
             seat_births,
+            handovers,
             launch_changes: LaunchChanges::default(),
         };
 
@@ -2479,6 +2484,7 @@ impl OpensFlowStore for FlowStore {
         let seat_births = engine.register_table(
             <FlowStore as restart::DescribesRestartTables>::seat_birth_descriptor(),
         )?;
+        let handovers = <FlowStore as handover::RegistersHandoverTable>::register_handover_table(&mut engine)?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2513,6 +2519,7 @@ impl OpensFlowStore for FlowStore {
             heartbeat_standings,
             restarts,
             seat_births,
+            handovers,
             launch_changes: LaunchChanges::default(),
         };
         store.archive_legacy_queue()?;

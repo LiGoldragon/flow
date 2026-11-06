@@ -83,15 +83,10 @@ impl PublishesHandoverArchive for GitHandoverArchive {
         fs::create_dir_all(target.parent().expect("archive path has parent"))
             .and_then(|_| fs::write(&target, request.document.as_bytes()))
             .map_err(|error| HandoverArchiveRefusal::Write(error.to_string()))?;
-        run_git(
-            &request.repository,
-            [
-                "add",
-                "--",
-                path_string(&target, &request.repository).as_str(),
-            ],
-        )?;
-        run_git(&request.repository, ["commit", "-m", "Archive handover"])?;
+        // Stage and commit only this path.  The archive publisher shares its
+        // repository with the rest of the psyche and must preserve unrelated
+        // staged work.
+        commit_target(&request.repository, &target)?;
         Ok(HandoverArchivePublication { path: target })
     }
 }

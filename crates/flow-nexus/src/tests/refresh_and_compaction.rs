@@ -9,6 +9,7 @@ use super::waking::{
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture, StagedLaunch};
 use crate::compacting::{CodexContextSignal, WatchesCompactions, WritesTranscriptTime};
 use crate::composition::{ComposesLaunch, HarnessedProfile};
+use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::reporting::RecordsReports;
 use crate::store::compaction::{Investigation, RecordsCompactions};
 use crate::store::context::{JudgesThreshold, RecordsContextSize, ThresholdStanding};
@@ -25,6 +26,7 @@ use signal_flow::{
 };
 use std::fs;
 use std::io::Write;
+use std::time::Duration;
 
 const CLAUDE_MODEL: &str = "claude-opus-5-5";
 
@@ -457,6 +459,87 @@ fn a_maintained_seat_refreshed_with_nothing_queued_starts_its_successor_first() 
     );
 }
 
+/// A Maintained Claude seat past its threshold is replaced at its Stop even
+/// while Herdr calls it Working. The confirmed successor exists before the
+/// predecessor's pane close completes; after it completes, the predecessor
+/// is Stopped and in Past and the metaflow is Awake as the successor.
+#[test]
+fn a_maintained_working_seat_refreshes_successor_first_at_its_stop() {
+    let fixture = NexusFixture::new();
+    claude_seat(&fixture, 230_000);
+    seat_refreshing_at(&fixture, 200_000);
+    let mut successor = staged_refresh_successor(&fixture);
+    successor.stage_to_ambiguity(&fixture.nexus);
+    successor.write_receipt();
+    declare_seat(
+        &fixture,
+        Continuity::Maintained,
+        vec!["spirit-core".into(), "intent-flow".into()],
+    );
+    seat_metaflow(&fixture, vec![]);
+    owe_staged_successor(&fixture);
+    let mut working = claude_agent(&fixture);
+    working["agent_status"] = serde_json::Value::String("working".into());
+    fixture.herdr_for_replacement_showing(0, vec![working]);
+
+    // Hold the predecessor's pane close so the store can be observed at the
+    // exact boundary: the successor is registered before close completes.
+    let closing = fixture.directory.path().join("close-reached");
+    let release = fixture.directory.path().join("close-released");
+    let script = fs::read_to_string(&fixture.snapshot_program).expect("fixture Herdr");
+    let pattern = "  *\" pane close \"*) exit 0 ;;";
+    assert!(script.contains(pattern), "{script}");
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&script.replacen(
+        pattern,
+        &format!(
+            "  *\" pane close \"*) : > '{closing}'; while [ ! -e '{release}' ]; do sleep 0.02; done; exit 0 ;;",
+            closing = closing.display(),
+            release = release.display(),
+        ),
+        1,
+    ));
+
+    let (at_stop, lifecycles) = std::thread::scope(|scope| {
+        let stopping = scope.spawn(|| fixture.nexus.settle_stopped(CLAUDE_SEAT));
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !closing.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let lifecycles = closing.exists().then(|| {
+            (
+                lifecycle(&fixture, "908786"),
+                lifecycle(&fixture, CLAUDE_SEAT),
+            )
+        });
+        // Release before any assertion or join: a failed observation can
+        // never strand the scoped worker inside the fixture Herdr.
+        fs::write(&release, "").expect("predecessor close released");
+        (stopping.join().expect("Stop settled"), lifecycles)
+    });
+
+    let (successor_lifecycle, predecessor_lifecycle) =
+        lifecycles.expect("the reap reached close before its bounded deadline");
+    assert_eq!(
+        successor_lifecycle,
+        FlowLifecycle::Active,
+        "the confirmed successor exists before predecessor close completes"
+    );
+    assert_eq!(
+        predecessor_lifecycle,
+        FlowLifecycle::Stopped,
+        "the predecessor stops receiving before its pane closes"
+    );
+    assert_eq!(at_stop, AtStop::Refreshed(seat_address()));
+    let metaflow = seat_metaflow_now(&fixture);
+    assert_eq!(metaflow.state, State::Awake("908786".into()));
+    assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
+    assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
+    assert!(closed(&fixture), "the predecessor's pane is closed");
+}
+
 /// An OnDemand metaflow holding a request that wakes it is refreshed
 /// successor first too: the successor is confirmed before the predecessor
 /// is reaped, and the predecessor is handed none of the work.
@@ -563,6 +646,86 @@ fn a_codex_flow_s_context_is_its_thread_s_last_input() {
         fixture.nexus.store.context_size("908786").unwrap(),
         Some(160_000)
     );
+}
+
+/// A Codex seat due a refresh remains live while its app-server thread is in
+/// a turn. Its turn completion supplies the rest fact and only then may the
+/// predecessor close and move to Past.
+#[test]
+fn a_codex_seat_due_a_refresh_waits_for_its_thread_to_rest() {
+    use crate::codex_turns::{ThreadStatus, TracksCodexTurns, TurnEvent};
+
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![fixture.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.register_with(FlowLifecycle::Active);
+    fixture.nexus.store.seed_role(Caller {
+        flow_id: "908786".into(),
+        aspect: Aspect::Mind,
+        power_level: PowerLevel::Medium,
+        model_name: "fixture-model".into(),
+    });
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::Thresholds(vec![ConfigureThreshold {
+            model_name: "fixture-model".into(),
+            refresh: 200_000,
+        }]))
+        .expect("threshold configured");
+    fixture
+        .nexus
+        .store
+        .record_context_size("908786", 230_000)
+        .expect("context recorded");
+    declare_seat(
+        &fixture,
+        Continuity::OnDemand,
+        vec!["spirit-core".into(), "intent-flow".into()],
+    );
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: seat_address(),
+        state: State::Awake("908786".into()),
+        past: vec![],
+        queue: vec![],
+    });
+    let thread = fixture.node().session_id;
+    fixture
+        .nexus
+        .codex_turns
+        .observe(&thread, TurnEvent::Started("turn-1".into()));
+
+    assert_eq!(
+        fixture.nexus.settle_stopped("908786"),
+        AtStop::Kept(crate::waking::KeptAtStop::InTurn)
+    );
+    assert_eq!(lifecycle(&fixture, "908786"), FlowLifecycle::Active);
+    assert!(!closed(&fixture), "an in-turn Codex pane stays open");
+
+    fixture
+        .nexus
+        .codex_turns
+        .observe(&thread, TurnEvent::Status(ThreadStatus::Idle));
+    // An idle status cannot overtake a named running turn.
+    assert_eq!(
+        fixture.nexus.settle_stopped("908786"),
+        AtStop::Kept(crate::waking::KeptAtStop::InTurn)
+    );
+    fixture
+        .nexus
+        .codex_turns
+        .observe(&thread, TurnEvent::Completed("turn-1".into()));
+    assert_eq!(
+        fixture.nexus.settle_stopped("908786"),
+        AtStop::Refreshed(seat_address())
+    );
+    assert!(closed(&fixture), "the resting Codex pane may now close");
+    assert_eq!(lifecycle(&fixture, "908786"), FlowLifecycle::Stopped);
+    let metaflow = seat_metaflow_now(&fixture);
+    assert_eq!(metaflow.state, State::Asleep);
+    assert_eq!(metaflow.past, vec!["908786".to_owned()]);
 }
 
 fn now_transcript_time() -> String {

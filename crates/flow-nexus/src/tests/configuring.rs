@@ -800,7 +800,7 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     let ask = |nexus: &RunningNexus, text: &str| -> String {
         let mut budget = Budget {
             remaining: 65536,
-            reader: ReaderBudget { remaining: 65536 },
+            reader: ReaderBudget::try_from(65536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1024,
         };
@@ -861,7 +861,7 @@ fn configured_counters_are_kept_across_a_reopen() {
     let ask = |nexus: &RunningNexus, text: &str| -> String {
         let mut budget = Budget {
             remaining: 65536,
-            reader: ReaderBudget { remaining: 65536 },
+            reader: ReaderBudget::try_from(65536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1024,
         };

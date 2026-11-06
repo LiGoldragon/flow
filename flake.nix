@@ -122,6 +122,32 @@
                 '';
               }
             );
+          # One named test across the workspace, run exactly once, for a
+          # test that drives the workspace's own CLIs, which a test of one
+          # package does not build.
+          exactWorkspaceTest =
+            testName:
+            craneLib.mkCargoDerivation (
+              commonArgs
+              // {
+                inherit cargoArtifacts;
+                pnameSuffix = "-test";
+                doCheck = true;
+                buildPhaseCargoCommand = "";
+                checkPhaseCargoCommand = ''
+                  cargoWithProfile test --locked --workspace ${testName} -- --exact 2>&1 | tee exact-test.log
+                  status=''${PIPESTATUS[0]}
+                  if [ "$status" -ne 0 ]; then
+                    exit "$status"
+                  fi
+                  ran=$(grep -cFx "test ${testName} ... ok" exact-test.log || true)
+                  if [ "$ran" -ne 1 ]; then
+                    echo "exact test ${testName} ran $ran times; it must run once" >&2
+                    exit 1
+                  fi
+                '';
+              }
+            );
         in
         {
           inherit
@@ -131,6 +157,7 @@
             commonArgs
             cargoArtifacts
             exactTest
+            exactWorkspaceTest
             lawSource
             ;
         };
@@ -652,6 +679,11 @@
             "tests::configuring::protected_addresses_persist_across_reopen";
           flow-store-0530-opens-unprotected = context.exactTest "flow-nexus"
             "store::tests::a_store_0530_wrote_opens_with_no_address_protected";
+          # 0.53.1: protos 0.33, datom-codec 0.33, signal 10.3: a Send holding
+          # nested and escaped guillemets round-trips through the real CLIs
+          # and the Nexus.
+          flow-send-guillemets-round-trip = context.exactWorkspaceTest
+            "tests::send_admission::a_send_with_nested_and_escaped_guillemets_round_trips_through_the_cli_and_the_nexus";
         }
       );
 

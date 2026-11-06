@@ -7,12 +7,12 @@ use protos::{Compactable, Protosizable, ReaderBudget};
 // The waking of the ruled contract (bie3-1 2.5): four inputs, oldest first,
 // one top-level vector; the same Address under two FlowIds, the living, and
 // Flow itself.
-const WAKING: &str = "[ { logical-delivery-7 Flow.{ { Psyche vision Fable } f94581 } Soft.Order.{ 30 «Draft the proposal.» } } { logical-delivery-8 Living Soft.Psyche.[ { «a context» «the living said { braces }» } ] } { logical-delivery-9 Flow.{ { Psyche vision Fable } e3a1b2 } MiddleAbrupt.Result.{ logical-delivery-7 «Done.» } } { logical-delivery-10 Notification HardAbrupt.Notice.«a datom inside: { x }» } ]";
+const WAKING: &str = "[ { logical-delivery-7 Flow.{ { Psyche vision Fable } f94581 } Soft.Order.{ 30 «Draft the proposal.» } } { logical-delivery-8 Living Soft.Psyche.[ { «a context» «the living said { braces }» } ] } { logical-delivery-9 Flow.{ { Psyche vision Fable } e3a1b2 } MiddleAbrupt.Result.{ logical-delivery-7 Done. } } { logical-delivery-10 Notification HardAbrupt.Notice.«a datom inside: { x }» } ]";
 
 fn budget() -> Budget {
     Budget {
         remaining: 4096,
-        reader: ReaderBudget { remaining: 4096 },
+        reader: ReaderBudget::try_from(4096).expect("a constant reader budget"),
         depth: 0,
         maximum_depth: 1024,
     }

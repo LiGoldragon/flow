@@ -14,7 +14,7 @@ fn main() {
     };
     let budget = || Budget {
         remaining: 65_536,
-        reader: ReaderBudget { remaining: 65_536 },
+        reader: ReaderBudget::try_from(65_536).expect("a constant reader budget"),
         depth: 0,
         maximum_depth: 1_024,
     };

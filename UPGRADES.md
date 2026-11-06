@@ -22,6 +22,20 @@ composed only after the old harness was closed, so a refused composition
   retried as any Failed record: once composition works, the same session
   resumes.
 
+## protos 0.33, datom-codec 0.33, signal 10.3
+
+Pins signal-flow 50.0.0 (8143240) and meta-signal-flow 63.0.0 (6fe04a7),
+both rebuilt on signal 10.3.0 (7afb68b), datom-codec 0.33.0 (eabead4) and
+protos 0.33.0 (3c7ade3). Flow pins datom-codec and protos by the revs signal
+names, so a build holds one of each.
+
+- A guillemet string is read by balance: `«Title «The Belief Nexus made
+  small»»` is one string, its inner pair content; an unbalanced guillemet
+  inside one is escaped, `«an unbalanced \» inside»`. Each goes from the
+  flow CLI through the Nexus and back out of flow-meta byte for byte.
+- A bare String prints bare: `«!»` prints `!`, `«Begin.»` prints `Begin.`;
+  both forms read the same.
+
 ## A protected Address
 
 Pins signal-flow 49.0.0 (3030a8c) and meta-signal-flow 62.0.0 (1d0b314).

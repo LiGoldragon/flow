@@ -54,7 +54,7 @@ impl ParsesStart for [String] {
         };
         let mut budget = Budget {
             remaining: 65_536,
-            reader: ReaderBudget { remaining: 65_536 },
+            reader: ReaderBudget::try_from(65_536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1_024,
         };
@@ -360,7 +360,7 @@ trait RunsConfigurationStartup {
         let source = format!("Store.{{ {path} {reason} }}");
         let mut budget = Budget {
             remaining: 65_536,
-            reader: ReaderBudget { remaining: 65_536 },
+            reader: ReaderBudget::try_from(65_536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1_024,
         };
@@ -507,7 +507,7 @@ mod tests {
         .expect("Start refusal is an authored Flow datom");
         let mut budget = Budget {
             remaining: 65_536,
-            reader: ReaderBudget { remaining: 65_536 },
+            reader: ReaderBudget::try_from(65_536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1_024,
         };
@@ -624,7 +624,7 @@ mod tests {
         let text = "Configure.Counters.{ 120 45 300 }";
         let mut budget = Budget {
             remaining: 65536,
-            reader: ReaderBudget { remaining: 65536 },
+            reader: ReaderBudget::try_from(65536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1024,
         };

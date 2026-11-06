@@ -371,7 +371,7 @@ mod tests {
     fn budget() -> datom_codec::Budget {
         datom_codec::Budget {
             remaining: 65536,
-            reader: protos::ReaderBudget { remaining: 65536 },
+            reader: protos::ReaderBudget::try_from(65536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1024,
         }

@@ -138,8 +138,18 @@ name = "datom-codec"
 version = "0.32.2"
 source = "git+https://github.com/LiGoldragon/datom-codec?rev=4dff16b4f7412febc3b71aac8b49680cd20988cb#4dff16b4f7412febc3b71aac8b49680cd20988cb"
 dependencies = [
- "datom-codec-derive",
- "protos",
+ "datom-codec-derive 0.32.0",
+ "protos 0.32.2",
+ "rkyv",
+]
+
+[[package]]
+name = "datom-codec"
+version = "0.33.0"
+source = "git+https://github.com/LiGoldragon/datom-codec?rev=eabead4#eabead48b31e8d4f429d7fb156dd18548bbd79c1"
+dependencies = [
+ "datom-codec-derive 0.32.3",
+ "protos 0.33.0",
  "rkyv",
 ]
 
@@ -147,6 +157,16 @@ dependencies = [
 name = "datom-codec-derive"
 version = "0.32.0"
 source = "git+https://github.com/LiGoldragon/datom-codec?rev=4dff16b4f7412febc3b71aac8b49680cd20988cb#4dff16b4f7412febc3b71aac8b49680cd20988cb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "datom-codec-derive"
+version = "0.32.3"
+source = "git+https://github.com/LiGoldragon/datom-codec?rev=eabead4#eabead48b31e8d4f429d7fb156dd18548bbd79c1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -181,13 +201,13 @@ dependencies = [
 
 [[package]]
 name = "ethos-zero"
-version = "16.0.0"
-source = "git+https://github.com/LiGoldragon/ethos-zero?rev=c2653dd82adbdb1f1f2f654405c6620e0d06fd58#c2653dd82adbdb1f1f2f654405c6620e0d06fd58"
+version = "17.0.0"
+source = "git+https://github.com/LiGoldragon/ethos-zero?rev=07714b0171802787bea1eefe4caa2d826d9c4030#07714b0171802787bea1eefe4caa2d826d9c4030"
 dependencies = [
- "datom-codec",
+ "datom-codec 0.32.2",
  "prettyplease",
  "proc-macro2",
- "protos",
+ "protos 0.32.2",
  "quote",
  "rkyv",
  "syn 3.0.6",
@@ -195,13 +215,13 @@ dependencies = [
 
 [[package]]
 name = "ethos-zero"
-version = "17.0.0"
-source = "git+https://github.com/LiGoldragon/ethos-zero?rev=07714b0171802787bea1eefe4caa2d826d9c4030#07714b0171802787bea1eefe4caa2d826d9c4030"
+version = "19.2.0"
+source = "git+https://github.com/LiGoldragon/ethos-zero?rev=5a5daca#5a5daca315ab24460ccbcd5038130c453e853e6e"
 dependencies = [
- "datom-codec",
+ "datom-codec 0.33.0",
  "prettyplease",
  "proc-macro2",
- "protos",
+ "protos 0.33.0",
  "quote",
  "rkyv",
  "syn 3.0.6",
@@ -223,11 +243,11 @@ checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 name = "flow"
 version = "0.53.1"
 dependencies = [
- "datom-codec",
+ "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
  "flow-ethos",
  "flow-native",
- "protos",
+ "protos 0.33.0",
  "rkyv",
  "serde_json",
  "signal-flow",
@@ -242,9 +262,9 @@ version = "0.53.1"
 name = "flow-ethos"
 version = "0.53.1"
 dependencies = [
- "datom-codec",
+ "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
- "protos",
+ "protos 0.33.0",
  "rkyv",
 ]
 
@@ -252,11 +272,11 @@ dependencies = [
 name = "flow-meta"
 version = "0.53.1"
 dependencies = [
- "datom-codec",
+ "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
  "flow-ethos",
  "meta-signal-flow",
- "protos",
+ "protos 0.33.0",
  "rkyv",
  "signal-flow",
  "tempfile",
@@ -274,7 +294,7 @@ name = "flow-nexus"
 version = "0.53.1"
 dependencies = [
  "base64",
- "datom-codec",
+ "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
  "flow",
  "flow-defaults",
@@ -283,7 +303,7 @@ dependencies = [
  "libc",
  "meta-signal-flow",
  "notify",
- "protos",
+ "protos 0.33.0",
  "redb",
  "rkyv",
  "rustix",
@@ -479,13 +499,13 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "meta-signal-flow"
-version = "62.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=1d0b3148ddea89cb1d2ede5a8a3162a841b236d0#1d0b3148ddea89cb1d2ede5a8a3162a841b236d0"
+version = "63.0.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=6fe04a7874fd000a4026eaa1d4c5c0fb93595e66#6fe04a7874fd000a4026eaa1d4c5c0fb93595e66"
 dependencies = [
- "datom-codec",
+ "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
  "flow-ethos",
- "protos",
+ "protos 0.33.0",
  "rkyv",
  "signal",
  "signal-flow",
@@ -594,6 +614,14 @@ dependencies = [
 name = "protos"
 version = "0.32.2"
 source = "git+https://github.com/LiGoldragon/protos?rev=15b41da8f2579e73ead59bc0c2b97529b8ac32d3#15b41da8f2579e73ead59bc0c2b97529b8ac32d3"
+dependencies = [
+ "rkyv",
+]
+
+[[package]]
+name = "protos"
+version = "0.33.0"
+source = "git+https://github.com/LiGoldragon/protos?rev=3c7ade3#3c7ade34010cec6cec153ae694ee335f7fea0193"
 dependencies = [
  "rkyv",
 ]
@@ -847,26 +875,25 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "signal"
-version = "8.0.0"
-source = "git+https://github.com/LiGoldragon/signal?rev=e0e3c05573405e793037205640e54cfd769bb1b4#e0e3c05573405e793037205640e54cfd769bb1b4"
+version = "10.3.0"
+source = "git+https://github.com/LiGoldragon/signal?rev=7afb68bcd19ce774f47d11c5e69f6e10054f78de#7afb68bcd19ce774f47d11c5e69f6e10054f78de"
 dependencies = [
- "blake3",
- "datom-codec",
- "ethos-zero 16.0.0",
- "protos",
+ "datom-codec 0.33.0",
+ "ethos-zero 19.2.0",
+ "protos 0.33.0",
  "rkyv",
  "thiserror",
 ]
 
 [[package]]
 name = "signal-flow"
-version = "49.0.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=3030a8c322b67d8093f990a4f6ba68f93a8129cc#3030a8c322b67d8093f990a4f6ba68f93a8129cc"
+version = "50.0.0"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=8143240cbc9e46dd2558c9caed2f0ae60823060c#8143240cbc9e46dd2558c9caed2f0ae60823060c"
 dependencies = [
- "datom-codec",
+ "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
  "flow-ethos",
- "protos",
+ "protos 0.33.0",
  "rkyv",
  "signal",
 ]

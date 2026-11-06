@@ -519,7 +519,7 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
     let typed = fixture.typed().expect("typed into the live pane");
     let mut budget = datom_codec::Budget {
         remaining: 65536,
-        reader: protos::ReaderBudget { remaining: 65536 },
+        reader: protos::ReaderBudget::try_from(65536).expect("a constant reader budget"),
         depth: 0,
         maximum_depth: 1024,
     };

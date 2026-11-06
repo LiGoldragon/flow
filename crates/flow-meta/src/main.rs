@@ -26,7 +26,7 @@ impl ParsesMetaDatom for FlowMetaClient {
     fn parse_datom<T: datom_codec::Composing>(source: String, subject: &str) -> Result<T, String> {
         let mut budget = Budget {
             remaining: 65_536,
-            reader: ReaderBudget { remaining: 65_536 },
+            reader: ReaderBudget::try_from(65_536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1_024,
         };
@@ -49,7 +49,7 @@ impl ParsesMetaCommand for FlowMetaClient {
         }
         let mut budget = Budget {
             remaining: 65_536,
-            reader: ReaderBudget { remaining: 65_536 },
+            reader: ReaderBudget::try_from(65_536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1_024,
         };

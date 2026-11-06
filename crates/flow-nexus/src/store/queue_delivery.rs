@@ -2415,7 +2415,7 @@ mod tests {
             let text = response.datomize(Path::new()).protosize().compact();
             let mut budget = Budget {
                 remaining: 65536,
-                reader: ReaderBudget { remaining: 65536 },
+                reader: ReaderBudget::try_from(65536).expect("a constant reader budget"),
                 depth: 0,
                 maximum_depth: 1024,
             };

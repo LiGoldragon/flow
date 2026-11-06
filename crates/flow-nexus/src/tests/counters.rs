@@ -26,7 +26,7 @@ fn ask(fixture: &NexusFixture, text: &str) -> String {
     use protos::{Compactable, Protosizable, ReaderBudget};
     let mut budget = Budget {
         remaining: 65536,
-        reader: ReaderBudget { remaining: 65536 },
+        reader: ReaderBudget::try_from(65536).expect("a constant reader budget"),
         depth: 0,
         maximum_depth: 1024,
     };

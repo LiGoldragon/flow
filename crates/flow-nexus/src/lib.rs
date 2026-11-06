@@ -33,6 +33,7 @@ pub mod compacting;
 pub mod composition;
 pub mod context;
 pub mod delivery;
+pub mod handover;
 pub mod lean;
 pub(crate) mod message_projection;
 mod metaflow;
@@ -1598,6 +1599,7 @@ mod tests {
     mod curriculum;
     mod delivery;
     mod ending;
+    mod handover;
     mod heartbeat_production;
     mod launching_nexus;
     mod model;

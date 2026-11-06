@@ -710,6 +710,27 @@
             "tests::curriculum::a_real_478c_rejected_frame_is_a_composer_rejection_carrying_its_text";
           flow-curriculum-478c-startup-composed-frame = context.exactTest "flow-nexus"
             "tests::curriculum::a_real_478c_startup_composed_frame_reads_and_verifies";
+          # 0.53.1: a successor's first prompt ends with its predecessor's handover.
+          flow-handover-waking-successor-last-whole = context.exactTest "flow-nexus"
+            "tests::handover::a_waking_successor_is_given_its_predecessors_handover_last_whole";
+          flow-handover-refresh-successor-last-whole = context.exactTest "flow-nexus"
+            "tests::handover::a_refresh_successor_is_given_its_predecessors_handover_last_whole";
+          flow-handover-absent-first-prompt-unchanged = context.exactTest "flow-nexus"
+            "tests::handover::a_successor_whose_predecessor_left_no_file_has_its_first_prompt_unchanged";
+          flow-handover-unreadable-launch-goes-on = context.exactTest "flow-nexus"
+            "tests::handover::a_handover_that_cannot_be_read_does_not_stop_the_successor";
+          flow-handover-last-bytes-either-harness = context.exactTest "flow-nexus"
+            "tests::handover::the_handover_is_the_last_bytes_of_the_first_prompt_on_either_harness";
+          flow-handover-restart-none = context.exactTest "flow-nexus"
+            "tests::handover::a_launch_naming_no_predecessor_is_given_no_handover";
+          flow-handover-large-last-whole-part = context.exactTest "flow-nexus"
+            "tests::handover::a_handover_larger_than_the_rest_of_the_message_is_the_last_whole_part";
+          flow-handover-simplified = context.exactTest "flow-nexus"
+            "tests::handover::a_simplified_flow_is_given_the_handover_after_its_first_message_only";
+          flow-handover-file-source = context.exactTest "flow-nexus"
+            "tests::handover::the_file_source_reads_a_predecessors_file_under_the_launch_root_only";
+          flow-handover-permission-denied-unreadable = context.exactTest "flow-nexus"
+            "tests::handover::a_file_the_nexus_may_not_read_is_unreadable";
           flow-restart-not-composed-refused-then-recovered = context.exactTest "flow-nexus"
             "tests::restarting::restart_not_composed_refused_then_recovered";
           flow-restart-not-composed-owner-stop = context.exactTest "flow-nexus"

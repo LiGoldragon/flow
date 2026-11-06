@@ -1,0 +1,64 @@
+//! The handover a successor flow is given: its predecessor's handover text,
+//! placed whole and last in the successor's first prompt.
+//!
+//! The composition asks one source, [`YieldsHandover`], for the text of a
+//! predecessor and places whatever it yields; where the text lives is the
+//! source's alone. [`HandoverFile`] is the source of today: the predecessor's
+//! `flows/<FlowId>/handover.md`, resolved against the launch root the
+//! successor runs in. A source that reads another store replaces it in
+//! [`crate::composition::OpensLaunchComposer::with_handover_source`]; the order of
+//! the prompt does not change.
+
+use std::path::Path;
+
+/// What a source holds of a predecessor's handover.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Handover {
+    /// The predecessor left none: nothing is placed.
+    Absent,
+    /// The handover text, to be placed whole.
+    Text(String),
+    /// The source holds one it could not read, with the reason. The launch
+    /// goes on without it and the Nexus logs the reason.
+    Unreadable(String),
+}
+
+/// Yields the handover of a predecessor flow.
+///
+/// `launch_root` is the root the successor runs in; a source that is not
+/// kept under a root ignores it.
+pub trait YieldsHandover: std::fmt::Debug + Send + Sync {
+    fn handover(&self, predecessor: &str, launch_root: &Path) -> Handover;
+}
+
+/// The file-backed source: `flows/<predecessor FlowId>/handover.md` under
+/// the launch root. A missing file, or an empty one, is [`Handover::Absent`];
+/// a file that cannot be read, or is not UTF-8, is [`Handover::Unreadable`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HandoverFile;
+
+impl YieldsHandover for HandoverFile {
+    fn handover(&self, predecessor: &str, launch_root: &Path) -> Handover {
+        // A FlowId names a directory: letters, digits, hyphen and underscore.
+        let names_a_flow = !predecessor.is_empty()
+            && predecessor
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+        if !names_a_flow {
+            return Handover::Unreadable(format!("{predecessor:?} does not name a flow"));
+        }
+        let path = launch_root
+            .join("flows")
+            .join(predecessor)
+            .join("handover.md");
+        match std::fs::read(&path) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) if text.is_empty() => Handover::Absent,
+                Ok(text) => Handover::Text(text),
+                Err(_) => Handover::Unreadable(format!("{} is not UTF-8", path.display())),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Handover::Absent,
+            Err(error) => Handover::Unreadable(format!("{}: {error}", path.display())),
+        }
+    }
+}

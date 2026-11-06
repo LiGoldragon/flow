@@ -4462,7 +4462,7 @@ fn a_codex_first_turn_starts_after_the_tui_attached_and_a_long_turn_refuses_noth
 
     let response = fixture.nexus.dispatch_serially(
         signal_flow::Query::Start(setup.sender.clone()),
-        Origin::Unbound,
+        Origin::Unbound.into(),
     );
 
     let calls = fs::read_to_string(setup.world.state.join("calls")).unwrap_or_default();
@@ -4494,7 +4494,7 @@ fn a_refused_codex_start_archives_its_idle_thread_and_starts_no_turn() {
 
     let response = fixture.nexus.dispatch_serially(
         signal_flow::Query::Start(setup.sender.clone()),
-        Origin::Unbound,
+        Origin::Unbound.into(),
     );
 
     let signal_flow::Response::StartRejected(signal_flow::StartRejection::HarnessSpawnRefused(
@@ -4713,7 +4713,7 @@ fn a_launch_interrupted_with_its_first_call_pending_is_refused_archived_and_sett
     assert_eq!(
         fixture.nexus.dispatch_serially(
             signal_flow::Query::Start(setup.sender.clone()),
-            Origin::Unbound
+            Origin::Unbound.into()
         ),
         signal_flow::Response::StartRejected(refused)
     );

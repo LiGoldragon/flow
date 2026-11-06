@@ -118,6 +118,15 @@ const META_HEARTBEAT_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_heartbeat_configuration");
 const META_HEARTBEAT_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-heartbeat-configuration";
 const META_HEARTBEAT_CONFIGURATION_SCHEMA: &str = "flow-nexus-meta-heartbeat-configuration-v2";
+const META_PROTECTED_ADDRESS_CONFIGURATION_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_meta_protected_address_configuration");
+const META_PROTECTED_ADDRESS_CONFIGURATION_FAMILY: &str =
+    "flow-nexus-meta-protected-address-configuration";
+const META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA: &str =
+    "flow-nexus-meta-protected-address-configuration-v1";
+/// The families 0.53.1 added. A store 0.53.0 wrote holds every other
+/// family and none of these; it is opened, and each is registered empty.
+const ADDED_IN_0531: &[&str] = &["flow_nexus_meta_protected_address_configuration"];
 const HEARTBEAT_STANDING_TABLE_NAME: TableName = TableName::new("flow_nexus_heartbeat_standings");
 const HEARTBEAT_STANDING_FAMILY: &str = "flow-nexus-heartbeat-standing";
 const HEARTBEAT_STANDING_SCHEMA: &str = "flow-nexus-heartbeat-standing-v2";
@@ -142,6 +151,7 @@ const CONFIGURATION_ONLY_TABLES: &[&str] = &[
     "flow_nexus_meta_harness_flags_configuration",
     "flow_nexus_meta_heartbeat_configuration",
     "flow_nexus_meta_metaflow_configuration",
+    "flow_nexus_meta_protected_address_configuration",
 ];
 /// The tables a running store holds, all of them.
 const RUNNING_TABLES: &[&str] = &[
@@ -194,6 +204,7 @@ const RUNNING_TABLES: &[&str] = &[
     "flow_nexus_heartbeat_standings",
     "flow_nexus_restarts",
     "flow_nexus_seat_births",
+    "flow_nexus_meta_protected_address_configuration",
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -855,6 +866,42 @@ impl DescribesHeartbeatTable for StoredMetaHeartbeatConfiguration {
     }
 }
 
+/// One protected Address, one row per Address; none by default.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredMetaProtectedAddressConfiguration {
+    address: Address,
+}
+
+impl EngineRecord for StoredMetaProtectedAddressConfiguration {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.address))
+    }
+}
+
+impl MemoryDefinition for StoredMetaProtectedAddressConfiguration {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA)
+    }
+}
+
+trait DescribesProtectedAddressTable {
+    fn descriptor() -> TableDescriptor<StoredMetaProtectedAddressConfiguration>;
+}
+
+impl DescribesProtectedAddressTable for StoredMetaProtectedAddressConfiguration {
+    fn descriptor() -> TableDescriptor<StoredMetaProtectedAddressConfiguration> {
+        TableDescriptor::new(
+            META_PROTECTED_ADDRESS_CONFIGURATION_TABLE_NAME,
+            FamilyName::new(META_PROTECTED_ADDRESS_CONFIGURATION_FAMILY),
+            SchemaHash::for_label(META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA),
+        )
+    }
+}
+
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredHeartbeatStanding {
     pub address: Address,
@@ -1414,6 +1461,7 @@ pub(crate) struct MetaConfigurationTables {
     default_minutes: TableReference<StoredMetaDefaultMinutesConfiguration>,
     harness_flags: TableReference<StoredMetaHarnessFlagsConfiguration>,
     heartbeat: TableReference<StoredMetaHeartbeatConfiguration>,
+    protected_addresses: TableReference<StoredMetaProtectedAddressConfiguration>,
 }
 
 trait RegistersMetaConfigurationTables: Sized {
@@ -1437,6 +1485,8 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             harness_flags: engine
                 .register_table(StoredMetaHarnessFlagsConfiguration::descriptor())?,
             heartbeat: engine.register_table(StoredMetaHeartbeatConfiguration::descriptor())?,
+            protected_addresses: engine
+                .register_table(StoredMetaProtectedAddressConfiguration::descriptor())?,
             metaflows: engine.register_table(
                 <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor(),
             )?,
@@ -1549,6 +1599,7 @@ pub struct ConfiguredFamilies {
     pub default_minutes: i64,
     pub configured_harness_flags: Vec<ConfigureHarnessFlags>,
     pub heartbeat: Option<HeartbeatConfig>,
+    pub protected_addresses: Vec<Address>,
 }
 
 pub trait CompletesSnapshot {
@@ -1569,6 +1620,7 @@ impl CompletesSnapshot for ConfiguredFamilies {
             default_minutes: self.default_minutes,
             configured_harness_flags: self.configured_harness_flags,
             heartbeat: self.heartbeat,
+            protected_addresses: self.protected_addresses,
             counters,
         }
     }
@@ -1635,6 +1687,8 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let meta_default_minutes_descriptor = StoredMetaDefaultMinutesConfiguration::descriptor();
         let meta_harness_flags_descriptor = StoredMetaHarnessFlagsConfiguration::descriptor();
         let meta_heartbeat_descriptor = StoredMetaHeartbeatConfiguration::descriptor();
+        let meta_protected_addresses_descriptor =
+            StoredMetaProtectedAddressConfiguration::descriptor();
         let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         let meta_metaflows_descriptor = <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor();
@@ -1656,6 +1710,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_default_minutes_descriptor)
                 .with_family(&meta_harness_flags_descriptor)
                 .with_family(&meta_heartbeat_descriptor)
+                .with_family(&meta_protected_addresses_descriptor)
                 .with_family(&meta_metaflows_descriptor),
         )?;
         let state = engine.register_table(state_descriptor)?;
@@ -1672,6 +1727,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             default_minutes: engine.register_table(meta_default_minutes_descriptor)?,
             harness_flags: engine.register_table(meta_harness_flags_descriptor)?,
             heartbeat: engine.register_table(meta_heartbeat_descriptor)?,
+            protected_addresses: engine.register_table(meta_protected_addresses_descriptor)?,
             metaflows: engine.register_table(meta_metaflows_descriptor)?,
         };
         if !recognized {
@@ -2204,6 +2260,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&StoredMetaDefaultMinutesConfiguration::descriptor())
                 .with_family(&StoredMetaHarnessFlagsConfiguration::descriptor())
                 .with_family(&StoredMetaHeartbeatConfiguration::descriptor())
+                .with_family(&StoredMetaProtectedAddressConfiguration::descriptor())
                 .with_family(&compactions_descriptor)
                 .with_family(&reminders_descriptor)
                 .with_family(&successor_intents_descriptor)
@@ -2540,6 +2597,8 @@ pub(crate) trait ManagesMetaflowState: Sized {
     /// Replace one configuration family whole with its declaration.
     fn configure_change(&self, change: ConfigurationChange)
     -> Result<ConfigureOutcome, StoreError>;
+    /// Whether ProtectedAddresses names `address`.
+    fn protects(&self, address: &Address) -> Result<bool, StoreError>;
     /// The refresh threshold configured for one model, if any.
     fn configured_threshold(
         &self,
@@ -2600,6 +2659,18 @@ impl ManagesMetaflowState for FlowStore {
                 &self.meta_configuration_tables,
                 change,
             ),
+        }
+    }
+
+    fn protects(&self, address: &Address) -> Result<bool, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.meta_configuration_tables.protected_addresses,
+            RecordKey::new(FlowStore::address_record_key(address)),
+        ))?;
+        match rows.records() {
+            [] => Ok(false),
+            [stored] if &stored.address == address => Ok(true),
+            _ => Err(StoreError::StateInvariant),
         }
     }
 
@@ -4543,6 +4614,10 @@ pub(crate) trait ReadsFlowMemory {
                 META_HEARTBEAT_CONFIGURATION_FAMILY,
                 META_HEARTBEAT_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_meta_protected_address_configuration" => (
+                META_PROTECTED_ADDRESS_CONFIGURATION_FAMILY,
+                META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA,
+            ),
             "flow_nexus_send_outcome_counter" => {
                 (send_outcome::COUNTER_FAMILY, send_outcome::COUNTER_SCHEMA)
             }
@@ -4646,10 +4721,16 @@ pub(crate) trait ReadsFlowMemory {
     }
 
     /// The catalog of a configuration-only store or of a running store,
-    /// whole: every table of the one, and none other.
+    /// whole: every table of the one and none other, or, as 0.53.0 wrote
+    /// it, every table but the ones 0.53.1 added.
     fn has_expected_flow_catalog(actual: &std::collections::BTreeSet<String>) -> bool {
         let is = |tables: &[&str]| {
-            actual.len() == tables.len() && tables.iter().all(|name| actual.contains(*name))
+            actual.iter().all(|name| tables.contains(&name.as_str()))
+                && tables
+                    .iter()
+                    .all(|name| actual.contains(*name) || ADDED_IN_0531.contains(name))
+                && (ADDED_IN_0531.iter().all(|name| actual.contains(*name))
+                    || ADDED_IN_0531.iter().all(|name| !actual.contains(*name)))
         };
         is(CONFIGURATION_ONLY_TABLES) || is(RUNNING_TABLES)
     }
@@ -4847,6 +4928,8 @@ pub(crate) trait ReadsFlowMemory {
         let default_minutes_rows = engine.match_records(QueryPlan::all(tables.default_minutes))?;
         let harness_flags_rows = engine.match_records(QueryPlan::all(tables.harness_flags))?;
         let heartbeat_rows = engine.match_records(QueryPlan::all(tables.heartbeat))?;
+        let protected_address_rows =
+            engine.match_records(QueryPlan::all(tables.protected_addresses))?;
         let metaflow_rows = engine.match_records(QueryPlan::all(tables.metaflows))?;
         if models_rows.database_marker() != marker
             || metaflow_rows.database_marker() != marker
@@ -4857,6 +4940,7 @@ pub(crate) trait ReadsFlowMemory {
             || default_minutes_rows.database_marker() != marker
             || harness_flags_rows.database_marker() != marker
             || heartbeat_rows.database_marker() != marker
+            || protected_address_rows.database_marker() != marker
             || engine.current_database_marker()? != marker
         {
             return Err(StoreError::ConfigurationReadViewChanged);
@@ -4922,6 +5006,12 @@ pub(crate) trait ReadsFlowMemory {
             .collect::<Vec<_>>();
         configured_harness_flags
             .sort_by_key(|configured| FlowStore::address_record_key(&configured.address));
+        let mut protected_addresses = protected_address_rows
+            .records()
+            .iter()
+            .map(|stored| stored.address.clone())
+            .collect::<Vec<_>>();
+        protected_addresses.sort_by_key(FlowStore::address_record_key);
         Ok(Some(ConfiguredFamilies {
             nexus,
             models,
@@ -4933,6 +5023,7 @@ pub(crate) trait ReadsFlowMemory {
             default_minutes,
             configured_harness_flags,
             heartbeat,
+            protected_addresses,
         }))
     }
 
@@ -5030,6 +5121,7 @@ pub(crate) trait ReadsFlowMemory {
             ConfigurationChange::Heartbeat(Some(config)) => {
                 config.heartbeat_recipients.iter().collect()
             }
+            ConfigurationChange::ProtectedAddresses(addresses) => addresses.iter().collect(),
             _ => Vec::new(),
         };
         if let Some(refused) = addresses
@@ -5168,6 +5260,16 @@ pub(crate) trait ReadsFlowMemory {
                     heartbeat
                         .into_iter()
                         .map(|heartbeat| StoredMetaHeartbeatConfiguration { heartbeat })
+                        .collect(),
+                )
+            }
+            ConfigurationChange::ProtectedAddresses(addresses) => {
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.protected_addresses,
+                    addresses
+                        .into_iter()
+                        .map(|address| StoredMetaProtectedAddressConfiguration { address })
                         .collect(),
                 )
             }
@@ -7319,6 +7421,64 @@ mod tests {
                 .map(|table| (*table).to_owned())
                 .collect::<std::collections::BTreeSet<_>>()
         );
+    }
+
+    /// A store 0.53.0 wrote holds every running family but the one 0.53.1
+    /// added, ProtectedAddresses: it is opened, that family registered
+    /// empty, and nothing is protected. A store missing any other family is
+    /// still refused, byte for byte as it was.
+    #[test]
+    fn a_store_0530_wrote_opens_with_no_address_protected() {
+        use super::ManagesMetaflowState;
+        let strip = |path: &std::path::Path, table: &str| {
+            let database = redb::Database::open(path).expect("store opens raw");
+            let write = database.begin_write().expect("write starts");
+            {
+                let mut catalog = write
+                    .open_table(super::SEMA_CATALOG_TABLE)
+                    .expect("catalog opens");
+                assert!(
+                    catalog
+                        .remove(table)
+                        .expect("catalog entry removed")
+                        .is_some()
+                );
+            }
+            // A family no row was written to has no table of its own yet;
+            // one that has is dropped with its rows.
+            write
+                .delete_table(redb::TableDefinition::<&str, &[u8]>::new(table))
+                .expect("table dropped");
+            write.commit().expect("strip commits");
+        };
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        drop(fixture.configured_store());
+        strip(
+            &fixture.path(),
+            "flow_nexus_meta_protected_address_configuration",
+        );
+        let store = fixture.configured_store();
+        assert_eq!(
+            store
+                .configuration_snapshot()
+                .expect("snapshot reads")
+                .expect("configured")
+                .protected_addresses,
+            Vec::<signal_flow::Address>::new()
+        );
+        drop(store);
+
+        let other = StoreFixture::new();
+        other.configured();
+        drop(other.configured_store());
+        strip(&other.path(), "flow_nexus_meta_heartbeat_configuration");
+        let before = std::fs::read(other.path()).expect("store reads");
+        assert!(matches!(
+            FlowStore::open_configured(&other.path()),
+            Err(super::StoreError::UnrecognizedMemory { .. })
+        ));
+        assert_eq!(std::fs::read(other.path()).expect("store rereads"), before);
     }
 
     /// A crash-left copy goes at the next open, one that adds nothing

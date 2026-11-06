@@ -148,7 +148,7 @@ fn a_refresh_ends_the_awake_flow_without_a_turn_and_leaves_the_metaflow_asleep()
     assert_eq!(
         fixture
             .nexus
-            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound),
+            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound.into()),
         Response::Refreshed(Refreshed {
             address: seat_address(),
             flow_id: CLAUDE_SEAT.into(),
@@ -232,7 +232,7 @@ fn a_refresh_is_refused_locked_while_another_holds_the_metaflow() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound),
+            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound.into()),
         Response::RefreshRejected(RefreshRejection::Locked)
     );
     assert!(!closed(&fixture), "nothing is closed while the hold stands");
@@ -243,7 +243,7 @@ fn a_refresh_is_refused_locked_while_another_holds_the_metaflow() {
     assert!(matches!(
         fixture
             .nexus
-            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound),
+            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound.into()),
         Response::Refreshed(_)
     ));
     assert_eq!(stored(&fixture).state, State::Asleep);
@@ -359,7 +359,7 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
         let refreshing = scope.spawn(|| {
             fixture
                 .nexus
-                .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound)
+                .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound.into())
         });
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while !closing.exists() {

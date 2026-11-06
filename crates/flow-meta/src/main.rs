@@ -208,13 +208,25 @@ mod tests {
     }
 
     #[test]
-    fn refresh_is_not_a_request() {
-        // Every wake is fresh, so no request marks one.
+    fn refresh_and_restart_are_the_meta_surface_s_own() {
+        // The meta surface refreshes an Address and restarts a flow, a
+        // protected Address's included.
         let client = FlowMetaClient;
-        assert!(
+        assert_eq!(
             client
                 .parse_query(["Refresh.{ Mind flow Sol }".to_owned()].into_iter())
-                .is_err()
+                .expect("Refresh parses"),
+            Query::Refresh(signal_flow::Address {
+                aspect: signal_flow::Aspect::Mind,
+                topic: "flow".into(),
+                model: signal_flow::Model::Sol,
+            })
+        );
+        assert_eq!(
+            client
+                .parse_query(["Restart.c1a0de".to_owned()].into_iter())
+                .expect("Restart parses"),
+            Query::Restart("c1a0de".into())
         );
     }
 
@@ -294,6 +306,7 @@ mod tests {
             investigation: None,
             default_minutes: 30,
             heartbeat: None,
+            protected_addresses: vec![],
             counters: meta_signal_flow::ConfigureCounters {
                 logical_delivery: 1,
                 queue_attempt: 3,

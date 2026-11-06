@@ -510,6 +510,7 @@ fn each_family_is_its_last_declaration() {
             investigation: None,
             default_minutes: crate::store::SEEDED_DEFAULT_MINUTES,
             heartbeat: None,
+            protected_addresses: vec![],
             counters: meta_signal_flow::ConfigureCounters {
                 logical_delivery: 1,
                 queue_attempt: 3,
@@ -816,7 +817,7 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     let nexus = fixture.open();
     let seeded = ask(&nexus, "Configuration");
     assert!(
-        seeded.ends_with(" None 30 None { 1 3 1 } }"),
+        seeded.ends_with(" None 30 None [] { 1 3 1 } }"),
         "seeded at 30: {seeded}"
     );
     assert_eq!(
@@ -839,14 +840,14 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     }
     let declared = ask(&nexus, "Configuration");
     assert!(
-        declared.ends_with(" None 45 None { 1 3 1 } }"),
+        declared.ends_with(" None 45 None [] { 1 3 1 } }"),
         "{declared}"
     );
     drop(nexus);
     let reopened = fixture.open();
     let kept = ask(&reopened, "Configuration");
     assert!(
-        kept.ends_with(" None 45 None { 1 3 1 } }"),
+        kept.ends_with(" None 45 None [] { 1 3 1 } }"),
         "kept across a reopen: {kept}"
     );
 }
@@ -883,11 +884,78 @@ fn configured_counters_are_kept_across_a_reopen() {
     let reopened = fixture.open();
     let kept = ask(&reopened, "Configuration");
     assert!(
-        kept.ends_with(" None 30 None { 120 45 300 } }"),
+        kept.ends_with(" None 30 None [] { 120 45 300 } }"),
         "kept across a reopen: {kept}"
     );
     assert_eq!(
         ask(&reopened, "Configure.Counters.{ 119 45 300 }"),
         "ConfigureRejected.CountersRefused.Lowered.{ 120 45 300 }"
     );
+}
+
+/// ProtectedAddresses is one family: declared whole, one entry per Address,
+/// read back in Address order, and kept across a reopen. An Address named
+/// twice, or one whose topic is not camelCase, is refused and changes
+/// nothing.
+#[test]
+fn protected_addresses_persist_across_reopen() {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let fable = Address {
+        aspect: Aspect::Psyche,
+        topic: "core".into(),
+        model: Model::Fable,
+    };
+    let other = Address {
+        aspect: Aspect::Mind,
+        topic: "versionZero".into(),
+        model: Model::Astra,
+    };
+    assert_eq!(snapshot(&nexus).protected_addresses, Vec::<Address>::new());
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::ProtectedAddresses(vec![fable.clone(), other.clone()])
+        ),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::ProtectedAddresses(vec![other.clone(), fable.clone()])
+        ),
+        MetaResponse::Configured(ConfigureOutcome::Unchanged)
+    );
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::ProtectedAddresses(vec![fable.clone(), fable.clone()])
+        ),
+        MetaResponse::ConfigureRejected(ConfigureRejection::DuplicateEntry)
+    );
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::ProtectedAddresses(vec![Address {
+                topic: "Not-camel".into(),
+                ..fable.clone()
+            }])
+        ),
+        MetaResponse::ConfigureRejected(ConfigureRejection::TopicRefused("Not-camel".into()))
+    );
+    let declared = snapshot(&nexus).protected_addresses;
+    assert_eq!(declared.len(), 2);
+    assert!(declared.contains(&fable) && declared.contains(&other));
+    drop(nexus);
+    let reopened = fixture.open();
+    assert_eq!(snapshot(&reopened).protected_addresses, declared);
+    assert_eq!(
+        configure(
+            &reopened,
+            ConfigurationChange::ProtectedAddresses(vec![fable.clone()])
+        ),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    drop(reopened);
+    assert_eq!(snapshot(&fixture.open()).protected_addresses, vec![fable]);
 }

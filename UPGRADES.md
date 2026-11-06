@@ -22,7 +22,34 @@ composed only after the old harness was closed, so a refused composition
   retried as any Failed record: once composition works, the same session
   resumes.
 
-Pins and Memory are unchanged: 0.53.1 opens the store 0.53.0 wrote.
+## A protected Address
+
+Pins signal-flow 49.0.0 (3030a8c) and meta-signal-flow 62.0.0 (1d0b314).
+
+- `Configure.ProtectedAddresses.[ { Psyche core Fable } ]` declares the
+  Addresses whose flows Flow keeps, one entry per Address, none by default,
+  read back in the Configuration snapshot before the counters and kept with
+  the configuration.
+- A protected Address's flow past its model's threshold stands `Protected`:
+  none of the automatic refresh paths refreshes it, it is handed its
+  messages, and a Compact of it is refused as below the threshold. Every
+  other Address, a Fable one included, and every threshold are unchanged.
+- On the ordinary socket a Restart, Refresh, Replace or Launch of a
+  protected Address answers `Protected` unless the flow's own seat asks,
+  read from the calling process as a restart's origin is; its Stop also
+  from the owner, a process in no flow's pane. The restart's check is the
+  first in `begun`, before anything is written. A self-asked Restart passes
+  it and is still answered `Unsupported`, as this slice answers every
+  restart a flow asks for itself.
+- The meta socket takes `Restart.FlowId` and `Refresh.Address` from any
+  peer it admits, a protected Address's included; a Refused answer there is
+  `OrdinaryRefused`. Its Retire of a protected Address's flow by another
+  flow answers `RetireRejected.Protected`.
+
+Memory gains one family, the ProtectedAddresses configuration. 0.53.1 opens
+the store 0.53.0 wrote: every other family as it was, that one registered
+empty, so nothing is protected until it is declared. A 0.53.0 Nexus refuses
+a store 0.53.1 has opened.
 
 # Flow 0.53.0
 

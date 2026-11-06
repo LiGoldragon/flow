@@ -2144,9 +2144,10 @@ fn a_start_reading_an_unanswering_codex_history_still_serves_metaflows() {
         while fake.runs() == 0 {
             std::thread::yield_now();
         }
-        let listed = fixture
-            .nexus
-            .dispatch_serially(signal_flow::Query::Metaflows, signal_flow::Origin::Unbound);
+        let listed = fixture.nexus.dispatch_serially(
+            signal_flow::Query::Metaflows,
+            signal_flow::Origin::Unbound.into(),
+        );
         assert!(
             matches!(listed, signal_flow::Response::Listed(_)),
             "{listed:?}"

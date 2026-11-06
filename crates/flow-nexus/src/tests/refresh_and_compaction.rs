@@ -738,3 +738,149 @@ fn unconfirmed_successor_keeps_predecessor_unreaped() {
         "the successor stays owed"
     );
 }
+
+const FABLE_MODEL: &str = "claude-fable-5";
+
+fn fable_address(topic: &str) -> Address {
+    Address {
+        aspect: Aspect::Psyche,
+        topic: topic.into(),
+        model: Model::Fable,
+    }
+}
+
+/// The Claude seat runs `FABLE_MODEL` past its 200 000 token threshold,
+/// Awake at `{ Psyche core Fable }` with one Order queued, its metaflow
+/// declared OnDemand; `protected` is the configured ProtectedAddresses.
+fn fable_seat_past_its_threshold(fixture: &NexusFixture, protected: Vec<Address>) {
+    fixture.accept_pane_operations(
+        vec![claude_agent(fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(fixture, 230_000);
+    append_main_rows(fixture, &[end_turn("last-turn")]);
+    fixture.nexus.store.seed_role(Caller {
+        flow_id: CLAUDE_SEAT.into(),
+        aspect: Aspect::Psyche,
+        model_name: FABLE_MODEL.into(),
+    });
+    for change in [
+        ConfigurationChange::Thresholds(vec![ConfigureThreshold {
+            model_name: FABLE_MODEL.into(),
+            refresh: 200_000,
+        }]),
+        ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+            root_option: None,
+            address: fable_address("core"),
+            system_modules: vec!["spirit-core".into()],
+            user_modules: vec!["operation-main-flow".into()],
+            flow_kind: signal_flow::FlowKind::Regular,
+            tool_set: signal_flow::ToolSet::Default,
+            continuity: Continuity::OnDemand,
+            purpose: String::new(),
+            records: vec![],
+        }]),
+        ConfigurationChange::Models(vec![ConfigureModel {
+            model: Model::Fable,
+            native: FABLE_MODEL.into(),
+        }]),
+        ConfigurationChange::ProtectedAddresses(protected),
+    ] {
+        fixture
+            .nexus
+            .store
+            .configure_change(change)
+            .expect("configured");
+    }
+    let mut metaflow = seat_metaflow_with(vec![Request::Order("Kept for this flow.".into())]);
+    metaflow.address = fable_address("core");
+    fixture.nexus.store.seed_metaflow(metaflow);
+    fixture
+        .nexus
+        .store
+        .record_context_size(CLAUDE_SEAT, 230_000)
+        .unwrap();
+}
+
+/// A protected Address's flow past its model's threshold stands Protected:
+/// it is not past it for delivery, a Compact of it is refused as below it,
+/// and at its Stop it is neither closed nor stopped, its metaflow Awake as
+/// it and its queued work handed to it.
+#[test]
+fn a_protected_seat_past_its_threshold_is_kept_and_handed_its_work() {
+    use crate::store::context::JudgesCompaction;
+    let fixture = NexusFixture::new();
+    fable_seat_past_its_threshold(&fixture, vec![fable_address("core")]);
+    assert_eq!(
+        fixture.nexus.store.threshold_standing(CLAUDE_SEAT).unwrap(),
+        ThresholdStanding::Protected {
+            context: 230_000,
+            refresh: 200_000
+        }
+    );
+    assert!(!fixture.nexus.store.past_threshold(CLAUDE_SEAT).unwrap());
+    assert_eq!(
+        fixture.nexus.store.compaction_refusal(CLAUDE_SEAT).unwrap(),
+        Some(meta_signal_flow::CompactionRefusal::BelowThreshold(
+            meta_signal_flow::ContextBelowThreshold {
+                context_tokens: 230_000,
+                refresh_tokens: 200_000,
+            }
+        ))
+    );
+
+    fixture
+        .nexus
+        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+
+    assert!(!closed(&fixture), "the protected seat's pane stays");
+    assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Active);
+    let metaflow = fixture
+        .nexus
+        .store
+        .metaflow(&fable_address("core"))
+        .unwrap()
+        .expect("metaflow held");
+    assert_eq!(metaflow.state, State::Awake(CLAUDE_SEAT.into()));
+    assert!(metaflow.past.is_empty());
+    assert!(
+        fixture
+            .typed()
+            .is_some_and(|typed| typed.contains("Kept for this flow.")),
+        "the queued work is handed to the protected seat: {:?}",
+        fixture.typed()
+    );
+}
+
+/// A Fable seat whose Address is not protected is refreshed past its
+/// threshold as any seat is, though another Address is protected: its pane
+/// closed, its flow Stopped, its metaflow Asleep with its work kept.
+#[test]
+fn an_unprotected_fable_seat_past_its_threshold_is_refreshed() {
+    let fixture = NexusFixture::new();
+    fable_seat_past_its_threshold(&fixture, vec![fable_address("other")]);
+    assert_eq!(
+        fixture.nexus.store.threshold_standing(CLAUDE_SEAT).unwrap(),
+        ThresholdStanding::Past {
+            context: 230_000,
+            refresh: 200_000
+        }
+    );
+
+    fixture
+        .nexus
+        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+
+    assert!(closed(&fixture), "the seat's pane is closed");
+    assert!(fixture.typed().is_none(), "nothing is typed into it");
+    assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
+    let metaflow = fixture
+        .nexus
+        .store
+        .metaflow(&fable_address("core"))
+        .unwrap()
+        .expect("metaflow held");
+    assert_eq!(metaflow.state, State::Asleep);
+    assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
+    assert_eq!(metaflow.queue.len(), 1, "the work waits for the next flow");
+}

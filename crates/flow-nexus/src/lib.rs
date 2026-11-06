@@ -37,6 +37,7 @@ pub mod lean;
 pub(crate) mod message_projection;
 mod metaflow;
 pub mod model;
+pub mod protecting;
 pub mod recovery;
 pub mod reminding;
 pub mod repairing;
@@ -76,12 +77,12 @@ use composition::{LaunchComposer, OpensLaunchComposer};
 use context::{CurriculumComposer, OpensCurriculumComposer};
 use delivery::{DeliversMessages, lease::LeasesPanes};
 use generated::operation::{Operation, Outcome, Record_Data};
-use generated::starter::DerivesOrigin;
 use launching::{AdmitsLaunch, LaunchesFlows, ObservesLaunch, ReadsHarnessArguments};
 use observe_agent::ObservesAgent;
 use observe_sends::ObservesLogicalSends;
 use peer::{AdmitsMetaPeer, NamesMetaPeer, ResolvesPeer};
 use performing::Performs;
+use protecting::GuardsProtectedAddresses;
 use reporting::RecordsReports;
 use send_tool::ServesLaunchCalls;
 use sending::{BindsSeats, LaunchesDeclared, RehearsesDeclared, SendsRequests};
@@ -148,7 +149,13 @@ pub trait Dispatches {
         self.dispatch_from(query, Origin::Unbound)
     }
     /// A query from `origin`, the calling process as the Nexus derived it.
-    fn dispatch_from(&self, query: Query, origin: Origin) -> Response;
+    fn dispatch_from(&self, query: Query, origin: Origin) -> Response {
+        self.dispatch_asked(query, protecting::Asker::Ordinary(origin))
+    }
+    /// A query from `asker`, the calling process as the Nexus read it: its
+    /// origin, or the owner. A protected Address's flow is restarted,
+    /// refreshed, replaced or stopped only as the asker may.
+    fn dispatch_asked(&self, query: Query, asker: protecting::Asker) -> Response;
     /// A meta query with no peer behind it: one that records who asked is
     /// refused as PeerUnknown.
     fn dispatch_meta(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response {
@@ -182,7 +189,9 @@ impl Dispatches for RunningNexus {
         }
     }
 
-    fn dispatch_from(&self, query: Query, origin: Origin) -> Response {
+    fn dispatch_asked(&self, query: Query, asker: protecting::Asker) -> Response {
+        use protecting::{ChecksAsker, GuardedAct};
+        let origin = asker.origin();
         match query {
             Query::Start(profile) => {
                 let launch_request_id = profile.launch_request_id.clone();
@@ -202,18 +211,25 @@ impl Dispatches for RunningNexus {
                 self.settle(&launch_request_id, response)
             }
             // Off the gate: the replacement takes it under the metaflow's
-            // lock.
-            Query::Replace(profile) => match self.admission_refusal(&profile) {
-                Ok(None) => {
-                    use crate::waking::RefreshesMetaflows;
-                    self.replace_held(profile, origin)
-                }
-                Ok(Some(rejection)) => Response::ReplaceRejected(
-                    signal_flow::ReplaceRejection::LaunchRefused(rejection),
-                ),
-                Err(_) => Response::ReplaceRejected(signal_flow::ReplaceRejection::LaunchRefused(
-                    StartRejection::LaunchPersistenceRefused,
-                )),
+            // lock. A protected Address's flow is replaced only by its own
+            // seat.
+            Query::Replace(profile) => match self.admits_refresh(&profile.address, &asker) {
+                Ok(true) => match self.admission_refusal(&profile) {
+                    Ok(None) => {
+                        use crate::waking::RefreshesMetaflows;
+                        self.replace_held(profile, origin)
+                    }
+                    Ok(Some(rejection)) => Response::ReplaceRejected(
+                        signal_flow::ReplaceRejection::LaunchRefused(rejection),
+                    ),
+                    Err(_) => {
+                        Response::ReplaceRejected(signal_flow::ReplaceRejection::LaunchRefused(
+                            StartRejection::LaunchPersistenceRefused,
+                        ))
+                    }
+                },
+                Ok(false) => Response::ReplaceRejected(signal_flow::ReplaceRejection::Protected),
+                Err(error) => Response::Refused(signal_flow::Refusal::Store(error.to_string())),
             },
             // A direct dispatch has no calling process: nothing sends or
             // binds from it, and its Launch starts as an Unbound one would.
@@ -228,7 +244,7 @@ impl Dispatches for RunningNexus {
             ),
             Query::Send(send) => self.send_request(send, None).response,
             Query::Launch(launch) => match self.declared_launch(launch, None) {
-                Ok(query) => self.dispatch_from(query, origin),
+                Ok(query) => self.dispatch_asked(query, asker),
                 Err(refusal) => *refusal,
             },
             Query::Rehearse(launch) => self.rehearse_declared(launch),
@@ -239,15 +255,20 @@ impl Dispatches for RunningNexus {
                 self.launch_status(&launch_request_id)
             }
             Query::Observe(ObserveSelection::Agent(flow_id)) => self.agent_observation(&flow_id),
-            // Off the gate: the refresh takes it for each of its steps.
-            Query::Refresh(address) => {
-                use crate::waking::RefreshesMetaflows;
-                self.refresh(&address)
-            }
+            // Off the gate: the refresh takes it for each of its steps. A
+            // protected Address is refreshed only by its own seat.
+            Query::Refresh(address) => match self.admits_refresh(&address, &asker) {
+                Ok(true) => {
+                    use crate::waking::RefreshesMetaflows;
+                    self.refresh(&address)
+                }
+                Ok(false) => Response::RefreshRejected(signal_flow::RefreshRejection::Protected),
+                Err(error) => Response::Refused(signal_flow::Refusal::Store(error.to_string())),
+            },
             // Off the gate: the restart takes it for each of its steps.
             Query::Restart(flow_id) => {
                 use crate::restarting::RestartsFlows;
-                self.restart(&flow_id, &origin)
+                self.restart(&flow_id, &asker)
             }
             Query::ResolveRecipient(flow_id) => {
                 match self.store.apply(Query::ResolveRecipient(flow_id)) {
@@ -269,6 +290,17 @@ impl Dispatches for RunningNexus {
                         return Response::Refused(signal_flow::Refusal::Store(error.to_string()));
                     }
                 };
+                // A protected Address's flow is stopped only by its own
+                // seat or the owner, before anything is written.
+                match self.admits(&flow_id, &asker, GuardedAct::Stop) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Response::StopRejected(signal_flow::StopRejection::Protected);
+                    }
+                    Err(error) => {
+                        return Response::Refused(signal_flow::Refusal::Store(error.to_string()));
+                    }
+                }
                 // A flow under a restart record is stopped as its restart
                 // stands: its FlowId, session and queue are kept.
                 {
@@ -444,6 +476,7 @@ impl Dispatches for RunningNexus {
             // first. Privileged, because it changes what Flow holds of a
             // flow without that flow acting.
             meta_signal_flow::Query::Retire(flow_id) => {
+                use protecting::{Asker, GuardedAct};
                 let node = match self.store.flow_node(&flow_id) {
                     Ok(Some(node)) => node,
                     Ok(None) => {
@@ -457,6 +490,26 @@ impl Dispatches for RunningNexus {
                         );
                     }
                 };
+                // A protected Address's flow is retired by the owner or by
+                // itself, never by another flow, before anything is written.
+                let asker = Asker::Meta(
+                    resolver
+                        .as_ref()
+                        .and_then(|identity| identity.flow_id_option.clone()),
+                );
+                match self.admits(&flow_id, &asker, GuardedAct::Retire) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return meta_signal_flow::Response::RetireRejected(
+                            meta_signal_flow::RetireRejection::Protected,
+                        );
+                    }
+                    Err(_) => {
+                        return meta_signal_flow::Response::RetireRejected(
+                            meta_signal_flow::RetireRejection::StoreRefused,
+                        );
+                    }
+                }
                 if !node.flow_lifecycle.is_live() {
                     return meta_signal_flow::Response::RetireRejected(
                         meta_signal_flow::RetireRejection::AlreadyGone,
@@ -537,6 +590,19 @@ impl Dispatches for RunningNexus {
                         meta_signal_flow::RetireRejection::StoreRefused,
                     ),
                 }
+            }
+            // The meta surface restarts and refreshes as the ordinary socket
+            // does, a protected Address's flow included; each runs off the
+            // gate and takes it for its steps.
+            meta_signal_flow::Query::Restart(flow_id) => {
+                use crate::restarting::RestartsFlows;
+                let asker =
+                    protecting::Asker::Meta(resolver.and_then(|identity| identity.flow_id_option));
+                self.restart(&flow_id, &asker).into_meta()
+            }
+            meta_signal_flow::Query::Refresh(address) => {
+                use crate::waking::RefreshesMetaflows;
+                self.refresh(&address).into_meta()
             }
             meta_signal_flow::Query::MetaBindExisting(request) => {
                 let container = request.flow_container;
@@ -1007,7 +1073,7 @@ impl ServesConnection for Connection {
             // process, or, for a metaflow Awake as a live flow, the Replace
             // of that flow under the metaflow's lock.
             Query::Launch(launch) => {
-                let origin = nexus.origin_of(self.peer.peer_process());
+                let asker = nexus.asker_of(self.peer.peer_process());
                 let declared = {
                     let _turn = nexus
                         .dispatch_gate
@@ -1016,27 +1082,24 @@ impl ServesConnection for Connection {
                     nexus.declared_launch(launch, self.process.as_ref())
                 };
                 match declared {
-                    Ok(query) => nexus.dispatch_serially(query, origin),
+                    Ok(query) => nexus.dispatch_serially(query, asker),
                     Err(refusal) => *refusal,
                 }
             }
             // A launch's origin is the calling process, as Identify reads
-            // it: its pane's bound flow and that flow's native session.
-            query @ Query::Start(_) => {
-                let origin = nexus.origin_of(self.peer.peer_process());
-                nexus.dispatch_serially(query, origin)
+            // it: its pane's bound flow and that flow's native session. A
+            // restart's, a refresh's and a stop's asker is read the same
+            // way, and the owner, a process in no flow's pane, told apart:
+            // a protected Address answers only whom each act allows.
+            query @ (Query::Start(_)
+            | Query::Replace(_)
+            | Query::Restart(_)
+            | Query::Refresh(_)
+            | Query::Stop(_)) => {
+                let asker = nexus.asker_of(self.peer.peer_process());
+                nexus.dispatch_serially(query, asker)
             }
-            query @ Query::Replace(_) => {
-                let origin = nexus.origin_of(self.peer.peer_process());
-                nexus.dispatch_serially(query, origin)
-            }
-            // A restart's origin is the calling process: a flow asking for
-            // its own restart is told apart from one asked from outside.
-            query @ Query::Restart(_) => {
-                let origin = nexus.origin_of(self.peer.peer_process());
-                nexus.dispatch_serially(query, origin)
-            }
-            query => nexus.dispatch_serially(query, Origin::Unbound),
+            query => nexus.dispatch_serially(query, protecting::Asker::Ordinary(Origin::Unbound)),
         };
         self.peer.write_response(&response)?;
         drop(self);
@@ -1351,12 +1414,37 @@ impl ReconcilesListedFlows for RunningNexus {
     }
 }
 
+/// An ordinary Restart's or Refresh's answer as the meta surface gives it.
+trait AnswersOnMeta {
+    fn into_meta(self) -> meta_signal_flow::Response;
+}
+
+impl AnswersOnMeta for Response {
+    fn into_meta(self) -> meta_signal_flow::Response {
+        match self {
+            Response::Restarted(flow_id) => meta_signal_flow::Response::Restarted(flow_id),
+            Response::RestartRefused(refusal) => {
+                meta_signal_flow::Response::RestartRefused(refusal)
+            }
+            Response::Refreshed(refreshed) => meta_signal_flow::Response::Refreshed(refreshed),
+            Response::RefreshRejected(rejection) => {
+                meta_signal_flow::Response::RefreshRejected(rejection)
+            }
+            Response::Refused(refusal) => meta_signal_flow::Response::OrdinaryRefused(refusal),
+            // Neither answers anything else.
+            other => meta_signal_flow::Response::Refused(meta_signal_flow::StoreRefusal::Store(
+                format!("unexpected answer {other:?}"),
+            )),
+        }
+    }
+}
+
 trait DispatchesSerially {
     /// Store transitions are read-modify-write; one dispatch runs at a time
     /// across both sockets while frames are read concurrently. A Refresh
     /// and a Replace take the gate for each of their own steps, as a wake
     /// does.
-    fn dispatch_serially(&self, query: Query, origin: Origin) -> Response;
+    fn dispatch_serially(&self, query: Query, asker: protecting::Asker) -> Response;
     fn dispatch_meta_serially(
         &self,
         query: meta_signal_flow::Query,
@@ -1365,16 +1453,16 @@ trait DispatchesSerially {
 }
 
 impl DispatchesSerially for RunningNexus {
-    fn dispatch_serially(&self, query: Query, origin: Origin) -> Response {
+    fn dispatch_serially(&self, query: Query, asker: protecting::Asker) -> Response {
         if let Query::Refresh(_) | Query::Replace(_) | Query::Restart(_) = &query {
-            return self.dispatch_from(query, origin);
+            return self.dispatch_asked(query, asker);
         }
         let response = {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.dispatch_from(query, origin)
+            self.dispatch_asked(query, asker)
         };
         self.wake_deferred();
         response
@@ -1385,6 +1473,11 @@ impl DispatchesSerially for RunningNexus {
         query: meta_signal_flow::Query,
         resolver: Option<meta_signal_flow::ResolverIdentity>,
     ) -> meta_signal_flow::Response {
+        if let meta_signal_flow::Query::Restart(_) | meta_signal_flow::Query::Refresh(_) = &query {
+            let response = self.dispatch_meta_from(query, resolver);
+            self.wake_deferred();
+            return response;
+        }
         let withdrawing = match &query {
             meta_signal_flow::Query::Withdraw(withdraw) => Some(withdraw.address.clone()),
             _ => None,

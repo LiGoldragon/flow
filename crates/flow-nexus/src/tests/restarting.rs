@@ -507,7 +507,11 @@ fn restart_arrival_queued_delivered_once() {
     fs::write(world.fresh.state.join("hold-start"), "").unwrap();
 
     std::thread::scope(|scope| {
-        let restarting = scope.spawn(|| fixture.nexus.restart(FLOW, &signal_flow::Origin::Unbound));
+        let restarting = scope.spawn(|| {
+            fixture
+                .nexus
+                .restart(FLOW, &signal_flow::Origin::Unbound.into())
+        });
         await_path(&world.fresh.state.join("start-held"));
         assert!(matches!(
             record(&fixture).map(|record| record.restart_phase),
@@ -1873,4 +1877,166 @@ fn restart_cutover_two_nexus() {
     );
     assert_eq!(new.store.seat_birth(FLOW).unwrap(), Some(birth));
     assert!(new.report_acts(FLOW, Some(new_hook)));
+}
+
+/// abc123's Address, `{ Mind flow Sol }`, protected.
+fn protect(fixture: &NexusFixture) {
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::ProtectedAddresses(
+            vec![address(Model::Sol)],
+        ))
+        .expect("protected");
+}
+
+/// Another flow, as the Nexus derives its origin from its process.
+fn another_flow() -> signal_flow::Origin {
+    signal_flow::Origin::Flow(signal_flow::FlowOrigin {
+        flow_id: "0f0e1d".into(),
+        session_id: "another-session".into(),
+    })
+}
+
+/// A protected Address's flow asked to restart, or its Address to refresh,
+/// by another flow, an unbound caller or the owner on the ordinary socket,
+/// is refused Protected, and nothing is written or touched: no record, the
+/// old harness running in its pane, the metaflow Awake as it, and no Herdr
+/// call made.
+#[test]
+fn restart_protected_from_outside_refused_no_effect() {
+    use crate::protecting::Asker;
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    protect(&fixture);
+    let calls = world.fresh.calls();
+    for asker in [
+        Asker::Ordinary(another_flow()),
+        Asker::Ordinary(signal_flow::Origin::Unbound),
+        Asker::Owner,
+    ] {
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_asked(Query::Restart(FLOW.into()), asker.clone()),
+            Response::RestartRefused(RestartRefusal::Protected(FLOW.into())),
+            "{asker:?}"
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_asked(Query::Refresh(address(Model::Sol)), asker.clone()),
+            Response::RefreshRejected(signal_flow::RefreshRejection::Protected),
+            "{asker:?}"
+        );
+    }
+    assert_eq!(record(&fixture), None, "no restart record is written");
+    assert!(FlowStore::process_is_live(&old), "the old harness runs on");
+    assert_eq!(route_pane(&fixture), OLD_PANE);
+    assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
+    assert_eq!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(FLOW.into())
+    );
+    assert_eq!(world.fresh.calls(), calls, "Herdr is not touched");
+}
+
+/// The protected flow's own seat is admitted: its Restart passes the
+/// protection and reaches the restart this slice serves, which answers a
+/// restart the flow asks for itself Unsupported and writes nothing. Its own
+/// Refresh is not refused Protected.
+#[test]
+fn restart_protected_self_accepted() {
+    use crate::protecting::Asker;
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    protect(&fixture);
+    let own = Asker::Ordinary(signal_flow::Origin::Flow(signal_flow::FlowOrigin {
+        flow_id: FLOW.into(),
+        session_id: world.seat.session.clone(),
+    }));
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_asked(Query::Restart(FLOW.into()), own.clone()),
+        Response::RestartRefused(RestartRefusal::Unsupported(FLOW.into()))
+    );
+    assert_eq!(record(&fixture), None);
+    assert_eq!(route_pane(&fixture), OLD_PANE);
+    let refreshed = fixture
+        .nexus
+        .dispatch_asked(Query::Refresh(address(Model::Sol)), own);
+    assert!(
+        matches!(&refreshed, Response::Refreshed(refreshed) if refreshed.flow_id == FLOW),
+        "{refreshed:?}"
+    );
+}
+
+/// The meta surface restarts a protected Address's flow: it is closed and
+/// its own session resumed in a new pane, as an unprotected flow's restart
+/// from outside is.
+#[test]
+fn restart_protected_from_meta_accepted() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    protect(&fixture);
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(meta_signal_flow::Query::Restart(FLOW.into())),
+        meta_signal_flow::Response::Restarted(FLOW.into())
+    );
+    assert_eq!(world.resumes().len(), 1, "{}", world.fresh.calls());
+    assert!(ended(&old), "the old harness exited");
+    assert_eq!(route_pane(&fixture), NEW_PANE);
+    assert_eq!(node(&fixture).session_id, world.seat.session);
+    assert_eq!(record(&fixture), None);
+}
+
+/// A protected Address's flow is not stopped by another flow or by an
+/// unbound caller in a flow's pane, nor retired over the meta socket by
+/// another flow: each is refused Protected and nothing changes. The owner
+/// stops it.
+#[test]
+fn stop_and_retire_protected_from_outside_refused() {
+    use crate::protecting::Asker;
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    protect(&fixture);
+    let calls = world.fresh.calls();
+    for asker in [
+        Asker::Ordinary(another_flow()),
+        Asker::Ordinary(signal_flow::Origin::Unbound),
+    ] {
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_asked(Query::Stop(FLOW.into()), asker.clone()),
+            Response::StopRejected(StopRejection::Protected),
+            "{asker:?}"
+        );
+    }
+    let mut resolver = super::queue_drain::resolver();
+    resolver.flow_id_option = Some("0f0e1d".into());
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta_from(meta_signal_flow::Query::Retire(FLOW.into()), Some(resolver)),
+        meta_signal_flow::Response::RetireRejected(meta_signal_flow::RetireRejection::Protected)
+    );
+    assert!(FlowStore::process_is_live(&old), "the old harness runs on");
+    assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
+    assert_eq!(route_pane(&fixture), OLD_PANE);
+    assert_eq!(world.fresh.calls(), calls, "Herdr is not touched");
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_asked(Query::Stop(FLOW.into()), Asker::Owner),
+        Response::Stopped(FLOW.into())
+    );
+    assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Stopped);
 }

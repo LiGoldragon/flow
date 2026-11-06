@@ -43,6 +43,7 @@ use crate::herdr::launch::{HoldsSystemPrompt, WaitsForPaneRest};
 use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::herdr::{HerdrCli, PaneOwnership, PanePresence, ReadsHerdrPanes};
 use crate::performing::Performs;
+use crate::protecting::Asker;
 use crate::store::restart::RecordsRestarts;
 use crate::store::{FlowStore, NamesLiveFlow, ReadsFlowMemory, ReadsFlowRows, StoreError};
 use meta_signal_flow::{
@@ -65,10 +66,10 @@ pub struct SeatWitness {
 
 /// Restart as the Nexus serves it.
 pub trait RestartsFlows {
-    /// Restarts `flow_id`, as `origin` asked. Runs off the dispatch gate and
+    /// Restarts `flow_id`, as `asker` asked. Runs off the dispatch gate and
     /// takes it for each step, so a Send arriving meanwhile is admitted and
     /// queues.
-    fn restart(&self, flow_id: &str, origin: &Origin) -> Response;
+    fn restart(&self, flow_id: &str, asker: &Asker) -> Response;
     /// Takes up every restart an earlier Nexus left: Closing and Closed are
     /// composed again first, then Closing is reconciled against the old
     /// pane and Closed resumes; Opening is Interrupted, and
@@ -259,8 +260,10 @@ struct PreparedRestart {
 trait RestartsInSteps {
     /// The checks, the resume composed and validated, then Closing written;
     /// a retry of a Failed restart is written Closing again, so its old
-    /// harness is reconciled first. A refusal writes nothing.
-    fn begun(&self, flow_id: &str, origin: &Origin) -> Result<PreparedRestart, Box<Response>>;
+    /// harness is reconciled first. A refusal writes nothing; a protected
+    /// Address's flow asked by another than its own seat or the meta
+    /// surface is refused Protected first.
+    fn begun(&self, flow_id: &str, asker: &Asker) -> Result<PreparedRestart, Box<Response>>;
     /// A restart another Nexus left at Closing or Closed, its resume
     /// composed and validated again; refused, the record is Failed and
     /// nothing is closed.
@@ -358,7 +361,8 @@ impl RefusesStoreForRestart for StoreError {
 }
 
 impl RestartsInSteps for RunningNexus {
-    fn begun(&self, flow_id: &str, origin: &Origin) -> Result<PreparedRestart, Box<Response>> {
+    fn begun(&self, flow_id: &str, asker: &Asker) -> Result<PreparedRestart, Box<Response>> {
+        use crate::protecting::{ChecksAsker, GuardedAct, GuardsProtectedAddresses};
         use crate::store::NamesConfiguredModel;
         use crate::store::address_hold::HoldsLaunchAddress;
         use crate::store::metaflow::SleepsMetaflows;
@@ -374,9 +378,16 @@ impl RestartsInSteps for RunningNexus {
             Ok(None) => return refused(RestartRefusal::UnknownFlow),
             Err(error) => return Err(Box::new(error.refused())),
         };
+        // A protected Address's flow is restarted only as its own seat or
+        // the meta surface asks, before anything is written.
+        match self.admits(flow_id, asker, GuardedAct::Restart) {
+            Ok(true) => {}
+            Ok(false) => return refused(RestartRefusal::Protected),
+            Err(error) => return Err(Box::new(error.refused())),
+        }
         // A flow asking for its own restart is owed one at its Stop, which
         // this slice does not serve.
-        if matches!(origin, Origin::Flow(asking) if asking.flow_id == flow_id) {
+        if matches!(asker.origin(), Origin::Flow(asking) if asking.flow_id == flow_id) {
             return refused(RestartRefusal::Unsupported);
         }
         match self.store.restart_record(flow_id) {
@@ -964,13 +975,13 @@ impl RestartsInSteps for RunningNexus {
 }
 
 impl RestartsFlows for RunningNexus {
-    fn restart(&self, flow_id: &str, origin: &Origin) -> Response {
+    fn restart(&self, flow_id: &str, asker: &Asker) -> Response {
         let closed = {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.begun(flow_id, origin)
+            self.begun(flow_id, asker)
                 .and_then(|prepared| self.closed_old(prepared))
         };
         let response = match closed {

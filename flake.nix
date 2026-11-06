@@ -633,6 +633,25 @@
           # the custody a new Nexus Adopted and Restarted.
           flow-restart-cutover-two-nexus = context.exactTest "flow-nexus"
             "tests::restarting::restart_cutover_two_nexus";
+          # 0.53.1: a protected Address answers only its own seat, the meta
+          # surface and, for Stop and Retire, the owner; it is never
+          # refreshed for its threshold.
+          flow-restart-protected-from-outside-refused-no-effect = context.exactTest "flow-nexus"
+            "tests::restarting::restart_protected_from_outside_refused_no_effect";
+          flow-restart-protected-self-accepted = context.exactTest "flow-nexus"
+            "tests::restarting::restart_protected_self_accepted";
+          flow-restart-protected-from-meta-accepted = context.exactTest "flow-nexus"
+            "tests::restarting::restart_protected_from_meta_accepted";
+          flow-protected-stop-and-retire-from-outside-refused = context.exactTest "flow-nexus"
+            "tests::restarting::stop_and_retire_protected_from_outside_refused";
+          flow-protected-past-threshold-kept = context.exactTest "flow-nexus"
+            "tests::refresh_and_compaction::a_protected_seat_past_its_threshold_is_kept_and_handed_its_work";
+          flow-unprotected-fable-past-threshold-refreshed = context.exactTest "flow-nexus"
+            "tests::refresh_and_compaction::an_unprotected_fable_seat_past_its_threshold_is_refreshed";
+          flow-protected-addresses-persist-across-reopen = context.exactTest "flow-nexus"
+            "tests::configuring::protected_addresses_persist_across_reopen";
+          flow-store-0530-opens-unprotected = context.exactTest "flow-nexus"
+            "store::tests::a_store_0530_wrote_opens_with_no_address_protected";
         }
       );
 

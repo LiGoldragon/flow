@@ -238,6 +238,12 @@ const RUNNING_TABLES: &[&str] = &[
 // Flow Memory v3 begins with 0.52.0, which opens no earlier store.
 // Restart (0.53.0) adds one family, RestartRecord; 0.53.0 also opens no earlier store.
 pub(crate) const FLOW_SCHEMA_VERSION: u32 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlowMemoryEra {
+    Current,
+    RequestIdPredecessor,
+}
 const FLOW_MEMORY_SCHEMA_VERSION: u64 = 2;
 const STATE_KEY: &str = "identity";
 const CONFIGURATION_KEY: &str = "configured";
@@ -4980,6 +4986,62 @@ pub(crate) trait ReadsFlowMemory {
         Some((family, SchemaHash::for_label(version)))
     }
 
+    fn request_id_predecessor_family_identity(
+        table_key: &str,
+    ) -> Option<(&'static str, SchemaHash)> {
+        let changed = match table_key {
+            "flow_nexus_logical_delivery_current" => Some((
+                "flow-nexus-logical-delivery-current",
+                "flow-nexus-logical-delivery-current-v6",
+            )),
+            "flow_nexus_logical_delivery_events" => Some((
+                "flow-nexus-logical-delivery-event",
+                "flow-nexus-logical-delivery-event-v6",
+            )),
+            "flow_nexus_metaflows" => Some(("flow-nexus-metaflow", "flow-nexus-metaflow-v7")),
+            "flow_nexus_address_holds" => {
+                Some(("flow-nexus-address-hold", "flow-nexus-address-hold-v6"))
+            }
+            "flow_nexus_queue_delivery_requests" => Some((
+                "flow-nexus-queue-delivery-request",
+                "flow-nexus-queue-delivery-request-v7",
+            )),
+            "flow_nexus_queue_delivery_attempts" => Some((
+                "flow-nexus-queue-delivery-attempt",
+                "flow-nexus-queue-delivery-attempt-v8",
+            )),
+            "flow_nexus_send_outcomes" => {
+                Some(("flow-nexus-send-outcome", "flow-nexus-send-outcome-v7"))
+            }
+            "flow_nexus_send_calls" => Some(("flow-nexus-send-call", "flow-nexus-send-call-v7")),
+            OPTIONAL_REQUEST_ID_TABLE
+            | OPTIONAL_DELIVER_CALL_TABLE
+            | OPTIONAL_STORE_IDENTITY_TABLE
+            | OPTIONAL_REQUEST_POLICY_TABLE
+            | OPTIONAL_PRIOR_DELIVERY_TABLE
+            | OPTIONAL_TASK_ANNOUNCEMENT_TABLE
+            | OPTIONAL_UPGRADE_ASSIGNMENT_TABLE => return None,
+            _ => None,
+        };
+        changed
+            .map(|(family, schema)| (family, SchemaHash::for_label(schema)))
+            .or_else(|| FlowStore::current_flow_family_identity(table_key))
+    }
+
+    fn is_request_id_predecessor_registration(
+        table_key: &str,
+        registration: &TableRegistration,
+    ) -> bool {
+        let identity = registration.identity();
+        FlowStore::request_id_predecessor_family_identity(table_key).is_some_and(
+            |(family, schema_hash)| {
+                identity.table_name() == table_key
+                    && identity.family().as_str() == family
+                    && identity.schema_hash() == schema_hash
+            },
+        )
+    }
+
     /// A family registration this Flow opens: its current identity alone.
     fn is_current_flow_registration(table_key: &str, registration: &TableRegistration) -> bool {
         let identity = registration.identity();
@@ -5039,11 +5101,15 @@ pub(crate) trait ReadsFlowMemory {
     }
 
     fn recognize_flow_memory(path: &Path) -> Result<bool, StoreError> {
+        Ok(FlowStore::recognize_flow_memory_era(path)?.is_some())
+    }
+
+    fn recognize_flow_memory_era(path: &Path) -> Result<Option<FlowMemoryEra>, StoreError> {
         if !path.is_absolute() || path.file_name().is_none() {
             return Err(StoreError::InvalidStorePath);
         }
         if !path.exists() {
-            return Ok(false);
+            return Ok(None);
         }
 
         let reject = |reason: String| StoreError::UnrecognizedMemory {
@@ -5059,7 +5125,9 @@ pub(crate) trait ReadsFlowMemory {
         // can stamp schema/layout metadata before a caller discovers this is an
         // old or foreign occupant.
         match redb::ReadOnlyDatabase::open(path) {
-            Ok(database) => FlowStore::recognize_open_memory(&database, &reject, &earlier),
+            Ok(database) => {
+                FlowStore::recognize_open_memory(&database, &reject, &earlier).map(Some)
+            }
             // A writer that did not close cleanly leaves redb's recovery flag,
             // and a read-only open refuses to repair. The flagged store is
             // recognized through a repaired copy, so the original is written
@@ -5078,7 +5146,7 @@ pub(crate) trait ReadsFlowMemory {
         path: &Path,
         reject: &dyn Fn(String) -> StoreError,
         earlier: &dyn Fn(u64) -> StoreError,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<Option<FlowMemoryEra>, StoreError> {
         /// The repaired copy is removed however recognition ends.
         struct RecognitionCopy(std::path::PathBuf);
         impl Drop for RecognitionCopy {
@@ -5108,7 +5176,7 @@ pub(crate) trait ReadsFlowMemory {
             .map_err(|error| reject(format!("flagged store copy cannot be repaired: {error}")))?;
         let database = redb::ReadOnlyDatabase::open(&copy.0)
             .map_err(|error| reject(format!("repaired store copy: {error}")))?;
-        let recognized = FlowStore::recognize_open_memory(&database, reject, earlier);
+        let recognized = FlowStore::recognize_open_memory(&database, reject, earlier).map(Some);
         drop(database);
         recognized
     }
@@ -5117,7 +5185,7 @@ pub(crate) trait ReadsFlowMemory {
         database: &redb::ReadOnlyDatabase,
         reject: &dyn Fn(String) -> StoreError,
         earlier: &dyn Fn(u64) -> StoreError,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<FlowMemoryEra, StoreError> {
         use redb::{ReadableDatabase as _, ReadableTable as _};
         let read = database
             .begin_read()
@@ -5162,11 +5230,13 @@ pub(crate) trait ReadsFlowMemory {
             )));
         }
 
-        let catalog_is_current = {
+        let catalog_era = {
             let catalog = read
                 .open_table(SEMA_CATALOG_TABLE)
                 .map_err(|error| reject(error.to_string()))?;
             let mut registered_tables = std::collections::BTreeSet::new();
+            let mut all_current = true;
+            let mut all_request_id_predecessor = true;
             for entry in catalog.iter().map_err(|error| reject(error.to_string()))? {
                 let (table_key, bytes) = entry.map_err(|error| reject(error.to_string()))?;
                 let table_key = table_key.value();
@@ -5177,20 +5247,27 @@ pub(crate) trait ReadsFlowMemory {
                                 "Flow family registration {table_key:?} cannot be read: {error}"
                             ))
                         })?;
-                if !FlowStore::is_current_flow_registration(table_key, &registration) {
+                all_current &= FlowStore::is_current_flow_registration(table_key, &registration);
+                all_request_id_predecessor &=
+                    FlowStore::is_request_id_predecessor_registration(table_key, &registration);
+                if !all_current && !all_request_id_predecessor {
                     return Err(reject(format!(
-                        "family registration {table_key:?} is not an authored Flow Memory v3 identity"
+                        "family registration {table_key:?} makes a mixed or unauthored Flow Memory v3 identity"
                     )));
                 }
                 registered_tables.insert(table_key.to_owned());
             }
-            FlowStore::has_expected_flow_catalog(&registered_tables)
+            if !FlowStore::has_expected_flow_catalog(&registered_tables) {
+                return Err(reject(
+                    "family catalog is not a complete authored Flow Memory v3 configuration-only or running schema".into(),
+                ));
+            }
+            match (all_current, all_request_id_predecessor) {
+                (true, false) | (true, true) => FlowMemoryEra::Current,
+                (false, true) => FlowMemoryEra::RequestIdPredecessor,
+                (false, false) => unreachable!("rejected during catalog walk"),
+            }
         };
-        if !catalog_is_current {
-            return Err(reject(
-                "family catalog is not a complete authored Flow Memory v3 configuration-only or running schema".into(),
-            ));
-        }
 
         let state_is_recognized = {
             let table = read
@@ -5207,7 +5284,7 @@ pub(crate) trait ReadsFlowMemory {
         if !state_is_recognized {
             return Err(reject("Flow state identity is invalid".into()));
         }
-        Ok(true)
+        Ok(catalog_era)
     }
 
     fn meta_configuration_snapshot(

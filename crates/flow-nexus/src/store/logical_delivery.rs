@@ -642,23 +642,15 @@ impl RecordsLogicalDeliveries for FlowStore {
         &self,
         request_id: &flow_ethos::RequestId,
     ) -> Result<Option<meta_signal_flow::DeliveryDebugged_Data>, StoreError> {
-        use super::queue_delivery::{NativeDeliveryReceipt, QueueDeliveryPhase, QueueEvidence};
+        use super::queue_delivery::{NativeDeliveryReceipt, QueueDeliveryPhase};
         let Some(binding) = self.request_binding(request_id)? else {
             return Ok(None);
         };
         let Some(snapshot) = self.logical_delivery_snapshot(&binding.logical_delivery_id)? else {
             return Err(StoreError::StateInvariant);
         };
-        let attempts = self
-            .engine
-            .match_records(QueryPlan::all(self.queue_delivery.attempts))?;
-        let receipt = attempts.records().iter().find_map(|attempt| {
-            let QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
-                return None;
-            };
-            if entry.logical_delivery_id != binding.logical_delivery_id {
-                return None;
-            }
+        let attempts = self.delivery_attempts_for(&binding.logical_delivery_id)?;
+        let receipt = attempts.iter().find_map(|attempt| {
             let recorded: &NativeDeliveryReceipt = match &attempt.phase {
                 QueueDeliveryPhase::ReceiptRecorded(value) | QueueDeliveryPhase::Settled(value) => {
                     value
@@ -765,18 +757,12 @@ impl RecordsLogicalDeliveries for FlowStore {
         if !matches!(&retained.entry.sent_by, SentBy::Sender(owner) if owner == sender) {
             return Ok(Err(ArchiveRejection::UnknownRequest));
         }
-        use super::queue_delivery::{EndsQueueDeliveryPhase, QueueEvidence};
-        let attempts = self
-            .engine
-            .match_records(QueryPlan::all(self.queue_delivery.attempts))?;
-        if attempts.records().iter().any(|attempt| {
-            matches!(
-                &attempt.queue_evidence,
-                QueueEvidence::Logical(entry)
-                    if entry.logical_delivery_id == binding.logical_delivery_id
-                        && !attempt.phase.is_finished()
-            )
-        }) {
+        use super::queue_delivery::EndsQueueDeliveryPhase;
+        if self
+            .delivery_attempts_for(&binding.logical_delivery_id)?
+            .iter()
+            .any(|attempt| !attempt.phase.is_finished())
+        {
             return Ok(Err(ArchiveRejection::NotYet));
         }
         let replies = self
@@ -894,12 +880,10 @@ impl RecordsLogicalDeliveries for FlowStore {
         if !rows.records().is_empty() {
             return Ok(());
         }
-        let mut bytes = [0_u8; 16];
-        getrandom::fill(&mut bytes).map_err(|_| StoreError::StateInvariant)?;
-        let store_identity = bytes
-            .into_iter()
-            .map(|byte| b"0123456789abcdefghijklmnopqrstuvwxyz"[(byte as usize) % 36] as char)
-            .collect();
+        let mut store_identity = String::with_capacity(16);
+        for _ in 0..4 {
+            store_identity.push_str(&self.request_id_drawer.draw_request_id()?);
+        }
         self.engine.assert(Assertion::new(
             self.logical_deliveries.store_identity,
             StoredStoreIdentity { store_identity },
@@ -1317,6 +1301,11 @@ impl RecordsLogicalDeliveries for FlowStore {
                 .assert(Assertion::new(self.send_calls, record(outcome.clone())))?;
             return Ok(outcome);
         }
+        let request = match &message {
+            Message::HardAbrupt(request)
+            | Message::MiddleAbrupt(request)
+            | Message::Soft(request) => request.clone(),
+        };
         let request_id = match self.mint_request_id()? {
             Ok(value) => value,
             Err(refusal) => {
@@ -1380,7 +1369,9 @@ impl RecordsLogicalDeliveries for FlowStore {
             send_acceptance: acceptance,
         });
         let next_counter = LogicalDeliveryCounter {
-            next_cursor: cursor.checked_add(1).ok_or(StoreError::StateInvariant)?,
+            next_cursor: cursor
+                .checked_add(if answers_request { 2 } else { 1 })
+                .ok_or(StoreError::StateInvariant)?,
         };
         let commit = self
             .engine
@@ -1392,6 +1383,33 @@ impl RecordsLogicalDeliveries for FlowStore {
             commit.mutate(self.logical_deliveries.counter, next_counter)
         };
         let commit = self.assert_logical_request(target, entry, commit);
+        let commit = if let Some(mut binding) = answered_binding {
+            let rows = self.engine.match_records(QueryPlan::key(
+                self.logical_deliveries.current,
+                RecordKey::new(binding.logical_delivery_id.clone()),
+            ))?;
+            let [current] = rows.records() else {
+                return Err(StoreError::StateInvariant);
+            };
+            if current.archived.is_some() {
+                return Err(StoreError::StateInvariant);
+            }
+            let mut read = current.clone();
+            read.snapshot.delivery_cursor = cursor + 1;
+            read.snapshot.delivery_state = DeliveryState::Read;
+            binding.closure = RequestClosure::Answered(accepted_logical_id.clone());
+            commit
+                .mutate(self.logical_deliveries.request_ids, binding)
+                .mutate(self.logical_deliveries.current, read.clone())
+                .assert(
+                    self.logical_deliveries.events,
+                    LogicalDeliveryEvent {
+                        snapshot: read.snapshot,
+                    },
+                )
+        } else {
+            commit
+        };
         self.engine.commit_atomic(
             commit
                 .assert(
@@ -1754,6 +1772,18 @@ impl RecordsLogicalDeliveries for FlowStore {
             Ok(value) => value,
             Err(refusal) => return Ok(signal_flow::PrivateSendResponse::Refused(refusal)),
         };
+        let answered_binding = match &request {
+            Request::Result(flow_ethos::ResultPayload::Answered(answered)) => Some(
+                self.request_binding(&answered.request_id)?
+                    .ok_or(StoreError::StateInvariant)?,
+            ),
+            Request::Done(flow_ethos::DonePayload::Answered(answered)) => Some(
+                self.request_binding(&answered.request_id)?
+                    .ok_or(StoreError::StateInvariant)?,
+            ),
+            _ => None,
+        };
+        let answers_request = answered_binding.is_some();
         let allocation = self.allocate_logical_cursor()?;
         let next = allocation.cursor;
         let create = !allocation.existing;

@@ -5,10 +5,10 @@
 
 use super::NexusFixture;
 use crate::reminding::RemindsCallers;
-use crate::store::ManagesMetaflowState;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::reminder::{RecordsReminders, TASK_REMINDERS};
+use crate::store::ManagesMetaflowState;
 use flow_ethos::{Address, Aspect, Model, Request};
 use signal_flow::{Message, Metaflow, PrivateSendResponse, QueueEntry, SentBy};
 
@@ -156,6 +156,74 @@ fn a_tasks_last_reminder_sends_its_failure_to_the_tasks_own_sender() {
             .queue,
         told,
         "nothing more is reminded"
+    );
+}
+
+#[test]
+fn archiving_an_ended_task_retracts_its_reminder_atomically() {
+    let fixture = NexusFixture::new();
+    let sender = at(Aspect::Psyche, "archiving", Model::Haiku);
+    let recipient = at(Aspect::Mind, "archivedTask", Model::Sol);
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: recipient.clone(),
+        state: flow_ethos::State::Asleep,
+        past: vec![],
+        queue: vec![],
+    });
+    let PrivateSendResponse::SendAccepted(acceptance) = fixture
+        .nexus
+        .store
+        .accept_logical_delivery(
+            &recipient,
+            SentBy::Sender(sender.clone()),
+            flow_ethos::Delivery::Queue,
+            Message::Soft(Request::Task(flow_ethos::AnswerableTask {
+                minutes: 10,
+                string: "Archive the completed task".into(),
+            })),
+            None,
+        )
+        .unwrap()
+    else {
+        panic!("the task is admitted")
+    };
+    assert!(
+        fixture
+            .nexus
+            .store
+            .reminder(&acceptance.logical_delivery_id)
+            .unwrap()
+            .is_some(),
+        "an open Task holds its reminder"
+    );
+    fixture
+        .nexus
+        .store
+        .transition_logical_delivery(
+            &acceptance.logical_delivery_id,
+            signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                harness_kind: flow_ethos::HarnessKind::Codex,
+                native_session_id: "archived-task-session".into(),
+                native_prompt_id: "archived-task-prompt".into(),
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .archive_request(&acceptance.request_id, &sender)
+            .unwrap(),
+        Ok(())
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .reminder(&acceptance.logical_delivery_id)
+            .unwrap()
+            .is_none(),
+        "the same archive commit retracts the Task reminder"
     );
 }
 

@@ -282,7 +282,7 @@ mod tests {
                         .match_records(QueryPlan::key(handovers, sibling.record_key()))
                         .unwrap()
                         .records(),
-                    &[sibling.clone()]
+                    std::slice::from_ref(&sibling)
                 );
             };
 

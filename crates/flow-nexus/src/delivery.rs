@@ -22,6 +22,7 @@ use crate::performing::Performs;
 use crate::store::context::{JudgesCompaction, JudgesThreshold};
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
 use crate::store::{ReadsFlowRows, RecordsReplacement};
+use crate::waking::{HoldsWakingMetaflows, WakingLease};
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
 use lease::LeasesPanes;
 use meta_signal_flow::{
@@ -191,21 +192,32 @@ impl ReadsLeasedPane for RunningNexus {
 /// The privileged pane writes.
 pub trait DeliversMessages {
     fn deliver(&self, request: DeliveryRequest) -> Response;
-    fn deliver_while_waking(&self, request: DeliveryRequest) -> Response;
+    fn deliver_while_waking(&self, request: DeliveryRequest, lease: &WakingLease<'_>) -> Response;
     fn vet(&self, request: &DeliveryRequest) -> Response;
     fn command(&self, request: CommandRequest) -> Response;
 }
 
 impl DeliversMessages for RunningNexus {
     fn deliver(&self, request: DeliveryRequest) -> Response {
-        self.deliver_inner(request, false)
+        let lease = match crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(
+            &*self.store,
+            &request.flow_id,
+        ) {
+            Ok(Some(metaflow)) => match self.waking.hold(&metaflow.address) {
+                Some(lease) => Some(lease),
+                None => return Response::DeliveryRejected(DeliveryRejection::RouteUnavailable),
+            },
+            Ok(None) => None,
+            Err(_) => return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused),
+        };
+        self.deliver_inner(request, lease.as_ref())
     }
 
-    fn deliver_while_waking(&self, request: DeliveryRequest) -> Response {
-        self.deliver_inner(request, true)
+    fn deliver_while_waking(&self, request: DeliveryRequest, lease: &WakingLease<'_>) -> Response {
+        self.deliver_inner(request, Some(lease))
     }
 
-    fn deliver_inner(&self, request: DeliveryRequest, held_wake: bool) -> Response {
+    fn deliver_inner(&self, request: DeliveryRequest, lease: Option<&WakingLease<'_>>) -> Response {
         match self.store.delivery(&request.delivery_id) {
             Ok(Some(delivery)) => {
                 return Response::Delivered(crate::message_projection::visible_delivery(&delivery));
@@ -229,14 +241,21 @@ impl DeliversMessages for RunningNexus {
             Ok(target) => target,
             Err(refusal) => return Response::DeliveryRejected(refusal.into()),
         };
-        if !held_wake {
-            if let Ok(Some(metaflow)) = crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(
-                &*self.store,
-                &request.flow_id,
-            ) {
-                if self.waking.is_waking(&metaflow.address) {
-                    return Response::DeliveryRejected(DeliveryRejection::RouteUnavailable);
-                }
+        let metaflow = match crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(
+            &*self.store,
+            &request.flow_id,
+        ) {
+            Ok(metaflow) => metaflow,
+            Err(_) => return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused),
+        };
+        if let Some(metaflow) = metaflow {
+            let Some(lease) = lease else {
+                return Response::DeliveryRejected(DeliveryRejection::RouteUnavailable);
+            };
+            if lease.address() != &metaflow.address
+                || !matches!(metaflow.state, flow_ethos::State::Awake(ref id) if id == &request.flow_id)
+            {
+                return Response::DeliveryRejected(DeliveryRejection::RouteUnavailable);
             }
         }
         if let Some(refusal) = request.message.refusal(&target.profile) {

@@ -138,6 +138,12 @@ pub struct WakingLease<'held> {
     address: Address,
 }
 
+impl WakingLease<'_> {
+    pub(crate) fn address(&self) -> &Address {
+        &self.address
+    }
+}
+
 pub trait HoldsWakingMetaflows {
     /// Holds the metaflow for a wake; None when a wake already holds it.
     fn hold(&self, address: &Address) -> Option<WakingLease<'_>>;
@@ -1309,7 +1315,9 @@ impl SleepsAndWakesSeats for RunningNexus {
             }
             // Every priority is submitted immediately to an Awake seat.
             // The delivery engine interrupts only for HardAbrupt.
-            let _ = self.drain_all(address.clone());
+            if let Some(lease) = self.waking.hold(address) {
+                let _ = self.drain_all_held(address.clone(), &lease);
+            }
         }
         self.wake_deferred();
     }
@@ -1349,7 +1357,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            match self.perform(Operation::Drain(address.clone())) {
+            match self.drain_held(address.clone(), &lease) {
                 Outcome::Drained(typed) if typed.is_empty() => {
                     drop(lease);
                     return;
@@ -1764,6 +1772,22 @@ impl PerformsWakeAndDrain for RunningNexus {
     }
 
     fn drain(&self, address: Address) -> Outcome {
+        let Some(lease) = self.waking.hold(&address) else {
+            return Outcome::Failed(Failed_Data::NotAwake);
+        };
+        self.drain_held(address, &lease)
+    }
+
+    fn drain_all(&self, address: Address) -> Outcome {
+        let Some(lease) = self.waking.hold(&address) else {
+            return Outcome::Failed(Failed_Data::NotAwake);
+        };
+        self.drain_all_held(address, &lease)
+    }
+}
+
+impl RunningNexus {
+    fn drain_held(&self, address: Address, lease: &WakingLease<'_>) -> Outcome {
         let flow_id = match self.store.metaflow(&address) {
             Ok(Some(Metaflow {
                 state: flow_ethos::State::Awake(flow_id),
@@ -1815,7 +1839,7 @@ impl PerformsWakeAndDrain for RunningNexus {
                     {
                         return Outcome::Failed(Failed_Data::StoreRefused);
                     }
-                    return match self.drain(address) {
+                    return match self.drain_held(address.clone(), lease) {
                         Outcome::Drained(mut following) => {
                             drained.append(&mut following);
                             Outcome::Drained(drained)
@@ -1978,11 +2002,14 @@ impl PerformsWakeAndDrain for RunningNexus {
         } else {
             meta_signal_flow::Message::Soft(letter)
         };
-        let result = self.deliver_while_waking(meta_signal_flow::DeliveryRequest {
-            delivery_id: attempt.attempt_id.clone(),
-            flow_id: flow_id.clone(),
-            message,
-        });
+        let result = self.deliver_while_waking(
+            meta_signal_flow::DeliveryRequest {
+                delivery_id: attempt.attempt_id.clone(),
+                flow_id: flow_id.clone(),
+                message,
+            },
+            lease,
+        );
         let proved_absent = matches!(&result,
             meta_signal_flow::Response::DeliveryRejected(rejected)
                 if matches!(rejected,
@@ -2011,7 +2038,7 @@ impl PerformsWakeAndDrain for RunningNexus {
         Outcome::Drained(drained)
     }
 
-    fn drain_all(&self, address: Address) -> Outcome {
+    fn drain_all_held(&self, address: Address, lease: &WakingLease<'_>) -> Outcome {
         let queued = match self.store.metaflow(&address) {
             Ok(Some(metaflow)) => metaflow.queue,
             Ok(None) => return Outcome::Failed(Failed_Data::NotAwake),
@@ -2020,7 +2047,7 @@ impl PerformsWakeAndDrain for RunningNexus {
         let mut removed = 0;
         let mut delivered = Vec::new();
         loop {
-            let outcome = self.drain(address.clone());
+            let outcome = self.drain_held(address.clone(), lease);
             match outcome {
                 Outcome::Drained(mut entries) => delivered.append(&mut entries),
                 Outcome::AwaitingReceipt(id) => return Outcome::AwaitingReceipt(id),

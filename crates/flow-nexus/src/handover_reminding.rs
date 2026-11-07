@@ -128,7 +128,7 @@ impl RemindsHandoverCallers for crate::RunningNexus {
         let Ok(configuration) = self.store.handover_policies() else { return };
         let HandoverPoliciesConfiguration::Configured(policies) = configuration else { return };
         for metaflow in metaflows {
-            let signal_flow::State::Awake(flow_id) = metaflow.state else { continue };
+            let flow_ethos::State::Awake(flow_id) = metaflow.state else { continue };
             let Ok(Some(model_name)) = self.store.flow_model(&flow_id) else { continue };
             let Some(policy) = policies.iter().find(|p| p.model_name == model_name) else { continue };
             let Ok(Some(refresh)) = self.store.configured_threshold(&model_name) else { continue };

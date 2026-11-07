@@ -6047,6 +6047,27 @@ mod tests {
         };
         assert_eq!(row.tries, 1);
         let notice = notice.clone();
+        let queued = store
+            .stored_metaflow(&recipient)
+            .unwrap()
+            .unwrap()
+            .metaflow
+            .queue
+            .len();
+        store
+            .run_request_id_announcements()
+            .expect("an admitted announcement coalesces");
+        assert_eq!(
+            store
+                .stored_metaflow(&recipient)
+                .unwrap()
+                .unwrap()
+                .metaflow
+                .queue
+                .len(),
+            queued,
+            "a concurrent trigger cannot admit a second Notice"
+        );
         store
             .transition_logical_delivery(&notice, signal_flow::DeliveryState::Uncertain)
             .expect("notice becomes uncertain");
@@ -6057,13 +6078,6 @@ mod tests {
             Err(signal_flow::ArchiveRejection::NotYet),
             "an unended announcement Notice holds every Task it lists"
         );
-        let queued = store
-            .stored_metaflow(&recipient)
-            .unwrap()
-            .unwrap()
-            .metaflow
-            .queue
-            .len();
         store
             .run_request_id_announcements()
             .expect("uncertain pass is quiet");
@@ -6137,6 +6151,100 @@ mod tests {
                 .archive_request(&task.request_id, &sender)
                 .expect("ended announcement releases the Task"),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn upgrade_announcement_for_an_archived_task_closes_without_admitting_a_notice() {
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        use crate::store::metaflow::SeedsMetaflow;
+        use crate::store::request_id_upgrade::{
+            RunsRequestIdAnnouncements, TaskAnnouncement, TaskAnnouncementStatus,
+        };
+        use signal_flow::{Message, Request, SentBy};
+
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let recipient = Address {
+            aspect: Aspect::Field,
+            topic: "closedUpgradeTask".into(),
+            model: Model::Sol,
+        };
+        let sender = Address {
+            aspect: Aspect::Mind,
+            topic: "closedUpgradeTask".into(),
+            model: Model::Sol,
+        };
+        for address in [&recipient, &sender] {
+            store.seed_metaflow(flow_ethos::Metaflow {
+                address: address.clone(),
+                state: flow_ethos::State::Asleep,
+                past: Vec::new(),
+                queue: Vec::new(),
+            });
+        }
+        let signal_flow::PrivateSendResponse::SendAccepted(task) = store
+            .accept_logical_delivery(
+                &recipient,
+                SentBy::Sender(sender.clone()),
+                flow_ethos::Delivery::Queue,
+                Message::Soft(Request::Task(flow_ethos::AnswerableTask {
+                    minutes: 1,
+                    string: "already archived".into(),
+                })),
+                None,
+            )
+            .expect("task admits")
+        else {
+            panic!("task accepted")
+        };
+        store
+            .transition_logical_delivery(
+                &task.logical_delivery_id,
+                signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                    harness_kind: flow_ethos::HarnessKind::Codex,
+                    native_session_id: "closed-task-session".into(),
+                    native_prompt_id: "closed-task-prompt".into(),
+                }),
+            )
+            .expect("task ends");
+        assert_eq!(
+            store
+                .archive_request(&task.request_id, &sender)
+                .expect("task archives"),
+            Ok(())
+        );
+        store
+            .engine
+            .assert(Assertion::new(
+                store.request_id_upgrade.task_announcements,
+                TaskAnnouncement {
+                    recipient: sender.clone(),
+                    part: 0,
+                    tasks: vec![task.logical_delivery_id],
+                    tries: 0,
+                    status: TaskAnnouncementStatus::Pending(None),
+                },
+            ))
+            .expect("announcement row seeds");
+
+        store
+            .run_request_id_announcements()
+            .expect("closed row settles");
+        let rows = store
+            .engine
+            .match_records(QueryPlan::all(store.request_id_upgrade.task_announcements))
+            .expect("closed row reads");
+        assert_eq!(rows.records()[0].status, TaskAnnouncementStatus::Closed);
+        assert!(
+            store
+                .stored_metaflow(&sender)
+                .unwrap()
+                .unwrap()
+                .metaflow
+                .queue
+                .is_empty(),
+            "an archived Task creates no announcement Notice"
         );
     }
 

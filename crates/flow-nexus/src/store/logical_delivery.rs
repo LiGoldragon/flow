@@ -394,6 +394,19 @@ impl RecordsLogicalDeliveries for FlowStore {
             .write_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        // A retry may present the same pre-commit snapshot after the prior
+        // atomic commit succeeded. The durable sent count is the expected
+        // state witness; refuse the stale attempt before creating a second
+        // logical Notice.
+        if let Some(expected) = handover_reminder.as_ref() {
+            if let Some(held) = self.handover_reminder(&expected.address, expected.generation)? {
+                if held.sent >= expected.sent {
+                    return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
+                        Unknown_Data::Address(address.clone()),
+                    )));
+                }
+            }
+        }
         let Some(mut stored) = self.stored_metaflow(address)? else {
             return Ok(false);
         };
@@ -1040,7 +1053,9 @@ impl RecordsLogicalDeliveries for FlowStore {
         held_lock: Option<VerifiedDeliveryLock>,
         purpose: crate::heartbeat::DeliveryPurpose,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError> {
-        self.accept_logical_delivery_for_with_transition(address, sent_by, delivery, message, held_lock, purpose, None)
+        self.accept_logical_delivery_for_with_transition(
+            address, sent_by, delivery, message, held_lock, purpose, None,
+        )
     }
     fn accept_handover_reminder(
         &self,
@@ -1048,7 +1063,15 @@ impl RecordsLogicalDeliveries for FlowStore {
         message: Message,
         reminder: crate::store::handover_reminders::HandoverReminder,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError> {
-        self.accept_logical_delivery_for_with_transition(address, SentBy::Flow, Delivery::Queue, message, None, crate::heartbeat::DeliveryPurpose::Ordinary, Some(reminder))
+        self.accept_logical_delivery_for_with_transition(
+            address,
+            SentBy::Flow,
+            Delivery::Queue,
+            message,
+            None,
+            crate::heartbeat::DeliveryPurpose::Ordinary,
+            Some(reminder),
+        )
     }
     fn accept_logical_delivery_for_with_transition(
         &self,
@@ -1238,9 +1261,17 @@ impl RecordsLogicalDeliveries for FlowStore {
         };
         let commit = if let Some(reminder) = handover_reminder {
             let key = reminder.record_key();
-            let existing = self.engine.match_records(QueryPlan::key(self.handover_reminders, key.clone()))?;
-            if existing.records().is_empty() { commit.assert(self.handover_reminders, reminder) } else { commit.mutate(self.handover_reminders, reminder) }
-        } else { commit };
+            let existing = self
+                .engine
+                .match_records(QueryPlan::key(self.handover_reminders, key.clone()))?;
+            if existing.records().is_empty() {
+                commit.assert(self.handover_reminders, reminder)
+            } else {
+                commit.mutate(self.handover_reminders, reminder)
+            }
+        } else {
+            commit
+        };
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
         Ok(signal_flow::PrivateSendResponse::SendAccepted(

@@ -102,7 +102,8 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
     use flow_ethos::{Metaflow, State};
     let fixture = NexusFixture::new();
     let address = address();
-    fixture.nexus.store.seed_metaflow(Metaflow { address: address.clone(), state: State::Asleep, past: vec![], queue: vec![] });
+    fixture.nexus.store.seed_metaflow(Metaflow { address: address.clone(), state: State::Awake("fixture-seat".into()), past: vec![], queue: vec![] });
+    fixture.nexus.store.ensure_live_handover(&address, "fixture-seat").unwrap();
     let reminder = HandoverReminder::open_handover_reminder(address.clone(), 0, "m".into(), 10, 5, "configured".into()).unwrap();
     fixture.nexus.store.hold_handover_reminder(reminder).unwrap();
     fixture.nexus.send_due_handover_reminders(10);
@@ -113,10 +114,11 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
 
 #[test]
 fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
-    use super::{CLAUDE_MODEL, CLAUDE_SEAT};
+    const CLAUDE_MODEL: &str = "fixture-model";
+    const CLAUDE_SEAT: &str = "fixture-seat";
     use super::NexusFixture;
     use crate::handover_reminding::RemindsHandoverCallers;
-    use crate::store::{ConfiguresFlowStore, ManagesMetaflowState, ReadsFlowMemory};
+    use crate::store::{ConfiguresFlowStore, ManagesMetaflowState, ReadsFlowMemory, SeedsRole};
     use crate::store::context::RecordsContextSize;
     use crate::store::handover::HoldsHandovers;
     use crate::store::metaflow::SeedsMetaflow;
@@ -146,7 +148,8 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
 
 #[test]
 fn green_keep_cancels_open_warning_timer() {
-    use super::{CLAUDE_MODEL, CLAUDE_SEAT};
+    const CLAUDE_MODEL: &str = "fixture-model";
+    const CLAUDE_SEAT: &str = "fixture-seat";
     use super::NexusFixture;
     use crate::handover_reminding::RemindsHandoverCallers;
     use crate::store::{ConfiguresFlowStore, SeedsRole};

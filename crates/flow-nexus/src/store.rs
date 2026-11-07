@@ -9516,6 +9516,254 @@ mod tests {
         );
     }
 
+    /// An answer has its own request id while retaining the id it answers.
+    /// Once both deliveries are archived, reuse resolves only to the new
+    /// request; a delayed duplicate answer therefore witnesses the accepted
+    /// reuse risk.  The sender's cursor replay remains a deterministic history
+    /// of both spans rather than merging them by request id.
+    #[test]
+    fn answer_ids_survive_restart_and_reused_ids_resolve_only_to_the_current_request() {
+        use super::logical_delivery::{MintsRequestIds, RecordsLogicalDeliveries, RequestClosure};
+        use super::metaflow::SeedsMetaflow;
+        use flow_ethos::{Delivery, Message, Request, ResultPayload, SentBy};
+        use signal_flow::{
+            DeliveryState, NativeReceipt, PrivateSendResponse, Refusal, SendableMessage,
+            SendableRequest,
+        };
+
+        let fixture = StoreFixture::new();
+        let mut store = fixture.store();
+        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+            &mut store,
+            std::sync::Arc::new(ScriptedRequestIdDrawer::new(["ord1", "ans1"])),
+        );
+        let requester = signal_flow::Address {
+            aspect: signal_flow::Aspect::Mind,
+            topic: "answerRequester".into(),
+            model: signal_flow::Model::Sol,
+        };
+        let answerer = signal_flow::Address {
+            aspect: signal_flow::Aspect::Field,
+            topic: "answerRecipient".into(),
+            model: signal_flow::Model::Sol,
+        };
+        for address in [&requester, &answerer] {
+            store.seed_metaflow(flow_ethos::Metaflow {
+                address: address.clone(),
+                state: flow_ethos::State::Asleep,
+                past: Vec::new(),
+                queue: Vec::new(),
+            });
+        }
+        let PrivateSendResponse::SendAccepted(order) = store
+            .accept_logical_delivery(
+                &answerer,
+                SentBy::Sender(requester.clone()),
+                Delivery::Queue,
+                Message::Soft(Request::Order("Review".into())),
+                None,
+            )
+            .expect("first Order admits")
+        else {
+            panic!("first Order accepted")
+        };
+        assert_eq!(order.request_id, "ord1");
+        store
+            .transition_logical_delivery(
+                &order.logical_delivery_id,
+                DeliveryState::Delivered(NativeReceipt {
+                    harness_kind: signal_flow::HarnessKind::Codex,
+                    native_session_id: "first-order-session".into(),
+                    native_prompt_id: "first-order-turn".into(),
+                }),
+            )
+            .expect("first Order delivered");
+
+        let result = |request_id: &str| {
+            SendableMessage::Soft(SendableRequest::Result(
+                signal_flow::SendableRequest_Result_Data {
+                    request_id: request_id.into(),
+                    string: "done".into(),
+                },
+            ))
+        };
+        let resolved = store
+            .resolve_sendable_message(&answerer, &requester, result(&order.request_id))
+            .expect("first Result resolution reads")
+            .expect("first Result resolves");
+        let Message::Soft(Request::Result(ResultPayload::Answered(answered))) = &resolved else {
+            panic!("resolved Result keeps its typed answered payload")
+        };
+        assert_eq!(answered.logical_delivery_id, order.logical_delivery_id);
+        assert_eq!(answered.request_id, order.request_id);
+        let PrivateSendResponse::SendAccepted(answer) = store
+            .accept_logical_delivery(
+                &requester,
+                SentBy::Sender(answerer.clone()),
+                Delivery::Queue,
+                resolved,
+                None,
+            )
+            .expect("first Result admits")
+        else {
+            panic!("first Result accepted")
+        };
+        assert_eq!(answer.request_id, "ans1");
+        assert_ne!(answer.request_id, order.request_id);
+        assert_eq!(
+            MintsRequestIds::request_binding(&store, &order.request_id)
+                .expect("Order binding reads")
+                .expect("Order binding remains")
+                .closure,
+            RequestClosure::Answered(answer.logical_delivery_id.clone())
+        );
+        assert_eq!(
+            store
+                .debug_delivery(&order.request_id)
+                .expect("Order debug reads")
+                .expect("Order remains held")
+                .read_by,
+            Some(answer.logical_delivery_id.clone())
+        );
+        assert_eq!(
+            store
+                .resolve_sendable_message(&requester, &answerer, result(&answer.request_id))
+                .expect("an answer's own id reads"),
+            Err(Refusal::Unresolved),
+            "a Result cannot answer another Result"
+        );
+        assert_eq!(
+            store
+                .resolve_sendable_message(&answerer, &requester, result(&order.request_id))
+                .expect("duplicate first Result reads"),
+            Err(Refusal::Unresolved),
+            "the first Order is already closed"
+        );
+
+        drop(store);
+        let mut store = fixture.store();
+        assert_eq!(
+            MintsRequestIds::request_binding(&store, &order.request_id)
+                .expect("reopened Order binding reads")
+                .expect("reopened Order binding remains")
+                .closure,
+            RequestClosure::Answered(answer.logical_delivery_id.clone())
+        );
+        let reopened_answer = store
+            .logical_delivery_snapshot(&answer.logical_delivery_id)
+            .expect("reopened answer snapshot reads")
+            .expect("reopened answer remains");
+        assert_eq!(reopened_answer.request_id, answer.request_id);
+        store
+            .transition_logical_delivery(
+                &answer.logical_delivery_id,
+                DeliveryState::Delivered(NativeReceipt {
+                    harness_kind: signal_flow::HarnessKind::Codex,
+                    native_session_id: "first-answer-session".into(),
+                    native_prompt_id: "first-answer-turn".into(),
+                }),
+            )
+            .expect("first Result delivered");
+        assert_eq!(
+            store
+                .archive_request(&answer.request_id, &answerer)
+                .expect("first Result archive reads"),
+            Ok(())
+        );
+        assert_eq!(
+            store
+                .archive_request(&order.request_id, &requester)
+                .expect("first Order archive reads"),
+            Ok(())
+        );
+
+        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+            &mut store,
+            std::sync::Arc::new(ScriptedRequestIdDrawer::new(["ord1", "ans2"])),
+        );
+        let PrivateSendResponse::SendAccepted(reused) = store
+            .accept_logical_delivery(
+                &answerer,
+                SentBy::Sender(requester.clone()),
+                Delivery::Queue,
+                Message::Soft(Request::Order("Review".into())),
+                None,
+            )
+            .expect("reused-id Order admits")
+        else {
+            panic!("reused-id Order accepted")
+        };
+        assert_eq!(reused.request_id, order.request_id);
+        assert_ne!(reused.logical_delivery_id, order.logical_delivery_id);
+        assert!(reused.delivery_cursor > answer.delivery_cursor);
+        store
+            .transition_logical_delivery(
+                &reused.logical_delivery_id,
+                DeliveryState::Delivered(NativeReceipt {
+                    harness_kind: signal_flow::HarnessKind::Codex,
+                    native_session_id: "second-order-session".into(),
+                    native_prompt_id: "second-order-turn".into(),
+                }),
+            )
+            .expect("reused-id Order delivered");
+
+        let duplicate = store
+            .resolve_sendable_message(&answerer, &requester, result(&reused.request_id))
+            .expect("delayed duplicate resolution reads")
+            .expect("the accepted reuse risk resolves to the current Order");
+        let PrivateSendResponse::SendAccepted(second_answer) = store
+            .accept_logical_delivery(
+                &requester,
+                SentBy::Sender(answerer.clone()),
+                Delivery::Queue,
+                duplicate,
+                None,
+            )
+            .expect("delayed duplicate admits as the new answer")
+        else {
+            panic!("delayed duplicate answer accepted")
+        };
+        assert_eq!(second_answer.request_id, "ans2");
+        assert_eq!(
+            MintsRequestIds::request_binding(&store, &reused.request_id)
+                .expect("reused binding reads")
+                .expect("reused binding remains")
+                .logical_delivery_id,
+            reused.logical_delivery_id
+        );
+
+        let first_replay = store
+            .read_logical_delivery_snapshots(&requester, Some(0))
+            .expect("first full replay reads");
+        let second_replay = store
+            .read_logical_delivery_snapshots(&requester, Some(0))
+            .expect("second full replay reads");
+        assert_eq!(first_replay, second_replay);
+        let same_id = first_replay
+            .delivery_snapshot_vector
+            .iter()
+            .filter(|snapshot| snapshot.request_id == order.request_id)
+            .collect::<Vec<_>>();
+        assert!(
+            same_id
+                .windows(2)
+                .all(|pair| pair[0].delivery_cursor < pair[1].delivery_cursor)
+        );
+        assert!(same_id.iter().any(|snapshot| {
+            snapshot.logical_delivery_id == order.logical_delivery_id
+                && snapshot.delivery_state == DeliveryState::Archived
+        }));
+        assert!(same_id.iter().any(|snapshot| {
+            snapshot.logical_delivery_id == reused.logical_delivery_id
+                && snapshot.delivery_state
+                    == DeliveryState::Delivered(NativeReceipt {
+                        harness_kind: signal_flow::HarnessKind::Codex,
+                        native_session_id: "second-order-session".into(),
+                        native_prompt_id: "second-order-turn".into(),
+                    })
+        }));
+    }
+
     #[test]
     fn terminal_and_archived_logical_deliveries_never_transition_again() {
         use super::logical_delivery::{RecordsLogicalDeliveries, RequestClosure, RequestIdBinding};

@@ -794,8 +794,8 @@ dependencies = [
 
 [[package]]
 name = "sema-engine"
-version = "0.18.0"
-source = "git+https://github.com/LiGoldragon/sema-engine?rev=9884905ff9c660ad97a35c524e42532d5c7bac90#9884905ff9c660ad97a35c524e42532d5c7bac90"
+version = "0.19.0"
+source = "git+https://github.com/LiGoldragon/sema-engine?rev=a519936f4c1470e4c4b41a41d0f5ad4a5aaf24f8#a519936f4c1470e4c4b41a41d0f5ad4a5aaf24f8"
 dependencies = [
  "blake3",
  "rkyv",

@@ -57,6 +57,7 @@ mod executable_default_configuration {
 }
 pub mod handover;
 pub mod handover_archive;
+mod handover_observation;
 pub mod handover_reminding;
 pub(crate) mod harness_command;
 pub mod heartbeat;
@@ -82,6 +83,9 @@ use composition::{LaunchComposer, OpensLaunchComposer};
 use context::{CurriculumComposer, OpensCurriculumComposer};
 use delivery::{DeliversMessages, lease::LeasesPanes};
 use generated::operation::{Operation, Outcome, Record_Data};
+use handover_observation::{
+    ObservesHandoverRetirement, ReadsRetirementSubscription, RetirementSubscription,
+};
 use launching::{AdmitsLaunch, LaunchesFlows, ObservesLaunch, ReadsHarnessArguments};
 use observe_agent::ObservesAgent;
 use observe_sends::ObservesLogicalSends;
@@ -362,6 +366,21 @@ impl Dispatches for RunningNexus {
                 self.launch_status(&launch_request_id)
             }
             Query::Observe(ObserveSelection::Agent(flow_id)) => self.agent_observation(&flow_id),
+            Query::Observe(ObserveSelection::Retirement(address)) => {
+                use crate::store::handover::HoldsHandovers;
+                match self.store.observe_handover_retirement(&address) {
+                    Ok(subscription) => {
+                        let response = Response::RetirementObserved(subscription.snapshot.clone());
+                        self.store.handover_observations.detach(&subscription);
+                        response
+                    }
+                    Err(error) => Response::RetirementObservationFailed(
+                        signal_flow::RetirementObservationFailure::MissingEvidence(
+                            error.to_string(),
+                        ),
+                    ),
+                }
+            }
             // Off the gate: the refresh takes it for each of its steps. A
             // protected Address is refreshed only by its own seat.
             Query::Refresh(address) => match self.admits_refresh(&address, &asker) {
@@ -1102,8 +1121,20 @@ pub trait ServesConnection: Sized {
         sender: &signal_flow::Address,
         cursor: Option<i64>,
     ) -> Result<(), String>;
+    fn serve_retirement(
+        &mut self,
+        nexus: &RunningNexus,
+        subscription: RetirementSubscription,
+    ) -> Result<(), String>;
     fn serve_ordinary(self, nexus: &RunningNexus) -> Result<(), String>;
     fn serve_meta(self, nexus: &RunningNexus) -> Result<(), String>;
+}
+
+trait ServesAttachedRetirement {
+    fn serve_attached_retirement(
+        &mut self,
+        subscription: &RetirementSubscription,
+    ) -> Result<(), String>;
 }
 
 impl ServesConnection for Connection {
@@ -1155,6 +1186,16 @@ impl ServesConnection for Connection {
         result.and(watcher_result)
     }
 
+    fn serve_retirement(
+        &mut self,
+        nexus: &RunningNexus,
+        subscription: RetirementSubscription,
+    ) -> Result<(), String> {
+        let result = self.serve_attached_retirement(&subscription);
+        nexus.store.handover_observations.detach(&subscription);
+        result
+    }
+
     fn serve_ordinary(mut self, nexus: &RunningNexus) -> Result<(), String> {
         let query = self.peer.read_query()?;
         let response = match query {
@@ -1170,6 +1211,22 @@ impl ServesConnection for Connection {
                 let peer = &mut self.peer;
                 return nexus
                     .observe_agent(&flow_id, &mut |response| peer.write_response(response));
+            }
+            Query::Observe(ObserveSelection::Retirement(address)) => {
+                use crate::store::handover::HoldsHandovers;
+                let subscription = match nexus.store.observe_handover_retirement(&address) {
+                    Ok(subscription) => subscription,
+                    Err(error) => {
+                        return self
+                            .peer
+                            .write_response(&Response::RetirementObservationFailed(
+                                signal_flow::RetirementObservationFailure::MissingEvidence(
+                                    error.to_string(),
+                                ),
+                            ));
+                    }
+                };
+                return self.serve_retirement(nexus, subscription);
             }
             Query::ObserveSends(cursor) => {
                 let Some(process) = self.process.as_ref() else {
@@ -1356,6 +1413,52 @@ impl ServesConnection for Connection {
     }
 }
 
+impl ServesAttachedRetirement for Connection {
+    fn serve_attached_retirement(
+        &mut self,
+        subscription: &RetirementSubscription,
+    ) -> Result<(), String> {
+        self.peer
+            .write_response(&Response::RetirementObserved(subscription.snapshot.clone()))?;
+        let mut reader = self.peer.try_clone().map_err(|error| error.to_string())?;
+        reader
+            .set_read_timeout(None)
+            .map_err(|error| error.to_string())?;
+        let watched = subscription.clone();
+        let watcher = std::thread::Builder::new()
+            .name("flow-handover-retirement-observer-peer".into())
+            .spawn(move || {
+                let mut bytes = [0_u8; 256];
+                loop {
+                    match reader.read(&mut bytes) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+                watched.disconnect();
+            })
+            .map_err(|error| error.to_string())?;
+        let result = loop {
+            match subscription.next_response() {
+                Ok(response @ Response::RetirementObservationFailed(_)) => {
+                    break self.peer.write_response(&response);
+                }
+                Ok(response) => {
+                    if let Err(error) = self.peer.write_response(&response) {
+                        break Err(error);
+                    }
+                }
+                Err(error) => break Err(error),
+            }
+        };
+        let _ = self.peer.shutdown(Shutdown::Both);
+        let watcher_result = watcher
+            .join()
+            .map_err(|_| "retirement peer-disconnect watcher panicked".to_owned());
+        result.and(watcher_result)
+    }
+}
+
 /// Binds a socket and serves each connection on its own thread.
 pub trait ListensOnSocket {
     fn listen(
@@ -1448,6 +1551,18 @@ pub trait StopsNexus {
 impl StopsNexus for RunningNexus {
     fn stop(&self, sockets: &[&Path]) {
         self.stopping.request();
+        {
+            let _gate = self
+                .store
+                .handover_write_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.store.handover_observations.fail_all(
+                signal_flow::RetirementObservationFailure::MissingEvidence(
+                    "the Nexus stopped; the retirement observation is incomplete".into(),
+                ),
+            );
+        }
         self.store.launch_changes.announce();
         // Each accept loop is blocked in accept; a connection wakes it. A
         // listener not yet bound sees the request once it binds.

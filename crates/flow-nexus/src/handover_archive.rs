@@ -2,9 +2,9 @@
 
 use crate::{
     RunningNexus,
-    store::handover::{ClosedHandover, HoldsHandovers},
+    store::handover::{ClosedHandover, HandoverRemovalOutcome, HoldsHandovers},
 };
-use signal_flow::{Address, Aspect, Model};
+use signal_flow::{Address, Aspect, HandoverArchiveIdentity, Model};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -23,6 +23,22 @@ pub struct HandoverArchiveRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandoverArchivePublication {
     pub path: PathBuf,
+    pub commit: String,
+    pub blob: String,
+}
+
+pub trait IdentifiesHandoverArchivePublication {
+    fn identity(&self) -> HandoverArchiveIdentity;
+}
+
+impl IdentifiesHandoverArchivePublication for HandoverArchivePublication {
+    fn identity(&self) -> HandoverArchiveIdentity {
+        HandoverArchiveIdentity {
+            git_commit: self.commit.clone(),
+            archive_document_path: self.path.to_string_lossy().into_owned(),
+            git_blob: self.blob.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -63,6 +79,8 @@ pub enum HandoverRetirementRefusal {
     Memory(String),
     #[error("handover archive refused publication: {0}")]
     Archive(#[from] HandoverArchiveRefusal),
+    #[error("handover removal did not remove the exact generation: {0:?}")]
+    Removal(HandoverRemovalOutcome),
 }
 
 impl RetiresHandoverGenerations for RunningNexus {
@@ -78,15 +96,28 @@ impl RetiresHandoverGenerations for RunningNexus {
             .map_err(|e| HandoverRetirementRefusal::Memory(e.to_string()))?;
         let mut retired = 0;
         for closed in rows {
-            publisher.publish(HandoverArchiveRequest {
+            let publication = match publisher.publish(HandoverArchiveRequest {
                 address: address.clone(),
                 flow_id: closed.predecessor.clone(),
                 document: render_closed(&closed),
-            })?;
-            self.store
-                .remove_closed_handover(address, &closed)
-                .map_err(|e| HandoverRetirementRefusal::Memory(e.to_string()))?;
-            retired += 1;
+            }) {
+                Ok(publication) => publication,
+                Err(error) => {
+                    self.store.fail_handover_retirement(
+                        address,
+                        format!("archive publication failed: {error}"),
+                    );
+                    return Err(error.into());
+                }
+            };
+            match self
+                .store
+                .complete_closed_handover_retirement(address, &closed, publication.identity())
+                .map_err(|e| HandoverRetirementRefusal::Memory(e.to_string()))?
+            {
+                HandoverRemovalOutcome::Removed => retired += 1,
+                outcome => return Err(HandoverRetirementRefusal::Removal(outcome)),
+            }
         }
         Ok(retired)
     }
@@ -135,7 +166,7 @@ impl PublishesHandoverArchive for ExistingGitHandoverArchive {
             .join(&request.address.topic)
             .join(model)
             .join(format!("{}.md", request.flow_id));
-        let target = self.repository.join(relative);
+        let target = self.repository.join(&relative);
         reject_symlink_components(&self.repository, &target)?;
         match fs::read_to_string(&target) {
             Ok(existing) => {
@@ -154,7 +185,22 @@ impl PublishesHandoverArchive for ExistingGitHandoverArchive {
             }
             Err(error) => return Err(HandoverArchiveRefusal::Write(error.to_string())),
         }
-        Ok(HandoverArchivePublication { path: target })
+        let commit = run_git_output(&self.repository, ["rev-parse", "HEAD"])?
+            .trim()
+            .to_owned();
+        let object = format!("{commit}:{}", path_string(&target, &self.repository));
+        let blob = run_git_output(&self.repository, ["rev-parse", object.as_str()])?
+            .trim()
+            .to_owned();
+        let archived = run_git_output(&self.repository, ["cat-file", "blob", blob.as_str()])?;
+        if archived != request.document {
+            return Err(HandoverArchiveRefusal::Conflict);
+        }
+        Ok(HandoverArchivePublication {
+            path: relative,
+            commit,
+            blob,
+        })
     }
 }
 
@@ -283,10 +329,40 @@ fn run_git_output<const N: usize>(
         .output()
         .map_err(|e| HandoverArchiveRefusal::Git(e.to_string()))?;
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        String::from_utf8(output.stdout).map_err(|error| {
+            HandoverArchiveRefusal::Git(format!("git returned non-UTF-8 evidence: {error}"))
+        })
     } else {
         Err(HandoverArchiveRefusal::Git(
             String::from_utf8_lossy(&output.stderr).trim().into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn invalid_utf8_git_evidence_is_rejected_instead_of_aliasing_replacement_text() {
+        let repository = tempfile::tempdir().unwrap();
+        run_git(repository.path(), ["init", "-q"]).unwrap();
+        let mut hash = Command::new("git")
+            .arg("-C")
+            .arg(repository.path())
+            .args(["hash-object", "-w", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        hash.stdin.as_mut().unwrap().write_all(&[0xff]).unwrap();
+        let output = hash.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let blob = String::from_utf8(output.stdout).unwrap();
+        assert!(matches!(
+            run_git_output(repository.path(), ["cat-file", "blob", blob.trim()]),
+            Err(HandoverArchiveRefusal::Git(_))
+        ));
     }
 }

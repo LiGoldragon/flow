@@ -1545,6 +1545,9 @@ pub struct FlowStore {
     handovers: TableReference<handover::HandoverMemory>,
     pub(crate) handover_reminders: TableReference<handover_reminders::HandoverReminder>,
     pub(crate) handover_write_gate: Mutex<()>,
+    pub(crate) handover_observations: crate::handover_observation::HandoverRetirementObservations,
+    #[cfg(test)]
+    pub(crate) fail_next_handover_removal: Mutex<bool>,
     pub launch_changes: LaunchChanges,
 }
 
@@ -2390,6 +2393,9 @@ impl OpensFlowStore for FlowStore {
             handovers,
             handover_reminders,
             handover_write_gate: Mutex::new(()),
+            handover_observations: Default::default(),
+            #[cfg(test)]
+            fail_next_handover_removal: Mutex::new(false),
             launch_changes: LaunchChanges::default(),
         };
 
@@ -2558,6 +2564,9 @@ impl OpensFlowStore for FlowStore {
             handovers,
             handover_reminders,
             handover_write_gate: Mutex::new(()),
+            handover_observations: Default::default(),
+            #[cfg(test)]
+            fail_next_handover_removal: Mutex::new(false),
             launch_changes: LaunchChanges::default(),
         };
         store.archive_legacy_queue()?;

@@ -126,6 +126,11 @@
                 '';
               }
             );
+          exactGitTest =
+            package: testName:
+            (exactTest package testName).overrideAttrs (old: {
+              nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [ pkgs.git ];
+            });
           # One named test across the workspace, run exactly once, for a
           # test that drives the workspace's own CLIs, which a test of one
           # package does not build.
@@ -161,6 +166,7 @@
             commonArgs
             cargoArtifacts
             exactTest
+            exactGitTest
             exactWorkspaceTest
             lawSource
             ;
@@ -781,6 +787,48 @@
             "tests::handover::a_simplified_flow_is_given_the_handover_after_its_first_message_only";
           flow-handover-file-source = context.exactTest "flow-nexus"
             "tests::handover::the_file_source_reads_a_predecessors_file_under_the_launch_root_only";
+          flow-retirement-observation-fifo-overflow = context.exactTest "flow-nexus"
+            "handover_observation::tests::overflow_is_an_out_of_band_terminal_after_the_complete_fifo";
+          flow-retirement-observation-disconnect = context.exactTest "flow-nexus"
+            "handover_observation::tests::disconnect_wakes_an_idle_subscription_as_incomplete";
+          flow-retirement-attach-during-publication = context.exactTest "flow-nexus"
+            "tests::handover_archive::attaching_during_publication_sees_closed_then_archive_then_removed";
+          flow-retirement-attach-close-no-gap = context.exactTest "flow-nexus"
+            "tests::handover_memory::concurrent_attach_and_close_places_the_generation_exactly_once_in_snapshot_or_fifo";
+          flow-retirement-two-closes-fifo = context.exactTest "flow-nexus"
+            "tests::handover_memory::two_closes_are_observed_in_their_durable_mutation_order";
+          flow-retirement-delivery-outside-gate = context.exactTest "flow-nexus"
+            "tests::handover_memory::queued_delivery_completes_while_the_handover_mutation_gate_is_held";
+          flow-retirement-initial-write-detaches = context.exactTest "flow-nexus"
+            "tests::handover_archive::initial_snapshot_write_failure_detaches_the_ephemeral_subscription";
+          flow-retirement-archive-identity = context.exactGitTest "flow-nexus"
+            "tests::handover_archive::archives_and_is_idempotent";
+          flow-retirement-archive-byte-identity = context.exactGitTest "flow-nexus"
+            "handover_archive::tests::invalid_utf8_git_evidence_is_rejected_instead_of_aliasing_replacement_text";
+          flow-retirement-preserves-current-and-sibling = context.exactTest "flow-nexus"
+            "tests::handover_memory::exact_retirement_identity_preserves_new_live_and_closed_rows";
+          flow-retirement-identity-mismatch-incomplete = context.exactTest "flow-nexus"
+            "tests::handover_memory::changed_published_snapshot_is_retained";
+          flow-retirement-already-absent-incomplete = context.exactTest "flow-nexus"
+            "tests::handover_memory::already_absent_is_explicitly_incomplete_and_never_emits_removed";
+          flow-retirement-memory-failure-incomplete = context.exactTest "flow-nexus"
+            "tests::handover_memory::verified_archive_then_memory_failure_reports_archive_and_incomplete_without_removed";
+          flow-retirement-cli-incomplete-eof = context.exactTest "flow"
+            "tests::retirement_eof_and_truncated_frames_are_incomplete";
+          flow-retirement-cli-terminal-failure = context.exactTest "flow"
+            "tests::a_terminal_retirement_failure_is_printed_and_fails_the_call";
+          flow-retirement-launch-eof-unchanged = context.exactTest "flow"
+            "tests::launch_observation_keeps_its_existing_clean_eof_semantics";
+          flow-retirement-immutable-contract-pins = context.pkgs.runCommand
+            "flow-retirement-immutable-contract-pins"
+            { nativeBuildInputs = [ context.pkgs.gnugrep ]; }
+            ''
+              grep -F 'rev = "5960b8cd5e7b1a1679c72457964584638c9f4b6f"' ${./Cargo.toml}
+              grep -F 'rev = "b0145e67c0a8d3c683fa34f71644c6e8b595584e"' ${./Cargo.toml}
+              grep -F 'signal-flow?rev=5960b8cd5e7b1a1679c72457964584638c9f4b6f#5960b8cd5e7b1a1679c72457964584638c9f4b6f' ${./Cargo.lock}
+              grep -F 'meta-signal-flow?rev=b0145e67c0a8d3c683fa34f71644c6e8b595584e#b0145e67c0a8d3c683fa34f71644c6e8b595584e' ${./Cargo.lock}
+              touch "$out"
+            '';
           flow-handover-permission-denied-unreadable = context.exactTest "flow-nexus"
             "tests::handover::a_file_the_nexus_may_not_read_is_unreadable";
           flow-restart-not-composed-refused-then-recovered = context.exactTest "flow-nexus"

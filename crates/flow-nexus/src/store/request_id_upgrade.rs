@@ -2627,6 +2627,202 @@ mod tests {
     }
 
     #[test]
+    fn evolution_classifies_every_hold_and_clears_only_moved_heartbeat_references() {
+        let directory = tempfile::tempdir().expect("temporary Memory");
+        let path = directory.path().join("flow.sema");
+        let descriptors = evolution_descriptors();
+        let heartbeat = StoredHeartbeatStanding::descriptor();
+        let (mut predecessor, tables) = old_engine(&path, &descriptors, &heartbeat);
+        let heartbeat_table = predecessor
+            .register_table(heartbeat.clone())
+            .expect("old heartbeat registers again");
+        let sender = old_address(old_flow::Aspect::Mind, "sender");
+        let recipient = old_address(old_flow::Aspect::Field, "recipient");
+        let native = old_signal::NativeReceipt {
+            harness_kind: old_flow::HarnessKind::Codex,
+            native_session_id: "session".into(),
+            native_prompt_id: "prompt".into(),
+        };
+        let cases = [
+            (
+                1,
+                "queued-held",
+                old_signal::DeliveryState::Queued,
+                old_flow::Request::Notice("queued".into()),
+                PriorRequestState::Queued,
+            ),
+            (
+                2,
+                "delivered-moved",
+                old_signal::DeliveryState::Delivered(native.clone()),
+                old_flow::Request::Notice("finished".into()),
+                PriorRequestState::Settled,
+            ),
+            (
+                3,
+                "task-held-by-reminder",
+                old_signal::DeliveryState::Delivered(native.clone()),
+                old_flow::Request::Task(old_flow::AnswerableTask {
+                    minutes: 5,
+                    string: "unfinished task".into(),
+                }),
+                PriorRequestState::Settled,
+            ),
+            (
+                4,
+                "input-held-by-reply",
+                old_signal::DeliveryState::Delivered(native),
+                old_flow::Request::Question("unfinished reply".into()),
+                PriorRequestState::Settled,
+            ),
+        ];
+        for (cursor, logical_id, state, request, request_state) in cases {
+            let snapshot = old_snapshot(cursor, logical_id, &sender, &recipient, state);
+            predecessor
+                .assert(Assertion::new(
+                    tables.current,
+                    PriorCurrentLogicalDelivery {
+                        snapshot: snapshot.clone(),
+                    },
+                ))
+                .expect("old current stores");
+            predecessor
+                .assert(Assertion::new(
+                    tables.events,
+                    PriorLogicalDeliveryEvent { snapshot },
+                ))
+                .expect("old event stores");
+            predecessor
+                .assert(Assertion::new(
+                    tables.requests,
+                    old_request(logical_id, &sender, &recipient, request, request_state),
+                ))
+                .expect("old request stores");
+        }
+        let heartbeat_row = StoredHeartbeatStanding {
+            address: current_address(&recipient).expect("address recodes"),
+            baseline_awake: 1,
+            baseline_working: None,
+            baseline_working_complete: true,
+            baseline_sent: 1,
+            baseline_queue: 0,
+            latest_awake: 1,
+            latest_working: None,
+            latest_working_complete: true,
+            latest_sent: 1,
+            latest_queue: 0,
+            outstanding: Some("delivered-moved".into()),
+        };
+        predecessor
+            .assert(Assertion::new(heartbeat_table, heartbeat_row.clone()))
+            .expect("old heartbeat stores");
+        drop(predecessor);
+
+        let reminder = super::super::reminder::Reminder {
+            key: "task-held-by-reminder".into(),
+            address: current_address(&sender).expect("sender recodes"),
+            recipient: current_address(&recipient).expect("recipient recodes"),
+            minutes: 5,
+            due: Some(123),
+            sent: 0,
+        };
+        let reply = super::super::logical_delivery::SimplifiedReplyBinding {
+            flow_id: "reply-flow".into(),
+            input_delivery_id: "input-held-by-reply".into(),
+            source: current_address(&sender).expect("source recodes"),
+            recipient: current_address(&recipient).expect("recipient recodes"),
+            completed: false,
+        };
+        let purposes = [
+            super::super::logical_delivery::LogicalDeliveryPurpose {
+                logical_delivery_id: "queued-held".into(),
+                address: current_address(&recipient).expect("recipient recodes"),
+                purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
+            },
+            super::super::logical_delivery::LogicalDeliveryPurpose {
+                logical_delivery_id: "delivered-moved".into(),
+                address: current_address(&recipient).expect("recipient recodes"),
+                purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
+            },
+        ];
+        let mut engine = Engine::open(
+            EngineOpen::new(&path, SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION))
+                .with_family(&descriptors.current)
+                .with_family(&descriptors.events)
+                .with_family(&descriptors.metaflows)
+                .with_family(&descriptors.address_holds)
+                .with_family(&descriptors.requests)
+                .with_family(&descriptors.attempts)
+                .with_family(&descriptors.outcomes)
+                .with_family(&descriptors.send_calls)
+                .with_family(&heartbeat),
+        )
+        .expect("predecessor catalog opens for evolution");
+        let heartbeat_table = engine
+            .register_table(heartbeat.clone())
+            .expect("heartbeat opens");
+        evolve_request_id_memory(
+            &mut engine,
+            descriptors,
+            std::slice::from_ref(&reminder),
+            std::slice::from_ref(&reply),
+            &purposes,
+            heartbeat_table,
+            std::slice::from_ref(&heartbeat_row),
+            &ScriptedDrawer::new(&["h001", "h002", "h003", "0000", "0001", "0002", "0003"]),
+        )
+        .expect("classification evolution commits");
+
+        let descriptors = evolution_descriptors();
+        let current = engine
+            .match_records(QueryPlan::all(
+                engine
+                    .register_table(descriptors.current)
+                    .expect("current registers"),
+            ))
+            .expect("current reads");
+        assert_eq!(current.records().len(), 3);
+        assert!(current.records().iter().all(|row| {
+            row.snapshot.logical_delivery_id != "delivered-moved"
+                && row.admission
+                    == super::super::logical_delivery::DeliveryAdmission::HistoricalUnknown
+        }));
+        let prior = engine
+            .match_records(QueryPlan::all(
+                engine
+                    .register_table(descriptors.prior_deliveries)
+                    .expect("prior deliveries register"),
+            ))
+            .expect("prior deliveries read");
+        assert_eq!(prior.records().len(), 1);
+        assert_eq!(prior.records()[0].logical_delivery_id, "delivered-moved");
+        let bindings = engine
+            .match_records(QueryPlan::all(
+                engine
+                    .register_table(descriptors.request_ids)
+                    .expect("bindings register"),
+            ))
+            .expect("bindings read");
+        assert_eq!(bindings.records().len(), 3);
+        let announcements = engine
+            .match_records(QueryPlan::all(
+                engine
+                    .register_table(descriptors.task_announcements)
+                    .expect("announcements register"),
+            ))
+            .expect("announcements read");
+        assert_eq!(announcements.records().len(), 1);
+        assert_eq!(
+            announcements.records()[0].tasks,
+            vec!["task-held-by-reminder"]
+        );
+        let heartbeat_rows = engine
+            .match_records(QueryPlan::all(heartbeat_table))
+            .expect("heartbeat reads");
+        assert_eq!(heartbeat_rows.records()[0].outstanding, None);
+    }
+
+    #[test]
     fn orphaned_predecessor_event_refuses_evolution_without_changing_memory() {
         let directory = tempfile::tempdir().expect("temporary Memory");
         let path = directory.path().join("flow.sema");

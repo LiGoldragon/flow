@@ -182,6 +182,64 @@ fn retirement_publishes_before_removal_and_retries_failures() {
     );
     assert_eq!(fixture.nexus.store.handover(&address).unwrap(), Vec::new());
 }
+
+#[test]
+fn retention_boundary_and_zero_count_are_explicit() {
+    let fixture = NexusFixture::new();
+    let address = Address {
+        aspect: Aspect::Mind,
+        topic: "retention".into(),
+        model: Model::Sol,
+    };
+    fixture
+        .nexus
+        .store
+        .close_handover_for_successor(&address, "one", "two")
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .close_handover_for_successor(&address, "two", "three")
+        .unwrap();
+    let keep_all = RecordingPublisher {
+        calls: AtomicUsize::new(0),
+        fail: false,
+    };
+    assert_eq!(
+        fixture
+            .nexus
+            .retire_handover_generations(&address, 2, &keep_all)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .closed_handovers(&address, 0)
+            .unwrap()
+            .len(),
+        2
+    );
+    let archive_all = RecordingPublisher {
+        calls: AtomicUsize::new(0),
+        fail: false,
+    };
+    assert_eq!(
+        fixture
+            .nexus
+            .retire_handover_generations(&address, 0, &archive_all)
+            .unwrap(),
+        2
+    );
+    assert!(fixture
+        .nexus
+        .store
+        .closed_handovers(&address, 0)
+        .unwrap()
+        .is_empty());
+    assert_eq!(fixture.nexus.store.handover(&address).unwrap(), Vec::new());
+}
 fn runout(path: &Path, args: &[&str]) -> String {
     String::from_utf8(
         Command::new("git")

@@ -15,9 +15,9 @@ flow = { path = "../flow" }
 flow-defaults = { path = "../flow-defaults" }
 flow-native = { path = "../flow-native" }
 flow-ethos.workspace = true
-flow-ethos-before-request-ids = { path = "../flow-ethos-before-request-ids" }
-signal-flow-before-request-ids = { path = "../signal-flow-before-request-ids" }
-meta-signal-flow-before-request-ids = { path = "../meta-signal-flow-before-request-ids" }
+flow-ethos-before-request-ids = { path = "../flow-ethos-before-request-ids", features = ["datom"] }
+signal-flow-before-request-ids = { path = "../signal-flow-before-request-ids", features = ["datom"] }
+meta-signal-flow-before-request-ids = { path = "../meta-signal-flow-before-request-ids", features = ["datom"] }
 base64 = "0.22"
 # The Nexus renders one typed value as text, the Message it types into a
 # pane (F6: Flow textualizes the letter so its Priority head comes first).

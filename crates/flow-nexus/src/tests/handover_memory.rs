@@ -274,3 +274,37 @@ fn changed_published_snapshot_is_retained() {
     );
     assert_eq!(store.closed_handovers(&address, 0).unwrap().len(), 1);
 }
+
+#[test]
+fn concurrent_authenticated_writes_preserve_both_sections() {
+    let fixture = NexusFixture::new();
+    let address = address("handoverConcurrent");
+    let store = fixture.nexus.store.clone();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let mut joins = Vec::new();
+    for title in ["one", "two"] {
+        let store = store.clone();
+        let address = address.clone();
+        let barrier = barrier.clone();
+        joins.push(std::thread::spawn(move || {
+            barrier.wait();
+            store
+                .keep_handover_for_flow(
+                    &HandoverWriter {
+                        address,
+                        flow_id: "flow".into(),
+                    },
+                    section(title, "d", title),
+                    Touch::Unknown,
+                )
+                .unwrap();
+        }));
+    }
+    barrier.wait();
+    for join in joins {
+        join.join().unwrap();
+    }
+    let row = store.handover_memory(&address).unwrap().unwrap();
+    assert_eq!(row.current.len(), 2);
+    assert_eq!(row.touch, Some(Touch::Unknown));
+}

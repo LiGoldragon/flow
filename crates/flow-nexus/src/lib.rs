@@ -658,10 +658,17 @@ impl Dispatches for RunningNexus {
         resolver: Option<meta_signal_flow::ResolverIdentity>,
     ) -> meta_signal_flow::Response {
         match query {
-            meta_signal_flow::Query::DebugDelivery(_) => {
-                meta_signal_flow::Response::DebugDeliveryRejected(
-                    meta_signal_flow::DebugDeliveryRejected_Data::StoreRefused,
-                )
+            meta_signal_flow::Query::DebugDelivery(request_id) => {
+                use crate::store::logical_delivery::RecordsLogicalDeliveries;
+                match self.store.debug_delivery(&request_id) {
+                    Ok(Some(delivery)) => meta_signal_flow::Response::DeliveryDebugged(delivery),
+                    Ok(None) => meta_signal_flow::Response::DebugDeliveryRejected(
+                        meta_signal_flow::DebugDeliveryRejected_Data::UnknownRequest,
+                    ),
+                    Err(_) => meta_signal_flow::Response::DebugDeliveryRejected(
+                        meta_signal_flow::DebugDeliveryRejected_Data::StoreRefused,
+                    ),
+                }
             }
             meta_signal_flow::Query::Configuration => match self.store.configuration_snapshot() {
                 Ok(Some(snapshot)) => meta_signal_flow::Response::Configuration(snapshot),

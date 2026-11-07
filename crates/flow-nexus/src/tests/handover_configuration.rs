@@ -202,3 +202,55 @@ fn handover_count_zero_persists_through_configuration_and_running_reopen() {
         meta_signal_flow::HandoverCountConfiguration::Configured(0)
     );
 }
+
+#[test]
+fn publication_deadline_defaults_positive_and_persists_override() {
+    let fixture = ConfiguredStore::new();
+    let path = fixture.path();
+    let configuration = crate::store::ConfigurationOnlyStore::open(path).unwrap();
+    assert_eq!(
+        configuration
+            .configuration_snapshot()
+            .unwrap()
+            .unwrap()
+            .publication_deadline,
+        meta_signal_flow::PublicationDeadlineConfiguration::Configured(60_000)
+    );
+    configuration
+        .configure_change(ConfigurationChange::PublicationDeadline(125))
+        .unwrap();
+    assert_eq!(
+        configuration
+            .configuration_snapshot()
+            .unwrap()
+            .unwrap()
+            .publication_deadline,
+        meta_signal_flow::PublicationDeadlineConfiguration::Configured(125)
+    );
+    drop(configuration);
+    let reopened = crate::store::ConfigurationOnlyStore::open(path).unwrap();
+    assert_eq!(
+        reopened
+            .configuration_snapshot()
+            .unwrap()
+            .unwrap()
+            .publication_deadline,
+        meta_signal_flow::PublicationDeadlineConfiguration::Configured(125)
+    );
+}
+
+#[test]
+fn publication_deadline_rejects_zero_and_negative_without_mutation() {
+    let fixture = ConfiguredStore::new();
+    let configuration = crate::store::ConfigurationOnlyStore::open(fixture.path()).unwrap();
+    let before = configuration.configuration_snapshot().unwrap();
+    for duration in [0, -1] {
+        assert!(matches!(
+            configuration.configure_change(ConfigurationChange::PublicationDeadline(duration)),
+            Err(crate::store::StoreError::HandoverConfigurationRefused(
+                meta_signal_flow::HandoverConfigurationRefusal::InvalidPublicationDeadline
+            ))
+        ));
+    }
+    assert_eq!(configuration.configuration_snapshot().unwrap(), before);
+}

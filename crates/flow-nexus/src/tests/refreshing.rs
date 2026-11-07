@@ -19,7 +19,7 @@ use super::{
 };
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::sending::{IdentifiesSender, SendsRequests};
-use crate::store::context::JudgesThreshold;
+use crate::store::context::{JudgesThreshold, RecordsContextSize};
 use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow, SleepsMetaflows};
 use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, ReadsFlowRows};
@@ -480,6 +480,22 @@ fn a_refused_close_or_an_unreadable_herdr_answers_refresh_s_own_rejection() {
     );
     awake_seat(&fixture, vec![]);
     declare(&fixture, seat_address());
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::Thresholds(vec![
+            meta_signal_flow::ConfigureThreshold {
+                model_name: "claude-opus-5-5".into(),
+                refresh: 1,
+            },
+        ]))
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .record_context_size(CLAUDE_SEAT, 40_000)
+        .unwrap();
+    assert!(fixture.nexus.store.past_threshold(CLAUDE_SEAT).unwrap());
     close_answers(&fixture, "exit 1");
     assert_eq!(
         fixture.nexus.dispatch(Query::Refresh(seat_address())),

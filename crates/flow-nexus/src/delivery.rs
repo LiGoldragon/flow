@@ -248,13 +248,24 @@ impl DeliversMessages for RunningNexus {
             Ok(metaflow) => metaflow,
             Err(_) => return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused),
         };
-        if let Some(metaflow) = metaflow {
-            let Some(lease) = lease else {
+        match (lease, metaflow) {
+            (Some(_), None) => {
+                // A binding disappearing after custody was acquired is a
+                // failed revalidation, never an unbound delivery.
                 return Response::DeliveryRejected(DeliveryRejection::RouteUnavailable);
-            };
-            if lease.address() != &metaflow.address
-                || !matches!(metaflow.state, flow_ethos::State::Awake(ref id) if id == &request.flow_id)
-            {
+            }
+            (None, None) => {}
+            (Some(lease), Some(metaflow)) => {
+                if !lease.owned_by(&self.waking)
+                    || lease.address() != &metaflow.address
+                    || !matches!(metaflow.state, flow_ethos::State::Awake(ref id) if id == &request.flow_id)
+                {
+                    return Response::DeliveryRejected(DeliveryRejection::RouteUnavailable);
+                }
+            }
+            (None, Some(_)) => {
+                // A binding appearing after the unbound read is also a
+                // failed revalidation: custody must precede the target.
                 return Response::DeliveryRejected(DeliveryRejection::RouteUnavailable);
             }
         }

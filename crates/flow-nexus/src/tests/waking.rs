@@ -1588,6 +1588,18 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
     assert_eq!(old.flow_lifecycle, FlowLifecycle::Stopped);
 }
 
+/// A lease is a capability of its owning waking registry, not merely an
+/// address-shaped token that another registry may reuse.
+#[test]
+fn waking_lease_requires_its_exact_registry_owner() {
+    let first = crate::waking::WakingMetaflows::default();
+    let second = crate::waking::WakingMetaflows::default();
+    let at = address(Model::Sol);
+    let lease = first.hold(&at).expect("first registry owns the address");
+    assert!(lease.owned_by(&first));
+    assert!(!lease.owned_by(&second));
+}
+
 #[test]
 fn a_simplified_wake_sends_the_first_abrupt_request_without_an_empty_turn() {
     let mut fixture = NexusFixture::new();

@@ -142,6 +142,10 @@ impl WakingLease<'_> {
     pub(crate) fn address(&self) -> &Address {
         &self.address
     }
+
+    pub(crate) fn owned_by(&self, holder: &WakingMetaflows) -> bool {
+        std::ptr::eq(self.held, holder)
+    }
 }
 
 pub trait HoldsWakingMetaflows {

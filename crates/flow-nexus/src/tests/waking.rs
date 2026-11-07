@@ -2504,17 +2504,32 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     let answer = fixture
         .nexus
         .dispatch_metaflow_peer(signal_flow::Query::Deliver(deliver.clone()), Some(&message));
-    let signal_flow::PrivateSendResponse::Sent(receipt) = answer.private_response else {
-        panic!("delivery answers from the successor's exact receipt")
+    let Response::SendAccepted(visible) = &answer.response else {
+        panic!("Deliver has one public admission answer")
     };
+    let signal_flow::PrivateSendResponse::SendAccepted(accepted) = answer.private_response else {
+        panic!("Deliver answers its durable admission")
+    };
+    assert_eq!(visible.request_id, accepted.request_id);
+    assert_eq!(visible.delivery_cursor, accepted.delivery_cursor);
+    let delivered = fixture
+        .nexus
+        .store
+        .logical_delivery_snapshot(&accepted.logical_delivery_id)
+        .expect("delivery state reads")
+        .expect("admitted delivery remains observable");
+    assert!(matches!(
+        delivered.delivery_state,
+        signal_flow::DeliveryState::Delivered(_)
+    ));
+    assert!(delivered.delivery_cursor > accepted.delivery_cursor);
     let replay = fixture
         .nexus
         .dispatch_metaflow_peer(signal_flow::Query::Deliver(deliver.clone()), Some(&message));
     let signal_flow::PrivateSendResponse::SendAccepted(replayed) = replay.private_response else {
         panic!("a lost Deliver answer is recovered from its key alone")
     };
-    assert_eq!(replayed.logical_delivery_id, receipt.logical_delivery_id);
-    assert_eq!(replayed.request_id, receipt.request_id);
+    assert_eq!(replayed, accepted, "replay returns the exact admission");
     let mut changed = deliver.clone();
     changed.sendable_message =
         super::sendable_message(Message::MiddleAbrupt(Request::Order("Different".into())));
@@ -2550,7 +2565,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
             .dispatch_metaflow_peer(
                 signal_flow::Query::Acknowledge(vec![
                     deliver.deliver_key.clone(),
-                    "unknown".into()
+                    super::deliver_key(99),
                 ]),
                 Some(&message),
             )
@@ -2577,8 +2592,8 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     // The woken flow's accepted first prompt carries the Order with the
     // Sender its Lock named.
     let sent = QueueEntry {
-        logical_delivery_id: receipt.logical_delivery_id,
-        request_id: receipt.request_id,
+        logical_delivery_id: accepted.logical_delivery_id,
+        request_id: accepted.request_id,
         sent_by: SentBy::Sender(sender_address.clone()),
         delivery: flow_ethos::Delivery::Wake,
         message: Message::MiddleAbrupt(order.clone()),
@@ -2592,9 +2607,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         "{turns:?}"
     );
     assert!(
-        turns
-            .iter()
-            .all(|turn| !turn.contains("wake-order-distinctive-private-key")),
+        turns.iter().all(|turn| !turn.contains("testMessageMemory")),
         "the Message-private key never enters the recipient pane: {turns:?}"
     );
 }

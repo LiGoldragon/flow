@@ -268,7 +268,7 @@
               inherit (context) cargoArtifacts;
               cargoTestExtraArgs = "--workspace";
               # The approval pipeline's tests read a real git repository.
-              nativeCheckInputs = [ context.pkgs.git ];
+              nativeCheckInputs = [ context.pkgs.git context.pkgs.util-linux ];
             }
           );
           fmt = context.craneLib.cargoFmt context.commonArgs;

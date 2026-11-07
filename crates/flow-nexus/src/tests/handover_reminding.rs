@@ -109,3 +109,32 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
     assert_eq!(held.sent, 1);
     assert_eq!(held.next_due, 310);
 }
+
+#[test]
+fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
+    use super::{CLAUDE_MODEL, CLAUDE_SEAT};
+    use super::NexusFixture;
+    use crate::handover_reminding::RemindsHandoverCallers;
+    use crate::store::{ConfiguresOnlyStore, ManagesMetaflowState};
+    use crate::store::context::RecordsContextSize;
+    use crate::store::handover::HoldsHandovers;
+    use crate::store::metaflow::SeedsMetaflow;
+    use meta_signal_flow::{ConfigurationChange, ConfigureThreshold, HandoverPolicy};
+    use signal_flow::{Address, Aspect, Caller, Metaflow, Model};
+    let fixture = NexusFixture::new();
+    let address = Address { aspect: Aspect::Mind, topic: "flow".into(), model: Model::Sol };
+    fixture.nexus.store.seed_role(Caller { flow_id: CLAUDE_SEAT.into(), aspect: Aspect::Mind, model_name: CLAUDE_MODEL.into() });
+    fixture.nexus.store.configure_change(ConfigurationChange::Thresholds(vec![ConfigureThreshold { model_name: CLAUDE_MODEL.into(), refresh: 101 }])).unwrap();
+    fixture.nexus.store.configure_change(ConfigurationChange::HandoverPolicies(vec![HandoverPolicy { model_name: CLAUDE_MODEL.into(), warning_share_left: 15, reminder_text: "fixture".into(), every_minutes: 5 }])).unwrap();
+    fixture.nexus.store.ensure_live_handover(&address, CLAUDE_SEAT).unwrap();
+    fixture.nexus.store.seed_metaflow(Metaflow { address: address.clone(), state: flow_ethos::State::Awake(CLAUDE_SEAT.into()), past: vec![], queue: vec![] });
+    fixture.nexus.store.record_context_size(CLAUDE_SEAT, 85).unwrap();
+    fixture.nexus.send_due_handover_reminders(10);
+    assert!(fixture.nexus.store.handover_reminder(&address, 0).unwrap().is_none());
+    fixture.nexus.store.record_context_size(CLAUDE_SEAT, 86).unwrap();
+    fixture.nexus.send_due_handover_reminders(20);
+    let row = fixture.nexus.store.handover_reminder(&address, 0).unwrap().unwrap();
+    assert_eq!(row.sent, 1);
+    fixture.nexus.send_due_handover_reminders(20);
+    assert_eq!(fixture.nexus.store.handover_reminder(&address, 0).unwrap().unwrap().sent, 1);
+}

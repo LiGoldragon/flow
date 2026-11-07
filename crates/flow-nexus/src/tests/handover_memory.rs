@@ -90,7 +90,7 @@ fn successor_closes_an_immutable_snapshot_and_starts_with_unknown_touch() {
         )
         .unwrap();
     store
-        .close_handover_for_successor(&address, "pred01")
+        .close_handover_for_successor(&address, "pred01", "succ01")
         .unwrap();
     let closed = store.handover_memory(&address).unwrap().unwrap();
     assert_eq!(closed.current, vec![section("one", "d", "before")]);
@@ -108,6 +108,32 @@ fn successor_closes_an_immutable_snapshot_and_starts_with_unknown_touch() {
     assert_eq!(
         changed.closed[0].sections,
         vec![section("one", "d", "before")]
+    );
+}
+
+#[test]
+fn successor_restart_is_idempotent_and_empty_generation_is_archived() {
+    let fixture = NexusFixture::new();
+    let address = address("handoverEmptyGeneration");
+    let store = &fixture.nexus.store;
+    store
+        .close_handover_for_successor(&address, "pred01", "succ01")
+        .unwrap();
+    store
+        .close_handover_for_successor(&address, "pred01", "succ01")
+        .unwrap();
+    let row = store.handover_memory(&address).unwrap().unwrap();
+    assert_eq!(row.closed.len(), 1);
+    assert!(row.closed[0].sections.is_empty());
+    assert_eq!(row.current_flow_id.as_deref(), Some("succ01"));
+    assert_eq!(row.generation, 1);
+    assert_eq!(
+        store.handover_for_flow(&address, "pred01").unwrap(),
+        Some(Vec::new())
+    );
+    assert_eq!(
+        store.handover_for_flow(&address, "succ01").unwrap(),
+        Some(Vec::new())
     );
 }
 

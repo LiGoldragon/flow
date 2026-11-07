@@ -1411,15 +1411,7 @@ impl AnnouncesLaunchChanges for LaunchChanges {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum HandoverConfigurationRefusal {
-    #[error("a handover policy has an invalid share or interval, or duplicates a model")]
-    InvalidPolicy,
-    #[error("the handover count must be non-negative")]
-    InvalidCount,
-}
-
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("sema-engine operation failed: {0}")]
     Engine(#[from] sema_engine::Error),
@@ -1435,8 +1427,8 @@ pub enum StoreError {
     ConfigurationReadViewChanged,
     #[error("a configuration declaration names one key twice")]
     DuplicateConfigurationEntry,
-    #[error("handover configuration refused: {0}")]
-    HandoverConfigurationRefused(#[from] HandoverConfigurationRefusal),
+    #[error("handover configuration refused: {0:?}")]
+    HandoverConfigurationRefused(meta_signal_flow::HandoverConfigurationRefusal),
     #[error("heartbeat period must be positive")]
     InvalidHeartbeatPeriod,
     #[error("store path must be an absolute file path")]
@@ -5198,12 +5190,24 @@ pub(crate) trait ReadsFlowMemory {
         }
         match change {
             ConfigurationChange::HandoverPolicies(policies) => {
-                if policies.iter().enumerate().any(|(i, p)| {
-                    p.warning_share_left > 100
-                        || p.every_minutes <= 0
-                        || policies[..i].iter().any(|q| q.model_name == p.model_name)
-                }) {
-                    return Err(HandoverConfigurationRefusal::InvalidPolicy.into());
+                if policies.iter().any(|p| p.warning_share_left > 100) {
+                    return Err(StoreError::HandoverConfigurationRefused(
+                        meta_signal_flow::HandoverConfigurationRefusal::InvalidWarningShareLeft,
+                    ));
+                }
+                if policies.iter().any(|p| p.every_minutes <= 0) {
+                    return Err(StoreError::HandoverConfigurationRefused(
+                        meta_signal_flow::HandoverConfigurationRefusal::InvalidEveryMinutes,
+                    ));
+                }
+                if policies
+                    .iter()
+                    .enumerate()
+                    .any(|(i, p)| policies[..i].iter().any(|q| q.model_name == p.model_name))
+                {
+                    return Err(StoreError::HandoverConfigurationRefused(
+                        meta_signal_flow::HandoverConfigurationRefusal::DuplicatePolicy,
+                    ));
                 }
                 let old = engine
                     .match_records(QueryPlan::all(tables.handover))?
@@ -5242,7 +5246,9 @@ pub(crate) trait ReadsFlowMemory {
             }
             ConfigurationChange::HandoverCount(count) => {
                 if count < 0 {
-                    return Err(HandoverConfigurationRefusal::InvalidCount.into());
+                    return Err(StoreError::HandoverConfigurationRefused(
+                        meta_signal_flow::HandoverConfigurationRefusal::NegativeHandoverCount,
+                    ));
                 }
                 let old = engine
                     .match_records(QueryPlan::all(tables.handover))?

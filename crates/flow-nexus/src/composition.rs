@@ -208,7 +208,10 @@ impl ReadsHandover for LaunchComposer {
         let launch_root = match launch_root {
             HandoverRoot::Unread => return Ok(None),
             HandoverRoot::At(root) => root,
-            HandoverRoot::Unresolved => return Err(refused(HandoverFault::RootUnresolved)),
+            HandoverRoot::Unresolved if self.handover.requires_launch_root() => {
+                return Err(refused(HandoverFault::RootUnresolved));
+            }
+            HandoverRoot::Unresolved => Path::new(""),
         };
         match self.handover.handover(&profile.address, predecessor, launch_root) {
             Handover::Text(text) => Ok(Some(text)),

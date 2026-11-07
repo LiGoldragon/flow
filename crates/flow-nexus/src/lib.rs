@@ -159,6 +159,8 @@ impl std::fmt::Debug for MemoryHandoverSource {
 }
 
 impl crate::handover::YieldsHandover for MemoryHandoverSource {
+    fn requires_launch_root(&self) -> bool { false }
+
     fn handover(
         &self,
         address: &signal_flow::Address,

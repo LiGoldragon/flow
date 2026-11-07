@@ -30,6 +30,7 @@ pub enum Handover {
 /// kept under a root ignores it.
 pub trait YieldsHandover: std::fmt::Debug + Send + Sync {
     fn handover(&self, address: &Address, predecessor: &str, launch_root: &Path) -> Handover;
+    fn requires_launch_root(&self) -> bool { true }
 }
 
 /// The file-backed source: `flows/<predecessor FlowId>/handover.md` under

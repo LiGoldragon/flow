@@ -6002,6 +6002,102 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_task_announcement_admits_atomically_and_uncertain_is_never_repeated() {
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        use crate::store::metaflow::SeedsMetaflow;
+        use crate::store::request_id_upgrade::{
+            RunsRequestIdAnnouncements, TaskAnnouncement, TaskAnnouncementStatus,
+        };
+        use signal_flow::{Message, Request, SentBy};
+
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let recipient = Address {
+            aspect: Aspect::Field,
+            topic: "upgradeNotice".into(),
+            model: Model::Sol,
+        };
+        store.seed_metaflow(flow_ethos::Metaflow {
+            address: recipient.clone(),
+            state: flow_ethos::State::Asleep,
+            past: Vec::new(),
+            queue: Vec::new(),
+        });
+        let signal_flow::PrivateSendResponse::SendAccepted(task) = store
+            .accept_logical_delivery(
+                &recipient,
+                SentBy::Sender(Address {
+                    aspect: Aspect::Mind,
+                    topic: "upgradeNotice".into(),
+                    model: Model::Sol,
+                }),
+                flow_ethos::Delivery::Queue,
+                Message::Soft(Request::Task(flow_ethos::AnswerableTask {
+                    minutes: 1,
+                    string: "finish the upgrade".into(),
+                })),
+                None,
+            )
+            .expect("task admits")
+        else {
+            panic!("task accepted")
+        };
+        store
+            .engine
+            .assert(Assertion::new(
+                store.request_id_upgrade.task_announcements,
+                TaskAnnouncement {
+                    recipient: recipient.clone(),
+                    part: 0,
+                    tasks: vec![task.logical_delivery_id],
+                    tries: 0,
+                    status: TaskAnnouncementStatus::Pending(None),
+                },
+            ))
+            .expect("announcement row seeds");
+
+        store
+            .run_request_id_announcements()
+            .expect("announcement pass admits");
+        let rows = store
+            .engine
+            .match_records(QueryPlan::all(store.request_id_upgrade.task_announcements))
+            .expect("announcement reads");
+        let [row] = rows.records() else {
+            panic!("one announcement")
+        };
+        let TaskAnnouncementStatus::Admitted(notice) = &row.status else {
+            panic!("notice admitted in the row")
+        };
+        assert_eq!(row.tries, 1);
+        let notice = notice.clone();
+        store
+            .transition_logical_delivery(&notice, signal_flow::DeliveryState::Uncertain)
+            .expect("notice becomes uncertain");
+        let queued = store
+            .stored_metaflow(&recipient)
+            .unwrap()
+            .unwrap()
+            .metaflow
+            .queue
+            .len();
+        store
+            .run_request_id_announcements()
+            .expect("uncertain pass is quiet");
+        assert_eq!(
+            store
+                .stored_metaflow(&recipient)
+                .unwrap()
+                .unwrap()
+                .metaflow
+                .queue
+                .len(),
+            queued,
+            "Uncertain never admits another Notice"
+        );
+    }
+
+    #[test]
     fn simplified_reply_requires_consumed_input_and_queues_once_to_its_sender() {
         use signal_flow::{
             Address, Aspect, DeliveryState, Message, Metaflow, Model, NativeReceipt, Request,

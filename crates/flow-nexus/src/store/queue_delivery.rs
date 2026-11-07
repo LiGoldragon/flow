@@ -372,11 +372,6 @@ pub trait AccountsQueueDelivery {
     fn observe_legacy_archive(
         &self,
     ) -> Result<Vec<meta_signal_flow::LegacyArchiveEntry>, StoreError>;
-    /// Kept archive identities are not eligible pending sender deliveries.
-    /// Their original lifecycle events and native evidence remain unchanged.
-    fn archived_legacy_request_ids(&self)
-    -> Result<std::collections::BTreeSet<String>, StoreError>;
-
     /// Gives the oldest queued request distinct durable request, attempt and
     /// native request identities before any native send occurs.
     fn prepare_oldest_delivery(
@@ -787,24 +782,6 @@ impl AccountsQueueDelivery for FlowStore {
             .collect::<Vec<_>>();
         archive.sort_by(|left, right| left.queue_request_id.cmp(&right.queue_request_id));
         Ok(archive)
-    }
-
-    fn archived_legacy_request_ids(
-        &self,
-    ) -> Result<std::collections::BTreeSet<String>, StoreError> {
-        let rows = self
-            .engine
-            .match_records(QueryPlan::all(self.queue_delivery.requests))?;
-        Ok(rows
-            .records()
-            .iter()
-            .filter(|request| {
-                request.state == RequestState::Parked
-                    && (matches!(request.queue_evidence, QueueEvidence::Legacy(_))
-                        || request.request_id.starts_with("legacy:"))
-            })
-            .map(|request| request.request_id.clone())
-            .collect())
     }
 
     fn prepare_oldest_delivery(

@@ -1266,7 +1266,7 @@ fn call_logical_id(call: &PriorSendCall) -> Option<&str> {
     }
 }
 
-fn prior_request<'a>(request: &'a PriorStoredDeliveryRequest) -> Option<&'a old_flow::Request> {
+fn prior_request(request: &PriorStoredDeliveryRequest) -> Option<&old_flow::Request> {
     match &request.queue_evidence {
         old_meta::QueueEvidence::Logical(entry) => Some(match &entry.message {
             old_flow::Message::HardAbrupt(request)
@@ -1660,14 +1660,12 @@ pub(crate) fn evolve_request_id_memory(
 
     // Reconstruct the 0.53.2 answer matcher by immutable delivery order.  Its
     // mutable current cursor is deliberately not an ordering key here.
-    let mut order_groups: BTreeMap<
-        String,
-        (
-            old_flow::Address,
-            old_flow::Address,
-            Vec<(String, Option<i64>, i64)>,
-        ),
-    > = BTreeMap::new();
+    type PriorOrderGroup = (
+        old_flow::Address,
+        old_flow::Address,
+        Vec<(String, Option<i64>, i64)>,
+    );
+    let mut order_groups: BTreeMap<String, PriorOrderGroup> = BTreeMap::new();
     let mut answer_groups: BTreeMap<String, Vec<(String, i64)>> = BTreeMap::new();
     for (logical_id, request) in &requests {
         let admission =

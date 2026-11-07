@@ -364,12 +364,10 @@ fn visible_tool_outcome(outcome: &SendOutcome) -> VisibleToolOutcome {
                 ),
             },
         }),
-        SendOutcome::Archived(value) => {
-            VisibleToolOutcome::LegacyUnknown(VisibleToolLegacyUnknown {
-                sender: value.sender.clone(),
-                target: value.target.clone(),
-            })
-        }
+        SendOutcome::Archived(value) => VisibleToolOutcome::Archived(VisibleToolLegacyUnknown {
+            sender: value.sender.clone(),
+            target: value.target.clone(),
+        }),
         SendOutcome::LegacyUnknown(value) => {
             VisibleToolOutcome::LegacyUnknown(VisibleToolLegacyUnknown {
                 sender: value.sender.clone(),

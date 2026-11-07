@@ -244,7 +244,7 @@ const RUNNING_TABLES: &[&str] = &[
 pub(crate) const FLOW_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FlowMemoryEra {
+pub(crate) enum FlowMemoryEra {
     Current,
     RequestIdPredecessor,
 }

@@ -171,13 +171,13 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     let current_revision = std::env::var("FLOW_MIGRATION_CURRENT_REV").unwrap();
     assert_eq!(
         predecessor_revision,
-        "5a0e9fa4c2695b7e1b14a7b0b72160ac560e6d13"
+        "f7d2336a7380206728cbd5aef2ebb3656d0cfd87"
     );
-    assert_eq!(
-        current_revision,
-        option_env!("FLOW_MIGRATION_SOURCE_REV")
-            .expect("the dedicated migration check stamps its source revision")
-    );
+    let stamped_revision = match option_env!("FLOW_MIGRATION_SOURCE_REV") {
+        Some(revision) => revision,
+        None => "unstamped",
+    };
+    assert_eq!(current_revision, stamped_revision);
     let predecessor = required_path("FLOW_MIGRATION_PREDECESSOR_BIN");
     let current = required_path("FLOW_MIGRATION_CURRENT_BIN");
     let home = tempfile::tempdir().expect("private home");

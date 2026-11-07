@@ -1,6 +1,6 @@
-use crate::sending::{AdmitsSendPayload, MeasuresSendPayload, MAX_SEND_PAYLOAD_BYTES};
-use crate::store::metaflow::SleepsMetaflows;
+use crate::sending::{AdmitsSendPayload, MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
 use crate::store::ReadsFlowMemory;
+use crate::store::metaflow::SleepsMetaflows;
 use flow_ethos::{Address, Aspect, Model, Request};
 
 fn sender() -> Address {
@@ -57,11 +57,11 @@ fn rendered_native_prompt_budget_counts_multibyte_utf8_bytes() {
 #[test]
 fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigured() {
     use super::{
-        bind_existing_caller, codex_agent_in, ControlsHerdrSnapshot, MarkedProcess, NexusFixture,
+        ControlsHerdrSnapshot, MarkedProcess, NexusFixture, bind_existing_caller, codex_agent_in,
     };
     use crate::sending::SendsRequests;
-    use crate::store::metaflow::SeedsMetaflow;
     use crate::store::FlowStore;
+    use crate::store::metaflow::SeedsMetaflow;
     use signal_flow::{Message, Metaflow, Response, SendRequest};
     let fixture = NexusFixture::new();
     bind_existing_caller(&fixture, "a001", "pane-1");
@@ -159,13 +159,13 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
 #[test]
 fn an_admitted_send_holds_archive_until_its_answer_object_is_released() {
     use super::{
-        bind_existing_caller, codex_agent_in, ControlsHerdrSnapshot, MarkedProcess, NexusFixture,
+        ControlsHerdrSnapshot, MarkedProcess, NexusFixture, bind_existing_caller, codex_agent_in,
     };
     use crate::sending::SendsRequests;
+    use crate::store::FlowStore;
     use crate::store::logical_delivery::RecordsLogicalDeliveries;
     use crate::store::metaflow::SeedsMetaflow;
     use crate::store::queue_delivery::AccountsQueueDelivery;
-    use crate::store::FlowStore;
     use signal_flow::{Message, Metaflow, PrivateSendResponse, SendRequest};
 
     let fixture = NexusFixture::new();
@@ -232,16 +232,16 @@ fn an_admitted_send_holds_archive_until_its_answer_object_is_released() {
 #[test]
 fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
     use super::waking::{
-        append_main_rows, claude_agent, claude_seat, claude_transcript, end_turn, CLAUDE_SEAT,
-        CLAUDE_SESSION,
+        CLAUDE_SEAT, CLAUDE_SESSION, append_main_rows, claude_agent, claude_seat,
+        claude_transcript, end_turn,
     };
     use super::{
-        bind_existing_caller, codex_agent_in, ControlsHerdrSnapshot, MarkedProcess, NexusFixture,
-        PromptFixture,
+        ControlsHerdrSnapshot, MarkedProcess, NexusFixture, PromptFixture, bind_existing_caller,
+        codex_agent_in,
     };
     use crate::sending::SendsRequests;
-    use crate::store::metaflow::SeedsMetaflow;
     use crate::store::FlowStore;
+    use crate::store::metaflow::SeedsMetaflow;
     use signal_flow::{Message, Metaflow, Response, SendRequest};
     use std::io::Write;
     use std::time::{Duration, Instant};
@@ -398,14 +398,16 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                 signal_flow::DeliveryState::Delivered(_)
             ));
             assert!(snapshot.delivery_cursor > accepted.delivery_cursor);
-            assert!(fixture
-                .nexus
-                .store
-                .metaflow(&target)
-                .unwrap()
-                .unwrap()
-                .queue
-                .is_empty());
+            assert!(
+                fixture
+                    .nexus
+                    .store
+                    .metaflow(&target)
+                    .unwrap()
+                    .unwrap()
+                    .queue
+                    .is_empty()
+            );
             continue;
         }
         let Response::Sent(receipt) = answer else {
@@ -426,14 +428,16 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
             )
         };
         assert_eq!(receipt.len(), 4);
-        assert!(fixture
-            .nexus
-            .store
-            .metaflow(&target)
-            .unwrap()
-            .unwrap()
-            .queue
-            .is_empty());
+        assert!(
+            fixture
+                .nexus
+                .store
+                .metaflow(&target)
+                .unwrap()
+                .unwrap()
+                .queue
+                .is_empty()
+        );
     }
 }
 
@@ -581,11 +585,11 @@ trait ServesCliWorld: Sized {
 
 impl ServesCliWorld for CliWorld {
     fn serving() -> Self {
-        use super::waking::{ended_claude, metaflow};
         use super::NexusFixture;
+        use super::waking::{ended_claude, metaflow};
         use crate::fixture_executable::{FixtureExecutable, InstallsScript};
-        use crate::store::metaflow::{SeedsMetaflow, TakesLaunchAddress};
         use crate::store::RegistersFlowIdentity;
+        use crate::store::metaflow::{SeedsMetaflow, TakesLaunchAddress};
         use crate::{ServesMeta, ServesOrdinary};
         use signal_flow::{
             EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
@@ -653,11 +657,13 @@ impl ServesCliWorld for CliWorld {
                 .unwrap(),
             crate::store::metaflow::AddressTaking::Takes(_)
         ));
-        assert!(fixture
-            .nexus
-            .store
-            .awaken_metaflow(&sender_address, "5e4de7", 0)
-            .unwrap());
+        assert!(
+            fixture
+                .nexus
+                .store
+                .awaken_metaflow(&sender_address, "5e4de7", 0)
+                .unwrap()
+        );
         // Herdr shows the sender's pane.
         let script = std::fs::read_to_string(&fixture.snapshot_program).unwrap();
         let sender_agent = r#"{"agent":"claude","agent_status":"working","name":"sender-agent","pane_id":"w5:p1","terminal_id":"term-sender","workspace_id":"w5"}"#;
@@ -750,9 +756,11 @@ fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
         "a refused Task is never queued"
     );
     // The same CLI and Nexus admit a Task whose Minutes stand.
-    assert!(world
-        .flow("Send.{ { Mind flow Sol } Soft.Task.{ 30 «Draft the proposal.» } }")
-        .starts_with("SendAccepted."),);
+    assert!(
+        world
+            .flow("Send.{ { Mind flow Sol } Soft.Task.{ 30 «Draft the proposal.» } }")
+            .starts_with("SendAccepted."),
+    );
 }
 
 /// A Send whose text holds a nested guillemet pair, and one holding an

@@ -2103,7 +2103,7 @@ mod tests {
             .read_uncertain_delivery("logical-first", "logical-answer", commit)
             .expect("answer settlement composes into its admission commit");
         reopened
-            .commit_logical_transition("logical-first", DeliveryState::Read, commit)
+            .commit_logical_transition(&"logical-first".into(), DeliveryState::Read, commit)
             .expect("answer admission and Read settle atomically");
 
         assert_eq!(

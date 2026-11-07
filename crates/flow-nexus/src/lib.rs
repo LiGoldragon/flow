@@ -281,9 +281,17 @@ impl Dispatches for RunningNexus {
     /// takes it.
     fn dispatch(&self, query: Query) -> Response {
         match query {
-            Query::Acknowledge(keys) => self.dispatch_from(Query::Acknowledge(keys), origin),
+            Query::Acknowledge(keys) => {
+                self.dispatch_from(Query::Acknowledge(keys), origin.clone())
+            }
             Query::ArchiveRequest(request_id) => {
-                self.dispatch_from(Query::ArchiveRequest(request_id), origin)
+                self.dispatch_from(Query::ArchiveRequest(request_id), origin.clone())
+            }
+            Query::Acknowledge(keys) => {
+                self.dispatch_from(Query::Acknowledge(keys), Origin::Unbound)
+            }
+            Query::ArchiveRequest(request_id) => {
+                self.dispatch_from(Query::ArchiveRequest(request_id), Origin::Unbound)
             }
             Query::Start(profile) => {
                 if let Err(rejection) = self.harness_arguments(&profile.address) {

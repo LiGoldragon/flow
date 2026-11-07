@@ -2179,6 +2179,66 @@ mod tests {
     }
 
     #[test]
+    fn archive_waits_for_every_native_attempt_to_finish() {
+        use super::super::logical_delivery::{MintsRequestIds, RecordsLogicalDeliveries};
+
+        let (fixture, store) = Fixture::new();
+        let prepared = prepare_claude(&store);
+        store
+            .transition_logical_delivery(
+                &"logical-first".into(),
+                DeliveryState::Delivered(signal_flow::NativeReceipt {
+                    harness_kind: HarnessKind::Claude,
+                    native_session_id: prepared.thread_id.clone(),
+                    native_prompt_id: "turn-9".into(),
+                }),
+            )
+            .expect("logical delivery ends while the attempt remains unfinished");
+        let first = queued("first");
+        let SentBy::Sender(sender) = first.sent_by.clone() else {
+            panic!("fixture request has a sender")
+        };
+        assert_eq!(
+            store
+                .archive_request(&first.request_id, &sender)
+                .expect("archive reads unfinished attempt"),
+            Err(signal_flow::ArchiveRejection::NotYet)
+        );
+        assert!(
+            store
+                .record_delivery_receipt(&prepared.attempt_id, receipt(&prepared))
+                .unwrap()
+        );
+        assert!(
+            store
+                .settle_recorded_delivery(&prepared.attempt_id)
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .archive_request(&first.request_id, &sender)
+                .expect("finished request archives"),
+            Ok(())
+        );
+        drop(store);
+        let reopened = fixture.reopen();
+        assert!(
+            reopened
+                .request_binding(&first.request_id)
+                .expect("bindings reopen")
+                .is_none(),
+            "archive binding retraction survives restart"
+        );
+        let history = reopened
+            .read_logical_delivery_snapshots(&sender, Some(0))
+            .expect("history reopens");
+        assert!(history.delivery_snapshot_vector.iter().any(|snapshot| {
+            snapshot.logical_delivery_id == "logical-first"
+                && snapshot.delivery_state == DeliveryState::Archived
+        }));
+    }
+
+    #[test]
     fn exact_receipt_survives_restart_and_settles_oldest_once() {
         let (fixture, store) = Fixture::new();
         let PrepareQueueDelivery::Prepared(prepared) = store

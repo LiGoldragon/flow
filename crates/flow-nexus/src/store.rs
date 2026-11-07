@@ -9072,7 +9072,7 @@ mod tests {
         );
         drop(store);
 
-        let reopened = fixture.store();
+        let reopened = fixture.configured_store();
         let held = reopened
             .read_message_delivery_snapshots(None)
             .expect("Message opening survives restart");

@@ -1482,8 +1482,6 @@ pub enum StoreError {
     Engine(#[from] sema_engine::Error),
     #[error("flow nexus state record is absent or duplicated")]
     StateInvariant,
-    #[error("the delivery admission answer is still being written")]
-    AdmissionAnswerPending,
     #[error("launch inspection rows changed while being read")]
     LaunchStatusReadViewChanged,
     #[error("launch inspection rows are inconsistent")]

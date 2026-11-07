@@ -2534,6 +2534,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         message_opening.delivery_snapshot_vector[0].logical_delivery_id,
         accepted.logical_delivery_id
     );
+    drop(answer);
     let replay = fixture
         .nexus
         .dispatch_metaflow_peer(signal_flow::Query::Deliver(deliver.clone()), Some(&message));
@@ -2541,23 +2542,6 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         panic!("a lost Deliver answer is recovered from its key alone")
     };
     assert_eq!(*replayed, accepted, "replay returns the exact admission");
-    assert!(matches!(
-        fixture
-            .nexus
-            .store
-            .acknowledge_deliver_calls(std::slice::from_ref(&deliver.deliver_key)),
-        Err(crate::store::StoreError::AdmissionAnswerPending)
-    ));
-    assert!(
-        fixture
-            .nexus
-            .store
-            .deliver_call(&deliver.deliver_key)
-            .expect("Deliver key reads while replay answer is held")
-            .is_some(),
-        "Acknowledge cannot retract the key before the replay answer write"
-    );
-    drop(replay);
     let mut changed = deliver.clone();
     changed.sendable_message =
         super::sendable_message(Message::MiddleAbrupt(Request::Order("Different".into())));
@@ -2654,9 +2638,9 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
             .archive_request(&accepted.request_id, &sender_address)
             .expect("archive reads while the Deliver answer is held"),
         Err(signal_flow::ArchiveRejection::NotYet),
-        "the admitted Deliver holds its request until its answer object is released"
+        "the replayed Deliver answer holds archive after Acknowledge removed its key"
     );
-    drop(answer);
+    drop(replay);
     assert_eq!(
         fixture
             .nexus

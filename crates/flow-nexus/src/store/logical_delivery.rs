@@ -831,10 +831,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             .unwrap_or_else(|error| error.into_inner());
         let mut commit = self.engine.begin_atomic_commit();
         for key in keys {
-            if let Some(call) = self.deliver_call(key)? {
-                if self.admission_answer_is_pending(&call.answer.request_id) {
-                    return Err(StoreError::AdmissionAnswerPending);
-                }
+            if self.deliver_call(key)?.is_some() {
                 commit = commit.retract(
                     self.logical_deliveries.deliver_calls,
                     key.deliver_call_record_key(),

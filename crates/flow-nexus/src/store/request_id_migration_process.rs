@@ -9,8 +9,10 @@
 use super::{
     DescribesRequestPolicyTable, FLOW_SCHEMA_VERSION, FlowStore, ManagesMetaflowState,
     OpensFlowStore, ReadsFlowMemory, RecordsLogicalDeliveries,
-    StoredMetaRequestPolicyConfiguration,
+    StoredMetaRequestPolicyConfiguration, TracksHeartbeat,
 };
+use crate::store::logical_delivery::{MintsRequestIds, RequestClosure, RequestIdBinding};
+use crate::store::queue_delivery::AccountsQueueDelivery;
 use sema_engine::{Engine, EngineOpen, QueryPlan, SchemaVersion};
 use std::{
     path::{Path, PathBuf},
@@ -72,6 +74,36 @@ fn required_path(name: &str) -> PathBuf {
         "the migration check supplies an immutable canonical binary"
     );
     path
+}
+
+fn required_directory(name: &str) -> PathBuf {
+    let path =
+        PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("{name} is required")));
+    assert!(path.is_dir(), "{name} names a directory");
+    path
+}
+
+fn fixture_ids(path: &Path) -> std::collections::BTreeMap<String, String> {
+    std::fs::read_to_string(path)
+        .expect("predecessor fixture ids read")
+        .lines()
+        .map(|line| {
+            let (name, value) = line.split_once('=').expect("fixture id has a name");
+            (name.to_owned(), value.to_owned())
+        })
+        .collect()
+}
+
+fn request_binding_for(store: &FlowStore, logical_id: &str) -> RequestIdBinding {
+    let rows = store
+        .engine
+        .match_records(QueryPlan::all(store.logical_deliveries.request_ids))
+        .expect("request bindings read");
+    rows.records()
+        .iter()
+        .find(|binding| binding.logical_delivery_id == logical_id)
+        .cloned()
+        .unwrap_or_else(|| panic!("request binding for {logical_id}"))
 }
 
 fn start_argument(runtime: &Path, store: &Path) -> String {
@@ -180,19 +212,32 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     };
     assert_eq!(current_revision, stamped_revision);
     let predecessor = required_path("FLOW_MIGRATION_PREDECESSOR_BIN");
+    let predecessor_fixture = required_directory("FLOW_MIGRATION_PREDECESSOR_STORE");
     let current = required_path("FLOW_MIGRATION_CURRENT_BIN");
     let home = tempfile::tempdir().expect("private home");
     let state = tempfile::tempdir().expect("private state");
     let store_path = state.path().join("flow.sema");
 
+    // Bind the unmodified accepted executable too: it creates and serves its
+    // own Memory. The nonempty fixture below is authored by a test-only
+    // module compiled inside the same exact accepted source and using its
+    // production FlowStore capabilities.
+    let exact_binary_state = tempfile::tempdir().expect("exact predecessor state");
     let predecessor_runtime = tempfile::tempdir().expect("predecessor runtime");
     serve_once(
         &predecessor,
         home.path(),
         predecessor_runtime.path(),
-        &store_path,
+        &exact_binary_state.path().join("flow.sema"),
     );
-    assert!(store_path.is_file(), "the predecessor process wrote Memory");
+    assert!(
+        exact_binary_state.path().join("flow.sema").is_file(),
+        "the exact predecessor process wrote Memory"
+    );
+    std::fs::copy(predecessor_fixture.join("flow.sema"), &store_path)
+        .expect("the exact-source nonempty predecessor Memory copies");
+    let ids = fixture_ids(&predecessor_fixture.join("fixture.ids"));
+    assert!(store_path.is_file(), "the predecessor fixture wrote Memory");
 
     let current_runtime = tempfile::tempdir().expect("current runtime");
     serve_once(&current, home.path(), current_runtime.path(), &store_path);
@@ -206,15 +251,192 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         .expect("predecessor seeded configuration");
     assert_eq!(configuration.request_id_draws, 64);
     assert_eq!(configuration.announcement_tries, 3);
+    let sender = signal_flow::Address {
+        aspect: signal_flow::Aspect::Mind,
+        topic: "migrationSender".into(),
+        model: signal_flow::Model::Sol,
+    };
+    let recipient = signal_flow::Address {
+        aspect: signal_flow::Aspect::Field,
+        topic: "migrationRecipient".into(),
+        model: signal_flow::Model::Sol,
+    };
+    let singleton = request_binding_for(&store, &ids["uncertain_order"]);
+    assert_eq!(
+        singleton.closure,
+        RequestClosure::Answered(ids["historical_result"].clone()),
+        "the singleton historical Result closes its uncertain Order"
+    );
+    let before_duplicate = std::fs::read(&store_path).expect("Memory reads before duplicate");
+    assert_eq!(
+        store
+            .resolve_sendable_message(
+                &recipient,
+                &sender,
+                signal_flow::SendableMessage::Soft(signal_flow::SendableRequest::Result(
+                    signal_flow::SendableRequest_Result_Data {
+                        request_id: singleton.request_id.clone(),
+                        string: "duplicate".into(),
+                    },
+                )),
+            )
+            .expect("duplicate historical Result reads"),
+        Err(signal_flow::Refusal::Unresolved)
+    );
+    assert_eq!(
+        std::fs::read(&store_path).expect("Memory reads after duplicate"),
+        before_duplicate,
+        "the duplicate historical Result writes nothing"
+    );
+    let heartbeat = store.heartbeat_standings().expect("heartbeat rows read");
+    assert_eq!(heartbeat.len(), 1);
+    assert_eq!(heartbeat[0].outstanding.as_deref(), Some(&ids["heartbeat"]));
     assert!(
         store
-            .read_message_delivery_snapshots(Some(0))
-            .expect("Message delivery history reads")
-            .delivery_snapshot_vector
-            .is_empty(),
-        "an empty predecessor invents no delivery"
+            .delivery_purposes()
+            .expect("purposes read")
+            .iter()
+            .any(|row| row.logical_delivery_id == ids["heartbeat"]
+                && row.purpose == crate::heartbeat::DeliveryPurpose::Heartbeat)
+    );
+    assert!(matches!(
+        store
+            .simplified_reply_receipt("open-simplified")
+            .expect("open simplified reply reads"),
+        super::logical_delivery::SimplifiedReplyStanding::Unreceived(_)
+    ));
+    assert!(matches!(
+        store
+            .simplified_reply_receipt("completed-simplified")
+            .expect("completed simplified reply reads"),
+        super::logical_delivery::SimplifiedReplyStanding::NoneOwed
+    ));
+
+    let open_order = request_binding_for(&store, &ids["open_order"]);
+    let resolved_result = store
+        .resolve_sendable_message(
+            &recipient,
+            &sender,
+            signal_flow::SendableMessage::Soft(signal_flow::SendableRequest::Result(
+                signal_flow::SendableRequest_Result_Data {
+                    request_id: open_order.request_id.clone(),
+                    string: "current result".into(),
+                },
+            )),
+        )
+        .expect("current Result resolution reads")
+        .expect("current Result resolves");
+    let signal_flow::PrivateSendResponse::SendAccepted(result) = store
+        .accept_logical_delivery(
+            &sender,
+            flow_ethos::SentBy::Sender(recipient.clone()),
+            flow_ethos::Delivery::Queue,
+            resolved_result,
+            None,
+        )
+        .expect("current Result admits")
+    else {
+        panic!("current Result accepted")
+    };
+    let open_task = request_binding_for(&store, &ids["open_task"]);
+    let resolved_done = store
+        .resolve_sendable_message(
+            &recipient,
+            &sender,
+            signal_flow::SendableMessage::Soft(signal_flow::SendableRequest::Done(
+                signal_flow::SendableRequest_Done_Data {
+                    request_id: open_task.request_id.clone(),
+                    string: "current done".into(),
+                },
+            )),
+        )
+        .expect("current Done resolution reads")
+        .expect("current Done resolves");
+    let signal_flow::PrivateSendResponse::SendAccepted(done) = store
+        .accept_logical_delivery(
+            &sender,
+            flow_ethos::SentBy::Sender(recipient.clone()),
+            flow_ethos::Delivery::Queue,
+            resolved_done,
+            None,
+        )
+        .expect("current Done admits")
+    else {
+        panic!("current Done accepted")
+    };
+    let signal_flow::PrivateSendResponse::SendAccepted(notice) = store
+        .accept_logical_delivery(
+            &recipient,
+            flow_ethos::SentBy::Sender(sender.clone()),
+            flow_ethos::Delivery::Queue,
+            flow_ethos::Message::Soft(flow_ethos::Request::Notice("current send".into())),
+            None,
+        )
+        .expect("current Send admits")
+    else {
+        panic!("current Send accepted")
+    };
+    let after_acceptance = store
+        .read_logical_delivery_snapshots(&sender, Some(notice.delivery_cursor))
+        .expect("cursor resume reads");
+    assert!(after_acceptance.delivery_cursor >= notice.delivery_cursor);
+    store
+        .transition_logical_delivery(
+            &ids["open_order"],
+            signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                harness_kind: signal_flow::HarnessKind::Codex,
+                native_session_id: "current-order-session".into(),
+                native_prompt_id: "current-order-turn".into(),
+            }),
+        )
+        .expect("answered Order becomes delivered");
+    assert_eq!(
+        store
+            .withdraw_queued(&recipient, &ids["open_order"])
+            .expect("answered Order queue reads"),
+        Ok(())
+    );
+    assert_eq!(
+        store
+            .archive_request(&open_order.request_id, &sender)
+            .expect("answered Order archive reads"),
+        Ok(())
     );
     drop(store);
+
+    let post_operation_runtime = tempfile::tempdir().expect("post-operation runtime");
+    serve_once(
+        &current,
+        home.path(),
+        post_operation_runtime.path(),
+        &store_path,
+    );
+    let reopened = FlowStore::open_configured(&store_path).expect("operated Memory reopens");
+    assert!(
+        reopened
+            .request_binding(&open_order.request_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        reopened
+            .logical_delivery_snapshot(&result.logical_delivery_id)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        reopened
+            .logical_delivery_snapshot(&done.logical_delivery_id)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        reopened
+            .logical_delivery_snapshot(&notice.logical_delivery_id)
+            .unwrap()
+            .is_some()
+    );
+    drop(reopened);
 
     inject_malformed_request_policy(&store_path);
     let malformed = vec![StoredMetaRequestPolicyConfiguration {

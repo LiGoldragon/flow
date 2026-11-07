@@ -294,6 +294,27 @@
           }).overrideAttrs (old: {
             nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [ context.pkgs.util-linux ];
           });
+          migrationPredecessorFixture = migrationPredecessorPackage.overrideAttrs (old: {
+            pname = "flow-configured-request-id-predecessor-fixture";
+            postPatch = (old.postPatch or "") + ''
+              cp ${./crates/flow-nexus/src/store/request_id_predecessor_fixture.rs} \
+                crates/flow-nexus/src/store/request_id_predecessor_fixture.rs
+              cat >> crates/flow-nexus/src/store.rs <<'RUST'
+
+              #[cfg(test)]
+              #[path = "store/request_id_predecessor_fixture.rs"]
+              mod request_id_predecessor_fixture;
+              RUST
+            '';
+            postCheck = (old.postCheck or "") + ''
+              export FLOW_PREDECESSOR_FIXTURE_OUT="$out/share/request-id-predecessor"
+              cargoWithProfile test -p flow-nexus --lib \
+                request_id_predecessor_fixture::writes_nonempty_request_id_predecessor_memory \
+                -- --exact
+              test -s "$FLOW_PREDECESSOR_FIXTURE_OUT/flow.sema"
+              test -s "$FLOW_PREDECESSOR_FIXTURE_OUT/fixture.ids"
+            '';
+          });
         in
         {
           default = context.craneLib.cargoTest (
@@ -375,6 +396,7 @@
               '';
               checkPhaseCargoCommand = ''
                 export FLOW_MIGRATION_PREDECESSOR_BIN="${migrationPredecessorPackage}/bin/flow-nexus"
+                export FLOW_MIGRATION_PREDECESSOR_STORE="${migrationPredecessorFixture}/share/request-id-predecessor"
                 export FLOW_MIGRATION_CURRENT_BIN="$PWD/target/release/flow-nexus"
                 export FLOW_MIGRATION_PREDECESSOR_REV="f7d2336a7380206728cbd5aef2ebb3656d0cfd87"
                 export FLOW_MIGRATION_CURRENT_REV="${self.rev or self.dirtyRev or "unpublished"}"

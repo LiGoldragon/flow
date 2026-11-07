@@ -6060,9 +6060,6 @@ mod tests {
         );
 
         store
-            .acknowledge_deliver_calls(&[key(0), key(1)])
-            .expect("Message calls acknowledge");
-        store
             .transition_logical_delivery(
                 &notice,
                 signal_flow::DeliveryState::Failed(signal_flow::Refusal::Direct(
@@ -9054,6 +9051,9 @@ mod tests {
             "one stream spans senders and excludes ordinary admission"
         );
 
+        store
+            .acknowledge_deliver_calls(&[key(0), key(1)])
+            .expect("Message calls acknowledge");
         store
             .transition_logical_delivery(
                 &first.logical_delivery_id,

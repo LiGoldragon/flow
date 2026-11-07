@@ -963,16 +963,54 @@
    "handover-full-preservation.json"
    [h0-wrapper-record-name "handover-H0-model-catalog.json"]))
 
+(def handover-finish-succeeded (atom true))
+(def handover-evidence-preserved (atom true))
+
+(defn preserve-teardown-witnesses!
+  "One witness owner after every writer stopped: typed handover evidence for
+  either handover mode, the legacy copy set for every other capsule."
+  []
+  (try
+    (if handover-mode
+      (let [receipt (if h0-diagnostic-mode (preserve-h0-diagnostic!) (preserve-full-handover!))
+            receipt-name (if h0-diagnostic-mode "handover-H0-preservation.json"
+                             "handover-full-preservation.json")
+            success (and (not-any? :error receipt)
+                         (fs/regular-file? (str @witness-dir "/" receipt-name)))]
+        (reset! handover-evidence-preserved (boolean success))
+        (str "handover witnesses " (if success "preserved" "incomplete") " in " @witness-dir))
+      (do (keep-witnesses! @witness-dir
+                           (teardown-witnesses false @run-log capsule-transcripts
+                                               (str codex-home "/sessions")))
+          (reset! handover-evidence-preserved true)
+          (str "witnesses kept in " @witness-dir)))
+    (catch Exception e
+      (reset! handover-evidence-preserved false)
+      (str "witnesses not kept in " @witness-dir ": " (.getMessage e)))))
+
 (defn finish-h0-diagnostic! []
   (try (stop-h0-sampler!)
        (catch Exception e
          (append-h0-json! h0-sampler-record-name
                           {:time (str (java.time.Instant/now)) :kind "sampler-stop-error"
-                           :error (.getMessage e)})))
-  (preserve-h0-diagnostic!))
+                           :error (.getMessage e)}))))
 
-(defn with-full-handover-finish [body]
-  (try (body) (finally (preserve-full-handover!))))
+(defn run-with-teardown!
+  "Runs the selected scenarios, quiesces their diagnostic sampler, then
+  tears down exactly once even when either earlier stage throws."
+  [body finish! teardown!]
+  (let [clean (atom false)]
+    (reset! handover-finish-succeeded true)
+    (reset! handover-evidence-preserved true)
+    (try
+      (body)
+      (finally
+        (try (finish!)
+             (catch Exception e
+               (reset! handover-finish-succeeded false)
+               (keep-text! "handover-finish-error.txt" (.getMessage e))))
+        (reset! clean (teardown!))))
+    @clean))
 
 ;; ---------------------------------------------------------------- readings
 
@@ -1479,13 +1517,8 @@
       (run {} "herdr" "session" "delete" session))
     ;; Every process that writes them has stopped: the Nexus log and each
     ;; flow transcript are kept before the state root and traces go.
-    (when-let [dir @witness-dir]
-      (swap! steps conj
-             (try (keep-witnesses! dir (teardown-witnesses handover-mode @run-log
-                                                           capsule-transcripts
-                                                           (str codex-home "/sessions")))
-                  (str "witnesses kept in " dir)
-                  (catch Exception e (str "witnesses not kept in " dir ": " (.getMessage e))))))
+    (when @witness-dir
+      (swap! steps conj (preserve-teardown-witnesses!)))
     ;; The capsule's Herdr keeps its sessions in the capsule's own config
     ;; home: its session is gone when its directory is, read before that
     ;; home is deleted with the state root, and no Herdr runs after it.
@@ -1501,6 +1534,8 @@
     (when (:runtime cleanup) (fs/delete-tree capsule-runtime))
     (doseq [s @steps] (println (str "  " s)))
     (let [remaining {:herdr-session @herdr-session-left
+                     :handover-finish @handover-finish-succeeded
+                     :handover-evidence @handover-evidence-preserved
                      :processes (vec (or (watch 20 #(let [left (capsule-processes)] (when (empty? left) []))) (capsule-processes)))
                      :store (fs/exists? state-root)
                      :source-root (fs/exists? source-parent)
@@ -1511,7 +1546,8 @@
                      :traces (traces @natives-seen)
                      :history-lines (history-lines @natives-seen)
                      :claude-project-entry (project-entry?)}
-          clean (and (not (:herdr-session remaining)) (empty? (:processes remaining)) (not (:store remaining))
+          clean (and (:handover-finish remaining) (:handover-evidence remaining)
+                     (not (:herdr-session remaining)) (empty? (:processes remaining)) (not (:store remaining))
                      (not (:sockets remaining)) (not (:source-root remaining)) (empty? (:traces remaining))
                      (not (:curriculum-process remaining)) (not (:curriculum-store remaining))
                      (not (:curriculum-socket remaining)))]
@@ -2126,16 +2162,15 @@
       (p/destroy-tree process)
       result)))
 
-(defn with-h0-diagnostic-finish [body]
-  (try (body) (finally (finish-h0-diagnostic!))))
-
 (defn seven-line-contract-complete? [handover-only h0-diagnostic-only outcomes]
   (cond h0-diagnostic-only false
         handover-only (not-any? #(false? (:contract-pass %)) outcomes)
         :else true))
 
 (defn h0-diagnostic-capture-complete? []
-  (and @witness-dir
+  (and @handover-finish-succeeded
+       @handover-evidence-preserved
+       @witness-dir
        (fs/regular-file? (str @witness-dir "/handover-H0-preservation.json"))
        (fs/regular-file? (str @witness-dir "/" h0-sampler-record-name))))
 
@@ -3405,10 +3440,9 @@
                 (catch Exception e
                   (reset! passed false)
                   (println (str "stopped: " (.getMessage e) " " (pr-str (ex-data e)))))))]
-        (cond h0-diagnostic-only (with-h0-diagnostic-finish run-capsule)
-              handover-only (with-full-handover-finish run-capsule)
-              :else (run-capsule)))
-      (let [clean (teardown!)
+        (let [clean (run-with-teardown! run-capsule
+                                        #(when h0-diagnostic-only (finish-h0-diagnostic!))
+                                        teardown!)
             contract-complete (seven-line-contract-complete? handover-only h0-diagnostic-only @results)
             diagnostic-capture (and h0-diagnostic-only (h0-diagnostic-capture-complete?))]
         (println (str "wall " (- (System/currentTimeMillis) wall) " ms | "
@@ -3416,7 +3450,7 @@
                       (count (filter :skipped @results)) " skipped | seven-line contract complete " contract-complete
                       " | diagnostic capture complete " diagnostic-capture
                       " | witnesses " @witness-dir))
-        (System/exit (if (and @passed clean contract-complete) 0 1))))))
+          (System/exit (if (and @passed clean contract-complete) 0 1)))))))
 
 (when (= *file* (System/getProperty "babashka.file"))
   (apply -main *command-line-args*))

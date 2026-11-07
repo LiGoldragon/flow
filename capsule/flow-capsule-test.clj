@@ -211,29 +211,60 @@
       (reset! flow-capsule/run-log saved-log)
       (fs/delete-tree scratch))))
 
-(let [finished (atom false)
-      threw (try
-              (with-redefs [flow-capsule/finish-h0-diagnostic! #(reset! finished true)]
-                (flow-capsule/with-h0-diagnostic-finish
-                 #(throw (ex-info "launch failure" {}))))
-              false
-              (catch Exception _ true))]
-  (check "an H0 launch exception still runs preservation before it escapes"
-         (and threw @finished)))
-
 (doseq [[label body throws?]
         [["success" #(identity :done) false]
-         ["exception" #(throw (ex-info "full handover failure" {})) true]]]
+         ["exception" #(throw (ex-info "handover failure" {})) true]]]
   (let [events (atom [])
         threw (try
-                (with-redefs [flow-capsule/preserve-full-handover!
-                              #(swap! events conj :preserved)]
-                  (flow-capsule/with-full-handover-finish
-                   #(do (swap! events conj :body) (body))))
+                (flow-capsule/run-with-teardown!
+                 #(do (swap! events conj :body) (body))
+                 #(swap! events conj :sampler-quiesced)
+                 #(do (swap! events conj :teardown) true))
                 false
                 (catch Exception _ true))]
-    (check (str "full handover preserves native evidence before teardown after " label)
-           (and (= throws? threw) (= [:body :preserved] @events)))))
+    (check (str "handover quiesces its sampler and tears down exactly once after " label)
+           (and (= throws? threw) (= [:body :sampler-quiesced :teardown] @events)))))
+
+(let [kept (with-redefs [flow-capsule/handover-mode true
+                         flow-capsule/h0-diagnostic-mode false
+                         flow-capsule/preserve-full-handover!
+                         #(throw (ex-info "preservation failed" {}))]
+             (flow-capsule/preserve-teardown-witnesses!))]
+  (check "a full-handover preservation error stays scoped so teardown can continue"
+         (and (str/includes? kept "preservation failed")
+              (not @flow-capsule/handover-evidence-preserved))))
+
+(let [scratch (str (fs/create-temp-dir))
+      saved @flow-capsule/witness-dir]
+  (try
+    (spit (str scratch "/handover-full-preservation.json") "destination already exists\n")
+    (reset! flow-capsule/witness-dir scratch)
+    (let [kept (with-redefs [flow-capsule/handover-mode true
+                             flow-capsule/h0-diagnostic-mode false
+                             flow-capsule/preserve-full-handover!
+                             (fn [] [{:present true :destination "existing"}
+                                     {:present false :error "partial copy"}])]
+                 (flow-capsule/preserve-teardown-witnesses!))]
+      (check "a destination plus a partial preservation error is capture-incomplete"
+             (and (str/includes? kept "incomplete")
+                  (not @flow-capsule/handover-evidence-preserved))))
+    (finally (reset! flow-capsule/witness-dir saved) (fs/delete-tree scratch))))
+
+(let [events (atom [])
+      clean (flow-capsule/run-with-teardown!
+             #(swap! events conj :body)
+             #(do (swap! events conj :sampler-stop-failed)
+                  (throw (ex-info "sampler stop failed" {})))
+             #(do (swap! events conj :teardown) true))]
+  (check "a sampler-stop failure still tears down once and is capture-incomplete"
+         (and clean
+              (= [:body :sampler-stop-failed :teardown] @events)
+              (not @flow-capsule/handover-finish-succeeded))))
+
+(let [calls (atom 0)
+      clean (flow-capsule/run-with-teardown! #() #() #(do (swap! calls inc) false))]
+  (check "a delete failure is returned after exactly one teardown"
+         (and (false? clean) (= 1 @calls))))
 
 (let [header (str "#!/bin/sh\nexport CODEX_HOME=" flow-capsule/codex-home "\n")
       exec (str "exec " flow-capsule/codex-binary " \"$@\"\n")

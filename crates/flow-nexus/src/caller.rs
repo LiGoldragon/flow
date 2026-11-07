@@ -410,7 +410,10 @@ impl ResolvesProcessAuthorityEvidence for RunningNexus {
             flow_ethos::State::Asleep => return Ok(ProcessAuthority::Unbound),
         };
         let Some(node) = self.store.flow_node(&flow_id)? else {
-            return Ok(ProcessAuthority::Unbound);
+            // An explicitly bound process owns an Address before it is a
+            // registered native flow. It may Send from that Address, while
+            // acts that require a FlowOrigin still see it as Launching.
+            return Ok(ProcessAuthority::Launching(address.clone()));
         };
         if !node.flow_lifecycle.is_live()
             || self

@@ -414,6 +414,11 @@ impl MintsRequestIds for FlowStore {
 
 pub(crate) trait RecordsLogicalDeliveries {
     fn seed_store_identity(&self) -> Result<(), StoreError>;
+    fn archive_request(
+        &self,
+        request_id: &str,
+        sender: &Address,
+    ) -> Result<Result<(), signal_flow::ArchiveRejection>, StoreError>;
     fn seed_missing_queued_deliveries(&self) -> Result<(), StoreError>;
     fn force_queue_wake(&self, address: &Address) -> Result<(), StoreError>;
     /// Resolves a public message against durable private evidence. The
@@ -537,6 +542,80 @@ pub(crate) trait RecordsLogicalDeliveries {
     ) -> Result<Option<Address>, StoreError>;
 }
 impl RecordsLogicalDeliveries for FlowStore {
+    fn archive_request(
+        &self,
+        request_id: &str,
+        sender: &Address,
+    ) -> Result<Result<(), signal_flow::ArchiveRejection>, StoreError> {
+        use signal_flow::ArchiveRejection;
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(binding) = self.request_binding(&request_id.to_owned())? else {
+            return Ok(Err(ArchiveRejection::UnknownRequest));
+        };
+        let Some(retained) = self
+            .retained_logical_requests()?
+            .into_iter()
+            .find(|value| value.entry.logical_delivery_id == binding.logical_delivery_id)
+        else {
+            return Err(StoreError::StateInvariant);
+        };
+        if !matches!(&retained.entry.sent_by, SentBy::Sender(owner) if owner == sender) {
+            return Ok(Err(ArchiveRejection::UnknownRequest));
+        }
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.logical_deliveries.current,
+            RecordKey::new(binding.logical_delivery_id.clone()),
+        ))?;
+        let [current] = rows.records() else {
+            return Err(StoreError::StateInvariant);
+        };
+        if current.archived.is_some()
+            || !matches!(
+                current.snapshot.delivery_state,
+                DeliveryState::Delivered(_)
+                    | DeliveryState::Read
+                    | DeliveryState::Failed(_)
+                    | DeliveryState::Withdrawn
+            )
+        {
+            return Ok(Err(ArchiveRejection::NotYet));
+        }
+        let allocation = self.allocate_logical_cursor()?;
+        let cursor = allocation.cursor;
+        let mut archived = current.clone();
+        archived.archived = Some(cursor);
+        let mut event = current.snapshot.clone();
+        event.delivery_cursor = cursor;
+        event.delivery_state = DeliveryState::Archived;
+        let next_counter = LogicalDeliveryCounter {
+            next_cursor: cursor.checked_add(1).ok_or(StoreError::StateInvariant)?,
+        };
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .mutate(self.logical_deliveries.current, archived)
+            .assert(
+                self.logical_deliveries.events,
+                LogicalDeliveryEvent { snapshot: event },
+            )
+            .retract(
+                self.logical_deliveries.request_ids,
+                RecordKey::new(request_id.to_owned()),
+            );
+        let commit = if allocation.existing {
+            commit.mutate(self.logical_deliveries.counter, next_counter)
+        } else {
+            commit.assert(self.logical_deliveries.counter, next_counter)
+        };
+        self.engine.commit_atomic(commit)?;
+        self.launch_changes.announce();
+        Ok(Ok(()))
+    }
+
     fn seed_store_identity(&self) -> Result<(), StoreError> {
         let rows = self.engine.match_records(QueryPlan::key(
             self.logical_deliveries.store_identity,

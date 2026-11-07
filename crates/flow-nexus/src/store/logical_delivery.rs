@@ -974,15 +974,16 @@ impl RecordsLogicalDeliveries for FlowStore {
         let [current] = rows.records() else {
             return Err(StoreError::StateInvariant);
         };
-        if current.archived.is_some()
-            || !matches!(
-                current.snapshot.delivery_state,
-                DeliveryState::Delivered(_)
-                    | DeliveryState::Read
-                    | DeliveryState::Failed(_)
-                    | DeliveryState::Withdrawn
-            )
-        {
+        if current.archived.is_some() {
+            return Err(StoreError::StateInvariant);
+        }
+        if !matches!(
+            current.snapshot.delivery_state,
+            DeliveryState::Delivered(_)
+                | DeliveryState::Read
+                | DeliveryState::Failed(_)
+                | DeliveryState::Withdrawn
+        ) {
             return Ok(Err(ArchiveRejection::NotYet));
         }
         let allocation = self.allocate_logical_cursor()?;

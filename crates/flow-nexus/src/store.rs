@@ -8961,6 +8961,59 @@ mod tests {
     }
 
     #[test]
+    fn request_id_is_drawn_independently_of_the_logical_delivery_id() {
+        use super::logical_delivery::RecordsLogicalDeliveries;
+        use super::metaflow::SeedsMetaflow;
+        use flow_ethos::{Delivery, Message, Request, SentBy};
+        use signal_flow::PrivateSendResponse;
+
+        let fixture = StoreFixture::new();
+        let mut store = fixture.store();
+        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+            &mut store,
+            std::sync::Arc::new(ScriptedRequestIdDrawer::new(["r001", "r002"])),
+        );
+        let sender = signal_flow::Address {
+            aspect: signal_flow::Aspect::Mind,
+            topic: "independentIds".into(),
+            model: signal_flow::Model::Sol,
+        };
+        let recipient = signal_flow::Address {
+            aspect: signal_flow::Aspect::Field,
+            topic: "independentIds".into(),
+            model: signal_flow::Model::Sol,
+        };
+        store.seed_metaflow(flow_ethos::Metaflow {
+            address: recipient.clone(),
+            state: flow_ethos::State::Asleep,
+            past: Vec::new(),
+            queue: Vec::new(),
+        });
+        let admit = |words: &str| {
+            let PrivateSendResponse::SendAccepted(accepted) = store
+                .accept_logical_delivery(
+                    &recipient,
+                    SentBy::Sender(sender.clone()),
+                    Delivery::Queue,
+                    Message::Soft(Request::Notice(words.into())),
+                    None,
+                )
+                .expect("Notice admits")
+            else {
+                panic!("Notice accepted")
+            };
+            accepted
+        };
+        let first = admit("first");
+        let second = admit("second");
+        assert_eq!(first.request_id, "r001");
+        assert_eq!(second.request_id, "r002");
+        assert_ne!(first.logical_delivery_id, first.request_id);
+        assert_ne!(second.logical_delivery_id, second.request_id);
+        assert_ne!(first.logical_delivery_id, second.logical_delivery_id);
+    }
+
+    #[test]
     fn request_id_draws_collided_refuses_unadmitted_and_writes_nothing() {
         use super::logical_delivery::{MintsRequestIds, RequestClosure, RequestIdBinding};
         use sema_engine::{Assertion, QueryPlan};
@@ -9114,7 +9167,7 @@ mod tests {
 
     #[test]
     fn terminal_and_archived_logical_deliveries_never_transition_again() {
-        use super::logical_delivery::RecordsLogicalDeliveries;
+        use super::logical_delivery::{RecordsLogicalDeliveries, RequestClosure, RequestIdBinding};
         use super::metaflow::SeedsMetaflow;
         use flow_ethos::{Delivery, Message, Request, SentBy};
         use signal_flow::{DeliveryState, NativeReceipt, PrivateSendResponse};
@@ -9209,6 +9262,21 @@ mod tests {
                     native_prompt_id: "later-prompt".into(),
                 })
             ),
+            Err(super::StoreError::StateInvariant)
+        ));
+        store
+            .engine
+            .assert(sema_engine::Assertion::new(
+                store.logical_deliveries.request_ids,
+                RequestIdBinding {
+                    request_id: archived.request_id.clone(),
+                    logical_delivery_id: archived.logical_delivery_id,
+                    closure: RequestClosure::Open,
+                },
+            ))
+            .expect("corrupt binding is planted");
+        assert!(matches!(
+            store.archive_request(&archived.request_id, &sender),
             Err(super::StoreError::StateInvariant)
         ));
     }

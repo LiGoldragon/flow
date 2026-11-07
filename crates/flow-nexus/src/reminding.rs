@@ -40,6 +40,7 @@ pub trait RemindsCallers {
 impl RemindsCallers for RunningNexus {
     fn send_due_reminders(&self) {
         use crate::handover_reminding::RemindsHandoverCallers;
+        use crate::reminding::ArchivesHandoverOnTick;
         let now = SystemTime::now().seconds_since_epoch();
         let mut reminded: Vec<Address> = Vec::new();
         {
@@ -112,10 +113,12 @@ impl RemindsCallers for RunningNexus {
             }
         }
         self.send_due_handover_reminders(SystemTime::now().seconds_since_epoch());
+        self.retire_handover_archives();
         for address in reminded {
             self.wake_due(address);
         }
     }
+
 
     fn keep_reminding(&self) {
         while !self.stopping.requested() {
@@ -127,4 +130,28 @@ impl RemindsCallers for RunningNexus {
             }
         }
     }
+}
+
+
+pub trait ArchivesHandoverOnTick { fn retire_handover_archives(&self); }
+
+impl ArchivesHandoverOnTick for RunningNexus {
+    fn retire_handover_archives(&self) {
+        use crate::handover_archive::{ExistingGitHandoverArchive, RetiresHandoverGenerations};
+        use crate::store::metaflow::SleepsMetaflows;
+        use std::collections::BTreeSet;
+        let Ok(Some(snapshot)) = self.store.configuration_snapshot() else { return };
+        let meta_signal_flow::HandoverArchiveConfiguration::Configured(path) = snapshot.handover_archive else { return };
+        let meta_signal_flow::HandoverCountConfiguration::Configured(count) = snapshot.handover_count else { return };
+        let Ok(metaflows) = self.store.list_metaflows() else { return };
+        let publisher = ExistingGitHandoverArchive::new(path);
+        let mut addresses = BTreeSet::new();
+        for metaflow in metaflows { addresses.insert(metaflow.address); }
+        for address in addresses {
+            if let Err(error) = self.retire_handover_generations(&address, count as usize, &publisher) {
+                eprintln!("flow-nexus: handover archive retry refused for {address:?}: {error}");
+            }
+        }
+    }
+
 }

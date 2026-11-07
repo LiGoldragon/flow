@@ -4035,13 +4035,13 @@ mod tests {
         bound.flow_binding_result
     }
 
-    /// The binding of the registered 908786 row (a RegisterFlow row, Active
-    /// and roleless, as 5f38bc is live) under a newer agent name.
+    /// The exact binding of the registered 908786 row (a RegisterFlow row,
+    /// Active and roleless, as 5f38bc is live).
     fn binding_of_registered_row(fixture: &NexusFixture) -> meta_signal_flow::FlowBinding {
         let mut binding = existing_binding("908786", "w1:p3");
         binding.native_session_id = fixture.node().session_id;
         binding.herdr_terminal_id = "term_65bb7f87270cb3".into();
-        binding.herdr_agent_name = "field-astra-908786".into();
+        binding.herdr_agent_name = "psyche-mind-astra".into();
         binding
     }
 
@@ -4056,11 +4056,11 @@ mod tests {
 
     #[test]
     fn a_matching_binding_of_a_flow_already_held_asserts_only_its_role() {
-        use crate::store::ReadsFlowRoles;
+        use crate::store::{ReadsFlowRoles, ReadsFlowRows};
         let fixture = NexusFixture::new();
         fixture.set_agents(vec![fixture.current_agent()]);
         fixture.register_with(FlowLifecycle::Active);
-        let before = listed(&fixture);
+        let before = fixture.nexus.store.flow_nodes().expect("Flow rows read");
         assert_eq!(fixture.nexus.store.role("908786").expect("role read"), None);
 
         let role = Caller {
@@ -4081,7 +4081,10 @@ mod tests {
                 fixture.nexus.store.role("908786").expect("role read"),
                 Some(role.clone())
             );
-            assert_eq!(listed(&fixture), before);
+            assert_eq!(
+                fixture.nexus.store.flow_nodes().expect("Flow rows read"),
+                before
+            );
         }
     }
 

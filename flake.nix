@@ -542,6 +542,10 @@
             "tests::waking::the_wake_pane_check_binds_a_codex_flow_by_pane_agent_and_thread";
           flow-bind-existing-verified-with-herdr = context.exactTest "flow-nexus"
             "tests::meta_bind_existing_verifies_the_pane_process_and_session_with_herdr";
+          flow-bind-existing-held-role-only = context.exactTest "flow-nexus"
+            "tests::a_matching_binding_of_a_flow_already_held_asserts_only_its_role";
+          flow-renamed-agent-current-name = context.exactTest "flow-nexus"
+            "tests::a_renamed_agent_keeps_its_route_and_reports_its_current_name";
           flow-codex-terminal-title-thread-only = context.exactTest "flow-nexus"
             "herdr::launch::tests::codex_launch_selects_one_exact_executable_and_remote_socket";
           flow-sleeping-codex-wakes-to-new-thread = context.exactTest "flow-nexus"

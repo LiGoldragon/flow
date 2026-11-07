@@ -286,12 +286,6 @@ impl Dispatches for RunningNexus {
     fn dispatch(&self, query: Query) -> Response {
         match query {
             Query::Acknowledge(keys) => {
-                self.dispatch_from(Query::Acknowledge(keys), origin.clone())
-            }
-            Query::ArchiveRequest(request_id) => {
-                self.dispatch_from(Query::ArchiveRequest(request_id), origin.clone())
-            }
-            Query::Acknowledge(keys) => {
                 self.dispatch_from(Query::Acknowledge(keys), Origin::Unbound)
             }
             Query::ArchiveRequest(request_id) => {
@@ -316,6 +310,12 @@ impl Dispatches for RunningNexus {
         use protecting::{ChecksAsker, GuardedAct};
         let origin = asker.origin();
         match query {
+            Query::Acknowledge(keys) => {
+                self.dispatch_from(Query::Acknowledge(keys), origin.clone())
+            }
+            Query::ArchiveRequest(request_id) => {
+                self.dispatch_from(Query::ArchiveRequest(request_id), origin.clone())
+            }
             Query::Start(profile) => {
                 let launch_request_id = profile.launch_request_id.clone();
                 if let Some(settled) = self.settled(&profile, &origin) {

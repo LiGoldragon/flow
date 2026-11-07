@@ -1589,7 +1589,7 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
         "the later arrival is a second prompt: {turns:?}"
     );
     assert!(
-        turns[1].contains("Order.D"),
+        turns[1].contains("Order.{") && turns[1].contains(" D }"),
         "the later prompt carries D: {turns:?}"
     );
     let node = fixture.nexus.store.flow_node(&flow_id).unwrap().unwrap();

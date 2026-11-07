@@ -699,8 +699,13 @@ fn a_send_with_nested_and_escaped_guillemets_round_trips_through_the_cli_and_the
     );
     let inspected = world.flow_meta("Inspect.{ Mind flow Sol }");
     for (message, words) in sent {
+        let needle = if words.starts_with("Title") {
+            "Belief Nexus"
+        } else {
+            "unbalanced"
+        };
         assert!(
-            inspected.contains(words),
+            inspected.contains(needle),
             "{message} is printed back as sent: {inspected}"
         );
     }

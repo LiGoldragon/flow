@@ -8127,4 +8127,23 @@ mod tests {
         drop(staged);
         assert_eq!(fixture.staged_copies(), Vec::<String>::new());
     }
+
+    struct FixedRequestIdDrawer;
+
+    impl super::logical_delivery::DrawsRequestId for FixedRequestIdDrawer {
+        fn draw_request_id(&self) -> Result<flow_ethos::RequestId, super::StoreError> {
+            Ok("abcd".into())
+        }
+    }
+
+    #[test]
+    fn request_id_entropy_is_an_injected_capability() {
+        let fixture = StoreFixture::new();
+        let mut store = fixture.store();
+        store.set_request_id_drawer_for_tests(std::sync::Arc::new(FixedRequestIdDrawer));
+        assert_eq!(
+            store.request_id_drawer.draw_request_id().expect("draws"),
+            "abcd"
+        );
+    }
 }

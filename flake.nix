@@ -16,7 +16,7 @@
     # The public default remains the last unconfigured Flow artifact while
     # callers move explicitly to lib.<system>.mkFlowPackage.
     unconfigured-flow.url = "github:LiGoldragon/flow/d3ab87ee18b1dd30947d5f0089f5abb4bafa80d5";
-    message.url = "github:LiGoldragon/message/bb329ba8230e02aa2e310b730c6ec0dabd8fdadf";
+    message.url = "github:LiGoldragon/message/70b7daa3ff069b0b8c836ba6aff223992dcf59a1";
   };
 
   outputs =
@@ -343,7 +343,7 @@
                 export FLOW_MESSAGE_JOINT_FLOW_BIN="$PWD/target/release/flow-nexus"
                 export FLOW_MESSAGE_JOINT_MESSAGE_BIN="${message.packages.${system}.default}/bin/message-nexus"
                 export FLOW_MESSAGE_JOINT_FLOW_REV="${self.rev or self.dirtyRev or "unpublished"}"
-                export FLOW_MESSAGE_JOINT_MESSAGE_REV="bb329ba8230e02aa2e310b730c6ec0dabd8fdadf"
+                export FLOW_MESSAGE_JOINT_MESSAGE_REV="70b7daa3ff069b0b8c836ba6aff223992dcf59a1"
                 sha256sum "$FLOW_MESSAGE_JOINT_FLOW_BIN" "$FLOW_MESSAGE_JOINT_MESSAGE_BIN"
                 cargoWithProfile test --locked -p flow-nexus --lib \
                   store::message_joint::real_flow_and_message_share_the_durable_delivery_ledger \

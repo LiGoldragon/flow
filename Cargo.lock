@@ -528,12 +528,12 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "message-defaults"
 version = "0.22.0"
-source = "git+https://github.com/LiGoldragon/message?rev=bb329ba8230e02aa2e310b730c6ec0dabd8fdadf#bb329ba8230e02aa2e310b730c6ec0dabd8fdadf"
+source = "git+https://github.com/LiGoldragon/message?rev=70b7daa3ff069b0b8c836ba6aff223992dcf59a1#70b7daa3ff069b0b8c836ba6aff223992dcf59a1"
 
 [[package]]
 name = "message-nexus"
 version = "0.22.0"
-source = "git+https://github.com/LiGoldragon/message?rev=bb329ba8230e02aa2e310b730c6ec0dabd8fdadf#bb329ba8230e02aa2e310b730c6ec0dabd8fdadf"
+source = "git+https://github.com/LiGoldragon/message?rev=70b7daa3ff069b0b8c836ba6aff223992dcf59a1#70b7daa3ff069b0b8c836ba6aff223992dcf59a1"
 dependencies = [
  "ethos-zero 16.0.0",
  "getrandom 0.4.3",
@@ -578,7 +578,7 @@ dependencies = [
 [[package]]
 name = "meta-signal-message"
 version = "3.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-message?rev=12d7373f0a9edfab6c3d2ec96431e518a333edd9#12d7373f0a9edfab6c3d2ec96431e518a333edd9"
+source = "git+https://github.com/LiGoldragon/meta-signal-message?rev=557f2dbbc50a448cb1358942ff383391d7f46669#557f2dbbc50a448cb1358942ff383391d7f46669"
 dependencies = [
  "ethos-zero 19.2.0",
  "rkyv",
@@ -998,7 +998,7 @@ dependencies = [
 [[package]]
 name = "signal-message"
 version = "21.0.0"
-source = "git+https://github.com/LiGoldragon/signal-message?rev=8b6faff411d7325b6c3196952a15ee7c903d35cc#8b6faff411d7325b6c3196952a15ee7c903d35cc"
+source = "git+https://github.com/LiGoldragon/signal-message?rev=17e509d3377034881f86dd6308455e95a0d21172#17e509d3377034881f86dd6308455e95a0d21172"
 dependencies = [
  "ethos-zero 17.0.0",
  "rkyv",

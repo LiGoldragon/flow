@@ -655,6 +655,31 @@ fn an_installed_memory_source_reads_the_live_store_and_ignores_the_file() {
     assert!(!launch.first_prompt_payload.first_prompt_body.contains("file text"));
 }
 
+#[test]
+fn memory_source_reads_only_the_last_closed_generation_and_ignores_root() {
+    let fixture = NexusFixture::new();
+    let at = address(Model::Sol);
+    fixture.nexus.store.ensure_live_handover(&at, "abc123").unwrap();
+    fixture.nexus.store.keep_handover(
+        &at, &at,
+        signal_flow::Section { title: "old".into(), description: "d".into(), body: "one".into() },
+        signal_flow::Touch::Unknown,
+    ).unwrap();
+    fixture.nexus.store.close_handover_for_successor(&at, "abc123", "def456").unwrap();
+    fixture.nexus.store.keep_handover(
+        &at, &at,
+        signal_flow::Section { title: "new".into(), description: "d".into(), body: "two".into() },
+        signal_flow::Touch::Unknown,
+    ).unwrap();
+    let source = super::MemoryHandoverSource(fixture.nexus.store.clone());
+    let root_a = tempfile::tempdir().unwrap();
+    let root_b = tempfile::tempdir().unwrap();
+    assert_eq!(source.handover(&at, "abc123", root_a.path()), Handover::Text("## old\nd\none".into()));
+    assert_eq!(source.handover(&at, "abc123", root_b.path()), Handover::Text("## old\nd\none".into()));
+    assert_eq!(source.handover(&at, "def456", root_a.path()), Handover::Text("## new\nd\ntwo".into()));
+    assert_eq!(source.handover(&at, "missing", root_a.path()), Handover::Absent);
+}
+
 /// An OnDemand seat resting with nothing queued is closed only once its
 /// successor composes: a successor refused its handover (one not UTF-8, or
 /// a root gone) keeps the seat Awake in its pane, nothing closed.

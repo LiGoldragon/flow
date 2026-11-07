@@ -46,7 +46,11 @@ impl RendersHandoverCommands for HandoverReminderNotice {
     }
     fn notice_text(&self, sections: &[Section]) -> String {
         let mut commands = vec![self.keep_commands(sections)];
-        for section in sections { commands.push(self.drop_command(section.title.clone())); }
+        if sections.is_empty() {
+            commands.push(self.drop_command(signal_flow::Title::from("")));
+        } else {
+            for section in sections { commands.push(self.drop_command(section.title.clone())); }
+        }
         commands.push(self.text.clone());
         commands.join("\n")
     }

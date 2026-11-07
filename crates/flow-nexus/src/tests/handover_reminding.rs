@@ -1,7 +1,7 @@
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::handover::HoldsHandovers;
 use crate::store::handover_reminders::SchedulesHandoverReminders;
-use crate::handover_reminding::DecidesHandoverReminder;
+use crate::handover_reminding::{DecidesHandoverReminder, RendersHandoverCommands};
 use crate::store::handover_reminders::{
     HandoverReminder, HandoverReminderRules, OpensHandoverReminder,
 };
@@ -65,6 +65,20 @@ fn recurrence_advances_from_each_due_instant() {
     assert_eq!(r.next_due, 600);
     r = r.advanced().unwrap();
     assert_eq!(r.next_due, 900);
+}
+
+#[test]
+fn an_empty_handover_notice_still_has_typed_keep_and_drop_forms() {
+    let reminder = HandoverReminder::open_handover_reminder(
+        address(), 1, "m".into(), 0, 5, "continue".into(),
+    ).unwrap();
+    let notice = reminder.notice_if_due(0).unwrap();
+    let text = notice.notice_text(&[]);
+    let lines: Vec<_> = text.lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0].contains("Keep"), "{text}");
+    assert!(lines[1].contains("Drop"), "{text}");
+    assert_eq!(lines[2], "continue");
 }
 
 #[test]

@@ -6163,7 +6163,8 @@ mod tests {
         use signal_flow::{Message, Request, SentBy};
 
         let fixture = StoreFixture::new();
-        let store = fixture.store();
+        fixture.configured();
+        let store = fixture.configured_store();
         store
             .configure_change(meta_signal_flow::ConfigurationChange::AnnouncementTries(1))
             .expect("one announcement try configures");
@@ -6232,7 +6233,7 @@ mod tests {
             queue: Vec::new(),
         });
         drop(store);
-        let store = fixture.store();
+        let store = fixture.configured_store();
         let rows = store
             .engine
             .match_records(QueryPlan::all(store.request_id_upgrade.task_announcements))

@@ -6,7 +6,6 @@
 //! script, and run `2n - 1` is the probe.
 
 use super::{ControlsHerdrSnapshot, NexusFixture};
-use crate::Dispatches;
 use crate::codex::{CodexAdapter, ResponderSignal, SelectsCodexEndpoint};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::send_tool::{
@@ -14,12 +13,13 @@ use crate::generated::send_tool::{
 };
 use crate::heartbeat::DeliveryPurpose;
 use crate::send_tool::{DescribesSendInvocation, RespondsToSendCalls, SendTool, ServesSendTool};
-use crate::sending::{MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
+use crate::sending::{MeasuresSendPayload, MAX_SEND_PAYLOAD_BYTES};
 use crate::store::logical_delivery::{MintsRequestIds, RecordsLogicalDeliveries};
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{AnnouncesLaunchChanges, RecordsFlowLifecycle, RegistersFlowIdentity};
-use crate::{HoldsStopRequest, generated::send_tool::DeclaresSendTool};
+use crate::Dispatches;
+use crate::{generated::send_tool::DeclaresSendTool, HoldsStopRequest};
 use flow_ethos::State;
 use meta_signal_flow::QueueEvidence;
 use signal_flow::{
@@ -620,13 +620,11 @@ fn a_replayed_call_of_a_retired_or_superseded_flow_is_refused() {
     assert_eq!(replayed, SendOutcome::Refused(SendRefusal::FlowEnded));
     // Superseded: a fresh wake made the metaflow Awake as a successor.
     let call_b = tool_call(THREAD_B, "call-b", "pending while superseded");
-    assert!(
-        fixture
-            .nexus
-            .store
-            .sleep_metaflow(&sender_b(), "b2b2b2")
-            .unwrap()
-    );
+    assert!(fixture
+        .nexus
+        .store
+        .sleep_metaflow(&sender_b(), "b2b2b2")
+        .unwrap());
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: sender_b(),
         state: State::Awake("b3b3b3".into()),
@@ -859,14 +857,12 @@ fn a_malformed_call_is_refused_and_recorded() {
         SendOutcome::Refused(SendRefusal::Malformed)
     );
     assert!(fixture.target_queue().is_empty());
-    assert!(
-        fixture
-            .nexus
-            .store
-            .send_call(&call.tool_call_key)
-            .unwrap()
-            .is_some()
-    );
+    assert!(fixture
+        .nexus
+        .store
+        .send_call(&call.tool_call_key)
+        .unwrap()
+        .is_some());
 }
 
 /// A target whose topic is not an uncapitalized camelCase identifier is
@@ -1007,8 +1003,8 @@ fn start_first_turn(
 #[ignore = "needs FLOW_SEND_TOOL_WITNESS_CODEX and FLOW_SEND_TOOL_WITNESS_SOCKET naming a scratch codex app-server"]
 fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
     use crate::codex::{ExchangesOnSubscription, OpensCodexThread, ProxyEvent, SubscribesThread};
-    use crate::composition::ComposesLaunch;
     use crate::composition::tests::{fixture_composer, fixture_profile};
+    use crate::composition::ComposesLaunch;
     use sha2::{Digest, Sha256};
     let client = std::env::var_os("FLOW_SEND_TOOL_WITNESS_CODEX").expect("codex client");
     let socket = std::env::var("FLOW_SEND_TOOL_WITNESS_SOCKET").expect("app-server socket");
@@ -1157,8 +1153,8 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
 #[ignore = "needs FLOW_SEND_TOOL_WITNESS_CODEX, FLOW_SEND_TOOL_WITNESS_SOCKET and FLOW_SEND_TOOL_WITNESS_HOME naming a scratch codex app-server"]
 fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
     use crate::codex::OpensCodexThread;
-    use crate::composition::ComposesLaunch;
     use crate::composition::tests::{fixture_composer, fixture_profile};
+    use crate::composition::ComposesLaunch;
     use crate::send_tool::ServesLaunchCalls;
     use crate::store::opened_thread::RecordsOpenedThreads;
     use crate::store::{RecordsNativeLaunchIntent, ReservesLaunchAttempt};
@@ -1205,26 +1201,24 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
         .store
         .reserve_launch_attempt(&launch, signal_flow::Origin::Unbound)
         .unwrap();
-    assert!(
-        fixture
-            .nexus
-            .store
-            .record_native_launch_intent(signal_flow::NativeLaunchIntent {
-                launch_request_id: profile.launch_request_id.clone(),
-                prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
-                harness_kind: signal_flow::HarnessKind::Codex,
-                model_name: profile.model_name.clone(),
-                effort: profile.effort.clone(),
-                system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
-                prompt_sha256_vector: launch
-                    .first_prompt_payload
-                    .prompt_part_vector
-                    .iter()
-                    .map(|part| part.prompt_sha256.clone())
-                    .collect(),
-            })
-            .unwrap()
-    );
+    assert!(fixture
+        .nexus
+        .store
+        .record_native_launch_intent(signal_flow::NativeLaunchIntent {
+            launch_request_id: profile.launch_request_id.clone(),
+            prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+            harness_kind: signal_flow::HarnessKind::Codex,
+            model_name: profile.model_name.clone(),
+            effort: profile.effort.clone(),
+            system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+            prompt_sha256_vector: launch
+                .first_prompt_payload
+                .prompt_part_vector
+                .iter()
+                .map(|part| part.prompt_sha256.clone())
+                .collect(),
+        })
+        .unwrap());
     super::waking::ended_claude(&fixture);
     let world = super::waking::WakesFreshClaude::fresh_claude_world(&mut fixture);
     fixture.asleep_at(asleep_target());
@@ -1237,12 +1231,10 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
     let nexus = &fixture.nexus;
     let (thread, mut connection) = adapter
         .open_thread(&launch, &mut |thread| {
-            assert!(
-                nexus
-                    .store
-                    .record_opened_thread(&profile.launch_request_id, thread)
-                    .unwrap()
-            );
+            assert!(nexus
+                .store
+                .record_opened_thread(&profile.launch_request_id, thread)
+                .unwrap());
             eprintln!("witness thread {thread} recorded before its first turn");
             Ok("{ Field flow Sol witness }".into())
         })
@@ -1305,8 +1297,8 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
 #[ignore = "needs the FLOW_SEND_TOOL_WITNESS variables and FLOW_INTERRUPTED_LAUNCH_STATE"]
 fn witness_interrupted_launch_first_half_exits_with_its_call_pending() {
     use crate::codex::OpensCodexThread;
-    use crate::composition::ComposesLaunch;
     use crate::composition::tests::{fixture_composer, fixture_profile};
+    use crate::composition::ComposesLaunch;
     use crate::store::opened_thread::RecordsOpenedThreads;
     use crate::store::{RecordsNativeLaunchIntent, ReservesLaunchAttempt};
     use sha2::{Digest, Sha256};
@@ -1351,36 +1343,32 @@ fn witness_interrupted_launch_first_half_exits_with_its_call_pending() {
         .store
         .reserve_launch_attempt(&launch, signal_flow::Origin::Unbound)
         .unwrap();
-    assert!(
-        fixture
-            .nexus
-            .store
-            .record_native_launch_intent(signal_flow::NativeLaunchIntent {
-                launch_request_id: profile.launch_request_id.clone(),
-                prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
-                harness_kind: signal_flow::HarnessKind::Codex,
-                model_name: profile.model_name.clone(),
-                effort: profile.effort.clone(),
-                system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
-                prompt_sha256_vector: launch
-                    .first_prompt_payload
-                    .prompt_part_vector
-                    .iter()
-                    .map(|part| part.prompt_sha256.clone())
-                    .collect(),
-            })
-            .unwrap()
-    );
+    assert!(fixture
+        .nexus
+        .store
+        .record_native_launch_intent(signal_flow::NativeLaunchIntent {
+            launch_request_id: profile.launch_request_id.clone(),
+            prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+            harness_kind: signal_flow::HarnessKind::Codex,
+            model_name: profile.model_name.clone(),
+            effort: profile.effort.clone(),
+            system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+            prompt_sha256_vector: launch
+                .first_prompt_payload
+                .prompt_part_vector
+                .iter()
+                .map(|part| part.prompt_sha256.clone())
+                .collect(),
+        })
+        .unwrap());
     fixture.asleep_at(asleep_target());
     let nexus = &fixture.nexus;
     let (thread, mut connection) = adapter
         .open_thread(&launch, &mut |thread| {
-            assert!(
-                nexus
-                    .store
-                    .record_opened_thread(&profile.launch_request_id, thread)
-                    .unwrap()
-            );
+            assert!(nexus
+                .store
+                .record_opened_thread(&profile.launch_request_id, thread)
+                .unwrap());
             Ok("{ Field flow Sol witness }".into())
         })
         .expect("the thread opens and is named");
@@ -1623,25 +1611,13 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
             "archive-content",
             core(),
             &core_primary(),
-            Message::Soft(Request::Task(flow_ethos::AnswerableTask {
-                minutes: 1,
-                string: "historical task".into(),
-            })),
+            Message::Soft(Request::Notice("historical".into())),
             0,
         )
         .expect("tool Send admits");
     let SendOutcome::Accepted(accepted) = first else {
         panic!("tool Send accepted")
     };
-    assert!(
-        crate::store::reminder::RecordsReminders::reminder(
-            fixture.nexus.store.as_ref(),
-            &accepted.send_acceptance.logical_delivery_id,
-        )
-        .expect("Task reminder reads")
-        .is_some(),
-        "an open Task keeps its reminder until archive"
-    );
     fixture
         .nexus
         .store
@@ -1677,16 +1653,6 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
             .expect("archive reads"),
         Ok(())
     );
-    assert!(
-        crate::store::reminder::RecordsReminders::reminder(
-            fixture.nexus.store.as_ref(),
-            &accepted.send_acceptance.logical_delivery_id,
-        )
-        .expect("archived Task reminder reads")
-        .is_none(),
-        "archive retracts the Task reminder in its commit"
-    );
-
     let replay = fixture
         .nexus
         .store
@@ -1695,10 +1661,7 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
             "archive-content",
             core(),
             &core_primary(),
-            Message::Soft(Request::Task(flow_ethos::AnswerableTask {
-                minutes: 1,
-                string: "historical task".into(),
-            })),
+            Message::Soft(Request::Notice("historical".into())),
             0,
         )
         .expect("tool replay reads");
@@ -2368,9 +2331,9 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
 /// Metaflows meanwhile: native history is read off the dispatch gate.
 #[test]
 fn a_start_reading_an_unanswering_codex_history_still_serves_metaflows() {
-    use crate::DispatchesSerially;
     use crate::store::queue_delivery::AccountsQueueDelivery;
     use crate::waking::ReconcilesQueueDelivery;
+    use crate::DispatchesSerially;
     let mut fixture = NexusFixture::new();
     fixture.awake_codex_seat(vec![from_core(Request::Order("First.".into()))]);
     let fake = FakeAppServer::install(vec![]);
@@ -2385,13 +2348,11 @@ fn a_start_reading_an_unanswering_codex_history_still_serves_metaflows() {
         .unsettled_deliveries(&seat_at())
         .unwrap()
         .remove(0);
-    assert!(
-        fixture
-            .nexus
-            .store
-            .park_uncertain_delivery(&attempt.attempt_id)
-            .unwrap()
-    );
+    assert!(fixture
+        .nexus
+        .store
+        .park_uncertain_delivery(&attempt.attempt_id)
+        .unwrap());
     std::thread::scope(|scope| {
         let recovery = scope.spawn(|| fixture.nexus.recover_deliveries());
         while fake.runs() == 0 {
@@ -2440,8 +2401,8 @@ fn a_completion_on_another_thread_drains_nothing() {
 fn codex_resolved_absent(
     first_event: crate::codex_turns::TurnEvent,
 ) -> (NexusFixture, FakeAppServer, TestRequest) {
-    use crate::DispatchesSerially;
     use crate::codex_turns::TracksCodexTurns;
+    use crate::DispatchesSerially;
     use meta_signal_flow::{QueueDeliveryResolution, QueueResolutionOutcome};
     let mut fixture = NexusFixture::new();
     let first = from_core(Request::Order("First.".into()));

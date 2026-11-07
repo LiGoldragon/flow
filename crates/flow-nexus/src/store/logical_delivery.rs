@@ -281,6 +281,12 @@ pub(crate) trait RecordsLogicalDeliveries {
         held_lock: Option<VerifiedDeliveryLock>,
         purpose: crate::heartbeat::DeliveryPurpose,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError>;
+    fn accept_handover_reminder(
+        &self,
+        address: &Address,
+        message: Message,
+        reminder: crate::store::handover_reminders::HandoverReminder,
+    ) -> Result<signal_flow::PrivateSendResponse, StoreError>;
     #[cfg(test)]
     fn transition_logical_delivery(
         &self,
@@ -1034,6 +1040,26 @@ impl RecordsLogicalDeliveries for FlowStore {
         held_lock: Option<VerifiedDeliveryLock>,
         purpose: crate::heartbeat::DeliveryPurpose,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError> {
+        self.accept_logical_delivery_for_with_transition(address, sent_by, delivery, message, held_lock, purpose, None)
+    }
+    fn accept_handover_reminder(
+        &self,
+        address: &Address,
+        message: Message,
+        reminder: crate::store::handover_reminders::HandoverReminder,
+    ) -> Result<signal_flow::PrivateSendResponse, StoreError> {
+        self.accept_logical_delivery_for_with_transition(address, SentBy::Flow, Delivery::Queue, message, None, crate::heartbeat::DeliveryPurpose::Ordinary, Some(reminder))
+    }
+    fn accept_logical_delivery_for_with_transition(
+        &self,
+        address: &Address,
+        sent_by: SentBy,
+        delivery: Delivery,
+        message: Message,
+        held_lock: Option<VerifiedDeliveryLock>,
+        purpose: crate::heartbeat::DeliveryPurpose,
+        handover_reminder: Option<crate::store::handover_reminders::HandoverReminder>,
+    ) -> Result<signal_flow::PrivateSendResponse, StoreError> {
         let _guard = self
             .logical_deliveries
             .write_gate
@@ -1210,6 +1236,11 @@ impl RecordsLogicalDeliveries for FlowStore {
         } else {
             commit
         };
+        let commit = if let Some(reminder) = handover_reminder {
+            let key = reminder.record_key();
+            let existing = self.engine.match_records(QueryPlan::key(self.handover_reminders, key.clone()))?;
+            if existing.records().is_empty() { commit.assert(self.handover_reminders, reminder) } else { commit.mutate(self.handover_reminders, reminder) }
+        } else { commit };
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
         Ok(signal_flow::PrivateSendResponse::SendAccepted(

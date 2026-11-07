@@ -82,12 +82,13 @@ impl RemindsHandoverCallers for crate::RunningNexus {
                 Err(_) => continue,
             };
             let base = HandoverReminderNotice { address: reminder.address.clone(), text: reminder.reminder_text.clone(), generation: reminder.generation };
-            let accepted = self.store.accept_logical_delivery(
+            let mut admitted = reminder.clone();
+            admitted.sent = match admitted.sent.checked_add(1) { Some(value) => value, None => continue };
+            admitted.next_due = match admitted.next_due() { Ok(value) => value, Err(_) => continue };
+            let accepted = self.store.accept_handover_reminder(
                 &reminder.address,
-                SentBy::Flow,
-                Delivery::Queue,
                 Message::HardAbrupt(Request::Notice(base.keep_commands(&sections))),
-                None,
+                admitted,
             );
             if !matches!(accepted, Ok(signal_flow::PrivateSendResponse::SendAccepted(_))) { continue; }
             let Some(mut next) = reminder.advanced() else { continue };

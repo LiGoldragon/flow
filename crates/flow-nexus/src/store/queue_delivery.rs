@@ -298,12 +298,14 @@ impl DeclaresQueueDeliveryTables for QueueDeliveryTables {
                 DELIVERY_REQUEST_TABLE_NAME,
                 FamilyName::new("flow-nexus-queue-delivery-request"),
                 StoredDeliveryRequest::schema_hash(),
-            ),
+            )
+            .with_predecessor::<super::request_id_upgrade::PriorStoredDeliveryRequest>(),
             TableDescriptor::new(
                 DELIVERY_ATTEMPT_TABLE_NAME,
                 FamilyName::new("flow-nexus-queue-delivery-attempt"),
                 QueueDeliveryAttempt::schema_hash(),
-            ),
+            )
+            .with_predecessor::<super::request_id_upgrade::PriorQueueDeliveryAttempt>(),
         )
     }
 

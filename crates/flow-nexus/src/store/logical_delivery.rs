@@ -304,12 +304,14 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
                 CURRENT_TABLE_NAME,
                 FamilyName::new("flow-nexus-logical-delivery-current"),
                 CurrentLogicalDelivery::schema_hash(),
-            ),
+            )
+            .with_predecessor::<super::request_id_upgrade::PriorCurrentLogicalDelivery>(),
             events: TableDescriptor::new(
                 EVENT_TABLE_NAME,
                 FamilyName::new("flow-nexus-logical-delivery-event"),
                 LogicalDeliveryEvent::schema_hash(),
-            ),
+            )
+            .with_predecessor::<super::request_id_upgrade::PriorLogicalDeliveryEvent>(),
             simplified_replies: TableDescriptor::new(
                 SIMPLIFIED_REPLY_TABLE_NAME,
                 FamilyName::new("flow-nexus-simplified-reply-binding"),

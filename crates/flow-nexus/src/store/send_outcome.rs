@@ -87,7 +87,8 @@ impl DeclaresSendOutcomeTables for SendOutcomeTables {
                 SEND_OUTCOME_TABLE_NAME,
                 FamilyName::new(OUTCOME_FAMILY),
                 StoredSendOutcome::schema_hash(),
-            ),
+            )
+            .with_predecessor::<super::request_id_upgrade::PriorStoredSendOutcome>(),
         }
     }
 

@@ -65,6 +65,7 @@ impl DescribesAddressHoldTable for AddressHold {
             FamilyName::new(ADDRESS_HOLD_FAMILY),
             AddressHold::schema_hash(),
         )
+        .with_predecessor::<super::request_id_upgrade::PriorAddressHold>()
     }
 }
 

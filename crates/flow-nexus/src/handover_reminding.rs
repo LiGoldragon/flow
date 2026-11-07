@@ -37,3 +37,39 @@ impl DecidesHandoverReminder for HandoverReminder {
         Some(next)
     }
 }
+
+/// Runtime capability used by the reminder tick. The caller supplies the
+/// clock so retry/reopen tests can exercise exact boundaries without sleeping.
+pub trait RemindsHandoverCallers {
+    fn send_due_handover_reminders(&self, now: i64);
+}
+
+impl RemindsHandoverCallers for crate::RunningNexus {
+    fn send_due_handover_reminders(&self, now: i64) {
+        use crate::store::handover_reminders::{SchedulesHandoverReminders, HandoverReminderRules};
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        use flow_ethos::Delivery;
+        use signal_flow::{Message, Request, SentBy};
+        let Ok(due) = self.store.due_handover_reminders(now) else { return };
+        for reminder in due {
+            // Admission is deliberately ordinary. In particular this does
+            // not use DeliveryPurpose::Heartbeat or any refresh hold bypass.
+            let accepted = self.store.accept_logical_delivery(
+                &reminder.address,
+                SentBy::Flow,
+                Delivery::Queue,
+                Message::HardAbrupt(Request::Notice(reminder.reminder_text.clone())),
+                None,
+            );
+            if !matches!(accepted, Ok(signal_flow::PrivateSendResponse::SendAccepted(_))) { continue; }
+            let Some(mut next) = reminder.advanced() else { continue };
+            // A current green check in the tick owner closes this row before
+            // calling this method. Once admitted, advance durably; retries
+            // therefore retain the same due row until ordinary admission wins.
+            if let Ok(next_due) = next.next_due() {
+                next.next_due = next_due;
+                let _ = self.store.hold_handover_reminder(next);
+            }
+        }
+    }
+}

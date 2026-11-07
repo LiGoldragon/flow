@@ -25,3 +25,15 @@ fn configured_text_and_generation_are_preserved() {
     assert_eq!(n.text, "configured");
     assert_eq!(n.generation, 8);
 }
+
+#[test]
+fn recurrence_advances_from_each_due_instant() {
+    let mut r = HandoverReminder::open_handover_reminder(address(), 1, "m".into(), 0, 5, "x".into()).unwrap();
+    assert_eq!(r.advanced_due(), Some(300));
+    r = r.advanced().unwrap();
+    assert_eq!(r.next_due, 300);
+    r = r.advanced().unwrap();
+    assert_eq!(r.next_due, 600);
+    r = r.advanced().unwrap();
+    assert_eq!(r.next_due, 900);
+}

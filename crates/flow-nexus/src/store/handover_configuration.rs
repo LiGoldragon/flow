@@ -173,3 +173,29 @@ pub(crate) fn upgrade_or_register(
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v1_upgrade_preserves_archive_policy_and_count_and_seeds_default_deadline() {
+        let old = StoredHandoverConfigurationV1 {
+            policies: HandoverPoliciesConfiguration::Configured(vec![]),
+            archive: HandoverArchiveConfiguration::Configured("/archive".into()),
+            count: HandoverCountConfiguration::Configured(3),
+        };
+        let Decision::Ready(current) = StoredHandoverConfiguration::upgrade_from(old) else {
+            panic!("legacy handover configuration must upgrade");
+        };
+        assert_eq!(
+            current.archive,
+            HandoverArchiveConfiguration::Configured("/archive".into())
+        );
+        assert_eq!(current.count, HandoverCountConfiguration::Configured(3));
+        assert_eq!(
+            current.publication_deadline,
+            PublicationDeadlineConfiguration::Configured(60_000)
+        );
+    }
+}

@@ -599,4 +599,46 @@ mod tests {
         });
         assert_eq!(result, Err(HandoverArchiveRefusal::PublicationTimedOut));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_rejects_unbounded_hook_output() {
+        let repository = tempfile::tempdir().unwrap();
+        run_git(
+            repository.path(),
+            ["init", "-q"],
+            Instant::now() + Duration::from_secs(60),
+        )
+        .unwrap();
+        run_git(
+            repository.path(),
+            ["config", "user.email", "flow@example.invalid"],
+            Instant::now() + Duration::from_secs(60),
+        )
+        .unwrap();
+        run_git(
+            repository.path(),
+            ["config", "user.name", "Flow Test"],
+            Instant::now() + Duration::from_secs(60),
+        )
+        .unwrap();
+        let hook = repository.path().join(".git/hooks/pre-commit");
+        fs::write(&hook, "#!/bin/sh\nyes output\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let result = ExistingGitHandoverArchive::new(repository.path())
+            .with_deadline(Duration::from_secs(2))
+            .publish(HandoverArchiveRequest {
+                address: Address {
+                    aspect: Aspect::Mind,
+                    topic: "testTopic".into(),
+                    model: Model::Sol,
+                },
+                flow_id: "flow-output-bound".into(),
+                document: "generation=1\n".into(),
+            });
+        assert!(
+            matches!(result, Err(HandoverArchiveRefusal::Git(message)) if message.contains("capture bound"))
+        );
+    }
 }

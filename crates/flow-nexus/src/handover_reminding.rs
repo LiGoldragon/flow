@@ -32,14 +32,24 @@ impl RendersHandoverCommands for HandoverReminderNotice {
     fn keep_commands(&self, sections: &[Section]) -> String {
         use datom_codec::Datomizable;
         use protos::{Compactable, Protosizable};
-        let section = sections.first().cloned().unwrap_or(Section { title: String::new(), description: String::new(), body: String::new() });
-        let query = Query::Keep(Keep_Data { address: self.address.clone(), section });
+        let section = sections.first().cloned().unwrap_or(Section {
+            title: String::new(),
+            description: String::new(),
+            body: String::new(),
+        });
+        let query = Query::Keep(Keep_Data {
+            address: self.address.clone(),
+            section,
+        });
         format!("flow {}", query.datomize(vec![]).protosize().compact())
     }
     fn drop_command(&self, title: signal_flow::Title) -> String {
         use datom_codec::Datomizable;
         use protos::{Compactable, Protosizable};
-        let query = Query::Drop(Drop_Data { address: self.address.clone(), title });
+        let query = Query::Drop(Drop_Data {
+            address: self.address.clone(),
+            title,
+        });
         format!("flow {}", query.datomize(vec![]).protosize().compact())
     }
 }
@@ -52,12 +62,46 @@ impl DecidesHandoverReminder for HandoverReminder {
             generation: self.generation,
         })
     }
-    fn advanced_due(&self) -> Option<i64> { self.next_due().ok() }
+    fn advanced_due(&self) -> Option<i64> {
+        self.next_due().ok()
+    }
     fn advanced(&self) -> Option<HandoverReminder> {
         let mut next = self.clone();
         next.sent = next.sent.checked_add(1)?;
         next.next_due = next.next_due().ok()?;
         Some(next)
+    }
+}
+
+/// The complete observation needed to open or close one warning window.
+/// The live flow supplies this from its latest Stop and current handover row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoverWindowObservation {
+    pub address: signal_flow::Address,
+    pub generation: i64,
+    pub model_name: String,
+    pub refresh_threshold: i64,
+    pub warning_share_left: i64,
+    pub context_tokens: i64,
+    pub current_flow_id: String,
+    pub touched_flow_id: Option<String>,
+    /// Result of the authoritative `HoldsHandovers::handover_green` check.
+    pub green: bool,
+    pub reminder_text: String,
+}
+
+pub trait DiscoversHandoverWindow {
+    fn warning_window_opens(&self) -> bool;
+    fn warning_window_is_current(&self) -> bool;
+}
+impl DiscoversHandoverWindow for HandoverWindowObservation {
+    fn warning_window_opens(&self) -> bool {
+        HandoverReminder::warning_open(self.refresh_threshold, self.warning_share_left, self.context_tokens)
+            && self.context_tokens >= 0
+    }
+    fn warning_window_is_current(&self) -> bool {
+        self.warning_window_opens() && !self.green
+            && self.touched_flow_id.as_deref() == Some(self.current_flow_id.as_str())
     }
 }
 
@@ -69,11 +113,13 @@ pub trait RemindsHandoverCallers {
 
 impl RemindsHandoverCallers for crate::RunningNexus {
     fn send_due_handover_reminders(&self, now: i64) {
-        use crate::store::handover_reminders::{SchedulesHandoverReminders, HandoverReminderRules};
+        use crate::store::handover_reminders::{HandoverReminderRules, SchedulesHandoverReminders};
         use crate::store::logical_delivery::RecordsLogicalDeliveries;
         use flow_ethos::Delivery;
         use signal_flow::{Message, Request, SentBy};
-        let Ok(due) = self.store.due_handover_reminders(now) else { return };
+        let Ok(due) = self.store.due_handover_reminders(now) else {
+            return;
+        };
         for reminder in due {
             // Admission is deliberately ordinary. In particular this does
             // not use DeliveryPurpose::Heartbeat or any refresh hold bypass.
@@ -81,24 +127,32 @@ impl RemindsHandoverCallers for crate::RunningNexus {
                 Ok(sections) => sections,
                 Err(_) => continue,
             };
-            let base = HandoverReminderNotice { address: reminder.address.clone(), text: reminder.reminder_text.clone(), generation: reminder.generation };
+            let base = HandoverReminderNotice {
+                address: reminder.address.clone(),
+                text: reminder.reminder_text.clone(),
+                generation: reminder.generation,
+            };
             let mut admitted = reminder.clone();
-            admitted.sent = match admitted.sent.checked_add(1) { Some(value) => value, None => continue };
-            admitted.next_due = match admitted.next_due() { Ok(value) => value, Err(_) => continue };
+            admitted.sent = match admitted.sent.checked_add(1) {
+                Some(value) => value,
+                None => continue,
+            };
+            admitted.next_due = match admitted.next_due() {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
             let accepted = self.store.accept_handover_reminder(
                 &reminder.address,
                 Message::HardAbrupt(Request::Notice(base.keep_commands(&sections))),
                 admitted,
             );
-            if !matches!(accepted, Ok(signal_flow::PrivateSendResponse::SendAccepted(_))) { continue; }
-            let Some(mut next) = reminder.advanced() else { continue };
-            // A current green check in the tick owner closes this row before
-            // calling this method. Once admitted, advance durably; retries
-            // therefore retain the same due row until ordinary admission wins.
-            if let Ok(next_due) = next.next_due() {
-                next.next_due = next_due;
-                let _ = self.store.hold_handover_reminder(next);
+            if !matches!(
+                accepted,
+                Ok(signal_flow::PrivateSendResponse::SendAccepted(_))
+            ) {
+                continue;
             }
+            self.wake_due(reminder.address.clone());
         }
     }
 }

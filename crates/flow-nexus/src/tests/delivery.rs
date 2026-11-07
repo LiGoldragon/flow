@@ -885,3 +885,41 @@ fn a_deliver_into_a_flow_past_its_threshold_reaches_the_pane() {
             .any(|prompt| prompt.contains("warning"))
     );
 }
+
+#[test]
+fn direct_delivery_is_refused_while_refresh_owns_address() {
+    use crate::waking::HoldsWakingMetaflows;
+    use signal_flow::{Address, Aspect, Model};
+    let fixture = NexusFixture::new();
+    let log = fixture.accept_pane_operations(
+        vec![fixture.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.register_with(FlowLifecycle::Active);
+    fixture.at_secondary_refreshing_at(200_000);
+    let address = Address {
+        aspect: Aspect::Psyche,
+        topic: "flow".into(),
+        model: Model::Opus,
+    };
+    let lease = fixture
+        .nexus
+        .waking
+        .hold(&address)
+        .expect("refresh custody");
+    assert!(matches!(
+        fixture.deliver("held-ordinary", middle_abrupt("held")),
+        MetaResponse::DeliveryRejected(DeliveryRejection::RouteUnavailable)
+    ));
+    assert!(matches!(
+        fixture.deliver("held-warning", Message::HardAbrupt(letter("warning"))),
+        MetaResponse::DeliveryRejected(DeliveryRejection::RouteUnavailable)
+    ));
+    assert!(prompts(&log).is_empty());
+    drop(lease);
+    assert!(matches!(
+        fixture.deliver("released", middle_abrupt("released")),
+        MetaResponse::Delivered(_)
+    ));
+    assert_eq!(prompts(&log).len(), 1);
+}

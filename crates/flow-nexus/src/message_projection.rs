@@ -424,3 +424,22 @@ pub(crate) fn visible_send_outcome_record(
         visible_ordinary_send_outcome,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::visible_delivery_state;
+    use signal_flow::{DeliveryState, HarnessKind, NativeReceipt, VisibleDeliveryState};
+
+    #[test]
+    fn visible_delivered_state_omits_native_receipt() {
+        let private = DeliveryState::Delivered(NativeReceipt {
+            harness_kind: HarnessKind::Codex,
+            native_session_id: "private-session".into(),
+            native_prompt_id: "private-prompt".into(),
+        });
+        assert_eq!(
+            visible_delivery_state(&private),
+            VisibleDeliveryState::Delivered
+        );
+    }
+}

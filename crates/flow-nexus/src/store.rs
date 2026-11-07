@@ -9152,6 +9152,57 @@ mod tests {
     }
 
     #[test]
+    fn request_id_binding_survives_restart_and_archived_id_is_drawable_again() {
+        use super::logical_delivery::{MintsRequestIds, RequestClosure, RequestIdBinding};
+        use sema_engine::{Assertion, RecordKey, Retraction};
+
+        let fixture = StoreFixture::new();
+        let mut store = fixture.store();
+        store
+            .engine
+            .assert(Assertion::new(
+                store.logical_deliveries.request_ids,
+                RequestIdBinding {
+                    request_id: "same".into(),
+                    logical_delivery_id: "logical-before-restart".into(),
+                    closure: RequestClosure::Open,
+                },
+            ))
+            .expect("held id is durable");
+        drop(store);
+
+        let mut reopened = fixture.store();
+        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+            &mut reopened,
+            std::sync::Arc::new(ScriptedRequestIdDrawer::new(["same", "next"])),
+        );
+        assert_eq!(
+            MintsRequestIds::mint_request_id(&reopened).expect("restarted mint reads"),
+            Ok("next".into()),
+            "restart preserves the binding independently of its logical id"
+        );
+        reopened
+            .engine
+            .retract(Retraction::new(
+                reopened.logical_deliveries.request_ids,
+                RecordKey::new("same"),
+            ))
+            .expect("archive releases the binding");
+        drop(reopened);
+
+        let mut after_archive = fixture.store();
+        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+            &mut after_archive,
+            std::sync::Arc::new(ScriptedRequestIdDrawer::new(["same"])),
+        );
+        assert_eq!(
+            MintsRequestIds::mint_request_id(&after_archive).expect("released mint reads"),
+            Ok("same".into()),
+            "the archived id is reusable after another restart"
+        );
+    }
+
+    #[test]
     fn request_id_entropy_is_an_injected_capability() {
         let fixture = StoreFixture::new();
         let mut store = fixture.store();

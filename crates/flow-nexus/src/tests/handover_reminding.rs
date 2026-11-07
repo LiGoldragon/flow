@@ -298,8 +298,9 @@ fn reminder_admission_waits_for_handover_gate_before_commit() {
 #[test]
 fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
     use super::NexusFixture;
-    use super::refresh_and_compaction::{declare_seat, seat_metaflow, seat_refreshing_at};
+    use super::refresh_and_compaction::{declare_seat, seat_metaflow};
     use super::waking::{CLAUDE_SEAT, append_main_rows, claude_seat, claude_stop, end_turn};
+    use crate::store::handover::HoldsHandovers;
     use crate::store::handover_reminders::SchedulesHandoverReminders;
     use crate::store::{ManagesMetaflowState, SeedsRole};
     use meta_signal_flow::{ConfigurationChange, ConfigureThreshold, Continuity, HandoverPolicy};
@@ -308,7 +309,16 @@ fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
         let fixture = NexusFixture::new();
         claude_seat(&fixture, tokens);
         append_main_rows(&fixture, &[end_turn("last-turn")]);
-        seat_refreshing_at(&fixture, 101);
+        let address = signal_flow::Address {
+            aspect: Aspect::Mind,
+            topic: "flow".into(),
+            model: Model::Sol,
+        };
+        fixture.nexus.store.seed_role(signal_flow::Caller {
+            flow_id: CLAUDE_SEAT.into(),
+            aspect: Aspect::Mind,
+            model_name: "claude-opus-5-5".into(),
+        });
         declare_seat(
             &fixture,
             Continuity::OnDemand,
@@ -326,6 +336,11 @@ fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
         fixture
             .nexus
             .store
+            .ensure_live_handover(&address, CLAUDE_SEAT)
+            .unwrap();
+        fixture
+            .nexus
+            .store
             .configure_change(ConfigurationChange::HandoverPolicies(vec![
                 HandoverPolicy {
                     model_name: "claude-opus-5-5".into(),
@@ -338,11 +353,6 @@ fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
         fixture
             .nexus
             .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
-        let address = signal_flow::Address {
-            aspect: Aspect::Mind,
-            topic: "flow".into(),
-            model: Model::Sol,
-        };
         let reminder = fixture.nexus.store.handover_reminder(&address, 0).unwrap();
         if tokens == 85 {
             assert!(reminder.is_none());

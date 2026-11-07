@@ -510,7 +510,11 @@ fn a_maintained_seat_refreshed_with_nothing_queued_starts_its_successor_first() 
                 description: "d".into(),
                 body: "body".into(),
             },
-            signal_flow::Touch::Unknown,
+            signal_flow::Touch::Known(signal_flow::Known_Data {
+                flow_id: CLAUDE_SEAT.into(),
+                tokens: 200_000,
+                timestamp: 1,
+            }),
         )
         .unwrap();
 
@@ -625,7 +629,11 @@ fn an_on_demand_seat_refreshed_with_a_waking_request_starts_its_successor_first(
                 description: "d".into(),
                 body: "body".into(),
             },
-            signal_flow::Touch::Unknown,
+            signal_flow::Touch::Known(signal_flow::Known_Data {
+                flow_id: CLAUDE_SEAT.into(),
+                tokens: 230_000,
+                timestamp: 1,
+            }),
         )
         .unwrap();
 

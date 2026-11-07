@@ -5888,11 +5888,7 @@ mod tests {
             .store
             .transition_logical_delivery(
                 &accepted.logical_delivery_id,
-                signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
-                    harness_kind: signal_flow::HarnessKind::Codex,
-                    native_session_id: "answerable-task-session".into(),
-                    native_prompt_id: "answerable-task-turn".into(),
-                }),
+                signal_flow::DeliveryState::Uncertain,
             )
             .expect("order reaches an answerable state");
         let result = |request_id: String| {
@@ -5983,7 +5979,11 @@ mod tests {
             .store
             .transition_logical_delivery(
                 &accepted.logical_delivery_id,
-                signal_flow::DeliveryState::Uncertain,
+                signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                    harness_kind: signal_flow::HarnessKind::Codex,
+                    native_session_id: "answerable-task-session".into(),
+                    native_prompt_id: "answerable-task-turn".into(),
+                }),
             )
             .expect("task reaches an answerable state");
         let done = || {

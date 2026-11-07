@@ -56,7 +56,8 @@ fn invalid_handover_policy_and_count_are_typed_and_atomic() {
     let mut invalid = policy();
     invalid.warning_share_left = 101;
     assert!(matches!(
-        configuration.configure_change(ConfigurationChange::HandoverPolicies(vec![invalid])),
+        configuration
+            .configure_change(ConfigurationChange::HandoverPolicies(vec![invalid.clone()])),
         Err(crate::store::StoreError::HandoverConfigurationRefused(
             meta_signal_flow::HandoverConfigurationRefusal::InvalidWarningShareLeft
         ))

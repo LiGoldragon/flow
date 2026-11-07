@@ -463,7 +463,10 @@ impl Dispatches for RunningNexus {
             Err(error) => return Response::KeepRefused(error),
         };
         let title = request.section.title.clone();
-        let touch = self.handover_touch(&asker);
+        let touch = match self.handover_touch(&asker) {
+            Ok(touch) => touch,
+            Err(error) => return Response::KeepRefused(error),
+        };
         match self
             .store
             .keep_handover(&request.address, &caller, request.section, touch)
@@ -484,7 +487,10 @@ impl Dispatches for RunningNexus {
             Err(error) => return Response::DropRefused(error),
         };
         let title = request.title.clone();
-        let touch = self.handover_touch(&asker);
+        let touch = match self.handover_touch(&asker) {
+            Ok(touch) => touch,
+            Err(error) => return Response::DropRefused(error),
+        };
         match self
             .store
             .drop_handover(&request.address, &caller, title, touch)

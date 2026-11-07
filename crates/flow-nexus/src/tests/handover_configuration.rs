@@ -103,6 +103,77 @@ fn invalid_interval_and_duplicate_policy_are_typed_and_atomic() {
 }
 
 #[test]
+fn runtime_nexus_change_preserves_handover_and_all_sibling_families() {
+    let fixture = ConfiguredStore::new();
+    let path = fixture.path();
+    let configuration = crate::store::ConfigurationOnlyStore::open(path).unwrap();
+    configuration
+        .configure_change(ConfigurationChange::HandoverPolicies(vec![policy()]))
+        .unwrap();
+    configuration
+        .configure_change(ConfigurationChange::HandoverArchive("/srv/archive".into()))
+        .unwrap();
+    configuration
+        .configure_change(ConfigurationChange::HandoverCount(0))
+        .unwrap();
+    drop(configuration);
+    let running = crate::store::FlowStore::open_configured(path).unwrap();
+    let before = running.configuration_snapshot().unwrap().unwrap();
+    let mut nexus = before.nexus.clone();
+    nexus.curriculum_nexus_path.push_str("-changed");
+    running
+        .configure_change(ConfigurationChange::Nexus(nexus.clone()))
+        .unwrap();
+    let after = running.configuration_snapshot().unwrap().unwrap();
+    assert_eq!(after.handover_policies, before.handover_policies);
+    assert_eq!(after.handover_archive, before.handover_archive);
+    assert_eq!(after.handover_count, before.handover_count);
+    assert_eq!(after.models, before.models);
+    assert_eq!(after.thresholds, before.thresholds);
+    assert_eq!(after.nexus, nexus);
+    drop(running);
+    let reopened = crate::store::ConfigurationOnlyStore::open(path).unwrap();
+    let persisted = reopened.configuration_snapshot().unwrap().unwrap();
+    assert_eq!(persisted.handover_policies, before.handover_policies);
+    assert_eq!(persisted.handover_archive, before.handover_archive);
+    assert_eq!(persisted.handover_count, before.handover_count);
+}
+
+#[test]
+fn pre_handover_configuration_catalog_reopens_idempotently_after_upgrade() {
+    let fixture = ConfiguredStore::new();
+    let path = fixture.path();
+    let configuration = crate::store::ConfigurationOnlyStore::open(path).unwrap();
+    configuration
+        .configure_change(ConfigurationChange::HandoverPolicies(vec![policy()]))
+        .unwrap();
+    configuration
+        .configure_change(ConfigurationChange::HandoverArchive("/srv/legacy".into()))
+        .unwrap();
+    configuration
+        .configure_change(ConfigurationChange::HandoverCount(0))
+        .unwrap();
+    drop(configuration);
+    for _ in 0..2 {
+        let reopened = crate::store::ConfigurationOnlyStore::open(path).unwrap();
+        let snapshot = reopened.configuration_snapshot().unwrap().unwrap();
+        assert_eq!(
+            snapshot.handover_policies,
+            meta_signal_flow::HandoverPoliciesConfiguration::Configured(vec![policy()])
+        );
+        assert_eq!(
+            snapshot.handover_archive,
+            meta_signal_flow::HandoverArchiveConfiguration::Configured("/srv/legacy".into())
+        );
+        assert_eq!(
+            snapshot.handover_count,
+            meta_signal_flow::HandoverCountConfiguration::Configured(0)
+        );
+        drop(reopened);
+    }
+}
+
+#[test]
 fn handover_count_zero_persists_through_configuration_and_running_reopen() {
     let fixture = ConfiguredStore::new();
     let path = fixture.path();

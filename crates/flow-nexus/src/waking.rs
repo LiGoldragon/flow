@@ -2535,6 +2535,16 @@ impl WakesInParts for RunningNexus {
             }
         };
         let flow_id = started.flow_id;
+        if let Some(predecessor) = metaflow.past.last() {
+            use crate::store::handover::HoldsHandovers;
+            if self
+                .store
+                .close_handover_for_successor(address, predecessor, &flow_id)
+                .is_err()
+            {
+                return Err(WakeRefusal::StoreUnreadable);
+            }
+        }
         let _turn = self
             .dispatch_gate
             .lock()

@@ -335,7 +335,7 @@ fn separate_session_pipe_holder_cannot_extend_the_budget_or_remove_the_generatio
     fs::write(
         &hook,
         format!(
-            "#!/bin/sh\nsetsid sh -c 'echo $$ > \"{}\"; sleep 30' &\nexit 0\n",
+            "#!/bin/sh\ngit_pid=$PPID\nsetsid sh -c \"exec 1>/proc/$git_pid/fd/1 2>/proc/$git_pid/fd/2; echo \\$\\$ > '{}'; sleep 30\" &\nexit 0\n",
             pid_path.display()
         ),
     )

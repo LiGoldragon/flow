@@ -1654,6 +1654,21 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
             }),
         )
         .expect("request ends");
+    let pending_answer =
+        crate::store::logical_delivery::HoldsAdmissionAnswers::hold_admission_answer(
+            fixture.nexus.store.as_ref(),
+            &accepted.send_acceptance.request_id,
+        );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .archive_request(&request_id, &core())
+            .expect("archive checks the admitting call"),
+        Err(signal_flow::ArchiveRejection::NotYet),
+        "an admission whose answer has not been written still holds its request"
+    );
+    drop(pending_answer);
     assert_eq!(
         fixture
             .nexus

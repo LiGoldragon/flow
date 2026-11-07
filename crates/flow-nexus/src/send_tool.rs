@@ -401,8 +401,17 @@ trait RefusesSendCall {
 
 impl RefusesSendCall for RunningNexus {}
 
-impl HandlesSendCall for RunningNexus {
-    fn handle_send_call<N: ToolCallCarrying>(&self, input: N) -> SendOutcome {
+struct SendCallAnswer {
+    outcome: SendOutcome,
+    _pending_answer: Option<crate::store::logical_delivery::PendingAnswerHold>,
+}
+
+trait HandlesSendCallAnswers {
+    fn handle_send_call_answer<N: ToolCallCarrying>(&self, input: N) -> SendCallAnswer;
+}
+
+impl HandlesSendCallAnswers for RunningNexus {
+    fn handle_send_call_answer<N: ToolCallCarrying>(&self, input: N) -> SendCallAnswer {
         let call = input.tool_call();
         let call_key = call.tool_call_key.clone();
         let content_sha256 = call.content_sha256();
@@ -412,12 +421,26 @@ impl HandlesSendCall for RunningNexus {
             .ok()
             .flatten()
             .is_some();
-        let outcome = {
+        let (outcome, pending_answer) = {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.handle_held_send_call(call)
+            let outcome = self.handle_held_send_call(call);
+            let pending_answer = if !previously_recorded {
+                if let SendOutcome::Accepted(accepted) = &outcome {
+                    use crate::store::logical_delivery::HoldsAdmissionAnswers;
+                    Some(
+                        self.store
+                            .hold_admission_answer(&accepted.send_acceptance.request_id),
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            (outcome, pending_answer)
         };
         if !previously_recorded
             && let SendOutcome::Accepted(accepted) = &outcome
@@ -425,29 +448,38 @@ impl HandlesSendCall for RunningNexus {
         {
             self.wake_due(accepted.target.clone());
         }
-        let mut accepted = match outcome {
-            SendOutcome::Accepted(accepted) => accepted,
-            other => return other,
+        let outcome = match outcome {
+            SendOutcome::Accepted(mut accepted) => {
+                if let Ok(Some(snapshot)) = self
+                    .store
+                    .logical_delivery_snapshot(&accepted.send_acceptance.logical_delivery_id)
+                    && snapshot.delivery_state != accepted.send_acceptance.delivery_state
+                {
+                    accepted.send_acceptance.delivery_state = snapshot.delivery_state;
+                    accepted.send_acceptance.delivery_cursor = snapshot.delivery_cursor;
+                    let refreshed = SendOutcome::Accepted(accepted);
+                    let _ = self.store.update_send_call(SendCall {
+                        tool_call_key: call_key,
+                        content_sha256,
+                        send_outcome: refreshed.clone(),
+                    });
+                    refreshed
+                } else {
+                    SendOutcome::Accepted(accepted)
+                }
+            }
+            other => other,
         };
-        let Ok(Some(snapshot)) = self
-            .store
-            .logical_delivery_snapshot(&accepted.send_acceptance.logical_delivery_id)
-        else {
-            return SendOutcome::Accepted(accepted);
-        };
-        if snapshot.delivery_state != accepted.send_acceptance.delivery_state {
-            accepted.send_acceptance.delivery_state = snapshot.delivery_state;
-            accepted.send_acceptance.delivery_cursor = snapshot.delivery_cursor;
-            let refreshed = SendOutcome::Accepted(accepted.clone());
-            let _ = self.store.update_send_call(SendCall {
-                tool_call_key: call_key,
-                content_sha256,
-                send_outcome: refreshed.clone(),
-            });
-            refreshed
-        } else {
-            SendOutcome::Accepted(accepted)
+        SendCallAnswer {
+            outcome,
+            _pending_answer: pending_answer,
         }
+    }
+}
+
+impl HandlesSendCall for RunningNexus {
+    fn handle_send_call<N: ToolCallCarrying>(&self, input: N) -> SendOutcome {
+        self.handle_send_call_answer(input).outcome
     }
 
     fn handle_held_send_call<N: ToolCallCarrying>(&self, input: N) -> SendOutcome {
@@ -700,16 +732,19 @@ impl RespondsToSendCalls for RunningNexus {
         let Some(id) = request.get("id").cloned() else {
             return Ok(());
         };
-        let outcome = match request
+        let answer = match request
             .get("params")
             .cloned()
             .and_then(ToolCall::read_tool_call::<serde_json::Value>)
         {
-            Some(call) => self.handle_send_call(call),
-            None => Self::refused(SendRefusal::Malformed),
+            Some(call) => self.handle_send_call_answer(call),
+            None => SendCallAnswer {
+                outcome: Self::refused(SendRefusal::Malformed),
+                _pending_answer: None,
+            },
         };
-        let answered = subscription.answer(id, outcome.tool_response());
-        if let SendOutcome::Accepted(accepted) = outcome {
+        let answered = subscription.answer(id, answer.outcome.tool_response());
+        if let SendOutcome::Accepted(accepted) = answer.outcome {
             self.wake_due(accepted.target);
         }
         answered
@@ -862,16 +897,46 @@ impl ServesLaunchCalls for RunningNexus {
         let Some(id) = request.get("id").cloned() else {
             return Ok(());
         };
-        let outcome = match request
+        let answer = match request
             .get("params")
             .cloned()
             .and_then(ToolCall::read_tool_call::<serde_json::Value>)
         {
-            Some(call) => self.handle_held_send_call(call),
-            None => Self::refused(SendRefusal::Malformed),
+            Some(call) => {
+                let previously_recorded = self
+                    .store
+                    .send_call(&call.tool_call_key)
+                    .ok()
+                    .flatten()
+                    .is_some();
+                let outcome = self.handle_held_send_call(call);
+                let pending_answer = if !previously_recorded {
+                    if let SendOutcome::Accepted(accepted) = &outcome {
+                        use crate::store::logical_delivery::HoldsAdmissionAnswers;
+                        Some(
+                            self.store
+                                .hold_admission_answer(&accepted.send_acceptance.request_id),
+                        )
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                SendCallAnswer {
+                    outcome,
+                    _pending_answer: pending_answer,
+                }
+            }
+            None => SendCallAnswer {
+                outcome: Self::refused(SendRefusal::Malformed),
+                _pending_answer: None,
+            },
         };
-        let answered = responder.subscription.answer(id, outcome.tool_response());
-        if let SendOutcome::Accepted(accepted) = outcome {
+        let answered = responder
+            .subscription
+            .answer(id, answer.outcome.tool_response());
+        if let SendOutcome::Accepted(accepted) = answer.outcome {
             self.defer_wake(accepted.target);
         }
         answered

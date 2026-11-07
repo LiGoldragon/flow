@@ -388,6 +388,7 @@ impl Dispatches for RunningNexus {
             | Query::BindSeat(_)
             | Query::Adopt(_)
             | Query::ObserveSends(_)
+            | Query::ObserveSender(_)
             | Query::ObserveDeliveries(_) => Response::Refused(
                 <signal_flow::Refusal as sending::RefusesUnidentified>::unidentified(
                     signal_flow::Process { pid: 0, started: 0 },
@@ -1318,11 +1319,23 @@ impl ServesConnection for Connection {
                         ),
                     ));
                 };
-                let sender = match nexus.observation_sender(process) {
+                let sender = match nexus.observation_sender(process, None) {
                     Ok(sender) => sender,
                     Err(refusal) => return self.peer.write_response(&refusal),
                 };
                 return self.serve_sends(nexus, &sender, cursor);
+            }
+            Query::ObserveSender(forwarded) => {
+                let Some(process) = self.process.as_ref() else {
+                    return self
+                        .peer
+                        .write_response(&Response::Refused(signal_flow::Refusal::NotMessage));
+                };
+                let sender = match nexus.observation_sender(process, Some(&forwarded)) {
+                    Ok(sender) => sender,
+                    Err(refusal) => return self.peer.write_response(&refusal),
+                };
+                return self.serve_sends(nexus, &sender, forwarded.delivery_cursor_option);
             }
             Query::ObserveDeliveries(cursor) => {
                 let Some(process) = self.process.as_ref() else {

@@ -61,7 +61,10 @@ impl CallsFlowNexus for FlowClient {
         peer.write_all(&bytes).map_err(|e| e.to_string())?;
         let streams = matches!(
             query,
-            Query::Observe(_) | Query::ObserveSends(_) | Query::ObserveDeliveries(_)
+            Query::Observe(_)
+                | Query::ObserveSends(_)
+                | Query::ObserveSender(_)
+                | Query::ObserveDeliveries(_)
         );
         let retirement_stream = matches!(query, Query::Observe(ObserveSelection::Retirement(_)));
         loop {

@@ -1,13 +1,18 @@
 //! Authenticated logical-delivery subscriptions, resumed by durable cursor.
+use crate::metaflow::IdentifiesThread;
 use crate::sending::IdentifiesSender;
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::{HoldsStopRequest, RunningNexus};
-use signal_flow::{Address, Process, Refusal, Response};
+use signal_flow::{Address, ObserveSender_Data, Process, Refusal, Response};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) trait ObservesLogicalSends {
-    fn observation_sender(&self, peer: &Process) -> Result<Address, Box<Response>>;
+    fn observation_sender(
+        &self,
+        peer: &Process,
+        forwarded: Option<&ObserveSender_Data>,
+    ) -> Result<Address, Box<Response>>;
     fn observe_sends(
         &self,
         sender: &Address,
@@ -31,8 +36,37 @@ pub(crate) trait ObservesLogicalSends {
 }
 
 impl ObservesLogicalSends for RunningNexus {
-    fn observation_sender(&self, peer: &Process) -> Result<Address, Box<Response>> {
-        self.sending_address(peer)
+    fn observation_sender(
+        &self,
+        peer: &Process,
+        forwarded: Option<&ObserveSender_Data>,
+    ) -> Result<Address, Box<Response>> {
+        let Some(forwarded) = forwarded else {
+            return self.sending_address(peer);
+        };
+        match self.store.message_peer(peer) {
+            Ok(true) => {}
+            Ok(false) => return Err(Box::new(Response::Refused(Refusal::NotMessage))),
+            Err(error) => {
+                return Err(Box::new(Response::Refused(Refusal::Store(
+                    error.to_string(),
+                ))));
+            }
+        }
+        if let Some(thread) = &forwarded.native_session_id_option {
+            match self.identify_thread(signal_flow::IdentifyThread_Data {
+                process: forwarded.process.clone(),
+                native_session_id: thread.clone(),
+            }) {
+                Ok(Response::Identified(address)) => Ok(address),
+                Ok(refusal) => Err(Box::new(refusal)),
+                Err(error) => Err(Box::new(Response::Refused(Refusal::Store(
+                    error.to_string(),
+                )))),
+            }
+        } else {
+            self.sending_address(&forwarded.process)
+        }
     }
 
     fn observe_sends(

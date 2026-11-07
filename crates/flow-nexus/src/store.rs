@@ -3188,6 +3188,7 @@ impl AppliesFlowQuery for FlowStore {
             | Query::BindSeat(_)
             | Query::Adopt(_)
             | Query::ObserveSends(_)
+            | Query::ObserveSender(_)
             | Query::ObserveDeliveries(_) => Ok(Response::Refused(
                 <signal_flow::Refusal as crate::sending::RefusesUnidentified>::unidentified(
                     signal_flow::Process { pid: 0, started: 0 },
@@ -3244,6 +3245,7 @@ impl ReservesPendingStart for FlowStore {
             | Query::LaunchStatus(_)
             | Query::Observe(_)
             | Query::ObserveSends(_)
+            | Query::ObserveSender(_)
             | Query::ObserveDeliveries(_)
             | Query::ResolveCaller(_)
             | Query::Report(_)
@@ -9160,6 +9162,163 @@ mod tests {
         assert_eq!(
             store.request_id_drawer.draw_request_id().expect("draws"),
             "abcd"
+        );
+    }
+
+    #[test]
+    fn message_delivery_observation_is_one_global_private_stream_across_ack_archive_and_restart() {
+        use super::logical_delivery::{DeliverCallSpec, VerifiedDeliveryLock};
+        use crate::store::metaflow::MutatesMetaflows;
+        use signal_flow::{DeliveryState, Lock_Data, Message, Metaflow, Request, Response, SentBy};
+
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let at = |topic: &str| Address {
+            aspect: Aspect::Mind,
+            topic: topic.into(),
+            model: Model::Sol,
+        };
+        let first_sender = at("messageSenderOne");
+        let second_sender = at("messageSenderTwo");
+        let ordinary_sender = at("ordinarySender");
+        let recipient = at("messageRecipient");
+        for sender in [&first_sender, &second_sender, &ordinary_sender] {
+            store.seed_metaflow(Metaflow {
+                address: sender.clone(),
+                state: flow_ethos::State::Awake(format!("{}-flow", sender.topic)),
+                past: Vec::new(),
+                queue: Vec::new(),
+            });
+        }
+        store.seed_metaflow(Metaflow {
+            address: recipient.clone(),
+            state: flow_ethos::State::Asleep,
+            past: Vec::new(),
+            queue: Vec::new(),
+        });
+        let key = |counter| signal_flow::DeliverKey {
+            namespace: "messageMemory".into(),
+            counter,
+        };
+        let admit_message = |sender: &Address, counter: i64| {
+            let Response::Locked(lock) = store
+                .lock_metaflow(
+                    Lock_Data {
+                        sender: sender.clone(),
+                        recipient: recipient.clone(),
+                    },
+                    100,
+                )
+                .expect("Message lock reads")
+            else {
+                panic!("Message locks the recipient")
+            };
+            let signal_flow::PrivateSendResponse::SendAccepted(accepted) = store
+                .accept_deliver_call(
+                    &recipient,
+                    sender.clone(),
+                    flow_ethos::Delivery::Queue,
+                    Message::Soft(Request::Notice(format!("message {counter}"))),
+                    VerifiedDeliveryLock { lock, now: 100 },
+                    DeliverCallSpec {
+                        key: key(counter),
+                        sender: sender.clone(),
+                        digest: format!("digest-{counter}"),
+                    },
+                )
+                .expect("Message Deliver admits")
+            else {
+                panic!("Message Deliver has an admission answer")
+            };
+            accepted
+        };
+        let first = admit_message(&first_sender, 0);
+        let second = admit_message(&second_sender, 1);
+        let signal_flow::PrivateSendResponse::SendAccepted(ordinary) = store
+            .accept_logical_delivery(
+                &recipient,
+                SentBy::Sender(ordinary_sender),
+                flow_ethos::Delivery::Queue,
+                Message::Soft(Request::Notice("ordinary".into())),
+                None,
+            )
+            .expect("ordinary delivery admits")
+        else {
+            panic!("ordinary delivery has an admission answer")
+        };
+        let opening = store
+            .read_message_delivery_snapshots(None)
+            .expect("Message opening reads");
+        assert_eq!(
+            opening
+                .delivery_snapshot_vector
+                .iter()
+                .map(|snapshot| snapshot.logical_delivery_id.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                first.logical_delivery_id.clone(),
+                second.logical_delivery_id.clone(),
+            ],
+            "one stream spans senders and excludes ordinary admission"
+        );
+
+        store
+            .transition_logical_delivery(
+                &first.logical_delivery_id,
+                DeliveryState::Delivered(signal_flow::NativeReceipt {
+                    harness_kind: signal_flow::HarnessKind::Codex,
+                    native_session_id: "message-session".into(),
+                    native_prompt_id: "message-prompt".into(),
+                }),
+            )
+            .expect("first Message delivery ends");
+        assert_eq!(
+            store
+                .archive_request(&first.request_id, &first_sender)
+                .expect("first Message delivery archives"),
+            Ok(())
+        );
+        store
+            .acknowledge_deliver_calls(&[key(0), key(1)])
+            .expect("Message calls acknowledge");
+        drop(store);
+
+        let reopened = fixture.store();
+        let held = reopened
+            .read_message_delivery_snapshots(None)
+            .expect("Message opening survives restart");
+        assert_eq!(held.delivery_snapshot_vector.len(), 1);
+        assert_eq!(
+            held.delivery_snapshot_vector[0].logical_delivery_id,
+            second.logical_delivery_id
+        );
+        let history = reopened
+            .read_message_delivery_snapshots(Some(0))
+            .expect("Message history survives restart");
+        assert_eq!(history.store_identity, opening.store_identity);
+        assert_eq!(history.delivery_cursor, held.delivery_cursor);
+        assert!(
+            history
+                .delivery_snapshot_vector
+                .windows(2)
+                .all(|pair| pair[0].delivery_cursor < pair[1].delivery_cursor)
+        );
+        assert!(history.delivery_snapshot_vector.iter().any(
+            |snapshot| snapshot.logical_delivery_id == first.logical_delivery_id
+                && snapshot.delivery_state == DeliveryState::Archived
+        ));
+        assert!(
+            history
+                .delivery_snapshot_vector
+                .iter()
+                .all(|snapshot| snapshot.logical_delivery_id != ordinary.logical_delivery_id)
+        );
+        assert!(
+            reopened
+                .read_message_delivery_snapshots(Some(history.delivery_cursor))
+                .expect("caught-up Message stream reads")
+                .delivery_snapshot_vector
+                .is_empty()
         );
     }
 }

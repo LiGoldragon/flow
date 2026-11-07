@@ -331,12 +331,15 @@ fn separate_session_pipe_holder_cannot_extend_the_budget_or_remove_the_generatio
         .close_handover_for_successor(&address, "before", "after")
         .unwrap();
     let pid_path = archive.path().join("separate-session-pid");
+    let ready_path = archive.path().join("separate-session-ready");
     let hook = archive.path().join(".git/hooks/pre-commit");
     fs::write(
         &hook,
         format!(
-            "#!/bin/sh\ngit_pid=$PPID\nsetsid sh -c \"exec 1>/proc/$git_pid/fd/1 2>/proc/$git_pid/fd/2; echo \\$\\$ > '{}'; sleep 30\" &\nexit 0\n",
-            pid_path.display()
+            "#!/bin/sh\ngit_pid=$PPID\nsetsid sh -c \"exec 1>/proc/$git_pid/fd/1 2>/proc/$git_pid/fd/2; echo \\$\\$ > '{}'; echo ready > '{}'; sleep 30\" &\nwhile test ! -f '{}'; do sleep 0.01; done\nexit 0\n",
+            pid_path.display(),
+            ready_path.display(),
+            ready_path.display()
         ),
     )
     .unwrap();

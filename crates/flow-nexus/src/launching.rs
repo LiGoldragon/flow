@@ -245,14 +245,6 @@ impl LaunchesFlows for RunningNexus {
         };
         if let Some(attempt) = existing {
             if attempt.launch_profile != profile || attempt.origin != origin {
-                eprintln!(
-                    "launch conflict id={} profile_equal={} origin_equal={} existing={:?} requested={:?}",
-                    launch_request_id,
-                    attempt.launch_profile == profile,
-                    attempt.origin == origin,
-                    attempt.launch_profile,
-                    profile
-                );
                 return Response::StartRejected(StartRejection::LaunchRequestConflict);
             }
             if attempt.launch_attempt_phase == LaunchAttemptPhase::PromptObserved {

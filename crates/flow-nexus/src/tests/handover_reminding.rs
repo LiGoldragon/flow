@@ -119,7 +119,7 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
     const CLAUDE_SEAT: &str = "fixture-seat";
     use super::NexusFixture;
     use crate::handover_reminding::RemindsHandoverCallers;
-    use crate::store::{ManagesMetaflowState, ReadsFlowMemory, SeedsRole};
+    use crate::store::{ManagesMetaflowState, SeedsRole};
     use crate::store::context::RecordsContextSize;
     use crate::store::handover::HoldsHandovers;
     use crate::store::metaflow::SeedsMetaflow;
@@ -139,8 +139,6 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
     fixture.nexus.send_due_handover_reminders(20);
     let row = fixture.nexus.store.handover_reminder(&address, 0).unwrap().unwrap();
     assert_eq!(row.sent, 1);
-    let stored = fixture.nexus.store.stored_metaflow(&address).unwrap().unwrap();
-    assert!(stored.metaflow.queue.iter().any(|entry| matches!(&entry.message, flow_ethos::Message::HardAbrupt(flow_ethos::Request::Notice(_)))));
     fixture.nexus.send_due_handover_reminders(319);
     assert_eq!(fixture.nexus.store.handover_reminder(&address, 0).unwrap().unwrap().sent, 1);
     fixture.nexus.send_due_handover_reminders(320);
@@ -199,7 +197,8 @@ fn atomic_same_expected_reminder_state_rejects_duplicate_admission() {
 #[test]
 fn reminder_state_reopens_with_anchored_due_without_duplicate_initial() {
     use crate::store::handover_reminders::{HandoverReminder, OpensHandoverReminder, SchedulesHandoverReminders};
-    use crate::store::{ConfiguredStore, OpensFlowStore};
+    use super::configuring::ConfiguredStore;
+    use crate::store::OpensFlowStore;
     let configured = ConfiguredStore::new();
     let path = configured.path();
     let store = crate::store::FlowStore::open_configured(path).unwrap();

@@ -1395,10 +1395,11 @@ impl ServesConnection for Connection {
             | Query::Identify(_)
             | Query::IdentifyThread(_)
             | Query::Lock(_)
-            | Query::Release(_)) => {
-                // A queued request is durable: the recipient's wake is read
-                // from Flow's records after the answer, whether or not the
-                // answer reached the sender, off the dispatch gate.
+            | Query::Release(_)
+            | Query::Acknowledge(_)) => {
+                // These are peer-routed operations. Acknowledge in
+                // particular reaches the authenticated Message path so an
+                // ordinary caller cannot retract Message's replay row.
                 let answer = nexus.dispatch_metaflow_peer(query, self.process.as_ref());
                 return self.peer.write_response(&answer.response);
             }

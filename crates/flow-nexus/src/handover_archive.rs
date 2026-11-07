@@ -1,8 +1,8 @@
 //! Publication of closed handovers into a configured Git archive.
 
 use crate::{
-    store::handover::{ClosedHandover, HandoverRemovalOutcome, HoldsHandovers},
     RunningNexus,
+    store::handover::{ClosedHandover, HandoverRemovalOutcome, HoldsHandovers},
 };
 use signal_flow::{Address, Aspect, HandoverArchiveIdentity, Model};
 use std::{
@@ -385,34 +385,112 @@ impl RunsWithDeadline for Command {
         &mut self,
         deadline: Instant,
     ) -> Result<std::process::Output, HandoverArchiveRefusal> {
+        // Git hooks are allowed to create descendants.  Put the command and
+        // all of its descendants in one owned process group so a publication
+        // timeout has one cleanup boundary rather than killing only git.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: the closure performs only async-signal-safe work and
+            // is installed before spawning the child.
+            unsafe {
+                self.pre_exec(|| {
+                    // SAFETY: setpgid is called in the child between fork
+                    // and exec, and uses only the child process' own ids.
+                    let result = libc::setpgid(0, 0);
+                    if result == 0 {
+                        Ok(())
+                    } else {
+                        Err(io::Error::last_os_error())
+                    }
+                });
+            }
+        }
         let mut child = self
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| HandoverArchiveRefusal::Git(e.to_string()))?;
-        loop {
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| HandoverArchiveRefusal::Git("git stdout was not piped".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| HandoverArchiveRefusal::Git("git stderr was not piped".into()))?;
+        let (output_sender, output_receiver) = std::sync::mpsc::channel();
+        let stdout_thread = thread::spawn({
+            let sender = output_sender.clone();
+            move || {
+                let mut bytes = Vec::new();
+                let result = io::Read::read_to_end(&mut io::BufReader::new(stdout), &mut bytes);
+                let _ = sender.send((true, result.map(|_| bytes)));
+            }
+        });
+        let stderr_thread = thread::spawn({
+            let sender = output_sender;
+            move || {
+                let mut bytes = Vec::new();
+                let result = io::Read::read_to_end(&mut io::BufReader::new(stderr), &mut bytes);
+                let _ = sender.send((false, result.map(|_| bytes)));
+            }
+        });
+        let process_id = child.id();
+        let status = loop {
             match child
                 .try_wait()
                 .map_err(|e| HandoverArchiveRefusal::Git(e.to_string()))?
             {
-                Some(status) => {
-                    let output = child
-                        .wait_with_output()
-                        .map_err(|e| HandoverArchiveRefusal::Git(e.to_string()))?;
-                    return Ok(std::process::Output {
-                        status,
-                        stdout: output.stdout,
-                        stderr: output.stderr,
-                    });
+                Some(exit) => {
+                    break exit;
                 }
                 None if Instant::now() >= deadline => {
-                    let _ = child.kill();
+                    kill_process_group(process_id);
                     let _ = child.wait();
                     return Err(HandoverArchiveRefusal::PublicationTimedOut);
                 }
                 None => thread::sleep(Duration::from_millis(2)),
             }
+        };
+        let mut stdout = None;
+        let mut stderr = None;
+        while stdout.is_none() || stderr.is_none() {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or(HandoverArchiveRefusal::PublicationTimedOut)?;
+            let (is_stdout, bytes) = output_receiver.recv_timeout(remaining).map_err(|_| {
+                kill_process_group(process_id);
+                HandoverArchiveRefusal::PublicationTimedOut
+            })?;
+            let bytes = bytes.map_err(|error| HandoverArchiveRefusal::Git(error.to_string()))?;
+            if is_stdout {
+                stdout = Some(bytes);
+            } else {
+                stderr = Some(bytes);
+            }
         }
+        let _ = stdout_thread.join();
+        let _ = stderr_thread.join();
+        Ok(std::process::Output {
+            status,
+            stdout: stdout.expect("stdout capture recorded"),
+            stderr: stderr.expect("stderr capture recorded"),
+        })
+    }
+}
+
+fn kill_process_group(process_id: u32) {
+    #[cfg(unix)]
+    {
+        // A negative pid addresses the process group whose id is the child
+        // pid.  Ignore ESRCH: the group may have exited between observation
+        // and cleanup.
+        let _ = unsafe { libc::kill(-(process_id as libc::pid_t), libc::SIGKILL) };
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = process_id;
     }
 }
 
@@ -450,5 +528,46 @@ mod tests {
             ),
             Err(HandoverArchiveRefusal::Git(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_timeout_owns_and_kills_a_hanging_hook_process_group() {
+        let repository = tempfile::tempdir().unwrap();
+        run_git(
+            repository.path(),
+            ["init", "-q"],
+            Instant::now() + Duration::from_secs(60),
+        )
+        .unwrap();
+        run_git(
+            repository.path(),
+            ["config", "user.email", "flow@example.invalid"],
+            Instant::now() + Duration::from_secs(60),
+        )
+        .unwrap();
+        run_git(
+            repository.path(),
+            ["config", "user.name", "Flow Test"],
+            Instant::now() + Duration::from_secs(60),
+        )
+        .unwrap();
+        fs::create_dir_all(repository.path().join(".git/hooks")).unwrap();
+        let hook = repository.path().join(".git/hooks/pre-commit");
+        fs::write(&hook, "#!/bin/sh\nsleep 30\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let publisher = ExistingGitHandoverArchive::new(repository.path())
+            .with_deadline(Duration::from_millis(100));
+        let result = publisher.publish(HandoverArchiveRequest {
+            address: Address {
+                aspect: Aspect::Mind,
+                topic: "testTopic".into(),
+                model: Model::Sol,
+            },
+            flow_id: "flow-test".into(),
+            document: "generation=1\n".into(),
+        });
+        assert_eq!(result, Err(HandoverArchiveRefusal::PublicationTimedOut));
     }
 }

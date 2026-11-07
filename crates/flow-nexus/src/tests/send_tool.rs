@@ -152,7 +152,7 @@ struct FakeConnection {
     deaf: bool,
 }
 
-struct FakeAppServer {
+pub(super) struct FakeAppServer {
     directory: tempfile::TempDir,
     executable: PathBuf,
 }
@@ -485,6 +485,17 @@ impl SeatsCodexFlows for NexusFixture {
             .adapter_for(model)
             .expect("model selects an endpoint")
     }
+}
+
+pub(super) fn accepting_codex_endpoint(
+    fixture: &mut NexusFixture,
+    model: &str,
+    thread: &str,
+) -> FakeAppServer {
+    let fake = FakeAppServer::install(vec![]);
+    fake.accept_queued_turns(thread, 1..=16);
+    let _ = fixture.adapter(model, &fake);
+    fake
 }
 
 /// Runs a responder for `thread` until `done` returns, then stops it.

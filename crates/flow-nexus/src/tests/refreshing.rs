@@ -9,6 +9,7 @@
 use super::refresh_and_compaction::{
     SUCCESSOR_REQUEST, declare_seat, owe_staged_successor, staged_refresh_successor,
 };
+use super::send_tool::accepting_codex_endpoint;
 use super::waking::{
     CLAUDE_SEAT, ReadsFreshWorld, WakesFreshClaude, address, claude_agent, claude_seat,
     launched_claude_ended_by,
@@ -18,7 +19,9 @@ use super::{
     codex_agent_in,
 };
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+use crate::generated::operation::{Operation, Outcome};
 use crate::handover_reminding::RemindsHandoverCallers;
+use crate::performing::Performs;
 use crate::sending::{IdentifiesSender, SendsRequests};
 use crate::store::SeedsRole;
 use crate::store::context::{JudgesThreshold, RecordsContextSize};
@@ -1034,8 +1037,20 @@ fn a_launch_ordered_replace_holds_the_metaflow_and_types_nothing_into_its_predec
 /// predecessor.
 #[test]
 fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
-    let (fixture, profile) =
+    let (mut fixture, profile) =
         refreshable_with_successor(Continuity::OnDemand, flow_ethos::Delivery::Queue);
+    let fixture_only_startup = stored(&fixture)
+        .queue
+        .into_iter()
+        .next()
+        .expect("replacement fixture startup entry");
+    assert!(
+        fixture
+            .nexus
+            .store
+            .remove_oldest_queued(&seat_address(), &fixture_only_startup)
+            .unwrap()
+    );
     fixture.nexus.store.seed_role(signal_flow::Caller {
         flow_id: CLAUDE_SEAT.into(),
         aspect: signal_flow::Aspect::Mind,
@@ -1080,11 +1095,20 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
         .unwrap()
         .expect("the scheduler created the timer");
     assert_eq!((first.sent, first.next_due), (1, 310));
+    let first_warning_id = stored(&fixture)
+        .queue
+        .iter()
+        .find(|entry| {
+            matches!(&entry.message, Message::HardAbrupt(Request::Notice(text))
+                if text.contains("flow Keep."))
+        })
+        .expect("the scheduler durably admitted its first warning")
+        .logical_delivery_id
+        .clone();
     let predecessor_calls = typing_calls(&fixture).len();
 
     let closing = fixture.directory.path().join("warning-close-reached");
     let release = fixture.directory.path().join("warning-close-release");
-    let _release_on_unwind = ReleasesFixtureOnDrop(release.clone());
     let script = fs::read_to_string(&fixture.snapshot_program).expect("fixture Herdr");
     let pattern = "  *\" pane close \"*) exit 0 ;;";
     assert!(script.contains(pattern), "{script}");
@@ -1102,6 +1126,10 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
     ));
 
     let (replaced, warning_id) = std::thread::scope(|scope| {
+        // Scope joins its children after this closure returns or unwinds.
+        // Keep the release guard inside the closure so an assertion releases
+        // the fixture's native close before that join can wait on it.
+        let _release_before_join = ReleasesFixtureOnDrop(release.clone());
         let replacing = scope.spawn(|| fixture.nexus.dispatch(Query::Replace(profile.clone())));
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while !closing.exists() {
@@ -1115,7 +1143,8 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
         let warning_id = loop {
             let metaflow = stored(&fixture);
             if let Some(entry) = metaflow.queue.iter().find(|entry| {
-                matches!(&entry.message, Message::HardAbrupt(Request::Notice(text))
+                entry.logical_delivery_id != first_warning_id
+                    && matches!(&entry.message, Message::HardAbrupt(Request::Notice(text))
                     if text.contains("flow Keep."))
             }) {
                 break entry.logical_delivery_id.clone();
@@ -1150,17 +1179,41 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
     });
 
     assert!(matches!(replaced, Response::Replaced(_)), "{replaced:?}");
+    assert_eq!(typing_calls(&fixture).len(), predecessor_calls);
+    let codex = accepting_codex_endpoint(
+        &mut fixture,
+        "fixture-model",
+        "01a0b22c-e24f-7452-9940-64490878680f",
+    );
+    let successor_herdr = fs::read_to_string(&fixture.snapshot_program).expect("fixture Herdr");
+    let refusal = "  *) exit 64 ;;";
+    assert!(successor_herdr.contains(refusal), "{successor_herdr}");
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&successor_herdr.replacen(
+        refusal,
+        &format!("  *\" pane send-keys \"*) exit 0 ;;\n{refusal}"),
+        1,
+    ));
+    let drained = fixture.nexus.perform(Operation::Drain(seat_address()));
+    assert!(matches!(drained, Outcome::Drained(_)), "{drained:?}");
+    let drained = fixture.nexus.perform(Operation::Drain(seat_address()));
+    assert!(matches!(drained, Outcome::Drained(_)), "{drained:?}");
     let delivered = fixture
         .nexus
         .store
         .logical_delivery_snapshot(&warning_id)
         .unwrap()
         .unwrap();
-    assert!(matches!(
-        delivered.delivery_state,
-        signal_flow::DeliveryState::Delivered(_)
-    ));
-    assert_eq!(typing_calls(&fixture).len(), predecessor_calls + 1);
+    assert!(
+        matches!(
+            delivered.delivery_state,
+            signal_flow::DeliveryState::Uncertain
+        ),
+        "the native input is durably placed under the same logical id: {delivered:?}"
+    );
+    drop(codex);
     assert_eq!(
         stored(&fixture)
             .queue

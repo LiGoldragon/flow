@@ -1620,6 +1620,10 @@ pub struct FlowStore {
     pub(crate) handover_observations: crate::handover_observation::HandoverRetirementObservations,
     #[cfg(test)]
     pub(crate) fail_next_handover_removal: Mutex<bool>,
+    #[cfg(test)]
+    pub(crate) fail_next_closed_handover_read: Mutex<bool>,
+    #[cfg(test)]
+    pub(crate) fail_next_retirement_completion_read: Mutex<bool>,
     pub launch_changes: LaunchChanges,
 }
 
@@ -2604,6 +2608,10 @@ impl OpensFlowStore for FlowStore {
             handover_observations: Default::default(),
             #[cfg(test)]
             fail_next_handover_removal: Mutex::new(false),
+            #[cfg(test)]
+            fail_next_closed_handover_read: Mutex::new(false),
+            #[cfg(test)]
+            fail_next_retirement_completion_read: Mutex::new(false),
             launch_changes: LaunchChanges::default(),
         };
 
@@ -2783,6 +2791,10 @@ impl OpensFlowStore for FlowStore {
             handover_observations: Default::default(),
             #[cfg(test)]
             fail_next_handover_removal: Mutex::new(false),
+            #[cfg(test)]
+            fail_next_closed_handover_read: Mutex::new(false),
+            #[cfg(test)]
+            fail_next_retirement_completion_read: Mutex::new(false),
             launch_changes: LaunchChanges::default(),
         };
         store.seed_request_policy()?;

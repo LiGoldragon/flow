@@ -426,6 +426,29 @@ fn verified_archive_then_memory_failure_reports_archive_and_incomplete_without_r
 }
 
 #[test]
+fn retirement_completion_read_failure_is_explicitly_incomplete_and_retains_the_generation() {
+    let fixture = NexusFixture::new();
+    let address = address("handoverCompletionReadFailure");
+    let store = &fixture.nexus.store;
+    store
+        .close_handover_for_successor(&address, "pred", "succ")
+        .unwrap();
+    let closed = store.closed_handovers(&address, 0).unwrap().pop().unwrap();
+    let subscription = store.observe_handover_retirement(&address).unwrap();
+    store.fail_next_retirement_completion_read();
+    assert!(
+        store
+            .complete_closed_handover_retirement(&address, &closed, archive_identity())
+            .is_err()
+    );
+    assert!(matches!(
+        subscription.next_response().unwrap(),
+        Response::RetirementObservationFailed(RetirementObservationFailure::MissingEvidence(_))
+    ));
+    assert_eq!(store.closed_handovers(&address, 0).unwrap(), vec![closed]);
+}
+
+#[test]
 fn concurrent_attach_and_close_places_the_generation_exactly_once_in_snapshot_or_fifo() {
     let fixture = NexusFixture::new();
     let address = address("handoverAttachCloseRace");

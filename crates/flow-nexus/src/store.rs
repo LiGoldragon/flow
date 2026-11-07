@@ -9359,6 +9359,58 @@ mod tests {
             panic!("first Order accepted")
         };
         assert_eq!(order.request_id, "ord1");
+        let result = |request_id: &str| {
+            SendableMessage::Soft(SendableRequest::Result(
+                signal_flow::SendableRequest_Result_Data {
+                    request_id: request_id.into(),
+                    string: "done".into(),
+                },
+            ))
+        };
+        let stranger = signal_flow::Address {
+            aspect: signal_flow::Aspect::Psyche,
+            topic: "answerStranger".into(),
+            model: signal_flow::Model::Opus,
+        };
+        for (answering, requesting, message) in [
+            (
+                answerer.clone(),
+                requester.clone(),
+                result(&order.request_id),
+            ),
+            (
+                stranger.clone(),
+                requester.clone(),
+                result(&order.request_id),
+            ),
+            (answerer.clone(), stranger, result(&order.request_id)),
+            (
+                answerer.clone(),
+                requester.clone(),
+                SendableMessage::Soft(SendableRequest::Done(
+                    signal_flow::SendableRequest_Done_Data {
+                        request_id: order.request_id.clone(),
+                        string: "done".into(),
+                    },
+                )),
+            ),
+        ] {
+            assert_eq!(
+                store
+                    .resolve_sendable_message(&answering, &requesting, message)
+                    .expect("answer refusal reads"),
+                Err(Refusal::Unresolved),
+                "queued state, foreign party, wrong requester and wrong kind read alike"
+            );
+        }
+        assert_eq!(
+            MintsRequestIds::request_binding(&store, &order.request_id)
+                .expect("refused answer leaves the binding readable")
+                .expect("refused answer leaves the request held")
+                .closure,
+            RequestClosure::Open,
+            "every pre-admission answer refusal writes nothing"
+        );
         store
             .transition_logical_delivery(
                 &order.logical_delivery_id,
@@ -9370,14 +9422,6 @@ mod tests {
             )
             .expect("first Order delivered");
 
-        let result = |request_id: &str| {
-            SendableMessage::Soft(SendableRequest::Result(
-                signal_flow::SendableRequest_Result_Data {
-                    request_id: request_id.into(),
-                    string: "done".into(),
-                },
-            ))
-        };
         let resolved = store
             .resolve_sendable_message(&answerer, &requester, result(&order.request_id))
             .expect("first Result resolution reads")

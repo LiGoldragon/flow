@@ -1978,7 +1978,7 @@ impl PerformsWakeAndDrain for RunningNexus {
         } else {
             meta_signal_flow::Message::Soft(letter)
         };
-        let result = self.deliver(meta_signal_flow::DeliveryRequest {
+        let result = self.deliver_while_waking(meta_signal_flow::DeliveryRequest {
             delivery_id: attempt.attempt_id.clone(),
             flow_id: flow_id.clone(),
             message,

@@ -191,12 +191,21 @@ impl ReadsLeasedPane for RunningNexus {
 /// The privileged pane writes.
 pub trait DeliversMessages {
     fn deliver(&self, request: DeliveryRequest) -> Response;
+    fn deliver_while_waking(&self, request: DeliveryRequest) -> Response;
     fn vet(&self, request: &DeliveryRequest) -> Response;
     fn command(&self, request: CommandRequest) -> Response;
 }
 
 impl DeliversMessages for RunningNexus {
     fn deliver(&self, request: DeliveryRequest) -> Response {
+        self.deliver_inner(request, false)
+    }
+
+    fn deliver_while_waking(&self, request: DeliveryRequest) -> Response {
+        self.deliver_inner(request, true)
+    }
+
+    fn deliver_inner(&self, request: DeliveryRequest, held_wake: bool) -> Response {
         match self.store.delivery(&request.delivery_id) {
             Ok(Some(delivery)) => {
                 return Response::Delivered(crate::message_projection::visible_delivery(&delivery));
@@ -220,6 +229,16 @@ impl DeliversMessages for RunningNexus {
             Ok(target) => target,
             Err(refusal) => return Response::DeliveryRejected(refusal.into()),
         };
+        if !held_wake {
+            if let Ok(Some(metaflow)) = crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(
+                &*self.store,
+                &request.flow_id,
+            ) {
+                if self.waking.is_waking(&metaflow.address) {
+                    return Response::DeliveryRejected(DeliveryRejection::RouteUnavailable);
+                }
+            }
+        }
         if let Some(refusal) = request.message.refusal(&target.profile) {
             return Response::DeliveryRejected(DeliveryRejection::BodyRefused(refusal));
         }

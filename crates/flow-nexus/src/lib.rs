@@ -2270,6 +2270,7 @@ mod tests {
                 let mut agent = serde_json::json!({
                     "agent": harness,
                     "agent_status": "idle",
+                    "interactive_ready": true,
                     "name": binding.herdr_agent_name,
                     "pane_id": binding.herdr_pane_id,
                     "terminal_id": binding.herdr_terminal_id,

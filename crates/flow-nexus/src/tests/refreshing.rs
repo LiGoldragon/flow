@@ -1178,32 +1178,51 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
         (replacing.join().expect("replacement answered"), warning_id)
     });
 
-    assert!(matches!(replaced, Response::Replaced(_)), "{replaced:?}");
+    let Response::Replaced(replaced) = replaced else {
+        panic!("replacement answered: {replaced:?}")
+    };
+    assert_eq!(replaced.flow_id, CLAUDE_SEAT);
+    let successor_flow_id = replaced.launched.flow_id;
+    assert_ne!(successor_flow_id, CLAUDE_SEAT);
+    assert_eq!(stored(&fixture).state, State::Awake(successor_flow_id.clone()));
     assert_eq!(typing_calls(&fixture).len(), predecessor_calls);
     let successor = fixture
         .nexus
         .store
-        .flow_node(CLAUDE_SEAT)
+        .flow_node(&successor_flow_id)
         .unwrap()
         .expect("replacement successor registered");
-    assert_eq!(
-        successor.session_id,
-        "01a0b22c-e24f-7452-9940-64490878680f"
-    );
-    let codex = accepting_codex_endpoint(
-        &mut fixture,
-        "fixture-model",
-        "01a0b22c-e24f-7452-9940-64490878680f",
-    );
+    let HerdrRouteSelection::Available(successor_route) =
+        successor.herdr_route_selection.clone()
+    else {
+        panic!("replacement successor has no Herdr route: {successor:?}")
+    };
+    let codex = accepting_codex_endpoint(&mut fixture, "fixture-model", &successor.session_id);
+    let successor_agent = serde_json::json!({
+        "agent":"codex",
+        "agent_status":"working",
+        "interactive_ready":true,
+        "name":successor_route.herdr_agent_name.clone(),
+        "pane_id":successor_route.herdr_pane_id.clone(),
+        "terminal_id":successor_route.herdr_terminal_id.clone(),
+        "agent_session":{
+            "source":"herdr:codex", "agent":"codex", "kind":"id",
+            "value":successor.session_id.clone()
+        }
+    });
     let successor_operations = fixture.accept_pane_operations(
-        vec![fixture.successor_agent()],
-        PromptFixture::Prompted("w1:p1"),
+        vec![successor_agent],
+        PromptFixture::Prompted(&successor_route.herdr_pane_id),
+    );
+    let successor_prompt = format!(
+        "--session {} agent prompt {}",
+        successor_route.herdr_session_name, successor_route.herdr_pane_id
     );
     let successor_input_count = || {
         fs::read_to_string(&successor_operations)
             .unwrap_or_default()
             .lines()
-            .filter(|call| call.contains("--session fixture-session agent prompt w1:p1"))
+            .filter(|call| call.contains(&successor_prompt))
             .count()
     };
     assert_eq!(successor_input_count(), 0);

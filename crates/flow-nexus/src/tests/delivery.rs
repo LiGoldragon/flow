@@ -1037,7 +1037,7 @@ fn public_direct_delivery_finishes_before_a_concurrent_existing_bind() {
         .install(&body.replacen(
             pattern,
             &format!(
-                "  \"agent prompt\") : > '{reached}'; while [ ! -e '{release}' ]; do sleep 0.02; done; printf '%s' \"$6\" > '{typed}'; printf '%s\\n' '{{\"id\":\"cli:agent:prompt\",\"result\":{{\"type\":\"agent_prompted\",\"agent\":{{\"pane_id\":\"w1:p3\"}}}}}}' ;;\n{pattern}",
+                "  \"agent read\") printf '%s\\n' '› ' ;;\n  \"agent prompt\") : > '{reached}'; while [ ! -e '{release}' ]; do sleep 0.02; done; printf '%s' \"$6\" > '{typed}'; printf '%s\\n' '{{\"id\":\"cli:agent:prompt\",\"result\":{{\"type\":\"agent_prompted\",\"agent\":{{\"pane_id\":\"w1:p3\"}}}}}}' ;;\n{pattern}",
                 reached = reached.display(),
                 release = release.display(),
                 typed = fixture.directory.path().join("pane-typed.txt").display(),
@@ -1045,18 +1045,26 @@ fn public_direct_delivery_finishes_before_a_concurrent_existing_bind() {
             1,
         ));
         std::thread::scope(|scope| {
+            let (delivery_answered, observe_delivery_answer) = std::sync::mpsc::channel();
             let delivering = scope.spawn(|| {
-                fixture.nexus.dispatch_meta_serially(
+                let response = fixture.nexus.dispatch_meta_serially(
                     MetaQuery::Deliver(DeliveryRequest {
                         delivery_id: "public-serial-delivery".into(),
                         flow_id: "908786".into(),
                         message: middle_abrupt("serialized delivery"),
                     }),
                     None,
-                )
+                );
+                delivery_answered
+                    .send(format!("{response:?}"))
+                    .expect("Deliver response observed");
+                response
             });
             let deadline = Instant::now() + Duration::from_secs(20);
             while !reached.exists() {
+                if let Ok(response) = observe_delivery_answer.try_recv() {
+                    panic!("public Deliver answered before Herdr input: {response}");
+                }
                 assert!(
                     Instant::now() < deadline,
                     "public Deliver never entered Herdr"

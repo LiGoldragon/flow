@@ -5806,22 +5806,30 @@ mod tests {
             ),
             Response::SendRefused(signal_flow::VisibleRefusal::Unresolved)
         ));
+        let queue = fixture
+            .nexus
+            .store
+            .metaflow(&sibling)
+            .expect("metaflow reads")
+            .expect("metaflow held")
+            .queue;
+        let [queued] = queue.as_slice() else {
+            panic!("one request is queued: {queue:?}")
+        };
         assert_eq!(
-            fixture
-                .nexus
-                .store
-                .metaflow(&sibling)
-                .expect("metaflow reads")
-                .expect("metaflow held")
-                .queue,
-            vec![QueueEntry {
-                logical_delivery_id: "logical-delivery-00000000000000000001".into(),
-                request_id: "test".into(),
-                sent_by: SentBy::Sender(sender),
-                delivery: flow_ethos::Delivery::Queue,
-                message: Message::Soft(order.clone()),
-            }]
+            queued.logical_delivery_id,
+            "logical-delivery-00000000000000000001"
         );
+        assert_eq!(queued.request_id.len(), 4);
+        assert!(
+            queued
+                .request_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
+        );
+        assert_eq!(queued.sent_by, SentBy::Sender(sender));
+        assert_eq!(queued.delivery, flow_ethos::Delivery::Queue);
+        assert_eq!(queued.message, Message::Soft(order.clone()));
         let stranger = MarkedProcess::spawn("sleep", &["30"], "pane-9");
         let stranger =
             FlowStore::process_identity_for_pid(stranger.0.id()).expect("stranger identity");

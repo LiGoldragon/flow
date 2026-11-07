@@ -334,7 +334,10 @@ fn a_refresh_successor_is_given_its_predecessors_handover_last_whole() {
 #[test]
 fn a_successor_whose_predecessor_left_no_file_has_its_first_prompt_unchanged() {
     let woken = woken_first_turn(Left::Nothing);
-    assert!(woken.contains("Order.A"), "{woken}");
+    assert!(
+        woken.contains("MiddleAbrupt.Order.{") && woken.contains(" A }"),
+        "{woken}"
+    );
     // An empty file is none left.
     assert_eq!(woken_first_turn(Left::Text(b"")), woken);
     let refreshed = refreshed_first_turn(Left::Nothing);

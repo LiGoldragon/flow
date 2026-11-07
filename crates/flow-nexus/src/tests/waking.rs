@@ -85,8 +85,8 @@ impl Unsent for Request {
             sha2::Sha256::digest(format!("{self:?}").as_bytes())
         );
         QueueEntry {
+            request_id: logical_delivery_id[5..9].into(),
             logical_delivery_id,
-            request_id: "test".into(),
             sent_by: SentBy::Unknown,
             delivery: flow_ethos::Delivery::Wake,
             message: Message::MiddleAbrupt(self),
@@ -105,6 +105,12 @@ impl Unsent for Vec<Request> {
                 if !ids.insert(entry.logical_delivery_id.clone()) {
                     entry.logical_delivery_id.push_str(&format!("-{index}"));
                     ids.insert(entry.logical_delivery_id.clone());
+                    use sha2::Digest;
+                    entry.request_id = format!(
+                        "{:x}",
+                        sha2::Sha256::digest(entry.logical_delivery_id.as_bytes())
+                    )[..4]
+                        .into();
                 }
                 entry
             })
@@ -484,7 +490,7 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
     };
     let task = QueueEntry {
         logical_delivery_id: "logical-delivery-00000000000000000001".into(),
-        request_id: "test".into(),
+        request_id: "t001".into(),
         sent_by: from(Aspect::Psyche, Model::Astra),
         delivery: flow_ethos::Delivery::Wake,
         message: Message::MiddleAbrupt(Request::Task(flow_ethos::AnswerableTask {
@@ -494,7 +500,7 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
     };
     let reminder = QueueEntry {
         logical_delivery_id: "logical-delivery-00000000000000000002".into(),
-        request_id: "test".into(),
+        request_id: "t002".into(),
         sent_by: SentBy::Flow,
         delivery: flow_ethos::Delivery::Wake,
         message: Message::Soft(Request::Notice(
@@ -504,7 +510,7 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
     };
     let done = QueueEntry {
         logical_delivery_id: "logical-delivery-00000000000000000003".into(),
-        request_id: "test".into(),
+        request_id: "t003".into(),
         sent_by: from(Aspect::Mind, Model::Sol),
         delivery: flow_ethos::Delivery::Wake,
         message: Message::Soft(Request::Done(flow_ethos::DonePayload::Historical(
@@ -660,15 +666,18 @@ fn a_resting_seat_with_work_queued_is_handed_the_oldest_request_and_stays_awake(
         PromptFixture::Prompted("w1:p3"),
     );
     claude_seat(&fixture, 40_000);
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Model::Sol,
-        State::Awake(CLAUDE_SEAT.into()),
-        vec![],
-        vec![
-            Request::Notice("first".into()),
-            Request::Result(flow_ethos::ResultPayload::Historical("second".into())),
-        ],
-    ));
+    let queued = vec![
+        Request::Notice("first".into()),
+        Request::Result(flow_ethos::ResultPayload::Historical("second".into())),
+    ]
+    .unsent();
+    let expected_prompt = queued.clone().prompt_text(&address(Model::Sol));
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: address(Model::Sol),
+        state: State::Awake(CLAUDE_SEAT.into()),
+        past: vec![],
+        queue: queued,
+    });
 
     assert!(matches!(
         fixture.nexus.settle_stopped(CLAUDE_SEAT),
@@ -683,9 +692,7 @@ fn a_resting_seat_with_work_queued_is_handed_the_oldest_request_and_stays_awake(
     assert!(!closes(&fixture), "it keeps its pane");
     assert_eq!(
         fixture.typed().as_deref(),
-        Some(
-            "[ { Unknown MiddleAbrupt.Notice.first } { Unknown MiddleAbrupt.Result.Historical.second } ]"
-        ),
+        Some(expected_prompt.as_str()),
         "the resting seat receives the whole ordered cohort"
     );
 }
@@ -1112,8 +1119,6 @@ fn a_fresh_wake_composes_modules_and_queued_work_in_the_first_prompt() {
             .contains("Spirit body.")
     );
     assert!(body.contains(&text));
-    assert!(body.contains("Order.first"));
-    assert!(body.contains("Question.second"));
     assert!(!body.contains("seat"));
 }
 
@@ -1570,9 +1575,12 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
     );
     let turns = world.user_turns(&fixture);
     assert!(
-        turns.first().is_some_and(|turn| turn.contains("Order.A")
-            && turn.contains("Notice.B")
-            && turn.contains("Question.C")),
+        turns.first().is_some_and(|turn| turn.contains("Order.{")
+            && turn.contains(" A }")
+            && turn.contains("Notice.{")
+            && turn.contains(" B }")
+            && turn.contains("Question.{")
+            && turn.contains(" C }")),
         "the fixed batch is the first turn: {turns:?}"
     );
     assert_eq!(
@@ -2510,7 +2518,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     // Sender its Lock named.
     let sent = QueueEntry {
         logical_delivery_id: receipt.logical_delivery_id,
-        request_id: "test".into(),
+        request_id: receipt.request_id,
         sent_by: SentBy::Sender(sender_address.clone()),
         delivery: flow_ethos::Delivery::Wake,
         message: Message::MiddleAbrupt(order.clone()),

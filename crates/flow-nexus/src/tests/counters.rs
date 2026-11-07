@@ -86,7 +86,7 @@ fn counters(fixture: &NexusFixture) -> String {
 #[test]
 fn counters_are_declared_on_an_empty_store_and_never_lowered() {
     let fixture = configured();
-    assert_eq!(counters(&fixture), "{ 1 3 1 }");
+    assert_eq!(counters(&fixture), "{ 1 3 1 } 64 3");
     for lowered in [
         "Configure.Counters.{ 0 3 1 }",
         "Configure.Counters.{ 1 2 1 }",
@@ -115,13 +115,13 @@ fn counters_are_declared_on_an_empty_store_and_never_lowered() {
         ask(&fixture, "Configure.Counters.{ 119 45 300 }"),
         "ConfigureRejected.CountersRefused.Lowered.{ 120 45 300 }"
     );
-    assert_eq!(counters(&fixture), "{ 120 45 300 }");
+    assert_eq!(counters(&fixture), "{ 120 45 300 } 64 3");
     // Still empty, a raised declaration is taken again.
     assert_eq!(
         ask(&fixture, "Configure.Counters.{ 130 50 310 }"),
         "Configured.Replaced"
     );
-    assert_eq!(counters(&fixture), "{ 130 50 310 }");
+    assert_eq!(counters(&fixture), "{ 130 50 310 } 64 3");
 }
 
 /// The declared value is the next id each family allocates. Once any of
@@ -147,7 +147,7 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
         )
         .expect("send outcome recorded");
     assert_eq!(outcome.send_outcome_id, "send-outcome-0000000000000136");
-    assert_eq!(counters(&fixture), "{ 130 50 311 }");
+    assert_eq!(counters(&fixture), "{ 130 50 311 } 64 3");
     assert_eq!(
         ask(&fixture, "Configure.Counters.{ 500 500 500 }"),
         "ConfigureRejected.CountersRefused.NotEmpty"

@@ -1554,7 +1554,7 @@ pub(crate) mod tests {
                 topic: "flow".into(),
                 model: signal_flow::Model::Opus
             }),
-            "[ { Notification Soft.Order.investigate } ]"
+            "[ { Notification Soft.Order.{ test investigate } } ]"
         );
     }
 

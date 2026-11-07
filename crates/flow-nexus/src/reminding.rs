@@ -141,8 +141,14 @@ impl ArchivesHandoverOnTick for RunningNexus {
         use crate::store::metaflow::SleepsMetaflows;
         use std::collections::BTreeSet;
         let Ok(Some(snapshot)) = self.store.configuration_snapshot() else { return };
-        let meta_signal_flow::HandoverArchiveConfiguration::Configured(path) = snapshot.handover_archive else { return };
-        let meta_signal_flow::HandoverCountConfiguration::Configured(count) = snapshot.handover_count else { return };
+        let meta_signal_flow::HandoverArchiveConfiguration::Configured(path) = snapshot.handover_archive else {
+            eprintln!("flow-nexus: handover archive is ArchiveUnconfigured; closed generations retained");
+            return;
+        };
+        let meta_signal_flow::HandoverCountConfiguration::Configured(count) = snapshot.handover_count else {
+            eprintln!("flow-nexus: handover count is Unconfigured; closed generations retained");
+            return;
+        };
         let Ok(metaflows) = self.store.list_metaflows() else { return };
         let publisher = ExistingGitHandoverArchive::new(path);
         let mut addresses = BTreeSet::new();

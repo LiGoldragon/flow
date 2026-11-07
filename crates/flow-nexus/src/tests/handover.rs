@@ -625,9 +625,17 @@ fn a_file_the_nexus_may_not_read_is_unreadable() {
 
 #[test]
 fn an_installed_memory_source_reads_the_live_store_and_ignores_the_file() {
-    let fixture = NexusFixture::new();
+    use crate::composition::OpensLaunchComposer;
+    let mut fixture = NexusFixture::new();
     leave(fixture.directory.path(), "abc123", Left::Text(b"file text"));
     let at = address(Model::Sol);
+    fixture.nexus.composer = fixture
+        .nexus
+        .composer
+        .clone()
+        .with_handover_source(std::sync::Arc::new(crate::MemoryHandoverSource(
+            fixture.nexus.store.clone(),
+        )));
     fixture
         .nexus
         .store
@@ -647,7 +655,9 @@ fn an_installed_memory_source_reads_the_live_store_and_ignores_the_file() {
             signal_flow::Touch::Unknown,
         )
         .unwrap();
-    let launch = composed(&fixture, "claude-fixture", Some("abc123"), |_| {});
+    let launch = composed(&fixture, "claude-fixture", Some("abc123"), |profile| {
+        profile.address = at.clone();
+    });
     let body = &launch.first_prompt_payload.first_prompt_body;
     let handover = "## live\nfrom memory\nsame live store";
     assert!(body.trim_end().ends_with(handover), "{body}");

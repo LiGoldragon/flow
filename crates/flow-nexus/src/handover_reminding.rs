@@ -27,6 +27,7 @@ pub trait DecidesHandoverReminder {
 pub trait RendersHandoverCommands {
     fn keep_commands(&self, sections: &[Section]) -> String;
     fn drop_command(&self, title: signal_flow::Title) -> String;
+    fn notice_text(&self, sections: &[Section]) -> String;
 }
 impl RendersHandoverCommands for HandoverReminderNotice {
     fn keep_commands(&self, sections: &[Section]) -> String {
@@ -41,7 +42,13 @@ impl RendersHandoverCommands for HandoverReminderNotice {
             address: self.address.clone(),
             section,
         });
-        format!("flow {}", query.datomize(vec![]).protosize().compact())
+        format!("flow '{}'", query.datomize(vec![]).protosize().compact().replace('\'', "'\"'\"'"))
+    }
+    fn notice_text(&self, sections: &[Section]) -> String {
+        let mut commands = vec![self.keep_commands(sections)];
+        for section in sections { commands.push(self.drop_command(section.title.clone())); }
+        commands.push(self.text.clone());
+        commands.join("\n")
     }
     fn drop_command(&self, title: signal_flow::Title) -> String {
         use datom_codec::Datomizable;
@@ -50,7 +57,7 @@ impl RendersHandoverCommands for HandoverReminderNotice {
             address: self.address.clone(),
             title,
         });
-        format!("flow {}", query.datomize(vec![]).protosize().compact())
+        format!("flow '{}'", query.datomize(vec![]).protosize().compact().replace('\'', "'\"'\"'"))
     }
 }
 
@@ -101,7 +108,6 @@ impl DiscoversHandoverWindow for HandoverWindowObservation {
     }
     fn warning_window_is_current(&self) -> bool {
         self.warning_window_opens() && !self.green
-            && self.touched_flow_id.as_deref() == Some(self.current_flow_id.as_str())
     }
 }
 
@@ -172,7 +178,7 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             };
             let accepted = self.store.accept_handover_reminder(
                 &reminder.address,
-                Message::HardAbrupt(Request::Notice(base.keep_commands(&sections))),
+                Message::HardAbrupt(Request::Notice(base.notice_text(&sections))),
                 admitted,
             );
             if !matches!(

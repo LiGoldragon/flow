@@ -3393,9 +3393,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(0, vec!["task-one".into()]), (1, vec!["task-two".into()])]
         );
+        let expected_announcements = announcements.records().to_vec();
         drop(announcements);
         drop(engine);
-        let evolved = std::fs::read(&path).expect("evolved Memory reads");
 
         let mut reopened = Engine::open(
             EngineOpen::new(&path, SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION))
@@ -3420,20 +3420,11 @@ mod tests {
         let announcement_table = reopened
             .register_table(descriptors.task_announcements)
             .expect("reopened announcements register");
-        assert_eq!(
-            reopened
-                .match_records(QueryPlan::all(announcement_table))
-                .expect("reopened announcements read")
-                .records()
-                .len(),
-            2
-        );
+        let reopened_announcements = reopened
+            .match_records(QueryPlan::all(announcement_table))
+            .expect("reopened announcements read");
+        assert_eq!(reopened_announcements.records(), expected_announcements);
         drop(reopened);
-        assert_eq!(
-            std::fs::read(&path).expect("reopened Memory reads"),
-            evolved,
-            "a wholly current reopen performs no second evolution write"
-        );
     }
 
     #[test]

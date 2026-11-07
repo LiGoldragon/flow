@@ -229,7 +229,7 @@ pub trait Dispatches {
     ) -> meta_signal_flow::Response;
 }
 
-impl RunningNexus {
+trait MeasuresHandoverTouch {
     fn handover_touch(
         &self,
         asker: &protecting::Asker,
@@ -254,6 +254,8 @@ impl RunningNexus {
         }))
     }
 }
+
+impl MeasuresHandoverTouch for RunningNexus {}
 
 impl Dispatches for RunningNexus {
     /// A query no calling process stands behind, taken as a connection
@@ -508,12 +510,15 @@ impl Dispatches for RunningNexus {
     fn keep_handover(&self, request: signal_flow::Keep_Data, asker: protecting::Asker) -> Response {
         use crate::store::handover::HoldsHandovers;
         use protecting::ChecksAsker;
-        let _caller = match self.handover_caller(&asker) {
+        let caller = match self.handover_caller(&asker) {
             Ok(value) => value,
             Err(error) => return Response::KeepRefused(error),
         };
+        if request.address != caller {
+            return Response::KeepRefused(signal_flow::HandoverRefusal::NotOwner);
+        }
         let writer = crate::store::handover::HandoverWriter {
-            address: request.address.clone(),
+            address: caller,
             flow_id: match asker.origin() {
                 signal_flow::Origin::Flow(origin) => origin.flow_id.clone(),
                 _ => return Response::KeepRefused(signal_flow::HandoverRefusal::UnknownCaller),
@@ -540,12 +545,15 @@ impl Dispatches for RunningNexus {
     fn drop_handover(&self, request: signal_flow::Drop_Data, asker: protecting::Asker) -> Response {
         use crate::store::handover::HoldsHandovers;
         use protecting::ChecksAsker;
-        let _caller = match self.handover_caller(&asker) {
+        let caller = match self.handover_caller(&asker) {
             Ok(value) => value,
             Err(error) => return Response::DropRefused(error),
         };
+        if request.address != caller {
+            return Response::DropRefused(signal_flow::HandoverRefusal::NotOwner);
+        }
         let writer = crate::store::handover::HandoverWriter {
-            address: request.address.clone(),
+            address: caller,
             flow_id: match asker.origin() {
                 signal_flow::Origin::Flow(origin) => origin.flow_id.clone(),
                 _ => return Response::DropRefused(signal_flow::HandoverRefusal::UnknownCaller),

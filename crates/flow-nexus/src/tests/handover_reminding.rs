@@ -6,7 +6,6 @@ use crate::store::handover_reminders::SchedulesHandoverReminders;
 use crate::store::handover_reminders::{
     HandoverReminder, HandoverReminderRules, OpensHandoverReminder,
 };
-use crate::store::metaflow::SleepsMetaflows;
 use signal_flow::{Address, Aspect, Model};
 
 fn address() -> Address {
@@ -154,7 +153,7 @@ fn typed_keep_and_drop_commands_are_shell_single_argument_forms() {
 
 #[test]
 fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
-    use super::{NexusFixture, PromptFixture};
+    use super::NexusFixture;
     use crate::store::context::RecordsContextSize;
     use crate::store::handover_reminders::{
         HandoverReminder, OpensHandoverReminder, SchedulesHandoverReminders,
@@ -307,11 +306,11 @@ fn reminder_admission_waits_for_handover_gate_before_commit() {
 
 #[test]
 fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
-    use super::NexusFixture;
     use super::refresh_and_compaction::{declare_seat, seat_metaflow};
     use super::waking::{
         CLAUDE_SEAT, append_main_rows, claude_agent, claude_seat, claude_stop, end_turn,
     };
+    use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
     use crate::store::handover::HoldsHandovers;
     use crate::store::handover_reminders::SchedulesHandoverReminders;
     use crate::store::{ManagesMetaflowState, SeedsRole};
@@ -507,7 +506,7 @@ fn green_keep_cancels_open_warning_timer() {
     use super::NexusFixture;
     use crate::store::context::RecordsContextSize;
     use crate::store::handover::{HandoverWriter, HoldsHandovers};
-    use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+    use crate::store::metaflow::SeedsMetaflow;
     use crate::store::{ManagesMetaflowState, SeedsRole};
     use meta_signal_flow::{ConfigurationChange, ConfigureThreshold, HandoverPolicy};
     use signal_flow::{Address, Aspect, Caller, Known_Data, Metaflow, Model, Touch};
@@ -603,7 +602,7 @@ fn atomic_same_expected_reminder_state_rejects_duplicate_admission() {
     use super::NexusFixture;
     use crate::store::handover_reminders::{HandoverReminder, OpensHandoverReminder};
     use crate::store::logical_delivery::RecordsLogicalDeliveries;
-    use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+    use crate::store::metaflow::SeedsMetaflow;
     use flow_ethos::{Message, Metaflow, Request, State};
     use signal_flow::PrivateSendResponse;
     let fixture = NexusFixture::new();

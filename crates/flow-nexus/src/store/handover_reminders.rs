@@ -65,9 +65,6 @@ impl DescribesHandoverReminderTable for HandoverReminder {
     }
 }
 
-/// A reminder's observable transition. `None` means the warning window was
-/// closed by a current green handover and the durable row should be retracted.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub trait SchedulesHandoverReminders {
     fn handover_reminder(
         &self,

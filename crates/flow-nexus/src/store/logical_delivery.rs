@@ -237,7 +237,7 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
 
 /// Mutations are assembled into the caller's AtomicCommit so metaflow queue
 /// changes and lifecycle transitions have one durability boundary.
-struct LogicalDeliveryTransition {
+pub(crate) struct LogicalDeliveryTransition {
     purpose: crate::heartbeat::DeliveryPurpose,
     handover_reminder: Option<crate::store::handover_reminders::HandoverReminder>,
 }
@@ -1108,6 +1108,10 @@ impl RecordsLogicalDeliveries for FlowStore {
             .handover_write_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let LogicalDeliveryTransition {
+            purpose,
+            handover_reminder,
+        } = transition;
         // A retry may present the same pre-commit snapshot after the prior
         // atomic commit succeeded. The durable sent count is the expected
         // state witness; refuse the stale attempt before creating a second

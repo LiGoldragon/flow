@@ -68,6 +68,7 @@ impl DescribesSendCallTable for SendCall {
             FamilyName::new(SEND_CALL_FAMILY),
             SchemaHash::for_label(SEND_CALL_SCHEMA),
         )
+        .with_predecessor::<super::request_id_upgrade::PriorSendCall>()
     }
 }
 

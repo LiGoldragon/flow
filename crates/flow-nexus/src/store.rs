@@ -2305,7 +2305,8 @@ impl OpensFlowStore for FlowStore {
             METAFLOW_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow"),
             StoredMetaflow::schema_hash(),
-        );
+        )
+        .with_predecessor::<request_id_upgrade::PriorStoredMetaflow>();
         let metaflow_processes_descriptor = TableDescriptor::<StoredMetaflowProcess>::new(
             METAFLOW_PROCESS_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow-process"),

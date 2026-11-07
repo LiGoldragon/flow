@@ -37,7 +37,7 @@ impl MemoryDefinition for SendOutcomeCounter {
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredSendOutcome {
-    record: SendOutcomeRecord,
+    pub(crate) record: SendOutcomeRecord,
 }
 
 impl EngineRecord for StoredSendOutcome {

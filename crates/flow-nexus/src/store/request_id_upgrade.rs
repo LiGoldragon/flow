@@ -2463,6 +2463,166 @@ mod tests {
     }
 
     #[test]
+    fn evolution_orders_undelivered_orders_by_admission_and_never_assigns_a_later_order() {
+        let directory = tempfile::tempdir().expect("temporary Memory");
+        let path = directory.path().join("flow.sema");
+        let descriptors = evolution_descriptors();
+        let heartbeat = StoredHeartbeatStanding::descriptor();
+        let (predecessor, tables) = old_engine(&path, &descriptors, &heartbeat);
+        let sender = old_address(old_flow::Aspect::Mind, "sender");
+        let recipient = old_address(old_flow::Aspect::Field, "recipient");
+        let native = old_signal::NativeReceipt {
+            harness_kind: old_flow::HarnessKind::Codex,
+            native_session_id: "session".into(),
+            native_prompt_id: "prompt".into(),
+        };
+        let early = old_snapshot(
+            1,
+            "order-early",
+            &sender,
+            &recipient,
+            old_signal::DeliveryState::Queued,
+        );
+        let late = old_snapshot(
+            2,
+            "order-late",
+            &sender,
+            &recipient,
+            old_signal::DeliveryState::Queued,
+        );
+        let answer_queued = old_snapshot(
+            3,
+            "answer",
+            &recipient,
+            &sender,
+            old_signal::DeliveryState::Queued,
+        );
+        let answer_delivered = old_snapshot(
+            4,
+            "answer",
+            &recipient,
+            &sender,
+            old_signal::DeliveryState::Delivered(native),
+        );
+        let after_answer = old_snapshot(
+            5,
+            "order-after-answer",
+            &sender,
+            &recipient,
+            old_signal::DeliveryState::Queued,
+        );
+        for snapshot in [
+            early.clone(),
+            late.clone(),
+            answer_delivered.clone(),
+            after_answer.clone(),
+        ] {
+            predecessor
+                .assert(Assertion::new(
+                    tables.current,
+                    PriorCurrentLogicalDelivery { snapshot },
+                ))
+                .expect("old current stores");
+        }
+        for snapshot in [early, late, answer_queued, answer_delivered, after_answer] {
+            predecessor
+                .assert(Assertion::new(
+                    tables.events,
+                    PriorLogicalDeliveryEvent { snapshot },
+                ))
+                .expect("old event stores");
+        }
+        for (logical_id, state, request) in [
+            (
+                "order-early",
+                PriorRequestState::Queued,
+                old_flow::Request::Order("same words".into()),
+            ),
+            (
+                "order-late",
+                PriorRequestState::Queued,
+                old_flow::Request::Order("same words".into()),
+            ),
+            (
+                "order-after-answer",
+                PriorRequestState::Queued,
+                old_flow::Request::Order("same words".into()),
+            ),
+            (
+                "answer",
+                PriorRequestState::Settled,
+                old_flow::Request::Result(old_flow::ResultPayload::Answered(
+                    old_flow::ResultPayload_Answered_Data {
+                        answerable: old_flow::Answerable::Order("same words".into()),
+                        string: "answer words".into(),
+                    },
+                )),
+            ),
+        ] {
+            let (from, to) = if logical_id == "answer" {
+                (&recipient, &sender)
+            } else {
+                (&sender, &recipient)
+            };
+            predecessor
+                .assert(Assertion::new(
+                    tables.requests,
+                    old_request(logical_id, from, to, request, state),
+                ))
+                .expect("old request stores");
+        }
+        drop(predecessor);
+
+        let mut engine = Engine::open(
+            EngineOpen::new(&path, SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION))
+                .with_family(&descriptors.current)
+                .with_family(&descriptors.events)
+                .with_family(&descriptors.metaflows)
+                .with_family(&descriptors.address_holds)
+                .with_family(&descriptors.requests)
+                .with_family(&descriptors.attempts)
+                .with_family(&descriptors.outcomes)
+                .with_family(&descriptors.send_calls)
+                .with_family(&heartbeat),
+        )
+        .expect("predecessor catalog opens for evolution");
+        let heartbeat_table = engine.register_table(heartbeat).expect("heartbeat opens");
+        evolve_request_id_memory(
+            &mut engine,
+            descriptors,
+            &[],
+            &[],
+            &[],
+            heartbeat_table,
+            &[],
+            &ScriptedDrawer::new(&["a001", "a002", "a003"]),
+        )
+        .expect("fallback-order evolution commits");
+        let assignment_table = engine
+            .register_table(evolution_descriptors().upgrade_assignments)
+            .expect("assignments register");
+        let assignments = engine
+            .match_records(QueryPlan::all(assignment_table))
+            .expect("assignments read");
+        let [assignment] = assignments.records() else {
+            panic!("one assignment part")
+        };
+        let [decision] = assignment.decisions.as_slice() else {
+            panic!("one ambiguous group is reported")
+        };
+        assert_eq!(decision.assigned.len(), 1);
+        assert_eq!(decision.assigned[0].order, "order-early");
+        assert_eq!(
+            decision
+                .open
+                .iter()
+                .map(|open| open.order.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(["order-after-answer", "order-late"])
+        );
+    }
+
+    #[test]
     fn orphaned_predecessor_event_refuses_evolution_without_changing_memory() {
         let directory = tempfile::tempdir().expect("temporary Memory");
         let path = directory.path().join("flow.sema");

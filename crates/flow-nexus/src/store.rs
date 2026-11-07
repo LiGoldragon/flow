@@ -8945,7 +8945,7 @@ mod tests {
         use sema_engine::{Assertion, RecordKey, Retraction};
 
         let fixture = StoreFixture::new();
-        let mut store = fixture.store();
+        let store = fixture.store();
         store
             .engine
             .assert(Assertion::new(

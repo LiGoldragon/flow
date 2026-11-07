@@ -1663,7 +1663,7 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
         fixture
             .nexus
             .store
-            .archive_request(&request_id, &core())
+            .archive_request(&accepted.send_acceptance.request_id, &core())
             .expect("archive checks the admitting call"),
         Err(signal_flow::ArchiveRejection::NotYet),
         "an admission whose answer has not been written still holds its request"

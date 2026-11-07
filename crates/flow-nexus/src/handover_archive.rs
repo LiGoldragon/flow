@@ -642,4 +642,37 @@ mod tests {
             matches!(result, Err(HandoverArchiveRefusal::Git(message)) if message.contains("capture bound"))
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspection_phase_timeout_is_bounded() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        assert_eq!(
+            command.output_with_deadline(Instant::now() + Duration::from_millis(50)),
+            Err(HandoverArchiveRefusal::PublicationTimedOut)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn add_phase_timeout_is_bounded() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        assert_eq!(
+            command.output_with_deadline(Instant::now() + Duration::from_millis(50)),
+            Err(HandoverArchiveRefusal::PublicationTimedOut)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_phase_timeout_is_bounded() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        assert_eq!(
+            command.output_with_deadline(Instant::now() + Duration::from_millis(50)),
+            Err(HandoverArchiveRefusal::PublicationTimedOut)
+        );
+    }
 }

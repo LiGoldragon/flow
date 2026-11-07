@@ -143,6 +143,7 @@ const OPTIONAL_HANDOVER_RUNTIME_TABLE: &str = "flow_nexus_handovers";
 const OPTIONAL_HANDOVER_REMINDER_TABLE: &str = "flow_nexus_handover_reminders";
 const OPTIONAL_REQUEST_ID_TABLE: &str = "flow_nexus_request_ids";
 const OPTIONAL_STORE_IDENTITY_TABLE: &str = "flow_nexus_store_identity";
+const OPTIONAL_DELIVER_CALL_TABLE: &str = "flow_nexus_deliver_calls";
 const OPTIONAL_REQUEST_POLICY_TABLE: &str = "flow_nexus_meta_request_policy_configuration";
 const HEARTBEAT_STANDING_TABLE_NAME: TableName = TableName::new("flow_nexus_heartbeat_standings");
 const HEARTBEAT_STANDING_FAMILY: &str = "flow-nexus-heartbeat-standing";
@@ -1562,6 +1563,7 @@ trait ReadsRequestPolicy {
 pub struct FlowStore {
     engine: Engine,
     native_owner_environment_reader: Arc<dyn ReadsNativeOwnerEnvironment>,
+    request_id_drawer: Arc<dyn logical_delivery::DrawsRequestId>,
     flows: TableReference<FlowRecord>,
     native_owner_proofs: TableReference<NativeOwnerProofRecord>,
     state: TableReference<FlowStoreState>,
@@ -2432,6 +2434,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&logical_delivery_descriptors.simplified_replies)
                 .with_family(&logical_delivery_descriptors.purposes)
                 .with_family(&logical_delivery_descriptors.request_ids)
+                .with_family(&logical_delivery_descriptors.deliver_calls)
                 .with_family(&logical_delivery_descriptors.store_identity)
                 .with_family(&heartbeat_standing_descriptor)
                 .with_family(&restart_descriptor)
@@ -2480,6 +2483,7 @@ impl OpensFlowStore for FlowStore {
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
+            request_id_drawer: Arc::new(logical_delivery::SystemRequestIdDrawer),
             flows,
             native_owner_proofs,
             state,
@@ -2657,6 +2661,7 @@ impl OpensFlowStore for FlowStore {
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
+            request_id_drawer: Arc::new(logical_delivery::SystemRequestIdDrawer),
             flows,
             native_owner_proofs,
             state,
@@ -4848,6 +4853,7 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-logical-delivery-purpose-v2",
             ),
             "flow_nexus_request_ids" => ("flow-nexus-request-id", "flow-nexus-request-id-v1"),
+            "flow_nexus_deliver_calls" => ("flow-nexus-deliver-call", "flow-nexus-deliver-call-v1"),
             "flow_nexus_store_identity" => {
                 ("flow-nexus-store-identity", "flow-nexus-store-identity-v1")
             }
@@ -4949,6 +4955,7 @@ pub(crate) trait ReadsFlowMemory {
                     || *name == OPTIONAL_HANDOVER_TABLE
                     || *name == OPTIONAL_HANDOVER_RUNTIME_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
+                    || *name == OPTIONAL_DELIVER_CALL_TABLE
                     || *name == OPTIONAL_STORE_IDENTITY_TABLE
                     || *name == OPTIONAL_REQUEST_POLICY_TABLE
             }) && tables.iter().all(|name| {
@@ -4958,6 +4965,7 @@ pub(crate) trait ReadsFlowMemory {
                     || *name == OPTIONAL_HANDOVER_RUNTIME_TABLE
                     || *name == OPTIONAL_HANDOVER_REMINDER_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
+                    || *name == OPTIONAL_DELIVER_CALL_TABLE
                     || *name == OPTIONAL_STORE_IDENTITY_TABLE
                     || *name == OPTIONAL_REQUEST_POLICY_TABLE
             }) && (actual.contains(OPTIONAL_REQUEST_ID_TABLE)

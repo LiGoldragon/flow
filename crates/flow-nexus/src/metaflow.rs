@@ -170,11 +170,30 @@ impl DispatchesMetaflowPeer for RunningNexus {
                 }),
                 Query::IdentifyThread(request) => self.identify_thread(request),
                 Query::Lock(request) => self.store.lock_metaflow(request, now),
+                Query::Acknowledge(keys) => {
+                    use crate::store::logical_delivery::RecordsLogicalDeliveries;
+                    return match self.store.acknowledge_deliver_calls(&keys) {
+                        Ok(()) => Response::Acknowledged.into(),
+                        Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
+                    };
+                }
                 Query::Deliver(request) => {
                     let digest_text = request.datomize(Vec::new()).protosize().compact();
                     let digest = format!("{:x}", Sha256::digest(digest_text.as_bytes()));
                     let sender = request.lock.sender.clone();
                     let recipient = request.lock.address.clone();
+                    use crate::store::logical_delivery::RecordsLogicalDeliveries;
+                    match self.store.deliver_call(&request.deliver_key) {
+                        Ok(Some(call)) if call.sender == sender && call.digest == digest => {
+                            return signal_flow::PrivateSendResponse::SendAccepted(call.answer)
+                                .into();
+                        }
+                        Ok(Some(_)) => return Response::DeliverKeyReused.into(),
+                        Ok(None) => {}
+                        Err(error) => {
+                            return Response::Refused(Refusal::Store(error.to_string())).into();
+                        }
+                    }
                     self.rest_ended_awake(&request.lock.address);
                     let abrupt = !matches!(
                         &request.sendable_message,

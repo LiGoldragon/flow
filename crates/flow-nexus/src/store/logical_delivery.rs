@@ -30,6 +30,33 @@ const SIMPLIFIED_REPLY_TABLE_NAME: TableName =
     TableName::new("flow_nexus_simplified_reply_bindings");
 const PURPOSE_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_purposes");
 const REQUEST_ID_TABLE_NAME: TableName = TableName::new("flow_nexus_request_ids");
+const DELIVER_CALL_TABLE_NAME: TableName = TableName::new("flow_nexus_deliver_calls");
+
+/// The entropy boundary for request ids.  Production draws from the operating
+/// system; tests can replace it with a deterministic sequence without changing
+/// admission or collision handling.
+pub(crate) trait DrawsRequestId: Send + Sync {
+    fn draw_request_id(&self) -> Result<flow_ethos::RequestId, StoreError>;
+}
+
+pub(crate) struct SystemRequestIdDrawer;
+
+impl DrawsRequestId for SystemRequestIdDrawer {
+    fn draw_request_id(&self) -> Result<flow_ethos::RequestId, StoreError> {
+        const ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        // 252 is the greatest multiple of 36 representable by one byte.  The
+        // rejection keeps every base36 character equiprobable.
+        let mut id = String::with_capacity(4);
+        while id.len() < 4 {
+            let mut byte = [0_u8; 1];
+            getrandom::fill(&mut byte).map_err(|_| StoreError::StateInvariant)?;
+            if byte[0] < 252 {
+                id.push(ALPHABET[(byte[0] % 36) as usize] as char);
+            }
+        }
+        Ok(id)
+    }
+}
 const STORE_IDENTITY_TABLE_NAME: TableName = TableName::new("flow_nexus_store_identity");
 const STORE_IDENTITY_KEY: &str = "store";
 
@@ -74,6 +101,27 @@ impl MemoryDefinition for RequestIdBinding {
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-request-id-v1")
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeliverCall {
+    pub key: signal_flow::DeliverKey,
+    pub sender: Address,
+    pub digest: String,
+    pub answer: SendAcceptance,
+}
+impl EngineRecord for DeliverCall {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.key.clone())
+    }
+}
+impl MemoryDefinition for DeliverCall {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-deliver-call-v1")
     }
 }
 
@@ -223,6 +271,7 @@ pub(crate) struct LogicalDeliveryTables {
     pub(crate) simplified_replies: TableReference<SimplifiedReplyBinding>,
     pub(crate) purposes: TableReference<LogicalDeliveryPurpose>,
     pub(crate) request_ids: TableReference<RequestIdBinding>,
+    pub(crate) deliver_calls: TableReference<DeliverCall>,
     pub(crate) store_identity: TableReference<StoredStoreIdentity>,
     pub(crate) write_gate: Mutex<()>,
 }
@@ -233,6 +282,7 @@ pub(crate) struct LogicalDeliveryDescriptors {
     pub(crate) simplified_replies: TableDescriptor<SimplifiedReplyBinding>,
     pub(crate) purposes: TableDescriptor<LogicalDeliveryPurpose>,
     pub(crate) request_ids: TableDescriptor<RequestIdBinding>,
+    pub(crate) deliver_calls: TableDescriptor<DeliverCall>,
     pub(crate) store_identity: TableDescriptor<StoredStoreIdentity>,
 }
 pub(crate) trait DeclaresLogicalDeliveryTables {
@@ -275,6 +325,11 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
                 FamilyName::new("flow-nexus-request-id"),
                 RequestIdBinding::schema_hash(),
             ),
+            deliver_calls: TableDescriptor::new(
+                DELIVER_CALL_TABLE_NAME,
+                FamilyName::new("flow-nexus-deliver-call"),
+                DeliverCall::schema_hash(),
+            ),
             store_identity: TableDescriptor::new(
                 STORE_IDENTITY_TABLE_NAME,
                 FamilyName::new("flow-nexus-store-identity"),
@@ -293,6 +348,7 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
             simplified_replies: engine.register_table(descriptors.simplified_replies)?,
             purposes: engine.register_table(descriptors.purposes)?,
             request_ids: engine.register_table(descriptors.request_ids)?,
+            deliver_calls: engine.register_table(descriptors.deliver_calls)?,
             store_identity: engine.register_table(descriptors.store_identity)?,
             write_gate: Mutex::new(()),
         })
@@ -304,6 +360,14 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
 pub(crate) struct LogicalDeliveryTransition {
     purpose: crate::heartbeat::DeliveryPurpose,
     handover_reminder: Option<crate::store::handover_reminders::HandoverReminder>,
+    deliver_call: Option<DeliverCallSpec>,
+}
+
+#[derive(Clone)]
+pub(crate) struct DeliverCallSpec {
+    pub key: signal_flow::DeliverKey,
+    pub sender: Address,
+    pub digest: String,
 }
 
 trait MintsRequestIds {
@@ -405,12 +469,14 @@ impl MintsRequestIds for FlowStore {
             return Ok(Err(Refusal::RequestIdSpaceFull));
         }
         for _ in 0..draws {
-            let mut bytes = [0_u8; 4];
-            getrandom::fill(&mut bytes).map_err(|_| StoreError::StateInvariant)?;
-            let id: String = bytes
-                .into_iter()
-                .map(|byte| b"0123456789abcdefghijklmnopqrstuvwxyz"[(byte as usize) % 36] as char)
-                .collect();
+            let id = self.request_id_drawer.draw_request_id()?;
+            if id.len() != 4
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
+            {
+                return Err(StoreError::StateInvariant);
+            }
             let exists = self.engine.match_records(QueryPlan::key(
                 self.logical_deliveries.request_ids,
                 RecordKey::new(id.clone()),
@@ -424,6 +490,12 @@ impl MintsRequestIds for FlowStore {
 }
 
 pub(crate) trait RecordsLogicalDeliveries {
+    fn deliver_call(
+        &self,
+        key: &signal_flow::DeliverKey,
+    ) -> Result<Option<DeliverCall>, StoreError>;
+    fn acknowledge_deliver_calls(&self, keys: &[signal_flow::DeliverKey])
+    -> Result<(), StoreError>;
     fn seed_store_identity(&self) -> Result<(), StoreError>;
     fn archive_request(
         &self,
@@ -467,6 +539,15 @@ pub(crate) trait RecordsLogicalDeliveries {
             crate::heartbeat::DeliveryPurpose::Ordinary,
         )
     }
+    fn accept_deliver_call(
+        &self,
+        address: &Address,
+        sender: Address,
+        delivery: Delivery,
+        message: Message,
+        held_lock: VerifiedDeliveryLock,
+        spec: DeliverCallSpec,
+    ) -> Result<signal_flow::PrivateSendResponse, StoreError>;
     fn accept_logical_delivery_for(
         &self,
         address: &Address,
@@ -553,6 +634,65 @@ pub(crate) trait RecordsLogicalDeliveries {
     ) -> Result<Option<Address>, StoreError>;
 }
 impl RecordsLogicalDeliveries for FlowStore {
+    fn deliver_call(
+        &self,
+        key: &signal_flow::DeliverKey,
+    ) -> Result<Option<DeliverCall>, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.logical_deliveries.deliver_calls,
+            RecordKey::new(key.clone()),
+        ))?;
+        match rows.records() {
+            [] => Ok(None),
+            [row] => Ok(Some(row.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn acknowledge_deliver_calls(
+        &self,
+        keys: &[signal_flow::DeliverKey],
+    ) -> Result<(), StoreError> {
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut commit = self.engine.begin_atomic_commit();
+        for key in keys {
+            if self.deliver_call(key)?.is_some() {
+                commit = commit.retract(
+                    self.logical_deliveries.deliver_calls,
+                    RecordKey::new(key.clone()),
+                );
+            }
+        }
+        self.engine.commit_atomic(commit)?;
+        Ok(())
+    }
+
+    fn accept_deliver_call(
+        &self,
+        address: &Address,
+        sender: Address,
+        delivery: Delivery,
+        message: Message,
+        held_lock: VerifiedDeliveryLock,
+        spec: DeliverCallSpec,
+    ) -> Result<signal_flow::PrivateSendResponse, StoreError> {
+        self.accept_logical_delivery_for_with_transition(
+            address,
+            SentBy::Sender(sender),
+            delivery,
+            message,
+            Some(held_lock),
+            LogicalDeliveryTransition {
+                purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
+                handover_reminder: None,
+                deliver_call: Some(spec),
+            },
+        )
+    }
     fn archive_request(
         &self,
         request_id: &str,
@@ -576,6 +716,16 @@ impl RecordsLogicalDeliveries for FlowStore {
         };
         if !matches!(&retained.entry.sent_by, SentBy::Sender(owner) if owner == sender) {
             return Ok(Err(ArchiveRejection::UnknownRequest));
+        }
+        let deliver_calls = self
+            .engine
+            .match_records(QueryPlan::all(self.logical_deliveries.deliver_calls))?;
+        if deliver_calls
+            .records()
+            .iter()
+            .any(|call| call.answer.logical_delivery_id == binding.logical_delivery_id)
+        {
+            return Ok(Err(ArchiveRejection::NotYet));
         }
         let rows = self.engine.match_records(QueryPlan::key(
             self.logical_deliveries.current,
@@ -1342,6 +1492,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             LogicalDeliveryTransition {
                 purpose,
                 handover_reminder: None,
+                deliver_call: None,
             },
         )
     }
@@ -1360,6 +1511,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             LogicalDeliveryTransition {
                 purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
                 handover_reminder: Some(reminder),
+                deliver_call: None,
             },
         )
     }
@@ -1387,6 +1539,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         let LogicalDeliveryTransition {
             purpose,
             handover_reminder,
+            deliver_call,
         } = transition;
         // A retry may present the same pre-commit snapshot after the prior
         // atomic commit succeeded. The durable sent count is the expected
@@ -1542,6 +1695,24 @@ impl RecordsLogicalDeliveries for FlowStore {
                     closure: RequestClosure::Open,
                 },
             );
+        let commit = if let Some(call) = deliver_call {
+            commit.assert(
+                self.logical_deliveries.deliver_calls,
+                DeliverCall {
+                    key: call.key,
+                    sender: call.sender,
+                    digest: call.digest,
+                    answer: SendAcceptance {
+                        logical_delivery_id: id.clone(),
+                        request_id: request_id.clone(),
+                        delivery_cursor: next,
+                        delivery_state: DeliveryState::Queued,
+                    },
+                },
+            )
+        } else {
+            commit
+        };
         let commit = self.assert_logical_request(address, entry, commit);
         let commit = match &request {
             Request::Result(flow_ethos::ResultPayload::Answered(answered)) => {

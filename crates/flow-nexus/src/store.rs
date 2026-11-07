@@ -8608,6 +8608,14 @@ mod tests {
         }
     }
 
+    struct RefusesRequestIdDraw;
+
+    impl super::logical_delivery::DrawsRequestId for RefusesRequestIdDraw {
+        fn draw_request_id(&self) -> Result<flow_ethos::RequestId, super::StoreError> {
+            panic!("a full id space is refused before entropy is read")
+        }
+    }
+
     #[test]
     fn request_id_collision_redraws_and_stays_four_characters() {
         use super::logical_delivery::{MintsRequestIds, RequestClosure, RequestIdBinding};
@@ -8672,6 +8680,75 @@ mod tests {
             .expect("bindings read");
         assert_eq!(bindings.records().len(), 1, "minting writes no binding");
         assert_eq!(bindings.records()[0].request_id, "held");
+    }
+
+    #[test]
+    fn request_id_drawer_must_return_exact_lower_base36_and_minting_writes_nothing() {
+        use super::logical_delivery::MintsRequestIds;
+        use sema_engine::QueryPlan;
+
+        for invalid in ["abc", "abcde", "ABC1", "ab-c", "abéc"] {
+            let fixture = StoreFixture::new();
+            let mut store = fixture.store();
+            super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+                &mut store,
+                std::sync::Arc::new(ScriptedRequestIdDrawer::new([invalid])),
+            );
+            assert!(matches!(
+                MintsRequestIds::mint_request_id(&store),
+                Err(super::StoreError::StateInvariant)
+            ));
+            assert!(
+                store
+                    .engine
+                    .match_records(QueryPlan::all(store.logical_deliveries.request_ids))
+                    .expect("bindings read")
+                    .records()
+                    .is_empty(),
+                "an invalid entropy value writes nothing"
+            );
+        }
+
+        let fixture = StoreFixture::new();
+        let mut store = fixture.store();
+        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+            &mut store,
+            std::sync::Arc::new(ScriptedRequestIdDrawer::new(["z9a0"])),
+        );
+        assert_eq!(
+            MintsRequestIds::mint_request_id(&store).expect("minting reads Memory"),
+            Ok("z9a0".into())
+        );
+        assert!(
+            store
+                .engine
+                .match_records(QueryPlan::all(store.logical_deliveries.request_ids))
+                .expect("bindings read")
+                .records()
+                .is_empty(),
+            "minting returns a candidate; admission owns the write"
+        );
+    }
+
+    #[test]
+    fn request_id_space_full_of_held_requests_refuses_without_drawing() {
+        use super::logical_delivery::MintsRequestIds;
+
+        let fixture = StoreFixture::new();
+        let mut store = fixture.store();
+        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+            &mut store,
+            std::sync::Arc::new(RefusesRequestIdDraw),
+        );
+        assert_eq!(
+            MintsRequestIds::mint_request_id_with_held_count(&store, 36usize.pow(4))
+                .expect("full-space policy reads"),
+            Err(signal_flow::Refusal::RequestIdSpaceFull)
+        );
+        assert!(matches!(
+            MintsRequestIds::mint_request_id_with_held_count(&store, 36usize.pow(4) + 1),
+            Err(super::StoreError::StateInvariant)
+        ));
     }
 
     #[test]

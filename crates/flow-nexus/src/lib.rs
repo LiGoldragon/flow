@@ -6082,6 +6082,129 @@ mod tests {
         );
     }
 
+    #[test]
+    fn archive_waits_for_its_answer_then_each_sender_archives_its_own_request() {
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        use crate::store::metaflow::SeedsMetaflow;
+        use flow_ethos::{ResultPayload, State};
+        use signal_flow::{
+            Address, ArchiveRejection, Message, Model, PrivateSendResponse, SendableMessage,
+            SendableRequest, SentBy,
+        };
+
+        let fixture = NexusFixture::new();
+        let at = |topic: &str| Address {
+            aspect: Aspect::Mind,
+            topic: topic.into(),
+            model: Model::Sol,
+        };
+        let sender = at("archiveOrderSender");
+        let recipient = at("archiveOrderRecipient");
+        for address in [&sender, &recipient] {
+            fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+                address: address.clone(),
+                state: State::Asleep,
+                past: vec![],
+                queue: vec![],
+            });
+        }
+        let PrivateSendResponse::SendAccepted(order) = fixture
+            .nexus
+            .store
+            .accept_logical_delivery(
+                &recipient,
+                SentBy::Sender(sender.clone()),
+                flow_ethos::Delivery::Queue,
+                Message::Soft(flow_ethos::Request::Order("Review".into())),
+                None,
+            )
+            .expect("order admits")
+        else {
+            panic!("order accepted")
+        };
+        fixture
+            .nexus
+            .store
+            .transition_logical_delivery(
+                &order.logical_delivery_id,
+                signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                    harness_kind: signal_flow::HarnessKind::Codex,
+                    native_session_id: "archive-order-session".into(),
+                    native_prompt_id: "archive-order-prompt".into(),
+                }),
+            )
+            .expect("order delivered");
+        let resolved = fixture
+            .nexus
+            .store
+            .resolve_sendable_message(
+                &recipient,
+                &sender,
+                SendableMessage::Soft(SendableRequest::Result(
+                    signal_flow::SendableRequest_Result_Data {
+                        request_id: order.request_id.clone(),
+                        string: "done".into(),
+                    },
+                )),
+            )
+            .expect("answer resolves")
+            .expect("answer is authorized");
+        assert!(matches!(
+            resolved,
+            Message::Soft(flow_ethos::Request::Result(ResultPayload::Answered(_)))
+        ));
+        let PrivateSendResponse::SendAccepted(answer) = fixture
+            .nexus
+            .store
+            .accept_logical_delivery(
+                &sender,
+                SentBy::Sender(recipient.clone()),
+                flow_ethos::Delivery::Queue,
+                resolved,
+                None,
+            )
+            .expect("answer admits")
+        else {
+            panic!("answer accepted")
+        };
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .archive_request(&order.request_id, &sender)
+                .expect("archive checks answer"),
+            Err(ArchiveRejection::NotYet)
+        );
+        fixture
+            .nexus
+            .store
+            .transition_logical_delivery(
+                &answer.logical_delivery_id,
+                signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                    harness_kind: signal_flow::HarnessKind::Codex,
+                    native_session_id: "archive-answer-session".into(),
+                    native_prompt_id: "archive-answer-prompt".into(),
+                }),
+            )
+            .expect("answer delivered");
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .archive_request(&answer.request_id, &recipient)
+                .expect("answer archives"),
+            Ok(())
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .archive_request(&order.request_id, &sender)
+                .expect("order archives"),
+            Ok(())
+        );
+    }
+
     /// Done resolution is the same exact typed operation for Tasks. The
     /// resolved private task key and its new delivery enter one atomic
     /// admission; repeating the public Done cannot close another task.

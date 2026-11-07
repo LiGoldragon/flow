@@ -11,7 +11,9 @@ use crate::compacting::{CodexContextSignal, WatchesCompactions, WritesTranscript
 use crate::composition::{ComposesLaunch, HarnessedProfile};
 use crate::reporting::RecordsReports;
 use crate::store::compaction::{Investigation, RecordsCompactions};
-use crate::store::context::{JudgesThreshold, RecordsContextSize, ThresholdStanding};
+use crate::store::context::{
+    JudgesThreshold, NamesFlowModel, RecordsContextSize, ThresholdStanding,
+};
 use crate::store::handover::HoldsHandovers;
 use crate::store::handover_configuration::ReadsHandoverConfiguration;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
@@ -86,7 +88,7 @@ pub(super) fn seat_refreshing_at(fixture: &NexusFixture, refresh: i64) {
         .expect("handover touch configured");
 }
 
-fn seat_metaflow(fixture: &NexusFixture, queue: Vec<Request>) {
+pub(super) fn seat_metaflow(fixture: &NexusFixture, queue: Vec<Request>) {
     fixture.nexus.store.seed_metaflow(seat_metaflow_with(queue));
 }
 

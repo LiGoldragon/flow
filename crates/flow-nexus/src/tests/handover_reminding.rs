@@ -1,4 +1,6 @@
+use crate::handover_reminding::RemindsHandoverCallers;
 use crate::handover_reminding::{DecidesHandoverReminder, RendersHandoverCommands};
+use crate::reporting::RecordsReports;
 use crate::store::handover::HoldsHandovers;
 use crate::store::handover_reminders::SchedulesHandoverReminders;
 use crate::store::handover_reminders::{
@@ -143,7 +145,6 @@ fn typed_keep_and_drop_commands_are_shell_single_argument_forms() {
 #[test]
 fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
     use super::NexusFixture;
-    use crate::handover_reminding::RemindsHandoverCallers;
     use crate::store::context::RecordsContextSize;
     use crate::store::handover_reminders::{
         HandoverReminder, OpensHandoverReminder, SchedulesHandoverReminders,
@@ -368,7 +369,6 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
     const CLAUDE_MODEL: &str = "fixture-model";
     const CLAUDE_SEAT: &str = "fixture-seat";
     use super::NexusFixture;
-    use crate::handover_reminding::RemindsHandoverCallers;
     use crate::store::context::RecordsContextSize;
     use crate::store::handover::HoldsHandovers;
     use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
@@ -478,7 +478,6 @@ fn green_keep_cancels_open_warning_timer() {
     const CLAUDE_MODEL: &str = "fixture-model";
     const CLAUDE_SEAT: &str = "fixture-seat";
     use super::NexusFixture;
-    use crate::handover_reminding::RemindsHandoverCallers;
     use crate::store::context::RecordsContextSize;
     use crate::store::handover::{HandoverWriter, HoldsHandovers};
     use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};

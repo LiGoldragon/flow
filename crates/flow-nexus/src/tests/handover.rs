@@ -2,23 +2,30 @@
 //! refresh's successor and a waking's successor are given
 //! `flows/<predecessor>/handover.md` of the launch root, whole, as the last
 //! bytes of the prompt. An absent file leaves the prompt as it was; a file
-//! that cannot be read is logged and the launch goes on without it. A Restart
-//! names no predecessor and has no first prompt, so it is given none.
+//! that exists and cannot be read whole, a predecessor that names no flow and
+//! a root that cannot be resolved refuse the launch `HandoverUnreadable`,
+//! naming the predecessor and the fault, and leave the predecessor's seat as
+//! it was. A Restart names no predecessor and has no first prompt, so it is
+//! given none.
 
 use super::NexusFixture;
 use super::waking::{
-    ReadsFreshWorld, WakesFreshClaude, address, ended_claude, launched_claude_ended_by, metaflow,
+    FreshWorld, ReadsFreshWorld, WakesFreshClaude, address, ended_claude, launched_claude_ended_by,
+    metaflow,
 };
-use crate::generated::operation::{Operation, Outcome};
+use crate::generated::operation::{Failed_Data, Operation, Outcome};
 use crate::handover::{Handover, HandoverFile, YieldsHandover};
 use crate::performing::Performs;
 use crate::store::ManagesMetaflowState as _;
 use crate::store::RecordsLaunchOutcome as _;
-use crate::store::metaflow::SeedsMetaflow;
+use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows as _};
 use crate::waking::HoldsWakingMetaflows;
 use flow_ethos::State;
 use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, Continuity};
-use signal_flow::{Model, Query, Refreshed, Request, Response};
+use signal_flow::{
+    CompositionRefusal, HandoverFault, HandoverUnreadable_Data, Model, Query, Refreshed, Request,
+    Response,
+};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -35,6 +42,8 @@ enum Left<'a> {
     Text(&'a [u8]),
     /// A directory where the file should be: it cannot be read.
     Directory,
+    /// The handover, a file the Nexus may not read (mode 000).
+    Forbidden,
 }
 
 fn leave(root: &Path, flow: &str, left: Left<'_>) {
@@ -46,38 +55,146 @@ fn leave(root: &Path, flow: &str, left: Left<'_>) {
             fs::write(directory.join("handover.md"), bytes).unwrap();
         }
         Left::Directory => fs::create_dir_all(directory.join("handover.md")).unwrap(),
+        Left::Forbidden => {
+            fs::create_dir_all(&directory).unwrap();
+            let file = directory.join("handover.md");
+            fs::write(&file, TEXT).unwrap();
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+        }
     }
+}
+
+/// Whether a mode-000 file refuses this process: a process that may read it
+/// anyway (root) has no permission refusal to show.
+fn permissions_refuse() -> bool {
+    let directory = tempfile::tempdir().unwrap();
+    leave(directory.path(), "abc123", Left::Forbidden);
+    fs::read(directory.path().join("flows/abc123/handover.md")).is_err()
+}
+
+/// Whether a fault is the one a case is refused for.
+type Fault = fn(&HandoverFault) -> bool;
+
+/// Each way a handover exists and cannot be read whole, with the fault it
+/// is refused for. The permission refusal is left out where it is not one.
+fn unreadable() -> Vec<(Left<'static>, Fault)> {
+    let mut cases: Vec<(Left<'static>, Fault)> = vec![
+        (Left::Text(b"not utf-8 \xff\xfe"), |fault| {
+            *fault == HandoverFault::NotUtf8
+        }),
+        (
+            Left::Directory,
+            |fault| matches!(fault, HandoverFault::Unreadable(text) if text.ends_with("flows/abc123/handover.md: Is a directory (os error 21)")),
+        ),
+    ];
+    if permissions_refuse() {
+        cases.push((Left::Forbidden, |fault| {
+            matches!(fault, HandoverFault::Unreadable(text) if text.ends_with("flows/abc123/handover.md: Permission denied (os error 13)"))
+        }));
+    }
+    cases
+}
+
+/// The refusal a launch naming `predecessor` is composed into.
+fn refused_for(predecessor: &str, fault: HandoverFault) -> CompositionRefusal {
+    CompositionRefusal::HandoverUnreadable(HandoverUnreadable_Data {
+        flow_id: predecessor.into(),
+        handover_fault: fault,
+    })
+}
+
+/// A waking of the metaflow whose last flow is `past`'s last, after the
+/// flow abc123 slept, with `left` under abc123 and Order.A queued; the
+/// metaflow `declared` with abc123's modules, or woken as abc123 launched.
+fn woken(left: Left<'_>, past: Vec<&str>, declared: bool) -> (NexusFixture, FreshWorld, Outcome) {
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    leave(fixture.directory.path(), "abc123", left);
+    let at = address(Model::Sol);
+    if declared {
+        declare(&fixture, None);
+    }
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Model::Sol,
+        State::Asleep,
+        past,
+        vec![Request::Order("A".into())],
+    ));
+    let world = fixture.fresh_claude_world();
+    let lease = fixture.nexus.waking.hold(&at).expect("the wake holds it");
+    let outcome = fixture.nexus.perform(Operation::Wake(at));
+    drop(lease);
+    (fixture, world, outcome)
 }
 
 /// The first prompt of the fresh flow a waking starts after the flow
 /// abc123 slept, with `left` under abc123.
 fn woken_first_turn(left: Left<'_>) -> String {
-    let mut fixture = NexusFixture::new();
-    ended_claude(&fixture);
-    leave(fixture.directory.path(), "abc123", left);
-    let at = address(Model::Sol);
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Model::Sol,
-        State::Asleep,
-        vec!["abc123"],
-        vec![Request::Order("A".into())],
-    ));
-    let world = fixture.fresh_claude_world();
-    let lease = fixture.nexus.waking.hold(&at).expect("the wake holds it");
-    let Outcome::Woken(_) = fixture.nexus.perform(Operation::Wake(at)) else {
+    let (fixture, world, outcome) = woken(left, vec!["abc123"], false);
+    let Outcome::Woken(_) = outcome else {
         panic!(
-            "the wake starts a fresh flow; Herdr calls: {}",
+            "the wake starts a fresh flow: {outcome:?}; Herdr calls: {}",
             world.calls()
         );
     };
-    drop(lease);
     let turns = world.user_turns(&fixture);
     turns.into_iter().next().expect("the first turn")
 }
 
-/// The first prompt of the successor a Refresh of a Maintained metaflow
-/// starts, with `left` under the ending flow abc123.
-fn refreshed_first_turn(left: Left<'_>) -> String {
+/// A waking refused for `refusal` leaves the metaflow Asleep with Order.A
+/// queued, and starts no harness.
+fn assert_asleep_with_its_queue(
+    (fixture, world, outcome): (NexusFixture, FreshWorld, Outcome),
+    refusal: impl FnOnce(&CompositionRefusal) -> bool,
+) {
+    match &outcome {
+        Outcome::Failed(Failed_Data::CompositionRefused(refused)) if refusal(refused) => {}
+        _ => panic!("the wake is refused: {outcome:?}"),
+    }
+    let metaflow = fixture
+        .nexus
+        .store
+        .metaflow(&address(Model::Sol))
+        .unwrap()
+        .expect("the metaflow");
+    assert_eq!(metaflow.state, State::Asleep);
+    assert_eq!(
+        metaflow
+            .queue
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect::<Vec<_>>(),
+        vec![signal_flow::Message::MiddleAbrupt(Request::Order(
+            "A".into()
+        ))],
+        "the queue is kept"
+    );
+    assert_eq!(world.claude_starts(), 0, "{}", world.calls());
+}
+
+/// The metaflow declared Maintained with abc123's modules, under
+/// `root_option`.
+fn declare(fixture: &NexusFixture, root_option: Option<String>) {
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+            root_option,
+            address: address(Model::Sol),
+            system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+            user_modules: vec!["operation-main-flow".into()],
+            flow_kind: signal_flow::FlowKind::Regular,
+            tool_set: signal_flow::ToolSet::Default,
+            continuity: Continuity::Maintained,
+            purpose: String::new(),
+            records: vec![],
+        }]))
+        .expect("metaflow declared");
+}
+
+/// A Refresh of a Maintained metaflow Awake as abc123, with `left` under
+/// abc123 and the metaflow's root `root_option`.
+fn refreshed(left: Left<'_>, root_option: Option<String>) -> (NexusFixture, FreshWorld, Response) {
     let mut fixture = NexusFixture::new();
     let seat = launched_claude_ended_by(&fixture, |_| true);
     leave(fixture.directory.path(), "abc123", left);
@@ -119,21 +236,7 @@ fn refreshed_first_turn(left: Left<'_>) -> String {
         .to_string(),
     )
     .unwrap();
-    fixture
-        .nexus
-        .store
-        .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
-            root_option: None,
-            address: at.clone(),
-            system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-            user_modules: vec!["operation-main-flow".into()],
-            flow_kind: signal_flow::FlowKind::Regular,
-            tool_set: signal_flow::ToolSet::Default,
-            continuity: Continuity::Maintained,
-            purpose: String::new(),
-            records: vec![],
-        }]))
-        .expect("metaflow declared");
+    declare(&fixture, root_option);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
         State::Awake("abc123".into()),
@@ -141,10 +244,18 @@ fn refreshed_first_turn(left: Left<'_>) -> String {
         vec![],
     ));
     use crate::Dispatches;
+    let response = fixture.nexus.dispatch(Query::Refresh(at));
+    (fixture, world, response)
+}
+
+/// The first prompt of the successor a Refresh of a Maintained metaflow
+/// starts, with `left` under the ending flow abc123.
+fn refreshed_first_turn(left: Left<'_>) -> String {
+    let (fixture, world, response) = refreshed(left, None);
     assert_eq!(
-        fixture.nexus.dispatch(Query::Refresh(at.clone())),
+        response,
         Response::Refreshed(Refreshed {
-            address: at,
+            address: address(Model::Sol),
             flow_id: "abc123".into(),
         }),
         "Herdr calls: {}",
@@ -153,6 +264,51 @@ fn refreshed_first_turn(left: Left<'_>) -> String {
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
     let turns = world.user_turns(&fixture);
     turns.into_iter().next().expect("the first turn")
+}
+
+/// A Refresh refused for `refusal` keeps abc123 running: its metaflow
+/// Awake as abc123, holding its Address, no successor owed or started, and
+/// its pane and harness untouched, nothing closed and nothing typed.
+fn assert_predecessor_kept(
+    (fixture, world, response): (NexusFixture, FreshWorld, Response),
+    refusal: impl FnOnce(&signal_flow::StartRejection) -> bool,
+) {
+    use crate::store::ReadsFlowRows as _;
+    use crate::store::successor::OwesSuccessors as _;
+    use signal_flow::{RefreshRejection, ReplaceRejection};
+    match &response {
+        Response::RefreshRejected(RefreshRejection::SuccessorRefused(
+            ReplaceRejection::LaunchRefused(rejection),
+        )) if refusal(rejection) => {}
+        _ => panic!("the refresh is refused: {response:?}"),
+    }
+    let at = address(Model::Sol);
+    let metaflow = fixture
+        .nexus
+        .store
+        .metaflow(&at)
+        .unwrap()
+        .expect("metaflow");
+    assert_eq!(metaflow.state, State::Awake("abc123".into()));
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .flow_node("abc123")
+            .unwrap()
+            .map(|node| node.flow_lifecycle),
+        Some(signal_flow::FlowLifecycle::Active)
+    );
+    assert_eq!(fixture.nexus.store.successor_intent(&at).unwrap(), None);
+    let calls = world.calls();
+    assert_eq!(world.claude_starts(), 0, "{calls}");
+    for step in ["pane close", "agent prompt", "agent start"] {
+        assert!(!calls.contains(step), "{step}: {calls}");
+    }
+    assert!(
+        world.state.join("old-agent").exists(),
+        "the old harness runs on: {calls}"
+    );
 }
 
 #[test]
@@ -185,16 +341,81 @@ fn a_successor_whose_predecessor_left_no_file_has_its_first_prompt_unchanged() {
 }
 
 #[test]
-fn a_handover_that_cannot_be_read_does_not_stop_the_successor() {
-    let woken = woken_first_turn(Left::Nothing);
-    assert_eq!(woken_first_turn(Left::Directory), woken);
-    assert_eq!(woken_first_turn(Left::Text(b"not utf-8 \xff\xfe")), woken);
-    let refreshed = refreshed_first_turn(Left::Nothing);
-    assert_eq!(refreshed_first_turn(Left::Directory), refreshed);
-    assert_eq!(
-        refreshed_first_turn(Left::Text(b"not utf-8 \xff\xfe")),
-        refreshed
+fn a_waking_whose_handover_cannot_be_read_is_refused_asleep_with_its_queue() {
+    for (left, fault) in unreadable() {
+        assert_asleep_with_its_queue(
+            woken(left, vec!["abc123"], false),
+            |refused| matches!(refused, CompositionRefusal::HandoverUnreadable(HandoverUnreadable_Data { flow_id, handover_fault }) if flow_id == "abc123" && fault(handover_fault)),
+        );
+    }
+}
+
+#[test]
+fn a_refresh_whose_handover_cannot_be_read_keeps_its_predecessor() {
+    for (left, fault) in unreadable() {
+        assert_predecessor_kept(
+            refreshed(left, None),
+            |rejection| matches!(rejection, signal_flow::StartRejection::CompositionRefused(CompositionRefusal::HandoverUnreadable(HandoverUnreadable_Data { flow_id, handover_fault })) if flow_id == "abc123" && fault(handover_fault)),
+        );
+    }
+}
+
+#[test]
+fn a_waking_after_a_predecessor_naming_no_flow_is_refused_asleep_with_its_queue() {
+    // The metaflow's last flow is not a FlowId: it is never joined to a
+    // path, and the waking is refused naming it.
+    assert_asleep_with_its_queue(
+        woken(Left::Nothing, vec!["abc123", "../abc123"], true),
+        |refused| *refused == refused_for("../abc123", HandoverFault::InvalidPredecessor),
     );
+}
+
+#[test]
+fn a_launch_whose_root_cannot_be_resolved_is_refused_naming_its_predecessor() {
+    // The Compose of a successor whose declared root is gone.
+    let fixture = NexusFixture::new();
+    let gone = tempfile::tempdir().unwrap();
+    let root = gone.path().to_string_lossy().into_owned();
+    drop(gone);
+    let mut profile = fixture
+        .staged_launch("handover-compose", Some("abc123"))
+        .profile;
+    profile.model_name = "claude-fixture".into();
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+            root_option: Some(root.clone()),
+            address: profile.address.clone(),
+            system_modules: profile.system_modules.clone(),
+            user_modules: profile.user_modules.clone(),
+            flow_kind: signal_flow::FlowKind::Regular,
+            tool_set: signal_flow::ToolSet::Default,
+            continuity: Continuity::Maintained,
+            purpose: String::new(),
+            records: vec![],
+        }]))
+        .expect("metaflow declared");
+    assert_eq!(
+        fixture.nexus.perform(Operation::Compose(profile.clone())),
+        Outcome::Failed(Failed_Data::CompositionRefused(refused_for(
+            "abc123",
+            HandoverFault::RootUnresolved
+        )))
+    );
+    // Naming no predecessor, the same launch reads no handover and composes.
+    profile.flow_id_option = None;
+    assert!(matches!(
+        fixture.nexus.perform(Operation::Compose(profile)),
+        Outcome::Composed(_)
+    ));
+
+    // A Refresh checks its successor's root before it composes: the gone
+    // root refuses it as before, the predecessor kept.
+    assert_predecessor_kept(refreshed(Left::Nothing, Some(root)), |rejection| {
+        *rejection
+            == signal_flow::StartRejection::CompositionRefused(CompositionRefusal::Unconfigured)
+    });
 }
 
 /// The Compose operation of a profile that names `predecessor`, as the
@@ -357,19 +578,23 @@ fn the_file_source_reads_a_predecessors_file_under_the_launch_root_only() {
     assert_eq!(source.handover("def456", root), Handover::Absent);
     // A file that is not UTF-8, or is not a file, is unreadable.
     leave(root, "aaa111", Left::Text(b"\xff"));
-    assert!(matches!(
+    assert_eq!(
         source.handover("aaa111", root),
-        Handover::Unreadable(_)
-    ));
+        Handover::Unreadable(HandoverFault::NotUtf8)
+    );
     leave(root, "bbb222", Left::Directory);
-    assert!(matches!(
+    assert_eq!(
         source.handover("bbb222", root),
-        Handover::Unreadable(_)
-    ));
+        Handover::Unreadable(HandoverFault::Unreadable(format!(
+            "{}: Is a directory (os error 21)",
+            root.join("flows/bbb222/handover.md").display()
+        )))
+    );
     // A predecessor that does not name a flow is never joined to a path.
     for name in ["", "..", "../abc123", "a/b", ".hidden"] {
-        assert!(
-            matches!(source.handover(name, root), Handover::Unreadable(_)),
+        assert_eq!(
+            source.handover(name, root),
+            Handover::Unreadable(HandoverFault::InvalidPredecessor),
             "{name:?}"
         );
     }
@@ -387,6 +612,99 @@ fn a_file_the_nexus_may_not_read_is_unreadable() {
     let reading = HandoverFile.handover("abc123", root);
     fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
     if !readable {
-        assert!(matches!(reading, Handover::Unreadable(_)), "{reading:?}");
+        assert_eq!(
+            reading,
+            Handover::Unreadable(HandoverFault::Unreadable(format!(
+                "{}: Permission denied (os error 13)",
+                file.display()
+            )))
+        );
+    }
+}
+
+/// An OnDemand seat resting with nothing queued is closed only once its
+/// successor composes: a successor refused its handover (one not UTF-8, or
+/// a root gone) keeps the seat Awake in its pane, nothing closed.
+#[test]
+fn an_on_demand_seat_whose_successor_is_refused_its_handover_is_not_closed() {
+    use super::refresh_and_compaction::{declare_seat, seat_refreshing_at};
+    use super::waking::{CLAUDE_SEAT, append_main_rows, claude_agent, claude_seat, end_turn};
+    use super::{ControlsHerdrSnapshot as _, PromptFixture};
+    use crate::store::context::RecordsContextSize as _;
+    use crate::waking::{AtStop, KeptAtStop, SleepsAndWakesSeats};
+    for gone_root in [false, true] {
+        let fixture = NexusFixture::new();
+        fixture.accept_pane_operations(
+            vec![claude_agent(&fixture)],
+            PromptFixture::Prompted("w1:p3"),
+        );
+        claude_seat(&fixture, 1_000);
+        append_main_rows(&fixture, &[end_turn("last-turn")]);
+        seat_refreshing_at(&fixture, 200_000);
+        fixture
+            .nexus
+            .store
+            .record_context_size(CLAUDE_SEAT, 1_000)
+            .unwrap();
+        declare_seat(
+            &fixture,
+            Continuity::OnDemand,
+            vec!["spirit-core".into(), "intent-flow".into()],
+        );
+        let fault = if gone_root {
+            let gone = tempfile::tempdir().unwrap();
+            let root = gone.path().to_string_lossy().into_owned();
+            drop(gone);
+            fixture
+                .nexus
+                .store
+                .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+                    root_option: Some(root),
+                    address: address(Model::Sol),
+                    system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+                    user_modules: vec!["operation-main-flow".into()],
+                    flow_kind: signal_flow::FlowKind::Regular,
+                    tool_set: signal_flow::ToolSet::Default,
+                    continuity: Continuity::OnDemand,
+                    purpose: String::new(),
+                    records: vec![],
+                }]))
+                .expect("metaflow declared");
+            HandoverFault::RootUnresolved
+        } else {
+            leave(
+                fixture.directory.path(),
+                CLAUDE_SEAT,
+                Left::Text(b"not utf-8 \xff\xfe"),
+            );
+            HandoverFault::NotUtf8
+        };
+        fixture.nexus.store.seed_metaflow(metaflow(
+            Model::Sol,
+            State::Awake(CLAUDE_SEAT.into()),
+            vec![],
+            vec![],
+        ));
+
+        assert_eq!(
+            fixture.nexus.settle_stopped(CLAUDE_SEAT),
+            AtStop::Kept(KeptAtStop::SuccessorUncomposable(Box::new(
+                Outcome::Failed(Failed_Data::CompositionRefused(refused_for(
+                    CLAUDE_SEAT,
+                    fault
+                )))
+            )))
+        );
+        let metaflow = fixture
+            .nexus
+            .store
+            .metaflow(&address(Model::Sol))
+            .unwrap()
+            .expect("metaflow");
+        assert_eq!(metaflow.state, State::Awake(CLAUDE_SEAT.into()));
+        for name in ["herdr-operations.log", "herdr-calls.log"] {
+            let calls = fs::read_to_string(fixture.directory.path().join(name)).unwrap_or_default();
+            assert!(!calls.contains("pane close"), "{name}: {calls}");
+        }
     }
 }

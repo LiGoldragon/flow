@@ -27,8 +27,8 @@ use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
 use signal_flow::{
     Address, Aspect, ComposedLaunch, CompositionRefusal, ContextRefusal, FirstPromptPayload,
-    HarnessKind, LaunchProfile, LeaveOut, LeaveOutRefusal, Model, PromptPart, QueueEntry,
-    SystemPrompt, TargetReceiptRequest,
+    HandoverFault, HarnessKind, LaunchProfile, LeaveOut, LeaveOutRefusal, Model, PromptPart,
+    QueueEntry, SystemPrompt, TargetReceiptRequest,
 };
 use std::collections::HashSet;
 use std::path::Path;
@@ -44,6 +44,11 @@ pub enum CompositionError {
     LeaveOut(LeaveOutRefusal),
     #[error("the Psyche core presentation prompt is unavailable: {0}")]
     PresentationPromptUnavailable(String),
+    #[error("the handover of {predecessor} could not be read: {fault:?}")]
+    HandoverUnreadable {
+        predecessor: String,
+        fault: HandoverFault,
+    },
 }
 
 impl From<ContextRefusal> for CompositionError {
@@ -160,28 +165,55 @@ impl OpensLaunchComposer for LaunchComposer {
     }
 }
 
+/// The root a launch's predecessor's handover is read under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandoverRoot<'a> {
+    /// A composition with no root ([`ComposesLaunch::compose`]): no handover
+    /// is read.
+    Unread,
+    /// The root the launch runs in.
+    At(&'a Path),
+    /// The launch's root could not be resolved: a launch given a handover
+    /// is refused `RootUnresolved`.
+    Unresolved,
+}
+
 trait ReadsHandover {
-    fn handover_text(&self, profile: &LaunchProfile, launch_root: Option<&Path>) -> Option<String>;
+    fn handover_text(
+        &self,
+        profile: &LaunchProfile,
+        launch_root: HandoverRoot<'_>,
+    ) -> Result<Option<String>, CompositionError>;
 }
 
 impl ReadsHandover for LaunchComposer {
     /// The text of a successor's handover, placed last in its first prompt:
     /// what the source yields for the launch's predecessor. None for a
-    /// launch with no predecessor, for one composed with no launch root, and
-    /// when the source holds none; a handover the source could not read is
-    /// logged and the launch goes on without it.
-    fn handover_text(&self, profile: &LaunchProfile, launch_root: Option<&Path>) -> Option<String> {
-        let (predecessor, launch_root) = (profile.flow_id_option.as_deref()?, launch_root?);
+    /// launch with no predecessor, for one composed with no root, and when
+    /// the source holds none. A handover the source could not read whole,
+    /// or a root that could not be resolved, refuses the launch
+    /// `HandoverUnreadable`, naming the predecessor and the fault.
+    fn handover_text(
+        &self,
+        profile: &LaunchProfile,
+        launch_root: HandoverRoot<'_>,
+    ) -> Result<Option<String>, CompositionError> {
+        let Some(predecessor) = profile.flow_id_option.as_deref() else {
+            return Ok(None);
+        };
+        let refused = |fault| CompositionError::HandoverUnreadable {
+            predecessor: predecessor.to_owned(),
+            fault,
+        };
+        let launch_root = match launch_root {
+            HandoverRoot::Unread => return Ok(None),
+            HandoverRoot::At(root) => root,
+            HandoverRoot::Unresolved => return Err(refused(HandoverFault::RootUnresolved)),
+        };
         match self.handover.handover(predecessor, launch_root) {
-            Handover::Text(text) => Some(text),
-            Handover::Absent => None,
-            Handover::Unreadable(reason) => {
-                eprintln!(
-                    "flow-nexus: launch {} goes on without the handover of {predecessor}: {reason}",
-                    profile.launch_request_id
-                );
-                None
-            }
+            Handover::Text(text) => Ok(Some(text)),
+            Handover::Absent => Ok(None),
+            Handover::Unreadable(fault) => Err(refused(fault)),
         }
     }
 }
@@ -575,7 +607,7 @@ impl ComposesLaunch for LaunchComposer {
         input_0: N,
         input_1: O,
     ) -> Result<ComposedLaunch, CompositionError> {
-        self.compose_in_root(input_0, input_1, None)
+        self.compose_in_root(input_0, input_1, HandoverRoot::Unread)
     }
 }
 
@@ -606,16 +638,17 @@ pub trait ComposesInRoot {
     /// `launch_root`. A launch that names a predecessor (a refresh's or a
     /// waking's successor) is given the predecessor's handover, whole and
     /// last in its first prompt: after the brief, the final bytes of the
-    /// message. A launch composed with no root has none to read it under and
-    /// gets none; so does a Restart, which names no predecessor and has no
-    /// first prompt. A simplified flow with no first message is given no
-    /// handover either, since the handover alone would create a
-    /// context-only startup turn.
+    /// message, or is refused `HandoverUnreadable` when it cannot be read
+    /// whole. A launch composed with [`HandoverRoot::Unread`] reads none; a
+    /// Restart names no predecessor, has no first prompt and is given none.
+    /// A simplified flow with no first message is given no handover either,
+    /// and reads none, since the handover alone would create a context-only
+    /// startup turn.
     fn compose_in_root<N: Profiled, O: LeaveOutListing>(
         &self,
         input_0: N,
         input_1: O,
-        launch_root: Option<&Path>,
+        launch_root: HandoverRoot<'_>,
     ) -> Result<ComposedLaunch, CompositionError>;
 }
 
@@ -624,7 +657,7 @@ impl ComposesInRoot for LaunchComposer {
         &self,
         input_0: N,
         input_1: O,
-        launch_root: Option<&Path>,
+        launch_root: HandoverRoot<'_>,
     ) -> Result<ComposedLaunch, CompositionError> {
         let harnessed = HarnessedProfile {
             remembered_flows: input_0.remembered_flows(),
@@ -638,7 +671,6 @@ impl ComposesInRoot for LaunchComposer {
         } else {
             harnessed.brief()
         };
-        let handover = self.handover_text(&harnessed.launch_profile, launch_root);
         let mut segments = verified.user_segments();
         // The raw records of the flows the launch remembers follow its
         // USER modules, as one segment, ahead of the brief.
@@ -654,9 +686,14 @@ impl ComposesInRoot for LaunchComposer {
             // instruction remains the first user message; an empty one does
             // not create a context-only startup turn.
             let system_prompt = self.launch_system_prompt(&harnessed, &verified, &segments)?;
+            let handover = if brief.is_empty() {
+                None
+            } else {
+                self.handover_text(&harnessed.launch_profile, launch_root)?
+            };
             let brief = match &handover {
-                Some(handover) if !brief.is_empty() => vec![brief].placed_last(handover).concat(),
-                _ => brief,
+                Some(handover) => vec![brief].placed_last(handover).concat(),
+                None => brief,
             };
             let parts = if brief.is_empty() {
                 Vec::new()
@@ -681,7 +718,7 @@ impl ComposesInRoot for LaunchComposer {
             self.launch_system_prompt(&harnessed, &verified, Vec::<String>::new())?;
         // The handover is the last piece of the message, after the brief.
         let mut pieces = segments.joined_with(&brief);
-        if let Some(handover) = &handover {
+        if let Some(handover) = &self.handover_text(&harnessed.launch_profile, launch_root)? {
             pieces = pieces.placed_last(handover);
         }
         let body = pieces.concat();

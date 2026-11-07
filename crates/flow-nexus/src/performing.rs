@@ -8,7 +8,7 @@ use crate::RunningNexus;
 use crate::codex::{
     AccountsOpenedThread, OpensCodexThread, SelectsCodexEndpoint, SubmitsBoundCodexPart,
 };
-use crate::composition::{ComposesInRoot, CompositionError, HarnessedProfile};
+use crate::composition::{ComposesInRoot, CompositionError, HandoverRoot, HarnessedProfile};
 use crate::generated::operation::{
     Failed_Data, Open_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Asleep_Data,
     Record_Data_Awoken_Data, Record_Data_Context_Data, Record_Data_Harness_Data,
@@ -249,12 +249,15 @@ impl Performs for RunningNexus {
                     }
                 };
                 // A successor's handover is read under the root its flow runs
-                // in. A launch that names no predecessor needs none, and a root
-                // the launch itself refuses later is not this step's refusal.
-                let launch_root = profile
-                    .flow_id_option
-                    .as_ref()
-                    .and_then(|_| self.launch_root(&profile.address).ok());
+                // in. A launch that names no predecessor needs none; one that
+                // names a predecessor and whose root cannot be resolved is
+                // refused if it is given a handover.
+                let launch_root = match profile.flow_id_option {
+                    None => None,
+                    Some(_) => Some(self.launch_root(&profile.address).inspect_err(|rejection| {
+                        eprintln!("flow-nexus: launch {request} root unresolved: {rejection:?}");
+                    })),
+                };
                 match self.composer.compose_in_root(
                     HarnessedProfile {
                         remembered_flows,
@@ -262,7 +265,11 @@ impl Performs for RunningNexus {
                         launch_profile: profile,
                     },
                     default,
-                    launch_root.as_deref().map(std::path::Path::new),
+                    match &launch_root {
+                        None => HandoverRoot::Unread,
+                        Some(Ok(root)) => HandoverRoot::At(std::path::Path::new(root)),
+                        Some(Err(_)) => HandoverRoot::Unresolved,
+                    },
                 ) {
                     Ok(launch) => Outcome::Composed(launch),
                     Err(CompositionError::LeaveOut(refusal)) => {
@@ -281,6 +288,19 @@ impl Performs for RunningNexus {
                         eprintln!("flow-nexus: launch {request} not composed: {error}");
                         Outcome::Failed(Failed_Data::CompositionRefused(
                             signal_flow::CompositionRefusal::PresentationUnavailable,
+                        ))
+                    }
+                    Err(CompositionError::HandoverUnreadable { predecessor, fault }) => {
+                        eprintln!(
+                            "flow-nexus: launch {request} not composed: the handover of {predecessor} could not be read: {fault:?}"
+                        );
+                        Outcome::Failed(Failed_Data::CompositionRefused(
+                            signal_flow::CompositionRefusal::HandoverUnreadable(
+                                signal_flow::HandoverUnreadable_Data {
+                                    flow_id: predecessor,
+                                    handover_fault: fault,
+                                },
+                            ),
                         ))
                     }
                 }

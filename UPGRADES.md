@@ -163,12 +163,24 @@ successor's first prompt: after the brief, after a blank line.
   its system prompt gains the `Predecessor:` line. The metaflow is Asleep
   then, so the predecessor takes no part in taking the Address.
 - A predecessor that left no file, or an empty one, leaves the prompt as it
-  was. A file Flow cannot read (a permission refusal, not UTF-8, not a
-  file) is logged, `flow-nexus: launch <id> goes on without the handover of
-  <flow>: <reason>`, and the launch goes on without it; it is not refused.
+  was. Otherwise the handover is given whole or the launch is refused
+  `CompositionRefused.HandoverUnreadable.{ <flow> <fault> }`, the fault one
+  of `NotUtf8`, `Unreadable.«<path>: <error>»` (a permission refusal, an I/O
+  error, not a file), `InvalidPredecessor` (the predecessor names no flow)
+  or `RootUnresolved` (its launch root could not be resolved). Nothing is
+  decoded lossily and nothing is dropped.
+- A refused Refresh answers `SuccessorRefused.LaunchRefused` with it: the
+  predecessor runs on, Awake and holding its Address, its pane and harness
+  untouched, no successor owed. A refused waking leaves the metaflow Asleep
+  with its queue, each request `Retryable.WakeRefused` with it. An OnDemand
+  seat whose successor is so refused is not closed or put to sleep.
 - A Restart resumes the same session and has no first prompt: it names no
-  predecessor and is given none. A simplified flow with no first message is
-  given none either, since the handover alone would be a context-only turn.
+  predecessor, reads none and is given none. A simplified flow with no
+  first message is given none either, since the handover alone would be a
+  context-only turn, and reads none.
+- Pins signal-flow 52.0.0 (2f9e2bf) and meta-signal-flow 65.0.0 (baaa5bd),
+  which add `CompositionRefusal.HandoverUnreadable` and `HandoverFault`. A
+  rejection the store holds from before reads the same.
 - A message too large for one part keeps the handover as a piece of its
   own, in the last part; one larger than a part refuses `ModuleTooLarge`
   as any module does.

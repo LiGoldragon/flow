@@ -2153,6 +2153,23 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_report_lines_are_utf8_safe_and_parts_stay_inside_the_prompt_budget() {
+        let words = "é".repeat(crate::sending::MAX_SEND_PAYLOAD_BYTES);
+        let first = render_bounded_line(TASK_ANNOUNCEMENT_HEADER, "0000 ", &words);
+        assert!(first.ends_with('…'));
+        assert!(
+            TASK_ANNOUNCEMENT_HEADER.len() + 1 + first.len()
+                <= crate::sending::MAX_SEND_PAYLOAD_BYTES
+        );
+        let second = render_bounded_line(TASK_ANNOUNCEMENT_HEADER, "0001 ", &words);
+        let parts = partition_rows(
+            TASK_ANNOUNCEMENT_HEADER,
+            [("first", first), ("second", second)],
+        );
+        assert_eq!(parts, vec![vec!["first"], vec!["second"]]);
+    }
+
+    #[test]
     fn an_empty_exact_predecessor_evolves_once_and_reopens_wholly_current() {
         let directory = tempfile::tempdir().expect("temporary Memory");
         let path = directory.path().join("flow.sema");
@@ -2259,20 +2276,18 @@ mod tests {
                 .with_family(&heartbeat),
         )
         .expect("current catalog reopens");
+        let identity_table = reopened
+            .register_table(descriptors.store_identity)
+            .expect("identity registers");
         let identities = reopened
-            .match_records(QueryPlan::all(
-                reopened
-                    .register_table(descriptors.store_identity)
-                    .expect("identity registers"),
-            ))
+            .match_records(QueryPlan::all(identity_table))
             .expect("identity reads");
         assert_eq!(identities.records()[0].store_identity, "0000000100020003");
+        let policy_table = reopened
+            .register_table(descriptors.request_policy)
+            .expect("policy registers");
         let policy = reopened
-            .match_records(QueryPlan::all(
-                reopened
-                    .register_table(descriptors.request_policy)
-                    .expect("policy registers"),
-            ))
+            .match_records(QueryPlan::all(policy_table))
             .expect("policy reads");
         assert_eq!(policy.records().len(), 1);
         assert_eq!(policy.records()[0].request_id_draws, 64);

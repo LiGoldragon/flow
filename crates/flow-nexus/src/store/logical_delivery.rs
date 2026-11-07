@@ -375,6 +375,10 @@ pub(crate) struct DeliverCallSpec {
 
 pub(crate) trait MintsRequestIds {
     fn mint_request_id(&self) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError>;
+    fn mint_request_id_with_held_count(
+        &self,
+        held_count: usize,
+    ) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError>;
     fn request_binding(
         &self,
         id: &flow_ethos::RequestId,
@@ -463,14 +467,23 @@ impl MintsRequestIds for FlowStore {
             && delivered)
     }
     fn mint_request_id(&self) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError> {
-        const SPACE: usize = 36usize.pow(4);
-        let draws = self.request_id_draws()?;
         let held = self
             .engine
             .match_records(QueryPlan::all(self.logical_deliveries.request_ids))?;
-        if held.records().len() == SPACE {
+        self.mint_request_id_with_held_count(held.records().len())
+    }
+    fn mint_request_id_with_held_count(
+        &self,
+        held_count: usize,
+    ) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError> {
+        const SPACE: usize = 36usize.pow(4);
+        if held_count == SPACE {
             return Ok(Err(Refusal::RequestIdSpaceFull));
         }
+        if held_count > SPACE {
+            return Err(StoreError::StateInvariant);
+        }
+        let draws = self.request_id_draws()?;
         for _ in 0..draws {
             let id = self.request_id_drawer.draw_request_id()?;
             if id.len() != 4
@@ -783,9 +796,10 @@ impl RecordsLogicalDeliveries for FlowStore {
         {
             return Ok(Err(ArchiveRejection::NotYet));
         }
-        let request_named = self.retained_logical_requests()?.into_iter().any(|held| {
+        let mut request_named = false;
+        for held in self.retained_logical_requests()? {
             if held.entry.logical_delivery_id == binding.logical_delivery_id {
-                return false;
+                continue;
             }
             let names = match &held.entry.message {
                 Message::HardAbrupt(request)
@@ -801,11 +815,9 @@ impl RecordsLogicalDeliveries for FlowStore {
                     _ => false,
                 },
             };
-            names
+            if names
                 && self
-                    .logical_delivery_snapshot(&held.entry.logical_delivery_id)
-                    .ok()
-                    .flatten()
+                    .logical_delivery_snapshot(&held.entry.logical_delivery_id)?
                     .is_some_and(|snapshot| {
                         !matches!(
                             snapshot.delivery_state,
@@ -816,7 +828,11 @@ impl RecordsLogicalDeliveries for FlowStore {
                                 | DeliveryState::Archived
                         )
                     })
-        });
+            {
+                request_named = true;
+                break;
+            }
+        }
         if request_named {
             return Ok(Err(ArchiveRejection::NotYet));
         }

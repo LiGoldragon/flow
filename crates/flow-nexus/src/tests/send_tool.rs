@@ -15,7 +15,7 @@ use crate::generated::send_tool::{
 use crate::heartbeat::DeliveryPurpose;
 use crate::send_tool::{DescribesSendInvocation, RespondsToSendCalls, SendTool, ServesSendTool};
 use crate::sending::{MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
-use crate::store::logical_delivery::RecordsLogicalDeliveries;
+use crate::store::logical_delivery::{MintsRequestIds, RecordsLogicalDeliveries};
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{AnnouncesLaunchChanges, RecordsFlowLifecycle, RegistersFlowIdentity};
@@ -1668,6 +1668,117 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
     };
     assert_eq!(archived.sender, core());
     assert_eq!(archived.target, core_primary());
+}
+
+#[test]
+fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically() {
+    let fixture = NexusFixture::new();
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: core_primary(),
+        state: State::Asleep,
+        past: vec![],
+        queue: vec![],
+    });
+    let key = ToolCallKey {
+        thread_id: THREAD_A.into(),
+        turn_id: TURN.into(),
+        call_id: "archive-contract".into(),
+    };
+    let SendOutcome::Accepted(accepted) = fixture
+        .nexus
+        .store
+        .accept_tool_send(
+            &key,
+            "archive-contract-content",
+            core(),
+            &core_primary(),
+            Message::Soft(Request::Notice("archive me".into())),
+            0,
+        )
+        .expect("tool Send admits")
+    else {
+        panic!("tool Send accepted")
+    };
+    let request_id = accepted.send_acceptance.request_id.clone();
+    let logical_id = accepted.send_acceptance.logical_delivery_id.clone();
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .archive_request("none", &core())
+            .expect("unknown archive reads"),
+        Err(signal_flow::ArchiveRejection::UnknownRequest)
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .archive_request(&request_id, &sender_a())
+            .expect("stranger archive reads"),
+        Err(signal_flow::ArchiveRejection::UnknownRequest)
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .archive_request(&request_id, &core())
+            .expect("early archive reads"),
+        Err(signal_flow::ArchiveRejection::NotYet)
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .request_binding(&request_id)
+            .expect("binding reads")
+            .expect("request stays held")
+            .logical_delivery_id,
+        logical_id
+    );
+
+    fixture
+        .nexus
+        .store
+        .transition_logical_delivery(
+            &logical_id,
+            signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                harness_kind: flow_ethos::HarnessKind::Codex,
+                native_session_id: "archive-contract-session".into(),
+                native_prompt_id: "archive-contract-prompt".into(),
+            }),
+        )
+        .expect("request ends");
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .archive_request(&request_id, &core())
+            .expect("archive commits"),
+        Ok(())
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .request_binding(&request_id)
+            .expect("binding reads")
+            .is_none(),
+        "archive releases the id in its commit"
+    );
+    let history = fixture
+        .nexus
+        .store
+        .read_logical_delivery_snapshots(&core(), Some(0))
+        .expect("history reads");
+    let archived = history
+        .delivery_snapshot_vector
+        .iter()
+        .filter(|snapshot| {
+            snapshot.logical_delivery_id == logical_id
+                && snapshot.delivery_state == signal_flow::DeliveryState::Archived
+        })
+        .count();
+    assert_eq!(archived, 1, "archive asserts one terminal history event");
 }
 
 fn from_core(request: Request) -> TestRequest {

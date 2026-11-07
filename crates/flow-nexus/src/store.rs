@@ -4803,9 +4803,12 @@ pub(crate) trait ReadsFlowMemory {
     fn is_current_flow_registration(table_key: &str, registration: &TableRegistration) -> bool {
         let identity = registration.identity();
         FlowStore::current_flow_family_identity(table_key).is_some_and(|(family, schema_hash)| {
+            let legacy_handover = table_key == OPTIONAL_HANDOVER_TABLE
+                && identity.schema_hash()
+                    == SchemaHash::for_label("flow-nexus-handover-configuration-v1");
             identity.table_name() == table_key
                 && identity.family().as_str() == family
-                && identity.schema_hash() == schema_hash
+                && (identity.schema_hash() == schema_hash || legacy_handover)
         })
     }
 

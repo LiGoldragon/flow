@@ -177,6 +177,9 @@ pub(crate) fn upgrade_or_register(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::handover::{ClosedHandover, DescribesHandoverTable, HandoverMemory};
+    use sema_engine::{EngineOpen, KeyedMutation, QueryPlan, SchemaVersion};
+    use signal_flow::{Address, Aspect, Model, Section, Touch};
 
     #[test]
     fn v1_upgrade_preserves_archive_policy_and_count_and_seeds_default_deadline() {
@@ -195,5 +198,124 @@ mod tests {
             current.publication_deadline,
             PublicationDeadlineConfiguration::Configured(60_000)
         );
+    }
+
+    #[test]
+    fn persisted_v1_upgrades_once_and_preserves_configuration_and_handover_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("handover-v1.sema");
+        let predecessor_descriptor = TableDescriptor::<StoredHandoverConfigurationV1>::new(
+            HANDOVER_CONFIGURATION_TABLE_NAME,
+            FamilyName::new("flow-nexus-handover-configuration"),
+            StoredHandoverConfigurationV1::schema_hash(),
+        );
+        let handover_descriptor = HandoverMemory::descriptor();
+        let predecessor = StoredHandoverConfigurationV1 {
+            policies: HandoverPoliciesConfiguration::Configured(vec![
+                meta_signal_flow::HandoverPolicy {
+                    model_name: "claude-opus-5-5".into(),
+                    warning_share_left: 15,
+                    reminder_text: "Continue every five minutes.".into(),
+                    every_minutes: 5,
+                },
+            ]),
+            archive: HandoverArchiveConfiguration::Configured("/archive/v1".into()),
+            count: HandoverCountConfiguration::Configured(3),
+        };
+        let address = Address {
+            aspect: Aspect::Mind,
+            topic: "upgradeSibling".into(),
+            model: Model::Sol,
+        };
+        let sibling = HandoverMemory {
+            address: address.clone(),
+            current: vec![Section {
+                title: "Live".into(),
+                description: "current generation".into(),
+                body: "live bytes".into(),
+            }],
+            touch: Some(Touch::Unknown),
+            generation: 8,
+            current_flow_id: Some("successor".into()),
+            closed: vec![ClosedHandover {
+                generation: 7,
+                predecessor: "predecessor".into(),
+                successor: "successor".into(),
+                sections: vec![Section {
+                    title: "Closed".into(),
+                    description: "archived generation".into(),
+                    body: "closed bytes".into(),
+                }],
+                touch: Some(Touch::Unknown),
+            }],
+        };
+        {
+            let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(1))).unwrap();
+            let configuration = engine.register_table(predecessor_descriptor).unwrap();
+            let handovers = engine.register_table(handover_descriptor).unwrap();
+            engine
+                .mutate_keyed(KeyedMutation::new(
+                    configuration,
+                    predecessor.record_key(),
+                    predecessor.clone(),
+                ))
+                .unwrap();
+            engine
+                .mutate_keyed(KeyedMutation::new(
+                    handovers,
+                    sibling.record_key(),
+                    sibling.clone(),
+                ))
+                .unwrap();
+        }
+
+        let assert_current =
+            |engine: &Engine,
+             configuration: TableReference<StoredHandoverConfiguration>,
+             handovers: TableReference<HandoverMemory>| {
+                let current = engine
+                    .match_records(QueryPlan::key(configuration, RecordKey::new("handover")))
+                    .unwrap()
+                    .records()[0]
+                    .clone();
+                assert_eq!(current.policies, predecessor.policies);
+                assert_eq!(current.archive, predecessor.archive);
+                assert_eq!(current.count, predecessor.count);
+                assert_eq!(
+                    current.publication_deadline,
+                    PublicationDeadlineConfiguration::Configured(60_000)
+                );
+                assert_eq!(
+                    engine
+                        .match_records(QueryPlan::key(handovers, sibling.record_key()))
+                        .unwrap()
+                        .records(),
+                    &[sibling.clone()]
+                );
+            };
+
+        let current_descriptor = StoredHandoverConfiguration::descriptor();
+        {
+            let mut engine = Engine::open(
+                EngineOpen::new(&path, SchemaVersion::new(1))
+                    .with_family(&current_descriptor)
+                    .with_family(&handover_descriptor),
+            )
+            .unwrap();
+            let configuration = upgrade_or_register(&mut engine).unwrap();
+            let handovers = engine.register_table(handover_descriptor).unwrap();
+            assert_current(&engine, configuration, handovers);
+        }
+        {
+            let mut engine = Engine::open(
+                EngineOpen::new(&path, SchemaVersion::new(1))
+                    .with_family(&current_descriptor)
+                    .with_family(&handover_descriptor),
+            )
+            .unwrap();
+            let configuration = upgrade_or_register(&mut engine).unwrap();
+            let handovers = engine.register_table(handover_descriptor).unwrap();
+            assert_current(&engine, configuration, handovers);
+        }
     }
 }

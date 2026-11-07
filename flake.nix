@@ -815,6 +815,14 @@
             "tests::handover_archive::archives_and_is_idempotent";
           flow-retirement-archive-byte-identity = context.exactGitTest "flow-nexus"
             "handover_archive::tests::invalid_utf8_git_evidence_is_rejected_instead_of_aliasing_replacement_text";
+          flow-publication-deadline-inspection = context.exactGitTest "flow-nexus"
+            "tests::handover_archive::inspection_phase_uses_whole_publication_budget_and_retains_generation";
+          flow-publication-deadline-add = context.exactGitTest "flow-nexus"
+            "tests::handover_archive::add_phase_uses_whole_publication_budget_and_retains_generation";
+          flow-publication-deadline-post-commit = context.exactGitTest "flow-nexus"
+            "tests::handover_archive::post_commit_timeout_reverifies_same_generation_before_removal";
+          flow-publication-deadline-upgrade = context.exactTest "flow-nexus"
+            "store::handover_configuration::tests::persisted_v1_upgrades_once_and_preserves_configuration_and_handover_rows";
           flow-retirement-preserves-current-and-sibling = context.exactTest "flow-nexus"
             "tests::handover_memory::exact_retirement_identity_preserves_new_live_and_closed_rows";
           flow-retirement-identity-mismatch-incomplete = context.exactTest "flow-nexus"
@@ -838,9 +846,9 @@
             { nativeBuildInputs = [ context.pkgs.gnugrep ]; }
             ''
               grep -F 'rev = "e050c8fbf334d859391cb64f6a47663a2c689c11"' ${./Cargo.toml}
-              grep -F 'rev = "91e1f45adced679a006638f1cec1b6456e5a4dc0"' ${./Cargo.toml}
+              grep -F 'rev = "6fcc233dc5b467871d9d104ef01afbe3f60af493"' ${./Cargo.toml}
               grep -F 'signal-flow?rev=e050c8fbf334d859391cb64f6a47663a2c689c11#e050c8fbf334d859391cb64f6a47663a2c689c11' ${./Cargo.lock}
-              grep -F 'meta-signal-flow?rev=91e1f45adced679a006638f1cec1b6456e5a4dc0#91e1f45adced679a006638f1cec1b6456e5a4dc0' ${./Cargo.lock}
+              grep -F 'meta-signal-flow?rev=6fcc233dc5b467871d9d104ef01afbe3f60af493#6fcc233dc5b467871d9d104ef01afbe3f60af493' ${./Cargo.lock}
               touch "$out"
             '';
           flow-handover-permission-denied-unreadable = context.exactTest "flow-nexus"

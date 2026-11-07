@@ -224,7 +224,7 @@ mod tests {
     fn send_keeps_message_content_and_validates_positions() {
         let client = FlowClient;
         for message in [
-            "Soft.Result.{ Order.«Review.» «Wake Send.{ is content }» }",
+            "Soft.Result.{ k7ph «Wake Send.{ is content }» }",
             "MiddleAbrupt.Notice.«Check the source.»",
             "HardAbrupt.Question.«Which revision?»",
             "Soft.Psyche.{ «context» «verbatim» }",

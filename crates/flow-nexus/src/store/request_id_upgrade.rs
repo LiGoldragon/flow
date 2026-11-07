@@ -2595,7 +2595,7 @@ mod tests {
             &[],
             heartbeat_table,
             &[],
-            &ScriptedDrawer::new(&["a001", "a002", "a003"]),
+            &ScriptedDrawer::new(&["a001", "a002", "a003", "b001", "b002", "b003", "b004"]),
         )
         .expect("fallback-order evolution commits");
         let assignment_table = engine

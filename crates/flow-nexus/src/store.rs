@@ -6019,6 +6019,11 @@ mod tests {
             topic: "upgradeNotice".into(),
             model: Model::Sol,
         };
+        let sender = Address {
+            aspect: Aspect::Mind,
+            topic: "upgradeNotice".into(),
+            model: Model::Sol,
+        };
         store.seed_metaflow(flow_ethos::Metaflow {
             address: recipient.clone(),
             state: flow_ethos::State::Asleep,
@@ -6028,11 +6033,7 @@ mod tests {
         let signal_flow::PrivateSendResponse::SendAccepted(task) = store
             .accept_logical_delivery(
                 &recipient,
-                SentBy::Sender(Address {
-                    aspect: Aspect::Mind,
-                    topic: "upgradeNotice".into(),
-                    model: Model::Sol,
-                }),
+                SentBy::Sender(sender.clone()),
                 flow_ethos::Delivery::Queue,
                 Message::Soft(Request::Task(flow_ethos::AnswerableTask {
                     minutes: 1,
@@ -6044,6 +6045,16 @@ mod tests {
         else {
             panic!("task accepted")
         };
+        store
+            .transition_logical_delivery(
+                &task.logical_delivery_id,
+                signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                    harness_kind: flow_ethos::HarnessKind::Codex,
+                    native_session_id: "task-session".into(),
+                    native_prompt_id: "task-prompt".into(),
+                }),
+            )
+            .expect("task delivery ends before its announcement");
         store
             .engine
             .assert(Assertion::new(
@@ -6076,6 +6087,13 @@ mod tests {
         store
             .transition_logical_delivery(&notice, signal_flow::DeliveryState::Uncertain)
             .expect("notice becomes uncertain");
+        assert_eq!(
+            store
+                .archive_request(&task.request_id, &sender)
+                .expect("archive checks the announcement Notice"),
+            Err(signal_flow::ArchiveRejection::NotYet),
+            "an unended announcement Notice holds every Task it lists"
+        );
         let queued = store
             .stored_metaflow(&recipient)
             .unwrap()
@@ -6150,6 +6168,12 @@ mod tests {
         assert_eq!(
             rows.records()[0].status,
             TaskAnnouncementStatus::Delivered(retried.clone())
+        );
+        assert_eq!(
+            store
+                .archive_request(&task.request_id, &sender)
+                .expect("ended announcement releases the Task"),
+            Ok(())
         );
     }
 

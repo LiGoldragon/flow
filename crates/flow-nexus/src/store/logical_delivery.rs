@@ -1116,7 +1116,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         // atomic commit succeeded. The durable sent count is the expected
         // state witness; refuse the stale attempt before creating a second
         // logical Notice.
-        if let Some(expected) = transition.handover_reminder.as_ref() {
+        if let Some(expected) = handover_reminder.as_ref() {
             // Revalidate green while holding the same logical write gate as
             // admission. A Keep/Drop that won the gate before this call
             // therefore suppresses the stale warning rather than queueing it.
@@ -1252,7 +1252,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 LogicalDeliveryPurpose {
                     logical_delivery_id: id.clone(),
                     address: address.clone(),
-                    purpose: transition.purpose,
+                    purpose,
                 },
             );
         let commit = self.assert_logical_request(address, entry, commit);

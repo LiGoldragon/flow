@@ -158,7 +158,7 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
     use crate::store::handover_reminders::{
         HandoverReminder, OpensHandoverReminder, SchedulesHandoverReminders,
     };
-    use crate::store::metaflow::SeedsMetaflow;
+    use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
     use crate::store::{ManagesMetaflowState, SeedsRole};
     use flow_ethos::{Metaflow, State};
     let fixture = NexusFixture::new();
@@ -397,7 +397,7 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
     use super::NexusFixture;
     use crate::store::context::RecordsContextSize;
     use crate::store::handover::HoldsHandovers;
-    use crate::store::metaflow::SeedsMetaflow;
+    use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
     use crate::store::{ManagesMetaflowState, SeedsRole};
     use meta_signal_flow::{ConfigurationChange, ConfigureThreshold, HandoverPolicy};
     use signal_flow::{Address, Aspect, Caller, Metaflow, Model};

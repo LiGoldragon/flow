@@ -2071,3 +2071,211 @@ pub(crate) fn evolve_request_id_memory(
     engine.commit_atomic_evolution(evolution)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::address_hold::DescribesAddressHoldTable;
+    use crate::store::logical_delivery::{
+        DeclaresLogicalDeliveryTables, DrawsRequestId, LogicalDeliveryTables,
+    };
+    use crate::store::queue_delivery::{DeclaresQueueDeliveryTables, QueueDeliveryTables};
+    use crate::store::send_call::DescribesSendCallTable;
+    use crate::store::send_outcome::{DeclaresSendOutcomeTables, SendOutcomeTables};
+    use crate::store::{
+        DescribesHeartbeatStandingTable, DescribesRequestPolicyTable, StoredHeartbeatStanding,
+        StoredMetaRequestPolicyConfiguration,
+    };
+    use sema_engine::{EngineOpen, QueryPlan, SchemaVersion};
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    struct ScriptedDrawer(Mutex<VecDeque<RequestId>>);
+
+    impl ScriptedDrawer {
+        fn new(values: &[&str]) -> Self {
+            Self(Mutex::new(
+                values.iter().map(|value| (*value).into()).collect(),
+            ))
+        }
+    }
+
+    impl DrawsRequestId for ScriptedDrawer {
+        fn draw_request_id(&self) -> Result<RequestId, StoreError> {
+            self.0
+                .lock()
+                .map_err(|_| StoreError::StateInvariant)?
+                .pop_front()
+                .ok_or(StoreError::StateInvariant)
+        }
+    }
+
+    fn predecessor_descriptor<Predecessor, Current>(
+        current: &TableDescriptor<Current>,
+    ) -> TableDescriptor<Predecessor>
+    where
+        Predecessor: MemoryDefinition,
+    {
+        TableDescriptor::new(
+            *current.name(),
+            current.family().clone(),
+            Predecessor::schema_hash(),
+        )
+    }
+
+    fn evolution_descriptors() -> RequestIdEvolutionDescriptors {
+        let logical = LogicalDeliveryTables::descriptors();
+        let queue = QueueDeliveryTables::descriptors();
+        let outcomes = SendOutcomeTables::descriptors();
+        let upgrade = RequestIdUpgradeTables::descriptors();
+        RequestIdEvolutionDescriptors {
+            metaflows: TableDescriptor::new(
+                crate::store::METAFLOW_TABLE_NAME,
+                FamilyName::new("flow-nexus-metaflow"),
+                crate::store::StoredMetaflow::schema_hash(),
+            )
+            .with_predecessor::<PriorStoredMetaflow>(),
+            address_holds: crate::store::address_hold::AddressHold::descriptor(),
+            send_calls: crate::generated::send_tool::SendCall::descriptor(),
+            requests: queue.1,
+            attempts: queue.2,
+            outcomes: outcomes.outcomes,
+            current: logical.current,
+            events: logical.events,
+            request_ids: logical.request_ids,
+            deliver_calls: logical.deliver_calls,
+            store_identity: logical.store_identity,
+            prior_deliveries: upgrade.prior_deliveries,
+            task_announcements: upgrade.task_announcements,
+            upgrade_assignments: upgrade.upgrade_assignments,
+            request_policy: StoredMetaRequestPolicyConfiguration::descriptor(),
+        }
+    }
+
+    #[test]
+    fn an_empty_exact_predecessor_evolves_once_and_reopens_wholly_current() {
+        let directory = tempfile::tempdir().expect("temporary Memory");
+        let path = directory.path().join("flow.sema");
+        let descriptors = evolution_descriptors();
+        let heartbeat = StoredHeartbeatStanding::descriptor();
+
+        let mut predecessor = Engine::open(EngineOpen::new(
+            &path,
+            SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION),
+        ))
+        .expect("predecessor Memory opens");
+        predecessor
+            .register_table(predecessor_descriptor::<PriorCurrentLogicalDelivery, _>(
+                &descriptors.current,
+            ))
+            .expect("old current registers");
+        predecessor
+            .register_table(predecessor_descriptor::<PriorLogicalDeliveryEvent, _>(
+                &descriptors.events,
+            ))
+            .expect("old events register");
+        predecessor
+            .register_table(predecessor_descriptor::<PriorStoredMetaflow, _>(
+                &descriptors.metaflows,
+            ))
+            .expect("old metaflows register");
+        predecessor
+            .register_table(predecessor_descriptor::<PriorAddressHold, _>(
+                &descriptors.address_holds,
+            ))
+            .expect("old holds register");
+        predecessor
+            .register_table(predecessor_descriptor::<PriorStoredDeliveryRequest, _>(
+                &descriptors.requests,
+            ))
+            .expect("old requests register");
+        predecessor
+            .register_table(predecessor_descriptor::<PriorQueueDeliveryAttempt, _>(
+                &descriptors.attempts,
+            ))
+            .expect("old attempts register");
+        predecessor
+            .register_table(predecessor_descriptor::<PriorStoredSendOutcome, _>(
+                &descriptors.outcomes,
+            ))
+            .expect("old outcomes register");
+        predecessor
+            .register_table(predecessor_descriptor::<PriorSendCall, _>(
+                &descriptors.send_calls,
+            ))
+            .expect("old calls register");
+        predecessor
+            .register_table(heartbeat.clone())
+            .expect("unchanged heartbeat registers");
+        drop(predecessor);
+
+        let mut engine = Engine::open(
+            EngineOpen::new(&path, SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION))
+                .with_family(&descriptors.current)
+                .with_family(&descriptors.events)
+                .with_family(&descriptors.metaflows)
+                .with_family(&descriptors.address_holds)
+                .with_family(&descriptors.requests)
+                .with_family(&descriptors.attempts)
+                .with_family(&descriptors.outcomes)
+                .with_family(&descriptors.send_calls)
+                .with_family(&heartbeat),
+        )
+        .expect("exact predecessor catalog is recognized");
+        let heartbeat_table = engine
+            .register_table(heartbeat.clone())
+            .expect("heartbeat opens");
+        evolve_request_id_memory(
+            &mut engine,
+            descriptors,
+            &[],
+            &[],
+            &[],
+            heartbeat_table,
+            &[],
+            &ScriptedDrawer::new(&["0000", "0001", "0002", "0003"]),
+        )
+        .expect("one atomic evolution commits");
+        drop(engine);
+
+        let descriptors = evolution_descriptors();
+        let mut reopened = Engine::open(
+            EngineOpen::new(&path, SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION))
+                .with_family(&descriptors.current)
+                .with_family(&descriptors.events)
+                .with_family(&descriptors.metaflows)
+                .with_family(&descriptors.address_holds)
+                .with_family(&descriptors.requests)
+                .with_family(&descriptors.attempts)
+                .with_family(&descriptors.outcomes)
+                .with_family(&descriptors.send_calls)
+                .with_family(&descriptors.request_ids)
+                .with_family(&descriptors.deliver_calls)
+                .with_family(&descriptors.store_identity)
+                .with_family(&descriptors.prior_deliveries)
+                .with_family(&descriptors.task_announcements)
+                .with_family(&descriptors.upgrade_assignments)
+                .with_family(&descriptors.request_policy)
+                .with_family(&heartbeat),
+        )
+        .expect("current catalog reopens");
+        let identities = reopened
+            .match_records(QueryPlan::all(
+                reopened
+                    .register_table(descriptors.store_identity)
+                    .expect("identity registers"),
+            ))
+            .expect("identity reads");
+        assert_eq!(identities.records()[0].store_identity, "0000000100020003");
+        let policy = reopened
+            .match_records(QueryPlan::all(
+                reopened
+                    .register_table(descriptors.request_policy)
+                    .expect("policy registers"),
+            ))
+            .expect("policy reads");
+        assert_eq!(policy.records().len(), 1);
+        assert_eq!(policy.records()[0].request_id_draws, 64);
+        assert_eq!(policy.records()[0].announcement_tries, 3);
+    }
+}

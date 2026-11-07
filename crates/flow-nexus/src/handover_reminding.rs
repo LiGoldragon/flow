@@ -77,14 +77,16 @@ impl RemindsHandoverCallers for crate::RunningNexus {
         for reminder in due {
             // Admission is deliberately ordinary. In particular this does
             // not use DeliveryPurpose::Heartbeat or any refresh hold bypass.
+            let sections = match self.store.handover(&reminder.address) {
+                Ok(sections) => sections,
+                Err(_) => continue,
+            };
+            let base = HandoverReminderNotice { address: reminder.address.clone(), text: reminder.reminder_text.clone(), generation: reminder.generation };
             let accepted = self.store.accept_logical_delivery(
                 &reminder.address,
                 SentBy::Flow,
                 Delivery::Queue,
-                Message::HardAbrupt(Request::Notice({
-                    let base = HandoverReminderNotice { address: reminder.address.clone(), text: reminder.reminder_text.clone(), generation: reminder.generation };
-                    base.keep_commands(&self.store.handover(&reminder.address).unwrap_or_else(|_| Vec::new()))
-                })),
+                Message::HardAbrupt(Request::Notice(base.keep_commands(&sections))),
                 None,
             );
             if !matches!(accepted, Ok(signal_flow::PrivateSendResponse::SendAccepted(_))) { continue; }

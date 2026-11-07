@@ -414,7 +414,8 @@
         outcome (try
                   (f)
                   (catch Exception e
-                    (let [typed (select-keys (ex-data e) [:package :client :query :error])]
+                    (let [typed (select-keys (ex-data e) [:package :client :query :error
+                                                          :prerequisite :identifier :address :h0-refusals])]
                       {:reply (str "exception: " (.getMessage e)
                                    (when (seq typed) (str " " (pr-str typed))))
                        :pass false
@@ -1114,12 +1115,35 @@
       (flush)
       (when-not ok (throw (ex-info (str "Configure." family " refused") {:reply reply}))))))
 
+(def handover-h0-refusals (atom nil))
+
+(defn require-handover-identifier
+  "A handover identifier established by H0, or a bounded failure that keeps
+  H0's exact launch refusals. No dependent client receives an empty id."
+  [kind value & [address]]
+  (let [identifier (some-> value str not-empty)]
+    (when (str/blank? identifier)
+      (throw (ex-info "handover prerequisite identifier missing after H0"
+                      (cond-> {:prerequisite "H0" :identifier kind
+                               :h0-refusals @handover-h0-refusals}
+                        address (assoc :address address)))))
+    identifier))
+
+(defn read-events-query [flow-id]
+  (str "ReadEvents." (require-handover-identifier :flow flow-id)))
+
+(defn handover-flow [address]
+  (require-handover-identifier :flow (awake-flow address) address))
+
+(defn handover-thread [address]
+  (require-handover-identifier :native-thread (native-session (inspect address)) address))
+
 (defn turns
   "The Haiku turns the capsule's flows took: the prompts each flow's harness
   reported submitted."
   []
   (into {} (for [f @seen-flows]
-             (let [reply (flow-meta (str "ReadEvents." f))]
+             (let [reply (flow-meta (read-events-query f))]
                [f {:prompts (count (heads-named "PromptSubmitted" (read-datom reply)))
                    :stops (count (heads-named "Stopped" (read-datom reply)))}]))))
 
@@ -1255,7 +1279,7 @@
   [(flow-meta (configure-line "Metaflows")) (flow-meta (configure-line "Thresholds"))])
 
 (defn stops-of [flow-id]
-  (count (heads-named "Stopped" (read-datom (flow-meta (str "ReadEvents." flow-id))))))
+  (count (heads-named "Stopped" (read-datom (flow-meta (read-events-query flow-id))))))
 
 (defn log-text [] (try (slurp @nexus-log) (catch Exception _ "")))
 
@@ -1538,7 +1562,8 @@
 (defn observer-model-catalog [] (observer-json "models" "models"))
 
 (defn observer-history [label thread-id]
-  (observer-json label "history" "--thread-id" thread-id))
+  (observer-json label "history" "--thread-id"
+                 (require-handover-identifier :native-thread thread-id)))
 
 (defn history-user-turns
   "Every exact-thread userMessage, chronologically, preserving its full content
@@ -1863,6 +1888,7 @@
             other-awake (watch 60 #(awake-flow ho-other))
             other-rested (when other-awake (watch 180 #(pos? (stops-of (str other-awake)))))
             test-launch (launch ho-seat)
+            _ (reset! handover-h0-refusals {:luna other-launch :terra test-launch})
             flow-id (watch 60 #(awake-flow ho-seat))
             rested (when flow-id (watch 180 #(pos? (stops-of (str flow-id)))))
             declared (seat-declaration (configure-line "Metaflows") ho-seat)
@@ -1883,9 +1909,9 @@
 
    ["H1 Keep and Drop from the seat's own pane; NotOwner from another pane; UnknownCaller from the driver; Read before and after Drop"
     (fn []
-      (let [pane (ho-pane)
-            other (bound-pane (inspect ho-other))
-            thread-id (native-session (inspect ho-seat))
+      (let [pane (require-handover-identifier :seat-pane (ho-pane) ho-seat)
+            other (require-handover-identifier :seat-pane (bound-pane (inspect ho-other)) ho-other)
+            thread-id (handover-thread ho-seat)
             observed (observed-turn! "h1-keep-one" thread-id
                                      #(seat-call! ho-seat "h1-keep-one" (keep-datom "canary-one" "The first canary section." "Body one.")))
             k1 (:result observed)
@@ -1918,8 +1944,8 @@
 
    ["H2 warning when the window opens: Keep command and needle, first reminder is the warning, next one interval later, none for two intervals after a Keep inside the window"
     (fn []
-      (let [flow-id (str (awake-flow ho-seat))
-            thread-id (native-session (inspect ho-seat))
+      (let [flow-id (handover-flow ho-seat)
+            thread-id (handover-thread ho-seat)
             rested (pos? (stops-of flow-id))
             latest-touch (:latest-touch @ho)
             baseline (observed-turn! "h2-warning-baseline" thread-id
@@ -1996,9 +2022,9 @@
 
    ["H3 refresh at the Stop of a green seat past its threshold: successor handed the Kept sections last in its first prompt; the closed generation refuses the old flow"
     (fn []
-      (let [old (str (awake-flow ho-seat))
-            old-pane (ho-pane)
-            old-native (native-session (inspect ho-seat))
+      (let [old (handover-flow ho-seat)
+            old-pane (require-handover-identifier :seat-pane (ho-pane) ho-seat)
+            old-native (handover-thread ho-seat)
             read (flow (str "Read." ho-seat))
             sections (sections-of read)
             expected (handover-text sections)
@@ -2011,12 +2037,16 @@
             measured (observed-turn! "h3-threshold" old-native #(ho-turn! old (bulk-order "h3-threshold")))
             sent (:result measured)
             crossed (boolean (and (:tokens measured) (>= (:tokens measured) r3)))
-            successor (watch 240 #(let [f (awake-flow ho-seat)] (when (and f (not= (str f) old)) (str f))))
+            successor (require-handover-identifier
+                       :successor-flow
+                       (watch 240 #(let [f (awake-flow ho-seat)] (when (and f (not= (str f) old)) (str f))))
+                       ho-seat)
             ;; The successor runs under the ordinary threshold again.
             restored (flow-meta (ho-threshold ho-high))
-            native (when successor (watch 60 #(native-session (inspect ho-seat))))
-            first-history (when native (watch 120 #(let [h (observer-history "h3-successor-first" native)]
-                                                     (when (seq (history-user-turns h)) h))))
+            native (require-handover-identifier
+                    :native-thread (watch 60 #(native-session (inspect ho-seat))) ho-seat)
+            first-history (watch 120 #(let [h (observer-history "h3-successor-first" native)]
+                                        (when (seq (history-user-turns h)) h)))
             handed (first (history-user-turns first-history))
             last-part (boolean (and handed (str/ends-with? (str/trim (:text handed)) (str/trim expected))))
             _ (spit marker "closed")
@@ -2038,7 +2068,7 @@
 
    ["H4 closed generation publishes exact immutable Git identity before the same generation key is removed; failing pre-commit hook delays both completion events until retry"
     (fn []
-      (let [pred (:pred @ho)
+      (let [pred (require-handover-identifier :predecessor-flow (:pred @ho) ho-seat)
             rel (str "Mind/test/Terra/" pred ".md")
             refused (watch 30 #(fs/exists? ho-hook-refused))
             publisher-waiting (watch 90 #(fs/exists? ho-hook-waiting))
@@ -2107,8 +2137,8 @@
    ["H5 ordinary delivery past threshold until green: no refresh at Stop, an Order drained by Wake reaches the transcript, no Uncertain mark; a Keep inside the window, then the next Stop refreshes"
     (fn []
       (let [policy (flow-meta (ho-policy ho-share))
-            flow-id (str (awake-flow ho-seat))
-            thread-id (native-session (inspect ho-seat))
+            flow-id (handover-flow ho-seat)
+            thread-id (handover-thread ho-seat)
             first-stop (watch 180 #(pos? (stops-of flow-id)))
             baseline (observed-turn! "h5-baseline" thread-id #(ho-turn! flow-id (bulk-order "h5-baseline")))
             push1 (:result baseline)
@@ -2154,14 +2184,20 @@
 
    ["H6 an ordered Refresh bypasses the gate: a non-green seat refreshed from its own pane, then from meta"
     (fn []
-      (let [f1 (str (awake-flow ho-seat))
+      (let [f1 (handover-flow ho-seat)
             rested (watch 180 #(pos? (stops-of f1)))
             glance (flow (str "Glance." ho-seat))
             own (seat-call! ho-seat "h6-refresh" (str "Refresh." ho-seat))
-            f2 (watch 180 #(let [f (awake-flow ho-seat)] (when (and f (not= (str f) f1)) (str f))))
+            f2 (require-handover-identifier
+                :successor-flow
+                (watch 180 #(let [f (awake-flow ho-seat)] (when (and f (not= (str f) f1)) (str f))))
+                ho-seat)
             rested2 (when f2 (watch 180 #(pos? (stops-of f2))))
             by-meta (flow-meta (str "Refresh." ho-seat))
-            f3 (watch 180 #(let [f (awake-flow ho-seat)] (when (and f f2 (not= (str f) f2)) (str f))))]
+            f3 (require-handover-identifier
+                :successor-flow
+                (watch 180 #(let [f (awake-flow ho-seat)] (when (and f f2 (not= (str f) f2)) (str f))))
+                ho-seat)]
         {:reply (str "Glance: " glance " / Refresh from its pane: " own " / Refresh from meta: " by-meta)
          :pass (boolean (and rested (or (nil? own) (str/starts-with? own "Refreshed.")) f2
                              (str/starts-with? by-meta "Refreshed.") f3))
@@ -2171,9 +2207,9 @@
 
    ["H7 empty-queue threshold crossing: after a pre-subscribed measured Stop, a Soft message reaches the same native thread before any green"
     (fn []
-      (let [flow-id (str (awake-flow ho-seat))
+      (let [flow-id (handover-flow ho-seat)
             rested (watch 180 #(pos? (stops-of flow-id)))
-            thread-id (native-session (inspect ho-seat))
+            thread-id (handover-thread ho-seat)
             baseline (observed-turn! "h7-baseline" thread-id #(ho-turn! flow-id (bulk-order "h7-baseline")))
             tp (:tokens baseline)
             r7 (+ tp 300)

@@ -79,6 +79,52 @@
              (not (str/includes? reply "must-not-print"))))
     (finally (reset! flow-capsule/results saved))))
 
+;; H0 establishes every identifier the later handover scenarios use. A missing
+;; seat, flow or native thread ends the dependent scenario with H0's exact
+;; launch refusals; it is never composed into a client query or observer argv.
+(let [saved @flow-capsule/handover-h0-refusals
+      refusals {:luna "StartRejected.Luna" :terra "StartRejected.Terra"}]
+  (try
+    (reset! flow-capsule/handover-h0-refusals refusals)
+    (let [queries (atom [])]
+      (with-redefs [flow-capsule/flow-meta
+                    (fn [query] (swap! queries conj query) "Events.[]")]
+        (check "a valid flow id composes the exact ReadEvents query"
+               (and (= 0 (flow-capsule/stops-of "abcdef"))
+                    (= ["ReadEvents.abcdef"] @queries)))))
+    (let [called (atom false)
+          failure (try
+                    (with-redefs [flow-capsule/flow-meta (fn [_] (reset! called true) "Events.[]")]
+                      (flow-capsule/stops-of ""))
+                    nil
+                    (catch Exception e (ex-data e)))]
+      (check "a missing flow id fails before ReadEvents composition"
+             (and (not @called)
+                  (= "H0" (:prerequisite failure))
+                  (= :flow (:identifier failure))
+                  (= refusals (:h0-refusals failure)))))
+    (let [called (atom false)
+          failure (try
+                    (with-redefs [flow-capsule/observer-json
+                                  (fn [& _] (reset! called true) {})]
+                      (flow-capsule/observer-history "missing-thread" nil))
+                    nil
+                    (catch Exception e (ex-data e)))]
+      (check "a missing native thread fails before an observer query"
+             (and (not @called)
+                  (= :native-thread (:identifier failure))
+                  (= refusals (:h0-refusals failure)))))
+    (let [failure (try
+                    (flow-capsule/require-handover-identifier
+                     :seat-pane nil "{ Mind test Terra }")
+                    nil
+                    (catch Exception e (ex-data e)))]
+      (check "a missing seat binding keeps its address and H0 refusals"
+             (and (= :seat-pane (:identifier failure))
+                  (= "{ Mind test Terra }" (:address failure))
+                  (= refusals (:h0-refusals failure)))))
+    (finally (reset! flow-capsule/handover-h0-refusals saved))))
+
 ;; Optional Claude state is absent before any Claude seat starts. Teardown
 ;; therefore reads no directory and finds no trace.
 (let [scratch (str (fs/create-temp-dir))]

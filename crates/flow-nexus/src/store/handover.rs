@@ -98,59 +98,6 @@ pub trait HoldsHandovers {
         flow_id: &str,
         refresh: i64,
     ) -> Result<bool, StoreError>;
-    fn record_handover_touch(
-        &self,
-        flow_id: &str,
-        tokens: i64,
-        timestamp: i64,
-    ) -> Result<(), StoreError>;
-}
-
-pub(crate) trait RegistersHandoverTable {
-    fn register_handover_table(
-        engine: &mut sema_engine::Engine,
-    ) -> Result<TableReference<HandoverMemory>, StoreError>;
-}
-
-impl RegistersHandoverTable for FlowStore {
-    fn register_handover_table(
-        engine: &mut sema_engine::Engine,
-    ) -> Result<TableReference<HandoverMemory>, StoreError> {
-        Ok(engine.register_table(HandoverMemory::descriptor())?)
-    }
-}
-
-impl HoldsHandovers for FlowStore {
-    fn handover_memory(&self, address: &Address) -> Result<Option<HandoverMemory>, StoreError> {
-        self.handover_row(address)
-    }
-
-    fn handover(&self, address: &Address) -> Result<Vec<Section>, StoreError> {
-        Ok(self
-            .handover_row(address)?
-            .map_or_else(Vec::new, |row| row.current))
-    }
-
-    fn record_handover_touch(
-        &self,
-        flow_id: &str,
-        tokens: i64,
-        timestamp: i64,
-    ) -> Result<(), StoreError> {
-        let Some(metaflow) = self.metaflow_awake_as(flow_id)? else {
-            return Ok(());
-        };
-        let Some(mut row) = self.handover_row(&metaflow.address)? else {
-            return Ok(());
-        };
-        row.touch = Some(signal_flow::Touch::Known(signal_flow::Known_Data {
-            flow_id: flow_id.into(),
-            tokens,
-            timestamp,
-        }));
-        self.write_handover(row)
-    }
-
     fn handover_green(
         &self,
         address: &Address,

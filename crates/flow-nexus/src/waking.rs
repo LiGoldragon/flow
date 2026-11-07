@@ -2649,12 +2649,6 @@ impl WakesInParts for RunningNexus {
             eprintln!("flow-nexus: flow {flow_id} context size not recorded");
             return;
         }
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs() as i64);
-        if let Err(error) = self.store.record_handover_touch(flow_id, tokens, timestamp) {
-            eprintln!("flow-nexus: flow {flow_id} handover touch not recorded: {error}");
-        }
     }
 
     fn refuse_live_session(&self, node: &FlowNode, sessions: &[String]) -> Result<(), WakeRefusal> {

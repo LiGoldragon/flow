@@ -1024,6 +1024,14 @@ fn public_direct_delivery_finishes_before_a_concurrent_existing_bind() {
     let reached = fixture.directory.path().join("serial-deliver-reached");
     let release = fixture.directory.path().join("serial-deliver-release");
 
+    struct ReleasesPublicDelivery(std::path::PathBuf);
+
+    impl Drop for ReleasesPublicDelivery {
+        fn drop(&mut self) {
+            let _ = fs::write(&self.0, "");
+        }
+    }
+
     let (delivered, bound) = with_bound_world(fixture, &[&binding], || {
         // Registration validates the native claim and live pane supplied by
         // this world; doing it before the world exists is truthfully refused.
@@ -1045,9 +1053,11 @@ fn public_direct_delivery_finishes_before_a_concurrent_existing_bind() {
             1,
         ));
         std::thread::scope(|scope| {
+            let _release_before_join = ReleasesPublicDelivery(release.clone());
             let (delivery_answered, observe_delivery_answer) = std::sync::mpsc::channel();
-            let delivering = scope.spawn(|| {
-                let response = fixture.nexus.dispatch_meta_serially(
+            let delivery_fixture: &'static NexusFixture = fixture;
+            let delivering = scope.spawn(move || {
+                let response = delivery_fixture.nexus.dispatch_meta_serially(
                     MetaQuery::Deliver(DeliveryRequest {
                         delivery_id: "public-serial-delivery".into(),
                         flow_id: "908786".into(),

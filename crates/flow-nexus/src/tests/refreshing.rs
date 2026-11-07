@@ -1184,7 +1184,10 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
     assert_eq!(replaced.flow_id, CLAUDE_SEAT);
     let successor_flow_id = replaced.launched.flow_id;
     assert_ne!(successor_flow_id, CLAUDE_SEAT);
-    assert_eq!(stored(&fixture).state, State::Awake(successor_flow_id.clone()));
+    assert_eq!(
+        stored(&fixture).state,
+        State::Awake(successor_flow_id.clone())
+    );
     assert_eq!(typing_calls(&fixture).len(), predecessor_calls);
     let successor = fixture
         .nexus
@@ -1192,8 +1195,7 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
         .flow_node(&successor_flow_id)
         .unwrap()
         .expect("replacement successor registered");
-    let HerdrRouteSelection::Available(successor_route) =
-        successor.herdr_route_selection.clone()
+    let HerdrRouteSelection::Available(successor_route) = successor.herdr_route_selection.clone()
     else {
         panic!("replacement successor has no Herdr route: {successor:?}")
     };

@@ -812,10 +812,10 @@ impl Drop for PanePeer {
     }
 }
 
-/// A flow past its model's refresh threshold is given no new message: a
-/// Deliver into it is refused before anything reaches the pane.
+/// A flow past its model's refresh threshold continues receiving ordinary
+/// delivery until an actual refresh is in motion.
 #[test]
-fn a_deliver_into_a_flow_past_its_threshold_is_refused() {
+fn a_deliver_into_a_flow_past_its_threshold_reaches_the_pane() {
     use crate::store::context::RecordsContextSize as _;
     let fixture = NexusFixture::new();
     let log = fixture.accept_pane_operations(
@@ -829,7 +829,7 @@ fn a_deliver_into_a_flow_past_its_threshold_is_refused() {
         .store
         .record_context_size("908786", 200_000)
         .expect("context size recorded");
-    assert_eq!(
+    assert!(matches!(
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Deliver(meta_signal_flow::DeliveryRequest {
@@ -837,7 +837,7 @@ fn a_deliver_into_a_flow_past_its_threshold_is_refused() {
                 flow_id: "908786".into(),
                 message: middle_abrupt("one more thing"),
             })),
-        MetaResponse::DeliveryRejected(meta_signal_flow::DeliveryRejection::PastThreshold)
-    );
-    assert!(prompts(&log).is_empty(), "nothing reached the pane");
+        MetaResponse::Delivered(_)
+    ));
+    assert!(!prompts(&log).is_empty(), "payload reached the pane");
 }

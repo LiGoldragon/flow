@@ -223,19 +223,6 @@ impl DeliversMessages for RunningNexus {
         if let Some(refusal) = request.message.refusal(&target.profile) {
             return Response::DeliveryRejected(DeliveryRejection::BodyRefused(refusal));
         }
-        // A flow past its model's refresh threshold is given no new
-        // message, unless its successor was refused: it stays the
-        // metaflow's flow and is handed what comes for it.
-        match self.store.past_threshold(&target.node.flow_id) {
-            Ok(false) => {}
-            Ok(true)
-                if crate::waking::NotesRefreshRefusals::holds(
-                    &self.refresh_refusals,
-                    &target.node.flow_id,
-                ) => {}
-            Ok(true) => return Response::DeliveryRejected(DeliveryRejection::PastThreshold),
-            Err(_) => return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused),
-        }
         let _lease = self.pane_leases.hold(&target.route);
         match LeasedDelivery::new(self, &request, &target).run() {
             Ok(delivery) => {

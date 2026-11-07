@@ -7,7 +7,7 @@
 //! fixtures in `request_id_upgrade`.
 
 use super::{
-    FlowStore, ManagesMetaflowState, OpensFlowStore, RecordsLogicalDeliveries,
+    FlowStore, ManagesMetaflowState, OpensFlowStore, ReadsFlowMemory, RecordsLogicalDeliveries,
     StoredMetaRequestPolicyConfiguration,
 };
 use std::{

@@ -512,6 +512,7 @@ fn a_maintained_seat_refreshed_with_nothing_queued_starts_its_successor_first() 
         )
         .unwrap();
 
+    fixture.nexus.record_context_at_stop(CLAUDE_SEAT);
     let before = seat_metaflow_now(&fixture);
     let standing = fixture.nexus.store.threshold_standing(CLAUDE_SEAT).unwrap();
     let green = fixture
@@ -622,6 +623,7 @@ fn an_on_demand_seat_refreshed_with_a_waking_request_starts_its_successor_first(
         )
         .unwrap();
 
+    fixture.nexus.record_context_at_stop(CLAUDE_SEAT);
     let before = seat_metaflow_now(&fixture);
     let standing = fixture.nexus.store.threshold_standing(CLAUDE_SEAT).unwrap();
     let green = fixture

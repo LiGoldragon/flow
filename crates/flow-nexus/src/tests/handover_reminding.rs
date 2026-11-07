@@ -119,7 +119,7 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
     const CLAUDE_SEAT: &str = "fixture-seat";
     use super::NexusFixture;
     use crate::handover_reminding::RemindsHandoverCallers;
-    use crate::store::{ConfiguresFlowStore, ManagesMetaflowState, ReadsFlowMemory, SeedsRole};
+    use crate::store::{ManagesMetaflowState, ReadsFlowMemory, SeedsRole};
     use crate::store::context::RecordsContextSize;
     use crate::store::handover::HoldsHandovers;
     use crate::store::metaflow::SeedsMetaflow;
@@ -153,7 +153,7 @@ fn green_keep_cancels_open_warning_timer() {
     const CLAUDE_SEAT: &str = "fixture-seat";
     use super::NexusFixture;
     use crate::handover_reminding::RemindsHandoverCallers;
-    use crate::store::{ConfiguresFlowStore, SeedsRole};
+    use crate::store::{ManagesMetaflowState, SeedsRole};
     use crate::store::context::RecordsContextSize;
     use crate::store::handover::{HandoverWriter, HoldsHandovers};
     use crate::store::metaflow::SeedsMetaflow;

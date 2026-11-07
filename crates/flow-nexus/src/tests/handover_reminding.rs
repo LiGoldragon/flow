@@ -142,3 +142,29 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
     fixture.nexus.send_due_handover_reminders(320);
     assert_eq!(fixture.nexus.store.handover_reminder(&address, 0).unwrap().unwrap().sent, 2);
 }
+
+#[test]
+fn green_keep_cancels_open_warning_timer() {
+    use super::{CLAUDE_MODEL, CLAUDE_SEAT};
+    use super::NexusFixture;
+    use crate::handover_reminding::RemindsHandoverCallers;
+    use crate::store::{ConfiguresFlowStore, SeedsRole};
+    use crate::store::context::RecordsContextSize;
+    use crate::store::handover::{HandoverWriter, HoldsHandovers};
+    use crate::store::metaflow::SeedsMetaflow;
+    use meta_signal_flow::{ConfigurationChange, ConfigureThreshold, HandoverPolicy};
+    use signal_flow::{Address, Aspect, Caller, Metaflow, Model, Touch, Known_Data};
+    let fixture = NexusFixture::new();
+    let address = Address { aspect: Aspect::Mind, topic: "flow".into(), model: Model::Sol };
+    fixture.nexus.store.seed_role(Caller { flow_id: CLAUDE_SEAT.into(), aspect: Aspect::Mind, model_name: CLAUDE_MODEL.into() });
+    fixture.nexus.store.configure_change(ConfigurationChange::Thresholds(vec![ConfigureThreshold { model_name: CLAUDE_MODEL.into(), refresh: 101 }])).unwrap();
+    fixture.nexus.store.configure_change(ConfigurationChange::HandoverPolicies(vec![HandoverPolicy { model_name: CLAUDE_MODEL.into(), warning_share_left: 15, reminder_text: "fixture".into(), every_minutes: 5 }])).unwrap();
+    fixture.nexus.store.ensure_live_handover(&address, CLAUDE_SEAT).unwrap();
+    fixture.nexus.store.seed_metaflow(Metaflow { address: address.clone(), state: flow_ethos::State::Awake(CLAUDE_SEAT.into()), past: vec![], queue: vec![] });
+    fixture.nexus.store.record_context_size(CLAUDE_SEAT, 86).unwrap();
+    fixture.nexus.send_due_handover_reminders(10);
+    assert!(fixture.nexus.store.handover_reminder(&address, 0).unwrap().is_some());
+    fixture.nexus.store.keep_handover_for_flow(&HandoverWriter { address: address.clone(), flow_id: CLAUDE_SEAT.into() }, signal_flow::Section { title: "x".into(), description: "d".into(), body: "b".into() }, Touch::Known(Known_Data { flow_id: CLAUDE_SEAT.into(), tokens: 86, timestamp: 10 })).unwrap();
+    fixture.nexus.send_due_handover_reminders(11);
+    assert!(fixture.nexus.store.handover_reminder(&address, 0).unwrap().is_none());
+}

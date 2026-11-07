@@ -9554,6 +9554,28 @@ mod tests {
             };
             accepted
         };
+        let unfinished = [
+            None,
+            Some(DeliveryState::Attempting),
+            Some(DeliveryState::Retryable(
+                signal_flow::RetryCause::HistoryAbsent,
+            )),
+            Some(DeliveryState::Uncertain),
+        ];
+        for (index, state) in unfinished.into_iter().enumerate() {
+            let accepted = admit(&format!("unfinished {index}"));
+            if let Some(state) = state {
+                store
+                    .transition_logical_delivery(&accepted.logical_delivery_id, state)
+                    .expect("delivery remains unfinished");
+            }
+            assert_eq!(
+                store
+                    .archive_request(&accepted.request_id, &sender)
+                    .expect("unfinished archive reads"),
+                Err(signal_flow::ArchiveRejection::NotYet)
+            );
+        }
         let terminal = [
             DeliveryState::Delivered(NativeReceipt {
                 harness_kind: flow_ethos::HarnessKind::Codex,
@@ -9582,6 +9604,12 @@ mod tests {
                     .expect("terminal snapshot reads")
                     .expect("terminal snapshot remains"),
                 ended
+            );
+            assert_eq!(
+                store
+                    .archive_request(&accepted.request_id, &sender)
+                    .expect("terminal archive reads"),
+                Ok(())
             );
         }
 

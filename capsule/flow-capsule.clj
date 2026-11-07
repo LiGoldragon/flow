@@ -477,24 +477,86 @@
 (defn nonempty-identifier? [value]
   (and (string? value) (not (str/blank? value))))
 
+(defn scalar-string [value]
+  (cond (string? value) value
+        (and (map? value) (contains? value :string)) (:string value)
+        :else nil))
+
+(defn struct-form? [value]
+  (= \{ (:enclosure value)))
+
+(defn variant-name [value]
+  (or (head value) (when (string? value) value)))
+
+(defn exact-bare-variant? [value names]
+  (and (contains? names (variant-name value)) (nil? (body value))))
+
+(defn valid-endpoint-selection? [selection]
+  (case (variant-name selection)
+    "Unavailable" (nil? (body selection))
+    "Available" (let [[path readiness :as fields] (items (body selection))]
+                  (and (struct-form? (body selection)) (= 2 (count fields))
+                       (nonempty-identifier? (scalar-string path))
+                       (exact-bare-variant? readiness #{"Ready" "Parked"})))
+    false))
+
+(defn valid-origin? [origin]
+  (case (variant-name origin)
+    "Unbound" (nil? (body origin))
+    "Flow" (let [[flow-id session-id :as fields] (items (body origin))]
+             (and (struct-form? (body origin)) (= 2 (count fields))
+                  (nonempty-identifier? (scalar-string flow-id))
+                  (nonempty-identifier? (scalar-string session-id))))
+    false))
+
+(defn valid-process-option? [process-option]
+  (case (variant-name process-option)
+    "None" (nil? (body process-option))
+    "Some" (let [[pid started :as fields] (items (body process-option))]
+             (and (struct-form? (body process-option)) (= 2 (count fields))
+                  (some? (parse-long (str pid))) (some? (parse-long (str started)))))
+    false))
+
 (defn inspected-binding
-  "The Flow/native binding carried by one typed Inspect reply."
+  "The exact Codex Flow/native/Herdr route carried by Binding's sole
+  Option<FlowNode>. Available values elsewhere in Inspected are irrelevant."
   [inspected addr]
   (let [d (read-datom inspected)
-        [visible _binding _locks _attempts _restart :as fields] (items (body d))
+        [visible binding locks attempts restart :as fields] (items (body d))
         [address state past queue :as visible-fields] (items visible)
-        flow-id (when (= "Awake" (head state)) (some-> state body str))
-        thread-id (native-session inspected)
-        pane (bound-pane inspected)]
-    (when-not (and (= "Inspected" (head d)) (= 5 (count fields))
-                   (= 4 (count visible-fields))
+        visible-flow-id (when (= "Awake" (head state)) (some-> state body scalar-string))
+        [node-option process-option :as binding-fields] (items binding)
+        node (when (= "Some" (variant-name node-option)) (body node-option))
+        [node-flow-id session-id harness endpoint route-selection origin lifecycle :as node-fields]
+        (items node)
+        route (when (= "Available" (variant-name route-selection)) (body route-selection))
+        [herdr-session agent pane terminal :as route-fields] (items route)
+        route-value {:session (scalar-string herdr-session) :agent (scalar-string agent)
+                     :pane (scalar-string pane) :terminal (scalar-string terminal)}]
+    (when-not (and (= "Inspected" (head d)) (struct-form? (body d)) (= 5 (count fields))
+                   (struct-form? visible) (= 4 (count visible-fields))
+                   (struct-form? address)
                    (= (mapv str (address-items addr)) (mapv str (items address)))
+                   (= "Awake" (head state)) (nil? (:enclosure (body state)))
                    (= \[ (:enclosure past)) (= \[ (:enclosure queue))
-                   (nonempty-identifier? flow-id) (nonempty-identifier? thread-id)
-                   (nonempty-identifier? pane))
+                   (struct-form? binding) (= 2 (count binding-fields))
+                   (= "Some" (variant-name node-option)) (struct-form? node)
+                   (= 7 (count node-fields))
+                   (nonempty-identifier? visible-flow-id)
+                   (= visible-flow-id (scalar-string node-flow-id))
+                   (nonempty-identifier? (scalar-string session-id)) (= "Codex" (str harness))
+                   (valid-endpoint-selection? endpoint)
+                   (= "Available" (variant-name route-selection)) (struct-form? route)
+                   (= 4 (count route-fields))
+                   (every? nonempty-identifier? (vals route-value))
+                   (valid-origin? origin)
+                   (exact-bare-variant? lifecycle #{"Pending" "Active" "Stopped" "Retired" "Exited"})
+                   (valid-process-option? process-option)
+                   (= \[ (:enclosure locks)) (= \[ (:enclosure attempts))
+                   (contains? #{"None" "Some"} (variant-name restart)))
       (throw (ex-info "Inspect did not carry one complete Awake Flow/native binding"
                       {:address addr :reply inspected})))
-    {:flow flow-id :thread thread-id :pane pane
+    {:flow visible-flow-id :thread (scalar-string session-id) :pane (scalar-string pane) :route route-value
      :past (vec (items past)) :queue (vec (items queue))}))
 
 (defn bound-process-id
@@ -2071,10 +2133,18 @@
   "The inspected Flow/native pair remains the exact expected successor pair
   across native-history observation."
   [expected-flow expected-thread before after]
-  (let [established (boolean (and (= (str expected-flow) (str (:flow before)) (str (:flow after)))
-                                  (= expected-thread (:thread before) (:thread after))))]
+  (let [route (:route before)
+        route-valid (and (map? route) (= #{:session :agent :pane :terminal} (set (keys route)))
+                         (every? nonempty-identifier? (vals route))
+                         (= (:pane before) (:pane route)))
+        established (boolean (and route-valid
+                                  (= (str expected-flow) (str (:flow before)) (str (:flow after)))
+                                  (= expected-thread (:thread before) (:thread after))
+                                  (= (:pane before) (:pane after))
+                                  (= route (:route after))))]
     {:established established :expected-flow (str expected-flow)
-     :expected-thread expected-thread :before before :after after}))
+     :expected-thread expected-thread :expected-route route
+     :before before :after after}))
 
 (defn handover-profile-proof
   "Checks the complete set of profile premises under which composition.rs's

@@ -300,32 +300,103 @@
          (= {:predecessor-depth 0 :profile-brief flow-capsule/brief} request)))
 
 (let [reply (str "Inspected.{ { { Mind test Terra } Awake.flow-a [] [] } "
-                 "{ None Some.{ native thread-a } } [] "
-                 "[ Available.{ one two pane-a three } ] None }")
+                 "{ Some.{ flow-a thread-a Codex Unavailable "
+                 "Available.{ default agent-a pane-a terminal-a } Unbound Active } "
+                 "Some.{ 123 456 } } [] [] None }")
+      outer-bracket (str "Inspected.[" (subs reply (count "Inspected.{") (dec (count reply))) "]")
+      available-reply (-> reply
+                          (str/replace "Unavailable Available."
+                                       "Available.{ /tmp/codex.sock Ready } Available.")
+                          (str/replace " Unbound Active" " Flow.{ caller caller-session } Active"))
       binding (flow-capsule/inspected-binding reply flow-capsule/ho-seat)]
   (check "one Inspect reply binds its own Flow, native thread and pane"
-         (= {:flow "flow-a" :thread "thread-a" :pane "pane-a" :past [] :queue []}
+         (= {:flow "flow-a" :thread "thread-a" :pane "pane-a"
+             :route {:session "default" :agent "agent-a"
+                     :pane "pane-a" :terminal "terminal-a"}
+             :past [] :queue []}
             binding))
+  (check "a valid Available endpoint, Flow origin and Some Process retain the own binding"
+         (= binding (flow-capsule/inspected-binding available-reply flow-capsule/ho-seat)))
   (check "an Inspect reply for a different Flow address is refused"
          (try (flow-capsule/inspected-binding reply flow-capsule/ho-other)
               false
-              (catch Exception _ true))))
+              (catch Exception _ true)))
+  (doseq [[label malformed]
+          [["an outer vector with five positions is refused" outer-bracket]
+           ["a VisibleMetaflow vector is refused"
+            (str/replace reply "{ { Mind test Terra } Awake.flow-a [] [] }"
+                         "[ { Mind test Terra } Awake.flow-a [] [] ]")]
+           ["an Address vector is refused"
+            (str/replace reply "{ Mind test Terra }" "[ Mind test Terra ]")]
+           ["a Binding vector with two positions is refused"
+            (str/replace reply
+                         "{ Some.{ flow-a thread-a Codex Unavailable Available.{ default agent-a pane-a terminal-a } Unbound Active } Some.{ 123 456 } }"
+                         "[ Some.{ flow-a thread-a Codex Unavailable Available.{ default agent-a pane-a terminal-a } Unbound Active } Some.{ 123 456 } ]")]
+           ["a FlowNode vector with seven positions is refused"
+            (str/replace reply
+                         "Some.{ flow-a thread-a Codex Unavailable Available.{ default agent-a pane-a terminal-a } Unbound Active }"
+                         "Some.[ flow-a thread-a Codex Unavailable Available.{ default agent-a pane-a terminal-a } Unbound Active ]")]
+           ["an own Herdr route vector with four positions is refused"
+            (str/replace reply "Available.{ default agent-a pane-a terminal-a }"
+                         "Available.[ default agent-a pane-a terminal-a ]")]
+           ["a Process vector with two positions is refused"
+            (str/replace reply "Some.{ 123 456 }" "Some.[ 123 456 ]")]
+           ["an Available endpoint vector is refused"
+            (str/replace available-reply "Available.{ /tmp/codex.sock Ready }"
+                         "Available.[ /tmp/codex.sock Ready ]")]
+           ["a Flow origin vector is refused"
+            (str/replace available-reply "Flow.{ caller caller-session }"
+                         "Flow.[ caller caller-session ]")]
+           ["the old Process-shaped pseudo-node is refused"
+            (str "Inspected.{ { { Mind test Terra } Awake.flow-a [] [] } "
+                 "{ None Some.{ native thread-a } } [] "
+                 "[ Available.{ one two pane-a three } ] None }")]
+           ["a FlowNode stale against visible Awake is refused"
+            (str/replace reply "Some.{ flow-a thread-a" "Some.{ stale thread-a")]
+           ["a non-Codex FlowNode is refused" (str/replace reply " Codex " " Claude ")]
+           ["a missing native session is refused"
+            (str/replace reply "flow-a thread-a Codex" "flow-a Codex")]
+           ["an empty native session is refused"
+            (str/replace reply "flow-a thread-a Codex" "flow-a «» Codex")]
+           ["an absent FlowNode cannot borrow an unrelated attempt route"
+            (str "Inspected.{ { { Mind test Terra } Awake.flow-a [] [] } "
+                 "{ None Some.{ 123 456 } } [] "
+                 "[ Available.{ default agent-x pane-x terminal-x } ] None }")]
+           ["an unavailable own route cannot borrow an unrelated attempt route"
+            (-> reply
+                (str/replace "Available.{ default agent-a pane-a terminal-a }" "Unavailable")
+                (str/replace "[] [] None" "[] [ Available.{ default agent-x pane-x terminal-x } ] None"))]
+           ["an extra duplicate route position is refused"
+            (str/replace reply "Unbound Active" "Unbound Active Available.{ default agent-b pane-b terminal-b }")]
+           ["a Binding with an extra candidate is refused"
+            (str/replace reply "Some.{ 123 456 } } []" "Some.{ 123 456 } None } []")]]]
+    (check label
+           (try (flow-capsule/inspected-binding malformed flow-capsule/ho-seat)
+                false
+                (catch Exception _ true)))))
 
-(let [stable (flow-capsule/binding-proof "flow-a" "thread-a"
-                                         {:flow "flow-a" :thread "thread-a"}
-                                         {:flow "flow-a" :thread "thread-a"})]
+(let [route {:session "default" :agent "agent-a" :pane "pane-a" :terminal "terminal-a"}
+      binding {:flow "flow-a" :thread "thread-a" :pane "pane-a" :route route}
+      stable (flow-capsule/binding-proof "flow-a" "thread-a" binding binding)]
   (check "the expected successor Flow/native binding is stable across observation"
          (:established stable))
   (check "a successor Flow binding race is refused"
          (not (:established (flow-capsule/binding-proof
                              "flow-a" "thread-a"
-                             {:flow "flow-a" :thread "thread-a"}
-                             {:flow "flow-b" :thread "thread-a"}))))
+                             binding (assoc binding :flow "flow-b")))))
   (check "a successor native-thread binding race is refused"
          (not (:established (flow-capsule/binding-proof
                              "flow-a" "thread-a"
-                             {:flow "flow-a" :thread "thread-a"}
-                             {:flow "flow-a" :thread "thread-b"})))))
+                             binding (assoc binding :thread "thread-b")))))
+  (check "a successor pane race is refused"
+         (not (:established (flow-capsule/binding-proof
+                             "flow-a" "thread-a"
+                             binding (-> binding (assoc :pane "pane-b")
+                                         (assoc-in [:route :pane] "pane-b"))))))
+  (check "a successor Herdr route race is refused even with the same pane"
+         (not (:established (flow-capsule/binding-proof
+                             "flow-a" "thread-a"
+                             binding (assoc-in binding [:route :terminal] "terminal-b"))))))
 
 (let [commit (apply str (repeat 40 "a"))
       blob (apply str (repeat 40 "b"))

@@ -173,7 +173,11 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         predecessor_revision,
         "5a0e9fa4c2695b7e1b14a7b0b72160ac560e6d13"
     );
-    assert_eq!(current_revision, env!("FLOW_MIGRATION_SOURCE_REV"));
+    assert_eq!(
+        current_revision,
+        option_env!("FLOW_MIGRATION_SOURCE_REV")
+            .expect("the dedicated migration check stamps its source revision")
+    );
     let predecessor = required_path("FLOW_MIGRATION_PREDECESSOR_BIN");
     let current = required_path("FLOW_MIGRATION_CURRENT_BIN");
     let home = tempfile::tempdir().expect("private home");

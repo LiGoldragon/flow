@@ -829,16 +829,10 @@ fn failed_process_authority_evidence_never_becomes_owner() {
         Asker::Ordinary(signal_flow::Origin::Unbound)
     );
 
-    let operator = SpawnedProcess(
-        Command::new("sleep")
-            .arg("30")
-            .env_remove("CODEX_THREAD_ID")
-            .env_remove("HERDR_SESSION")
-            .env_remove("HERDR_PANE_ID")
-            .spawn()
-            .unwrap(),
-    );
-    let operator = FlowStore::process_identity_for_pid(operator.0.id()).unwrap();
+    // The fixture process itself is the service/terminal operator here. A
+    // child would be below the configured app-server by construction and
+    // must be rejected even if its own environment were scrubbed.
+    let operator = FlowStore::process_identity_for_pid(std::process::id()).unwrap();
     assert_eq!(
         configured.nexus.process_authority(&operator).unwrap(),
         ProcessAuthority::Owner

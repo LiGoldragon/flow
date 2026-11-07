@@ -477,6 +477,35 @@ fn a_repeated_delivery_answers_its_outcome_and_types_nothing_more() {
 }
 
 #[test]
+fn a_recorded_delivery_answers_while_refresh_custody_is_held_without_input() {
+    use crate::waking::HoldsWakingMetaflows;
+    use signal_flow::{Address, Aspect, Model};
+    let fixture = NexusFixture::new();
+    let log = fixture.accept_pane_operations(
+        vec![fixture.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.register_with(FlowLifecycle::Active);
+    fixture.at_secondary_refreshing_at(200_000);
+    let first = fixture.deliver("refresh-receipt", middle_abrupt("only once"));
+    assert!(matches!(first, MetaResponse::Delivered(_)));
+    let address = Address {
+        aspect: Aspect::Psyche,
+        topic: "flow".into(),
+        model: Model::Opus,
+    };
+    let lease = fixture
+        .nexus
+        .waking
+        .hold(&address)
+        .expect("refresh owns the address");
+    let second = fixture.deliver("refresh-receipt", middle_abrupt("only once"));
+    assert_eq!(first, second);
+    drop(lease);
+    assert_eq!(prompts(&log).len(), 1);
+}
+
+#[test]
 fn a_delivery_a_crash_left_under_its_lease_settles_uncertain_and_is_never_retried() {
     use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries};
     use crate::store::{FlowStore, OpensFlowStore};

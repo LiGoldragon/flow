@@ -1765,6 +1765,15 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
             .is_none(),
         "archive releases the id in its commit"
     );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .debug_delivery(&request_id)
+            .expect("archived debug reads")
+            .is_none(),
+        "a private debug lookup resolves held ids only"
+    );
     let opening = fixture
         .nexus
         .store

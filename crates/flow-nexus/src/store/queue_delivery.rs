@@ -2136,6 +2136,12 @@ mod tests {
                 .is_empty(),
             "Read work is never recovered"
         );
+        let debug = reopened
+            .debug_delivery(&queued("first").request_id)
+            .expect("Read delivery debugs")
+            .expect("held request remains debuggable");
+        assert_eq!(debug.read_by.as_deref(), Some("logical-answer"));
+        assert_eq!(debug.receipt, None, "an answer is not a native receipt");
         let late = receipt(&prepared);
         assert!(
             reopened
@@ -2169,6 +2175,20 @@ mod tests {
                 answer: "logical-answer".into(),
                 late_receipt: Some(late),
             }
+        );
+        let debug = restarted
+            .debug_delivery(&queued("first").request_id)
+            .expect("restarted Read delivery debugs")
+            .expect("held request remains debuggable");
+        assert_eq!(debug.read_by.as_deref(), Some("logical-answer"));
+        assert_eq!(
+            debug.receipt,
+            Some(signal_flow::NativeReceipt {
+                harness_kind: HarnessKind::Codex,
+                native_session_id: "thread-7".into(),
+                native_prompt_id: "turn-9".into(),
+            }),
+            "late native evidence stays apart from the answer"
         );
         assert!(
             restarted

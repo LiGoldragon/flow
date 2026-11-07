@@ -823,6 +823,10 @@
             "tests::handover_archive::post_commit_timeout_reverifies_same_generation_before_removal";
           flow-publication-deadline-upgrade = context.exactTest "flow-nexus"
             "store::handover_configuration::tests::persisted_v1_upgrades_once_and_preserves_configuration_and_handover_rows";
+          flow-publication-deadline-new-memory = context.exactTest "flow-nexus"
+            "store::tests::new_memory_persists_the_publication_deadline_default_before_configuration";
+          flow-publication-deadline-descendant-pipes = context.exactGitTest "flow-nexus"
+            "handover_archive::tests::publication_timeout_kills_a_descendant_holding_capture_pipes_after_git_exits";
           flow-retirement-preserves-current-and-sibling = context.exactTest "flow-nexus"
             "tests::handover_memory::exact_retirement_identity_preserves_new_live_and_closed_rows";
           flow-retirement-identity-mismatch-incomplete = context.exactTest "flow-nexus"

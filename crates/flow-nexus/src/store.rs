@@ -1775,6 +1775,10 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                     next_flow_number: 1,
                 },
             ))?;
+            engine.assert(Assertion::new(
+                meta_configuration_tables.handover,
+                handover_configuration::unconfigured(),
+            ))?;
         }
         Ok(Self {
             engine,
@@ -7004,6 +7008,24 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    #[test]
+    fn new_memory_persists_the_publication_deadline_default_before_configuration() {
+        let fixture = StoreFixture::new();
+        for open in 0..2 {
+            let store = ConfigurationOnlyStore::open(&fixture.path()).expect("Memory opens");
+            let rows = store
+                .engine
+                .match_records(QueryPlan::all(store.meta_configuration_tables.handover))
+                .expect("handover configuration reads");
+            assert_eq!(rows.records().len(), 1, "open {open} has one durable row");
+            assert_eq!(
+                rows.records()[0].publication_deadline,
+                meta_signal_flow::PublicationDeadlineConfiguration::Configured(60_000)
+            );
+            drop(store);
+        }
     }
 
     #[test]

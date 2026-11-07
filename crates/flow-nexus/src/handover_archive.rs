@@ -683,6 +683,62 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn publication_timeout_kills_a_descendant_holding_capture_pipes_after_git_exits() {
+        let repository = tempfile::tempdir().unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "flow@example.invalid"][..],
+            &["config", "user.name", "Flow Test"][..],
+        ] {
+            RealGitCommand
+                .run(
+                    repository.path(),
+                    args,
+                    Instant::now() + Duration::from_secs(60),
+                )
+                .unwrap();
+        }
+        let child_pid = repository.path().join("descendant-pid");
+        let hook = repository.path().join(".git/hooks/pre-commit");
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nsleep 30 &\necho $! > '{}'\nexit 0\n",
+                child_pid.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let result = ExistingGitHandoverArchive::new(repository.path())
+            .with_deadline(Duration::from_millis(200))
+            .publish(HandoverArchiveRequest {
+                address: Address {
+                    aspect: Aspect::Mind,
+                    topic: "descendantPipes".into(),
+                    model: Model::Sol,
+                },
+                flow_id: "flow-descendant".into(),
+                document: "generation=1\n".into(),
+            });
+        assert_eq!(result, Err(HandoverArchiveRefusal::PublicationTimedOut));
+        let pid = fs::read_to_string(child_pid)
+            .unwrap()
+            .trim()
+            .parse::<libc::pid_t>()
+            .unwrap();
+        for _ in 0..100 {
+            if unsafe { libc::kill(pid, 0) } == -1 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn publication_rejects_unbounded_hook_output() {
         let repository = tempfile::tempdir().unwrap();
         run_git(

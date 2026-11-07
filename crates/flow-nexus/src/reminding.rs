@@ -166,7 +166,20 @@ impl ArchivesHandoverOnTick for RunningNexus {
             eprintln!("flow-nexus: handover count is Unconfigured; closed generations retained");
             return;
         };
-        let publisher = ExistingGitHandoverArchive::new(path);
+        let Ok(deadline_configuration) = self.store.publication_deadline() else {
+            eprintln!("flow-nexus: publication deadline configuration unreadable");
+            return;
+        };
+        let meta_signal_flow::PublicationDeadlineConfiguration::Configured(deadline_ms) =
+            deadline_configuration
+        else {
+            eprintln!(
+                "flow-nexus: publication deadline is Unconfigured; closed generations retained"
+            );
+            return;
+        };
+        let publisher = ExistingGitHandoverArchive::new(path)
+            .with_deadline(Duration::from_millis(deadline_ms as u64));
         for address in addresses {
             if let Err(error) =
                 self.retire_handover_generations(&address, count as usize, &publisher)

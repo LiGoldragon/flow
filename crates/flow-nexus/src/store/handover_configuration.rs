@@ -1,5 +1,6 @@
 use meta_signal_flow::{
     HandoverArchiveConfiguration, HandoverCountConfiguration, HandoverPoliciesConfiguration,
+    PublicationDeadlineConfiguration,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::TableName;
@@ -14,6 +15,7 @@ pub(crate) struct StoredHandoverConfiguration {
     pub policies: HandoverPoliciesConfiguration,
     pub archive: HandoverArchiveConfiguration,
     pub count: HandoverCountConfiguration,
+    pub publication_deadline: PublicationDeadlineConfiguration,
 }
 impl EngineRecord for StoredHandoverConfiguration {
     fn record_key(&self) -> RecordKey {
@@ -22,10 +24,10 @@ impl EngineRecord for StoredHandoverConfiguration {
 }
 impl MemoryDefinition for StoredHandoverConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
+        MemoryVersion::new(2)
     }
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-handover-configuration-v1")
+        SchemaHash::for_label("flow-nexus-handover-configuration-v2")
     }
 }
 pub(crate) trait DescribesHandoverConfiguration {
@@ -45,6 +47,7 @@ pub(crate) fn unconfigured() -> StoredHandoverConfiguration {
         policies: HandoverPoliciesConfiguration::Unconfigured,
         archive: HandoverArchiveConfiguration::Unconfigured,
         count: HandoverCountConfiguration::Unconfigured,
+        publication_deadline: PublicationDeadlineConfiguration::Configured(60_000),
     }
 }
 
@@ -52,6 +55,7 @@ pub(crate) trait ReadsHandoverConfiguration {
     fn handover_policies(&self) -> Result<HandoverPoliciesConfiguration, super::StoreError>;
     fn handover_archive(&self) -> Result<HandoverArchiveConfiguration, super::StoreError>;
     fn handover_count(&self) -> Result<HandoverCountConfiguration, super::StoreError>;
+    fn publication_deadline(&self) -> Result<PublicationDeadlineConfiguration, super::StoreError>;
 }
 
 impl ReadsHandoverConfiguration for super::FlowStore {
@@ -101,5 +105,20 @@ impl ReadsHandoverConfiguration for super::FlowStore {
             .first()
             .map(|row| row.count.clone())
             .unwrap_or(HandoverCountConfiguration::Unconfigured))
+    }
+    fn publication_deadline(&self) -> Result<PublicationDeadlineConfiguration, super::StoreError> {
+        use sema_engine::{QueryPlan, RecordKey};
+        let rows = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.meta_configuration_tables.handover,
+                RecordKey::new("handover"),
+            ))?
+            .records()
+            .to_vec();
+        Ok(rows
+            .first()
+            .map(|row| row.publication_deadline.clone())
+            .unwrap_or(PublicationDeadlineConfiguration::Configured(60_000)))
     }
 }

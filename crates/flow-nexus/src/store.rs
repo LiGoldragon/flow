@@ -1627,6 +1627,7 @@ pub struct ConfiguredFamilies {
     pub handover_policies: meta_signal_flow::HandoverPoliciesConfiguration,
     pub handover_archive: meta_signal_flow::HandoverArchiveConfiguration,
     pub handover_count: meta_signal_flow::HandoverCountConfiguration,
+    pub publication_deadline: meta_signal_flow::PublicationDeadlineConfiguration,
 }
 
 pub trait CompletesSnapshot {
@@ -1651,6 +1652,7 @@ impl CompletesSnapshot for ConfiguredFamilies {
             handover_policies: self.handover_policies,
             handover_archive: self.handover_archive,
             handover_count: self.handover_count,
+            publication_deadline: self.publication_deadline,
             counters,
         }
     }
@@ -5123,6 +5125,7 @@ pub(crate) trait ReadsFlowMemory {
             handover_policies: handover.policies,
             handover_archive: handover.archive,
             handover_count: handover.count,
+            publication_deadline: handover.publication_deadline,
         }))
     }
 
@@ -5268,6 +5271,7 @@ pub(crate) trait ReadsFlowMemory {
                         ),
                         archive: old.archive,
                         count: old.count,
+                        publication_deadline: old.publication_deadline,
                     }],
                 )
             }
@@ -5285,6 +5289,7 @@ pub(crate) trait ReadsFlowMemory {
                         policies: old.policies,
                         archive: meta_signal_flow::HandoverArchiveConfiguration::Configured(path),
                         count: old.count,
+                        publication_deadline: old.publication_deadline,
                     }],
                 )
             }
@@ -5307,6 +5312,31 @@ pub(crate) trait ReadsFlowMemory {
                         policies: old.policies,
                         archive: old.archive,
                         count: meta_signal_flow::HandoverCountConfiguration::Configured(count),
+                        publication_deadline: old.publication_deadline,
+                    }],
+                )
+            }
+            ConfigurationChange::PublicationDeadline(duration) => {
+                if duration <= 0 {
+                    return Err(StoreError::HandoverConfigurationRefused(
+                        meta_signal_flow::HandoverConfigurationRefusal::InvalidPublicationDeadline,
+                    ));
+                }
+                let old = engine
+                    .match_records(QueryPlan::all(tables.handover))?
+                    .records()
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(handover_configuration::unconfigured);
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.handover,
+                    vec![handover_configuration::StoredHandoverConfiguration {
+                        policies: old.policies,
+                        archive: old.archive,
+                        count: old.count,
+                        publication_deadline:
+                            meta_signal_flow::PublicationDeadlineConfiguration::Configured(duration),
                     }],
                 )
             }

@@ -4493,6 +4493,148 @@ mod tests {
     }
 
     #[test]
+    fn sender_observation_replays_archived_history_in_cursor_order_and_keeps_other_senders_private()
+    {
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        use crate::store::metaflow::SeedsMetaflow;
+
+        let fixture = NexusFixture::new();
+        let sender = signal_flow::Address {
+            aspect: Aspect::Field,
+            topic: "observerA".into(),
+            model: Model::Luna,
+        };
+        let other_sender = signal_flow::Address {
+            aspect: Aspect::Field,
+            topic: "observerB".into(),
+            model: Model::Luna,
+        };
+        let recipient = signal_flow::Address {
+            aspect: Aspect::Mind,
+            topic: "message".into(),
+            model: Model::Sol,
+        };
+        fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+            address: recipient.clone(),
+            state: flow_ethos::State::Asleep,
+            past: vec![],
+            queue: vec![],
+        });
+        let admit = |sender: &signal_flow::Address, words: &str| {
+            let signal_flow::PrivateSendResponse::SendAccepted(accepted) = fixture
+                .nexus
+                .store
+                .accept_logical_delivery(
+                    &recipient,
+                    signal_flow::SentBy::Sender(sender.clone()),
+                    flow_ethos::Delivery::Queue,
+                    signal_flow::Message::Soft(signal_flow::Request::Notice(words.into())),
+                    None,
+                )
+                .expect("logical send admits")
+            else {
+                panic!("queued admission has an acceptance cursor")
+            };
+            accepted
+        };
+        let archived = admit(&sender, "archive this sender's request");
+        let other = admit(&other_sender, "another sender's request");
+        fixture
+            .nexus
+            .store
+            .transition_logical_delivery(
+                &archived.logical_delivery_id,
+                signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                    harness_kind: flow_ethos::HarnessKind::Codex,
+                    native_session_id: "recipient-session".into(),
+                    native_prompt_id: "recipient-prompt".into(),
+                }),
+            )
+            .expect("request ends");
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .archive_request(&archived.request_id, &sender)
+                .expect("archive reads"),
+            Ok(())
+        );
+
+        let current = fixture
+            .nexus
+            .store
+            .read_logical_delivery_snapshots(&sender, None)
+            .expect("cursorless opening reads");
+        assert!(
+            current.delivery_snapshot_vector.is_empty(),
+            "an archived request is absent from the held-only opening"
+        );
+        let history = fixture
+            .nexus
+            .store
+            .read_logical_delivery_snapshots(&sender, Some(0))
+            .expect("sender history reads");
+        assert_eq!(history.store_identity, current.store_identity);
+        assert_eq!(history.delivery_cursor, current.delivery_cursor);
+        assert_eq!(
+            history
+                .delivery_snapshot_vector
+                .iter()
+                .map(|snapshot| snapshot.delivery_state.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                signal_flow::DeliveryState::Queued,
+                signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                    harness_kind: flow_ethos::HarnessKind::Codex,
+                    native_session_id: "recipient-session".into(),
+                    native_prompt_id: "recipient-prompt".into(),
+                }),
+                signal_flow::DeliveryState::Archived,
+            ]
+        );
+        assert!(
+            history
+                .delivery_snapshot_vector
+                .windows(2)
+                .all(|pair| pair[0].delivery_cursor < pair[1].delivery_cursor)
+        );
+        assert!(
+            history
+                .delivery_snapshot_vector
+                .iter()
+                .all(|snapshot| snapshot.logical_delivery_id == archived.logical_delivery_id)
+        );
+
+        let other_opening = fixture
+            .nexus
+            .store
+            .read_logical_delivery_snapshots(&other_sender, None)
+            .expect("other sender opening reads");
+        assert_eq!(other_opening.store_identity, history.store_identity);
+        assert_eq!(other_opening.delivery_cursor, history.delivery_cursor);
+        assert_eq!(other_opening.delivery_snapshot_vector.len(), 1);
+        assert_eq!(
+            other_opening.delivery_snapshot_vector[0].logical_delivery_id,
+            other.logical_delivery_id
+        );
+        assert!(
+            history
+                .delivery_snapshot_vector
+                .iter()
+                .all(|snapshot| snapshot.logical_delivery_id != other.logical_delivery_id)
+        );
+        assert!(
+            fixture
+                .nexus
+                .store
+                .read_logical_delivery_snapshots(&sender, Some(history.delivery_cursor))
+                .expect("caught-up sender reads")
+                .delivery_snapshot_vector
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn a_report_is_recorded_for_a_held_flow_and_refused_for_an_unknown_one() {
         use signal_flow::{Event, Report_Data};
         let fixture = NexusFixture::new();

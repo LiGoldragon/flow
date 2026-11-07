@@ -2759,15 +2759,9 @@ impl WakesInParts for RunningNexus {
         };
         self.settle_owed(&address, &response);
         match response {
-            Response::Replaced(replaced) => {
-                use crate::store::handover::HoldsHandovers;
-                if self
-                    .store
-                    .close_handover_for_successor(&address, flow_id, &replaced.flow_id)
-                    .is_err()
-                {
-                    return AtStop::Kept(KeptAtStop::StoreUnreadable);
-                }
+            Response::Replaced(_) => {
+                // The launching reap closes the handover before recording
+                // Replaced; this response is already past that durable point.
                 AtStop::Refreshed(address)
             }
             response => AtStop::Kept(KeptAtStop::RefreshLaunchRefused(Box::new(response))),

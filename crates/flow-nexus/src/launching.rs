@@ -767,6 +767,17 @@ impl LaunchesFlows for RunningNexus {
                 ));
             }
         };
+        let address = match self.store.list_metaflows() {
+            Ok(rows) => rows.into_iter().find_map(|row| {
+                (matches!(row.state, flow_ethos::State::Awake(ref id) if id == &replacement.predecessor)
+                    || row.past.last().is_some_and(|id| id == &replacement.predecessor))
+                    .then_some(row.address)
+            }),
+            Err(_) => None,
+        };
+        let Some(address) = address else {
+            return refuse(ReplaceRejection::UnknownPredecessor);
+        };
         // The predecessor stops receiving first: Stopped is what
         // ResolveRecipient and Deliver refuse.
         if node.flow_lifecycle != FlowLifecycle::Stopped
@@ -799,6 +810,25 @@ impl LaunchesFlows for RunningNexus {
             flow_id: replacement.predecessor.clone(),
             launched,
         };
+        // Close the predecessor generation before the durable outcome releases
+        // the successor to routing.  Reaping is retried after a crash; the
+        // handover transition is idempotent for the same successor identity.
+        {
+            use crate::store::handover::HoldsHandovers;
+            if self
+                .store
+                .close_handover_for_successor(
+                    &address,
+                    &replacement.predecessor,
+                    &replaced.launched.flow_id,
+                )
+                .is_err()
+            {
+                return refuse(ReplaceRejection::ReapRefused(
+                    StopRejection::PersistenceRefused,
+                ));
+            }
+        }
         // The Replaced outcome is what releases the successor to routing.
         if self.perform(Self::settled_as(
             &replacement.launch_request_id,

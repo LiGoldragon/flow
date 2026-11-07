@@ -2309,6 +2309,7 @@ fn a_metaflow_left_awake_as_an_ended_flow_is_woken_by_an_order() {
 fn identifies_and_wakes_by_an_order(recipient: State) {
     use crate::metaflow::DispatchesMetaflowPeer;
     use crate::sending::MeasuresSendPayload;
+    use crate::store::logical_delivery::RecordsLogicalDeliveries;
     use crate::store::metaflow::TakesLaunchAddress;
     use crate::store::send_outcome::RecordsSendOutcomes;
     use crate::store::{FlowStore, ReadsFlowMemory};
@@ -2495,17 +2496,76 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     };
     let order = Request::Order("Run the tier tests.".into());
     let world = fixture.fresh_claude_world();
-    let answer = fixture.nexus.dispatch_metaflow_peer(
-        signal_flow::Query::Deliver(Deliver_Data {
-            lock,
-            deliver_key: "wake-order".into(),
-            sendable_message: super::sendable_message(Message::MiddleAbrupt(order.clone())),
-        }),
-        Some(&message),
-    );
+    let deliver = Deliver_Data {
+        lock,
+        deliver_key: "wake-order-distinctive-private-key".into(),
+        sendable_message: super::sendable_message(Message::MiddleAbrupt(order.clone())),
+    };
+    let answer = fixture
+        .nexus
+        .dispatch_metaflow_peer(signal_flow::Query::Deliver(deliver.clone()), Some(&message));
     let signal_flow::PrivateSendResponse::Sent(receipt) = answer.private_response else {
         panic!("delivery answers from the successor's exact receipt")
     };
+    let replay = fixture
+        .nexus
+        .dispatch_metaflow_peer(signal_flow::Query::Deliver(deliver.clone()), Some(&message));
+    let signal_flow::PrivateSendResponse::SendAccepted(replayed) = replay.private_response else {
+        panic!("a lost Deliver answer is recovered from its key alone")
+    };
+    assert_eq!(replayed.logical_delivery_id, receipt.logical_delivery_id);
+    assert_eq!(replayed.request_id, receipt.request_id);
+    let mut changed = deliver.clone();
+    changed.sendable_message =
+        super::sendable_message(Message::MiddleAbrupt(Request::Order("Different".into())));
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_metaflow_peer(signal_flow::Query::Deliver(changed), Some(&message))
+            .response,
+        Response::DeliverKeyReused
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_metaflow_peer(
+                signal_flow::Query::Acknowledge(vec![deliver.deliver_key.clone()]),
+                None,
+            )
+            .response,
+        Response::Refused(signal_flow::Refusal::NotMessage)
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .deliver_call(&deliver.deliver_key)
+            .expect("Deliver key reads")
+            .is_some(),
+        "an unauthenticated Acknowledge writes nothing"
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_metaflow_peer(
+                signal_flow::Query::Acknowledge(vec![
+                    deliver.deliver_key.clone(),
+                    "unknown".into()
+                ]),
+                Some(&message),
+            )
+            .response,
+        Response::Acknowledged
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .deliver_call(&deliver.deliver_key)
+            .expect("Deliver key reads")
+            .is_none(),
+        "Acknowledge retracts the durable key"
+    );
     let woken = stored(&fixture, Model::Sol);
     let State::Awake(flow_id) = &woken.state else {
         panic!(
@@ -2530,6 +2590,12 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
             .iter()
             .any(|turn| turn.contains(&[sent.clone()].prompt_text(&address(Model::Sol)))),
         "{turns:?}"
+    );
+    assert!(
+        turns
+            .iter()
+            .all(|turn| !turn.contains("wake-order-distinctive-private-key")),
+        "the Message-private key never enters the recipient pane: {turns:?}"
     );
 }
 

@@ -138,14 +138,16 @@ pub trait ArchivesHandoverOnTick { fn retire_handover_archives(&self); }
 impl ArchivesHandoverOnTick for RunningNexus {
     fn retire_handover_archives(&self) {
         use crate::handover_archive::{ExistingGitHandoverArchive, RetiresHandoverGenerations};
+        use crate::store::handover_configuration::ReadsHandoverConfiguration;
         use crate::store::metaflow::SleepsMetaflows;
         use std::collections::BTreeSet;
-        let Ok(Some(snapshot)) = self.store.configuration_snapshot() else { return };
-        let meta_signal_flow::HandoverArchiveConfiguration::Configured(path) = snapshot.handover_archive else {
+        let Ok(archive) = self.store.handover_archive() else { eprintln!("flow-nexus: handover archive configuration unreadable"); return };
+        let meta_signal_flow::HandoverArchiveConfiguration::Configured(path) = archive else {
             eprintln!("flow-nexus: handover archive is ArchiveUnconfigured; closed generations retained");
             return;
         };
-        let meta_signal_flow::HandoverCountConfiguration::Configured(count) = snapshot.handover_count else {
+        let Ok(count_configuration) = self.store.handover_count() else { eprintln!("flow-nexus: handover count configuration unreadable"); return };
+        let meta_signal_flow::HandoverCountConfiguration::Configured(count) = count_configuration else {
             eprintln!("flow-nexus: handover count is Unconfigured; closed generations retained");
             return;
         };

@@ -254,6 +254,38 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_result_by_request_id() {
+        let client = FlowClient;
+        let Query::Send(send) = client
+            .parse_query(
+                ["Send.{ { Psyche core Opus } Soft.Result.{ k7ph «Reviewed; green.» } }".into()]
+                    .into_iter(),
+            )
+            .expect("a Result names the request it answers")
+        else {
+            panic!("fixture must remain a Send")
+        };
+        assert_eq!(
+            send.sendable_message,
+            SendableMessage::Soft(SendableRequest::Result(
+                signal_flow::SendableRequest_Result_Data {
+                    request_id: "k7ph".into(),
+                    string: "Reviewed; green.".into(),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn cli_prints_sent_with_request_id() {
+        let client = FlowClient;
+        assert_eq!(
+            client.textualize_reply(&Response::Sent("k7ph".into())),
+            "Sent.k7ph"
+        );
+    }
+
+    #[test]
     fn version_is_the_one_non_datom_invocation() {
         assert_eq!(
             (&["--version".to_owned()] as &[String]).version_answer(),

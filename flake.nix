@@ -336,6 +336,7 @@
               inherit (context) cargoArtifacts;
               pnameSuffix = "-message-joint";
               doCheck = true;
+              FLOW_MESSAGE_JOINT_SOURCE_REV = self.rev or self.dirtyRev or "unpublished";
               buildPhaseCargoCommand = ''
                 cargoWithProfile build --locked -p flow-nexus --bin flow-nexus
               '';

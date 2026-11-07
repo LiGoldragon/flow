@@ -290,13 +290,18 @@ fn message_tracking(home: &Path, runtime: &Path) -> message_nexus::store::Durabl
 #[test]
 #[ignore = "the dedicated Nix check supplies exact production Flow and Message binaries"]
 fn real_flow_and_message_share_the_durable_delivery_ledger() {
+    #[allow(clippy::manual_unwrap_or)]
+    let stamped_revision = match option_env!("FLOW_MESSAGE_JOINT_SOURCE_REV") {
+        Some(revision) => revision,
+        None => "unstamped",
+    };
     assert_eq!(
         std::env::var("FLOW_MESSAGE_JOINT_FLOW_REV").unwrap(),
-        "f37d4470afc8d923752ac77d9a32d0ebfe9c99a9"
+        stamped_revision
     );
     assert_eq!(
         std::env::var("FLOW_MESSAGE_JOINT_MESSAGE_REV").unwrap(),
-        "bb329ba8230e02aa2e310b730c6ec0dabd8fdadf"
+        "70b7daa3ff069b0b8c836ba6aff223992dcf59a1"
     );
     let flow_binary = required_path("FLOW_MESSAGE_JOINT_FLOW_BIN");
     let message_binary = required_path("FLOW_MESSAGE_JOINT_MESSAGE_BIN");

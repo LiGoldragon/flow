@@ -6225,30 +6225,20 @@ mod tests {
             TaskAnnouncementStatus::Pending(Some(_))
         ));
         drop(rows);
-        drop(store);
-        let store = fixture.store();
-        let rows = store
-            .engine
-            .match_records(QueryPlan::all(store.request_id_upgrade.task_announcements))
-            .expect("refused pending row survives restart");
-        assert_eq!(rows.records()[0].tries, 0);
-        drop(rows);
-
         store.seed_metaflow(flow_ethos::Metaflow {
             address: notice_recipient.clone(),
             state: flow_ethos::State::Asleep,
             past: Vec::new(),
             queue: Vec::new(),
         });
-        store
-            .run_request_id_announcements()
-            .expect("available recipient admits");
+        drop(store);
+        let store = fixture.store();
         let rows = store
             .engine
             .match_records(QueryPlan::all(store.request_id_upgrade.task_announcements))
-            .expect("admitted row reads");
+            .expect("startup retries the pending row");
         let TaskAnnouncementStatus::Admitted(notice) = &rows.records()[0].status else {
-            panic!("notice admitted")
+            panic!("startup admits the pending Notice")
         };
         let notice = notice.clone();
         assert_eq!(rows.records()[0].tries, 1);

@@ -675,4 +675,67 @@ mod tests {
             Err(HandoverArchiveRefusal::PublicationTimedOut)
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn ambiguous_commit_timeout_retries_and_reverifies_exact_identity_and_bytes() {
+        let repository = tempfile::tempdir().unwrap();
+        run_git(
+            repository.path(),
+            ["init", "-q"],
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap();
+        run_git(
+            repository.path(),
+            ["config", "user.email", "flow@example.invalid"],
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap();
+        run_git(
+            repository.path(),
+            ["config", "user.name", "Flow Test"],
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap();
+        let hook = repository.path().join(".git/hooks/pre-commit");
+        let state = repository.path().join("hook-state");
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nif test ! -e '{}'; then touch '{}'; sleep 30; fi\n",
+                state.display(),
+                state.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let request = HandoverArchiveRequest {
+            address: Address {
+                aspect: Aspect::Mind,
+                topic: "retryTopic".into(),
+                model: Model::Sol,
+            },
+            flow_id: "flow-retry".into(),
+            document: "generation=7\nexact-bytes\n".into(),
+        };
+        let first = ExistingGitHandoverArchive::new(repository.path())
+            .with_deadline(Duration::from_millis(80))
+            .publish(request.clone());
+        assert_eq!(first, Err(HandoverArchiveRefusal::PublicationTimedOut));
+        let second = ExistingGitHandoverArchive::new(repository.path())
+            .with_deadline(Duration::from_secs(5))
+            .publish(request)
+            .unwrap();
+        assert!(!second.commit.is_empty());
+        assert!(!second.blob.is_empty());
+        let bytes = run_git_output(
+            repository.path(),
+            ["cat-file", "blob", second.blob.as_str()],
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(bytes, "generation=7\nexact-bytes\n");
+    }
 }

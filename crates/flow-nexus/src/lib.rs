@@ -387,7 +387,7 @@ impl Dispatches for RunningNexus {
             | Query::BindSeat(_)
             | Query::Adopt(_)
             | Query::ObserveSends(_)
-            | Query::ObserveSender(_) => Response::Refused(
+            | Query::ObserveDeliveries(_) => Response::Refused(
                 <signal_flow::Refusal as sending::RefusesUnidentified>::unidentified(
                     signal_flow::Process { pid: 0, started: 0 },
                 ),
@@ -1181,6 +1181,21 @@ pub trait ServesConnection: Sized {
         nexus: &RunningNexus,
         sender: &signal_flow::Address,
         cursor: Option<i64>,
+    ) -> Result<(), String> {
+        self.serve_delivery_changes(nexus, Some(sender), cursor)
+    }
+    fn serve_deliveries(
+        &mut self,
+        nexus: &RunningNexus,
+        cursor: Option<i64>,
+    ) -> Result<(), String> {
+        self.serve_delivery_changes(nexus, None, cursor)
+    }
+    fn serve_delivery_changes(
+        &mut self,
+        nexus: &RunningNexus,
+        sender: Option<&signal_flow::Address>,
+        cursor: Option<i64>,
     ) -> Result<(), String>;
     fn serve_retirement(
         &mut self,
@@ -1209,10 +1224,10 @@ impl ServesConnection for Connection {
         Ok(Self { peer, process })
     }
 
-    fn serve_sends(
+    fn serve_delivery_changes(
         &mut self,
         nexus: &RunningNexus,
-        sender: &signal_flow::Address,
+        sender: Option<&signal_flow::Address>,
         cursor: Option<i64>,
     ) -> Result<(), String> {
         let mut reader = self.peer.try_clone().map_err(|error| error.to_string())?;
@@ -1237,9 +1252,14 @@ impl ServesConnection for Connection {
             })
             .map_err(|error| error.to_string())?;
 
-        let result = nexus.observe_sends(sender, cursor, &disconnected, &mut |response| {
-            self.peer.write_response(response)
-        });
+        let result = match sender {
+            Some(sender) => nexus.observe_sends(sender, cursor, &disconnected, &mut |response| {
+                self.peer.write_response(response)
+            }),
+            None => nexus.observe_deliveries(cursor, &disconnected, &mut |response| {
+                self.peer.write_response(response)
+            }),
+        };
         let _ = self.peer.shutdown(Shutdown::Both);
         let watcher_result = watcher
             .join()
@@ -1297,23 +1317,32 @@ impl ServesConnection for Connection {
                         ),
                     ));
                 };
-                let sender = match nexus.observation_sender(process, None) {
+                let sender = match nexus.observation_sender(process) {
                     Ok(sender) => sender,
                     Err(refusal) => return self.peer.write_response(&refusal),
                 };
                 return self.serve_sends(nexus, &sender, cursor);
             }
-            Query::ObserveSender(forwarded) => {
+            Query::ObserveDeliveries(cursor) => {
                 let Some(process) = self.process.as_ref() else {
                     return self
                         .peer
                         .write_response(&Response::Refused(signal_flow::Refusal::NotMessage));
                 };
-                let sender = match nexus.observation_sender(process, Some(&forwarded)) {
-                    Ok(sender) => sender,
-                    Err(refusal) => return self.peer.write_response(&refusal),
+                match nexus.store.message_peer(process) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return self
+                            .peer
+                            .write_response(&Response::Refused(signal_flow::Refusal::NotMessage));
+                    }
+                    Err(error) => {
+                        return self.peer.write_response(&Response::Refused(
+                            signal_flow::Refusal::Store(error.to_string()),
+                        ));
+                    }
                 };
-                return self.serve_sends(nexus, &sender, forwarded.delivery_cursor_option);
+                return self.serve_deliveries(nexus, cursor);
             }
             // A hook's Report never waits behind a running launch: the
             // launch may itself be waiting on the harness whose hook this is.

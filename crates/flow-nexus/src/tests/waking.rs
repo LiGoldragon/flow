@@ -2523,6 +2523,16 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         signal_flow::DeliveryState::Delivered(_)
     ));
     assert!(delivered.delivery_cursor > accepted.delivery_cursor);
+    let message_opening = fixture
+        .nexus
+        .store
+        .read_message_delivery_snapshots(None)
+        .expect("Message delivery opening reads");
+    assert_eq!(message_opening.delivery_snapshot_vector.len(), 1);
+    assert_eq!(
+        message_opening.delivery_snapshot_vector[0].logical_delivery_id,
+        accepted.logical_delivery_id
+    );
     let replay = fixture
         .nexus
         .dispatch_metaflow_peer(signal_flow::Query::Deliver(deliver.clone()), Some(&message));
@@ -2580,6 +2590,15 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
             .expect("Deliver key reads")
             .is_none(),
         "Acknowledge retracts the durable key"
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .read_message_delivery_snapshots(None)
+            .expect("Message delivery provenance survives Acknowledge")
+            .delivery_snapshot_vector,
+        message_opening.delivery_snapshot_vector
     );
     let woken = stored(&fixture, Model::Sol);
     let State::Awake(flow_id) = &woken.state else {

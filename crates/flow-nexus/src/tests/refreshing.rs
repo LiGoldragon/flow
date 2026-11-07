@@ -1180,26 +1180,54 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
 
     assert!(matches!(replaced, Response::Replaced(_)), "{replaced:?}");
     assert_eq!(typing_calls(&fixture).len(), predecessor_calls);
+    let successor = fixture
+        .nexus
+        .store
+        .flow_node(CLAUDE_SEAT)
+        .unwrap()
+        .expect("replacement successor registered");
+    assert_eq!(
+        successor.session_id,
+        "01a0b22c-e24f-7452-9940-64490878680f"
+    );
     let codex = accepting_codex_endpoint(
         &mut fixture,
         "fixture-model",
         "01a0b22c-e24f-7452-9940-64490878680f",
     );
-    let successor_herdr = fs::read_to_string(&fixture.snapshot_program).expect("fixture Herdr");
-    let refusal = "  *) exit 64 ;;";
-    assert!(successor_herdr.contains(refusal), "{successor_herdr}");
-    FixtureExecutable {
-        path: fixture.snapshot_program.clone(),
-    }
-    .install(&successor_herdr.replacen(
-        refusal,
-        &format!("  *\" pane send-keys \"*) exit 0 ;;\n{refusal}"),
+    let successor_operations = fixture.accept_pane_operations(
+        vec![fixture.successor_agent()],
+        PromptFixture::Prompted("w1:p1"),
+    );
+    let successor_input_count = || {
+        fs::read_to_string(&successor_operations)
+            .unwrap_or_default()
+            .lines()
+            .filter(|call| call.contains("--session fixture-session agent prompt w1:p1"))
+            .count()
+    };
+    assert_eq!(successor_input_count(), 0);
+    assert_eq!(fixture.typed(), None);
+    let drained = fixture.nexus.perform(Operation::Drain(seat_address()));
+    assert!(matches!(drained, Outcome::Drained(_)), "{drained:?}");
+    let first_input = fixture.typed().expect("first warning typed to successor");
+    assert_eq!(
+        first_input
+            .matches("flow Keep.{ WhatIAmStillTryingToDo")
+            .count(),
         1,
-    ));
+        "the first native input carries one warning: {first_input}"
+    );
+    assert_eq!(successor_input_count(), 1);
     let drained = fixture.nexus.perform(Operation::Drain(seat_address()));
     assert!(matches!(drained, Outcome::Drained(_)), "{drained:?}");
-    let drained = fixture.nexus.perform(Operation::Drain(seat_address()));
-    assert!(matches!(drained, Outcome::Drained(_)), "{drained:?}");
+    let second_input = fixture.typed().expect("second warning typed to successor");
+    assert_eq!(
+        second_input,
+        format!("{first_input}{first_input}"),
+        "the second drain types the same warning payload exactly once"
+    );
+    assert_eq!(successor_input_count(), 2);
     let delivered = fixture
         .nexus
         .store
@@ -1212,6 +1240,13 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
             signal_flow::DeliveryState::Uncertain
         ),
         "the native input is durably placed under the same logical id: {delivered:?}"
+    );
+    let _ = fixture.nexus.perform(Operation::Drain(seat_address()));
+    assert_eq!(fixture.typed(), Some(second_input));
+    assert_eq!(
+        successor_input_count(),
+        2,
+        "an extra drain produces no additional native input"
     );
     drop(codex);
     assert_eq!(

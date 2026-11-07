@@ -2828,11 +2828,13 @@ mod tests {
         fn register_with(&self, lifecycle: FlowLifecycle) {
             let mut node = self.node();
             node.flow_lifecycle = lifecycle;
-            assert!(matches!(
-                self.nexus
-                    .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node)),
-                meta_signal_flow::Response::FlowRegistered(_)
-            ));
+            let response = self
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node));
+            assert!(
+                matches!(response, meta_signal_flow::Response::FlowRegistered(_)),
+                "{response:?}"
+            );
         }
 
         /// A MiddleAbrupt Deliver of `text` from the owner: the tier that

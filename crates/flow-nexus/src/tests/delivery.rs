@@ -1013,7 +1013,6 @@ fn public_direct_delivery_finishes_before_a_concurrent_existing_bind() {
     use std::time::{Duration, Instant};
 
     let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
-    fixture.register_with(FlowLifecycle::Active);
     let mut binding = existing_binding("908786", "w1:p3");
     binding.native_session_id = "01a0b22c-e24f-7452-9940-64490878680f".into();
     binding.herdr_workspace_id = "w1".into();
@@ -1026,6 +1025,9 @@ fn public_direct_delivery_finishes_before_a_concurrent_existing_bind() {
     let release = fixture.directory.path().join("serial-deliver-release");
 
     let (delivered, bound) = with_bound_world(fixture, &[&binding], || {
+        // Registration validates the native claim and live pane supplied by
+        // this world; doing it before the world exists is truthfully refused.
+        fixture.register_with(FlowLifecycle::Active);
         let body = fs::read_to_string(&fixture.snapshot_program).expect("bound Herdr world");
         let pattern = "  *) exit 64 ;;";
         assert!(body.contains(pattern), "{body}");

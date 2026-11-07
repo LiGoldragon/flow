@@ -310,7 +310,7 @@ fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
     use super::waking::{
         CLAUDE_SEAT, append_main_rows, claude_agent, claude_seat, claude_stop, end_turn,
     };
-    use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
+    use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture, prompts};
     use crate::store::handover::HoldsHandovers;
     use crate::store::handover_reminders::SchedulesHandoverReminders;
     use crate::store::{ManagesMetaflowState, SeedsRole};
@@ -705,3 +705,129 @@ fn reminder_state_reopens_with_anchored_due_without_duplicate_initial() {
         400
     );
 }
+
+/// A scheduled warning is an ordinary queued HardAbrupt delivery: once the
+/// recipient is already past its threshold, admission still drains through
+/// the real waking path and reaches its pane.  The threshold is a warning
+/// observation, not a delivery hold.
+#[test]
+fn runtime_tick_drains_due_hard_notice_past_threshold_into_the_pane() {
+    use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
+    use crate::store::context::{JudgesThreshold, RecordsContextSize};
+    use crate::store::delivery::RecordsDeliveries;
+    use crate::store::handover::HoldsHandovers;
+    use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+    use crate::store::{ManagesMetaflowState, SeedsRole};
+    use flow_ethos::{Metaflow, State};
+    use signal_flow::Caller;
+
+    let fixture = NexusFixture::new();
+    let log = fixture.accept_pane_operations(
+        vec![fixture.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.register_with(signal_flow::FlowLifecycle::Active);
+    let address = signal_flow::Address {
+        aspect: Aspect::Psyche,
+        topic: "flow".into(),
+        model: Model::Opus,
+    };
+    fixture.nexus.store.seed_role(Caller {
+        flow_id: "908786".into(),
+        aspect: Aspect::Psyche,
+        model_name: "claude-opus-5-5".into(),
+    });
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: address.clone(),
+        state: State::Awake("908786".into()),
+        past: vec![],
+        queue: vec![],
+    });
+    fixture
+        .nexus
+        .store
+        .ensure_live_handover(&address, "908786")
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Thresholds(vec![
+            meta_signal_flow::ConfigureThreshold {
+                model_name: "claude-opus-5-5".into(),
+                refresh: 101,
+            },
+        ]))
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::HandoverPolicies(
+            vec![meta_signal_flow::HandoverPolicy {
+                model_name: "claude-opus-5-5".into(),
+                warning_share_left: 15,
+                reminder_text: "configured".into(),
+                every_minutes: 5,
+            }],
+        ))
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .record_context_size("908786", 200)
+        .unwrap();
+    assert!(fixture.nexus.store.past_threshold("908786").unwrap());
+
+    fixture.nexus.send_due_handover_reminders(10);
+
+    let stored = fixture.nexus.store.metaflow(&address).unwrap().unwrap();
+    assert!(
+        stored.queue.is_empty(),
+        "scheduled warning drained, not parked"
+    );
+    assert_eq!(
+        fixture.nexus.store.outstanding_delivery(&address).unwrap(),
+        None
+    );
+    let typed = fixture.typed().expect("warning reached pane");
+    assert!(typed.contains("configured"), "{typed}");
+    assert_eq!(
+        prompts(&log)
+            .iter()
+            .filter(|line| line.contains("configured"))
+            .count(),
+        1
+    );
+    let reminder = fixture
+        .nexus
+        .store
+        .handover_reminder(&address, 0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reminder.sent, 1);
+}
+
+#[test]
+fn reminder_admission_waits_for_handover_gate_before_commit() {
+    use super::NexusFixture;
+    use crate::store::logical_delivery::RecordsLogicalDeliveries;
+    use crate::store::metaflow::SeedsMetaflow;
+    use signal_flow::{Message, Request};
+    let fixture = NexusFixture::new();
+    let address = address();
+    fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+        address: address.clone(),
+        state: flow_ethos::State::Awake("fixture-seat".into()),
+        past: vec![],
+        queue: vec![],
+    });
+    fixture
+        .nexus
+        .store
+        .ensure_live_handover(&address, "fixture-seat")
+        .unwrap();
+    let reminder = HandoverReminder::open_handover_reminder(
+        address.clone(),
+        0,
+        "m".into(),
+        10,
+        5,

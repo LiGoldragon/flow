@@ -8373,7 +8373,10 @@ mod tests {
     fn request_id_entropy_is_an_injected_capability() {
         let fixture = StoreFixture::new();
         let mut store = fixture.store();
-        store.set_request_id_drawer_for_tests(std::sync::Arc::new(FixedRequestIdDrawer));
+        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+            &mut store,
+            std::sync::Arc::new(FixedRequestIdDrawer),
+        );
         assert_eq!(
             store.request_id_drawer.draw_request_id().expect("draws"),
             "abcd"

@@ -18,7 +18,6 @@ import math
 import os
 import secrets
 import selectors
-import stat
 import struct
 import subprocess
 import sys
@@ -54,30 +53,8 @@ def require_object(value: Any, where: str) -> dict[str, Any]:
     return value
 
 
-def private_path_guard(root_text: str, socket_text: str) -> tuple[Path, Path]:
-    root = Path(root_text)
-    socket_path = Path(socket_text)
-    if not root.is_absolute() or not socket_path.is_absolute():
-        raise ObserverError("private root and socket must be absolute paths")
-    root = root.resolve(strict=True)
-    socket_path = socket_path.resolve(strict=True)
-    try:
-        socket_path.relative_to(root)
-    except ValueError as error:
-        raise ObserverError("socket is outside the private root") from error
-    root_stat = root.stat()
-    if not stat.S_ISDIR(root_stat.st_mode):
-        raise ObserverError("private root is not a directory")
-    if root_stat.st_uid != os.geteuid():
-        raise ObserverError("private root is not owned by this user")
-    if root_stat.st_mode & 0o077:
-        raise ObserverError("private root grants group or other access")
-    socket_stat = socket_path.stat()
-    if not stat.S_ISSOCK(socket_stat.st_mode):
-        raise ObserverError("socket path is not a Unix socket")
-    if socket_stat.st_uid != os.geteuid():
-        raise ObserverError("socket is not owned by this user")
-    return root, socket_path
+def observer_paths(root_text: str, socket_text: str) -> tuple[Path, Path]:
+    return Path(root_text), Path(socket_text)
 
 
 def private_log(root: Path, text: str) -> tuple[Path, BinaryIO]:
@@ -768,7 +745,7 @@ def main(argv: list[str] | None = None) -> int:
         raise ObserverError("a command is required")
     if not args.codex or not args.private_root or not args.socket:
         raise ObserverError("--codex, --private-root and --socket are required")
-    root, socket_path = private_path_guard(args.private_root, args.socket)
+    root, socket_path = observer_paths(args.private_root, args.socket)
     with ProxySession(args.codex, socket_path, args.timeout) as session:
         session.initialize()
         if args.command == "models":

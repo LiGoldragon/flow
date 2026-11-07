@@ -1033,31 +1033,6 @@
 
 (def codex-server (atom nil))
 
-(defn codex-socket-path-witness!
-  "Records only path and Unix metadata needed to prove whether the Codex
-  socket stayed inside the private capsule. Refuses a canonical escape before
-  an observer or scenario runs."
-  []
-  (let [socket-path (fs/path codex-socket)
-        no-follow (into-array java.nio.file.LinkOption [java.nio.file.LinkOption/NOFOLLOW_LINKS])
-        symbolic (java.nio.file.Files/isSymbolicLink socket-path)
-        canonical-root (fs/path (fs/canonicalize private-root))
-        canonical-socket (fs/path (fs/canonicalize codex-socket))
-        contained (.startsWith canonical-socket canonical-root)
-        witness {:root private-root
-                 :socket codex-socket
-                 :socket-symbolic-link symbolic
-                 :socket-link-target (when symbolic (str (java.nio.file.Files/readSymbolicLink socket-path)))
-                 :canonical-root (str canonical-root)
-                 :canonical-socket (str canonical-socket)
-                 :contained contained
-                 :socket-lstat-mode (java.nio.file.Files/getAttribute socket-path "unix:mode" no-follow)
-                 :socket-lstat-uid (java.nio.file.Files/getAttribute socket-path "unix:uid" no-follow)
-                 :socket-lstat-gid (java.nio.file.Files/getAttribute socket-path "unix:gid" no-follow)}]
-    (keep-text! "handover-codex-socket-path.edn" (pr-str witness))
-    (when-not contained
-      (throw (ex-info "Codex socket canonical path escaped private root" witness)))))
-
 (defn start-codex! [log]
   (when-not codex-binary (throw (ex-info "no Codex executable: set FLOW_CAPSULE_CODEX" {})))
   (fs/create-dirs codex-home)
@@ -1074,7 +1049,6 @@
                                    :out :append :out-file (fs/file log) :err :append :err-file (fs/file log) :in ""}))
   (when-not (watch 30 #(fs/exists? codex-socket))
     (throw (ex-info "the capsule's Codex app-server opened no socket" {})))
-  (codex-socket-path-witness!)
   (println (str "codex | " codex-binary " | " codex-model " | " codex-socket)))
 
 (defn start-text

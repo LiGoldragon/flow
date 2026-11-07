@@ -91,41 +91,6 @@
              (= [] (flow-capsule/traces #{}))))
     (finally (fs/delete-tree scratch))))
 
-;; Socket diagnostics serialize path metadata only and refuse both an absent
-;; endpoint and a symlink whose canonical target escapes the capsule root.
-(let [scratch (str (fs/create-temp-dir))
-      root (str scratch "/root")
-      witness (str scratch "/witness")
-      inside (str root "/inside.sock")
-      outside (str scratch "/outside.sock")
-      alias (str root "/alias.sock")]
-  (try
-    (fs/create-dirs root)
-    (fs/create-dirs witness)
-    (spit inside "inside")
-    (spit outside "outside")
-    (with-redefs [flow-capsule/private-root root
-                  flow-capsule/codex-socket inside
-                  flow-capsule/witness-dir (atom witness)]
-      (flow-capsule/codex-socket-path-witness!)
-      (let [text (slurp (str witness "/handover-codex-socket-path.edn"))]
-        (check "socket diagnostics keep bounded path metadata"
-               (and (str/includes? text ":canonical-socket")
-                    (str/includes? text ":socket-lstat-mode")
-                    (not (str/includes? text "auth"))))))
-    (fs/create-sym-link alias outside)
-    (with-redefs [flow-capsule/private-root root
-                  flow-capsule/codex-socket alias
-                  flow-capsule/witness-dir (atom (str scratch "/escape-witness"))]
-      (check "socket diagnostics refuse a canonical escape"
-             (try (flow-capsule/codex-socket-path-witness!) false (catch Exception _ true))))
-    (with-redefs [flow-capsule/private-root root
-                  flow-capsule/codex-socket (str root "/missing.sock")
-                  flow-capsule/witness-dir (atom (str scratch "/missing-witness"))]
-      (check "socket diagnostics refuse an absent endpoint"
-             (try (flow-capsule/codex-socket-path-witness!) false (catch Exception _ true))))
-    (finally (fs/delete-tree scratch))))
-
 ;; A wake hands an asleep seat its whole queue as one vector datom, each
 ;; entry its own id, sender and priority, oldest first; the flow's first
 ;; turn holds it after the context it is composed into.

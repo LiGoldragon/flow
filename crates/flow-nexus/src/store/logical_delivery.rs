@@ -2,12 +2,12 @@
 //! hand-over attempts. The event table is append-only; the current table is
 //! a materialized view used for sender-filtered reconnect snapshots.
 
+use super::ManagesMetaflowState;
+use super::handover::HoldsHandovers;
+use super::handover_reminders::SchedulesHandoverReminders;
 use super::metaflow::SleepsMetaflows;
 use super::queue_delivery::AccountsQueueDelivery;
 use super::reminder::RecordsReminders;
-use super::handover_reminders::SchedulesHandoverReminders;
-use super::handover::HoldsHandovers;
-use super::ManagesMetaflowState;
 use super::*;
 use crate::generated::send_tool::{
     Accepted_Data, SendCall, SendOutcome as ToolSendOutcome, SendRefusal as ToolSendRefusal,
@@ -1108,7 +1108,9 @@ impl RecordsLogicalDeliveries for FlowStore {
                     if let Some(flow_id) = live.current_flow_id.as_deref() {
                         if let Some(threshold) = self.configured_threshold(&expected.model_name)? {
                             if self.handover_green(&expected.address, flow_id, threshold.refresh)? {
-                                return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(Unknown_Data::Address(address.clone()))));
+                                return Ok(signal_flow::PrivateSendResponse::Refused(
+                                    Refusal::Unknown(Unknown_Data::Address(address.clone())),
+                                ));
                             }
                         }
                     }

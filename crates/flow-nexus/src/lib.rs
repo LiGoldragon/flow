@@ -55,8 +55,8 @@ pub mod generated;
 mod executable_default_configuration {
     include!(env!("FLOW_NEXUS_DEFAULT_CONFIGURATION_RS"));
 }
-pub mod handover_archive;
 pub mod handover;
+pub mod handover_archive;
 pub mod handover_reminding;
 pub(crate) mod harness_command;
 pub mod heartbeat;
@@ -159,7 +159,9 @@ impl std::fmt::Debug for MemoryHandoverSource {
 }
 
 impl crate::handover::YieldsHandover for MemoryHandoverSource {
-    fn requires_launch_root(&self) -> bool { false }
+    fn requires_launch_root(&self) -> bool {
+        false
+    }
 
     fn handover(
         &self,
@@ -173,7 +175,10 @@ impl crate::handover::YieldsHandover for MemoryHandoverSource {
                 sections
                     .into_iter()
                     .map(|section| {
-                        format!("## {}\n{}\n{}", section.title, section.description, section.body)
+                        format!(
+                            "## {}\n{}\n{}",
+                            section.title, section.description, section.body
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join("\n\n"),
@@ -571,10 +576,7 @@ impl Dispatches for RunningNexus {
             Ok(touch) => touch,
             Err(error) => return Response::DropRefused(error),
         };
-        match self
-            .store
-            .drop_handover_for_flow(&writer, title, touch)
-        {
+        match self.store.drop_handover_for_flow(&writer, title, touch) {
             Ok(touch) => Response::Dropped(signal_flow::Dropped_Data {
                 address: request.address,
                 title: request.title,
@@ -1810,9 +1812,9 @@ mod tests {
     mod curriculum;
     mod delivery;
     mod ending;
+    mod handover;
     mod handover_archive;
     mod handover_configuration;
-    mod handover;
     mod handover_memory;
     mod handover_reminding;
     mod heartbeat_production;

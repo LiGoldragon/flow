@@ -1,8 +1,8 @@
 //! Publication of closed handovers into a configured Git archive.
 
 use crate::{
-    store::handover::{ClosedHandover, HoldsHandovers},
     RunningNexus,
+    store::handover::{ClosedHandover, HoldsHandovers},
 };
 use signal_flow::{Address, Aspect, Model};
 use std::{
@@ -178,7 +178,7 @@ fn reject_symlink_components(
         cursor.push(component);
         match fs::symlink_metadata(&cursor) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(HandoverArchiveRefusal::InvalidPath)
+                return Err(HandoverArchiveRefusal::InvalidPath);
             }
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}

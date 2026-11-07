@@ -213,7 +213,10 @@ impl ReadsHandover for LaunchComposer {
             }
             HandoverRoot::Unresolved => Path::new(""),
         };
-        match self.handover.handover(&profile.address, predecessor, launch_root) {
+        match self
+            .handover
+            .handover(&profile.address, predecessor, launch_root)
+        {
             Handover::Text(text) => Ok(Some(text)),
             Handover::Absent => Ok(None),
             Handover::Unreadable(fault) => Err(refused(fault)),

@@ -73,13 +73,33 @@ impl ReadsHandoverConfiguration for super::FlowStore {
 
     fn handover_archive(&self) -> Result<HandoverArchiveConfiguration, super::StoreError> {
         use sema_engine::{QueryPlan, RecordKey};
-        let rows = self.engine.match_records(QueryPlan::key(self.meta_configuration_tables.handover, RecordKey::new("handover")))?.records().to_vec();
-        Ok(rows.first().map(|row| row.archive.clone()).unwrap_or(HandoverArchiveConfiguration::Unconfigured))
+        let rows = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.meta_configuration_tables.handover,
+                RecordKey::new("handover"),
+            ))?
+            .records()
+            .to_vec();
+        Ok(rows
+            .first()
+            .map(|row| row.archive.clone())
+            .unwrap_or(HandoverArchiveConfiguration::Unconfigured))
     }
 
     fn handover_count(&self) -> Result<HandoverCountConfiguration, super::StoreError> {
         use sema_engine::{QueryPlan, RecordKey};
-        let rows = self.engine.match_records(QueryPlan::key(self.meta_configuration_tables.handover, RecordKey::new("handover")))?.records().to_vec();
-        Ok(rows.first().map(|row| row.count.clone()).unwrap_or(HandoverCountConfiguration::Unconfigured))
+        let rows = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.meta_configuration_tables.handover,
+                RecordKey::new("handover"),
+            ))?
+            .records()
+            .to_vec();
+        Ok(rows
+            .first()
+            .map(|row| row.count.clone())
+            .unwrap_or(HandoverCountConfiguration::Unconfigured))
     }
 }

@@ -1313,6 +1313,32 @@ impl RecordsLogicalDeliveries for FlowStore {
             .match_records(QueryPlan::key(self.send_calls, call_key))?;
         match prior.records() {
             [record] if record.content_sha256 == content_sha256 => {
+                if let ToolSendOutcome::Accepted(accepted) = &record.send_outcome {
+                    let logical_id = &accepted.send_acceptance.logical_delivery_id;
+                    let binding = self.request_binding(&accepted.send_acceptance.request_id)?;
+                    if binding
+                        .as_ref()
+                        .is_some_and(|binding| binding.logical_delivery_id == *logical_id)
+                    {
+                        return Ok(record.send_outcome.clone());
+                    }
+                    let current = self.engine.match_records(QueryPlan::key(
+                        self.logical_deliveries.current,
+                        RecordKey::new(logical_id.clone()),
+                    ))?;
+                    let [current] = current.records() else {
+                        return Err(StoreError::StateInvariant);
+                    };
+                    if current.archived.is_none() {
+                        return Err(StoreError::StateInvariant);
+                    }
+                    return Ok(ToolSendOutcome::Archived(
+                        crate::generated::send_tool::Archived_Data {
+                            sender: accepted.sender.clone(),
+                            target: accepted.target.clone(),
+                        },
+                    ));
+                }
                 return Ok(record.send_outcome.clone());
             }
             [_] => return Ok(ToolSendOutcome::Refused(ToolSendRefusal::KeyReused)),

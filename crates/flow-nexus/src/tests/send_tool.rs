@@ -1601,6 +1601,75 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
     );
 }
 
+#[test]
+fn tool_replay_after_archive_answers_archived_without_the_old_id() {
+    let fixture = NexusFixture::new();
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: core_primary(),
+        state: State::Asleep,
+        past: vec![],
+        queue: vec![],
+    });
+    let key = ToolCallKey {
+        thread_id: THREAD_A.into(),
+        turn_id: TURN.into(),
+        call_id: "archive-replay".into(),
+    };
+    let first = fixture
+        .nexus
+        .store
+        .accept_tool_send(
+            &key,
+            "archive-content",
+            core(),
+            &core_primary(),
+            Message::Soft(Request::Notice("historical".into())),
+            0,
+        )
+        .expect("tool Send admits");
+    let SendOutcome::Accepted(accepted) = first else {
+        panic!("tool Send accepted")
+    };
+    fixture
+        .nexus
+        .store
+        .transition_logical_delivery(
+            &accepted.send_acceptance.logical_delivery_id,
+            signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                harness_kind: flow_ethos::HarnessKind::Codex,
+                native_session_id: "recipient-session".into(),
+                native_prompt_id: "recipient-prompt".into(),
+            }),
+        )
+        .expect("request ends");
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .archive_request(&accepted.send_acceptance.request_id, &core())
+            .expect("archive reads"),
+        Ok(())
+    );
+
+    let replay = fixture
+        .nexus
+        .store
+        .accept_tool_send(
+            &key,
+            "archive-content",
+            core(),
+            &core_primary(),
+            Message::Soft(Request::Notice("historical".into())),
+            0,
+        )
+        .expect("tool replay reads");
+    let SendOutcome::Archived(archived) = replay else {
+        panic!("archived replay is explicit")
+    };
+    assert_eq!(archived.sender, core());
+    assert_eq!(archived.target, core_primary());
+}
+
 fn from_core(request: Request) -> TestRequest {
     TestRequest {
         sent_by: SentBy::Sender(core()),

@@ -7026,12 +7026,12 @@ mod tests {
 
     #[test]
     fn actual_configuration_and_flow_openers_admit_and_upgrade_the_exact_v1_handover_family() {
-        use crate::store::handover::{DescribesHandoverTable, HandoverMemory};
+        use crate::store::handover::{ClosedHandover, DescribesHandoverTable, HandoverMemory};
         use crate::store::handover_configuration::StoredHandoverConfigurationV1;
         use sema_engine::{
             Assertion, FamilyIdentity, FamilyName, MemoryDefinition, TableRegistration,
         };
-        use signal_flow::{Address, Aspect, ClosedHandover, Model, Section, Touch};
+        use signal_flow::{Address, Aspect, Model, Section, Touch};
 
         let fixture = StoreFixture::new();
         let path = fixture.path();

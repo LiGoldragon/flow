@@ -2471,6 +2471,7 @@ impl OpensFlowStore for FlowStore {
                 engine.register_table(logical_delivery_descriptors.simplified_replies.clone())?;
             let heartbeat_standings =
                 engine.register_table(heartbeat_standing_descriptor.clone())?;
+            let purposes = engine.register_table(logical_delivery_descriptors.purposes.clone())?;
             let reminder_rows = engine
                 .match_records(QueryPlan::all(reminders))?
                 .records()
@@ -2481,6 +2482,10 @@ impl OpensFlowStore for FlowStore {
                 .to_vec();
             let heartbeat_rows = engine
                 .match_records(QueryPlan::all(heartbeat_standings))?
+                .records()
+                .to_vec();
+            let purpose_rows = engine
+                .match_records(QueryPlan::all(purposes))?
                 .records()
                 .to_vec();
             request_id_upgrade::evolve_request_id_memory(
@@ -2504,6 +2509,7 @@ impl OpensFlowStore for FlowStore {
                 },
                 &reminder_rows,
                 &simplified_reply_rows,
+                &purpose_rows,
                 heartbeat_standings,
                 &heartbeat_rows,
                 &logical_delivery::SystemRequestIdDrawer,

@@ -1066,6 +1066,7 @@ pub(crate) fn evolve_request_id_memory(
     descriptors: RequestIdEvolutionDescriptors,
     reminders: &[super::reminder::Reminder],
     simplified_replies: &[super::logical_delivery::SimplifiedReplyBinding],
+    purposes: &[super::logical_delivery::LogicalDeliveryPurpose],
     heartbeat_table: TableReference<super::StoredHeartbeatStanding>,
     heartbeat_rows: &[super::StoredHeartbeatStanding],
     drawer: &dyn super::logical_delivery::DrawsRequestId,
@@ -1215,6 +1216,11 @@ pub(crate) fn evolve_request_id_memory(
     }
     for binding in simplified_replies {
         if !currents.contains_key(&binding.input_delivery_id) {
+            return Err(StoreError::StateInvariant);
+        }
+    }
+    for purpose in purposes {
+        if !currents.contains_key(&purpose.logical_delivery_id) {
             return Err(StoreError::StateInvariant);
         }
     }
@@ -1446,7 +1452,7 @@ pub(crate) fn evolve_request_id_memory(
                 .get(logical_id)
                 .into_iter()
                 .flatten()
-                .map(|event| (logical_id, event))
+                .map(move |event| (logical_id, event))
         })
         .map(|(logical_id, event)| {
             Ok(LogicalDeliveryEvent {

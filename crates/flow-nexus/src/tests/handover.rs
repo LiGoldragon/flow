@@ -594,7 +594,7 @@ fn the_file_source_reads_a_predecessors_file_under_the_launch_root_only() {
     // A predecessor that does not name a flow is never joined to a path.
     for name in ["", "..", "../abc123", "a/b", ".hidden"] {
         assert_eq!(
-            source.handover(name, root),
+            source.handover(&address(Model::Sol), name, root),
             Handover::Unreadable(HandoverFault::InvalidPredecessor),
             "{name:?}"
         );
@@ -671,7 +671,7 @@ fn memory_source_reads_only_the_last_closed_generation_and_ignores_root() {
         signal_flow::Section { title: "new".into(), description: "d".into(), body: "two".into() },
         signal_flow::Touch::Unknown,
     ).unwrap();
-    let source = super::MemoryHandoverSource(fixture.nexus.store.clone());
+    let source = crate::MemoryHandoverSource(fixture.nexus.store.clone());
     let root_a = tempfile::tempdir().unwrap();
     let root_b = tempfile::tempdir().unwrap();
     assert_eq!(source.handover(&at, "abc123", root_a.path()), Handover::Text("## old\nd\none".into()));

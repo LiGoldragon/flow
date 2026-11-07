@@ -767,14 +767,12 @@ impl LaunchesFlows for RunningNexus {
                 ));
             }
         };
-        let address = match self.store.list_metaflows() {
-            Ok(rows) => rows.into_iter().find_map(|row| {
-                (matches!(row.state, flow_ethos::State::Awake(ref id) if id == &replacement.predecessor)
-                    || row.past.last().is_some_and(|id| id == &replacement.predecessor))
-                    .then_some(row.address)
-            }),
-            Err(_) => None,
-        };
+        let address = self
+            .store
+            .launch_attempt(&replacement.launch_request_id)
+            .ok()
+            .flatten()
+            .map(|attempt| attempt.launch_profile.address);
         let Some(address) = address else {
             return refuse(ReplaceRejection::UnknownPredecessor);
         };

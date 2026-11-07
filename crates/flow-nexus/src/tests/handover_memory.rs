@@ -251,7 +251,7 @@ fn exact_retirement_identity_preserves_new_live_and_closed_rows() {
     store
         .close_handover_for_successor(&address, "succ", "next")
         .unwrap();
-    assert_eq!(store.remove_closed_handover(&address, &published), Ok(()));
+    assert!(store.remove_closed_handover(&address, &published).is_ok());
     let row = store.handover_memory(&address).unwrap().unwrap();
     assert_eq!(row.current, vec![section("live", "d", "new")]);
     assert_eq!(row.closed.len(), 1);
@@ -268,10 +268,10 @@ fn changed_published_snapshot_is_retained() {
         .unwrap();
     let mut published = store.closed_handovers(&address, 0).unwrap().pop().unwrap();
     published.successor = "changed".into();
-    assert_eq!(
+    assert!(matches!(
         store.remove_closed_handover(&address, &published),
         Err(crate::store::StoreError::StateInvariant)
-    );
+    ));
     assert_eq!(store.closed_handovers(&address, 0).unwrap().len(), 1);
 }
 

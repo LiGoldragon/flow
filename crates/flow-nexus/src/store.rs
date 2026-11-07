@@ -8128,12 +8128,100 @@ mod tests {
         assert_eq!(fixture.staged_copies(), Vec::<String>::new());
     }
 
+    struct ScriptedRequestIdDrawer {
+        draws: std::sync::Mutex<std::collections::VecDeque<flow_ethos::RequestId>>,
+    }
+
+    impl ScriptedRequestIdDrawer {
+        fn new(draws: impl IntoIterator<Item = &'static str>) -> Self {
+            Self {
+                draws: std::sync::Mutex::new(draws.into_iter().map(str::to_owned).collect()),
+            }
+        }
+    }
+
+    impl super::logical_delivery::DrawsRequestId for ScriptedRequestIdDrawer {
+        fn draw_request_id(&self) -> Result<flow_ethos::RequestId, super::StoreError> {
+            self.draws
+                .lock()
+                .map_err(|_| super::StoreError::StateInvariant)?
+                .pop_front()
+                .ok_or(super::StoreError::StateInvariant)
+        }
+    }
+
     struct FixedRequestIdDrawer;
 
     impl super::logical_delivery::DrawsRequestId for FixedRequestIdDrawer {
         fn draw_request_id(&self) -> Result<flow_ethos::RequestId, super::StoreError> {
             Ok("abcd".into())
         }
+    }
+
+    #[test]
+    fn request_id_collision_redraws_and_stays_four_characters() {
+        use super::logical_delivery::{MintsRequestIds, RequestClosure, RequestIdBinding};
+        use sema_engine::Assertion;
+
+        let fixture = StoreFixture::new();
+        let mut store = fixture.store();
+        store
+            .engine
+            .assert(Assertion::new(
+                store.logical_deliveries.request_ids,
+                RequestIdBinding {
+                    request_id: "held".into(),
+                    logical_delivery_id: "delivery-held".into(),
+                    closure: RequestClosure::Open,
+                },
+            ))
+            .expect("held id is stored");
+        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+            &mut store,
+            std::sync::Arc::new(ScriptedRequestIdDrawer::new(["held", "free"])),
+        );
+
+        assert_eq!(
+            MintsRequestIds::mint_request_id(&store).expect("minting reads Memory"),
+            Ok("free".into())
+        );
+    }
+
+    #[test]
+    fn request_id_draws_collided_refuses_unadmitted_and_writes_nothing() {
+        use super::logical_delivery::{MintsRequestIds, RequestClosure, RequestIdBinding};
+        use sema_engine::{Assertion, QueryPlan};
+
+        let fixture = StoreFixture::new();
+        let mut store = fixture.store();
+        store
+            .engine
+            .assert(Assertion::new(
+                store.logical_deliveries.request_ids,
+                RequestIdBinding {
+                    request_id: "held".into(),
+                    logical_delivery_id: "delivery-held".into(),
+                    closure: RequestClosure::Open,
+                },
+            ))
+            .expect("held id is stored");
+        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+            &mut store,
+            std::sync::Arc::new(ScriptedRequestIdDrawer::new(std::iter::repeat_n(
+                "held", 64,
+            ))),
+        );
+
+        assert_eq!(
+            MintsRequestIds::mint_request_id(&store).expect("minting reads Memory"),
+            Err(signal_flow::Refusal::RequestIdDrawsCollided)
+        );
+        let bindings = store
+            .engine
+            .match_records(QueryPlan::all(store.logical_deliveries.request_ids))
+            .expect("bindings read");
+        assert_eq!(bindings.records().len(), 1, "minting writes no binding");
+        assert_eq!(bindings.records()[0].request_id, "held");
     }
 
     #[test]

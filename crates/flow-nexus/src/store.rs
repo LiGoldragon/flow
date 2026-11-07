@@ -1542,6 +1542,7 @@ pub struct FlowStore {
     seat_births: TableReference<crate::generated::memory::SeatBirth>,
     handovers: TableReference<handover::HandoverMemory>,
     pub(crate) handover_reminders: TableReference<handover_reminders::HandoverReminder>,
+    pub(crate) handover_write_gate: Mutex<()>,
     pub launch_changes: LaunchChanges,
 }
 
@@ -2386,6 +2387,7 @@ impl OpensFlowStore for FlowStore {
             seat_births,
             handovers,
             handover_reminders,
+            handover_write_gate: Mutex::new(()),
             launch_changes: LaunchChanges::default(),
         };
 
@@ -2553,6 +2555,7 @@ impl OpensFlowStore for FlowStore {
             seat_births,
             handovers,
             handover_reminders,
+            handover_write_gate: Mutex::new(()),
             launch_changes: LaunchChanges::default(),
         };
         store.archive_legacy_queue()?;

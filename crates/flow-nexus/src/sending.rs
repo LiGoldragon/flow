@@ -967,7 +967,7 @@ impl RunningNexus {
         };
         // A restart holds the Address: no seat binds to it meanwhile.
         if !matches!(
-            crate::store::restart::RecordsRestarts::restart_at(&self.store, &address),
+            crate::store::restart::RecordsRestarts::restart_at(&*self.store, &address),
             Ok(None)
         ) {
             return Response::Refused(Refusal::Locked);
@@ -1257,7 +1257,7 @@ impl CompletesDirectSends for RunningNexus {
                     // the resumed seat.
                     || !matches!(
                         crate::store::restart::RecordsRestarts::restart_record(
-                            &self.store,
+                            &*self.store,
                             flow_id
                         ),
                         Ok(None)

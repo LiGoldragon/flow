@@ -691,7 +691,7 @@ impl PerformsInParts for RunningNexus {
             // restart's to close, and its seat's own exit is fenced.
             Record_Data::Exited(flow_id)
                 if !matches!(
-                    crate::store::restart::RecordsRestarts::restart_record(&self.store, &flow_id),
+                    crate::store::restart::RecordsRestarts::restart_record(&*self.store, &flow_id),
                     Ok(None)
                 ) =>
             {

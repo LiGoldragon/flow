@@ -56,6 +56,7 @@ mod executable_default_configuration {
     include!(env!("FLOW_NEXUS_DEFAULT_CONFIGURATION_RS"));
 }
 pub mod handover_archive;
+pub mod handover;
 pub mod handover_reminding;
 pub(crate) mod harness_command;
 pub mod heartbeat;
@@ -145,6 +146,53 @@ pub struct RunningNexus {
     pub codex_turns: codex_turns::CodexTurns,
     /// How far each flow's compactions have been read; see `compacting`.
     pub compactions: compacting::CompactionWatch,
+}
+
+/// The running Memory is the sole handover source for fresh successors.
+#[derive(Clone)]
+struct MemoryHandoverSource(Arc<FlowStore>);
+
+impl std::fmt::Debug for MemoryHandoverSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("MemoryHandoverSource")
+    }
+}
+
+impl crate::handover::YieldsHandover for MemoryHandoverSource {
+    fn handover(
+        &self,
+        address: &signal_flow::Address,
+        predecessor: &str,
+        _launch_root: &Path,
+    ) -> crate::handover::Handover {
+        use crate::store::handover::HoldsHandovers;
+        match self.store_handover(address, predecessor) {
+            Ok(Some(sections)) if !sections.is_empty() => crate::handover::Handover::Text(
+                sections
+                    .into_iter()
+                    .map(|section| {
+                        format!("## {}\n{}\n{}", section.title, section.description, section.body)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            ),
+            Ok(_) => crate::handover::Handover::Absent,
+            Err(error) => crate::handover::Handover::Unreadable(
+                signal_flow::HandoverFault::Unreadable(error.to_string()),
+            ),
+        }
+    }
+}
+
+impl MemoryHandoverSource {
+    fn store_handover(
+        &self,
+        address: &signal_flow::Address,
+        predecessor: &str,
+    ) -> Result<Option<Vec<signal_flow::Section>>, StoreError> {
+        use crate::store::handover::HoldsHandovers;
+        self.0.handover_for_flow(address, predecessor)
+    }
 }
 
 pub trait Dispatches {
@@ -459,6 +507,7 @@ impl Dispatches for RunningNexus {
 
     fn keep_handover(&self, request: signal_flow::Keep_Data, asker: protecting::Asker) -> Response {
         use crate::store::handover::HoldsHandovers;
+        use protecting::ChecksAsker;
         let _caller = match self.handover_caller(&asker) {
             Ok(value) => value,
             Err(error) => return Response::KeepRefused(error),
@@ -490,6 +539,7 @@ impl Dispatches for RunningNexus {
 
     fn drop_handover(&self, request: signal_flow::Drop_Data, asker: protecting::Asker) -> Response {
         use crate::store::handover::HoldsHandovers;
+        use protecting::ChecksAsker;
         let _caller = match self.handover_caller(&asker) {
             Ok(value) => value,
             Err(error) => return Response::DropRefused(error),
@@ -979,7 +1029,7 @@ impl OpensRunningNexus for RunningNexus {
         // restart, so the store's value at open is the one being served.
         let ordinary_socket = PathBuf::from(&start.ordinary_socket_path);
         Ok(Self {
-            store,
+            store: store.clone(),
             codex_endpoints: codex_endpoints.clone(),
             herdr: herdr::HerdrCli::default()
                 .with_source_root(&source_root)
@@ -992,7 +1042,8 @@ impl OpensRunningNexus for RunningNexus {
                     &snapshot.nexus.curriculum_nexus_path,
                 ))),
                 snapshot.nexus.presentation_prompt_option.clone(),
-            ),
+            )
+            .with_handover_source(Arc::new(MemoryHandoverSource(store.clone()))),
             dispatch_gate: Mutex::new(()),
             pane_leases: delivery::lease::PaneLeases::default(),
             waking: waking::WakingMetaflows::default(),
@@ -1271,7 +1322,7 @@ impl ServesConnection for Connection {
         if let meta_signal_flow::Response::BoundExisting(bound) = &response
             && let meta_signal_flow::FlowBindingResult::Bound(binding) = &bound.flow_binding_result
             && let Ok(Some(metaflow)) = crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(
-                &nexus.store,
+                &*nexus.store,
                 &binding.flow_id,
             )
         {

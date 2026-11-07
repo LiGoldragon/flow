@@ -560,31 +560,31 @@ fn the_file_source_reads_a_predecessors_file_under_the_launch_root_only() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     let source = HandoverFile;
-    assert_eq!(source.handover("abc123", root), Handover::Absent);
+    assert_eq!(source.handover(&address(Model::Sol), "abc123", root), Handover::Absent);
     leave(root, "abc123", Left::Text(TEXT.as_bytes()));
     assert_eq!(
-        source.handover("abc123", root),
+        source.handover(&address(Model::Sol), "abc123", root),
         Handover::Text(TEXT.to_owned())
     );
     // Another flow's file, and another root's, are not this one's.
-    assert_eq!(source.handover("def456", root), Handover::Absent);
+    assert_eq!(source.handover(&address(Model::Sol), "def456", root), Handover::Absent);
     let elsewhere = tempfile::tempdir().unwrap();
     assert_eq!(
-        source.handover("abc123", elsewhere.path()),
+        source.handover(&address(Model::Sol), "abc123", elsewhere.path()),
         Handover::Absent
     );
     // An empty file is none.
     leave(root, "def456", Left::Text(b""));
-    assert_eq!(source.handover("def456", root), Handover::Absent);
+    assert_eq!(source.handover(&address(Model::Sol), "def456", root), Handover::Absent);
     // A file that is not UTF-8, or is not a file, is unreadable.
     leave(root, "aaa111", Left::Text(b"\xff"));
     assert_eq!(
-        source.handover("aaa111", root),
+        source.handover(&address(Model::Sol), "aaa111", root),
         Handover::Unreadable(HandoverFault::NotUtf8)
     );
     leave(root, "bbb222", Left::Directory);
     assert_eq!(
-        source.handover("bbb222", root),
+        source.handover(&address(Model::Sol), "bbb222", root),
         Handover::Unreadable(HandoverFault::Unreadable(format!(
             "{}: Is a directory (os error 21)",
             root.join("flows/bbb222/handover.md").display()
@@ -609,7 +609,7 @@ fn a_file_the_nexus_may_not_read_is_unreadable() {
     fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
     // A process that may read it anyway (root) shows nothing to refuse.
     let readable = fs::read(&file).is_ok();
-    let reading = HandoverFile.handover("abc123", root);
+    let reading = HandoverFile.handover(&address(Model::Sol), "abc123", root);
     fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
     if !readable {
         assert_eq!(

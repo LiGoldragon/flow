@@ -210,7 +210,7 @@ impl ReadsHandover for LaunchComposer {
             HandoverRoot::At(root) => root,
             HandoverRoot::Unresolved => return Err(refused(HandoverFault::RootUnresolved)),
         };
-        match self.handover.handover(predecessor, launch_root) {
+        match self.handover.handover(&profile.address, predecessor, launch_root) {
             Handover::Text(text) => Ok(Some(text)),
             Handover::Absent => Ok(None),
             Handover::Unreadable(fault) => Err(refused(fault)),

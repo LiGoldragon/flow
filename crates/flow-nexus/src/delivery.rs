@@ -208,7 +208,7 @@ impl DeliversMessages for RunningNexus {
         }
         // A restart holds the flow: nothing is typed into a pane it is
         // closing or opening.
-        match crate::store::restart::RecordsRestarts::restart_record(&self.store, &request.flow_id)
+        match crate::store::restart::RecordsRestarts::restart_record(&*self.store, &request.flow_id)
         {
             Ok(None) => {}
             Ok(Some(_)) => return Response::DeliveryRejected(DeliveryRejection::RouteUnavailable),

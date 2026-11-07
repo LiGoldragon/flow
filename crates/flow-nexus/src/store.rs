@@ -4530,7 +4530,7 @@ pub(crate) trait ReadsFlowMemory {
         }
     }
 
-    pub(crate) fn address_record_key(address: &Address) -> String {
+    fn address_record_key(address: &Address) -> String {
         format!(
             "{}:{}:{}:{}",
             FlowStore::aspect_key(&address.aspect),

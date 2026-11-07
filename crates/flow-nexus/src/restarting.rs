@@ -1457,7 +1457,7 @@ impl RestartsFlows for RunningNexus {
         // The queue that waited goes through the ordinary delivery custody.
         if let Response::Restarted(_) = &response
             && let Ok(Some(metaflow)) =
-                crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(&self.store, flow_id)
+                crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(&*self.store, flow_id)
         {
             crate::waking::SleepsAndWakesSeats::drain_awake(self, &metaflow.address);
         }

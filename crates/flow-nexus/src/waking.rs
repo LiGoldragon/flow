@@ -1236,7 +1236,7 @@ impl SleepsAndWakesSeats for RunningNexus {
     fn settle_stopped(&self, flow_id: &str) -> AtStop {
         // A restart holds the Address: no drain, sleep or refresh of it.
         if !matches!(
-            crate::store::restart::RecordsRestarts::restart_record(&self.store, flow_id),
+            crate::store::restart::RecordsRestarts::restart_record(&*self.store, flow_id),
             Ok(None)
         ) {
             eprintln!(
@@ -1291,7 +1291,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 || self.waking.is_waking(address)
                 || !matches!(self.store.address_hold(&flow_id), Ok(None))
                 || !matches!(
-                    crate::store::restart::RecordsRestarts::restart_record(&self.store, &flow_id),
+                    crate::store::restart::RecordsRestarts::restart_record(&*self.store, &flow_id),
                     Ok(None)
                 )
             {
@@ -1581,7 +1581,7 @@ impl RefreshesMetaflows for RunningNexus {
         // A restart holds the flow's Address as a refresh would.
         if let flow_ethos::State::Awake(current) = &metaflow.state
             && !matches!(
-                crate::store::restart::RecordsRestarts::restart_record(&self.store, current),
+                crate::store::restart::RecordsRestarts::restart_record(&*self.store, current),
                 Ok(None)
             )
         {
@@ -1714,7 +1714,7 @@ impl RefreshesMetaflows for RunningNexus {
             };
             // A restart holds the Address its predecessor runs at.
             if let Ok(Some(_)) =
-                crate::store::restart::RecordsRestarts::restart_at(&self.store, &address)
+                crate::store::restart::RecordsRestarts::restart_at(&*self.store, &address)
             {
                 return Response::ReplaceRejected(ReplaceRejection::Locked);
             }

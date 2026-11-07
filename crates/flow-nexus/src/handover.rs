@@ -9,7 +9,7 @@
 //! [`crate::composition::OpensLaunchComposer::with_handover_source`]; the order of
 //! the prompt does not change.
 
-use signal_flow::HandoverFault;
+use signal_flow::{Address, HandoverFault};
 use std::path::Path;
 
 /// What a source holds of a predecessor's handover.
@@ -29,7 +29,7 @@ pub enum Handover {
 /// `launch_root` is the root the successor runs in; a source that is not
 /// kept under a root ignores it.
 pub trait YieldsHandover: std::fmt::Debug + Send + Sync {
-    fn handover(&self, predecessor: &str, launch_root: &Path) -> Handover;
+    fn handover(&self, address: &Address, predecessor: &str, launch_root: &Path) -> Handover;
 }
 
 /// The file-backed source: `flows/<predecessor FlowId>/handover.md` under
@@ -40,7 +40,7 @@ pub trait YieldsHandover: std::fmt::Debug + Send + Sync {
 pub struct HandoverFile;
 
 impl YieldsHandover for HandoverFile {
-    fn handover(&self, predecessor: &str, launch_root: &Path) -> Handover {
+    fn handover(&self, _address: &Address, predecessor: &str, launch_root: &Path) -> Handover {
         // A FlowId names a directory: letters, digits, hyphen and underscore.
         let names_a_flow = !predecessor.is_empty()
             && predecessor

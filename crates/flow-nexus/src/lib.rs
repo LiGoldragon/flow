@@ -310,11 +310,38 @@ impl Dispatches for RunningNexus {
         use protecting::{ChecksAsker, GuardedAct};
         let origin = asker.origin();
         match query {
-            Query::Acknowledge(keys) => {
-                self.dispatch_from(Query::Acknowledge(keys), origin.clone())
-            }
+            Query::Acknowledge(_) => Response::Refused(signal_flow::Refusal::NotMessage),
             Query::ArchiveRequest(request_id) => {
-                self.dispatch_from(Query::ArchiveRequest(request_id), origin.clone())
+                use crate::store::RecordsLogicalDeliveries;
+                let signal_flow::Origin::Flow(flow) = origin else {
+                    return Response::ArchiveRejected(signal_flow::ArchiveRejection::Caller(
+                        signal_flow::VisibleRefusal::Direct(
+                            "the caller is not an identified flow".into(),
+                        ),
+                    ));
+                };
+                let caller = match self.store.metaflow_awake_as(&flow.flow_id) {
+                    Ok(Some(metaflow)) => metaflow.address,
+                    Ok(None) => {
+                        return Response::ArchiveRejected(signal_flow::ArchiveRejection::Caller(
+                            signal_flow::VisibleRefusal::Direct(
+                                "the caller holds no awake address".into(),
+                            ),
+                        ));
+                    }
+                    Err(_) => {
+                        return Response::ArchiveRejected(
+                            signal_flow::ArchiveRejection::StoreRefused,
+                        );
+                    }
+                };
+                match self.store.archive_request(&request_id, &caller) {
+                    Ok(Ok(())) => Response::RequestArchived(request_id),
+                    Ok(Err(rejection)) => Response::ArchiveRejected(rejection),
+                    Err(_) => {
+                        Response::ArchiveRejected(signal_flow::ArchiveRejection::StoreRefused)
+                    }
+                }
             }
             Query::Start(profile) => {
                 let launch_request_id = profile.launch_request_id.clone();

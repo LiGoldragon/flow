@@ -1612,13 +1612,17 @@ impl ReadsRequestPolicy for FlowStore {
             self.meta_configuration_tables.request_policy,
         ))?;
         match rows.records() {
-            [] => self.engine.assert(Assertion::new(
-                self.meta_configuration_tables.request_policy,
-                StoredMetaRequestPolicyConfiguration {
-                    request_id_draws: SEEDED_REQUEST_ID_DRAWS,
-                    announcement_tries: SEEDED_ANNOUNCEMENT_TRIES,
-                },
-            )),
+            [] => self
+                .engine
+                .assert(Assertion::new(
+                    self.meta_configuration_tables.request_policy,
+                    StoredMetaRequestPolicyConfiguration {
+                        request_id_draws: SEEDED_REQUEST_ID_DRAWS,
+                        announcement_tries: SEEDED_ANNOUNCEMENT_TRIES,
+                    },
+                ))
+                .map(drop)
+                .map_err(StoreError::from),
             [stored] if stored.request_id_draws >= 1 && stored.announcement_tries >= 1 => Ok(()),
             _ => Err(StoreError::StateInvariant),
         }
@@ -1870,13 +1874,15 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let policy_rows =
             engine.match_records(QueryPlan::all(meta_configuration_tables.request_policy))?;
         match policy_rows.records() {
-            [] => engine.assert(Assertion::new(
-                meta_configuration_tables.request_policy,
-                StoredMetaRequestPolicyConfiguration {
-                    request_id_draws: SEEDED_REQUEST_ID_DRAWS,
-                    announcement_tries: SEEDED_ANNOUNCEMENT_TRIES,
-                },
-            ))?,
+            [] => {
+                engine.assert(Assertion::new(
+                    meta_configuration_tables.request_policy,
+                    StoredMetaRequestPolicyConfiguration {
+                        request_id_draws: SEEDED_REQUEST_ID_DRAWS,
+                        announcement_tries: SEEDED_ANNOUNCEMENT_TRIES,
+                    },
+                ))?;
+            }
             [stored] if stored.request_id_draws >= 1 && stored.announcement_tries >= 1 => {}
             _ => return Err(StoreError::StateInvariant),
         }

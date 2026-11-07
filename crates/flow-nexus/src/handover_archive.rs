@@ -338,14 +338,16 @@ fn is_tracked_and_clean(
     deadline: Instant,
 ) -> Result<bool, HandoverArchiveRefusal> {
     let relative = path_string(target, repository);
-    if run_git_output(
+    match run_git_output(
         repository,
         ["ls-files", "--error-unmatch", "--", relative.as_str()],
         deadline,
-    )
-    .is_err()
-    {
-        return Ok(false);
+    ) {
+        Ok(_) => {}
+        Err(HandoverArchiveRefusal::PublicationTimedOut) => {
+            return Err(HandoverArchiveRefusal::PublicationTimedOut);
+        }
+        Err(_) => return Ok(false),
     }
     Ok(run_git_output(
         repository,
@@ -505,9 +507,14 @@ impl RunsWithDeadline for Command {
         let mut stdout = None;
         let mut stderr = None;
         while stdout.is_none() || stderr.is_none() {
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .ok_or(HandoverArchiveRefusal::PublicationTimedOut)?;
+            let remaining = match deadline.checked_duration_since(Instant::now()) {
+                Some(remaining) => remaining,
+                None => {
+                    kill_process_group(process_id);
+                    let _ = child.wait();
+                    return Err(HandoverArchiveRefusal::PublicationTimedOut);
+                }
+            };
             let (is_stdout, bytes) = output_receiver.recv_timeout(remaining).map_err(|_| {
                 kill_process_group(process_id);
                 HandoverArchiveRefusal::PublicationTimedOut

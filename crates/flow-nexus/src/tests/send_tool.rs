@@ -1635,7 +1635,7 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
     };
     assert!(
         crate::store::reminder::RecordsReminders::reminder(
-            &fixture.nexus.store,
+            fixture.nexus.store.as_ref(),
             &accepted.send_acceptance.logical_delivery_id,
         )
         .expect("Task reminder reads")
@@ -1664,7 +1664,7 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
     );
     assert!(
         crate::store::reminder::RecordsReminders::reminder(
-            &fixture.nexus.store,
+            fixture.nexus.store.as_ref(),
             &accepted.send_acceptance.logical_delivery_id,
         )
         .expect("archived Task reminder reads")

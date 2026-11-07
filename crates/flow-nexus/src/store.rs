@@ -7144,7 +7144,7 @@ mod tests {
                 .unwrap();
             let table = redb::TableDefinition::<String, &[u8]>::new(super::OPTIONAL_HANDOVER_TABLE);
             let mut rows = write.open_table(table).unwrap();
-            rows.insert("handover", predecessor_bytes.as_slice())
+            rows.insert("handover".to_owned(), predecessor_bytes.as_slice())
                 .unwrap();
         }
         write.commit().unwrap();

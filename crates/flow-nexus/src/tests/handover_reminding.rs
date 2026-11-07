@@ -154,7 +154,7 @@ fn typed_keep_and_drop_commands_are_shell_single_argument_forms() {
 
 #[test]
 fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
-    use super::NexusFixture;
+    use super::{NexusFixture, PromptFixture};
     use crate::store::context::RecordsContextSize;
     use crate::store::handover_reminders::{
         HandoverReminder, OpensHandoverReminder, SchedulesHandoverReminders,
@@ -309,7 +309,9 @@ fn reminder_admission_waits_for_handover_gate_before_commit() {
 fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
     use super::NexusFixture;
     use super::refresh_and_compaction::{declare_seat, seat_metaflow};
-    use super::waking::{CLAUDE_SEAT, append_main_rows, claude_seat, claude_stop, end_turn};
+    use super::waking::{
+        CLAUDE_SEAT, append_main_rows, claude_agent, claude_seat, claude_stop, end_turn,
+    };
     use crate::store::handover::HoldsHandovers;
     use crate::store::handover_reminders::SchedulesHandoverReminders;
     use crate::store::{ManagesMetaflowState, SeedsRole};
@@ -317,6 +319,10 @@ fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
     use signal_flow::{Aspect, Model};
     for tokens in [85_i64, 86_i64] {
         let fixture = NexusFixture::new();
+        fixture.accept_pane_operations(
+            vec![claude_agent(&fixture)],
+            PromptFixture::Prompted("w1:p3"),
+        );
         claude_seat(&fixture, tokens);
         append_main_rows(&fixture, &[end_turn("last-turn")]);
         let address = signal_flow::Address {

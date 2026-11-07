@@ -13,7 +13,9 @@ use crate::generated::send_tool::{
     Accepted_Data, SendCall, SendOutcome as ToolSendOutcome, SendRefusal as ToolSendRefusal,
     Target, ToolCallKey,
 };
+use datom_codec::Datomizable;
 use flow_ethos::{Delivery, Message, QueueEntry};
+use protos::{Compactable, Protosizable};
 use sema_engine::AtomicCommit;
 use signal_flow::{
     Address, DeliverySnapshot, DeliveryState, Lock, LogicalDeliveryId, NativeReceipt, Refusal,
@@ -111,9 +113,19 @@ pub(crate) struct DeliverCall {
     pub digest: String,
     pub answer: SendAcceptance,
 }
+trait KeysDeliverCalls {
+    fn deliver_call_record_key(&self) -> RecordKey;
+}
+impl KeysDeliverCalls for signal_flow::DeliverKey {
+    fn deliver_call_record_key(&self) -> RecordKey {
+        // The engine key is the canonical Datom projection of the typed key;
+        // one codec owns its representation and both fields remain distinct.
+        RecordKey::new(self.datomize(Vec::new()).protosize().compact())
+    }
+}
 impl EngineRecord for DeliverCall {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.key.clone())
+        self.key.deliver_call_record_key()
     }
 }
 impl MemoryDefinition for DeliverCall {
@@ -700,7 +712,7 @@ impl RecordsLogicalDeliveries for FlowStore {
     ) -> Result<Option<DeliverCall>, StoreError> {
         let rows = self.engine.match_records(QueryPlan::key(
             self.logical_deliveries.deliver_calls,
-            RecordKey::new(key.clone()),
+            key.deliver_call_record_key(),
         ))?;
         match rows.records() {
             [] => Ok(None),
@@ -723,7 +735,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             if self.deliver_call(key)?.is_some() {
                 commit = commit.retract(
                     self.logical_deliveries.deliver_calls,
-                    RecordKey::new(key.clone()),
+                    key.deliver_call_record_key(),
                 );
             }
         }

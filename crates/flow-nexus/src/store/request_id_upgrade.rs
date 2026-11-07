@@ -3286,6 +3286,157 @@ mod tests {
     }
 
     #[test]
+    fn evolved_task_announcements_partition_and_current_reopen_changes_nothing() {
+        let directory = tempfile::tempdir().expect("temporary Memory");
+        let path = directory.path().join("flow.sema");
+        let descriptors = evolution_descriptors();
+        let heartbeat = StoredHeartbeatStanding::descriptor();
+        let (predecessor, tables) = old_engine(&path, &descriptors, &heartbeat);
+        let sender = old_address(old_flow::Aspect::Mind, "sender");
+        let recipient = old_address(old_flow::Aspect::Field, "recipient");
+        let native = old_signal::NativeReceipt {
+            harness_kind: old_flow::HarnessKind::Codex,
+            native_session_id: "session".into(),
+            native_prompt_id: "prompt".into(),
+        };
+        let words = "é".repeat(crate::sending::MAX_SEND_PAYLOAD_BYTES / 2);
+        for (cursor, logical_id) in [(1, "task-one"), (2, "task-two")] {
+            let snapshot = old_snapshot(
+                cursor,
+                logical_id,
+                &sender,
+                &recipient,
+                old_signal::DeliveryState::Delivered(native.clone()),
+            );
+            predecessor
+                .assert(Assertion::new(
+                    tables.current,
+                    PriorCurrentLogicalDelivery {
+                        snapshot: snapshot.clone(),
+                    },
+                ))
+                .expect("old current stores");
+            predecessor
+                .assert(Assertion::new(
+                    tables.events,
+                    PriorLogicalDeliveryEvent { snapshot },
+                ))
+                .expect("old event stores");
+            predecessor
+                .assert(Assertion::new(
+                    tables.requests,
+                    old_request(
+                        logical_id,
+                        &sender,
+                        &recipient,
+                        old_flow::Request::Task(old_flow::AnswerableTask {
+                            minutes: 1,
+                            string: format!("{logical_id}-{words}"),
+                        }),
+                        PriorRequestState::Settled,
+                    ),
+                ))
+                .expect("old task stores");
+        }
+        drop(predecessor);
+        let current_sender = current_address(&sender).expect("sender recodes");
+        let current_recipient = current_address(&recipient).expect("recipient recodes");
+        let reminders = ["task-one", "task-two"].map(|key| super::super::reminder::Reminder {
+            key: key.into(),
+            address: current_sender.clone(),
+            recipient: current_recipient.clone(),
+            minutes: 1,
+            due: Some(1),
+            sent: 0,
+        });
+
+        let mut engine = Engine::open(
+            EngineOpen::new(&path, SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION))
+                .with_family(&descriptors.current)
+                .with_family(&descriptors.events)
+                .with_family(&descriptors.metaflows)
+                .with_family(&descriptors.address_holds)
+                .with_family(&descriptors.requests)
+                .with_family(&descriptors.attempts)
+                .with_family(&descriptors.outcomes)
+                .with_family(&descriptors.send_calls)
+                .with_family(&heartbeat),
+        )
+        .expect("predecessor catalog opens for evolution");
+        let heartbeat_table = engine
+            .register_table(heartbeat.clone())
+            .expect("heartbeat opens");
+        evolve_request_id_memory(
+            &mut engine,
+            descriptors,
+            &reminders,
+            &[],
+            &[],
+            heartbeat_table,
+            &[],
+            &ScriptedDrawer::new(&["t001", "t002", "0000", "0001", "0002", "0003"]),
+        )
+        .expect("task evolution commits");
+        let descriptors = evolution_descriptors();
+        let announcement_table = engine
+            .register_table(descriptors.task_announcements.clone())
+            .expect("announcements register");
+        let announcements = engine
+            .match_records(QueryPlan::all(announcement_table))
+            .expect("announcements read");
+        assert_eq!(announcements.records().len(), 2);
+        assert_eq!(
+            announcements
+                .records()
+                .iter()
+                .map(|row| (row.part, row.tasks.clone()))
+                .collect::<Vec<_>>(),
+            vec![(0, vec!["task-one".into()]), (1, vec!["task-two".into()])]
+        );
+        drop(announcements);
+        drop(engine);
+        let evolved = std::fs::read(&path).expect("evolved Memory reads");
+
+        let mut reopened = Engine::open(
+            EngineOpen::new(&path, SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION))
+                .with_family(&descriptors.current)
+                .with_family(&descriptors.events)
+                .with_family(&descriptors.metaflows)
+                .with_family(&descriptors.address_holds)
+                .with_family(&descriptors.requests)
+                .with_family(&descriptors.attempts)
+                .with_family(&descriptors.outcomes)
+                .with_family(&descriptors.send_calls)
+                .with_family(&descriptors.request_ids)
+                .with_family(&descriptors.deliver_calls)
+                .with_family(&descriptors.store_identity)
+                .with_family(&descriptors.prior_deliveries)
+                .with_family(&descriptors.task_announcements)
+                .with_family(&descriptors.upgrade_assignments)
+                .with_family(&descriptors.request_policy)
+                .with_family(&heartbeat),
+        )
+        .expect("current catalog reopens without evolution");
+        let announcement_table = reopened
+            .register_table(descriptors.task_announcements)
+            .expect("reopened announcements register");
+        assert_eq!(
+            reopened
+                .match_records(QueryPlan::all(announcement_table))
+                .expect("reopened announcements read")
+                .records()
+                .len(),
+            2
+        );
+        drop(reopened);
+        assert_eq!(
+            std::fs::read(&path).expect("reopened Memory reads"),
+            evolved,
+            "a wholly current reopen performs no second evolution write"
+        );
+    }
+
+    #[test]
     fn orphaned_predecessor_event_refuses_evolution_without_changing_memory() {
         let directory = tempfile::tempdir().expect("temporary Memory");
         let path = directory.path().join("flow.sema");

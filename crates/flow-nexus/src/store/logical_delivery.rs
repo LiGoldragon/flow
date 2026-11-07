@@ -370,7 +370,7 @@ pub(crate) struct DeliverCallSpec {
     pub digest: String,
 }
 
-trait MintsRequestIds {
+pub(crate) trait MintsRequestIds {
     fn mint_request_id(&self) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError>;
     fn request_binding(
         &self,

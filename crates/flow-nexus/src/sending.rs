@@ -1262,11 +1262,6 @@ impl CompletesDirectSends for RunningNexus {
                         ),
                         Ok(None)
                     )
-                    || (!matches!(self.store.past_threshold(flow_id), Ok(false))
-                        && !crate::waking::NotesRefreshRefusals::holds(
-                            &self.refresh_refusals,
-                            flow_id,
-                        ))
             })
         {
             return Ok(None);

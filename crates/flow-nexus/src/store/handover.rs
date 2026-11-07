@@ -1,6 +1,8 @@
 //! Durable current and closed handover generations.
 
-use super::{FlowStore, ReadsFlowMemory, StoreError};
+use super::context::{NamesFlowModel, RecordsContextSize};
+use super::metaflow::SleepsMetaflows;
+use super::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,
@@ -88,6 +90,20 @@ pub trait HoldsHandovers {
     ) -> Result<(), StoreError>;
     fn handover_headings(&self, address: &Address)
     -> Result<Vec<signal_flow::Heading>, StoreError>;
+    /// Whether the current flow has a policy-qualified measured handover touch
+    /// and may be automatically refreshed at its threshold.
+    fn handover_green(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        refresh: i64,
+    ) -> Result<bool, StoreError>;
+    fn record_handover_touch(
+        &self,
+        flow_id: &str,
+        tokens: i64,
+        timestamp: i64,
+    ) -> Result<(), StoreError>;
 }
 
 pub(crate) trait RegistersHandoverTable {
@@ -113,6 +129,68 @@ impl HoldsHandovers for FlowStore {
         Ok(self
             .handover_row(address)?
             .map_or_else(Vec::new, |row| row.current))
+    }
+
+    fn record_handover_touch(
+        &self,
+        flow_id: &str,
+        tokens: i64,
+        timestamp: i64,
+    ) -> Result<(), StoreError> {
+        let Some(metaflow) = self.metaflow_awake_as(flow_id)? else {
+            return Ok(());
+        };
+        let Some(mut row) = self.handover_row(&metaflow.address)? else {
+            return Ok(());
+        };
+        row.touch = Some(signal_flow::Touch::Known(signal_flow::Known_Data {
+            flow_id: flow_id.into(),
+            tokens,
+            timestamp,
+        }));
+        self.write_handover(row)
+    }
+
+    fn handover_green(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        refresh: i64,
+    ) -> Result<bool, StoreError> {
+        let Some(snapshot) = self.configuration_snapshot()? else {
+            return Ok(false);
+        };
+        let Some(model_name) = self.flow_model(flow_id)? else {
+            return Ok(false);
+        };
+        let meta_signal_flow::HandoverPoliciesConfiguration::Configured(policies) =
+            snapshot.handover_policies
+        else {
+            return Ok(false);
+        };
+        let Some(policy) = policies
+            .into_iter()
+            .find(|policy| policy.model_name == model_name)
+        else {
+            return Ok(false);
+        };
+        let Some(row) = self.handover_row(address)? else {
+            return Ok(false);
+        };
+        let Some(signal_flow::Touch::Known(touch)) = row.touch else {
+            return Ok(false);
+        };
+        if touch.flow_id != flow_id {
+            return Ok(false);
+        }
+        let Some(latest_tokens) = self.context_size(flow_id)? else {
+            return Ok(false);
+        };
+        if latest_tokens != touch.tokens {
+            return Ok(false);
+        }
+        let left = i128::from(100 - policy.warning_share_left);
+        Ok(i128::from(touch.tokens) * 100 >= i128::from(refresh) * left)
     }
 
     fn handover_headings(

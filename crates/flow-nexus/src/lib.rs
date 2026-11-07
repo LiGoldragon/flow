@@ -2,6 +2,8 @@
 
 use crate::store::ManagesMetaflowState;
 use crate::store::ReadsFlowMemory;
+use crate::store::context::RecordsContextSize;
+use crate::store::metaflow::SleepsMetaflows;
 use crate::store::send_outcome::RecordsSendOutcomes;
 // The generated roots name this crate's types by its name: Operation names
 // the Memory root's `flow_nexus::LaunchOutcome`, and Memory the starter's
@@ -176,6 +178,32 @@ pub trait Dispatches {
         query: meta_signal_flow::Query,
         resolver: Option<meta_signal_flow::ResolverIdentity>,
     ) -> meta_signal_flow::Response;
+}
+
+impl RunningNexus {
+    fn handover_touch(
+        &self,
+        asker: &protecting::Asker,
+    ) -> Result<signal_flow::Touch, signal_flow::HandoverRefusal> {
+        use crate::reminding::CountsUnixSeconds;
+        use protecting::ChecksAsker;
+        let signal_flow::Origin::Flow(origin) = asker.origin() else {
+            return Ok(signal_flow::Touch::Unknown);
+        };
+        let tokens = self
+            .store
+            .context_size(&origin.flow_id)
+            .map_err(|error| signal_flow::HandoverRefusal::Store(error.to_string()))?;
+        let Some(tokens) = tokens else {
+            return Ok(signal_flow::Touch::Unknown);
+        };
+        let timestamp = std::time::SystemTime::now().seconds_since_epoch();
+        Ok(signal_flow::Touch::Known(signal_flow::Known_Data {
+            flow_id: origin.flow_id.clone(),
+            tokens,
+            timestamp,
+        }))
+    }
 }
 
 impl Dispatches for RunningNexus {
@@ -418,7 +446,14 @@ impl Dispatches for RunningNexus {
             .store
             .flow_node(&origin.flow_id)
             .map_err(|error| signal_flow::HandoverRefusal::Store(error.to_string()))?;
-        Err(signal_flow::HandoverRefusal::UnknownCaller)
+        let Some(metaflow) = self
+            .store
+            .metaflow_awake_as(&origin.flow_id)
+            .map_err(|error| signal_flow::HandoverRefusal::Store(error.to_string()))?
+        else {
+            return Err(signal_flow::HandoverRefusal::UnknownCaller);
+        };
+        Ok(metaflow.address)
     }
 
     fn keep_handover(&self, request: signal_flow::Keep_Data, asker: protecting::Asker) -> Response {
@@ -428,12 +463,11 @@ impl Dispatches for RunningNexus {
             Err(error) => return Response::KeepRefused(error),
         };
         let title = request.section.title.clone();
-        match self.store.keep_handover(
-            &request.address,
-            &caller,
-            request.section,
-            signal_flow::Touch::Unknown,
-        ) {
+        let touch = self.handover_touch(&asker);
+        match self
+            .store
+            .keep_handover(&request.address, &caller, request.section, touch)
+        {
             Ok(touch) => Response::Kept(signal_flow::Kept_Data {
                 address: request.address,
                 title,
@@ -450,12 +484,11 @@ impl Dispatches for RunningNexus {
             Err(error) => return Response::DropRefused(error),
         };
         let title = request.title.clone();
-        match self.store.drop_handover(
-            &request.address,
-            &caller,
-            title,
-            signal_flow::Touch::Unknown,
-        ) {
+        let touch = self.handover_touch(&asker);
+        match self
+            .store
+            .drop_handover(&request.address, &caller, title, touch)
+        {
             Ok(touch) => Response::Dropped(signal_flow::Dropped_Data {
                 address: request.address,
                 title: request.title,

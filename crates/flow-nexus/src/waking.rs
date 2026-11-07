@@ -91,6 +91,7 @@ use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
 use crate::store::events::RecordsHarnessEvents;
+use crate::store::handover::HoldsHandovers;
 use crate::store::logical_delivery::{
     CorePresentationRoute, RecordsLogicalDeliveries, SimplifiedReplyBinding,
     SimplifiedReplyStanding,
@@ -1842,15 +1843,6 @@ impl PerformsWakeAndDrain for RunningNexus {
         // is free for the request now oldest.
         self.reconcile_typed(&address);
         self.queue_simplified_answer(&flow_id);
-        // A flow past its model's refresh threshold is given no new
-        // message: what is queued stays for the metaflow's next flow. One
-        // whose successor was refused stays the metaflow's flow, and is
-        // handed its queue until a successor stands.
-        if matches!(self.store.past_threshold(&flow_id), Ok(true))
-            && !self.refresh_refusals.holds(&flow_id)
-        {
-            return Outcome::Drained(drained);
-        }
         let queue = match self.store.metaflow(&address) {
             Ok(Some(metaflow)) => metaflow.queue,
             _ => return Outcome::Failed(Failed_Data::StoreRefused),
@@ -2655,6 +2647,13 @@ impl WakesInParts for RunningNexus {
         ))) != Outcome::Recorded
         {
             eprintln!("flow-nexus: flow {flow_id} context size not recorded");
+            return;
+        }
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs() as i64);
+        if let Err(error) = self.store.record_handover_touch(flow_id, tokens, timestamp) {
+            eprintln!("flow-nexus: flow {flow_id} handover touch not recorded: {error}");
         }
     }
 
@@ -2953,11 +2952,25 @@ impl WakesInParts for RunningNexus {
 
     fn settle_rested(&self, flow_id: &str) -> AtStop {
         self.record_context_at_stop(flow_id);
-        // A seat past its model's refresh threshold is ended at its Stop
-        // rather than handed work; it is told nothing and writes no handover.
-        // Its Stop is the idle fact: whatever Herdr shows of its pane, Working
-        // included, neither waits for nor holds its refresh.
-        let refresh_due = matches!(self.store.past_threshold(flow_id), Ok(true));
+        // A seat refreshes automatically only when its latest handover touch
+        // is policy-qualified and reaches the inclusive warning boundary.
+        let refresh_due = match self.store.metaflow_awake_as(flow_id) {
+            Ok(Some(metaflow)) => match self.store.threshold_standing(flow_id) {
+                Ok(crate::store::context::ThresholdStanding::Past { refresh, .. }) => {
+                    match self
+                        .store
+                        .handover_green(&metaflow.address, flow_id, refresh)
+                    {
+                        Ok(green) => green,
+                        Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+                    }
+                }
+                Ok(_) => false,
+                Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+            },
+            Ok(None) => false,
+            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+        };
         // A Codex seat's rest is its app-server's, and a Claude seat whose
         // transcript records its main turn's end_turn has ended its turn
         // whatever its screen shows (background agents keep Herdr at

@@ -6380,6 +6380,126 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_announcement_retries_after_archive_frees_its_request_id_draw() {
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        use crate::store::metaflow::SeedsMetaflow;
+        use crate::store::request_id_upgrade::{
+            RunsRequestIdAnnouncements, TaskAnnouncement, TaskAnnouncementStatus,
+        };
+        use signal_flow::{Message, Request, SentBy};
+
+        let fixture = StoreFixture::new();
+        let mut store = fixture.store();
+        let sender = Address {
+            aspect: Aspect::Mind,
+            topic: "announcementCapacity".into(),
+            model: Model::Sol,
+        };
+        let recipient = Address {
+            aspect: Aspect::Field,
+            topic: "announcementCapacity".into(),
+            model: Model::Sol,
+        };
+        for address in [&sender, &recipient] {
+            store.seed_metaflow(flow_ethos::Metaflow {
+                address: address.clone(),
+                state: flow_ethos::State::Asleep,
+                past: Vec::new(),
+                queue: Vec::new(),
+            });
+        }
+        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+            &mut store,
+            std::sync::Arc::new(ScriptedRequestIdDrawer::new(["held", "task"])),
+        );
+        let accept = |request| {
+            let signal_flow::PrivateSendResponse::SendAccepted(value) = store
+                .accept_logical_delivery(
+                    &recipient,
+                    SentBy::Sender(sender.clone()),
+                    flow_ethos::Delivery::Queue,
+                    Message::Soft(request),
+                    None,
+                )
+                .expect("request admits")
+            else {
+                panic!("request accepted")
+            };
+            value
+        };
+        let holder = accept(Request::Notice("capacity holder".into()));
+        let task = accept(Request::Task(flow_ethos::AnswerableTask {
+            minutes: 1,
+            string: "announce after capacity returns".into(),
+        }));
+        store
+            .engine
+            .assert(Assertion::new(
+                store.request_id_upgrade.task_announcements,
+                TaskAnnouncement {
+                    recipient: sender.clone(),
+                    part: 0,
+                    tasks: vec![task.logical_delivery_id],
+                    tries: 0,
+                    status: TaskAnnouncementStatus::Pending(None),
+                },
+            ))
+            .expect("announcement row seeds");
+        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+            &mut store,
+            std::sync::Arc::new(ScriptedRequestIdDrawer::new(std::iter::repeat_n(
+                "held", 64,
+            ))),
+        );
+        store
+            .run_request_id_announcements()
+            .expect("collided announcement records its refusal");
+        let refused = store
+            .engine
+            .match_records(QueryPlan::all(store.request_id_upgrade.task_announcements))
+            .expect("refused announcement reads");
+        assert_eq!(refused.records()[0].tries, 0);
+        assert!(matches!(
+            refused.records()[0].status,
+            TaskAnnouncementStatus::Pending(Some(signal_flow::Refusal::RequestIdDrawsCollided))
+        ));
+        drop(refused);
+
+        store
+            .transition_logical_delivery(
+                &holder.logical_delivery_id,
+                signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                    harness_kind: flow_ethos::HarnessKind::Codex,
+                    native_session_id: "capacity-session".into(),
+                    native_prompt_id: "capacity-prompt".into(),
+                }),
+            )
+            .expect("holder ends");
+        assert_eq!(
+            store
+                .archive_request(&holder.request_id, &sender)
+                .expect("holder archives"),
+            Ok(())
+        );
+        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+            &mut store,
+            std::sync::Arc::new(ScriptedRequestIdDrawer::new(["free"])),
+        );
+        store
+            .run_request_id_announcements()
+            .expect("announcement retries after archive");
+        let retried = store
+            .engine
+            .match_records(QueryPlan::all(store.request_id_upgrade.task_announcements))
+            .expect("retried announcement reads");
+        assert_eq!(retried.records()[0].tries, 1);
+        assert!(matches!(
+            retried.records()[0].status,
+            TaskAnnouncementStatus::Admitted(_)
+        ));
+    }
+
+    #[test]
     fn upgrade_assignment_notice_carries_the_original_order_words() {
         use crate::store::logical_delivery::RecordsLogicalDeliveries;
         use crate::store::metaflow::SeedsMetaflow;
@@ -6401,14 +6521,12 @@ mod tests {
             topic: "upgradeAssignment".into(),
             model: Model::Sol,
         };
-        for address in [&sender, &recipient] {
-            store.seed_metaflow(flow_ethos::Metaflow {
-                address: address.clone(),
-                state: flow_ethos::State::Asleep,
-                past: Vec::new(),
-                queue: Vec::new(),
-            });
-        }
+        store.seed_metaflow(flow_ethos::Metaflow {
+            address: recipient.clone(),
+            state: flow_ethos::State::Asleep,
+            past: Vec::new(),
+            queue: Vec::new(),
+        });
         let accept = |words: &str| {
             let signal_flow::PrivateSendResponse::SendAccepted(value) = store
                 .accept_logical_delivery(
@@ -6466,7 +6584,26 @@ mod tests {
 
         store
             .run_request_id_announcements()
-            .expect("assignment pass admits");
+            .expect("unheld assignment recipient refusal records");
+        let refused = store
+            .engine
+            .match_records(QueryPlan::all(store.request_id_upgrade.upgrade_assignments))
+            .expect("refused assignment reads");
+        assert_eq!(refused.records()[0].tries, 0, "refusal is not a try");
+        assert!(matches!(
+            refused.records()[0].status,
+            TaskAnnouncementStatus::Pending(Some(_))
+        ));
+        drop(refused);
+        store.seed_metaflow(flow_ethos::Metaflow {
+            address: sender.clone(),
+            state: flow_ethos::State::Asleep,
+            past: Vec::new(),
+            queue: Vec::new(),
+        });
+        store
+            .run_request_id_announcements()
+            .expect("assignment pass admits after binding");
         let stored = store
             .stored_metaflow(&sender)
             .expect("sender reads")
@@ -9279,6 +9416,92 @@ mod tests {
             store.archive_request(&archived.request_id, &sender),
             Err(super::StoreError::StateInvariant)
         ));
+    }
+
+    #[test]
+    fn flow_and_unknown_sent_requests_stay_held_across_commits_and_restart() {
+        use super::logical_delivery::{MintsRequestIds, RecordsLogicalDeliveries};
+        use super::metaflow::SeedsMetaflow;
+        use flow_ethos::{Delivery, Message, Reminder_Data, Request, SentBy};
+        use signal_flow::{DeliveryState, NativeReceipt, PrivateSendResponse};
+
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let address = signal_flow::Address {
+            aspect: signal_flow::Aspect::Mind,
+            topic: "flowOwnedRequests".into(),
+            model: signal_flow::Model::Sol,
+        };
+        store.seed_metaflow(flow_ethos::Metaflow {
+            address: address.clone(),
+            state: flow_ethos::State::Asleep,
+            past: Vec::new(),
+            queue: Vec::new(),
+        });
+        let cases = [
+            (
+                SentBy::Flow,
+                Message::Soft(Request::Reminder(Reminder_Data {
+                    request_id: "task".into(),
+                    string: "flow reminder".into(),
+                })),
+            ),
+            (
+                SentBy::Flow,
+                Message::Soft(Request::Notice("flow announcement".into())),
+            ),
+            (
+                SentBy::Unknown,
+                Message::Soft(Request::Notice("unknown sender".into())),
+            ),
+        ];
+        let mut held = Vec::new();
+        for (index, (sent_by, message)) in cases.into_iter().enumerate() {
+            let PrivateSendResponse::SendAccepted(accepted) = store
+                .accept_logical_delivery(&address, sent_by, Delivery::Queue, message, None)
+                .expect("internal request admits")
+            else {
+                panic!("internal request accepted")
+            };
+            store
+                .transition_logical_delivery(
+                    &accepted.logical_delivery_id,
+                    DeliveryState::Delivered(NativeReceipt {
+                        harness_kind: flow_ethos::HarnessKind::Codex,
+                        native_session_id: format!("internal-session-{index}"),
+                        native_prompt_id: format!("internal-prompt-{index}"),
+                    }),
+                )
+                .expect("internal request ends");
+            assert_eq!(
+                store
+                    .archive_request(&accepted.request_id, &address)
+                    .expect("archive ownership reads"),
+                Err(signal_flow::ArchiveRejection::UnknownRequest)
+            );
+            held.push((accepted.request_id, accepted.logical_delivery_id));
+        }
+        drop(store);
+
+        let reopened = fixture.store();
+        for (request_id, logical_delivery_id) in held {
+            assert_eq!(
+                reopened
+                    .request_binding(&request_id)
+                    .expect("binding reopens")
+                    .expect("internal request remains held")
+                    .logical_delivery_id,
+                logical_delivery_id
+            );
+            assert!(matches!(
+                reopened
+                    .logical_delivery_snapshot(&logical_delivery_id)
+                    .expect("snapshot reopens")
+                    .expect("snapshot remains")
+                    .delivery_state,
+                DeliveryState::Delivered(_)
+            ));
+        }
     }
 
     #[test]

@@ -9408,13 +9408,23 @@ mod tests {
                 .closure,
             RequestClosure::Answered(answer.logical_delivery_id.clone())
         );
+        let debugged = store
+            .debug_delivery(&order.request_id)
+            .expect("Order debug reads")
+            .expect("Order remains held");
         assert_eq!(
-            store
-                .debug_delivery(&order.request_id)
-                .expect("Order debug reads")
-                .expect("Order remains held")
-                .read_by,
-            Some(answer.logical_delivery_id.clone())
+            debugged.receipt,
+            Some(NativeReceipt {
+                harness_kind: signal_flow::HarnessKind::Codex,
+                native_session_id: "first-order-session".into(),
+                native_prompt_id: "first-order-turn".into(),
+            }),
+            "delivery evidence stays separate from answer evidence"
+        );
+        assert_eq!(
+            debugged.read_by,
+            Some(answer.logical_delivery_id.clone()),
+            "the answer is referenced by its logical id, never its reusable request id"
         );
         assert_eq!(
             store
@@ -9466,6 +9476,13 @@ mod tests {
                 .archive_request(&order.request_id, &requester)
                 .expect("first Order archive reads"),
             Ok(())
+        );
+        assert_eq!(
+            store
+                .debug_delivery(&order.request_id)
+                .expect("archived debug reads"),
+            None,
+            "an archived id is indistinguishable from an unknown id"
         );
 
         super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
@@ -9553,6 +9570,90 @@ mod tests {
                         native_prompt_id: "second-order-turn".into(),
                     })
         }));
+    }
+
+    /// Configure.Counters prepares a distinct empty replacement Memory. It
+    /// carries only the three legacy counters: no request binding crosses the
+    /// store boundary, and the replacement draws its own store identity.
+    #[test]
+    fn counter_replacement_holds_no_request_binding_and_draws_a_new_store_identity() {
+        use super::counters::ConfiguresCounters;
+        use super::logical_delivery::{MintsRequestIds, RecordsLogicalDeliveries};
+        use super::metaflow::SeedsMetaflow;
+        use flow_ethos::{Delivery, Message, Request, SentBy};
+        use signal_flow::PrivateSendResponse;
+
+        let previous = StoreFixture::new();
+        let mut previous_store = previous.store();
+        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+            &mut previous_store,
+            std::sync::Arc::new(ScriptedRequestIdDrawer::new([
+                "aaaa", "aaaa", "aaaa", "aaaa", "old1",
+            ])),
+        );
+        let previous_identity = previous_store
+            .store_identity()
+            .expect("previous store identity seeds");
+        let sender = signal_flow::Address {
+            aspect: signal_flow::Aspect::Mind,
+            topic: "replacementSender".into(),
+            model: signal_flow::Model::Sol,
+        };
+        let recipient = signal_flow::Address {
+            aspect: signal_flow::Aspect::Field,
+            topic: "replacementRecipient".into(),
+            model: signal_flow::Model::Sol,
+        };
+        previous_store.seed_metaflow(flow_ethos::Metaflow {
+            address: recipient.clone(),
+            state: flow_ethos::State::Asleep,
+            past: Vec::new(),
+            queue: Vec::new(),
+        });
+        let PrivateSendResponse::SendAccepted(previous_request) = previous_store
+            .accept_logical_delivery(
+                &recipient,
+                SentBy::Sender(sender),
+                Delivery::Queue,
+                Message::Soft(Request::Notice("previous store".into())),
+                None,
+            )
+            .expect("previous request admits")
+        else {
+            panic!("previous request accepted")
+        };
+        assert_eq!(previous_request.request_id, "old1");
+
+        let replacement = StoreFixture::new();
+        let mut replacement_store = replacement.store();
+        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+            &mut replacement_store,
+            std::sync::Arc::new(ScriptedRequestIdDrawer::new([
+                "bbbb", "bbbb", "bbbb", "bbbb",
+            ])),
+        );
+        assert_eq!(
+            replacement_store
+                .configure_counters(meta_signal_flow::ConfigureCounters {
+                    logical_delivery: 120,
+                    queue_attempt: 45,
+                    send_outcome: 300,
+                })
+                .expect("replacement counters configure"),
+            super::ConfigureOutcome::Replaced
+        );
+        assert_eq!(
+            MintsRequestIds::request_binding(&replacement_store, &previous_request.request_id)
+                .expect("replacement binding lookup reads"),
+            None,
+            "Configure.Counters carries no request id or binding"
+        );
+        let replacement_identity = replacement_store
+            .store_identity()
+            .expect("replacement store identity seeds");
+        assert_eq!(previous_identity, "aaaaaaaaaaaaaaaa");
+        assert_eq!(replacement_identity, "bbbbbbbbbbbbbbbb");
+        assert_ne!(replacement_identity, previous_identity);
     }
 
     #[test]

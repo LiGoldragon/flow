@@ -91,3 +91,21 @@ fn typed_keep_and_drop_commands_are_shell_single_argument_forms() {
     assert_eq!(query.datomize(vec![]).protosize().compact(), payload);
     assert!(notice.drop_command("title".into()).starts_with("flow '"));
 }
+
+#[test]
+fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
+    use super::NexusFixture;
+    use crate::handover_reminding::RemindsHandoverCallers;
+    use crate::store::handover_reminders::{HandoverReminder, OpensHandoverReminder, SchedulesHandoverReminders};
+    use crate::store::metaflow::SeedsMetaflow;
+    use flow_ethos::{Metaflow, State};
+    let fixture = NexusFixture::new();
+    let address = address();
+    fixture.nexus.store.seed_metaflow(Metaflow { address: address.clone(), state: State::Asleep, past: vec![], queue: vec![] });
+    let reminder = HandoverReminder::open_handover_reminder(address.clone(), 0, "m".into(), 10, 5, "configured".into()).unwrap();
+    fixture.nexus.store.hold_handover_reminder(reminder).unwrap();
+    fixture.nexus.send_due_handover_reminders(10);
+    let held = fixture.nexus.store.handover_reminder(&address, 0).unwrap().unwrap();
+    assert_eq!(held.sent, 1);
+    assert_eq!(held.next_due, 310);
+}

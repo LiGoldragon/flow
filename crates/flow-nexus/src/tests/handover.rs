@@ -648,11 +648,11 @@ fn an_installed_memory_source_reads_the_live_store_and_ignores_the_file() {
         )
         .unwrap();
     let launch = composed(&fixture, "claude-fixture", Some("abc123"), |_| {});
-    assert!(launch
-        .first_prompt_payload
-        .first_prompt_body
-        .contains("## live\nfrom memory\nsame live store"));
-    assert!(!launch.first_prompt_payload.first_prompt_body.contains("file text"));
+    let body = &launch.first_prompt_payload.first_prompt_body;
+    let handover = "## live\nfrom memory\nsame live store";
+    assert!(body.trim_end().ends_with(handover), "{body}");
+    assert_eq!(body.matches(handover).count(), 1, "{body}");
+    assert!(!body.contains("file text"), "{body}");
 }
 
 #[test]

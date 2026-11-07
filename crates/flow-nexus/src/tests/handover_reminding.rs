@@ -263,7 +263,6 @@ fn reminder_state_reopens_with_anchored_due_without_duplicate_initial() {
     let mut advanced = reminder.clone(); advanced.sent = 1; advanced.next_due = 400;
     let accepted = store.accept_handover_reminder(&address, flow_ethos::Message::HardAbrupt(flow_ethos::Request::Notice("x".into())), advanced.clone()).unwrap();
     assert!(matches!(accepted, signal_flow::PrivateSendResponse::SendAccepted(_)));
-    store.hold_handover_reminder(advanced.clone()).unwrap();
     drop(store);
     let reopened = crate::store::FlowStore::open_configured(path).unwrap();
     assert_eq!(reopened.handover_reminder(&address, 4).unwrap(), Some(advanced.clone()));

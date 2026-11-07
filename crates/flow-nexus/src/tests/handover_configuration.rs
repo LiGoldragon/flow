@@ -126,22 +126,22 @@ fn runtime_nexus_change_preserves_handover_and_all_sibling_families() {
         .configure_change(ConfigurationChange::Nexus(nexus.clone()))
         .unwrap();
     let after = running.configuration_snapshot().unwrap().unwrap();
-    assert_eq!(after.handover_policies, before.handover_policies);
-    assert_eq!(after.handover_archive, before.handover_archive);
-    assert_eq!(after.handover_count, before.handover_count);
-    assert_eq!(after.models, before.models);
-    assert_eq!(after.thresholds, before.thresholds);
     assert_eq!(after.nexus, nexus);
+    let mut normalized = after.clone();
+    normalized.nexus = before.nexus.clone();
+    assert_eq!(normalized, before);
     drop(running);
     let reopened = crate::store::ConfigurationOnlyStore::open(path).unwrap();
     let persisted = reopened.configuration_snapshot().unwrap().unwrap();
     assert_eq!(persisted.handover_policies, before.handover_policies);
     assert_eq!(persisted.handover_archive, before.handover_archive);
     assert_eq!(persisted.handover_count, before.handover_count);
+    assert_eq!(persisted.models, before.models);
+    assert_eq!(persisted.thresholds, before.thresholds);
 }
 
 #[test]
-fn pre_handover_configuration_catalog_reopens_idempotently_after_upgrade() {
+fn current_handover_configuration_catalog_reopens_idempotently() {
     let fixture = ConfiguredStore::new();
     let path = fixture.path();
     let configuration = crate::store::ConfigurationOnlyStore::open(path).unwrap();

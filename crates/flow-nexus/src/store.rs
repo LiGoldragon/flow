@@ -7566,6 +7566,11 @@ mod tests {
         use redb::ReadableDatabase;
         let fixture = StoreFixture::new();
         fixture.configured();
+        let before = ConfigurationOnlyStore::open(&fixture.path())
+            .expect("current catalog opens")
+            .configuration_snapshot()
+            .expect("current snapshot")
+            .expect("current configuration");
         let database = redb::Database::open(fixture.path()).expect("legacy catalog opens");
         {
             let write = database.begin_write().expect("legacy catalog writes");
@@ -7601,19 +7606,59 @@ mod tests {
         drop(database);
         let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("legacy opens");
         configuration
+            .configure_change(meta_signal_flow::ConfigurationChange::HandoverPolicies(vec![
+                meta_signal_flow::HandoverPolicy {
+                    model_name: "claude-opus-5-5".into(),
+                    warning_share_left: 15,
+                    reminder_text: "Continue every five minutes.".into(),
+                    every_minutes: 5,
+                },
+            ]))
+            .expect("policy config commits");
+        configuration
+            .configure_change(meta_signal_flow::ConfigurationChange::HandoverArchive(
+                "/srv/legacy".into(),
+            ))
+            .expect("archive config commits");
+        configuration
             .configure_change(meta_signal_flow::ConfigurationChange::HandoverCount(0))
-            .expect("handover config commits");
+            .expect("count config commits");
+        let configured = configuration
+            .configuration_snapshot()
+            .expect("upgraded snapshot")
+            .expect("upgraded configuration");
+        assert_eq!(
+            configured.handover_policies,
+            meta_signal_flow::HandoverPoliciesConfiguration::Configured(vec![
+                meta_signal_flow::HandoverPolicy {
+                    model_name: "claude-opus-5-5".into(),
+                    warning_share_left: 15,
+                    reminder_text: "Continue every five minutes.".into(),
+                    every_minutes: 5,
+                },
+            ])
+        );
+        assert_eq!(
+            configured.handover_archive,
+            meta_signal_flow::HandoverArchiveConfiguration::Configured("/srv/legacy".into())
+        );
+        assert_eq!(
+            configured.handover_count,
+            meta_signal_flow::HandoverCountConfiguration::Configured(0)
+        );
+        let mut normalized = configured.clone();
+        normalized.handover_policies = before.handover_policies.clone();
+        normalized.handover_archive = before.handover_archive.clone();
+        normalized.handover_count = before.handover_count.clone();
+        assert_eq!(normalized, before);
         drop(configuration);
         for _ in 0..2 {
             let reopened = ConfigurationOnlyStore::open(&fixture.path()).expect("legacy reopens");
-            assert_eq!(
-                reopened
-                    .configuration_snapshot()
-                    .unwrap()
-                    .unwrap()
-                    .handover_count,
-                meta_signal_flow::HandoverCountConfiguration::Configured(0)
-            );
+            let snapshot = reopened
+                .configuration_snapshot()
+                .unwrap()
+                .unwrap();
+            assert_eq!(snapshot, configured);
             drop(reopened);
         }
     }

@@ -290,7 +290,10 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     );
     let heartbeat = store.heartbeat_standings().expect("heartbeat rows read");
     assert_eq!(heartbeat.len(), 1);
-    assert_eq!(heartbeat[0].outstanding.as_deref(), Some(&ids["heartbeat"]));
+    assert_eq!(
+        heartbeat[0].outstanding.as_deref(),
+        Some(ids["heartbeat"].as_str())
+    );
     assert!(
         store
             .delivery_purposes()

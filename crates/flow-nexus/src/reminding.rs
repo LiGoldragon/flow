@@ -4,13 +4,13 @@
 //! metaflow as Soft.Notice with Wake, as from Flow, and woken or handed
 //! over as any waking request is.
 
-use crate::HoldsStopRequest;
-use crate::RunningNexus;
 use crate::handover_archive::AccessesExistingGitHandoverArchive;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::reminder::{AdvancesReminder, RecordsReminders};
 use crate::waking::SleepsAndWakesSeats;
+use crate::HoldsStopRequest;
+use crate::RunningNexus;
 use signal_flow::{Address, Message, Request, SentBy};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -166,11 +166,10 @@ impl ArchivesHandoverOnTick for RunningNexus {
             eprintln!("flow-nexus: handover count is Unconfigured; closed generations retained");
             return;
         };
-        let Ok(deadline_configuration) = self.store.publication_deadline() else {
+        let Ok(deadline_ms) = self.store.publication_deadline() else {
             eprintln!("flow-nexus: publication deadline configuration unreadable");
             return;
         };
-        let deadline_ms = deadline_configuration;
         let Ok(deadline_ms) = u64::try_from(deadline_ms) else {
             eprintln!(
                 "flow-nexus: publication deadline is unrepresentable; closed generations retained"

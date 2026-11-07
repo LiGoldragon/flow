@@ -151,7 +151,7 @@ impl ReadsHandoverConfiguration for super::FlowStore {
             .to_vec();
         Ok(rows
             .first()
-            .map(|row| row.publication_deadline.clone())
+            .map(|row| row.publication_deadline)
             .unwrap_or(60_000))
     }
 }

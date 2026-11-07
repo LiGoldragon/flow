@@ -172,6 +172,7 @@
             cargoArtifacts
             exactTest
             exactGitTest
+            exactGitSessionTest
             exactWorkspaceTest
             lawSource
             ;

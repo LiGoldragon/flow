@@ -7578,6 +7578,7 @@ mod tests {
             catalog
                 .remove(super::OPTIONAL_HANDOVER_RUNTIME_TABLE)
                 .expect("runtime family removes");
+            drop(catalog);
             write.commit().expect("legacy catalog commits");
         }
         let read = database.begin_read().expect("legacy catalog reads");

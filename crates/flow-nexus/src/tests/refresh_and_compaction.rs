@@ -18,7 +18,7 @@ use crate::store::handover::HoldsHandovers;
 use crate::store::handover_configuration::ReadsHandoverConfiguration;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
-use crate::store::{ManagesMetaflowState, ReadsFlowMemory, ReadsFlowRows, SeedsRole};
+use crate::store::{ManagesMetaflowState, ReadsFlowRows, SeedsRole};
 use crate::waking::{AtStop, SleepsAndWakesSeats};
 use flow_ethos::State;
 use meta_signal_flow::{
@@ -587,11 +587,18 @@ fn a_maintained_seat_refreshed_with_nothing_queued_starts_its_successor_first() 
     assert_eq!(handover.closed[0].predecessor, CLAUDE_SEAT);
     assert_eq!(
         handover.closed[0].sections,
-        vec![Section {
-            title: "before".into(),
-            description: "d".into(),
-            body: "body".into()
-        }]
+        vec![
+            Section {
+                title: "fixture".into(),
+                description: "fixture".into(),
+                body: "fixture".into(),
+            },
+            Section {
+                title: "before".into(),
+                description: "d".into(),
+                body: "body".into(),
+            },
+        ]
     );
 }
 

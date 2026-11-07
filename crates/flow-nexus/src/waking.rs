@@ -2661,7 +2661,6 @@ impl WakesInParts for RunningNexus {
         ))) != Outcome::Recorded
         {
             eprintln!("flow-nexus: flow {flow_id} context size not recorded");
-            return;
         }
     }
 

@@ -138,7 +138,6 @@ pub trait ArchivesHandoverOnTick {
 impl ArchivesHandoverOnTick for RunningNexus {
     fn retire_handover_archives(&self) {
         use crate::handover_archive::{ExistingGitHandoverArchive, RetiresHandoverGenerations};
-        use crate::store::ManagesMetaflowState;
         use crate::store::handover::HoldsHandovers;
         use crate::store::handover_configuration::ReadsHandoverConfiguration;
         let Ok(addresses) = self.store.handover_addresses_with_closed() else {

@@ -108,8 +108,8 @@ fn window_requires_boundary_qualified_current_flow_touch() {
 #[test]
 fn typed_keep_and_drop_commands_are_shell_single_argument_forms() {
     use crate::handover_reminding::{HandoverReminderNotice, RendersHandoverCommands};
-    use datom_codec::{Actualizing, Budget, Datomizable, Potential};
-    use protos::{Compactable, Protosizable, ReaderBudget};
+    use datom_codec::{Actualizing, Budget, Potential};
+    use protos::ReaderBudget;
     use signal_flow::{Query, Section};
     let notice = HandoverReminderNotice {
         address: address(),
@@ -159,7 +159,7 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
     use crate::store::handover_reminders::{
         HandoverReminder, OpensHandoverReminder, SchedulesHandoverReminders,
     };
-    use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+    use crate::store::metaflow::SeedsMetaflow;
     use crate::store::{ManagesMetaflowState, SeedsRole};
     use flow_ethos::{Metaflow, State};
     let fixture = NexusFixture::new();
@@ -398,7 +398,7 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
     use super::NexusFixture;
     use crate::store::context::RecordsContextSize;
     use crate::store::handover::HoldsHandovers;
-    use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+    use crate::store::metaflow::SeedsMetaflow;
     use crate::store::{ManagesMetaflowState, SeedsRole};
     use meta_signal_flow::{ConfigurationChange, ConfigureThreshold, HandoverPolicy};
     use signal_flow::{Address, Aspect, Caller, Metaflow, Model};
@@ -605,7 +605,7 @@ fn atomic_same_expected_reminder_state_rejects_duplicate_admission() {
     use crate::store::logical_delivery::RecordsLogicalDeliveries;
     use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
     use flow_ethos::{Message, Metaflow, Request, State};
-    use signal_flow::{PrivateSendResponse, SentBy};
+    use signal_flow::PrivateSendResponse;
     let fixture = NexusFixture::new();
     let address = address();
     fixture.nexus.store.seed_metaflow(Metaflow {
@@ -647,7 +647,7 @@ fn reminder_state_reopens_with_anchored_due_without_duplicate_initial() {
     let store = crate::store::FlowStore::open_configured(path).unwrap();
     let address = address();
     use crate::store::logical_delivery::RecordsLogicalDeliveries;
-    use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+    use crate::store::metaflow::SeedsMetaflow;
     store.seed_metaflow(flow_ethos::Metaflow {
         address: address.clone(),
         state: flow_ethos::State::Asleep,

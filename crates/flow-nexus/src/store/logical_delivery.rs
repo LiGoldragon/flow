@@ -237,6 +237,11 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
 
 /// Mutations are assembled into the caller's AtomicCommit so metaflow queue
 /// changes and lifecycle transitions have one durability boundary.
+struct LogicalDeliveryTransition {
+    purpose: crate::heartbeat::DeliveryPurpose,
+    handover_reminder: Option<crate::store::handover_reminders::HandoverReminder>,
+}
+
 pub(crate) trait RecordsLogicalDeliveries {
     fn seed_missing_queued_deliveries(&self) -> Result<(), StoreError>;
     fn force_queue_wake(&self, address: &Address) -> Result<(), StoreError>;
@@ -297,8 +302,7 @@ pub(crate) trait RecordsLogicalDeliveries {
         delivery: Delivery,
         message: Message,
         held_lock: Option<VerifiedDeliveryLock>,
-        purpose: crate::heartbeat::DeliveryPurpose,
-        handover_reminder: Option<crate::store::handover_reminders::HandoverReminder>,
+        transition: LogicalDeliveryTransition,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError>;
     #[cfg(test)]
     fn transition_logical_delivery(
@@ -1054,7 +1058,15 @@ impl RecordsLogicalDeliveries for FlowStore {
         purpose: crate::heartbeat::DeliveryPurpose,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError> {
         self.accept_logical_delivery_for_with_transition(
-            address, sent_by, delivery, message, held_lock, purpose, None,
+            address,
+            sent_by,
+            delivery,
+            message,
+            held_lock,
+            LogicalDeliveryTransition {
+                purpose,
+                handover_reminder: None,
+            },
         )
     }
     fn accept_handover_reminder(
@@ -1069,8 +1081,10 @@ impl RecordsLogicalDeliveries for FlowStore {
             Delivery::Queue,
             message,
             None,
-            crate::heartbeat::DeliveryPurpose::Ordinary,
-            Some(reminder),
+            LogicalDeliveryTransition {
+                purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
+                handover_reminder: Some(reminder),
+            },
         )
     }
     fn accept_logical_delivery_for_with_transition(
@@ -1080,8 +1094,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         delivery: Delivery,
         message: Message,
         held_lock: Option<VerifiedDeliveryLock>,
-        purpose: crate::heartbeat::DeliveryPurpose,
-        handover_reminder: Option<crate::store::handover_reminders::HandoverReminder>,
+        transition: LogicalDeliveryTransition,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError> {
         let _guard = self
             .logical_deliveries
@@ -1099,29 +1112,26 @@ impl RecordsLogicalDeliveries for FlowStore {
         // atomic commit succeeded. The durable sent count is the expected
         // state witness; refuse the stale attempt before creating a second
         // logical Notice.
-        if let Some(expected) = handover_reminder.as_ref() {
+        if let Some(expected) = transition.handover_reminder.as_ref() {
             // Revalidate green while holding the same logical write gate as
             // admission. A Keep/Drop that won the gate before this call
             // therefore suppresses the stale warning rather than queueing it.
-            if let Some(live) = self.handover_memory(&expected.address)? {
-                if live.generation == expected.generation {
-                    if let Some(flow_id) = live.current_flow_id.as_deref() {
-                        if let Some(threshold) = self.configured_threshold(&expected.model_name)? {
-                            if self.handover_green(&expected.address, flow_id, threshold.refresh)? {
-                                return Ok(signal_flow::PrivateSendResponse::Refused(
-                                    Refusal::Unknown(Unknown_Data::Address(address.clone())),
-                                ));
-                            }
-                        }
-                    }
-                }
+            if let Some(live) = self.handover_memory(&expected.address)?
+                && live.generation == expected.generation
+                && let Some(flow_id) = live.current_flow_id.as_deref()
+                && let Some(threshold) = self.configured_threshold(&expected.model_name)?
+                && self.handover_green(&expected.address, flow_id, threshold.refresh)?
+            {
+                return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
+                    Unknown_Data::Address(address.clone()),
+                )));
             }
-            if let Some(held) = self.handover_reminder(&expected.address, expected.generation)? {
-                if held.sent >= expected.sent {
-                    return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
-                        Unknown_Data::Address(address.clone()),
-                    )));
-                }
+            if let Some(held) = self.handover_reminder(&expected.address, expected.generation)?
+                && held.sent >= expected.sent
+            {
+                return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
+                    Unknown_Data::Address(address.clone()),
+                )));
             }
         }
         let Some(mut stored) = self.stored_metaflow(address)? else {
@@ -1238,7 +1248,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 LogicalDeliveryPurpose {
                     logical_delivery_id: id.clone(),
                     address: address.clone(),
-                    purpose,
+                    purpose: transition.purpose,
                 },
             );
         let commit = self.assert_logical_request(address, entry, commit);

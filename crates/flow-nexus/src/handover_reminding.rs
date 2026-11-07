@@ -142,6 +142,7 @@ pub trait RemindsHandoverCallers {
 
 impl RemindsHandoverCallers for crate::RunningNexus {
     fn send_due_handover_reminders(&self, now: i64) {
+        use crate::store::ManagesMetaflowState;
         use crate::store::context::{NamesFlowModel, RecordsContextSize};
         use crate::store::handover::HoldsHandovers;
         use crate::store::handover_configuration::ReadsHandoverConfiguration;
@@ -149,11 +150,9 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             HandoverReminderRules, OpensHandoverReminder, SchedulesHandoverReminders,
         };
         use crate::store::logical_delivery::RecordsLogicalDeliveries;
-        use crate::store::{ManagesMetaflowState, ReadsFlowMemory};
         use crate::waking::SleepsAndWakesSeats;
-        use flow_ethos::Delivery;
         use meta_signal_flow::HandoverPoliciesConfiguration;
-        use signal_flow::{Message, Request, SentBy};
+        use signal_flow::{Message, Request};
         // Discover warning windows from every awake metaflow before reading
         // due rows. All inputs are durable Memory observations.
         let Ok(metaflows) = self.store.list_metaflows() else {

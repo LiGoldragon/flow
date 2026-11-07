@@ -1,9 +1,8 @@
 //! Durable current and closed handover generations.
 
-use super::context::{NamesFlowModel, RecordsContextSize};
+use super::context::NamesFlowModel;
 use super::handover_configuration::ReadsHandoverConfiguration;
-use super::metaflow::SleepsMetaflows;
-use super::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, StoreError};
+use super::{FlowStore, ReadsFlowMemory, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,
@@ -100,6 +99,7 @@ pub trait HoldsHandovers {
         address: &Address,
         expected: &ClosedHandover,
     ) -> Result<(), StoreError>;
+    #[cfg(test)]
     fn keep_handover(
         &self,
         address: &Address,
@@ -113,6 +113,7 @@ pub trait HoldsHandovers {
         section: Section,
         touch: Touch,
     ) -> Result<Touch, HandoverRefusal>;
+    #[cfg(test)]
     fn drop_handover(
         &self,
         address: &Address,
@@ -307,6 +308,7 @@ impl HoldsHandovers for FlowStore {
         }))
     }
 
+    #[cfg(test)]
     fn keep_handover(
         &self,
         address: &Address,
@@ -381,6 +383,7 @@ impl HoldsHandovers for FlowStore {
         Ok(touch)
     }
 
+    #[cfg(test)]
     fn drop_handover(
         &self,
         address: &Address,
@@ -524,6 +527,7 @@ impl FlowStore {
     }
 }
 
+#[cfg(test)]
 fn ensure_owner(address: &Address, caller: &Address) -> Result<(), HandoverRefusal> {
     if address == caller {
         Ok(())
@@ -537,12 +541,11 @@ fn ensure_live_writer(
     address: &Address,
     flow_id: &str,
 ) -> Result<(), HandoverRefusal> {
-    if let Some(row) = store.handover_row(address).map_err(store_refusal)? {
-        if let Some(owner) = row.current_flow_id.as_deref() {
-            if owner != flow_id {
-                return Err(HandoverRefusal::NotOwner);
-            }
-        }
+    if let Some(row) = store.handover_row(address).map_err(store_refusal)?
+        && let Some(owner) = row.current_flow_id.as_deref()
+        && owner != flow_id
+    {
+        return Err(HandoverRefusal::NotOwner);
     }
     Ok(())
 }

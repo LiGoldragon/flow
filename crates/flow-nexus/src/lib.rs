@@ -169,7 +169,6 @@ impl crate::handover::YieldsHandover for MemoryHandoverSource {
         predecessor: &str,
         _launch_root: &Path,
     ) -> crate::handover::Handover {
-        use crate::store::handover::HoldsHandovers;
         match self.store_handover(address, predecessor) {
             Ok(Some(sections)) if !sections.is_empty() => crate::handover::Handover::Text(
                 sections

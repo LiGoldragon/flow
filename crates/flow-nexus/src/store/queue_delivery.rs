@@ -2077,7 +2077,9 @@ mod tests {
 
     #[test]
     fn an_authenticated_answer_atomically_marks_uncertain_delivery_read_and_recovery_excludes_it() {
-        use super::super::logical_delivery::{RecordsLogicalDeliveries, RequestClosure};
+        use super::super::logical_delivery::{
+            MintsRequestIds, RecordsLogicalDeliveries, RequestClosure,
+        };
 
         let (fixture, store) = Fixture::new();
         let PrepareQueueDelivery::Prepared(prepared) = store

@@ -12,6 +12,7 @@ use crate::composition::{ComposesLaunch, HarnessedProfile};
 use crate::reporting::RecordsReports;
 use crate::store::compaction::{Investigation, RecordsCompactions};
 use crate::store::context::{JudgesThreshold, RecordsContextSize, ThresholdStanding};
+use crate::store::handover::HoldsHandovers;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
 use crate::store::{ManagesMetaflowState, ReadsFlowRows, SeedsRole};
@@ -52,6 +53,36 @@ pub(super) fn seat_refreshing_at(fixture: &NexusFixture, refresh: i64) {
             refresh,
         }]))
         .expect("threshold configured");
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::HandoverPolicies(vec![
+            meta_signal_flow::HandoverPolicy {
+                model_name: CLAUDE_MODEL.into(),
+                warning_share_left: 15,
+                reminder_text: "fixture".into(),
+                every_minutes: 5,
+            },
+        ]))
+        .expect("handover policy configured");
+    fixture
+        .nexus
+        .store
+        .keep_handover(
+            &seat_address(),
+            &seat_address(),
+            signal_flow::Section {
+                title: "fixture".into(),
+                description: "fixture".into(),
+                body: "fixture".into(),
+            },
+            signal_flow::Touch::Known(signal_flow::Known_Data {
+                flow_id: CLAUDE_SEAT.into(),
+                tokens: 40_000,
+                timestamp: 1,
+            }),
+        )
+        .expect("handover touch configured");
 }
 
 fn seat_metaflow(fixture: &NexusFixture, queue: Vec<Request>) {
@@ -207,6 +238,24 @@ fn a_flow_s_context_is_judged_against_its_model_s_threshold() {
         .nexus
         .store
         .record_context_size(CLAUDE_SEAT, 200_000)
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .keep_handover(
+            &seat_address(),
+            &seat_address(),
+            signal_flow::Section {
+                title: "fixture".into(),
+                description: "fixture".into(),
+                body: "fixture".into(),
+            },
+            signal_flow::Touch::Known(signal_flow::Known_Data {
+                flow_id: CLAUDE_SEAT.into(),
+                tokens: 200_000,
+                timestamp: 1,
+            }),
+        )
         .unwrap();
     assert!(fixture.nexus.store.past_threshold(CLAUDE_SEAT).unwrap());
     // Another model's threshold is not this flow's.

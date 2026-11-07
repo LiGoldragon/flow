@@ -1812,6 +1812,7 @@ mod tests {
     mod ending;
     mod handover_archive;
     mod handover_configuration;
+    mod handover_memory;
     mod handover_reminding;
     mod heartbeat_production;
     mod launching_nexus;

@@ -122,7 +122,7 @@ impl CodexCliWorld {
             .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
                 meta_signal_flow::ConfigureModel {
                     model: Model::Terra,
-                    native: "gpt-6.1-terra".into(),
+                    native: "gpt-6-sol".into(),
                 },
                 meta_signal_flow::ConfigureModel {
                     model: Model::Luna,

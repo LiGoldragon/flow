@@ -346,6 +346,7 @@ struct VisibleToolLegacyUnknown {
 enum VisibleToolOutcome {
     Accepted(VisibleToolAccepted),
     LegacyUnknown(VisibleToolLegacyUnknown),
+    Archived(VisibleToolLegacyUnknown),
     Refused(SendRefusal),
 }
 
@@ -356,11 +357,18 @@ fn visible_tool_outcome(outcome: &SendOutcome) -> VisibleToolOutcome {
             target: value.target.clone(),
             visible_send_acceptance: signal_flow::VisibleSendAcceptance {
                 delivery_cursor: value.send_acceptance.delivery_cursor,
+                request_id: value.send_acceptance.request_id.clone(),
                 visible_delivery_state: crate::message_projection::visible_delivery_state(
                     &value.send_acceptance.delivery_state,
                 ),
             },
         }),
+        SendOutcome::Archived(value) => {
+            VisibleToolOutcome::LegacyUnknown(VisibleToolLegacyUnknown {
+                sender: value.sender.clone(),
+                target: value.target.clone(),
+            })
+        }
         SendOutcome::LegacyUnknown(value) => {
             VisibleToolOutcome::LegacyUnknown(VisibleToolLegacyUnknown {
                 sender: value.sender.clone(),

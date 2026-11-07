@@ -650,6 +650,7 @@ fn restart_resumed_hooks_report_to_live_nexus() {
     let mut queued = stored(&fixture, Model::Sol);
     queued.queue = vec![signal_flow::QueueEntry {
         logical_delivery_id: "after-restart".into(),
+        request_id: "test".into(),
         sent_by: signal_flow::SentBy::Unknown,
         delivery: flow_ethos::Delivery::Wake,
         message: signal_flow::Message::Soft(signal_flow::Request::Order(
@@ -721,6 +722,7 @@ fn restart_resume_refused_custody_kept() {
     let mut queued = stored(&fixture, Model::Sol);
     queued.queue = vec![signal_flow::QueueEntry {
         logical_delivery_id: "kept-through-refusal".into(),
+        request_id: "test".into(),
         sent_by: signal_flow::SentBy::Unknown,
         delivery: flow_ethos::Delivery::Wake,
         message: signal_flow::Message::Soft(signal_flow::Request::Order("kept work".into())),
@@ -1181,6 +1183,7 @@ fn restart_crash_around_bind_commit_delivers_once() {
         let mut queued = stored(&fixture, Model::Sol);
         queued.queue = vec![signal_flow::QueueEntry {
             logical_delivery_id: "around-the-commit".into(),
+            request_id: "test".into(),
             sent_by: signal_flow::SentBy::Unknown,
             delivery: flow_ethos::Delivery::Wake,
             message: signal_flow::Message::Soft(signal_flow::Request::Order(
@@ -1668,6 +1671,7 @@ fn queued_for_seat(fixture: &NexusFixture, body: &str) {
     let mut queued = stored(fixture, Model::Sol);
     queued.queue = vec![signal_flow::QueueEntry {
         logical_delivery_id: body.into(),
+        request_id: "test".into(),
         sent_by: signal_flow::SentBy::Unknown,
         delivery: flow_ethos::Delivery::Wake,
         message: signal_flow::Message::Soft(signal_flow::Request::Order(body.into())),
@@ -2631,6 +2635,7 @@ fn restart_cutover_two_nexus() {
     let mut queued = new.store.metaflow(&address(Model::Sol)).unwrap().unwrap();
     queued.queue = vec![signal_flow::QueueEntry {
         logical_delivery_id: "cutover-queued".into(),
+        request_id: "test".into(),
         sent_by: signal_flow::SentBy::Unknown,
         delivery: flow_ethos::Delivery::Wake,
         message: signal_flow::Message::Soft(signal_flow::Request::Order(
@@ -2646,6 +2651,7 @@ fn restart_cutover_two_nexus() {
     let mut held = stored(&fixture, Model::Sol);
     held.queue = vec![signal_flow::QueueEntry {
         logical_delivery_id: "held-by-the-old-nexus".into(),
+        request_id: "test".into(),
         sent_by: signal_flow::SentBy::Unknown,
         delivery: flow_ethos::Delivery::Wake,
         message: signal_flow::Message::Soft(signal_flow::Request::Order(
@@ -3236,6 +3242,7 @@ fn restart_not_composed_refused_then_recovered() {
     let mut queued = new_metaflow(&new);
     queued.queue = vec![signal_flow::QueueEntry {
         logical_delivery_id: "held-through-not-composed".into(),
+        request_id: "test".into(),
         sent_by: signal_flow::SentBy::Unknown,
         delivery: flow_ethos::Delivery::Wake,
         message: signal_flow::Message::Soft(signal_flow::Request::Order(
@@ -3363,6 +3370,7 @@ fn restart_not_composed_owner_stop() {
     let mut queued = new_metaflow(&new);
     queued.queue = vec![signal_flow::QueueEntry {
         logical_delivery_id: "kept-through-stop".into(),
+        request_id: "test".into(),
         sent_by: signal_flow::SentBy::Unknown,
         delivery: flow_ethos::Delivery::Wake,
         message: signal_flow::Message::Soft(signal_flow::Request::Order(

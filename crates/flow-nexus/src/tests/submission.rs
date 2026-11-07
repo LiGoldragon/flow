@@ -558,6 +558,7 @@ fn a_native_input_matching_a_letter_shaped_prompt_is_submitted_again_never_retra
         content: Content::Waking(vec![
             signal_flow::QueueEntry {
                 logical_delivery_id: "logical-delivery-00000000000000000002".into(),
+                request_id: "test".into(),
                 sent_by: signal_flow::SentBy::Flow,
                 delivery: flow_ethos::Delivery::Wake,
                 message: signal_flow::Message::HardAbrupt(signal_flow::Request::Order(text.into())),

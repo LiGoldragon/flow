@@ -522,6 +522,8 @@ fn each_family_is_its_last_declaration() {
                 queue_attempt: 3,
                 send_outcome: 1,
             },
+            request_id_draws: 64,
+            announcement_tries: 3,
         }
     );
     // An empty declaration empties the family.

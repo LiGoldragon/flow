@@ -53,6 +53,7 @@ impl RendersNativeContent for signal_flow::Request {
                 flow_ethos::ResultPayload::Answered(result) => result.string.clone(),
                 flow_ethos::ResultPayload::Historical(text) => text.clone(),
             },
+            signal_flow::Request::Reminder(reminder) => reminder.string.clone(),
             signal_flow::Request::Task(task) => {
                 format!("Task, {} minutes:\n{}", task.minutes, task.string)
             }
@@ -437,6 +438,7 @@ mod tests {
             content: Content::Waking(vec![
                 signal_flow::QueueEntry {
                     logical_delivery_id: input.logical_delivery_id.clone(),
+                    request_id: "test".into(),
                     sent_by: input.sent_by.clone(),
                     delivery: flow_ethos::Delivery::Wake,
                     message: input.message.clone(),
@@ -475,6 +477,7 @@ mod tests {
         };
         let entries = [input.clone(), second.clone()].map(|input| signal_flow::QueueEntry {
             logical_delivery_id: input.logical_delivery_id,
+            request_id: "test".into(),
             sent_by: input.sent_by,
             delivery: flow_ethos::Delivery::Queue,
             message: input.message,
@@ -513,6 +516,7 @@ mod tests {
                 content: Content::Waking(vec![
                     signal_flow::QueueEntry {
                         logical_delivery_id: "native-content".into(),
+                        request_id: "test".into(),
                         sent_by: signal_flow::SentBy::Flow,
                         delivery: flow_ethos::Delivery::Wake,
                         message: signal_flow::Message::HardAbrupt(signal_flow::Request::Order(

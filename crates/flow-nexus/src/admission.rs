@@ -36,6 +36,7 @@ impl NamesRequestKind for Request {
             Request::Notice(_) => "Notice",
             Request::Task(_) => "Task",
             Request::Done(_) => "Done",
+            Request::Reminder(_) => "Reminder",
         }
     }
 }

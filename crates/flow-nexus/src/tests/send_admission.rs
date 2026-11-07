@@ -91,9 +91,12 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
     assert!(
         matches!(
             answer.response,
-            Response::Failed(signal_flow::VisibleSendFailure {
-                visible_send_failure_reason: signal_flow::VisibleSendFailureReason::NotSent(_),
-            })
+            Response::Failed(signal_flow::VisibleSendFailure::Admitted(
+                signal_flow::VisibleSendFailure_Admitted_Data {
+                    visible_send_failure_reason: signal_flow::VisibleSendFailureReason::NotSent(_),
+                    ..
+                }
+            ))
         ),
         "{:?}",
         answer.response
@@ -125,10 +128,9 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
     );
     assert!(matches!(
         answer.response,
-        Response::Failed(signal_flow::VisibleSendFailure {
-            visible_send_failure_reason:
-                signal_flow::VisibleSendFailureReason::RecipientUnavailable(_),
-        })
+        Response::Failed(signal_flow::VisibleSendFailure::Unadmitted(
+            signal_flow::VisibleSendFailureReason::RecipientUnavailable(_)
+        ))
     ));
     assert!(fixture.nexus.store.metaflow(&unknown).unwrap().is_none());
     let queued = fixture.nexus.send_request(
@@ -257,7 +259,11 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
             fixture
                 .nexus
                 .dispatch_metaflow_peer(
-                    signal_flow::Query::Deliver(signal_flow::Deliver_Data { lock, message }),
+                    signal_flow::Query::Deliver(signal_flow::Deliver_Data {
+                        lock,
+                        deliver_key: format!("test-deliver-{index}"),
+                        sendable_message: message,
+                    }),
                     Some(&message_peer),
                 )
                 .response
@@ -312,8 +318,8 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                 answer
             )
         };
-        assert_eq!(receipt.native_session_id, CLAUDE_SESSION);
-        assert_eq!(receipt.native_prompt_id, "direct-native-receipt");
+        assert!(!receipt.logical_delivery_id.is_empty());
+        assert_eq!(receipt.request_id.len(), 4);
         assert!(
             fixture
                 .nexus

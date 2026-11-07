@@ -44,6 +44,7 @@ fn elsewhere() -> Address {
 fn entry(id: &str) -> QueueEntry {
     QueueEntry {
         logical_delivery_id: id.into(),
+        request_id: "test".into(),
         sent_by: SentBy::Unknown,
         delivery: flow_ethos::Delivery::Queue,
         message: Message::Soft(Request::Order(format!("Order {id}."))),

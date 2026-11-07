@@ -1188,11 +1188,8 @@ impl AccountsQueueDelivery for FlowStore {
             return Ok(Err(Rejected::UnknownAttempt));
         };
         if let QueueDeliveryPhase::Settled(receipt) = &attempt.phase {
-            return Ok(Err(Rejected::AlreadyDelivered(NativeReceipt {
-                harness_kind: attempt.harness_kind.clone(),
-                native_session_id: attempt.thread_id.clone(),
-                native_prompt_id: receipt.turn_id.clone(),
-            })));
+            let _ = receipt;
+            return Ok(Err(Rejected::AlreadyDelivered));
         }
         if let QueueDeliveryPhase::Resolved(prior) = &attempt.phase {
             if prior.queue_resolution_outcome == QueueResolutionOutcome::Absent
@@ -2611,11 +2608,7 @@ mod tests {
             store
                 .resolve_uncertain_delivery(&prepared.attempt_id, delivered.clone())
                 .unwrap(),
-            Err(Rejected::AlreadyDelivered(NativeReceipt {
-                harness_kind: HarnessKind::Claude,
-                native_session_id: "thread-7".into(),
-                native_prompt_id: "turn-9".into(),
-            }))
+            Err(Rejected::AlreadyDelivered)
         );
 
         // An empty reason is refused and nothing is written.

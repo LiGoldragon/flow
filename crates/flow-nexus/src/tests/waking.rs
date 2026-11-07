@@ -86,6 +86,7 @@ impl Unsent for Request {
         );
         QueueEntry {
             logical_delivery_id,
+            request_id: "test".into(),
             sent_by: SentBy::Unknown,
             delivery: flow_ethos::Delivery::Wake,
             message: Message::MiddleAbrupt(self),
@@ -483,6 +484,7 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
     };
     let task = QueueEntry {
         logical_delivery_id: "logical-delivery-00000000000000000001".into(),
+        request_id: "test".into(),
         sent_by: from(Aspect::Psyche, Model::Astra),
         delivery: flow_ethos::Delivery::Wake,
         message: Message::MiddleAbrupt(Request::Task(flow_ethos::AnswerableTask {
@@ -492,6 +494,7 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
     };
     let reminder = QueueEntry {
         logical_delivery_id: "logical-delivery-00000000000000000002".into(),
+        request_id: "test".into(),
         sent_by: SentBy::Flow,
         delivery: flow_ethos::Delivery::Wake,
         message: Message::Soft(Request::Notice(
@@ -501,6 +504,7 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
     };
     let done = QueueEntry {
         logical_delivery_id: "logical-delivery-00000000000000000003".into(),
+        request_id: "test".into(),
         sent_by: from(Aspect::Mind, Model::Sol),
         delivery: flow_ethos::Delivery::Wake,
         message: Message::Soft(Request::Done(flow_ethos::DonePayload::Historical(
@@ -2431,7 +2435,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
             .dispatch_metaflow_peer(
                 signal_flow::Query::Deliver(Deliver_Data {
                     lock: lock.clone(),
-                    message: Message::Soft(oversized),
+                    sendable_message: Message::Soft(oversized),
                 }),
                 Some(&message),
             )
@@ -2485,7 +2489,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     let answer = fixture.nexus.dispatch_metaflow_peer(
         signal_flow::Query::Deliver(Deliver_Data {
             lock,
-            message: Message::MiddleAbrupt(order.clone()),
+            sendable_message: Message::MiddleAbrupt(order.clone()),
         }),
         Some(&message),
     );
@@ -2504,6 +2508,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     // Sender its Lock named.
     let sent = QueueEntry {
         logical_delivery_id: receipt.logical_delivery_id,
+        request_id: "test".into(),
         sent_by: SentBy::Sender(sender_address.clone()),
         delivery: flow_ethos::Delivery::Wake,
         message: Message::MiddleAbrupt(order.clone()),
@@ -2940,7 +2945,7 @@ fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
     let response = fixture.nexus.dispatch_metaflow_peer(
         signal_flow::Query::Deliver(Deliver_Data {
             lock,
-            message: Message::Soft(order.clone()),
+            sendable_message: Message::Soft(order.clone()),
         }),
         Some(&message),
     );

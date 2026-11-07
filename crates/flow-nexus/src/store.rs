@@ -2965,6 +2965,8 @@ impl AppliesFlowQuery for FlowStore {
             | Query::IdentifyThread(_)
             | Query::Lock(_)
             | Query::Deliver(_)
+            | Query::Acknowledge(_)
+            | Query::ArchiveRequest(_)
             | Query::Release(_) => Ok(Response::Refused(signal_flow::Refusal::NotMessage)),
             // The sender is read from the socket, which the store never sees.
             Query::Send(_)
@@ -3036,6 +3038,8 @@ impl ReservesPendingStart for FlowStore {
             | Query::IdentifyThread(_)
             | Query::Lock(_)
             | Query::Deliver(_)
+            | Query::Acknowledge(_)
+            | Query::ArchiveRequest(_)
             | Query::Release(_)
             | Query::Send(_)
             | Query::DeliverAll(_)

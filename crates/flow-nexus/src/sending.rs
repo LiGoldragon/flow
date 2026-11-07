@@ -1326,9 +1326,10 @@ impl CompletesDirectSends for RunningNexus {
             if let Ok(Some(snapshot)) = state {
                 match snapshot.delivery_state {
                     DeliveryState::Delivered(native_receipt) => {
+                        let request_id = snapshot.request_id;
                         return PrivateSendResponse::Sent(SendReceipt {
                             logical_delivery_id: logical_id,
-                            native_receipt,
+                            request_id,
                         })
                         .into();
                     }

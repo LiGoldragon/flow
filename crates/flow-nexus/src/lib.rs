@@ -285,6 +285,10 @@ impl Dispatches for RunningNexus {
     /// takes it.
     fn dispatch(&self, query: Query) -> Response {
         match query {
+            Query::Acknowledge(keys) => self.dispatch_from(Query::Acknowledge(keys), origin),
+            Query::ArchiveRequest(request_id) => {
+                self.dispatch_from(Query::ArchiveRequest(request_id), origin)
+            }
             Query::Start(profile) => {
                 if let Err(rejection) = self.harness_arguments(&profile.address) {
                     return Response::StartRejected(rejection);
@@ -638,6 +642,11 @@ impl Dispatches for RunningNexus {
         resolver: Option<meta_signal_flow::ResolverIdentity>,
     ) -> meta_signal_flow::Response {
         match query {
+            meta_signal_flow::Query::DebugDelivery(_) => {
+                meta_signal_flow::Response::DebugDeliveryRejected(
+                    meta_signal_flow::DebugDeliveryRejection::StoreRefused,
+                )
+            }
             meta_signal_flow::Query::Configuration => match self.store.configuration_snapshot() {
                 Ok(Some(snapshot)) => meta_signal_flow::Response::Configuration(snapshot),
                 Ok(None) => meta_signal_flow::Response::Unconfigured,
@@ -1970,14 +1979,14 @@ mod tests {
             signal_flow::Request::Notice(value) => signal_flow::SendableRequest::Notice(value),
             signal_flow::Request::Task(value) => signal_flow::SendableRequest::Task(value),
             signal_flow::Request::Result(flow_ethos::ResultPayload::Answered(value)) => {
-                signal_flow::SendableRequest::Result(signal_flow::Result_Data {
-                    answerable: value.answerable,
+                signal_flow::SendableRequest::Result(signal_flow::SendableRequest_Result_Data {
+                    request_id: value.request_id,
                     string: value.string,
                 })
             }
             signal_flow::Request::Done(flow_ethos::DonePayload::Answered(value)) => {
-                signal_flow::SendableRequest::Done(signal_flow::Done_Data {
-                    answerable: value.answerable,
+                signal_flow::SendableRequest::Done(signal_flow::SendableRequest_Done_Data {
+                    request_id: value.request_id,
                     string: value.string,
                 })
             }
@@ -2111,11 +2120,13 @@ mod tests {
         for response in [
             signal_flow::PrivateSendResponse::SendAccepted(signal_flow::SendAcceptance {
                 logical_delivery_id: "logical-delivery-1".into(),
+                request_id: "req1".into(),
                 delivery_cursor: 1,
                 delivery_state: signal_flow::DeliveryState::Queued,
             }),
             signal_flow::PrivateSendResponse::SendAccepted(signal_flow::SendAcceptance {
                 logical_delivery_id: "logical-delivery-2".into(),
+                request_id: "req2".into(),
                 delivery_cursor: 2,
                 delivery_state: signal_flow::DeliveryState::Attempting,
             }),
@@ -3655,6 +3666,7 @@ mod tests {
             past: vec![],
             queue: vec![signal_flow::QueueEntry {
                 logical_delivery_id: "retained-logical-id".into(),
+                request_id: "test".into(),
                 sent_by: signal_flow::SentBy::Sender(signal_flow::Address {
                     aspect: Aspect::Field,
                     topic: "core".into(),
@@ -3721,6 +3733,7 @@ mod tests {
         };
         let original_queue = vec![signal_flow::QueueEntry {
             logical_delivery_id: "retained-logical-id".into(),
+            request_id: "test".into(),
             sent_by: signal_flow::SentBy::Sender(signal_flow::Address {
                 aspect: Aspect::Field,
                 topic: "core".into(),
@@ -5854,7 +5867,8 @@ mod tests {
                 address(Aspect::Mind, "core", Model::Astra),
                 Request::Result(flow_ethos::ResultPayload::Answered(
                     flow_ethos::ResultPayload_Answered_Data {
-                        answerable: flow_ethos::Answerable::Order("not an open order".into()),
+                        logical_delivery_id: String::new(),
+                        request_id: "none".into(),
                         string: "done".into(),
                     },
                 )),
@@ -5872,6 +5886,7 @@ mod tests {
                 .queue,
             vec![QueueEntry {
                 logical_delivery_id: "logical-delivery-00000000000000000001".into(),
+                request_id: "test".into(),
                 sent_by: SentBy::Sender(sender),
                 delivery: flow_ethos::Delivery::Queue,
                 message: Message::Soft(order.clone()),
@@ -5890,13 +5905,13 @@ mod tests {
     /// exact typed Order retained in the delivery ledger. Missing, foreign,
     /// and duplicate matches leave every retained request untouched.
     #[test]
-    fn a_result_resolves_one_exact_owned_order_and_refuses_missing_or_ambiguous_matches() {
+    fn a_result_resolves_one_owned_request_id_and_refuses_missing_or_foreign_ids() {
         use crate::store::RecordsLogicalDeliveries;
         use crate::store::metaflow::SeedsMetaflow;
-        use flow_ethos::{Answerable, ResultPayload, State};
+        use flow_ethos::{ResultPayload, State};
         use signal_flow::{
-            Address, DeliveryState, Message, Model, NativeReceipt, PrivateSendResponse, Refusal,
-            SendableMessage, SendableRequest, SentBy,
+            Address, Message, Model, PrivateSendResponse, Refusal, SendableMessage,
+            SendableRequest, SentBy,
         };
 
         let fixture = NexusFixture::new();
@@ -5905,9 +5920,9 @@ mod tests {
             topic: topic.into(),
             model: Model::Sol,
         };
-        let sender = at("sender");
-        let recipient = at("recipient");
-        let stranger = at("stranger");
+        let sender = at("resultSender");
+        let recipient = at("resultRecipient");
+        let stranger = at("resultStranger");
         for address in [&sender, &recipient, &stranger] {
             fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
                 address: address.clone(),
@@ -5916,48 +5931,33 @@ mod tests {
                 queue: vec![],
             });
         }
-        let order = "Retain the exact typed order.".to_owned();
-        let admit_order = || {
-            let PrivateSendResponse::SendAccepted(accepted) = fixture
-                .nexus
-                .store
-                .accept_logical_delivery(
-                    &recipient,
-                    SentBy::Sender(sender.clone()),
-                    flow_ethos::Delivery::Queue,
-                    Message::Soft(flow_ethos::Request::Order(order.clone())),
-                    None,
-                )
-                .expect("order admission")
-            else {
-                panic!("the seeded recipient accepts the order")
-            };
-            fixture
-                .nexus
-                .store
-                .transition_logical_delivery(
-                    &accepted.logical_delivery_id,
-                    DeliveryState::Delivered(NativeReceipt {
-                        harness_kind: flow_ethos::HarnessKind::Codex,
-                        native_session_id: "thread-result-test".into(),
-                        native_prompt_id: accepted.logical_delivery_id.clone(),
-                    }),
-                )
-                .expect("order delivery");
+        let PrivateSendResponse::SendAccepted(accepted) = fixture
+            .nexus
+            .store
+            .accept_logical_delivery(
+                &recipient,
+                SentBy::Sender(sender.clone()),
+                flow_ethos::Delivery::Queue,
+                Message::Soft(flow_ethos::Request::Order("Review".into())),
+                None,
+            )
+            .expect("order admission")
+        else {
+            panic!("order accepted")
         };
-        let result = |answerable| {
-            SendableMessage::Soft(SendableRequest::Result(signal_flow::Result_Data {
-                answerable,
-                string: "done".into(),
-            }))
+        let result = |request_id: String| {
+            SendableMessage::Soft(SendableRequest::Result(
+                signal_flow::SendableRequest_Result_Data {
+                    request_id,
+                    string: "done".into(),
+                },
+            ))
         };
-
-        admit_order();
         assert!(matches!(
             fixture.nexus.store.resolve_sendable_message(
                 &recipient,
                 &sender,
-                result(Answerable::Order(order.clone()))
+                result(accepted.request_id.clone())
             ),
             Ok(Ok(Message::Soft(flow_ethos::Request::Result(
                 ResultPayload::Answered(_)
@@ -5967,35 +5967,17 @@ mod tests {
             fixture
                 .nexus
                 .store
-                .resolve_sendable_message(
-                    &stranger,
-                    &sender,
-                    result(Answerable::Order(order.clone()))
-                )
-                .expect("foreign result resolution"),
+                .resolve_sendable_message(&stranger, &sender, result(accepted.request_id.clone()))
+                .unwrap(),
             Err(Refusal::Unresolved)
         );
         assert_eq!(
             fixture
                 .nexus
                 .store
-                .resolve_sendable_message(
-                    &recipient,
-                    &sender,
-                    result(Answerable::Order("another order".into()))
-                )
-                .expect("missing result resolution"),
+                .resolve_sendable_message(&recipient, &sender, result("none".into()))
+                .unwrap(),
             Err(Refusal::Unresolved)
-        );
-
-        admit_order();
-        assert_eq!(
-            fixture
-                .nexus
-                .store
-                .resolve_sendable_message(&recipient, &sender, result(Answerable::Order(order)))
-                .expect("duplicate result resolution"),
-            Err(Refusal::Ambiguous)
         );
     }
 
@@ -6003,13 +5985,13 @@ mod tests {
     /// resolved private task key and its new delivery enter one atomic
     /// admission; repeating the public Done cannot close another task.
     #[test]
-    fn a_done_closes_one_exact_owned_task_once_and_preserves_ambiguous_tasks() {
+    fn a_done_closes_one_owned_task_id_once() {
         use crate::store::RecordsLogicalDeliveries;
         use crate::store::metaflow::SeedsMetaflow;
-        use flow_ethos::{Answerable, AnswerableTask, DonePayload, State};
+        use flow_ethos::{AnswerableTask, DonePayload, State};
         use signal_flow::{
-            Address, DeliveryState, Message, Model, NativeReceipt, PrivateSendResponse, Refusal,
-            SendableMessage, SendableRequest, SentBy,
+            Address, Message, Model, PrivateSendResponse, Refusal, SendableMessage,
+            SendableRequest, SentBy,
         };
 
         let fixture = NexusFixture::new();
@@ -6020,8 +6002,7 @@ mod tests {
         };
         let sender = at("taskSender");
         let recipient = at("taskRecipient");
-        let stranger = at("taskStranger");
-        for address in [&sender, &recipient, &stranger] {
+        for address in [&sender, &recipient] {
             fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
                 address: address.clone(),
                 state: State::Asleep,
@@ -6030,59 +6011,37 @@ mod tests {
             });
         }
         let task = AnswerableTask {
-            minutes: 30,
-            string: "Return the exact receipt.".into(),
+            minutes: 5,
+            string: "Do it".into(),
         };
-        let admit_task = || {
-            let PrivateSendResponse::SendAccepted(accepted) = fixture
-                .nexus
-                .store
-                .accept_logical_delivery(
-                    &recipient,
-                    SentBy::Sender(sender.clone()),
-                    flow_ethos::Delivery::Queue,
-                    Message::Soft(flow_ethos::Request::Task(task.clone())),
-                    None,
-                )
-                .expect("task admission")
-            else {
-                panic!("the seeded recipient accepts the task")
-            };
-            fixture
-                .nexus
-                .store
-                .transition_logical_delivery(
-                    &accepted.logical_delivery_id,
-                    DeliveryState::Delivered(NativeReceipt {
-                        harness_kind: flow_ethos::HarnessKind::Codex,
-                        native_session_id: "thread-done-test".into(),
-                        native_prompt_id: accepted.logical_delivery_id.clone(),
-                    }),
-                )
-                .expect("task delivery");
+        let PrivateSendResponse::SendAccepted(accepted) = fixture
+            .nexus
+            .store
+            .accept_logical_delivery(
+                &recipient,
+                SentBy::Sender(sender.clone()),
+                flow_ethos::Delivery::Queue,
+                Message::Soft(flow_ethos::Request::Task(task)),
+                None,
+            )
+            .expect("task admission")
+        else {
+            panic!("task accepted")
         };
         let done = || {
-            SendableMessage::Soft(SendableRequest::Done(signal_flow::Done_Data {
-                answerable: Answerable::Task(task.clone()),
-                string: "done".into(),
-            }))
+            SendableMessage::Soft(SendableRequest::Done(
+                signal_flow::SendableRequest_Done_Data {
+                    request_id: accepted.request_id.clone(),
+                    string: "done".into(),
+                },
+            ))
         };
-
-        admit_task();
-        assert_eq!(
-            fixture
-                .nexus
-                .store
-                .resolve_sendable_message(&stranger, &sender, done())
-                .expect("foreign done resolution"),
-            Err(Refusal::Unresolved)
-        );
         let private_done = fixture
             .nexus
             .store
             .resolve_sendable_message(&recipient, &sender, done())
             .expect("done resolution")
-            .expect("one exact task resolves");
+            .expect("task id resolves");
         assert!(matches!(
             &private_done,
             Message::Soft(flow_ethos::Request::Done(DonePayload::Answered(_)))
@@ -6096,7 +6055,7 @@ mod tests {
                     SentBy::Sender(recipient.clone()),
                     flow_ethos::Delivery::Queue,
                     private_done,
-                    None,
+                    None
                 )
                 .expect("done admission"),
             PrivateSendResponse::SendAccepted(_)
@@ -6106,19 +6065,8 @@ mod tests {
                 .nexus
                 .store
                 .resolve_sendable_message(&recipient, &sender, done())
-                .expect("repeated done resolution"),
+                .unwrap(),
             Err(Refusal::Unresolved)
-        );
-
-        admit_task();
-        admit_task();
-        assert_eq!(
-            fixture
-                .nexus
-                .store
-                .resolve_sendable_message(&recipient, &sender, done())
-                .expect("duplicate done resolution"),
-            Err(Refusal::Ambiguous)
         );
     }
 

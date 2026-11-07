@@ -554,7 +554,8 @@ impl RecordsLogicalDeliveries for FlowStore {
         self.engine.assert(Assertion::new(
             self.logical_deliveries.store_identity,
             StoredStoreIdentity { store_identity },
-        ))
+        ))?;
+        Ok(())
     }
     fn delivery_purposes(&self) -> Result<Vec<LogicalDeliveryPurpose>, StoreError> {
         Ok(self
@@ -610,10 +611,6 @@ impl RecordsLogicalDeliveries for FlowStore {
             return Ok(false);
         }
 
-        let request_id = match self.mint_request_id()? {
-            Ok(value) => value,
-            Err(refusal) => return Ok(signal_flow::PrivateSendResponse::Refused(refusal)),
-        };
         let allocation = self.allocate_logical_cursor()?;
         let mut next_cursor = allocation.cursor;
         let mut changed = false;
@@ -1381,12 +1378,17 @@ impl RecordsLogicalDeliveries for FlowStore {
         } else {
             None
         };
+        let request_id = match self.mint_request_id()? {
+            Ok(value) => value,
+            Err(refusal) => return Ok(signal_flow::PrivateSendResponse::Refused(refusal)),
+        };
         let allocation = self.allocate_logical_cursor()?;
         let next = allocation.cursor;
         let create = !allocation.existing;
         let id = format!("logical-delivery-{next:020}");
         let entry = QueueEntry {
             logical_delivery_id: id.clone(),
+            request_id: request_id.clone(),
             sent_by: sent_by.clone(),
             delivery,
             message,

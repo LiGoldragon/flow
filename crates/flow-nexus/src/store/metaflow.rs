@@ -813,7 +813,7 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock: forged,
-                        message: flow_ethos::Message::Soft(body.clone())
+                        sendable_message: flow_ethos::Message::Soft(body.clone())
                     },
                     101
                 )
@@ -835,7 +835,7 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock: lock.clone(),
-                        message: flow_ethos::Message::Soft(body.clone())
+                        sendable_message: flow_ethos::Message::Soft(body.clone())
                     },
                     101
                 )
@@ -864,7 +864,9 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock,
-                        message: flow_ethos::Message::Soft(Request::Notice("duplicate".into()))
+                        sendable_message: flow_ethos::Message::Soft(Request::Notice(
+                            "duplicate".into()
+                        ))
                     },
                     102
                 )
@@ -909,7 +911,9 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock,
-                        message: flow_ethos::Message::Soft(Request::Notice("expired".into()))
+                        sendable_message: flow_ethos::Message::Soft(Request::Notice(
+                            "expired".into()
+                        ))
                     },
                     40
                 )

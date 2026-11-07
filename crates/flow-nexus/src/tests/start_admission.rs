@@ -176,11 +176,11 @@ fn a_send_to_a_bad_topic_is_topic_refused() {
         );
         assert_eq!(
             abrupt.response,
-            Response::Failed(signal_flow::VisibleSendFailure {
-                visible_send_failure_reason: signal_flow::VisibleSendFailureReason::Refused(
+            Response::Failed(signal_flow::VisibleSendFailure::Unadmitted(
+                signal_flow::VisibleSendFailureReason::Refused(
                     signal_flow::VisibleRefusal::TopicRefused(topic.into())
-                ),
-            }),
+                )
+            )),
             "{topic:?}"
         );
     }

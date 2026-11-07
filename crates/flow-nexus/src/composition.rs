@@ -1543,6 +1543,7 @@ pub(crate) mod tests {
         use signal_flow::{QueueEntry, Request, SentBy};
         let order = QueueEntry {
             logical_delivery_id: "logical-delivery-0000000000000001".into(),
+            request_id: "test".into(),
             sent_by: SentBy::Flow,
             delivery: flow_ethos::Delivery::Queue,
             message: signal_flow::Message::Soft(Request::Order("investigate".into())),

@@ -316,6 +316,8 @@ mod tests {
                 queue_attempt: 3,
                 send_outcome: 1,
             },
+            request_id_draws: 64,
+            announcement_tries: 3,
         };
         let printed = Response::Configuration(snapshot)
             .datomize(vec![])

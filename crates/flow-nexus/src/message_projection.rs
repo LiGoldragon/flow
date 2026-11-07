@@ -298,6 +298,7 @@ pub(crate) fn visible_queue_rejection(
             Visible::AlreadyResolved(visible_queue_resolution_record(&value))
         }
         Private::AlreadyDelivered => Visible::AlreadyDelivered,
+        Private::AlreadyRead => Visible::AlreadyRead,
     }
 }
 

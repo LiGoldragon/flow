@@ -271,6 +271,7 @@ mod tests {
             request_digest: "abc".into(),
             ordinary_send_outcome: OrdinarySendOutcome::Accepted(signal_flow::SendAcceptance {
                 logical_delivery_id: "logical-delivery-0000000000000001".into(),
+                request_id: "test".into(),
                 delivery_cursor: 1,
                 delivery_state: signal_flow::DeliveryState::Queued,
             }),

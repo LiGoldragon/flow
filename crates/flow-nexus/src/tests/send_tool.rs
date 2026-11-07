@@ -45,6 +45,7 @@ struct TestRequest {
 fn queue_entry(id: impl Into<String>, queued: TestRequest) -> QueueEntry {
     QueueEntry {
         logical_delivery_id: id.into(),
+        request_id: "test".into(),
         sent_by: queued.sent_by,
         delivery: flow_ethos::Delivery::Wake,
         message: Message::Soft(queued.request),
@@ -1498,6 +1499,7 @@ fn a_queued_request_is_rendered_as_its_datom_in_one_vector() {
         queue_entry("render-1", sent(sender_a(), "Carry on.")),
         QueueEntry {
             logical_delivery_id: "render-2".into(),
+            request_id: "test".into(),
             sent_by: SentBy::Unknown,
             delivery: flow_ethos::Delivery::Queue,
             message: Message::Soft(Request::Notice("kept".into())),
@@ -2272,6 +2274,7 @@ fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
         past: vec![],
         queue: vec![QueueEntry {
             logical_delivery_id: "logical-delivery-test".into(),
+            request_id: "test".into(),
             sent_by: order.sent_by,
             delivery: flow_ethos::Delivery::Wake,
             message: Message::Soft(order.request),

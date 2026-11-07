@@ -18,7 +18,10 @@ use crate::generated::memory::SeatBirth;
 use crate::generated::operation::{Operation, Outcome, Record_Data};
 use crate::performing::Performs;
 use crate::reporting::RecordsReports;
-use crate::restarting::{FencesSeatEvents, SeatWitness};
+use crate::restarting::{
+    ExitDoubt, ExitEvidence, ExitProof, FencesSeatEvents, ProcFs, ProvesExit, ReadsProcessStatus,
+    SeatWitness,
+};
 use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow};
 use crate::store::restart::RecordsRestarts;
 use crate::store::successor::OwesSuccessors;
@@ -38,6 +41,8 @@ use std::{fs, path::Path, time::Duration};
 const FLOW: &str = "abc123";
 const OLD_PANE: &str = "w1:p3";
 const NEW_PANE: &str = "w7:p1";
+/// The pane the fixture makes next, where a restart reopens by itself.
+const REOPENED_PANE: &str = "w8:p1";
 
 /// The old harness: a shell whose argv names the session as Claude's does,
 /// marked as Herdr marks a pane's processes, with a hook child whose
@@ -704,9 +709,11 @@ fn restart_close_refused_flow_unchanged() {
     assert_eq!(route_pane(&fixture), NEW_PANE);
 }
 
-/// The resume is refused: ResumeRefused, the record Failed, its pane
-/// discarded, the session and queue kept. The owner's Stop records it
-/// Stopped, and a retry then resumes it and hands it its queue once.
+/// The resume is refused once its harness runs, and refused again when the
+/// restart reopens it by itself: ResumeRefused, the record Failed, each
+/// pane discarded, the session and queue kept. The owner's Stop records it
+/// Stopped, and a retry, the last harness proven exited, then resumes it
+/// and hands it its queue once.
 #[test]
 fn restart_resume_refused_custody_kept() {
     let mut fixture = NexusFixture::new();
@@ -719,7 +726,7 @@ fn restart_resume_refused_custody_kept() {
         message: signal_flow::Message::Soft(signal_flow::Request::Order("kept work".into())),
     }];
     fixture.nexus.store.seed_metaflow(queued);
-    fs::write(world.fresh.state.join("resume-refused"), "").unwrap();
+    fs::write(world.fresh.state.join("refused-after-start"), "").unwrap();
 
     assert_eq!(
         restarted(&fixture),
@@ -754,19 +761,66 @@ fn restart_resume_refused_custody_kept() {
     assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
     assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1);
 
-    fs::remove_file(world.fresh.state.join("resume-refused")).unwrap();
+    fs::remove_file(world.fresh.state.join("refused-after-start")).unwrap();
     assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
     assert_eq!(received(&world, &fixture, "kept work"), 1);
     assert_eq!(record(&fixture), None);
 }
 
-/// The old pane is already gone and no spawn is recorded: the restart
-/// closes nothing and resumes.
+/// The old pane is already gone and no harness of it is seen or recorded:
+/// a pane's absence proves no exit, so the restart is refused
+/// ExitUnwitnessed before any write: no record, nothing closed or started,
+/// abc123 Active and Awake in w1:p3 as it was.
 #[test]
-fn restart_harness_already_dead() {
+fn restart_first_old_pane_gone_unrecorded_refused_unwitnessed() {
     let mut fixture = NexusFixture::new();
     let world = fixture.restart_world(false);
-    assert_eq!(record(&fixture), None, "no spawn is in flight");
+    let before = node(&fixture);
+    assert_eq!(restarted(&fixture), resume_refused("ExitUnwitnessed"));
+    assert_eq!(record(&fixture), None, "nothing written");
+    assert_eq!(fixture.nexus.store.seat_birth(FLOW).unwrap(), None);
+    assert_eq!(node(&fixture), before);
+    assert_eq!(route_pane(&fixture), OLD_PANE);
+    assert!(world.resumes().is_empty(), "{}", world.fresh.calls());
+    assert!(
+        world.calls_naming("pane close").is_empty(),
+        "{}",
+        world.fresh.calls()
+    );
+}
+
+/// The old pane is gone and the harness recorded for its seat still runs,
+/// born when the record says: refused ExitUnproven before any write, the
+/// harness untouched, no record, nothing closed or started, abc123 and its
+/// recorded birth as they were.
+#[test]
+fn restart_first_old_pane_gone_harness_alive_refused() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(false);
+    let running = live_process();
+    let birth = born_at_route(&fixture, running.1.clone());
+    let before = node(&fixture);
+    assert_eq!(restarted(&fixture), resume_refused("ExitUnproven"));
+    assert_eq!(record(&fixture), None, "nothing written");
+    assert_eq!(fixture.nexus.store.seat_birth(FLOW).unwrap(), Some(birth));
+    assert_eq!(node(&fixture), before);
+    assert!(FlowStore::process_is_live(&running.1), "harness untouched");
+    assert!(world.resumes().is_empty(), "{}", world.fresh.calls());
+    assert!(
+        world.calls_naming("pane close").is_empty(),
+        "{}",
+        world.fresh.calls()
+    );
+}
+
+/// The old pane is gone and the harness recorded for its seat is proven
+/// exited by its birth: the restart closes nothing and resumes the same
+/// session.
+#[test]
+fn restart_first_old_pane_gone_harness_exited_proceeds() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(false);
+    born_at_route(&fixture, exited_process());
     assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
     assert!(
         world.calls_naming("pane close").is_empty(),
@@ -775,6 +829,58 @@ fn restart_harness_already_dead() {
     );
     assert_eq!(world.resumes().len(), 1);
     assert_eq!(route_pane(&fixture), NEW_PANE);
+    assert_eq!(node(&fixture).session_id, world.seat.session);
+    assert_eq!(record(&fixture), None);
+}
+
+/// A restart bound abc123's seat at the route it runs in now, `process` its
+/// harness: its SeatBirth, recorded as a bind records it.
+fn born_at_route(fixture: &NexusFixture, process: Process) -> SeatBirth {
+    let HerdrRouteSelection::Available(route) = node(fixture).herdr_route_selection else {
+        panic!("abc123 is routed")
+    };
+    let pane = HerdrPaneBinding {
+        launch_request_id: "restart-earlier".into(),
+        herdr_session_name: route.herdr_session_name.clone(),
+        herdr_agent_name: route.herdr_agent_name.clone(),
+        herdr_workspace_id: "w1".into(),
+        herdr_pane_id: route.herdr_pane_id.clone(),
+        herdr_terminal_id: route.herdr_terminal_id.clone(),
+    };
+    let store = &fixture.nexus.store;
+    store
+        .record_restart(RestartRecord {
+            restart_phase: RestartPhase::Spawning(pane),
+            ..spawning_record_at(fixture)
+        })
+        .unwrap();
+    let birth = SeatBirth {
+        flow_id: FLOW.into(),
+        herdr_route: route,
+        process,
+    };
+    assert!(store.rebind_restarted(birth.clone()).unwrap());
+    assert_eq!(record(fixture), None);
+    birth
+}
+
+/// abc123's restart record, its old seat its current route, no harness.
+fn spawning_record_at(fixture: &NexusFixture) -> RestartRecord {
+    let node = node(fixture);
+    let HerdrRouteSelection::Available(route) = node.herdr_route_selection else {
+        panic!("abc123 is routed")
+    };
+    RestartRecord {
+        flow_id: FLOW.into(),
+        native_session_id: node.session_id,
+        address: address(Model::Sol),
+        old_seat: OldSeat {
+            herdr_route: route,
+            process_option: None,
+        },
+        restart_phase: RestartPhase::Closing,
+        attempts: 1,
+    }
 }
 
 /// A flow Flow does not hold is refused UnknownFlow, and nothing is closed.
@@ -871,9 +977,10 @@ fn restart_busy() {
     assert!(world.calls_naming("pane close").is_empty());
 }
 
-/// The resumed pane reports another session: ResumeRefused BindMismatch,
-/// the record Failed, the pane discarded, and no new identity minted: the
-/// flow keeps its session and no FlowId is claimed.
+/// Each resumed pane, the first and the one the restart reopens by itself,
+/// reports another session: ResumeRefused BindMismatch, the record Failed,
+/// each pane discarded, and no new identity minted: the flow keeps its
+/// session and no FlowId is claimed.
 #[test]
 fn restart_bind_mismatch() {
     let mut fixture = NexusFixture::new();
@@ -895,11 +1002,18 @@ fn restart_bind_mismatch() {
         }))
     );
     assert_eq!(
-        record(&fixture).map(|record| record.restart_phase),
-        Some(RestartPhase::Failed(RestartFailure::BindMismatch))
+        record(&fixture).map(|record| (record.restart_phase, record.attempts)),
+        Some((RestartPhase::Failed(RestartFailure::BindMismatch), 2))
     );
+    assert_eq!(world.resumes().len(), 2);
     assert_eq!(
         world.calls_naming(&format!("pane close {NEW_PANE}")).len(),
+        1
+    );
+    assert_eq!(
+        world
+            .calls_naming(&format!("pane close {REOPENED_PANE}"))
+            .len(),
         1
     );
     assert_eq!(node(&fixture).session_id, world.seat.session);
@@ -965,7 +1079,7 @@ fn restart_inspect_shows_record() {
 /// again and resumes; Closed resumes; Opening is Interrupted with no pane
 /// made; Spawning whose pane shows no seat is Interrupted with no harness
 /// started; Spawning whose pane runs the session binds it without starting
-/// another; Failed stays Failed.
+/// another; Failed whose bound is spent stays Failed.
 #[test]
 fn restart_nexus_death_each_phase() {
     let reopened_at = |phase: &str| {
@@ -983,6 +1097,9 @@ fn restart_nexus_death_each_phase() {
             restart_phase: at,
             ..spawning_record(&world, pane.clone())
         };
+        if phase == "Failed" {
+            left.attempts = 2;
+        }
         if phase == "Closing" {
             left.old_seat.process_option = Some(world.old_harness());
         }
@@ -1513,6 +1630,778 @@ fn restart_failed_not_composed_by_0530_retry_resumes_same_session() {
     assert_eq!(node(&fixture).session_id, world.seat.session);
     assert_eq!(route_pane(&fixture), NEW_PANE);
     assert_eq!(record(&fixture), None);
+}
+
+// 0.53.1: a restart whose resume fails after the close reopens the same
+// session by itself, once, and only once nothing holds the session.
+
+/// Whether a pid the fixture wrote has ended: gone, or a zombie.
+fn pid_ended(pid: u32) -> bool {
+    match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Err(_) => true,
+        Ok(stat) => stat.contains(") Z"),
+    }
+}
+
+/// Every harness the fixture Herdr resumed, in order.
+fn resumed_pids(world: &RestartWorld) -> Vec<u32> {
+    fs::read_to_string(world.fresh.state.join("resumed-pids"))
+        .unwrap_or_default()
+        .lines()
+        .map(|pid| pid.parse().expect("a pid"))
+        .collect()
+}
+
+/// No resume started while an earlier resumed harness, or the old one,
+/// still ran.
+fn never_two_live(world: &RestartWorld) {
+    let overlap = world.fresh.state.join("overlap");
+    assert!(
+        !overlap.exists(),
+        "a resume started while {} still ran",
+        fs::read_to_string(&overlap).unwrap_or_default()
+    );
+}
+
+/// `body` queued for abc123's Address.
+fn queued_for_seat(fixture: &NexusFixture, body: &str) {
+    let mut queued = stored(fixture, Model::Sol);
+    queued.queue = vec![signal_flow::QueueEntry {
+        logical_delivery_id: body.into(),
+        sent_by: signal_flow::SentBy::Unknown,
+        delivery: flow_ethos::Delivery::Wake,
+        message: signal_flow::Message::Soft(signal_flow::Request::Order(body.into())),
+    }];
+    fixture.nexus.store.seed_metaflow(queued);
+}
+
+/// The pane a resume that failed past the close ran in, discarded, as its
+/// Failed record names it.
+const FAILED_PANE: &str = "w6:p1";
+
+/// The failed pane, and `process_option`, the harness Flow saw there.
+fn failed_seat(process_option: Option<Process>) -> OldSeat {
+    OldSeat {
+        herdr_route: HerdrRoute {
+            herdr_session_name: "fixture-session".into(),
+            herdr_agent_name: "restart-agent".into(),
+            herdr_pane_id: FAILED_PANE.into(),
+            herdr_terminal_id: "term-failed".into(),
+        },
+        process_option,
+    }
+}
+
+/// A process the kernel knew, by its birth, since ended and reaped.
+fn exited_process() -> Process {
+    let mut child = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("a process");
+    let process = FlowStore::process_identity_for_pid(child.id()).expect("its birth");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    process
+}
+
+/// What a Nexus leaves when its resume failed after the close at run
+/// `attempts`, its pane discarded: the old seat that pane, with
+/// `process_option`, the harness Flow saw there.
+fn failed_at(
+    world: &RestartWorld,
+    attempts: i64,
+    process_option: Option<Process>,
+) -> RestartRecord {
+    RestartRecord {
+        restart_phase: RestartPhase::Failed(RestartFailure::ResumeRefused("SpawnRefused".into())),
+        attempts,
+        old_seat: failed_seat(process_option),
+        ..spawning_record(world, next_pane("restart-agent"))
+    }
+}
+
+/// What a Nexus leaves when its resume failed after the close, its pane
+/// discarded and the harness Flow saw there exited, at run `attempts`.
+fn failed_after_close(world: &RestartWorld, attempts: i64) -> RestartRecord {
+    failed_at(world, attempts, Some(exited_process()))
+}
+
+/// The restart ran twice: `claude --resume <the same session>` in w7:p1,
+/// then in w8:p1, made only once w7:p1 was discarded, no harness started
+/// while another ran; abc123 bound in w8:p1 to the second harness, its
+/// session kept and its lock gone.
+fn reopened_once(world: &RestartWorld, fixture: &NexusFixture) {
+    let resumes = world.resumes();
+    assert_eq!(resumes.len(), 2, "{}", world.fresh.calls());
+    for (resume, pane) in resumes.iter().zip([NEW_PANE, REOPENED_PANE]) {
+        assert!(
+            resume.contains(&format!("--resume {}", world.seat.session)),
+            "{resume}"
+        );
+        assert!(!resume.contains("--session-id"), "{resume}");
+        assert!(resume.contains(&format!("--pane {pane}")), "{resume}");
+    }
+    let calls = world.fresh.calls();
+    let at = |fragment: &str| -> Vec<usize> {
+        calls
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains(fragment))
+            .map(|(at, _)| at)
+            .collect()
+    };
+    let creates = at("workspace create");
+    let discarded = at(&format!("pane close {NEW_PANE}"));
+    assert_eq!(creates.len(), 2, "{calls}");
+    assert_eq!(discarded.len(), 1, "{calls}");
+    assert!(
+        creates[0] < discarded[0] && discarded[0] < creates[1],
+        "the failed pane is gone before the next is made: {calls}"
+    );
+    never_two_live(world);
+    assert_eq!(record(fixture), None);
+    assert_eq!(route_pane(fixture), REOPENED_PANE);
+    assert_eq!(node(fixture).session_id, world.seat.session);
+    assert_eq!(node(fixture).flow_lifecycle, FlowLifecycle::Active);
+    let birth = fixture
+        .nexus
+        .store
+        .seat_birth(FLOW)
+        .unwrap()
+        .expect("birth");
+    assert_eq!(
+        Some(birth.process),
+        FlowStore::process_identity_for_pid(pid_in(&world.fresh.state.join("pid")))
+    );
+}
+
+/// The first resume is refused after the old harness is closed, its
+/// harness seen running in the pane: the restart discards its pane, that
+/// harness proven exited by its birth, and reopens the same session by
+/// itself with the launch it composed, answering Restarted. One start per
+/// run, two in all, never two harnesses at once; the old pane closed once.
+#[test]
+fn restart_spawn_refused_once_reopens_same_session() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    queued_for_seat(&fixture, "handed over after the reopen");
+    fs::write(world.fresh.state.join("refused-after-start-once"), "").unwrap();
+
+    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+
+    reopened_once(&world, &fixture);
+    assert_eq!(
+        world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
+        1
+    );
+    assert!(ended(&old));
+    let pids = resumed_pids(&world);
+    assert_eq!(pids.len(), 2, "one harness per run");
+    assert!(pid_ended(pids[0]), "the refused start's harness exited");
+    assert_eq!(
+        received(&world, &fixture, "handed over after the reopen"),
+        1
+    );
+    fixture.nexus.drain_awake(&address(Model::Sol));
+    assert_eq!(
+        received(&world, &fixture, "handed over after the reopen"),
+        1
+    );
+}
+
+/// The first resumed pane reports another session: its harness is
+/// discarded and seen exited, then the restart reopens the same session by
+/// itself and binds it. No new identity is minted.
+#[test]
+fn restart_bind_mismatch_once_reopens_same_session() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let flows_before = fixture.nexus.store.flow_nodes().unwrap().len();
+    let claims_before =
+        fs::read_to_string(fixture.directory.path().join("flow-id-calls")).unwrap_or_default();
+    fs::write(
+        world.fresh.state.join("report-session-once"),
+        "f0f0f0f0-0000-4000-8000-00000000f0f0",
+    )
+    .unwrap();
+
+    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+
+    reopened_once(&world, &fixture);
+    let pids = resumed_pids(&world);
+    assert_eq!(pids.len(), 2, "one harness per run");
+    assert!(pid_ended(pids[0]), "the mismatched harness exited");
+    assert!(!pid_ended(pids[1]), "the bound harness runs");
+    assert_eq!(
+        fixture.nexus.store.flow_nodes().unwrap().len(),
+        flows_before
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.directory.path().join("flow-id-calls")).unwrap_or_default(),
+        claims_before
+    );
+}
+
+/// Every resume is refused once its harness runs: the restart's own run
+/// and the one reopen the bound gives it, two starts, each harness proven
+/// exited, then Failed with its runs counted, the session, the Address and
+/// the queue kept and nothing delivered. A Nexus started again starts
+/// nothing more. The owner's retry resumes the same session and hands it
+/// the queue once.
+#[test]
+fn restart_failure_every_time_spends_bound_custody_kept() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    queued_for_seat(&fixture, "kept through the bound");
+    fs::write(world.fresh.state.join("refused-after-start"), "").unwrap();
+
+    assert_eq!(restarted(&fixture), resume_refused("SpawnRefused"));
+    let failed = record(&fixture).expect("record");
+    assert_eq!(
+        failed.restart_phase,
+        RestartPhase::Failed(RestartFailure::ResumeRefused("SpawnRefused".into()))
+    );
+    assert_eq!(failed.attempts, 2, "the restart's run and one reopen");
+    assert_eq!(world.resumes().len(), 2, "one start per run");
+    for pane in [NEW_PANE, REOPENED_PANE] {
+        assert_eq!(world.calls_naming(&format!("pane close {pane}")).len(), 1);
+    }
+    assert_eq!(node(&fixture).session_id, world.seat.session);
+    assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
+    assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1);
+    fixture.nexus.drain_awake(&address(Model::Sol));
+    assert_eq!(received(&world, &fixture, "kept through the bound"), 0);
+
+    fixture.reopen_store();
+    fixture.nexus.recover_wakes();
+    assert_eq!(record(&fixture), Some(failed), "the bound is spent");
+    assert_eq!(world.resumes().len(), 2);
+    assert_eq!(received(&world, &fixture, "kept through the bound"), 0);
+
+    fs::remove_file(world.fresh.state.join("refused-after-start")).unwrap();
+    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    let resumes = world.resumes();
+    assert_eq!(resumes.len(), 3);
+    assert!(resumes[2].contains(&format!("--resume {}", world.seat.session)));
+    assert_eq!(record(&fixture), None);
+    assert_eq!(received(&world, &fixture, "kept through the bound"), 1);
+    fixture.nexus.drain_awake(&address(Model::Sol));
+    assert_eq!(received(&world, &fixture, "kept through the bound"), 1);
+    assert!(stored(&fixture, Model::Sol).queue.is_empty());
+    never_two_live(&world);
+}
+
+/// A failed resume whose pane Herdr will not show closed may still have a
+/// start in flight there, its harness unobserved: Interrupted, and nothing
+/// is started again, by this Nexus or by the next at its start.
+#[test]
+fn restart_start_in_flight_not_respawned() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(false);
+    born_at_route(&fixture, exited_process());
+    fs::write(world.fresh.state.join("close-refused"), "").unwrap();
+    fs::write(world.fresh.state.join("resume-refused"), "").unwrap();
+
+    assert_eq!(
+        restarted(&fixture),
+        Response::RestartRefused(RestartRefusal::Interrupted(FLOW.into()))
+    );
+    let interrupted = record(&fixture).expect("record");
+    assert!(
+        matches!(
+            &interrupted.restart_phase,
+            RestartPhase::Interrupted(Some(pane)) if pane.herdr_pane_id == NEW_PANE
+        ),
+        "{interrupted:?}"
+    );
+    assert_eq!(world.resumes().len(), 1);
+
+    fixture.reopen_store();
+    fixture.nexus.recover_wakes();
+    assert_eq!(record(&fixture), Some(interrupted));
+    assert_eq!(world.resumes().len(), 1, "no respawn");
+    assert_eq!(world.calls_naming("workspace create").len(), 1);
+}
+
+/// A Nexus that died after a resume failed past the close, its pane
+/// discarded and the record Failed with the bound unspent, the harness it
+/// saw there exited: the next Nexus, the seat proven quiescent, reopens the
+/// same session at its start and hands it its queue once; a later start
+/// does nothing more. One whose reopen is refused again ends Failed with
+/// the bound spent, its old seat the pane that failed, and the start after
+/// it starts nothing.
+#[test]
+fn restart_nexus_crash_after_post_close_failure_recovers() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(false);
+    queued_for_seat(&fixture, "queued before the crash");
+    fixture
+        .nexus
+        .store
+        .record_restart(failed_after_close(&world, 1))
+        .unwrap();
+    fixture.reopen_store();
+    fixture.nexus.recover_wakes();
+
+    let resumes = world.resumes();
+    assert_eq!(resumes.len(), 1, "{}", world.fresh.calls());
+    assert!(resumes[0].contains(&format!("--resume {}", world.seat.session)));
+    assert!(resumes[0].contains(&format!("--pane {NEW_PANE}")));
+    assert_eq!(record(&fixture), None);
+    assert_eq!(route_pane(&fixture), NEW_PANE);
+    assert_eq!(node(&fixture).session_id, world.seat.session);
+    assert_eq!(received(&world, &fixture, "queued before the crash"), 1);
+    fixture.reopen_store();
+    fixture.nexus.recover_wakes();
+    assert_eq!(world.resumes().len(), 1);
+    assert_eq!(received(&world, &fixture, "queued before the crash"), 1);
+
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(false);
+    fixture
+        .nexus
+        .store
+        .record_restart(failed_after_close(&world, 1))
+        .unwrap();
+    fs::write(world.fresh.state.join("resume-refused"), "").unwrap();
+    fixture.reopen_store();
+    fixture.nexus.recover_wakes();
+    assert_eq!(world.resumes().len(), 1);
+    let spent = record(&fixture).expect("record");
+    assert_eq!(
+        (spent.restart_phase.clone(), spent.attempts),
+        (
+            RestartPhase::Failed(RestartFailure::ResumeRefused("SpawnRefused".into())),
+            2
+        )
+    );
+    assert_eq!(spent.old_seat.herdr_route.herdr_pane_id, NEW_PANE);
+    assert_eq!(spent.old_seat.process_option, None, "no harness ran there");
+    fixture.reopen_store();
+    fixture.nexus.recover_wakes();
+    assert_eq!(world.resumes().len(), 1, "the bound holds across starts");
+    assert_eq!(record(&fixture), Some(spent));
+}
+
+/// The owner's Stop while the bound is unspent. A Failed record a dead
+/// Nexus left before its reopen is Stopped: the next start reopens nothing,
+/// and the owner's retry resumes the same session and hands it its queue
+/// once. While a reopen's spawn runs, Stop answers Restarting and changes
+/// nothing; the reopen then binds.
+#[test]
+fn restart_owner_stop_during_bound() {
+    use crate::restarting::RestartsFlows;
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(false);
+    queued_for_seat(&fixture, "kept through the Stop");
+    fixture
+        .nexus
+        .store
+        .record_restart(failed_after_close(&world, 1))
+        .unwrap();
+    assert_eq!(
+        fixture.nexus.dispatch(Query::Stop(FLOW.into())),
+        Response::Stopped(FLOW.into())
+    );
+    let stopped = record(&fixture).expect("record");
+    assert_eq!(
+        (stopped.restart_phase.clone(), stopped.attempts),
+        (RestartPhase::Failed(RestartFailure::Stopped), 1)
+    );
+    fixture.reopen_store();
+    fixture.nexus.recover_wakes();
+    assert_eq!(record(&fixture), Some(stopped), "Stopped is the owner's");
+    assert!(world.resumes().is_empty());
+    assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
+    assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1);
+    assert_eq!(received(&world, &fixture, "kept through the Stop"), 0);
+    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(world.resumes().len(), 1);
+    assert_eq!(record(&fixture), None);
+    assert_eq!(received(&world, &fixture, "kept through the Stop"), 1);
+
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(false);
+    fixture
+        .nexus
+        .store
+        .record_restart(failed_after_close(&world, 1))
+        .unwrap();
+    fs::write(world.fresh.state.join("hold-start"), "").unwrap();
+    std::thread::scope(|scope| {
+        let recovering = scope.spawn(|| fixture.nexus.recover_restarts());
+        await_path(&world.fresh.state.join("start-held"));
+        let spawning = record(&fixture).expect("record");
+        assert!(
+            matches!(spawning.restart_phase, RestartPhase::Spawning(_)),
+            "{spawning:?}"
+        );
+        assert_eq!(spawning.attempts, 2);
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Stop(FLOW.into())),
+            Response::StopRejected(StopRejection::Restarting)
+        );
+        assert_eq!(record(&fixture), Some(spawning));
+        fs::write(world.fresh.state.join("release-start"), "").unwrap();
+        recovering.join().unwrap();
+    });
+    assert_eq!(record(&fixture), None);
+    assert_eq!(world.resumes().len(), 1);
+    assert_eq!(route_pane(&fixture), NEW_PANE);
+}
+
+/// A Failed record from before the close, its old harness still running in
+/// its pane: a Nexus start reopens nothing and touches nothing, only reads
+/// reaching Herdr. Once the old harness is gone, the next start resumes the
+/// same session by itself, closing nothing.
+#[test]
+fn restart_failed_before_close_taken_up_once_old_harness_gone() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    let left = RestartRecord {
+        restart_phase: RestartPhase::Failed(RestartFailure::CloseRefused),
+        old_seat: OldSeat {
+            process_option: Some(old.clone()),
+            ..spawning_record(&world, next_pane("restart-agent")).old_seat
+        },
+        ..spawning_record(&world, next_pane("restart-agent"))
+    };
+    fixture.nexus.store.record_restart(left.clone()).unwrap();
+    fixture.reopen_store();
+    fixture.nexus.recover_wakes();
+    old_seat_untouched(&world, &fixture, &old, Some(left));
+
+    assert!(
+        std::process::Command::new(&fixture.snapshot_program)
+            .args(["--session", "fixture-session", "pane", "close", OLD_PANE])
+            .output()
+            .expect("fixture Herdr")
+            .status
+            .success()
+    );
+    assert!(ended(&old));
+    fixture.reopen_store();
+    fixture.nexus.recover_wakes();
+    let resumes = world.resumes();
+    assert_eq!(resumes.len(), 1, "{}", world.fresh.calls());
+    assert!(resumes[0].contains(&format!("--resume {}", world.seat.session)));
+    assert_eq!(
+        world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
+        1,
+        "only the close by hand"
+    );
+    assert_eq!(record(&fixture), None);
+    assert_eq!(route_pane(&fixture), NEW_PANE);
+    never_two_live(&world);
+}
+
+// 0.53.1: a reopen, by itself or the owner's, needs the failed seat's
+// harness recorded and proven exited by its birth: a harness can outlive
+// its pane.
+
+/// A process that runs until the test drops it.
+struct LiveProcess(std::process::Child, Process);
+
+impl Drop for LiveProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn live_process() -> LiveProcess {
+    let child = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("a process");
+    let process = FlowStore::process_identity_for_pid(child.id()).expect("its birth");
+    LiveProcess(child, process)
+}
+
+/// Ends a process the fixture Herdr started and left running, and waits,
+/// bounded, until the kernel shows it ended.
+fn killed(process: &Process) {
+    assert!(
+        std::process::Command::new("kill")
+            .arg(process.pid.to_string())
+            .status()
+            .expect("kill")
+            .success()
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !ended(process) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the orphan never ended"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// abc123's restart whose first resumed pane reports another session and
+/// whose discard takes the pane down but leaves its harness running: the
+/// answer the restart gave, and that orphan, by its birth.
+fn orphaned(world: &RestartWorld, fixture: &NexusFixture) -> (Response, Process) {
+    queued_for_seat(fixture, "held until a reopen is proven");
+    fs::write(
+        world.fresh.state.join("report-session-once"),
+        "f0f0f0f0-0000-4000-8000-00000000f0f0",
+    )
+    .unwrap();
+    fs::write(world.fresh.state.join("orphan-on-close"), "").unwrap();
+    let answer = restarted(fixture);
+    fs::remove_file(world.fresh.state.join("orphan-on-close")).unwrap();
+    let pids = resumed_pids(world);
+    assert_eq!(pids.len(), 1, "one harness, the failed run's");
+    let orphan = FlowStore::process_identity_for_pid(pids[0]).expect("the orphan runs");
+    (answer, orphan)
+}
+
+/// The Failed record the orphaned run wrote: its old seat the discarded
+/// pane w7:p1 and the orphan's birth, its run counted once.
+fn orphan_record(world: &RestartWorld, fixture: &NexusFixture, orphan: &Process) -> RestartRecord {
+    let failed = record(fixture).expect("record");
+    assert_eq!(
+        (failed.restart_phase.clone(), failed.attempts),
+        (RestartPhase::Failed(RestartFailure::BindMismatch), 1)
+    );
+    assert_eq!(failed.native_session_id, world.seat.session);
+    assert_eq!(failed.old_seat.herdr_route.herdr_pane_id, NEW_PANE);
+    assert_eq!(failed.old_seat.herdr_route.herdr_terminal_id, "term-fresh");
+    assert_eq!(failed.old_seat.process_option.as_ref(), Some(orphan));
+    failed
+}
+
+/// Nothing reopened and nothing delivered: one resume, one pane made, the
+/// session, the Address and the queue held.
+fn not_reopened(world: &RestartWorld, fixture: &NexusFixture) {
+    assert_eq!(world.resumes().len(), 1, "{}", world.fresh.calls());
+    assert_eq!(world.calls_naming("workspace create").len(), 1);
+    assert_eq!(node(fixture).session_id, world.seat.session);
+    assert_eq!(node(fixture).flow_lifecycle, FlowLifecycle::Active);
+    assert_eq!(stored(fixture, Model::Sol).queue.len(), 1);
+    assert_eq!(received(world, fixture, "held until a reopen is proven"), 0);
+}
+
+/// The failed pane is gone but its harness runs on, holding the session:
+/// the restart does not reopen by itself, its record Failed and naming that
+/// harness by its birth, and the owner's retry is refused ExitUnproven,
+/// the record as it was.
+#[test]
+fn restart_live_orphan_not_reopened_in_turn() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let (answer, orphan) = orphaned(&world, &fixture);
+
+    assert_eq!(answer, resume_refused("BindMismatch"));
+    let failed = orphan_record(&world, &fixture, &orphan);
+    assert!(FlowStore::process_is_live(&orphan), "the orphan runs on");
+    assert!(world.calls_naming(&format!("pane close {NEW_PANE}")).len() == 1);
+    not_reopened(&world, &fixture);
+
+    assert_eq!(restarted(&fixture), resume_refused("ExitUnproven"));
+    assert_eq!(record(&fixture), Some(failed));
+    not_reopened(&world, &fixture);
+    killed(&orphan);
+}
+
+/// The Nexus that left the orphaned record dies: the next one reads the
+/// orphan's birth from the record, finds it running, and reopens nothing,
+/// though no pane holds the session; the start after that alike.
+#[test]
+fn restart_live_orphan_not_reopened_at_start() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let (_, orphan) = orphaned(&world, &fixture);
+    let failed = orphan_record(&world, &fixture, &orphan);
+
+    for _ in 0..2 {
+        fixture.reopen_store();
+        fixture.nexus.recover_wakes();
+        assert_eq!(record(&fixture), Some(failed.clone()));
+        assert!(FlowStore::process_is_live(&orphan), "the orphan runs on");
+        not_reopened(&world, &fixture);
+    }
+    killed(&orphan);
+}
+
+/// The resume is refused before any harness is seen in its pane: nothing
+/// proves no harness holds the session, so the restart stays Failed, its
+/// old seat the discarded pane and no harness, at its start and after a
+/// Nexus start alike. The owner's retry is refused ExitUnwitnessed and
+/// changes nothing; the owner's Stop stands, and a retry after it is
+/// refused alike. The session, Address and queue are held throughout.
+#[test]
+fn restart_missing_witness_not_reopened_retry_refused() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    queued_for_seat(&fixture, "held until a reopen is proven");
+    fs::write(world.fresh.state.join("resume-refused-once"), "").unwrap();
+
+    assert_eq!(restarted(&fixture), resume_refused("SpawnRefused"));
+    let failed = record(&fixture).expect("record");
+    assert_eq!(
+        (failed.restart_phase.clone(), failed.attempts),
+        (
+            RestartPhase::Failed(RestartFailure::ResumeRefused("SpawnRefused".into())),
+            1
+        )
+    );
+    assert_eq!(failed.old_seat.herdr_route.herdr_pane_id, NEW_PANE);
+    assert_eq!(failed.old_seat.process_option, None);
+    assert!(resumed_pids(&world).is_empty(), "no harness was seen");
+    not_reopened(&world, &fixture);
+
+    fixture.reopen_store();
+    fixture.nexus.recover_wakes();
+    assert_eq!(record(&fixture), Some(failed.clone()));
+    not_reopened(&world, &fixture);
+
+    assert_eq!(restarted(&fixture), resume_refused("ExitUnwitnessed"));
+    assert_eq!(record(&fixture), Some(failed.clone()));
+    not_reopened(&world, &fixture);
+
+    assert_eq!(
+        fixture.nexus.dispatch(Query::Stop(FLOW.into())),
+        Response::Stopped(FLOW.into())
+    );
+    let stopped = record(&fixture).expect("record");
+    assert_eq!(
+        stopped,
+        RestartRecord {
+            restart_phase: RestartPhase::Failed(RestartFailure::Stopped),
+            ..failed
+        }
+    );
+    assert_eq!(restarted(&fixture), resume_refused("ExitUnwitnessed"));
+    assert_eq!(record(&fixture), Some(stopped));
+    not_reopened(&world, &fixture);
+}
+
+/// The orphan of the failed pane exits: the next Nexus start proves it
+/// exited by the birth the record holds and reopens the same session by
+/// itself, `claude --resume <session>` in the next pane, never beside the
+/// orphan; the flow bound there, its queue handed over once.
+#[test]
+fn restart_recorded_harness_exited_reopens_same_session() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let (_, orphan) = orphaned(&world, &fixture);
+    orphan_record(&world, &fixture, &orphan);
+    killed(&orphan);
+
+    fixture.reopen_store();
+    fixture.nexus.recover_wakes();
+    let resumes = world.resumes();
+    assert_eq!(resumes.len(), 2, "{}", world.fresh.calls());
+    assert!(
+        resumes[1].contains(&format!("--resume {}", world.seat.session)),
+        "{}",
+        resumes[1]
+    );
+    assert!(!resumes[1].contains("--session-id"), "{}", resumes[1]);
+    assert!(
+        resumes[1].contains(&format!("--pane {REOPENED_PANE}")),
+        "{}",
+        resumes[1]
+    );
+    never_two_live(&world);
+    assert_eq!(record(&fixture), None);
+    assert_eq!(route_pane(&fixture), REOPENED_PANE);
+    assert_eq!(node(&fixture).session_id, world.seat.session);
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .seat_birth(FLOW)
+            .unwrap()
+            .map(|birth| birth.process),
+        FlowStore::process_identity_for_pid(pid_in(&world.fresh.state.join("pid")))
+    );
+    assert_eq!(
+        received(&world, &fixture, "held until a reopen is proven"),
+        1
+    );
+}
+
+/// The recorded harness's pid names a running process. Born when the
+/// record says, it is the harness, running: nothing is reopened and only
+/// reads reach Herdr. Born at another time, the recorded harness has
+/// exited and its pid was taken again: the restart reopens the same
+/// session.
+#[test]
+fn restart_pid_reused_exited_by_birth_only() {
+    for reused in [false, true] {
+        let mut fixture = NexusFixture::new();
+        let world = fixture.restart_world(false);
+        let running = live_process();
+        let recorded = Process {
+            pid: running.1.pid,
+            started: running.1.started + i64::from(reused),
+        };
+        let left = failed_at(&world, 1, Some(recorded));
+        fixture.nexus.store.record_restart(left.clone()).unwrap();
+        fixture.reopen_store();
+        fixture.nexus.recover_wakes();
+
+        assert!(FlowStore::process_is_live(&running.1));
+        if reused {
+            let resumes = world.resumes();
+            assert_eq!(resumes.len(), 1, "{}", world.fresh.calls());
+            assert!(resumes[0].contains(&format!("--resume {}", world.seat.session)));
+            assert_eq!(record(&fixture), None);
+            assert_eq!(route_pane(&fixture), NEW_PANE);
+        } else {
+            assert_eq!(record(&fixture), Some(left));
+            assert!(world.resumes().is_empty());
+            assert!(
+                world
+                    .fresh
+                    .calls()
+                    .lines()
+                    .all(|line| line.contains("api snapshot")
+                        || line.contains("process-info")
+                        || line.contains("session list")),
+                "only reads reach Herdr: {}",
+                world.fresh.calls()
+            );
+        }
+    }
+}
+
+/// At its start a Nexus decides a Failed record by the harness the record
+/// names, nothing else: the failed pane gone and no pane holding the
+/// session in each case, a record naming no harness and one naming a
+/// running harness stay as they are, nothing made or started; one naming a
+/// harness that exited reopens the same session.
+#[test]
+fn restart_startup_recovery_uses_recorded_identity() {
+    for named in ["none", "running", "exited"] {
+        let mut fixture = NexusFixture::new();
+        let world = fixture.restart_world(false);
+        let running = live_process();
+        let process_option = match named {
+            "none" => None,
+            "running" => Some(running.1.clone()),
+            _ => Some(exited_process()),
+        };
+        let left = failed_at(&world, 1, process_option);
+        fixture.nexus.store.record_restart(left.clone()).unwrap();
+        fixture.reopen_store();
+        assert_eq!(record(&fixture), Some(left.clone()), "durable as written");
+        fixture.nexus.recover_wakes();
+
+        if named == "exited" {
+            assert_eq!(world.resumes().len(), 1, "{}", world.fresh.calls());
+            assert_eq!(record(&fixture), None);
+        } else {
+            assert_eq!(record(&fixture), Some(left), "{named}");
+            assert!(world.calls_naming("workspace create").is_empty(), "{named}");
+            assert!(world.calls_naming("agent start").is_empty(), "{named}");
+        }
+    }
 }
 
 /// Where the old Nexus's hooks report: the place an adopted seat's hooks
@@ -2673,4 +3562,210 @@ fn restart_composition_against_curriculum_socket() {
         }
     }
     eprintln!("expect {expect}: {composed} composed");
+}
+
+// The proof of a recorded harness's exit, fed case by case through the
+// process-status seam: only a pid not found, another birth at the pid, or a
+// zombie or dead state proves it; everything else is unproven.
+
+/// A kernel fed one answer for every stat read, with `pid_max` as given,
+/// counting the reads.
+struct FedKernel {
+    stat: Result<String, std::io::ErrorKind>,
+    pid_max: Option<u32>,
+    reads: std::cell::Cell<usize>,
+}
+
+impl ReadsProcessStatus for FedKernel {
+    fn process_stat(&self, _pid: u32) -> std::io::Result<String> {
+        self.reads.set(self.reads.get() + 1);
+        self.stat.clone().map_err(std::io::Error::from)
+    }
+
+    fn pid_max(&self) -> Option<u32> {
+        self.pid_max
+    }
+}
+
+/// The pid_max the fed kernel reports unless a case says otherwise.
+const FED_PID_MAX: u32 = 4_194_304;
+
+/// The recorded harness every case asks about: pid 4242, born at tick 777.
+const RECORDED: Process = Process {
+    pid: 4242,
+    started: 777,
+};
+
+/// A kernel whose stat read answers `stat`.
+fn fed(stat: Result<String, std::io::ErrorKind>) -> FedKernel {
+    FedKernel {
+        stat,
+        pid_max: Some(FED_PID_MAX),
+        reads: std::cell::Cell::new(0),
+    }
+}
+
+/// `/proc/4242/stat` as the kernel writes it, in `state`, started at
+/// `started`; the command holds a `) ` as a command may.
+fn stat_line(state: &str, started: &str) -> String {
+    format!(
+        "4242 (claude) x) {state} 1 4242 4242 0 -1 4194560 10 0 0 0 5 2 0 0 20 0 3 0 {started} 1000 200 18446744073709551615"
+    )
+}
+
+#[test]
+fn restart_exit_proof_not_found_proves_exit() {
+    let kernel = fed(Err(std::io::ErrorKind::NotFound));
+    assert_eq!(
+        RECORDED.exit_proof(&kernel),
+        ExitProof::Exited(ExitEvidence::Gone)
+    );
+    assert_eq!(kernel.reads.get(), 1);
+}
+
+#[test]
+fn restart_exit_proof_other_birth_proves_exit() {
+    for state in ["R", "S", "D", "Z"] {
+        assert_eq!(
+            RECORDED.exit_proof(&fed(Ok(stat_line(state, "778")))),
+            ExitProof::Exited(ExitEvidence::Reborn),
+            "{state}"
+        );
+    }
+}
+
+#[test]
+fn restart_exit_proof_zombie_and_dead_prove_exit() {
+    for state in ["Z", "X"] {
+        assert_eq!(
+            RECORDED.exit_proof(&fed(Ok(stat_line(state, "777")))),
+            ExitProof::Exited(ExitEvidence::Defunct),
+            "{state}"
+        );
+    }
+}
+
+#[test]
+fn restart_exit_proof_permission_denied_unproven() {
+    assert_eq!(
+        RECORDED.exit_proof(&fed(Err(std::io::ErrorKind::PermissionDenied))),
+        ExitProof::Unproven(ExitDoubt::PermissionDenied)
+    );
+}
+
+#[test]
+fn restart_exit_proof_io_error_unproven() {
+    for kind in [
+        std::io::ErrorKind::Interrupted,
+        std::io::ErrorKind::InvalidData,
+        std::io::ErrorKind::UnexpectedEof,
+        std::io::ErrorKind::Other,
+    ] {
+        assert_eq!(
+            RECORDED.exit_proof(&fed(Err(kind))),
+            ExitProof::Unproven(ExitDoubt::Unreadable),
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn restart_exit_proof_malformed_stat_unproven() {
+    for stat in [
+        "",
+        "4242 claude Z 777",
+        "4242 (claude) ",
+        "4242 (claude) Zz 1 2",
+    ] {
+        assert_eq!(
+            RECORDED.exit_proof(&fed(Ok(stat.into()))),
+            ExitProof::Unproven(ExitDoubt::Malformed),
+            "{stat:?}"
+        );
+    }
+}
+
+#[test]
+fn restart_exit_proof_unparseable_start_time_unproven() {
+    for state in ["S", "Z", "X"] {
+        for started in ["", "seven", "-777", "7.77"] {
+            let stat = if started.is_empty() {
+                "4242 (claude) Z 1 4242".replace('Z', state)
+            } else {
+                stat_line(state, started)
+            };
+            assert_eq!(
+                RECORDED.exit_proof(&fed(Ok(stat.clone()))),
+                ExitProof::Unproven(ExitDoubt::StartUnparsed),
+                "{stat:?}"
+            );
+        }
+    }
+}
+
+/// A pid that cannot name a process is never read: the kernel here would
+/// answer not found, which would otherwise prove the exit.
+#[test]
+fn restart_exit_proof_invalid_pid_unproven() {
+    let beyond = i64::from(FED_PID_MAX) + 1;
+    for pid in [0, -1, -4242, beyond, i64::from(u32::MAX) + 1, i64::MAX] {
+        let kernel = fed(Err(std::io::ErrorKind::NotFound));
+        let process = Process { pid, started: 777 };
+        assert_eq!(
+            process.exit_proof(&kernel),
+            ExitProof::Unproven(ExitDoubt::InvalidPid),
+            "{pid}"
+        );
+        assert_eq!(kernel.reads.get(), 0, "{pid}");
+    }
+    let unread = FedKernel {
+        pid_max: None,
+        ..fed(Err(std::io::ErrorKind::NotFound))
+    };
+    assert_eq!(
+        RECORDED.exit_proof(&unread),
+        ExitProof::Unproven(ExitDoubt::InvalidPid)
+    );
+    assert_eq!(unread.reads.get(), 0);
+}
+
+/// A recorded birth no kernel start time can be is never compared: the
+/// kernel here would answer not found.
+#[test]
+fn restart_exit_proof_unparsed_birth_unproven() {
+    let kernel = fed(Err(std::io::ErrorKind::NotFound));
+    let process = Process {
+        pid: 4242,
+        started: -1,
+    };
+    assert_eq!(
+        process.exit_proof(&kernel),
+        ExitProof::Unproven(ExitDoubt::BirthUnparsed)
+    );
+    assert_eq!(kernel.reads.get(), 0);
+}
+
+#[test]
+fn restart_exit_proof_live_states_same_birth_running() {
+    for state in ["R", "S", "D"] {
+        assert_eq!(
+            RECORDED.exit_proof(&fed(Ok(stat_line(state, "777")))),
+            ExitProof::Running,
+            "{state}"
+        );
+    }
+}
+
+/// The production reader is the kernel's /proc: a running process is
+/// Running, and once ended and reaped it is Gone.
+#[test]
+fn restart_exit_proof_proc_reads_the_kernel() {
+    let running = live_process();
+    assert_eq!(running.1.exit_proof(&ProcFs), ExitProof::Running);
+    let ended = exited_process();
+    assert!(
+        matches!(ended.exit_proof(&ProcFs), ExitProof::Exited(_)),
+        "{:?}",
+        ended.exit_proof(&ProcFs)
+    );
 }

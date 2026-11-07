@@ -543,6 +543,9 @@ fn a_launch_after_a_replaced_declaration_takes_the_new_defaults() {
     nexus.composer = crate::composition::tests::fixture_composer();
     let mut profile = crate::composition::tests::fixture_profile();
     profile.address = quaternary_field();
+    // A first launch: it names no predecessor, so no handover is read under
+    // the store's root.
+    profile.flow_id_option = None;
     profile.model_name = "claude-haiku-5-5".into();
     let composed_leave_outs =
         |nexus: &RunningNexus| match nexus.perform(Operation::Compose(profile.clone())) {
@@ -604,6 +607,9 @@ fn a_launch_naming_a_claude_alias_is_not_composed_and_its_full_name_is() {
     nexus.composer = crate::composition::tests::fixture_composer();
     let mut profile = crate::composition::tests::fixture_profile();
     profile.address = quaternary_field();
+    // A first launch: it names no predecessor, so no handover is read under
+    // the store's root.
+    profile.flow_id_option = None;
     for inexact in [
         "haiku",
         "claude-opus-5-5[1m]",
@@ -726,6 +732,9 @@ fn a_codex_start_naming_none_takes_no_claude_default() {
     );
     let mut profile = crate::composition::tests::fixture_profile();
     profile.address = quaternary_field();
+    // A first launch: it names no predecessor, so no handover is read under
+    // the store's root.
+    profile.flow_id_option = None;
     profile.leave_outs_option = None;
     profile.model_name = SOL.into();
     match nexus.perform(Operation::Compose(profile.clone())) {

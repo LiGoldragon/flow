@@ -3369,6 +3369,19 @@ case "$*" in
       i=0; while [ ! -f "$S/release-start" ] && [ "$i" -lt 2000 ]; do sleep 0.01; i=$((i + 1)); done
     fi
     if [ -n "$resumed" ] && [ -f "$S/resume-refused" ]; then printf '%s\n' '{{"id":"cli:agent:start","error":{{"code":"agent_start_failed","message":"resume refused"}}}}'; exit 1; fi
+    # RESUME_REFUSED_ONCE refuses the next resume only.
+    if [ -n "$resumed" ] && [ -f "$S/resume-refused-once" ]; then rm -f "$S/resume-refused-once"; printf '%s\n' '{{"id":"cli:agent:start","error":{{"code":"agent_start_failed","message":"resume refused once"}}}}'; exit 1; fi
+    # REPORT_SESSION_ONCE is the session the next resumed pane reports; a
+    # later one reports its own.
+    if [ -n "$resumed" ] && [ -f "$S/reported-once" ]; then rm -f "$S/reported-once" "$S/report-session"; fi
+    if [ -n "$resumed" ] && [ -f "$S/report-session-once" ]; then mv "$S/report-session-once" "$S/report-session"; : > "$S/reported-once"; fi
+    # A resume started while an earlier resumed harness, or the old one,
+    # still runs is written to OVERLAP.
+    if [ -n "$resumed" ]; then
+      for p in $(cat "$S/resumed-pids" "$S/old-pid" 2>/dev/null); do
+        if [ -e "/proc/$p" ] && ! grep -q ') Z' "/proc/$p/stat" 2>/dev/null; then printf '%s\n' "$p" >> "$S/overlap"; fi
+      done
+    fi
     printf '%s' "$harness" > "$S/harness"
     # A resumed Claude runs `--resume <session>` in the pane's foreground,
     # marked as Herdr marks a pane's processes; its hook (HOOK_PID) is a
@@ -3376,7 +3389,12 @@ case "$*" in
     if [ -n "$resumed" ]; then
       HERDR_PANE_ID="$pane" HERDR_SESSION=fixture-session sh -c 's=$(command -v sleep); env -i "$s" 120 & printf "%s" "$!" > "$0"; sleep 120; :' "$S/hook-pid" --resume "$(cat "$S/session")" < /dev/null > /dev/null 2>&1 &
       printf '%s' "$!" > "$S/pid"
+      printf '%s\n' "$!" >> "$S/resumed-pids"
     fi
+    # REFUSED_AFTER_START refuses every resume once its harness runs in the
+    # pane; REFUSED_AFTER_START_ONCE the next one only.
+    if [ -n "$resumed" ] && [ -f "$S/refused-after-start" ]; then printf '%s\n' '{{"id":"cli:agent:start","error":{{"code":"timeout","message":"refused after the harness started"}}}}'; exit 1; fi
+    if [ -n "$resumed" ] && [ -f "$S/refused-after-start-once" ]; then rm -f "$S/refused-after-start-once"; printf '%s\n' '{{"id":"cli:agent:start","error":{{"code":"timeout","message":"refused once after the harness started"}}}}'; exit 1; fi
     # The Codex TUI runs `resume <thread>` in the pane's foreground.
     if [ "$harness" = codex ]; then
       sh -c 'sleep 120; :' resume "$(cat "$S/session")" < /dev/null > /dev/null 2>&1 &
@@ -3415,10 +3433,11 @@ case "$*" in
     fi ;;
   *"pane close"*)
     # CLOSE_REFUSED refuses every close. A restart world's close takes the
-    # pane and its harness down.
+    # pane and its harness down; with ORPHAN_ON_CLOSE the pane goes and the
+    # harness of a restart's pane outlives it.
     if [ -f "$S/close-refused" ]; then printf '%s\n' '{{"error":{{"code":"pane_close_failed","message":"refused"}}}}' >&2; exit 1; fi
     if [ -f "$S/old-pane" ] && [ "$5" = "$(cat "$S/old-pane")" ]; then rm -f "$S/old-agent"; p=$(cat "$S/old-pid" 2>/dev/null); [ -n "$p" ] && kill "$p" 2>/dev/null && gone "$p"; fi
-    if [ -f "$S/restart-world" ] && [ "$5" = "$pane" ]; then rm -f "$S/harness"; : > "$S/closed-$ws"; p=$(cat "$S/pid" 2>/dev/null); [ -n "$p" ] && kill "$p" 2>/dev/null && gone "$p"; rm -f "$S/pid"; fi
+    if [ -f "$S/restart-world" ] && [ "$5" = "$pane" ]; then rm -f "$S/harness"; : > "$S/closed-$ws"; p=$(cat "$S/pid" 2>/dev/null); [ -n "$p" ] && [ ! -f "$S/orphan-on-close" ] && kill "$p" 2>/dev/null && gone "$p"; rm -f "$S/pid"; fi
     printf '%s\n' '{{"result":{{}}}}' ;;
   *"agent read"*) printf '%s\n' '❯ ' ;;
   *"agent prompt"*)

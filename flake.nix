@@ -621,8 +621,6 @@
             "tests::restarting::restart_close_refused_flow_unchanged";
           flow-restart-resume-refused-custody-kept = context.exactTest "flow-nexus"
             "tests::restarting::restart_resume_refused_custody_kept";
-          flow-restart-harness-already-dead = context.exactTest "flow-nexus"
-            "tests::restarting::restart_harness_already_dead";
           flow-restart-unknown-flow = context.exactTest "flow-nexus"
             "tests::restarting::restart_unknown_flow";
           flow-restart-no-held-session = context.exactTest "flow-nexus"
@@ -660,6 +658,68 @@
             "tests::restarting::restart_crash_after_closing_composition_refused_old_harness_untouched";
           flow-restart-failed-not-composed-by-0530-retry-resumes-same-session = context.exactTest "flow-nexus"
             "tests::restarting::restart_failed_not_composed_by_0530_retry_resumes_same_session";
+          # 0.53.1: a resume that fails after the close reopens the same
+          # session by itself, once, once nothing holds the session.
+          flow-restart-spawn-refused-once-reopens-same-session = context.exactTest "flow-nexus"
+            "tests::restarting::restart_spawn_refused_once_reopens_same_session";
+          flow-restart-bind-mismatch-once-reopens-same-session = context.exactTest "flow-nexus"
+            "tests::restarting::restart_bind_mismatch_once_reopens_same_session";
+          flow-restart-failure-every-time-spends-bound-custody-kept = context.exactTest "flow-nexus"
+            "tests::restarting::restart_failure_every_time_spends_bound_custody_kept";
+          flow-restart-start-in-flight-not-respawned = context.exactTest "flow-nexus"
+            "tests::restarting::restart_start_in_flight_not_respawned";
+          flow-restart-nexus-crash-after-post-close-failure-recovers = context.exactTest "flow-nexus"
+            "tests::restarting::restart_nexus_crash_after_post_close_failure_recovers";
+          flow-restart-owner-stop-during-bound = context.exactTest "flow-nexus"
+            "tests::restarting::restart_owner_stop_during_bound";
+          flow-restart-failed-before-close-taken-up-once-old-harness-gone = context.exactTest "flow-nexus"
+            "tests::restarting::restart_failed_before_close_taken_up_once_old_harness_gone";
+          # 0.53.1: a reopen, by itself or the owner's, needs the failed
+          # seat's harness recorded and proven exited by its birth.
+          flow-restart-live-orphan-not-reopened-in-turn = context.exactTest "flow-nexus"
+            "tests::restarting::restart_live_orphan_not_reopened_in_turn";
+          flow-restart-live-orphan-not-reopened-at-start = context.exactTest "flow-nexus"
+            "tests::restarting::restart_live_orphan_not_reopened_at_start";
+          flow-restart-missing-witness-not-reopened = context.exactTest "flow-nexus"
+            "tests::restarting::restart_missing_witness_not_reopened_retry_refused";
+          flow-restart-recorded-harness-exited-reopens-same-session = context.exactTest "flow-nexus"
+            "tests::restarting::restart_recorded_harness_exited_reopens_same_session";
+          flow-restart-pid-reused-exited-by-birth = context.exactTest "flow-nexus"
+            "tests::restarting::restart_pid_reused_exited_by_birth_only";
+          flow-restart-startup-recovery-uses-recorded-identity = context.exactTest "flow-nexus"
+            "tests::restarting::restart_startup_recovery_uses_recorded_identity";
+          # 0.53.1: an exit is proven only by a pid not found, another birth
+          # at the pid, or a Z or X state; anything else is unproven. A
+          # first restart whose old pane is gone needs its recorded harness
+          # so proven, before any write.
+          flow-restart-exit-proof-not-found = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_not_found_proves_exit";
+          flow-restart-exit-proof-other-birth = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_other_birth_proves_exit";
+          flow-restart-exit-proof-zombie-and-dead = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_zombie_and_dead_prove_exit";
+          flow-restart-exit-proof-permission-denied-unproven = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_permission_denied_unproven";
+          flow-restart-exit-proof-io-error-unproven = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_io_error_unproven";
+          flow-restart-exit-proof-malformed-stat-unproven = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_malformed_stat_unproven";
+          flow-restart-exit-proof-unparseable-start-time-unproven = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_unparseable_start_time_unproven";
+          flow-restart-exit-proof-invalid-pid-unproven = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_invalid_pid_unproven";
+          flow-restart-exit-proof-unparsed-birth-unproven = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_unparsed_birth_unproven";
+          flow-restart-exit-proof-live-states-running = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_live_states_same_birth_running";
+          flow-restart-exit-proof-proc-reads-the-kernel = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_proc_reads_the_kernel";
+          flow-restart-first-old-pane-gone-harness-alive-refused = context.exactTest "flow-nexus"
+            "tests::restarting::restart_first_old_pane_gone_harness_alive_refused";
+          flow-restart-first-old-pane-gone-unrecorded-refused-unwitnessed = context.exactTest "flow-nexus"
+            "tests::restarting::restart_first_old_pane_gone_unrecorded_refused_unwitnessed";
+          flow-restart-first-old-pane-gone-harness-exited-proceeds = context.exactTest "flow-nexus"
+            "tests::restarting::restart_first_old_pane_gone_harness_exited_proceeds";
           # The cutover with both Nexuses live: the old side cannot take or end
           # the custody a new Nexus Adopted and Restarted.
           flow-restart-cutover-two-nexus = context.exactTest "flow-nexus"
@@ -694,6 +754,35 @@
             "tests::curriculum::a_real_478c_rejected_frame_is_a_composer_rejection_carrying_its_text";
           flow-curriculum-478c-startup-composed-frame = context.exactTest "flow-nexus"
             "tests::curriculum::a_real_478c_startup_composed_frame_reads_and_verifies";
+          # 0.53.1: a successor's first prompt ends with its predecessor's handover.
+          flow-handover-waking-successor-last-whole = context.exactTest "flow-nexus"
+            "tests::handover::a_waking_successor_is_given_its_predecessors_handover_last_whole";
+          flow-handover-refresh-successor-last-whole = context.exactTest "flow-nexus"
+            "tests::handover::a_refresh_successor_is_given_its_predecessors_handover_last_whole";
+          flow-handover-absent-first-prompt-unchanged = context.exactTest "flow-nexus"
+            "tests::handover::a_successor_whose_predecessor_left_no_file_has_its_first_prompt_unchanged";
+          flow-handover-unreadable-waking-refused-asleep = context.exactTest "flow-nexus"
+            "tests::handover::a_waking_whose_handover_cannot_be_read_is_refused_asleep_with_its_queue";
+          flow-handover-unreadable-refresh-refused-predecessor-kept = context.exactTest "flow-nexus"
+            "tests::handover::a_refresh_whose_handover_cannot_be_read_keeps_its_predecessor";
+          flow-handover-invalid-predecessor-refused = context.exactTest "flow-nexus"
+            "tests::handover::a_waking_after_a_predecessor_naming_no_flow_is_refused_asleep_with_its_queue";
+          flow-handover-root-unresolved-refused = context.exactTest "flow-nexus"
+            "tests::handover::a_launch_whose_root_cannot_be_resolved_is_refused_naming_its_predecessor";
+          flow-handover-on-demand-seat-kept = context.exactTest "flow-nexus"
+            "tests::handover::an_on_demand_seat_whose_successor_is_refused_its_handover_is_not_closed";
+          flow-handover-last-bytes-either-harness = context.exactTest "flow-nexus"
+            "tests::handover::the_handover_is_the_last_bytes_of_the_first_prompt_on_either_harness";
+          flow-handover-restart-none = context.exactTest "flow-nexus"
+            "tests::handover::a_launch_naming_no_predecessor_is_given_no_handover";
+          flow-handover-large-last-whole-part = context.exactTest "flow-nexus"
+            "tests::handover::a_handover_larger_than_the_rest_of_the_message_is_the_last_whole_part";
+          flow-handover-simplified = context.exactTest "flow-nexus"
+            "tests::handover::a_simplified_flow_is_given_the_handover_after_its_first_message_only";
+          flow-handover-file-source = context.exactTest "flow-nexus"
+            "tests::handover::the_file_source_reads_a_predecessors_file_under_the_launch_root_only";
+          flow-handover-permission-denied-unreadable = context.exactTest "flow-nexus"
+            "tests::handover::a_file_the_nexus_may_not_read_is_unreadable";
           flow-restart-not-composed-refused-then-recovered = context.exactTest "flow-nexus"
             "tests::restarting::restart_not_composed_refused_then_recovered";
           flow-restart-not-composed-owner-stop = context.exactTest "flow-nexus"

@@ -260,7 +260,12 @@ its first turn. The first USER message is the same for both.
 
 The first prompt is the brief, and the seat's first answer performs it. The
 brief ends asking for a presentation, as does queued work that carries the
-living's words; a message from another flow carries no such line. The
+living's words; a message from another flow carries no such line. A
+successor of a refresh or a waking is given its predecessor's
+`flows/<FlowId>/handover.md`, under the launch root, whole and last: the
+final bytes of its first message, read through one source
+(`handover::YieldsHandover`) the composer holds. A Restart has no first
+prompt and is given none. The
 receipt is what the native transcript of the bound
 session shows: the first turn authenticated by its body digest, every selected
 skill loaded in order, and, for Claude, the seat's first answer after them at

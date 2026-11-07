@@ -138,14 +138,14 @@ impl SeatsRestartWorld for NexusFixture {
         use crate::store::{OpensFlowStore, SetsNativeOwnerEnvironmentForTests};
         let placeholder = FlowStore::open(&self.directory.path().join("placeholder.sema"))
             .expect("placeholder store");
-        drop(std::mem::replace(&mut self.nexus.store, placeholder));
+        drop(std::mem::replace(&mut self.nexus.store, placeholder.into()));
         let mut reopened =
             FlowStore::open(&self.directory.path().join("flow.sema")).expect("store reopens");
         reopened.set_native_owner_environment_for_tests(crate::store::NativeOwnerEnvironment {
             host_id: "isolated-test-host".into(),
             boot_id: "isolated-test-boot".into(),
         });
-        self.nexus.store = reopened;
+        self.nexus.store = reopened.into();
     }
 }
 
@@ -666,7 +666,7 @@ fn restart_resumed_hooks_report_to_live_nexus() {
         Some(world.new_hook())
     ));
     assert_eq!(received(&world, &fixture, "for the resumed seat"), 1);
-    let events = crate::store::events::RecordsHarnessEvents::events(&fixture.nexus.store, FLOW)
+    let events = crate::store::events::RecordsHarnessEvents::events(&*fixture.nexus.store, FLOW)
         .unwrap()
         .unwrap();
     assert_eq!(events.len(), 2, "both reports are recorded");
@@ -2479,7 +2479,7 @@ impl OpensSecondNexus for NexusFixture {
             ]))
             .expect("metaflow declared");
         crate::RunningNexus {
-            store: opened,
+            store: opened.into(),
             codex_endpoints: self.nexus.codex_endpoints.clone(),
             herdr: crate::herdr::HerdrCli::at(self.snapshot_program.clone(), root.join("flows"))
                 .with_codex_endpoints(self.nexus.codex_endpoints.clone())
@@ -3158,14 +3158,14 @@ fn reopen_new(fixture: &NexusFixture, nexus: &mut crate::RunningNexus) {
     use crate::store::{OpensFlowStore, SetsNativeOwnerEnvironmentForTests};
     let placeholder = FlowStore::open(&fixture.directory.path().join("new-placeholder.sema"))
         .expect("placeholder store");
-    drop(std::mem::replace(&mut nexus.store, placeholder));
+    drop(std::mem::replace(&mut nexus.store, placeholder.into()));
     let mut reopened =
         FlowStore::open(&fixture.directory.path().join(NEW_STORE)).expect("store reopens");
     reopened.set_native_owner_environment_for_tests(crate::store::NativeOwnerEnvironment {
         host_id: "isolated-test-host".into(),
         boot_id: "isolated-test-boot".into(),
     });
-    nexus.store = reopened;
+    nexus.store = reopened.into();
 }
 
 /// The answer the live restarts got.

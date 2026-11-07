@@ -39,6 +39,7 @@ pub trait RemindsCallers {
 
 impl RemindsCallers for RunningNexus {
     fn send_due_reminders(&self) {
+        use crate::handover_reminding::RemindsHandoverCallers;
         let now = SystemTime::now().seconds_since_epoch();
         let mut reminded: Vec<Address> = Vec::new();
         {
@@ -110,6 +111,7 @@ impl RemindsCallers for RunningNexus {
                 }
             }
         }
+        self.send_due_handover_reminders(SystemTime::now().seconds_since_epoch());
         for address in reminded {
             self.wake_due(address);
         }

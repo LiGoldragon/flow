@@ -233,6 +233,13 @@ trait MeasuresHandoverTouch {
     fn handover_touch(
         &self,
         asker: &protecting::Asker,
+    ) -> Result<signal_flow::Touch, signal_flow::HandoverRefusal>;
+}
+
+impl MeasuresHandoverTouch for RunningNexus {
+    fn handover_touch(
+        &self,
+        asker: &protecting::Asker,
     ) -> Result<signal_flow::Touch, signal_flow::HandoverRefusal> {
         use crate::reminding::CountsUnixSeconds;
         use protecting::ChecksAsker;
@@ -254,8 +261,6 @@ trait MeasuresHandoverTouch {
         }))
     }
 }
-
-impl MeasuresHandoverTouch for RunningNexus {}
 
 impl Dispatches for RunningNexus {
     /// A query no calling process stands behind, taken as a connection
@@ -2559,7 +2564,7 @@ mod tests {
                 boot_id: "isolated-test-boot".into(),
             });
             let nexus = RunningNexus {
-                store,
+                store: store.into(),
                 codex_endpoints: codex_endpoints.clone(),
                 herdr: HerdrCli::at(snapshot_program.clone(), flows_root)
                     .with_codex_endpoints(codex_endpoints),

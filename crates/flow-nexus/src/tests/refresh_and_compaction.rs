@@ -423,7 +423,7 @@ fn a_seat_whose_successor_cannot_compose_stays_and_is_handed_its_queue() {
     );
     // The refusal is told to no flow: no message is queued anywhere, and
     // only the seat's own metaflow and the two held are Flow's.
-    let metaflows = crate::store::ManagesMetaflowState::list_metaflows(&fixture.nexus.store)
+    let metaflows = crate::store::ManagesMetaflowState::list_metaflows(&*fixture.nexus.store)
         .expect("metaflows list");
     assert_eq!(metaflows.len(), 3, "{metaflows:?}");
     for address in &held {

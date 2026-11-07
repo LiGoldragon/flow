@@ -415,9 +415,10 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
 /// still passed to Keep and Drop as Unbound on the ordinary connection.
 #[test]
 fn ordinary_codex_cli_keep_and_drop_remain_unknown_after_real_sender_attribution() {
+    use crate::sending::SendsRequests;
     use crate::store::ReadsFlowRows;
     use crate::store::handover::HoldsHandovers;
-    use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+    use crate::store::metaflow::SeedsMetaflow;
     use crate::store::send_outcome::RecordsSendOutcomes;
     use crate::store::sent::NamesCodexAppServers;
     use flow_ethos::State;

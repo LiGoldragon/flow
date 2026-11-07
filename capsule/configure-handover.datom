@@ -1,0 +1,7 @@
+; Capsule-only Codex declarations; accepted meta66 ConfigureNexus ten positions.
+Configure.Nexus.{ @SOURCE_ROOT@ { @CODEX_CLIENT@ @CODEX_HOME@ @CODEX_SOCKET@ [ @CODEX_MODEL@ ] } { @SOURCE_ROOT@/../bin/codex-next @SOURCE_ROOT@/../codex-next @CAPSULE_RUNTIME@/next.sock [ gpt-6-luna ] } [ { Codex [ / «!» ] [ esc ] [] } ] [ Psyche ] None None @CURRICULUM_SOCKET@ 60 None }
+Configure.Models.[ { Terra @CODEX_MODEL@ } { Luna @CODEX_MODEL@ } ]
+Configure.Thresholds.[ { @CODEX_MODEL@ 200000 } ]
+Configure.DefaultMinutes.30
+Configure.LeaveOuts.[ { { Mind test Terra } Codex [ CodexAgentsMd CodexSkillListing CodexCollaborationMode CodexEnvironmentContext CodexPermissions CodexDeveloperInstructions ] } { { Mind test Luna } Codex [ CodexAgentsMd CodexSkillListing CodexCollaborationMode CodexEnvironmentContext CodexPermissions CodexDeveloperInstructions ] } ]
+Configure.Metaflows.[ { { Mind test Terra } None [ spirit:core intent:models ] [] Regular Default OnDemand «» [] } { { Mind test Luna } None [ spirit:core intent:models ] [] Regular Default OnDemand «» [] } ]

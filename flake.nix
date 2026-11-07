@@ -232,6 +232,11 @@
             } > "$out/libexec/flow-capsule/flow-capsule"
             chmod +x "$out/libexec/flow-capsule/flow-capsule"
             cp ${./capsule/configure.datom} "$out/libexec/flow-capsule/configure.datom"
+            cp ${./capsule/configure-handover.datom} "$out/libexec/flow-capsule/configure-handover.datom"
+            cp ${./capsule/codex-observer.py} "$out/libexec/flow-capsule/codex-observer.py"
+            substituteInPlace "$out/libexec/flow-capsule/codex-observer.py" \
+              --replace-fail '#!/usr/bin/env python3' '#!${context.pkgs.python3}/bin/python3'
+            chmod 700 "$out/libexec/flow-capsule/codex-observer.py"
             ln -s "$out/libexec/flow-capsule/flow-capsule" "$out/bin/flow-capsule"
           '';
         }

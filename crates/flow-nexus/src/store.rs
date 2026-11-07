@@ -9113,6 +9113,107 @@ mod tests {
     }
 
     #[test]
+    fn terminal_and_archived_logical_deliveries_never_transition_again() {
+        use super::logical_delivery::RecordsLogicalDeliveries;
+        use super::metaflow::SeedsMetaflow;
+        use flow_ethos::{Delivery, Message, Request, SentBy};
+        use signal_flow::{DeliveryState, NativeReceipt, PrivateSendResponse};
+
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let sender = signal_flow::Address {
+            aspect: signal_flow::Aspect::Mind,
+            topic: "terminalSender".into(),
+            model: signal_flow::Model::Sol,
+        };
+        let recipient = signal_flow::Address {
+            aspect: signal_flow::Aspect::Field,
+            topic: "terminalRecipient".into(),
+            model: signal_flow::Model::Sol,
+        };
+        store.seed_metaflow(flow_ethos::Metaflow {
+            address: recipient.clone(),
+            state: flow_ethos::State::Asleep,
+            past: Vec::new(),
+            queue: Vec::new(),
+        });
+        let admit = |words: &str| {
+            let PrivateSendResponse::SendAccepted(accepted) = store
+                .accept_logical_delivery(
+                    &recipient,
+                    SentBy::Sender(sender.clone()),
+                    Delivery::Queue,
+                    Message::Soft(Request::Notice(words.into())),
+                    None,
+                )
+                .expect("Notice admits")
+            else {
+                panic!("Notice accepted")
+            };
+            accepted
+        };
+        let terminal = [
+            DeliveryState::Delivered(NativeReceipt {
+                harness_kind: flow_ethos::HarnessKind::Codex,
+                native_session_id: "terminal-session".into(),
+                native_prompt_id: "terminal-prompt".into(),
+            }),
+            DeliveryState::Read,
+            DeliveryState::Failed(signal_flow::Refusal::Direct("terminal failure".into())),
+            DeliveryState::Withdrawn,
+        ];
+        for (index, state) in terminal.into_iter().enumerate() {
+            let accepted = admit(&format!("terminal {index}"));
+            let ended = store
+                .transition_logical_delivery(&accepted.logical_delivery_id, state)
+                .expect("delivery ends");
+            assert!(matches!(
+                store.transition_logical_delivery(
+                    &accepted.logical_delivery_id,
+                    DeliveryState::Retryable(signal_flow::RetryCause::HistoryAbsent)
+                ),
+                Err(super::StoreError::StateInvariant)
+            ));
+            assert_eq!(
+                store
+                    .logical_delivery_snapshot(&accepted.logical_delivery_id)
+                    .expect("terminal snapshot reads")
+                    .expect("terminal snapshot remains"),
+                ended
+            );
+        }
+
+        let archived = admit("archived");
+        store
+            .transition_logical_delivery(
+                &archived.logical_delivery_id,
+                DeliveryState::Delivered(NativeReceipt {
+                    harness_kind: flow_ethos::HarnessKind::Codex,
+                    native_session_id: "archived-session".into(),
+                    native_prompt_id: "archived-prompt".into(),
+                }),
+            )
+            .expect("archived request first ends");
+        assert_eq!(
+            store
+                .archive_request(&archived.request_id, &sender)
+                .expect("archive reads"),
+            Ok(())
+        );
+        assert!(matches!(
+            store.transition_logical_delivery(
+                &archived.logical_delivery_id,
+                DeliveryState::Delivered(NativeReceipt {
+                    harness_kind: flow_ethos::HarnessKind::Codex,
+                    native_session_id: "later-session".into(),
+                    native_prompt_id: "later-prompt".into(),
+                })
+            ),
+            Err(super::StoreError::StateInvariant)
+        ));
+    }
+
+    #[test]
     fn request_id_binding_survives_restart_and_archived_id_is_drawable_again() {
         use super::logical_delivery::{MintsRequestIds, RequestClosure, RequestIdBinding};
         use sema_engine::{Assertion, RecordKey, Retraction};

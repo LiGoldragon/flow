@@ -2271,6 +2271,9 @@ impl RecordsLogicalDeliveries for FlowStore {
         let [current] = records.records() else {
             return Err(StoreError::StateInvariant);
         };
+        if current.archived.is_some() {
+            return Err(StoreError::StateInvariant);
+        }
         if current.snapshot.delivery_state == state {
             if commit.operation_count() == 0 {
                 return Ok(current.snapshot.clone());
@@ -2278,6 +2281,16 @@ impl RecordsLogicalDeliveries for FlowStore {
             self.engine.commit_atomic(commit)?;
             self.launch_changes.announce();
             return Ok(current.snapshot.clone());
+        }
+        if matches!(
+            current.snapshot.delivery_state,
+            DeliveryState::Delivered(_)
+                | DeliveryState::Read
+                | DeliveryState::Failed(_)
+                | DeliveryState::Withdrawn
+                | DeliveryState::Archived
+        ) {
+            return Err(StoreError::StateInvariant);
         }
         let allocation = self.allocate_logical_cursor()?;
         let next = allocation.cursor;

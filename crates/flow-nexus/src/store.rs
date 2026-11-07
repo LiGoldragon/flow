@@ -8960,7 +8960,8 @@ mod tests {
         use signal_flow::{DeliveryState, Lock_Data, Message, Metaflow, Request, Response, SentBy};
 
         let fixture = StoreFixture::new();
-        let store = fixture.store();
+        fixture.configured();
+        let store = fixture.configured_store();
         let at = |topic: &str| Address {
             aspect: Aspect::Mind,
             topic: topic.into(),
@@ -8989,7 +8990,7 @@ mod tests {
             counter,
         };
         let admit_message = |sender: &Address, counter: i64| {
-            let Response::Locked(lock) = store
+            let response = store
                 .lock_metaflow(
                     Lock_Data {
                         sender: sender.clone(),
@@ -8997,9 +8998,9 @@ mod tests {
                     },
                     100,
                 )
-                .expect("Message lock reads")
-            else {
-                panic!("Message locks the recipient")
+                .expect("Message lock reads");
+            let Response::Locked(lock) = response else {
+                panic!("Message locks the recipient: {response:?}")
             };
             let signal_flow::PrivateSendResponse::SendAccepted(accepted) = store
                 .accept_deliver_call(

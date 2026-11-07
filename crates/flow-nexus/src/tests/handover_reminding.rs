@@ -260,41 +260,42 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
 /// observation, not a delivery hold.
 #[test]
 fn runtime_tick_drains_due_hard_notice_past_threshold_into_the_pane() {
-    use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
+    use super::waking::{CLAUDE_SEAT, claude_agent, claude_seat};
+    use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture, prompts};
     use crate::store::context::{JudgesThreshold, RecordsContextSize};
-    use crate::store::delivery::RecordsDeliveries;
     use crate::store::handover::HoldsHandovers;
     use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+    use crate::store::queue_delivery::AccountsQueueDelivery;
     use crate::store::{ManagesMetaflowState, SeedsRole};
     use flow_ethos::{Metaflow, State};
     use signal_flow::Caller;
 
     let fixture = NexusFixture::new();
     let log = fixture.accept_pane_operations(
-        vec![fixture.settled_agent()],
+        vec![claude_agent(&fixture)],
         PromptFixture::Prompted("w1:p3"),
     );
-    fixture.register_with(signal_flow::FlowLifecycle::Active);
+    claude_seat(&fixture, 200);
     let address = signal_flow::Address {
-        aspect: Aspect::Psyche,
+        aspect: Aspect::Mind,
         topic: "flow".into(),
-        model: Model::Opus,
+        model: Model::Sol,
     };
     fixture.nexus.store.seed_role(Caller {
-        flow_id: "908786".into(),
-        aspect: Aspect::Psyche,
+        flow_id: CLAUDE_SEAT.into(),
+        aspect: Aspect::Mind,
         model_name: "claude-opus-5-5".into(),
     });
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address.clone(),
-        state: State::Awake("908786".into()),
+        state: State::Awake(CLAUDE_SEAT.into()),
         past: vec![],
         queue: vec![],
     });
     fixture
         .nexus
         .store
-        .ensure_live_handover(&address, "908786")
+        .ensure_live_handover(&address, CLAUDE_SEAT)
         .unwrap();
     fixture
         .nexus
@@ -321,9 +322,9 @@ fn runtime_tick_drains_due_hard_notice_past_threshold_into_the_pane() {
     fixture
         .nexus
         .store
-        .record_context_size("908786", 200)
+        .record_context_size(CLAUDE_SEAT, 200)
         .unwrap();
-    assert!(fixture.nexus.store.past_threshold("908786").unwrap());
+    assert!(fixture.nexus.store.past_threshold(CLAUDE_SEAT).unwrap());
 
     fixture.nexus.send_due_handover_reminders(10);
 
@@ -338,13 +339,8 @@ fn runtime_tick_drains_due_hard_notice_past_threshold_into_the_pane() {
     );
     let typed = fixture.typed().expect("warning reached pane");
     assert!(typed.contains("configured"), "{typed}");
-    assert_eq!(
-        prompts(&log)
-            .iter()
-            .filter(|line| line.contains("configured"))
-            .count(),
-        1
-    );
+    assert_eq!(typed.matches("configured").count(), 1);
+    assert_eq!(prompts(&log).len(), 1);
     let reminder = fixture
         .nexus
         .store

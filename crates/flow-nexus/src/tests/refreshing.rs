@@ -480,16 +480,7 @@ fn a_refused_close_or_an_unreadable_herdr_answers_refresh_s_own_rejection() {
     );
     awake_seat(&fixture, vec![]);
     declare(&fixture, seat_address());
-    fixture
-        .nexus
-        .store
-        .configure_change(ConfigurationChange::Thresholds(vec![
-            meta_signal_flow::ConfigureThreshold {
-                model_name: "claude-opus-5-5".into(),
-                refresh: 1,
-            },
-        ]))
-        .unwrap();
+    super::refresh_and_compaction::seat_refreshing_at(&fixture, 1);
     fixture
         .nexus
         .store

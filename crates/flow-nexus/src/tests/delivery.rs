@@ -929,9 +929,8 @@ fn direct_delivery_is_refused_while_refresh_owns_address() {
 /// rather than closing the predecessor beneath an in-flight delivery.
 #[test]
 fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
-    use crate::delivery::DeliversMessages;
-    use crate::fixture_executable::{FixtureExecutable, InstallsScript};
     use crate::DispatchesSerially;
+    use crate::fixture_executable::{FixtureExecutable, InstallsScript};
     use signal_flow::{Origin, Query, RefreshRejection};
     use std::time::{Duration, Instant};
 
@@ -966,15 +965,8 @@ fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
         model: signal_flow::Model::Opus,
     };
     let (delivery, refresh) = std::thread::scope(|scope| {
-        let delivery = scope.spawn(|| {
-            fixture.deliver(
-                meta_signal_flow::DeliveryRequest {
-                    delivery_id: "custody-race".into(),
-                    flow_id: "908786".into(),
-                    message: middle_abrupt("custody race"),
-                },
-            )
-        });
+        let delivery =
+            scope.spawn(|| fixture.deliver("custody-race", middle_abrupt("custody race")));
         let deadline = Instant::now() + Duration::from_secs(20);
         while !reached.exists() {
             assert!(Instant::now() < deadline, "direct input never started");
@@ -991,10 +983,19 @@ fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
         (delivery.join().expect("direct delivery"), refresh)
     });
     assert!(matches!(delivery, meta_signal_flow::Response::Delivered(_)));
-    assert_eq!(refresh, signal_flow::Response::RefreshRejected(RefreshRejection::Locked));
-    assert_eq!(fixture.typed(), Some("MiddleAbrupt.{ Notification Text.«custody race» }".into()));
+    assert_eq!(
+        refresh,
+        signal_flow::Response::RefreshRejected(RefreshRejection::Locked)
+    );
+    assert_eq!(
+        fixture.typed(),
+        Some("MiddleAbrupt.{ Notification Text.«custody race» }".into())
+    );
     let after = fixture
         .nexus
         .dispatch_serially(Query::Refresh(address), Origin::Unbound.into());
-    assert!(!matches!(after, signal_flow::Response::RefreshRejected(RefreshRejection::Locked)));
+    assert!(!matches!(
+        after,
+        signal_flow::Response::RefreshRejected(RefreshRejection::Locked)
+    ));
 }

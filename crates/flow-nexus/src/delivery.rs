@@ -193,12 +193,22 @@ impl ReadsLeasedPane for RunningNexus {
 pub trait DeliversMessages {
     fn deliver(&self, request: DeliveryRequest) -> Response;
     fn deliver_while_waking(&self, request: DeliveryRequest, lease: &WakingLease<'_>) -> Response;
+    fn deliver_inner(&self, request: DeliveryRequest, lease: Option<&WakingLease<'_>>) -> Response;
     fn vet(&self, request: &DeliveryRequest) -> Response;
     fn command(&self, request: CommandRequest) -> Response;
 }
 
 impl DeliversMessages for RunningNexus {
     fn deliver(&self, request: DeliveryRequest) -> Response {
+        match self.store.delivery(&request.delivery_id) {
+            Ok(Some(delivery)) => {
+                return Response::Delivered(crate::message_projection::visible_delivery(&delivery));
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused);
+            }
+        }
         let lease = match crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(
             &*self.store,
             &request.flow_id,

@@ -303,6 +303,40 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
             );
             continue;
         }
+        if privileged {
+            let Response::SendAccepted(accepted) = answer else {
+                panic!("Deliver answers its admission: {answer:?}")
+            };
+            use crate::store::logical_delivery::{MintsRequestIds, RecordsLogicalDeliveries};
+            let binding = fixture
+                .nexus
+                .store
+                .request_binding(&accepted.request_id)
+                .unwrap()
+                .expect("the admitted request remains bound");
+            let snapshot = fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(&binding.logical_delivery_id)
+                .unwrap()
+                .expect("the admitted delivery remains observable");
+            assert!(matches!(
+                snapshot.delivery_state,
+                signal_flow::DeliveryState::Delivered(_)
+            ));
+            assert!(snapshot.delivery_cursor > accepted.delivery_cursor);
+            assert!(
+                fixture
+                    .nexus
+                    .store
+                    .metaflow(&target)
+                    .unwrap()
+                    .unwrap()
+                    .queue
+                    .is_empty()
+            );
+            continue;
+        }
         let Response::Sent(receipt) = answer else {
             use crate::store::queue_delivery::AccountsQueueDelivery;
             use crate::waking::{ReadsClaudeDelivery, RendersAttemptInput};

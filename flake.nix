@@ -256,6 +256,36 @@
         system:
         let
           context = mkContext system;
+          migrationPredecessor = builtins.getFlake "git+file:///git/github.com/LiGoldragon/flow?rev=5a0e9fa4c2695b7e1b14a7b0b72160ac560e6d13";
+          migrationRoot = "/tmp/flow-request-id-migration-intermediate";
+          migrationPredecessorPackage = migrationPredecessor.lib.${system}.mkFlowPackage {
+            defaultConfiguration = {
+              sourceRoot = "${migrationRoot}/source";
+              runtimeDirectory = "${migrationRoot}/runtime";
+              stableCodex = {
+                clientPath = "${migrationRoot}/bin/codex-stable";
+                home = "${migrationRoot}/codex-stable";
+                controlSocketPath = "${migrationRoot}/runtime/stable.sock";
+                roster = [ "migration-stable" ];
+              };
+              nextCodex = {
+                clientPath = "${migrationRoot}/bin/codex-next";
+                home = "${migrationRoot}/codex-next";
+                controlSocketPath = "${migrationRoot}/runtime/next.sock";
+                roster = [ "migration-next" ];
+              };
+              harnessProfiles = [
+                {
+                  harnessKind = "Codex";
+                  commandSigils = [ "/" ];
+                  interruptKeys = [ "esc" ];
+                  submitKeys = [ ];
+                }
+              ];
+              metaAspects = [ "Mind" ];
+              presentationPrompt = null;
+            };
+          };
         in
         {
           default = context.craneLib.cargoTest (
@@ -319,6 +349,37 @@
                 ran=$(grep -cFx "test store::message_joint::real_flow_and_message_share_the_durable_delivery_ledger ... ok" message-joint.log || true)
                 if [ "$ran" -ne 1 ]; then
                   echo "joint Flow/Message test ran $ran times; it must run once" >&2
+                  exit 1
+                fi
+              '';
+            }
+          );
+          request-id-migration-process = context.craneLib.mkCargoDerivation (
+            context.commonArgs
+            // {
+              inherit (context) cargoArtifacts;
+              pnameSuffix = "-request-id-migration-process";
+              doCheck = true;
+              FLOW_MIGRATION_SOURCE_REV = self.rev or self.dirtyRev or "unpublished";
+              buildPhaseCargoCommand = ''
+                cargoWithProfile build --locked -p flow-nexus --bin flow-nexus
+              '';
+              checkPhaseCargoCommand = ''
+                export FLOW_MIGRATION_PREDECESSOR_BIN="${migrationPredecessorPackage}/bin/flow-nexus"
+                export FLOW_MIGRATION_CURRENT_BIN="$PWD/target/release/flow-nexus"
+                export FLOW_MIGRATION_PREDECESSOR_REV="5a0e9fa4c2695b7e1b14a7b0b72160ac560e6d13"
+                export FLOW_MIGRATION_CURRENT_REV="${self.rev or self.dirtyRev or "unpublished"}"
+                sha256sum "$FLOW_MIGRATION_PREDECESSOR_BIN" "$FLOW_MIGRATION_CURRENT_BIN"
+                cargoWithProfile test --locked -p flow-nexus --lib \
+                  store::request_id_migration_process::actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without_writing \
+                  -- --exact --ignored --nocapture 2>&1 | tee request-id-migration-process.log
+                status=''${PIPESTATUS[0]}
+                if [ "$status" -ne 0 ]; then
+                  exit "$status"
+                fi
+                ran=$(grep -cF 'test store::request_id_migration_process::actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without_writing ... ok' request-id-migration-process.log || true)
+                if [ "$ran" -ne 1 ]; then
+                  echo "actual-process migration test ran $ran times; it must run once" >&2
                   exit 1
                 fi
               '';

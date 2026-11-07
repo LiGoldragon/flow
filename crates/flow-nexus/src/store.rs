@@ -19,6 +19,8 @@ pub(crate) mod launch_cleanup;
 pub(crate) mod logical_delivery;
 #[cfg(test)]
 mod message_joint;
+#[cfg(test)]
+mod request_id_migration_process;
 pub(crate) mod metaflow;
 pub(crate) mod metaflow_declaration;
 pub(crate) mod nexus_configuration;

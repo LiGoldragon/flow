@@ -132,6 +132,7 @@ const META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA: &str =
 const ADDED_IN_0531: &[&str] = &["flow_nexus_meta_protected_address_configuration"];
 const OPTIONAL_HANDOVER_TABLE: &str = "flow_nexus_meta_handover_configuration";
 const OPTIONAL_HANDOVER_RUNTIME_TABLE: &str = "flow_nexus_handovers";
+const OPTIONAL_HANDOVER_REMINDER_TABLE: &str = "flow_nexus_handover_reminders";
 const HEARTBEAT_STANDING_TABLE_NAME: TableName = TableName::new("flow_nexus_heartbeat_standings");
 const HEARTBEAT_STANDING_FAMILY: &str = "flow-nexus-heartbeat-standing";
 const HEARTBEAT_STANDING_SCHEMA: &str = "flow-nexus-heartbeat-standing-v2";
@@ -213,6 +214,7 @@ const RUNNING_TABLES: &[&str] = &[
     "flow_nexus_meta_protected_address_configuration",
     "flow_nexus_meta_handover_configuration",
     "flow_nexus_handovers",
+    OPTIONAL_HANDOVER_REMINDER_TABLE,
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -4728,6 +4730,10 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-handover-configuration-v1",
             ),
             "flow_nexus_handovers" => (handover::HANDOVER_FAMILY, handover::HANDOVER_SCHEMA),
+            "flow_nexus_handover_reminders" => (
+                handover_reminders::HANDOVER_REMINDER_FAMILY,
+                handover_reminders::HANDOVER_REMINDER_SCHEMA,
+            ),
             "flow_nexus_flow_events" => (events::FLOW_EVENT_FAMILY, events::FLOW_EVENT_SCHEMA),
             "flow_nexus_flow_context_sizes" => (
                 context::FLOW_CONTEXT_SIZE_FAMILY,

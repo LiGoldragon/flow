@@ -310,9 +310,7 @@ mod tests {
             handover_policies: meta_signal_flow::HandoverPoliciesConfiguration::Unconfigured,
             handover_archive: meta_signal_flow::HandoverArchiveConfiguration::Unconfigured,
             handover_count: meta_signal_flow::HandoverCountConfiguration::Unconfigured,
-            publication_deadline: meta_signal_flow::PublicationDeadlineConfiguration::Configured(
-                60_000,
-            ),
+            publication_deadline: 60_000,
             counters: meta_signal_flow::ConfigureCounters {
                 logical_delivery: 1,
                 queue_attempt: 3,

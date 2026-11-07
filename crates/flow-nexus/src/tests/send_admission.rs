@@ -261,7 +261,9 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                 .dispatch_metaflow_peer(
                     signal_flow::Query::Deliver(signal_flow::Deliver_Data {
                         lock,
-                        deliver_key: format!("test-deliver-{hard}-{duplicate}-{privileged}"),
+                        deliver_key: super::deliver_key(
+                            i64::from(hard) * 4 + i64::from(duplicate) * 2 + i64::from(privileged),
+                        ),
                         sendable_message: super::sendable_message(message),
                     }),
                     Some(&message_peer),

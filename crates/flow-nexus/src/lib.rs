@@ -2092,6 +2092,13 @@ mod tests {
         }
     }
 
+    pub(crate) fn deliver_key(counter: i64) -> signal_flow::DeliverKey {
+        signal_flow::DeliverKey {
+            namespace: "testMessageMemory".into(),
+            counter,
+        }
+    }
+
     /// The answer is `Unidentified` for exactly this process: the refusal
     /// carries the process beside the evidence read, never an identity.
     pub(crate) fn assert_unidentified(

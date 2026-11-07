@@ -853,14 +853,14 @@
             "tests::a_terminal_retirement_failure_is_printed_and_fails_the_call";
           flow-retirement-launch-eof-unchanged = context.exactTest "flow"
             "tests::launch_observation_keeps_its_existing_clean_eof_semantics";
-          flow-retirement-immutable-contract-pins = context.pkgs.runCommand
-            "flow-retirement-immutable-contract-pins"
+          flow-request-id-immutable-contract-pins = context.pkgs.runCommand
+            "flow-request-id-immutable-contract-pins"
             { nativeBuildInputs = [ context.pkgs.gnugrep ]; }
             ''
-              grep -F 'rev = "e050c8fbf334d859391cb64f6a47663a2c689c11"' ${./Cargo.toml}
-              grep -F 'rev = "b8f7953c7be44740b49364b965abd35a7919ecab"' ${./Cargo.toml}
-              grep -F 'signal-flow?rev=e050c8fbf334d859391cb64f6a47663a2c689c11#e050c8fbf334d859391cb64f6a47663a2c689c11' ${./Cargo.lock}
-              grep -F 'meta-signal-flow?rev=b8f7953c7be44740b49364b965abd35a7919ecab#b8f7953c7be44740b49364b965abd35a7919ecab' ${./Cargo.lock}
+              grep -F 'rev = "a150f3b59d63ef851a2ba02ef7559f32b3df42c4"' ${./Cargo.toml}
+              grep -F 'rev = "1739a7875c1a4fab3a17e2f020831039f715da1d"' ${./Cargo.toml}
+              grep -F 'signal-flow?rev=a150f3b59d63ef851a2ba02ef7559f32b3df42c4#a150f3b59d63ef851a2ba02ef7559f32b3df42c4' ${./Cargo.lock}
+              grep -F 'meta-signal-flow?rev=1739a7875c1a4fab3a17e2f020831039f715da1d#1739a7875c1a4fab3a17e2f020831039f715da1d' ${./Cargo.lock}
               touch "$out"
             '';
           flow-handover-permission-denied-unreadable = context.exactTest "flow-nexus"

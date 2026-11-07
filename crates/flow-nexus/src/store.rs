@@ -6098,6 +6098,100 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_assignment_notice_carries_the_original_order_words() {
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        use crate::store::metaflow::SeedsMetaflow;
+        use crate::store::request_id_upgrade::{
+            AssignedAnswer, AssignmentDecision, OpenOrder, RunsRequestIdAnnouncements,
+            TaskAnnouncementStatus, UpgradeAssignment,
+        };
+        use signal_flow::{Message, Request, SentBy};
+
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let sender = Address {
+            aspect: Aspect::Mind,
+            topic: "upgradeAssignment".into(),
+            model: Model::Sol,
+        };
+        let recipient = Address {
+            aspect: Aspect::Field,
+            topic: "upgradeAssignment".into(),
+            model: Model::Sol,
+        };
+        for address in [&sender, &recipient] {
+            store.seed_metaflow(flow_ethos::Metaflow {
+                address: address.clone(),
+                state: flow_ethos::State::Asleep,
+                past: Vec::new(),
+                queue: Vec::new(),
+            });
+        }
+        let accept = |words: &str| {
+            let signal_flow::PrivateSendResponse::SendAccepted(value) = store
+                .accept_logical_delivery(
+                    &recipient,
+                    SentBy::Sender(sender.clone()),
+                    flow_ethos::Delivery::Queue,
+                    Message::Soft(Request::Order(words.into())),
+                    None,
+                )
+                .expect("Order admits")
+            else {
+                panic!("Order accepted")
+            };
+            value
+        };
+        let assigned = accept("first original Order words");
+        let open = accept("second original Order words");
+        store
+            .engine
+            .assert(Assertion::new(
+                store.request_id_upgrade.upgrade_assignments,
+                UpgradeAssignment {
+                    sender: sender.clone(),
+                    part: 0,
+                    decisions: vec![AssignmentDecision {
+                        recipient,
+                        assigned: vec![AssignedAnswer {
+                            answer: "legacy-answer".into(),
+                            order: assigned.logical_delivery_id.clone(),
+                            order_id: Some(assigned.request_id),
+                        }],
+                        open: vec![OpenOrder {
+                            order: open.logical_delivery_id.clone(),
+                            order_id: open.request_id,
+                        }],
+                    }],
+                    tries: 0,
+                    status: TaskAnnouncementStatus::Pending(None),
+                },
+            ))
+            .expect("assignment row seeds");
+
+        store
+            .run_request_id_announcements()
+            .expect("assignment pass admits");
+        let stored = store
+            .stored_metaflow(&sender)
+            .expect("sender reads")
+            .expect("sender exists");
+        let notice = stored
+            .metaflow
+            .queue
+            .iter()
+            .find_map(|entry| match &entry.message {
+                flow_ethos::Message::Soft(flow_ethos::Request::Notice(text)) => Some(text),
+                _ => None,
+            })
+            .expect("assignment Notice queued");
+        assert!(notice.contains("answered first original Order words"));
+        assert!(notice.contains("open second original Order words"));
+        assert!(!notice.contains(&assigned.logical_delivery_id));
+        assert!(!notice.contains(&open.logical_delivery_id));
+    }
+
+    #[test]
     fn simplified_reply_requires_consumed_input_and_queues_once_to_its_sender() {
         use signal_flow::{
             Address, Aspect, DeliveryState, Message, Metaflow, Model, NativeReceipt, Request,

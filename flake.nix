@@ -262,7 +262,7 @@
         system:
         let
           context = mkContext system;
-          migrationPredecessor = builtins.getFlake "git+file:///git/github.com/LiGoldragon/flow?rev=5a0e9fa4c2695b7e1b14a7b0b72160ac560e6d13";
+          migrationPredecessor = builtins.getFlake "git+file:///git/github.com/LiGoldragon/flow?rev=f7d2336a7380206728cbd5aef2ebb3656d0cfd87";
           migrationRoot = "/tmp/flow-request-id-migration-intermediate";
           migrationPredecessorPackage = migrationPredecessor.lib.${system}.mkFlowPackage {
             defaultConfiguration = {
@@ -342,7 +342,7 @@
               checkPhaseCargoCommand = ''
                 export FLOW_MESSAGE_JOINT_FLOW_BIN="$PWD/target/release/flow-nexus"
                 export FLOW_MESSAGE_JOINT_MESSAGE_BIN="${message.packages.${system}.default}/bin/message-nexus"
-                export FLOW_MESSAGE_JOINT_FLOW_REV="f37d4470afc8d923752ac77d9a32d0ebfe9c99a9"
+                export FLOW_MESSAGE_JOINT_FLOW_REV="${self.rev or self.dirtyRev or "unpublished"}"
                 export FLOW_MESSAGE_JOINT_MESSAGE_REV="bb329ba8230e02aa2e310b730c6ec0dabd8fdadf"
                 sha256sum "$FLOW_MESSAGE_JOINT_FLOW_BIN" "$FLOW_MESSAGE_JOINT_MESSAGE_BIN"
                 cargoWithProfile test --locked -p flow-nexus --lib \
@@ -373,7 +373,7 @@
               checkPhaseCargoCommand = ''
                 export FLOW_MIGRATION_PREDECESSOR_BIN="${migrationPredecessorPackage}/bin/flow-nexus"
                 export FLOW_MIGRATION_CURRENT_BIN="$PWD/target/release/flow-nexus"
-                export FLOW_MIGRATION_PREDECESSOR_REV="5a0e9fa4c2695b7e1b14a7b0b72160ac560e6d13"
+                export FLOW_MIGRATION_PREDECESSOR_REV="f7d2336a7380206728cbd5aef2ebb3656d0cfd87"
                 export FLOW_MIGRATION_CURRENT_REV="${self.rev or self.dirtyRev or "unpublished"}"
                 sha256sum "$FLOW_MIGRATION_PREDECESSOR_BIN" "$FLOW_MIGRATION_CURRENT_BIN"
                 cargoWithProfile test --locked -p flow-nexus --lib \

@@ -120,7 +120,7 @@ use waking::SettlesStopsAtConfirmation;
 use waking::SleepsAndWakesSeats;
 
 pub struct RunningNexus {
-    pub store: FlowStore,
+    pub store: Arc<FlowStore>,
     pub codex_endpoints: CodexEndpoints,
     pub herdr: herdr::HerdrCli,
     pub composer: LaunchComposer,
@@ -459,9 +459,16 @@ impl Dispatches for RunningNexus {
 
     fn keep_handover(&self, request: signal_flow::Keep_Data, asker: protecting::Asker) -> Response {
         use crate::store::handover::HoldsHandovers;
-        let caller = match self.handover_caller(&asker) {
+        let _caller = match self.handover_caller(&asker) {
             Ok(value) => value,
             Err(error) => return Response::KeepRefused(error),
+        };
+        let writer = crate::store::handover::HandoverWriter {
+            address: request.address.clone(),
+            flow_id: match asker.origin() {
+                signal_flow::Origin::Flow(origin) => origin.flow_id.clone(),
+                _ => return Response::KeepRefused(signal_flow::HandoverRefusal::UnknownCaller),
+            },
         };
         let title = request.section.title.clone();
         let touch = match self.handover_touch(&asker) {
@@ -470,7 +477,7 @@ impl Dispatches for RunningNexus {
         };
         match self
             .store
-            .keep_handover(&request.address, &caller, request.section, touch)
+            .keep_handover_for_flow(&writer, request.section, touch)
         {
             Ok(touch) => Response::Kept(signal_flow::Kept_Data {
                 address: request.address,
@@ -483,9 +490,16 @@ impl Dispatches for RunningNexus {
 
     fn drop_handover(&self, request: signal_flow::Drop_Data, asker: protecting::Asker) -> Response {
         use crate::store::handover::HoldsHandovers;
-        let caller = match self.handover_caller(&asker) {
+        let _caller = match self.handover_caller(&asker) {
             Ok(value) => value,
             Err(error) => return Response::DropRefused(error),
+        };
+        let writer = crate::store::handover::HandoverWriter {
+            address: request.address.clone(),
+            flow_id: match asker.origin() {
+                signal_flow::Origin::Flow(origin) => origin.flow_id.clone(),
+                _ => return Response::DropRefused(signal_flow::HandoverRefusal::UnknownCaller),
+            },
         };
         let title = request.title.clone();
         let touch = match self.handover_touch(&asker) {
@@ -494,7 +508,7 @@ impl Dispatches for RunningNexus {
         };
         match self
             .store
-            .drop_handover(&request.address, &caller, title, touch)
+            .drop_handover_for_flow(&writer, title, touch)
         {
             Ok(touch) => Response::Dropped(signal_flow::Dropped_Data {
                 address: request.address,
@@ -948,7 +962,7 @@ impl OpensRunningNexus for RunningNexus {
         // reads the committed snapshot, and only then registers runtime tables.
         // It never seeds defaults or settles work, and refuses a store an
         // earlier Flow wrote.
-        let store = FlowStore::open_configured(store_path)?;
+        let store = Arc::new(FlowStore::open_configured(store_path)?);
         let snapshot = store
             .configuration_snapshot()?
             .ok_or(store::StoreError::NotConfigured)?;

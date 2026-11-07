@@ -2759,11 +2759,11 @@ impl WakesInParts for RunningNexus {
         };
         self.settle_owed(&address, &response);
         match response {
-            Response::Replaced(_) => {
+            Response::Replaced(replaced) => {
                 use crate::store::handover::HoldsHandovers;
                 if self
                     .store
-                    .close_handover_for_successor(&address, flow_id)
+                    .close_handover_for_successor(&address, flow_id, &replaced.flow_id)
                     .is_err()
                 {
                     return AtStop::Kept(KeptAtStop::StoreUnreadable);
@@ -2805,28 +2805,6 @@ impl WakesInParts for RunningNexus {
         };
         let mut profile = seat.fresh_profile();
         profile.flow_id_option = Some(flow_id.to_owned());
-        // Handover is the final part of the successor's first prompt.  Read
-        // it from Memory exactly once; an unreadable row refuses composition
-        // rather than silently dropping owed context.
-        use crate::store::handover::HoldsHandovers;
-        let handover = self.store.handover_memory(&address).ok()?;
-        if let Some(handover) = handover.filter(|row| !row.current.is_empty()) {
-            let text = handover
-                .current
-                .iter()
-                .map(|section| {
-                    format!(
-                        "## {}\n{}\n{}",
-                        section.title, section.description, section.body
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            profile.instruction_prompt = match profile.instruction_prompt.is_empty() {
-                true => format!("Handover\n\n{text}"),
-                false => format!("{}\n\nHandover\n\n{text}", profile.instruction_prompt),
-            };
-        }
         Some(profile)
     }
 

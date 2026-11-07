@@ -795,6 +795,14 @@ fn failed_process_authority_evidence_never_becomes_owner() {
 
     let unconfigured = NexusFixture::new();
     let (_marked_child, marked) = command_of("unknown-native-session");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while unconfigured.nexus.process_authority(&marked).unwrap() == ProcessAuthority::Owner {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "child environment appears"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     assert_eq!(
         unconfigured.nexus.process_authority(&marked).unwrap(),
         ProcessAuthority::Rejected,
@@ -808,6 +816,14 @@ fn failed_process_authority_evidence_never_becomes_owner() {
     let configured = NexusFixture::new();
     configured.serves_codex_commands();
     let (_unknown_child, unknown) = command_of("unknown-native-session");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while configured.nexus.process_authority(&unknown).unwrap() == ProcessAuthority::Owner {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "child ancestry appears"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     assert_eq!(
         configured.nexus.process_authority(&unknown).unwrap(),
         ProcessAuthority::Rejected,

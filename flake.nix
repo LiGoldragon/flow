@@ -850,9 +850,9 @@
             { nativeBuildInputs = [ context.pkgs.gnugrep ]; }
             ''
               grep -F 'rev = "e050c8fbf334d859391cb64f6a47663a2c689c11"' ${./Cargo.toml}
-              grep -F 'rev = "9ee567e1c9efadccaf027c5c5188c01688874097"' ${./Cargo.toml}
+              grep -F 'rev = "af0cf42ffe4a3147f2cb463438d8b9cb3c9b027f"' ${./Cargo.toml}
               grep -F 'signal-flow?rev=e050c8fbf334d859391cb64f6a47663a2c689c11#e050c8fbf334d859391cb64f6a47663a2c689c11' ${./Cargo.lock}
-              grep -F 'meta-signal-flow?rev=9ee567e1c9efadccaf027c5c5188c01688874097#9ee567e1c9efadccaf027c5c5188c01688874097' ${./Cargo.lock}
+              grep -F 'meta-signal-flow?rev=af0cf42ffe4a3147f2cb463438d8b9cb3c9b027f#af0cf42ffe4a3147f2cb463438d8b9cb3c9b027f' ${./Cargo.lock}
               touch "$out"
             '';
           flow-handover-permission-denied-unreadable = context.exactTest "flow-nexus"

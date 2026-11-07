@@ -19,6 +19,7 @@ use crate::performing::Performs;
 use crate::store::ManagesMetaflowState as _;
 use crate::store::RecordsLaunchOutcome as _;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows as _};
+use crate::store::handover::HoldsHandovers as _;
 use crate::waking::HoldsWakingMetaflows;
 use flow_ethos::State;
 use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, Continuity};
@@ -620,6 +621,38 @@ fn a_file_the_nexus_may_not_read_is_unreadable() {
             )))
         );
     }
+}
+
+#[test]
+fn an_installed_memory_source_reads_the_live_store_and_ignores_the_file() {
+    let fixture = NexusFixture::new();
+    leave(fixture.directory.path(), "abc123", Left::Text(b"file text"));
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .ensure_live_handover(&at, "abc123")
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .keep_handover(
+            &at,
+            &at,
+            signal_flow::Section {
+                title: "live".into(),
+                description: "from memory".into(),
+                body: "same live store".into(),
+            },
+            signal_flow::Touch::Unknown,
+        )
+        .unwrap();
+    let launch = composed(&fixture, "claude-fixture", Some("abc123"), |_| {});
+    assert!(launch
+        .first_prompt_payload
+        .first_prompt_body
+        .ends_with("## live\nfrom memory\nsame live store"));
+    assert!(!launch.first_prompt_payload.first_prompt_body.contains("file text"));
 }
 
 /// An OnDemand seat resting with nothing queued is closed only once its

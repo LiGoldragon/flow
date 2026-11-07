@@ -397,8 +397,21 @@ fn current_address_key(address: &Address) -> String {
         },
         address.topic.len(),
         address.topic,
-        address.model.name()
+        current_model_key(&address.model)
     )
+}
+
+fn current_model_key(model: &flow_ethos::Model) -> &'static str {
+    match model {
+        flow_ethos::Model::Fable => "Fable",
+        flow_ethos::Model::Opus => "Opus",
+        flow_ethos::Model::Sonnet => "Sonnet",
+        flow_ethos::Model::Haiku => "Haiku",
+        flow_ethos::Model::Astra => "Astra",
+        flow_ethos::Model::Sol => "Sol",
+        flow_ethos::Model::Luna => "Luna",
+        flow_ethos::Model::Terra => "Terra",
+    }
 }
 
 pub(crate) struct RequestIdUpgradeDescriptors {
@@ -570,7 +583,9 @@ pub(crate) fn current_refusal(
             old_signal::Unknown_Data::FlowId(flow_id) => {
                 signal_flow::Unknown_Data::FlowId(flow_id.clone())
             }
-            old_signal::Unknown_Data::Key(key) => signal_flow::Unknown_Data::Key(key.clone()),
+            old_signal::Unknown_Data::Key(key) => {
+                signal_flow::Unknown_Data::Key(recode_unchanged!(key, flow_ethos::Key)?)
+            }
         }),
         old_signal::Refusal::NotConfigured => signal_flow::Refusal::NotConfigured,
         old_signal::Refusal::NotMessage => signal_flow::Refusal::NotMessage,
@@ -919,4 +934,587 @@ pub(crate) fn current_send_call(
         content_sha256: value.content_sha256.clone(),
         send_outcome,
     })
+}
+
+pub(crate) struct RequestIdEvolutionDescriptors {
+    pub(crate) metaflows: TableDescriptor<super::StoredMetaflow>,
+    pub(crate) address_holds: TableDescriptor<super::address_hold::AddressHold>,
+    pub(crate) send_calls: TableDescriptor<crate::generated::send_tool::SendCall>,
+    pub(crate) requests: TableDescriptor<super::queue_delivery::StoredDeliveryRequest>,
+    pub(crate) attempts: TableDescriptor<super::queue_delivery::QueueDeliveryAttempt>,
+    pub(crate) outcomes: TableDescriptor<super::send_outcome::StoredSendOutcome>,
+    pub(crate) current: TableDescriptor<super::logical_delivery::CurrentLogicalDelivery>,
+    pub(crate) events: TableDescriptor<super::logical_delivery::LogicalDeliveryEvent>,
+    pub(crate) request_ids: TableDescriptor<super::logical_delivery::RequestIdBinding>,
+    pub(crate) deliver_calls: TableDescriptor<super::logical_delivery::DeliverCall>,
+    pub(crate) store_identity: TableDescriptor<super::logical_delivery::StoredStoreIdentity>,
+    pub(crate) prior_deliveries: TableDescriptor<PriorDelivery>,
+    pub(crate) task_announcements: TableDescriptor<TaskAnnouncement>,
+    pub(crate) upgrade_assignments: TableDescriptor<UpgradeAssignment>,
+    pub(crate) request_policy: TableDescriptor<super::StoredMetaRequestPolicyConfiguration>,
+}
+
+fn prior_logical_id(evidence: &old_meta::QueueEvidence) -> Option<&str> {
+    match evidence {
+        old_meta::QueueEvidence::Logical(entry) => Some(&entry.logical_delivery_id),
+        old_meta::QueueEvidence::Legacy(_) => None,
+    }
+}
+
+fn outcome_logical_id(outcome: &PriorStoredSendOutcome) -> Option<&str> {
+    match &outcome.record.ordinary_send_outcome {
+        old_meta::OrdinarySendOutcome::Accepted(value) => Some(&value.logical_delivery_id),
+        old_meta::OrdinarySendOutcome::Sent(value) => Some(&value.logical_delivery_id),
+        old_meta::OrdinarySendOutcome::Failed(value) => value.logical_delivery_id_option.as_deref(),
+        old_meta::OrdinarySendOutcome::Refused(_)
+        | old_meta::OrdinarySendOutcome::PriorAdmission(_) => None,
+    }
+}
+
+fn call_logical_id(call: &PriorSendCall) -> Option<&str> {
+    match &call.send_outcome {
+        crate::generated::send_tool_before_request_ids::SendOutcome::Accepted(value) => {
+            Some(&value.send_acceptance.logical_delivery_id)
+        }
+        _ => None,
+    }
+}
+
+fn prior_request<'a>(request: &'a PriorStoredDeliveryRequest) -> Option<&'a old_flow::Request> {
+    match &request.queue_evidence {
+        old_meta::QueueEvidence::Logical(entry) => Some(match &entry.message {
+            old_flow::Message::HardAbrupt(request)
+            | old_flow::Message::MiddleAbrupt(request)
+            | old_flow::Message::Soft(request) => request,
+        }),
+        old_meta::QueueEvidence::Legacy(value) => Some(&value.request),
+    }
+}
+
+fn prior_sender(request: &PriorStoredDeliveryRequest) -> Option<&old_flow::Address> {
+    match &request.queue_evidence {
+        old_meta::QueueEvidence::Logical(entry) => match &entry.sent_by {
+            old_flow::SentBy::Sender(address) => Some(address),
+            old_flow::SentBy::Unknown | old_flow::SentBy::Flow => None,
+        },
+        old_meta::QueueEvidence::Legacy(value) => match &value.sent_by {
+            old_flow::SentBy::Sender(address) => Some(address),
+            old_flow::SentBy::Unknown | old_flow::SentBy::Flow => None,
+        },
+    }
+}
+
+fn attempt_unfinished(attempt: &PriorQueueDeliveryAttempt) -> bool {
+    matches!(
+        attempt.phase,
+        PriorQueueDeliveryPhase::Prepared
+            | PriorQueueDeliveryPhase::Uncertain(_)
+            | PriorQueueDeliveryPhase::ReceiptRecorded(_)
+    )
+}
+
+fn state_is_held(state: &old_signal::DeliveryState) -> bool {
+    matches!(
+        state,
+        old_signal::DeliveryState::Queued
+            | old_signal::DeliveryState::Attempting
+            | old_signal::DeliveryState::Retryable(_)
+            | old_signal::DeliveryState::Uncertain
+    )
+}
+
+fn first_event_cursor(events: &[PriorLogicalDeliveryEvent]) -> Option<i64> {
+    events
+        .iter()
+        .map(|event| event.snapshot.delivery_cursor)
+        .min()
+}
+
+fn first_delivered_cursor(events: &[PriorLogicalDeliveryEvent]) -> Option<i64> {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.snapshot.delivery_state,
+                old_signal::DeliveryState::Delivered(_)
+            )
+        })
+        .map(|event| event.snapshot.delivery_cursor)
+        .min()
+}
+
+/// Evolves the exact accepted 0.53.2 running Memory in one engine commit.
+/// Every check and projection is completed before the commit is built.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evolve_request_id_memory(
+    engine: &mut Engine,
+    descriptors: RequestIdEvolutionDescriptors,
+    reminders: &[super::reminder::Reminder],
+    simplified_replies: &[super::logical_delivery::SimplifiedReplyBinding],
+    heartbeat_table: TableReference<super::StoredHeartbeatStanding>,
+    heartbeat_rows: &[super::StoredHeartbeatStanding],
+    drawer: &dyn super::logical_delivery::DrawsRequestId,
+) -> Result<(), StoreError> {
+    use super::logical_delivery::{
+        CurrentLogicalDelivery, LogicalDeliveryEvent, RequestClosure, RequestIdBinding,
+        StoredStoreIdentity,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let current_inventory = engine
+        .inspect_predecessor::<PriorCurrentLogicalDelivery, CurrentLogicalDelivery>(
+            &descriptors.current,
+        )?;
+    let event_inventory = engine
+        .inspect_predecessor::<PriorLogicalDeliveryEvent, LogicalDeliveryEvent>(
+            &descriptors.events,
+        )?;
+    let metaflow_inventory = engine
+        .inspect_predecessor::<PriorStoredMetaflow, super::StoredMetaflow>(
+            &descriptors.metaflows,
+        )?;
+    let hold_inventory = engine
+        .inspect_predecessor::<PriorAddressHold, super::address_hold::AddressHold>(
+            &descriptors.address_holds,
+        )?;
+    let request_inventory = engine.inspect_predecessor::<
+        PriorStoredDeliveryRequest,
+        super::queue_delivery::StoredDeliveryRequest,
+    >(&descriptors.requests)?;
+    let attempt_inventory = engine.inspect_predecessor::<
+        PriorQueueDeliveryAttempt,
+        super::queue_delivery::QueueDeliveryAttempt,
+    >(&descriptors.attempts)?;
+    let outcome_inventory = engine
+        .inspect_predecessor::<PriorStoredSendOutcome, super::send_outcome::StoredSendOutcome>(
+            &descriptors.outcomes,
+        )?;
+    let call_inventory = engine
+        .inspect_predecessor::<PriorSendCall, crate::generated::send_tool::SendCall>(
+            &descriptors.send_calls,
+        )?;
+
+    let mut currents = BTreeMap::new();
+    for (key, row) in current_inventory.rows() {
+        if *key != row.record_key()
+            || currents
+                .insert(row.snapshot.logical_delivery_id.clone(), row.clone())
+                .is_some()
+        {
+            return Err(StoreError::StateInvariant);
+        }
+    }
+    let mut events: BTreeMap<String, Vec<PriorLogicalDeliveryEvent>> = BTreeMap::new();
+    let mut event_cursors = BTreeSet::new();
+    for (key, row) in event_inventory.rows() {
+        if *key != row.record_key()
+            || !event_cursors.insert(row.snapshot.delivery_cursor)
+            || !currents.contains_key(&row.snapshot.logical_delivery_id)
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        events
+            .entry(row.snapshot.logical_delivery_id.clone())
+            .or_default()
+            .push(row.clone());
+    }
+    for (logical_id, current) in &currents {
+        let delivery_events = events
+            .get_mut(logical_id)
+            .ok_or(StoreError::StateInvariant)?;
+        delivery_events.sort_by_key(|event| event.snapshot.delivery_cursor);
+        if first_event_cursor(delivery_events).is_none()
+            || delivery_events.last().map(|event| &event.snapshot) != Some(&current.snapshot)
+        {
+            return Err(StoreError::StateInvariant);
+        }
+    }
+
+    let mut requests = BTreeMap::new();
+    for (key, row) in request_inventory.rows() {
+        if *key != row.record_key()
+            || !currents.contains_key(&row.request_id)
+            || requests
+                .insert(row.request_id.clone(), row.clone())
+                .is_some()
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        if let Some(logical_id) = prior_logical_id(&row.queue_evidence)
+            && logical_id != row.request_id
+        {
+            return Err(StoreError::StateInvariant);
+        }
+    }
+    if currents
+        .keys()
+        .any(|logical_id| !requests.contains_key(logical_id))
+    {
+        return Err(StoreError::StateInvariant);
+    }
+
+    let mut attempts: BTreeMap<String, Vec<PriorQueueDeliveryAttempt>> = BTreeMap::new();
+    for (key, row) in attempt_inventory.rows() {
+        if *key != row.record_key() || !currents.contains_key(&row.request_id) {
+            return Err(StoreError::StateInvariant);
+        }
+        if let Some(logical_id) = prior_logical_id(&row.queue_evidence)
+            && logical_id != row.request_id
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        attempts
+            .entry(row.request_id.clone())
+            .or_default()
+            .push(row.clone());
+    }
+
+    let mut outcomes: BTreeMap<String, Vec<PriorStoredSendOutcome>> = BTreeMap::new();
+    let mut unbound_outcomes = Vec::new();
+    for (key, row) in outcome_inventory.rows() {
+        if *key != row.record_key() {
+            return Err(StoreError::StateInvariant);
+        }
+        match outcome_logical_id(row) {
+            Some(logical_id) if currents.contains_key(logical_id) => {
+                outcomes
+                    .entry(logical_id.to_owned())
+                    .or_default()
+                    .push(row.clone());
+            }
+            Some(_) => return Err(StoreError::StateInvariant),
+            None => unbound_outcomes.push(row.clone()),
+        }
+    }
+    for (_, row) in call_inventory.rows() {
+        if let Some(logical_id) = call_logical_id(row)
+            && !currents.contains_key(logical_id)
+        {
+            return Err(StoreError::StateInvariant);
+        }
+    }
+    for reminder in reminders {
+        if !currents.contains_key(&reminder.key) {
+            return Err(StoreError::StateInvariant);
+        }
+    }
+    for binding in simplified_replies {
+        if !currents.contains_key(&binding.input_delivery_id) {
+            return Err(StoreError::StateInvariant);
+        }
+    }
+    for standing in heartbeat_rows {
+        if standing
+            .outstanding
+            .as_ref()
+            .is_some_and(|logical_id| !currents.contains_key(logical_id))
+        {
+            return Err(StoreError::StateInvariant);
+        }
+    }
+    for (_, metaflow) in metaflow_inventory.rows() {
+        for entry in &metaflow.metaflow.queue {
+            let current = currents
+                .get(&entry.logical_delivery_id)
+                .ok_or(StoreError::StateInvariant)?;
+            if !state_is_held(&current.snapshot.delivery_state) {
+                return Err(StoreError::StateInvariant);
+            }
+        }
+    }
+
+    let reminder_tasks: BTreeSet<_> = reminders.iter().map(|row| row.key.clone()).collect();
+    let reply_inputs: BTreeSet<_> = simplified_replies
+        .iter()
+        .filter(|row| !row.completed)
+        .map(|row| row.input_delivery_id.clone())
+        .collect();
+    let mut held = BTreeSet::new();
+    for (logical_id, current) in &currents {
+        if state_is_held(&current.snapshot.delivery_state)
+            || attempts
+                .get(logical_id)
+                .is_some_and(|values| values.iter().any(attempt_unfinished))
+            || reminder_tasks.contains(logical_id)
+            || reply_inputs.contains(logical_id)
+        {
+            held.insert(logical_id.clone());
+        }
+    }
+
+    const REQUEST_ID_SPACE: usize = 36 * 36 * 36 * 36;
+    if held.len() > REQUEST_ID_SPACE {
+        return Err(StoreError::StateInvariant);
+    }
+    let mut request_ids = BTreeMap::new();
+    let mut used = BTreeSet::new();
+    for logical_id in &held {
+        let mut selected = None;
+        for _ in 0..super::SEEDED_REQUEST_ID_DRAWS {
+            let id = drawer.draw_request_id()?;
+            if id.len() != 4
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
+            {
+                return Err(StoreError::StateInvariant);
+            }
+            if used.insert(id.clone()) {
+                selected = Some(id);
+                break;
+            }
+        }
+        request_ids.insert(
+            logical_id.clone(),
+            selected.ok_or(StoreError::StateInvariant)?,
+        );
+    }
+
+    let mut closures: BTreeMap<String, RequestClosure> = held
+        .iter()
+        .map(|logical_id| (logical_id.clone(), RequestClosure::Open))
+        .collect();
+    for (answer_id, request) in &requests {
+        if let Some(old_flow::Request::Done(old_flow::DonePayload::Answered(done))) =
+            prior_request(request)
+            && held.contains(&done.logical_delivery_id)
+        {
+            closures.insert(
+                done.logical_delivery_id.clone(),
+                RequestClosure::Answered(answer_id.clone()),
+            );
+        }
+    }
+    for binding in simplified_replies.iter().filter(|row| row.completed) {
+        if held.contains(&binding.input_delivery_id) {
+            closures.insert(
+                binding.input_delivery_id.clone(),
+                RequestClosure::Answered(format!(
+                    "simplified-result-{}-{}",
+                    binding.flow_id, binding.input_delivery_id
+                )),
+            );
+        }
+    }
+
+    let current_rows = held
+        .iter()
+        .map(|logical_id| {
+            let old = currents.get(logical_id).ok_or(StoreError::StateInvariant)?;
+            Ok(CurrentLogicalDelivery {
+                snapshot: current_snapshot(
+                    &old.snapshot,
+                    request_ids
+                        .get(logical_id)
+                        .cloned()
+                        .ok_or(StoreError::StateInvariant)?,
+                )?,
+                archived: None,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    let event_rows = held
+        .iter()
+        .flat_map(|logical_id| {
+            events
+                .get(logical_id)
+                .into_iter()
+                .flatten()
+                .map(|event| (logical_id, event))
+        })
+        .map(|(logical_id, event)| {
+            Ok(LogicalDeliveryEvent {
+                snapshot: current_snapshot(
+                    &event.snapshot,
+                    request_ids
+                        .get(logical_id)
+                        .cloned()
+                        .ok_or(StoreError::StateInvariant)?,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    let request_rows = held
+        .iter()
+        .map(|logical_id| {
+            current_stored_request(
+                requests.get(logical_id).ok_or(StoreError::StateInvariant)?,
+                &request_ids,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let attempt_rows = held
+        .iter()
+        .flat_map(|logical_id| attempts.get(logical_id).into_iter().flatten())
+        .map(|attempt| current_attempt(attempt, &request_ids))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut outcome_rows = unbound_outcomes
+        .iter()
+        .map(|outcome| current_send_outcome(outcome, &request_ids))
+        .collect::<Result<Vec<_>, _>>()?;
+    for logical_id in &held {
+        for outcome in outcomes.get(logical_id).into_iter().flatten() {
+            outcome_rows.push(current_send_outcome(outcome, &request_ids)?);
+        }
+    }
+
+    let metaflow_rows = metaflow_inventory
+        .rows()
+        .iter()
+        .map(|(_, old)| {
+            Ok(super::StoredMetaflow {
+                metaflow: current_metaflow(&old.metaflow, &request_ids)?,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    let hold_rows = hold_inventory
+        .rows()
+        .iter()
+        .map(|(_, old)| {
+            Ok(super::address_hold::AddressHold {
+                flow_id: old.flow_id.clone(),
+                address: current_address(&old.address)?,
+                found: old
+                    .found
+                    .as_ref()
+                    .map(|value| current_metaflow(value, &request_ids))
+                    .transpose()?,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    let call_rows = call_inventory
+        .rows()
+        .iter()
+        .map(|(_, call)| {
+            let archived = call_logical_id(call).is_some_and(|id| !held.contains(id));
+            current_send_call(call, &request_ids, archived)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut prior_rows = Vec::new();
+    for logical_id in currents
+        .keys()
+        .filter(|logical_id| !held.contains(*logical_id))
+    {
+        prior_rows.push(PriorDelivery {
+            logical_delivery_id: logical_id.clone(),
+            current: currents
+                .get(logical_id)
+                .cloned()
+                .ok_or(StoreError::StateInvariant)?,
+            events: events
+                .get(logical_id)
+                .cloned()
+                .ok_or(StoreError::StateInvariant)?,
+            request: requests
+                .get(logical_id)
+                .cloned()
+                .ok_or(StoreError::StateInvariant)?,
+            attempts: attempts.get(logical_id).cloned().unwrap_or_default(),
+            outcomes: outcomes.get(logical_id).cloned().unwrap_or_default(),
+        });
+    }
+    let binding_rows = held
+        .iter()
+        .map(|logical_id| RequestIdBinding {
+            request_id: request_ids[logical_id].clone(),
+            logical_delivery_id: logical_id.clone(),
+            closure: closures
+                .get(logical_id)
+                .cloned()
+                .unwrap_or(RequestClosure::Open),
+        })
+        .collect::<Vec<_>>();
+
+    let mut announcement_groups: BTreeMap<String, (Address, Vec<String>)> = BTreeMap::new();
+    for reminder in reminders {
+        if !held.contains(&reminder.key)
+            || !matches!(
+                closures.get(&reminder.key),
+                None | Some(RequestClosure::Open)
+            )
+        {
+            continue;
+        }
+        let current = &currents[&reminder.key].snapshot.delivery_state;
+        if matches!(
+            current,
+            old_signal::DeliveryState::Attempting
+                | old_signal::DeliveryState::Uncertain
+                | old_signal::DeliveryState::Delivered(_)
+        ) {
+            announcement_groups
+                .entry(current_address_key(&reminder.recipient))
+                .or_insert_with(|| (reminder.recipient.clone(), Vec::new()))
+                .1
+                .push(reminder.key.clone());
+        }
+    }
+    let task_announcements = announcement_groups
+        .into_iter()
+        .map(|(_, (recipient, mut tasks))| {
+            tasks.sort();
+            TaskAnnouncement {
+                recipient,
+                part: 0,
+                tasks,
+                tries: 0,
+                status: TaskAnnouncementStatus::Pending(None),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut identity = String::with_capacity(16);
+    for _ in 0..4 {
+        identity.push_str(&drawer.draw_request_id()?);
+    }
+    if identity.len() != 16
+        || !identity
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
+    {
+        return Err(StoreError::StateInvariant);
+    }
+
+    let mut evolution = engine
+        .begin_atomic_evolution()
+        .evolve(current_inventory, descriptors.current, current_rows)
+        .evolve(event_inventory, descriptors.events, event_rows)
+        .evolve(metaflow_inventory, descriptors.metaflows, metaflow_rows)
+        .evolve(hold_inventory, descriptors.address_holds, hold_rows)
+        .evolve(request_inventory, descriptors.requests, request_rows)
+        .evolve(attempt_inventory, descriptors.attempts, attempt_rows)
+        .evolve(outcome_inventory, descriptors.outcomes, outcome_rows)
+        .evolve(call_inventory, descriptors.send_calls, call_rows)
+        .register(descriptors.request_ids, binding_rows)
+        .register(descriptors.deliver_calls, Vec::new())
+        .register(
+            descriptors.store_identity,
+            vec![StoredStoreIdentity {
+                store_identity: identity,
+            }],
+        )
+        .register(descriptors.prior_deliveries, prior_rows)
+        .register(descriptors.task_announcements, task_announcements)
+        .register(descriptors.upgrade_assignments, Vec::new())
+        .register(
+            descriptors.request_policy,
+            vec![super::StoredMetaRequestPolicyConfiguration {
+                request_id_draws: super::SEEDED_REQUEST_ID_DRAWS,
+                announcement_tries: super::SEEDED_ANNOUNCEMENT_TRIES,
+            }],
+        );
+    for standing in heartbeat_rows {
+        if standing
+            .outstanding
+            .as_ref()
+            .is_some_and(|logical_id| !held.contains(logical_id))
+        {
+            let mut cleared = standing.clone();
+            cleared.outstanding = None;
+            evolution = evolution.mutate(heartbeat_table, cleared);
+        }
+    }
+    engine.commit_atomic_evolution(evolution)?;
+    Ok(())
 }

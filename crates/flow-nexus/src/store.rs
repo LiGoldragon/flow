@@ -7561,6 +7561,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_legacy_configuration_catalog_without_handover_families_upgrades_idempotently() {
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        let database = redb::Database::open(fixture.path()).expect("legacy catalog opens");
+        {
+            let write = database.begin_write().expect("legacy catalog writes");
+            let mut catalog = write
+                .open_table(super::SEMA_CATALOG_TABLE)
+                .expect("catalog opens");
+            catalog
+                .delete(super::OPTIONAL_HANDOVER_TABLE)
+                .expect("configuration family removes");
+            catalog
+                .delete(super::OPTIONAL_HANDOVER_RUNTIME_TABLE)
+                .expect("runtime family removes");
+            write.commit().expect("legacy catalog commits");
+        }
+        let read = database.begin_read().expect("legacy catalog reads");
+        let catalog = read
+            .open_table(super::SEMA_CATALOG_TABLE)
+            .expect("catalog opens");
+        assert!(
+            catalog
+                .get(super::OPTIONAL_HANDOVER_TABLE)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            catalog
+                .get(super::OPTIONAL_HANDOVER_RUNTIME_TABLE)
+                .unwrap()
+                .is_none()
+        );
+        drop(read);
+        drop(database);
+        let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("legacy opens");
+        configuration
+            .configure_change(meta_signal_flow::ConfigurationChange::HandoverCount(0))
+            .expect("handover config commits");
+        drop(configuration);
+        for _ in 0..2 {
+            let reopened = ConfigurationOnlyStore::open(&fixture.path()).expect("legacy reopens");
+            assert_eq!(
+                reopened
+                    .configuration_snapshot()
+                    .unwrap()
+                    .unwrap()
+                    .handover_count,
+                meta_signal_flow::HandoverCountConfiguration::Configured(0)
+            );
+            drop(reopened);
+        }
+    }
+
     /// A store 0.53.0 wrote holds every running family but the one 0.53.1
     /// added, ProtectedAddresses: it is opened, that family registered
     /// empty, and nothing is protected. A store missing any other family is

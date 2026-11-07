@@ -840,4 +840,19 @@ fn a_deliver_into_a_flow_past_its_threshold_reaches_the_pane() {
         MetaResponse::Delivered(_)
     ));
     assert!(!prompts(&log).is_empty(), "payload reached the pane");
+    assert!(matches!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::Deliver(meta_signal_flow::DeliveryRequest {
+                delivery_id: "warning-past".into(),
+                flow_id: "908786".into(),
+                message: Message::HardAbrupt(letter("warning")),
+            })),
+        MetaResponse::Delivered(_)
+    ));
+    assert!(
+        prompts(&log)
+            .iter()
+            .any(|prompt| prompt.contains("warning"))
+    );
 }

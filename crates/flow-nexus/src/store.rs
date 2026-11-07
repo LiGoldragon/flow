@@ -6152,6 +6152,146 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_announcement_refusal_is_not_a_try_and_the_configured_bound_is_final() {
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        use crate::store::metaflow::SeedsMetaflow;
+        use crate::store::request_id_upgrade::{
+            RunsRequestIdAnnouncements, TaskAnnouncement, TaskAnnouncementStatus,
+        };
+        use signal_flow::{Message, Request, SentBy};
+
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        store
+            .configure_change(meta_signal_flow::ConfigurationChange::AnnouncementTries(1))
+            .expect("one announcement try configures");
+        let task_recipient = Address {
+            aspect: Aspect::Field,
+            topic: "upgradeTask".into(),
+            model: Model::Sol,
+        };
+        let notice_recipient = Address {
+            aspect: Aspect::Mind,
+            topic: "upgradeNoticeBound".into(),
+            model: Model::Sol,
+        };
+        store.seed_metaflow(flow_ethos::Metaflow {
+            address: task_recipient.clone(),
+            state: flow_ethos::State::Asleep,
+            past: Vec::new(),
+            queue: Vec::new(),
+        });
+        let signal_flow::PrivateSendResponse::SendAccepted(task) = store
+            .accept_logical_delivery(
+                &task_recipient,
+                SentBy::Sender(notice_recipient.clone()),
+                flow_ethos::Delivery::Queue,
+                Message::Soft(Request::Task(flow_ethos::AnswerableTask {
+                    minutes: 1,
+                    string: "announce after binding".into(),
+                })),
+                None,
+            )
+            .expect("task admits")
+        else {
+            panic!("task accepted")
+        };
+        store
+            .engine
+            .assert(Assertion::new(
+                store.request_id_upgrade.task_announcements,
+                TaskAnnouncement {
+                    recipient: notice_recipient.clone(),
+                    part: 0,
+                    tasks: vec![task.logical_delivery_id],
+                    tries: 0,
+                    status: TaskAnnouncementStatus::Pending(None),
+                },
+            ))
+            .expect("announcement row seeds");
+
+        store
+            .run_request_id_announcements()
+            .expect("unheld recipient refusal records");
+        let rows = store
+            .engine
+            .match_records(QueryPlan::all(store.request_id_upgrade.task_announcements))
+            .expect("refused row reads");
+        assert_eq!(rows.records()[0].tries, 0, "refusal is not a try");
+        assert!(matches!(
+            rows.records()[0].status,
+            TaskAnnouncementStatus::Pending(Some(_))
+        ));
+        drop(rows);
+        drop(store);
+        let store = fixture.store();
+        let rows = store
+            .engine
+            .match_records(QueryPlan::all(store.request_id_upgrade.task_announcements))
+            .expect("refused pending row survives restart");
+        assert_eq!(rows.records()[0].tries, 0);
+        drop(rows);
+
+        store.seed_metaflow(flow_ethos::Metaflow {
+            address: notice_recipient.clone(),
+            state: flow_ethos::State::Asleep,
+            past: Vec::new(),
+            queue: Vec::new(),
+        });
+        store
+            .run_request_id_announcements()
+            .expect("available recipient admits");
+        let rows = store
+            .engine
+            .match_records(QueryPlan::all(store.request_id_upgrade.task_announcements))
+            .expect("admitted row reads");
+        let TaskAnnouncementStatus::Admitted(notice) = &rows.records()[0].status else {
+            panic!("notice admitted")
+        };
+        let notice = notice.clone();
+        assert_eq!(rows.records()[0].tries, 1);
+        store
+            .transition_logical_delivery(
+                &notice,
+                signal_flow::DeliveryState::Failed(signal_flow::Refusal::Direct(
+                    "placement absent".into(),
+                )),
+            )
+            .expect("only try fails");
+        store
+            .run_request_id_announcements()
+            .expect("configured bound settles failure");
+        let rows = store
+            .engine
+            .match_records(QueryPlan::all(store.request_id_upgrade.task_announcements))
+            .expect("failed row reads");
+        assert_eq!(
+            rows.records()[0].status,
+            TaskAnnouncementStatus::Failed(notice)
+        );
+        let queued = store
+            .stored_metaflow(&notice_recipient)
+            .unwrap()
+            .unwrap()
+            .metaflow
+            .queue
+            .len();
+        store
+            .run_request_id_announcements()
+            .expect("terminal failure stays quiet");
+        assert_eq!(
+            store
+                .stored_metaflow(&notice_recipient)
+                .unwrap()
+                .unwrap()
+                .metaflow
+                .queue
+                .len(),
+            queued
+        );
+    }
+
+    #[test]
     fn upgrade_assignment_notice_carries_the_original_order_words() {
         use crate::store::logical_delivery::RecordsLogicalDeliveries;
         use crate::store::metaflow::SeedsMetaflow;

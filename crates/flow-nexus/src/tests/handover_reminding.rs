@@ -115,7 +115,7 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
     use super::{CLAUDE_MODEL, CLAUDE_SEAT};
     use super::NexusFixture;
     use crate::handover_reminding::RemindsHandoverCallers;
-    use crate::store::{ConfiguresFlowStore, ManagesMetaflowState};
+    use crate::store::{ConfiguresFlowStore, ManagesMetaflowState, ReadsFlowMemory};
     use crate::store::context::RecordsContextSize;
     use crate::store::handover::HoldsHandovers;
     use crate::store::metaflow::SeedsMetaflow;
@@ -135,6 +135,10 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
     fixture.nexus.send_due_handover_reminders(20);
     let row = fixture.nexus.store.handover_reminder(&address, 0).unwrap().unwrap();
     assert_eq!(row.sent, 1);
-    fixture.nexus.send_due_handover_reminders(20);
+    let stored = fixture.nexus.store.stored_metaflow(&address).unwrap().unwrap();
+    assert!(stored.metaflow.queue.iter().any(|entry| matches!(&entry.message, flow_ethos::Message::HardAbrupt(flow_ethos::Request::Notice(_)))));
+    fixture.nexus.send_due_handover_reminders(319);
     assert_eq!(fixture.nexus.store.handover_reminder(&address, 0).unwrap().unwrap().sent, 1);
+    fixture.nexus.send_due_handover_reminders(320);
+    assert_eq!(fixture.nexus.store.handover_reminder(&address, 0).unwrap().unwrap().sent, 2);
 }

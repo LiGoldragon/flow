@@ -5856,7 +5856,7 @@ mod tests {
         use crate::store::ReadsFlowMemory;
         use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
         use signal_flow::{
-            Address, Message, Metaflow, Model, QueueEntry, Recipient, Request, SendRequest, SentBy,
+            Address, Message, Metaflow, Model, Recipient, Request, SendRequest, SentBy,
         };
         let fixture = NexusFixture::new();
         bind_existing_caller(&fixture, "a001", "pane-1");

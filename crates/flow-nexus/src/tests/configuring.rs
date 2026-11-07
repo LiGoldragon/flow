@@ -977,3 +977,52 @@ fn protected_addresses_persist_across_reopen() {
     drop(reopened);
     assert_eq!(snapshot(&fixture.open()).protected_addresses, vec![fable]);
 }
+
+#[test]
+fn request_policy_fields_replace_independently_validate_and_survive_reopen() {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let seeded = snapshot(&nexus);
+    assert_eq!(seeded.request_id_draws, 64);
+    assert_eq!(seeded.announcement_tries, 3);
+
+    assert_eq!(
+        configure(&nexus, ConfigurationChange::AnnouncementTries(7)),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    let after_tries = snapshot(&nexus);
+    assert_eq!(after_tries.request_id_draws, 64);
+    assert_eq!(after_tries.announcement_tries, 7);
+
+    assert_eq!(
+        configure(&nexus, ConfigurationChange::RequestIdDraws(19)),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    let after_draws = snapshot(&nexus);
+    assert_eq!(after_draws.request_id_draws, 19);
+    assert_eq!(after_draws.announcement_tries, 7);
+    assert_eq!(
+        configure(&nexus, ConfigurationChange::RequestIdDraws(0)),
+        MetaResponse::ConfigureRejected(ConfigureRejection::RequestIdDrawsRefused)
+    );
+    assert_eq!(
+        configure(&nexus, ConfigurationChange::AnnouncementTries(-1)),
+        MetaResponse::ConfigureRejected(ConfigureRejection::AnnouncementTriesRefused)
+    );
+    assert_eq!(snapshot(&nexus), after_draws);
+    drop(nexus);
+    let reopened = fixture.open();
+    assert_eq!(snapshot(&reopened), after_draws);
+
+    assert_eq!(
+        configure(&reopened, ConfigurationChange::RequestIdDraws(23)),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    assert_eq!(
+        configure(&reopened, ConfigurationChange::AnnouncementTries(5)),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    let opposite = snapshot(&reopened);
+    assert_eq!(opposite.request_id_draws, 23);
+    assert_eq!(opposite.announcement_tries, 5);
+}

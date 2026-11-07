@@ -698,7 +698,7 @@ impl AccountsQueueDelivery for FlowStore {
                         commit = commit.assert(
                             self.queue_delivery.requests,
                             StoredDeliveryRequest {
-                                request_id: id,
+                                request_id: id.clone(),
                                 address: metaflow.address.clone(),
                                 queue_evidence: evidence,
                                 state: RequestState::Parked,

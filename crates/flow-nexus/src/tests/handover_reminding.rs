@@ -134,6 +134,7 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
 fn reminder_admission_waits_for_handover_gate_before_commit() {
     use super::NexusFixture;
     use crate::store::logical_delivery::RecordsLogicalDeliveries;
+    use crate::store::metaflow::SeedsMetaflow;
     use signal_flow::{Message, Request};
     let fixture = NexusFixture::new();
     let address = address();

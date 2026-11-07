@@ -74,3 +74,20 @@ fn window_requires_boundary_qualified_current_flow_touch() {
     o.touched_flow_id = Some("successor".into());
     assert!(!o.warning_window_is_current());
 }
+
+#[test]
+fn typed_keep_and_drop_commands_are_shell_single_argument_forms() {
+    use crate::handover_reminding::{HandoverReminderNotice, RendersHandoverCommands};
+    use signal_flow::{Query, Section};
+    use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+    use protos::{Compactable, Protosizable, ReaderBudget};
+    let notice = HandoverReminderNotice { address: address(), text: "Configured reminder".into(), generation: 1 };
+    let section = Section { title: "title".into(), description: "description".into(), body: "body".into() };
+    let text = notice.keep_commands(std::slice::from_ref(&section));
+    assert!(text.starts_with("flow '") && text.ends_with("'"));
+    let payload = text.strip_prefix("flow '").unwrap().strip_suffix(''').unwrap().replace("'\"'\"'", "'");
+    let mut budget = Budget { remaining: 4096, reader: ReaderBudget::try_from(4096).unwrap(), depth: 0, maximum_depth: 1024 };
+    let query = Potential::<Query>::from(payload.as_str()).actualize(&mut budget).unwrap();
+    assert_eq!(query.datomize(vec![]).protosize().compact(), payload);
+    assert!(notice.drop_command("title".into()).starts_with("flow '"));
+}

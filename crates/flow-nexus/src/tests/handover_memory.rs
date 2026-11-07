@@ -194,3 +194,37 @@ fn authenticated_unknown_write_sets_live_owner_atomically() {
         Err(signal_flow::HandoverRefusal::NotOwner)
     );
 }
+
+#[test]
+fn closed_snapshot_survives_successor_edit_and_reopen_notification() {
+    let fixture = NexusFixture::new();
+    let address = address("handoverSnapshot");
+    let store = &fixture.nexus.store;
+    let writer = HandoverWriter {
+        address: address.clone(),
+        flow_id: "pred".into(),
+    };
+    store
+        .keep_handover_for_flow(&writer, section("one", "d", "before"), Touch::Unknown)
+        .unwrap();
+    store
+        .close_handover_for_successor(&address, "pred", "succ")
+        .unwrap();
+    store
+        .keep_handover_for_flow(
+            &HandoverWriter {
+                address: address.clone(),
+                flow_id: "succ".into(),
+            },
+            section("one", "d", "after"),
+            Touch::Unknown,
+        )
+        .unwrap();
+    store
+        .close_handover_for_successor(&address, "pred", "succ")
+        .unwrap();
+    let row = store.handover_memory(&address).unwrap().unwrap();
+    assert_eq!(row.closed.len(), 1);
+    assert_eq!(row.closed[0].sections, vec![section("one", "d", "before")]);
+    assert_eq!(row.current, vec![section("one", "d", "after")]);
+}

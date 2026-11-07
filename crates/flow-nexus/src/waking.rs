@@ -2932,6 +2932,15 @@ impl WakesInParts for RunningNexus {
 
     fn settle_rested(&self, flow_id: &str) -> AtStop {
         self.record_context_at_stop(flow_id);
+        // The stop measurement is the warning-window opening witness. Run the
+        // ordinary reminder admission now; the worker remains responsible for
+        // anchored repeats and recovery after a restart.
+        use crate::handover_reminding::RemindsHandoverCallers;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or_default();
+        self.send_due_handover_reminders(now);
         // A seat refreshes automatically only when its latest handover touch
         // is policy-qualified and reaches the inclusive warning boundary.
         let refresh_due = match self.store.metaflow_awake_as(flow_id) {

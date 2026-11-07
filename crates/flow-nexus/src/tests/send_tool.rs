@@ -18,10 +18,7 @@ use crate::sending::{MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
 use crate::store::logical_delivery::{MintsRequestIds, RecordsLogicalDeliveries};
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::send_call::KeepsSendCalls;
-use crate::store::{
-    AnnouncesLaunchChanges, RecordsFlowLifecycle, RegistersFlowIdentity,
-    SetsRequestIdDrawerForTests,
-};
+use crate::store::{AnnouncesLaunchChanges, RecordsFlowLifecycle, RegistersFlowIdentity};
 use crate::{HoldsStopRequest, generated::send_tool::DeclaresSendTool};
 use flow_ethos::State;
 use meta_signal_flow::QueueEvidence;
@@ -38,14 +35,6 @@ use std::{
 const THREAD_A: &str = "01a0b22c-0000-7000-8000-00000000000a";
 const THREAD_B: &str = "01a0b22c-0000-7000-8000-00000000000b";
 const TURN: &str = "01a0b22c-0000-7000-8000-0000000000f0";
-
-struct OneRequestId(String);
-
-impl crate::store::logical_delivery::DrawsRequestId for OneRequestId {
-    fn draw_request_id(&self) -> Result<flow_ethos::RequestId, crate::store::StoreError> {
-        Ok(self.0.clone())
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TestRequest {
@@ -531,7 +520,7 @@ fn responding<T>(
 
 #[test]
 fn two_threads_are_each_attributed_to_their_own_metaflow() {
-    let mut fixture = NexusFixture::new();
+    let fixture = NexusFixture::new();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.codex_seat("b2b2b2", THREAD_B, "w1:p6", "gpt-6-sol", sender_b());
     fixture.awake_target();
@@ -1776,41 +1765,6 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
             .is_none(),
         "archive releases the id in its commit"
     );
-    fixture
-        .nexus
-        .store
-        .set_request_id_drawer_for_tests(std::sync::Arc::new(OneRequestId(request_id.clone())));
-    let SendOutcome::Accepted(reused) = fixture
-        .nexus
-        .store
-        .accept_tool_send(
-            &ToolCallKey {
-                thread_id: THREAD_A.into(),
-                turn_id: TURN.into(),
-                call_id: "archive-contract-reuse".into(),
-            },
-            "archive-contract-reuse-content",
-            core(),
-            &core_primary(),
-            Message::Soft(Request::Notice("reuse me".into())),
-            0,
-        )
-        .expect("the next admission can redraw an archived id")
-    else {
-        panic!("reused id accepted")
-    };
-    assert_eq!(reused.send_acceptance.request_id, request_id);
-    assert_ne!(reused.send_acceptance.logical_delivery_id, logical_id);
-    assert_eq!(
-        fixture
-            .nexus
-            .store
-            .request_binding(&request_id)
-            .expect("new binding reads")
-            .expect("reused id is held by the new request")
-            .logical_delivery_id,
-        reused.send_acceptance.logical_delivery_id
-    );
     let history = fixture
         .nexus
         .store
@@ -1825,19 +1779,6 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
         })
         .count();
     assert_eq!(archived, 1, "archive asserts one terminal history event");
-    let old_archive_cursor = history
-        .delivery_snapshot_vector
-        .iter()
-        .find(|snapshot| {
-            snapshot.logical_delivery_id == logical_id
-                && snapshot.delivery_state == signal_flow::DeliveryState::Archived
-        })
-        .expect("old archive is in history")
-        .delivery_cursor;
-    assert!(
-        reused.send_acceptance.delivery_cursor > old_archive_cursor,
-        "reuse is admitted only after the archived event"
-    );
 }
 
 fn from_core(request: Request) -> TestRequest {

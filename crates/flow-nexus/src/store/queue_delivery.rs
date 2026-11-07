@@ -2076,6 +2076,109 @@ mod tests {
     }
 
     #[test]
+    fn an_authenticated_answer_atomically_marks_uncertain_delivery_read_and_recovery_excludes_it() {
+        use super::super::logical_delivery::RecordsLogicalDeliveries;
+
+        let (fixture, store) = Fixture::new();
+        let PrepareQueueDelivery::Prepared(prepared) = store
+            .prepare_oldest_delivery(
+                &address(),
+                "flow-delivery",
+                "thread-7",
+                HarnessKind::Codex,
+                NativeHistoryAnchor::CodexTurns(None),
+            )
+            .unwrap()
+        else {
+            panic!("oldest request prepared")
+        };
+        drop(store);
+
+        let reopened = fixture.reopen();
+        let recovered = reopened.recover_outstanding_deliveries().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].phase, QueueDeliveryPhase::Uncertain(None));
+        let commit = reopened.engine.begin_atomic_commit();
+        let commit = reopened
+            .read_uncertain_delivery("logical-first", "logical-answer", commit)
+            .expect("answer settlement composes into its admission commit");
+        reopened
+            .commit_logical_transition("logical-first", DeliveryState::Read, commit)
+            .expect("answer admission and Read settle atomically");
+
+        assert_eq!(
+            reopened.metaflow(&address()).unwrap().unwrap().queue,
+            vec![queued("second")]
+        );
+        let read = reopened
+            .queue_delivery_attempt(&prepared.attempt_id)
+            .unwrap()
+            .expect("attempt retained as evidence");
+        assert_eq!(
+            read.phase,
+            QueueDeliveryPhase::Read {
+                answer: "logical-answer".into(),
+                late_receipt: None,
+            }
+        );
+        assert_eq!(
+            reopened
+                .logical_delivery_snapshot(&"logical-first".into())
+                .unwrap()
+                .expect("logical delivery remains")
+                .delivery_state,
+            DeliveryState::Read
+        );
+        assert!(
+            reopened
+                .recover_outstanding_deliveries()
+                .unwrap()
+                .is_empty(),
+            "Read work is never recovered"
+        );
+        let late = receipt(&prepared);
+        assert!(
+            reopened
+                .record_delivery_receipt(&prepared.attempt_id, late.clone())
+                .unwrap()
+        );
+        let mut different = late.clone();
+        different.turn_id = "different-turn".into();
+        assert!(
+            !reopened
+                .record_delivery_receipt(&prepared.attempt_id, different)
+                .unwrap(),
+            "a different late receipt is refused"
+        );
+        assert!(
+            reopened
+                .settle_recorded_delivery(&prepared.attempt_id)
+                .unwrap(),
+            "settlement is idempotent on Read"
+        );
+        drop(reopened);
+
+        let restarted = fixture.reopen();
+        assert_eq!(
+            restarted
+                .queue_delivery_attempt(&prepared.attempt_id)
+                .unwrap()
+                .expect("Read evidence survives restart")
+                .phase,
+            QueueDeliveryPhase::Read {
+                answer: "logical-answer".into(),
+                late_receipt: Some(late),
+            }
+        );
+        assert!(
+            restarted
+                .recover_outstanding_deliveries()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn exact_receipt_survives_restart_and_settles_oldest_once() {
         let (fixture, store) = Fixture::new();
         let PrepareQueueDelivery::Prepared(prepared) = store

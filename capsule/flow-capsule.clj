@@ -1496,6 +1496,9 @@
 (def ho-high 200000)
 (def ho-archive "/tmp/flow-0532-01e4a4-preflight/handover-archive")
 (def ho-hook (str ho-archive "/.git/hooks/pre-commit"))
+(def ho-hook-refused (str ho-archive "/.git/hook-refused"))
+(def ho-hook-waiting (str ho-archive "/.git/hook-waiting"))
+(def ho-hook-release (str ho-archive "/.git/hook-release"))
 (def ho-bulk (str source-root "/bulk.txt"))
 (def ho (atom {}))
 (def retirement-observation (atom nil))
@@ -1755,6 +1758,29 @@
 
       {:kind :unknown :raw line})))
 
+(defn retirement-verdict
+  "Judges one fresh post-refusal subscription. The exact closed target must
+  be its sole snapshot key, followed by archive evidence and removal for that
+  key. Any other frame before removal makes the observation incomplete."
+  [snapshot later predecessor successor expected-path git-evidence]
+  (let [keys (:keys snapshot)
+        key (first keys)
+        target (and (= 1 (count keys)) (= predecessor (:predecessor key))
+                    (= successor (:successor key)) (integer? (:generation key)))
+        removed-index (first (keep-indexed #(when (= :removed (:kind %2)) %1) later))
+        before-boundary (if removed-index (subvec (vec later) 0 (inc removed-index)) (vec later))
+        kinds (mapv :kind before-boundary)
+        [archive removed] before-boundary
+        same-key (and archive removed (= key (:key archive) (:key removed)))
+        identity (:identity archive)
+        identity-exact (and (= expected-path (:path identity))
+                            (= (:commit identity) (:commit git-evidence))
+                            (= (:blob identity) (:blob git-evidence))
+                            (= (:content git-evidence) (:requested-content git-evidence)))]
+    {:complete (boolean (and target (= [:archive :removed] kinds) same-key identity-exact))
+     :key key :kinds kinds :target (boolean target) :same-key (boolean same-key)
+     :identity-exact (boolean identity-exact)}))
+
 (defn start-retirement-observation! []
   (let [query (str "Observe.Retirement." ho-seat)
         proc (p/process [(str @package "/bin/flow")
@@ -1773,9 +1799,22 @@
       (let [frames (atom [first-frame])
             read-future (future
                           (loop []
-                            (when-let [line (try (.readLine reader) (catch Exception _ nil))]
-                              (swap! frames conj (retirement-frame line))
-                              (recur))))]
+                            (let [[outcome value] (try [:line (.readLine reader)]
+                                                       (catch Exception e [:error e]))]
+                              (cond
+                                (= outcome :error)
+                                (swap! frames conj {:kind :read-failed :error (.getMessage value)})
+
+                                (nil? value)
+                                (swap! frames conj {:kind :eof})
+
+                                :else
+                                (let [frame (try (retirement-frame value)
+                                                 (catch Exception e
+                                                   {:kind :parse-failed :error (.getMessage e) :raw value}))]
+                                  (swap! frames conj frame)
+                                  (when-not (contains? #{:parse-failed :unknown} (:kind frame))
+                                    (recur))))))) ]
         (reset! retirement-observation {:query query :process proc :reader reader
                                         :frames frames :read-future read-future}))
       first-frame)))
@@ -1784,7 +1823,7 @@
   (let [{:keys [process reader frames]} @retirement-observation]
     (when-not (and process reader frames)
       (throw (ex-info "retirement observation was not attached before refresh" {})))
-    (watch (/ timeout-ms 1000) #(some (fn [frame] (contains? #{:removed :failed} (:kind frame))) @frames))
+    (watch (/ timeout-ms 1000) #(some (fn [frame] (contains? #{:removed :failed :eof :read-failed :parse-failed :unknown} (:kind frame))) @frames))
     (let [result @frames]
       (p/destroy-tree process)
       result)))
@@ -1803,7 +1842,14 @@
             git-init [(ho-git "init" "-q") (ho-git "config" "user.name" "flow-capsule")
                       (ho-git "config" "user.email" "flow-capsule@localhost")
                       (ho-git "commit" "-q" "--allow-empty" "-m" "Initial empty commit")]
-            _ (spit ho-hook "#!/bin/sh\necho flow-capsule canary hook refuses >&2\nexit 1\n")
+            _ (spit ho-hook (str "#!/bin/sh\n"
+                                 "if [ ! -e " ho-hook-refused " ]; then\n"
+                                 "  : > " ho-hook-refused "\n"
+                                 "  echo flow-capsule canary hook refuses once >&2\n"
+                                 "  exit 1\n"
+                                 "fi\n"
+                                 ": > " ho-hook-waiting "\n"
+                                 "while [ ! -e " ho-hook-release " ]; do sleep 0.1; done\n"))
             _ (fs/set-posix-file-permissions ho-hook "rwxr-xr-x")
             _ (spit ho-bulk (str/join "\n" (for [i (range 600)] (str "line " i " of the canary bulk: alpha bravo charlie delta echo foxtrot"))))
             policy (flow-meta (ho-policy ho-share))
@@ -1955,7 +2001,6 @@
             marker (str ho-calls "/h3-closed")
             [waiter old-out] (ho-script! "h3-old-keep" "flow" (keep-datom "after-close" "From the closed generation." "x") marker)
             armed (ho-turn! old (str "OPERATOR-SCRIPT: Run the shell command sh " waiter " once, then answer with one word and stop. Tag h3-arm."))
-            retirement-snapshot (start-retirement-observation!)
             cur (:t2 @ho)
             r3 (+ cur 300)
             thresholds (flow-meta (ho-threshold r3))
@@ -1974,7 +2019,6 @@
             old-keep (when (watch 30 #(fs/exists? old-out)) (str/trim (slurp old-out)))
             read-after (flow (str "Read." ho-seat))]
         (swap! ho assoc :pred old :successor successor)
-        (keep-text! "handover-H3-retirement-snapshot.txt" (:raw retirement-snapshot))
         (keep-text! "handover-H3-first-prompt.json" (json/generate-string {:threadId native :history first-history :expectedHandover expected} {:pretty true}))
         {:reply (str "Thresholds " r3 ": " thresholds " / bulk turn rested " (boolean sent) " / restored: " restored
                      " / Keep by the old flow's waiter after the close: " old-keep " / Read after: " read-after)
@@ -1986,49 +2030,52 @@
                        "; expected handover " (pr-str expected) "; its first prompt holds it " (boolean handed)
                        ", as its last part " last-part " (whole first-prompt history kept as handover-H3-first-prompt.json)"
                        "; the old flow (pane " old-pane ") armed a waiting Keep " (boolean armed)
-                       ", run after the successor started, answered " (pr-str old-keep)
-                       "; retirement observation attached before refresh with " (count (:keys retirement-snapshot)) " closed identities")}))]
+                       ", run after the successor started, answered " (pr-str old-keep))}))]
 
    ["H4 closed generation publishes exact immutable Git identity before the same generation key is removed; failing pre-commit hook delays both completion events until retry"
     (fn []
       (let [pred (:pred @ho)
             rel (str "Mind/test/Terra/" pred ".md")
-            retried (watch 30 #(<= 2 (count (log-lines-with "handover archive"))))
+            refused (watch 30 #(fs/exists? ho-hook-refused))
+            publisher-waiting (watch 90 #(fs/exists? ho-hook-waiting))
             retry-lines (log-lines-with "handover archive")
             log-before (:out (ho-git "log" "--format=%h %s"))
-            tracked-before (str/trim (:out (ho-git "ls-files" "--" rel)))
+            tracked-before (str/trim (:out (ho-git "ls-tree" "--name-only" "HEAD" "--" rel)))
             status-before (str/trim (:out (ho-git "status" "--porcelain")))
             exists-before (fs/exists? (str ho-archive "/" rel))
+            live-before {:current (str (awake-flow ho-seat)) :handover (flow (str "Read." ho-seat))
+                         :sibling (str (awake-flow ho-other)) :sibling-handover (flow (str "Read." ho-other))}
+            retirement-snapshot (start-retirement-observation!)
             removed-at (System/currentTimeMillis)
-            _ (fs/delete ho-hook)
+            _ (spit ho-hook-release "release\n")
             committed (watch 30 #(str/includes? (:out (ho-git "log" "--format=%s")) "Archive handover"))
             secs (/ (- (System/currentTimeMillis) removed-at) 1000.0)
             log-after (:out (ho-git "log" "--stat" "--format=%h %s"))
-            tracked-after (str/trim (:out (ho-git "ls-files" "--" rel)))
+            tracked-after (str/trim (:out (ho-git "ls-tree" "--name-only" "HEAD" "--" rel)))
             content (try (slurp (str ho-archive "/" rel)) (catch Exception _ nil))
             retirement-frames (finish-retirement-observation! 45000)
-            changes (filterv #(contains? #{:closed :archive :removed} (:kind %)) retirement-frames)
-            failure (first (filter #(= :failed (:kind %)) retirement-frames))
-            [closed archive removed] changes
-            ordered (= [:closed :archive :removed] (mapv :kind changes))
-            same-key (and closed archive removed (= (:key closed) (:key archive) (:key removed)))
-            key (:key closed)
-            identity (:identity archive)
-            head (str/trim (:out (ho-git "rev-parse" "HEAD")))
-            blob (str/trim (:out (ho-git "rev-parse" (str "HEAD:" rel))))
-            blob-content (:out (ho-git "cat-file" "blob" (str "HEAD:" rel)))
-            identity-exact (and (= head (:commit identity)) (= rel (:path identity))
-                                (= blob (:blob identity)) (= content blob-content))
-            lifecycle-exact (and (= ho-seat (:address key)) (= pred (:predecessor key))
-                                 (= (:successor @ho) (:successor key)) (integer? (:generation key)))
-            archive-seen (boolean (and pred retried (str/blank? tracked-before)
+            later (subvec (vec retirement-frames) 1)
+            emitted (some #(when (= :archive (:kind %)) (:identity %)) later)
+            emitted-spec (when emitted (str (:commit emitted) ":" (:path emitted)))
+            emitted-blob (when emitted-spec (str/trim (:out (ho-git "rev-parse" emitted-spec))))
+            emitted-content (when emitted-spec (:out (ho-git "cat-file" "blob" emitted-spec)))
+            verdict (retirement-verdict retirement-snapshot later pred (:successor @ho) rel
+                                        {:commit (:commit emitted) :blob emitted-blob
+                                         :content emitted-content :requested-content content})
+            live-after {:current (str (awake-flow ho-seat)) :handover (flow (str "Read." ho-seat))
+                        :sibling (str (awake-flow ho-other)) :sibling-handover (flow (str "Read." ho-other))}
+            live-preserved (= live-before live-after)
+            archive-seen (boolean (and pred refused publisher-waiting (str/blank? tracked-before)
                                        (not (str/includes? log-before "Archive handover"))
                                        committed (= tracked-after rel) (< secs 15)))
-            retirement-seen (boolean (and (not failure) ordered same-key identity-exact lifecycle-exact))]
+            retirement-seen (boolean (and (= ho-seat (:address (:key verdict))) (:complete verdict) live-preserved))]
         (keep-text! "handover-H4-archive.txt" (str "before:\n" log-before "\nstatus: " status-before
                                                     "\n\nafter:\n" log-after "\n" rel ":\n" content
                                                     "\n\nNexus log:\n" (str/join "\n" retry-lines)))
-        (keep-text! "handover-H4-retirement.txt" (str/join "\n" (map :raw retirement-frames)))
+        (keep-text! "handover-H4-retirement.txt"
+                    (str (str/join "\n" (map #(or (:raw %) (pr-str %)) retirement-frames))
+                         "\nverdict " (pr-str verdict) "\nlive-before " (pr-str live-before)
+                         "\nlive-after " (pr-str live-after)))
         {:reply (str "git log before: " (str/trim log-before) " / after: " (str/replace (str/trim log-after) "\n" " | "))
          :pass (and archive-seen retirement-seen)
          :contract-pass retirement-seen
@@ -2037,12 +2084,13 @@
          :watched (str "predecessor " pred "; Nexus log lines naming the handover archive " (count retry-lines)
                        ", first " (pr-str (first retry-lines)) "; before the hook went: file present " exists-before
                        ", tracked " (pr-str tracked-before) ", status " (pr-str status-before)
-                       "; hook removed, \"Archive handover\" committed " (boolean committed) " " secs " s later, "
+                       "; waiting hook released, \"Archive handover\" committed " (boolean committed) " " secs " s later, "
                        rel " tracked " (= tracked-after rel)
-                       "; ordinary retirement subscription attached before refresh; exact changes " (mapv :kind changes)
-                       ", same key " (boolean same-key) ", lifecycle identity " (boolean lifecycle-exact)
-                       ", Git commit:path:blob and bytes exact " (boolean identity-exact)
-                       ", terminal failure " (pr-str failure)
+                       "; refusal observed " (boolean refused) ", next publisher held at the hook " (boolean publisher-waiting)
+                       "; fresh ordinary retirement subscription exact sole closed key " (boolean (:target verdict))
+                       ", changes through completion " (:kinds verdict) ", same key " (:same-key verdict)
+                       ", emitted immutable commit:path blob and bytes exact " (:identity-exact verdict)
+                       ", live current handover and sibling fixture preserved " live-preserved
                        "; kept as handover-H4-archive.txt and handover-H4-retirement.txt")}))]
 
    ["H5 ordinary delivery past threshold until green: no refresh at Stop, an Order drained by Wake reaches the transcript, no Uncertain mark; a Keep inside the window, then the next Stop refreshes"

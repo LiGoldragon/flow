@@ -169,3 +169,25 @@ fn green_keep_cancels_open_warning_timer() {
     fixture.nexus.send_due_handover_reminders(11);
     assert!(fixture.nexus.store.handover_reminder(&address, 0).unwrap().is_none());
 }
+
+#[test]
+fn atomic_same_expected_reminder_state_rejects_duplicate_admission() {
+    use super::NexusFixture;
+    use crate::store::logical_delivery::RecordsLogicalDeliveries;
+    use crate::store::handover_reminders::{HandoverReminder, OpensHandoverReminder};
+    use crate::store::metaflow::SeedsMetaflow;
+    use flow_ethos::{Metaflow, Message, Request, State};
+    use signal_flow::{PrivateSendResponse, SentBy};
+    let fixture = NexusFixture::new();
+    let address = address();
+    fixture.nexus.store.seed_metaflow(Metaflow { address: address.clone(), state: State::Asleep, past: vec![], queue: vec![] });
+    let reminder = HandoverReminder::open_handover_reminder(address.clone(), 0, "m".into(), 0, 5, "x".into()).unwrap();
+    let mut advanced = reminder.clone();
+    advanced.sent = 1;
+    advanced.next_due = 300;
+    let message = Message::HardAbrupt(Request::Notice("flow 'Notice'".into()));
+    let first = fixture.nexus.store.accept_handover_reminder(&address, message.clone(), advanced.clone()).unwrap();
+    assert!(matches!(first, PrivateSendResponse::SendAccepted(_)));
+    let second = fixture.nexus.store.accept_handover_reminder(&address, message, advanced).unwrap();
+    assert!(matches!(second, PrivateSendResponse::Refused(_)));
+}

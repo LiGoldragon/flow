@@ -176,7 +176,10 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     let sender = request.lock.sender.clone();
                     let recipient = request.lock.address.clone();
                     self.rest_ended_awake(&request.lock.address);
-                    let abrupt = !matches!(&request.message, signal_flow::Message::Soft(_));
+                    let abrupt = !matches!(
+                        &request.sendable_message,
+                        signal_flow::SendableMessage::Soft(_)
+                    );
                     let direct_requested = abrupt || self.live_awake_flow(&recipient).is_some();
                     // A metaflow another holds takes the request into its
                     // queue instead.
@@ -204,12 +207,11 @@ impl DispatchesMetaflowPeer for RunningNexus {
                                     .private_response
                             }
                             signal_flow::PrivateSendResponse::Refused(refusal) => {
-                                signal_flow::PrivateSendResponse::Failed(signal_flow::SendFailure {
-                                    logical_delivery_id_option: None,
-                                    send_failure_reason: signal_flow::SendFailureReason::Refused(
-                                        refusal,
+                                signal_flow::PrivateSendResponse::Failed(
+                                    signal_flow::SendFailure::Unadmitted(
+                                        signal_flow::SendFailureReason::Refused(refusal),
                                     ),
-                                })
+                                )
                             }
                             other => other,
                         };

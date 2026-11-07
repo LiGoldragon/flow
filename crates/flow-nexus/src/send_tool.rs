@@ -188,7 +188,7 @@ trait ReadsSendFields {
     fn aspect(value: &serde_json::Value) -> Option<Aspect>;
     fn model(value: &serde_json::Value) -> Option<Model>;
     fn priority(value: &serde_json::Value) -> Option<SendPriority>;
-    fn kind(value: &serde_json::Value) -> Option<SendKind>;
+    fn kind(value: &serde_json::Value, request: Option<&serde_json::Value>) -> Option<SendKind>;
     fn only_fields(value: &serde_json::Value, fields: &[&str]) -> bool;
 }
 
@@ -216,11 +216,11 @@ impl ReadsSendFields for ToolCall {
         }
     }
 
-    fn kind(value: &serde_json::Value) -> Option<SendKind> {
+    fn kind(value: &serde_json::Value, request: Option<&serde_json::Value>) -> Option<SendKind> {
         match value.as_str()? {
             "Order" => Some(SendKind::Order),
             "Question" => Some(SendKind::Question),
-            "Result" => Some(SendKind::Result),
+            "Result" => Some(SendKind::Result(request?.as_str()?.to_owned())),
             "Notice" => Some(SendKind::Notice),
             _ => None,
         }
@@ -245,7 +245,10 @@ impl ReadsSendFields for ToolCall {
 impl ReadsSendArguments for ToolCall {
     fn send_arguments(&self) -> Option<SendArguments> {
         let arguments = serde_json::from_str::<serde_json::Value>(&self.arguments).ok()?;
-        if !Self::only_fields(&arguments, &["target", "priority", "kind", "body"]) {
+        if !Self::only_fields(
+            &arguments,
+            &["target", "priority", "kind", "body", "request"],
+        ) {
             return None;
         }
         let target = arguments.get("target")?;
@@ -267,7 +270,7 @@ impl ReadsSendArguments for ToolCall {
                 model: Self::model(target.get("model")?)?,
             },
             send_priority: Self::priority(arguments.get("priority")?)?,
-            send_kind: Self::kind(arguments.get("kind")?)?,
+            send_kind: Self::kind(arguments.get("kind")?, arguments.get("request"))?,
             body: body.to_owned(),
         })
     }
@@ -296,7 +299,13 @@ impl BecomesRequest for SendArguments {
         match &self.send_kind {
             SendKind::Order => Request::Order(body),
             SendKind::Question => Request::Question(body),
-            SendKind::Result => Request::Result(flow_ethos::ResultPayload::Historical(body)),
+            SendKind::Result(request_id) => Request::Result(flow_ethos::ResultPayload::Answered(
+                flow_ethos::ResultPayload_Answered_Data {
+                    logical_delivery_id: String::new(),
+                    request_id: request_id.clone(),
+                    string: body,
+                },
+            )),
             SendKind::Notice => Request::Notice(body),
         }
     }

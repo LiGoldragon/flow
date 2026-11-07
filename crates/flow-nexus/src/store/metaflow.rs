@@ -251,6 +251,14 @@ impl MutatesMetaflows for FlowStore {
         request: Deliver_Data,
         now: i64,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError> {
+        let message = match self.resolve_sendable_message(
+            &request.lock.sender,
+            &request.lock.address,
+            request.sendable_message.clone(),
+        )? {
+            Ok(message) => message,
+            Err(refusal) => return Ok(signal_flow::PrivateSendResponse::Refused(refusal)),
+        };
         let Some(held) = self.stored_metaflow_lock(&request.lock.address)? else {
             return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
                 Unknown_Data::Lock(request.lock),
@@ -269,7 +277,7 @@ impl MutatesMetaflows for FlowStore {
                 Unknown_Data::Address(request.lock.address),
             )));
         };
-        if let Some(refusal) = request.message.oversized_refusal(&request.lock.sender) {
+        if let Some(refusal) = message.oversized_refusal(&request.lock.sender) {
             let released = self.release_metaflow_lock(request.lock.clone(), now)?;
             if released != Response::Released {
                 return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Store(
@@ -278,7 +286,7 @@ impl MutatesMetaflows for FlowStore {
             }
             return Ok(signal_flow::PrivateSendResponse::Refused(refusal));
         }
-        let delivery = if matches!(request.message, signal_flow::Message::Soft(_)) {
+        let delivery = if matches!(message, signal_flow::Message::Soft(_)) {
             flow_ethos::Delivery::Queue
         } else {
             flow_ethos::Delivery::Wake
@@ -287,7 +295,7 @@ impl MutatesMetaflows for FlowStore {
             &request.lock.address,
             SentBy::Sender(request.lock.sender.clone()),
             delivery,
-            request.message,
+            message,
             Some(VerifiedDeliveryLock {
                 lock: request.lock.clone(),
                 now,

@@ -343,10 +343,10 @@ impl SendsRequests for RunningNexus {
             }
         })();
         if abrupt && let PrivateSendResponse::Refused(refusal) = &answer.private_response {
-            answer.private_response = PrivateSendResponse::Failed(signal_flow::SendFailure {
-                logical_delivery_id_option: None,
-                send_failure_reason: signal_flow::SendFailureReason::Refused(refusal.clone()),
-            });
+            answer.private_response =
+                PrivateSendResponse::Failed(signal_flow::SendFailure::Unadmitted(
+                    signal_flow::SendFailureReason::Refused(refusal.clone()),
+                ));
             answer.response =
                 crate::message_projection::visible_send_response(&answer.private_response);
         }
@@ -1196,12 +1196,8 @@ impl CompletesDirectSends for RunningNexus {
         address: &Address,
     ) -> Result<Option<crate::waking::WakingLease<'_>>, Box<PrivateSendResponse>> {
         use signal_flow::{SendFailure, SendFailureReason};
-        let failed = |reason| {
-            Box::new(PrivateSendResponse::Failed(SendFailure {
-                logical_delivery_id_option: None,
-                send_failure_reason: reason,
-            }))
-        };
+        let failed =
+            |reason| Box::new(PrivateSendResponse::Failed(SendFailure::Unadmitted(reason)));
         let Some(lease) = self.waking.hold(address) else {
             return Ok(None);
         };
@@ -1387,10 +1383,13 @@ impl CompletesDirectSends for RunningNexus {
                     signal_flow::RetryCause::WakeRefused(rejection),
                 );
             }
-            return PrivateSendResponse::Failed(SendFailure {
-                logical_delivery_id_option: Some(logical_id),
-                send_failure_reason: SendFailureReason::NotSent(observed),
-            })
+            return PrivateSendResponse::Failed(SendFailure::Admitted(
+                signal_flow::SendFailure_Admitted_Data {
+                    logical_delivery_id: logical_id,
+                    request_id: acceptance.request_id.clone(),
+                    send_failure_reason: SendFailureReason::NotSent(observed),
+                },
+            ))
             .into();
         }
         let state = {
@@ -1405,16 +1404,17 @@ impl CompletesDirectSends for RunningNexus {
                 .finish_failed_direct(address, &logical_id, &observed)
         };
         let reason = match state {
-            Ok(DeliveryState::Delivered(native_receipt)) => {
+            Ok(DeliveryState::Delivered(_)) => {
                 return PrivateSendResponse::Sent(SendReceipt {
                     logical_delivery_id: logical_id,
-                    native_receipt,
+                    request_id: acceptance.request_id.clone(),
                 })
                 .into();
             }
             Ok(delivery_state @ (DeliveryState::Uncertain | DeliveryState::Attempting)) => {
                 return PrivateSendResponse::SendAccepted(signal_flow::SendAcceptance {
                     logical_delivery_id: logical_id,
+                    request_id: acceptance.request_id.clone(),
                     delivery_cursor: acceptance.delivery_cursor,
                     delivery_state,
                 })
@@ -1423,10 +1423,13 @@ impl CompletesDirectSends for RunningNexus {
             Ok(_) => SendFailureReason::NotSent(observed),
             Err(error) => SendFailureReason::Refused(Refusal::Store(error.to_string())),
         };
-        PrivateSendResponse::Failed(SendFailure {
-            logical_delivery_id_option: Some(logical_id),
-            send_failure_reason: reason,
-        })
+        PrivateSendResponse::Failed(SendFailure::Admitted(
+            signal_flow::SendFailure_Admitted_Data {
+                logical_delivery_id: logical_id,
+                request_id: acceptance.request_id.clone(),
+                send_failure_reason: reason,
+            },
+        ))
         .into()
     }
 }

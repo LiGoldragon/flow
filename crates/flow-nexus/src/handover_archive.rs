@@ -1,5 +1,9 @@
 //! Publication of closed handovers into a configured Git archive.
 
+use crate::{
+    store::handover::{ClosedHandover, HoldsHandovers},
+    RunningNexus,
+};
 use signal_flow::{Address, Aspect, Model};
 use std::{
     fs, io,
@@ -40,6 +44,59 @@ pub trait PublishesHandoverArchive {
         &self,
         request: HandoverArchiveRequest,
     ) -> Result<HandoverArchivePublication, HandoverArchiveRefusal>;
+}
+
+/// Runs archive publication before retiring closed Memory rows. The caller supplies
+/// the resolved retention policy and configured publisher from its configuration view.
+pub trait RetiresHandoverGenerations {
+    fn retire_handover_generations(
+        &self,
+        address: &Address,
+        retain: usize,
+        publisher: &dyn PublishesHandoverArchive,
+    ) -> Result<usize, HandoverRetirementRefusal>;
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum HandoverRetirementRefusal {
+    #[error("handover Memory failed: {0}")]
+    Memory(String),
+    #[error("handover archive refused publication: {0}")]
+    Archive(#[from] HandoverArchiveRefusal),
+}
+
+impl RetiresHandoverGenerations for RunningNexus {
+    fn retire_handover_generations(
+        &self,
+        address: &Address,
+        retain: usize,
+        publisher: &dyn PublishesHandoverArchive,
+    ) -> Result<usize, HandoverRetirementRefusal> {
+        let rows = self
+            .store
+            .closed_handovers(address, retain)
+            .map_err(|e| HandoverRetirementRefusal::Memory(e.to_string()))?;
+        let mut retired = 0;
+        for closed in rows {
+            publisher.publish(HandoverArchiveRequest {
+                address: address.clone(),
+                flow_id: closed.predecessor.clone(),
+                document: render_closed(&closed),
+            })?;
+            self.store
+                .remove_closed_handover(address, closed.generation)
+                .map_err(|e| HandoverRetirementRefusal::Memory(e.to_string()))?;
+            retired += 1;
+        }
+        Ok(retired)
+    }
+}
+
+fn render_closed(closed: &ClosedHandover) -> String {
+    format!(
+        "generation={} predecessor={} successor={} sections={:?} touch={:?}\n",
+        closed.generation, closed.predecessor, closed.successor, closed.sections, closed.touch
+    )
 }
 
 /// A publisher bound to one pre-existing Git work tree.

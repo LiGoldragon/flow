@@ -394,19 +394,6 @@ impl RecordsLogicalDeliveries for FlowStore {
             .write_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // A retry may present the same pre-commit snapshot after the prior
-        // atomic commit succeeded. The durable sent count is the expected
-        // state witness; refuse the stale attempt before creating a second
-        // logical Notice.
-        if let Some(expected) = handover_reminder.as_ref() {
-            if let Some(held) = self.handover_reminder(&expected.address, expected.generation)? {
-                if held.sent >= expected.sent {
-                    return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
-                        Unknown_Data::Address(address.clone()),
-                    )));
-                }
-            }
-        }
         let Some(mut stored) = self.stored_metaflow(address)? else {
             return Ok(false);
         };
@@ -1088,7 +1075,20 @@ impl RecordsLogicalDeliveries for FlowStore {
             .write_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let Some(mut stored) = self.stored_metaflow(address)? else {
+        let Some(mut stored) = self.stored_metaflow(address)? else {        // A retry may present the same pre-commit snapshot after the prior
+        // atomic commit succeeded. The durable sent count is the expected
+        // state witness; refuse the stale attempt before creating a second
+        // logical Notice.
+        if let Some(expected) = handover_reminder.as_ref() {
+            if let Some(held) = self.handover_reminder(&expected.address, expected.generation)? {
+                if held.sent >= expected.sent {
+                    return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
+                        Unknown_Data::Address(address.clone()),
+                    )));
+                }
+            }
+        }
+
             return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
                 Unknown_Data::Address(address.clone()),
             )));

@@ -91,6 +91,17 @@ fn existing_read_error_is_not_absence() {
         Err(HandoverArchiveRefusal::Write(_))
     ));
 }
+
+#[test]
+fn symlinked_archive_parent_is_refused() {
+    let d = repo();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), d.path().join("Mind")).unwrap();
+    assert_eq!(
+        ExistingGitHandoverArchive::new(d.path()).publish(request(d.path())),
+        Err(HandoverArchiveRefusal::InvalidPath)
+    );
+}
 fn runout(path: &Path, args: &[&str]) -> String {
     String::from_utf8(
         Command::new("git")

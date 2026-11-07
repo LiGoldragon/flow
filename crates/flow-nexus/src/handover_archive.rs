@@ -74,6 +74,7 @@ impl PublishesHandoverArchive for ExistingGitHandoverArchive {
             .join(model)
             .join(format!("{}.md", request.flow_id));
         let target = self.repository.join(relative);
+        reject_symlink_components(&self.repository, &target)?;
         match fs::read_to_string(&target) {
             Ok(existing) => {
                 if existing != request.document {
@@ -106,6 +107,28 @@ fn validate_component(value: &str) -> Result<(), HandoverArchiveRefusal> {
     } else {
         Ok(())
     }
+}
+
+fn reject_symlink_components(
+    repository: &Path,
+    target: &Path,
+) -> Result<(), HandoverArchiveRefusal> {
+    let relative = target
+        .strip_prefix(repository)
+        .map_err(|_| HandoverArchiveRefusal::InvalidPath)?;
+    let mut cursor = repository.to_path_buf();
+    for component in relative.components() {
+        cursor.push(component);
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(HandoverArchiveRefusal::InvalidPath)
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(HandoverArchiveRefusal::Write(error.to_string())),
+        }
+    }
+    Ok(())
 }
 fn aspect_name(aspect: &Aspect) -> &'static str {
     match aspect {

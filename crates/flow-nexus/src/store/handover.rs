@@ -217,7 +217,8 @@ impl HoldsHandovers for FlowStore {
         if count == 0 {
             return Ok(row.closed);
         }
-        Ok(row.closed.into_iter().take(count).collect())
+        let excess = row.closed.len().saturating_sub(count);
+        Ok(row.closed.into_iter().take(excess).collect())
     }
 
     fn remove_closed_handover(&self, address: &Address, generation: i64) -> Result<(), StoreError> {

@@ -1498,6 +1498,7 @@
 (def ho-hook (str ho-archive "/.git/hooks/pre-commit"))
 (def ho-bulk (str source-root "/bulk.txt"))
 (def ho (atom {}))
+(def retirement-observation (atom nil))
 
 (declare keep-datom)
 (defn ho-reminder []
@@ -1719,6 +1720,75 @@
 (defn log-lines-with [& needles]
   (filterv (fn [l] (every? #(str/includes? l %) needles)) (str/split-lines (log-text))))
 
+(defn retirement-address-text [address]
+  (str "{ " (str/join " " (map str (items address))) " }"))
+
+(defn retirement-key [d]
+  (let [[address generation predecessor successor] (items d)]
+    {:address (retirement-address-text address)
+     :generation (some-> generation str parse-long)
+     :predecessor (str predecessor)
+     :successor (str successor)}))
+
+(defn retirement-frame [line]
+  (let [outer (read-datom line)
+        inner (body outer)]
+    (case (head outer)
+      "RetirementObserved"
+      (let [[address keys] (items inner)]
+        {:kind :snapshot :address (retirement-address-text address)
+         :keys (mapv retirement-key (items keys)) :raw line})
+
+      "RetirementChanged"
+      (case (head inner)
+        "GenerationClosed" {:kind :closed :key (retirement-key (body inner)) :raw line}
+        "GenerationRemoved" {:kind :removed :key (retirement-key (body inner)) :raw line}
+        "ArchiveCommitted"
+        (let [[key identity] (items (body inner))
+              [commit path blob] (items identity)]
+          {:kind :archive :key (retirement-key key)
+           :identity {:commit (str commit) :path (str path) :blob (str blob)} :raw line})
+        {:kind :unknown :raw line})
+
+      "RetirementObservationFailed"
+      {:kind :failed :failure (head inner) :detail (some-> inner body str) :raw line}
+
+      {:kind :unknown :raw line})))
+
+(defn start-retirement-observation! []
+  (let [query (str "Observe.Retirement." ho-seat)
+        proc (p/process [(str @package "/bin/flow")
+                         (client-argument @package "flow" ordinary-socket query)]
+                        {:env (clean-env (marks @driver-pane)) :out :stream :err :string :in ""})
+        reader (java.io.BufferedReader. (java.io.InputStreamReader. (:out proc)))
+        first-line (deref (future (try (.readLine reader) (catch Exception _ nil))) 20000 nil)]
+    (when-not first-line
+      (p/destroy-tree proc)
+      (throw (ex-info "retirement observation produced no attachment snapshot" {:query query})))
+    (let [first-frame (retirement-frame first-line)]
+      (when-not (and (= :snapshot (:kind first-frame)) (= ho-seat (:address first-frame)))
+        (p/destroy-tree proc)
+        (throw (ex-info "retirement observation attachment was not the selected Address snapshot"
+                        {:query query :frame first-frame})))
+      (let [frames (atom [first-frame])
+            read-future (future
+                          (loop []
+                            (when-let [line (try (.readLine reader) (catch Exception _ nil))]
+                              (swap! frames conj (retirement-frame line))
+                              (recur))))]
+        (reset! retirement-observation {:query query :process proc :reader reader
+                                        :frames frames :read-future read-future}))
+      first-frame)))
+
+(defn finish-retirement-observation! [timeout-ms]
+  (let [{:keys [process reader frames]} @retirement-observation]
+    (when-not (and process reader frames)
+      (throw (ex-info "retirement observation was not attached before refresh" {})))
+    (watch (/ timeout-ms 1000) #(some (fn [frame] (contains? #{:removed :failed} (:kind frame))) @frames))
+    (let [result @frames]
+      (p/destroy-tree process)
+      result)))
+
 (def handover-scenarios
   [["H0 setup: Terra re-declared Maintained; archive repo with a refusing pre-commit hook; policy, archive, count; Luna and Terra launched"
    (fn []
@@ -1885,6 +1955,7 @@
             marker (str ho-calls "/h3-closed")
             [waiter old-out] (ho-script! "h3-old-keep" "flow" (keep-datom "after-close" "From the closed generation." "x") marker)
             armed (ho-turn! old (str "OPERATOR-SCRIPT: Run the shell command sh " waiter " once, then answer with one word and stop. Tag h3-arm."))
+            retirement-snapshot (start-retirement-observation!)
             cur (:t2 @ho)
             r3 (+ cur 300)
             thresholds (flow-meta (ho-threshold r3))
@@ -1903,6 +1974,7 @@
             old-keep (when (watch 30 #(fs/exists? old-out)) (str/trim (slurp old-out)))
             read-after (flow (str "Read." ho-seat))]
         (swap! ho assoc :pred old :successor successor)
+        (keep-text! "handover-H3-retirement-snapshot.txt" (:raw retirement-snapshot))
         (keep-text! "handover-H3-first-prompt.json" (json/generate-string {:threadId native :history first-history :expectedHandover expected} {:pretty true}))
         {:reply (str "Thresholds " r3 ": " thresholds " / bulk turn rested " (boolean sent) " / restored: " restored
                      " / Keep by the old flow's waiter after the close: " old-keep " / Read after: " read-after)
@@ -1914,9 +1986,10 @@
                        "; expected handover " (pr-str expected) "; its first prompt holds it " (boolean handed)
                        ", as its last part " last-part " (whole first-prompt history kept as handover-H3-first-prompt.json)"
                        "; the old flow (pane " old-pane ") armed a waiting Keep " (boolean armed)
-                       ", run after the successor started, answered " (pr-str old-keep))}))]
+                       ", run after the successor started, answered " (pr-str old-keep)
+                       "; retirement observation attached before refresh with " (count (:keys retirement-snapshot)) " closed identities")}))]
 
-   ["H4 archive artifact only; Memory retirement ordering NOT SEEN; closed generation archived at Mind/test/Terra/<predecessor>.md: refused by a failing pre-commit hook and retried, committed the tick after the hook goes"
+   ["H4 closed generation publishes exact immutable Git identity before the same generation key is removed; failing pre-commit hook delays both completion events until retry"
     (fn []
       (let [pred (:pred @ho)
             rel (str "Mind/test/Terra/" pred ".md")
@@ -1933,25 +2006,44 @@
             log-after (:out (ho-git "log" "--stat" "--format=%h %s"))
             tracked-after (str/trim (:out (ho-git "ls-files" "--" rel)))
             content (try (slurp (str ho-archive "/" rel)) (catch Exception _ nil))
+            retirement-frames (finish-retirement-observation! 45000)
+            changes (filterv #(contains? #{:closed :archive :removed} (:kind %)) retirement-frames)
+            failure (first (filter #(= :failed (:kind %)) retirement-frames))
+            [closed archive removed] changes
+            ordered (= [:closed :archive :removed] (mapv :kind changes))
+            same-key (and closed archive removed (= (:key closed) (:key archive) (:key removed)))
+            key (:key closed)
+            identity (:identity archive)
+            head (str/trim (:out (ho-git "rev-parse" "HEAD")))
+            blob (str/trim (:out (ho-git "rev-parse" (str "HEAD:" rel))))
+            blob-content (:out (ho-git "cat-file" "blob" (str "HEAD:" rel)))
+            identity-exact (and (= head (:commit identity)) (= rel (:path identity))
+                                (= blob (:blob identity)) (= content blob-content))
+            lifecycle-exact (and (= ho-seat (:address key)) (= pred (:predecessor key))
+                                 (= (:successor @ho) (:successor key)) (integer? (:generation key)))
             archive-seen (boolean (and pred retried (str/blank? tracked-before)
                                        (not (str/includes? log-before "Archive handover"))
-                                       committed (= tracked-after rel) (< secs 15)))]
+                                       committed (= tracked-after rel) (< secs 15)))
+            retirement-seen (boolean (and (not failure) ordered same-key identity-exact lifecycle-exact))]
         (keep-text! "handover-H4-archive.txt" (str "before:\n" log-before "\nstatus: " status-before
                                                     "\n\nafter:\n" log-after "\n" rel ":\n" content
                                                     "\n\nNexus log:\n" (str/join "\n" retry-lines)))
+        (keep-text! "handover-H4-retirement.txt" (str/join "\n" (map :raw retirement-frames)))
         {:reply (str "git log before: " (str/trim log-before) " / after: " (str/replace (str/trim log-after) "\n" " | "))
-         :pass archive-seen
-         ;; The archive artifact is useful evidence, but the current API has
-         ;; no Memory-retirement ordering witness. It therefore cannot make
-         ;; the seven-line contract complete or the process successful.
-         :contract-pass false
-         :memory-retirement-seen false
+         :pass (and archive-seen retirement-seen)
+         :contract-pass retirement-seen
+         :memory-retirement-seen retirement-seen
          :archive-seen archive-seen
          :watched (str "predecessor " pred "; Nexus log lines naming the handover archive " (count retry-lines)
                        ", first " (pr-str (first retry-lines)) "; before the hook went: file present " exists-before
                        ", tracked " (pr-str tracked-before) ", status " (pr-str status-before)
                        "; hook removed, \"Archive handover\" committed " (boolean committed) " " secs " s later, "
-                       rel " tracked " (= tracked-after rel) "; Memory retirement/commit-before-delete NOT SEEN (no supported observer); kept as handover-H4-archive.txt")}))]
+                       rel " tracked " (= tracked-after rel)
+                       "; ordinary retirement subscription attached before refresh; exact changes " (mapv :kind changes)
+                       ", same key " (boolean same-key) ", lifecycle identity " (boolean lifecycle-exact)
+                       ", Git commit:path:blob and bytes exact " (boolean identity-exact)
+                       ", terminal failure " (pr-str failure)
+                       "; kept as handover-H4-archive.txt and handover-H4-retirement.txt")}))]
 
    ["H5 ordinary delivery past threshold until green: no refresh at Stop, an Order drained by Wake reaches the transcript, no Uncertain mark; a Keep inside the window, then the next Stop refreshes"
     (fn []

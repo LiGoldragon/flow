@@ -2594,8 +2594,8 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     // The woken flow's accepted first prompt carries the Order with the
     // Sender its Lock named.
     let sent = QueueEntry {
-        logical_delivery_id: accepted.logical_delivery_id,
-        request_id: accepted.request_id,
+        logical_delivery_id: accepted.logical_delivery_id.clone(),
+        request_id: accepted.request_id.clone(),
         sent_by: SentBy::Sender(sender_address.clone()),
         delivery: flow_ethos::Delivery::Wake,
         message: Message::MiddleAbrupt(order.clone()),

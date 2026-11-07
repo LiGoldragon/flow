@@ -115,9 +115,11 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
     use crate::handover_reminding::RemindsHandoverCallers;
     use crate::store::handover_reminders::{HandoverReminder, OpensHandoverReminder, SchedulesHandoverReminders};
     use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+    use crate::store::SeedsRole;
     use flow_ethos::{Metaflow, State};
     let fixture = NexusFixture::new();
     let address = address();
+    fixture.nexus.store.seed_role(signal_flow::Caller { flow_id: "fixture-seat".into(), aspect: Aspect::Field, model_name: "m".into() });
     fixture.nexus.store.seed_metaflow(Metaflow { address: address.clone(), state: State::Awake("fixture-seat".into()), past: vec![], queue: vec![] });
     fixture.nexus.store.ensure_live_handover(&address, "fixture-seat").unwrap();
     let reminder = HandoverReminder::open_handover_reminder(address.clone(), 0, "m".into(), 10, 5, "configured".into()).unwrap();
@@ -261,9 +263,10 @@ fn reminder_state_reopens_with_anchored_due_without_duplicate_initial() {
     let mut advanced = reminder.clone(); advanced.sent = 1; advanced.next_due = 400;
     let accepted = store.accept_handover_reminder(&address, flow_ethos::Message::HardAbrupt(flow_ethos::Request::Notice("x".into())), advanced.clone()).unwrap();
     assert!(matches!(accepted, signal_flow::PrivateSendResponse::SendAccepted(_)));
+    store.hold_handover_reminder(advanced.clone()).unwrap();
     drop(store);
     let reopened = crate::store::FlowStore::open_configured(path).unwrap();
-    assert_eq!(reopened.handover_reminder(&address, 4).unwrap(), Some(reminder));
+    assert_eq!(reopened.handover_reminder(&address, 4).unwrap(), Some(advanced.clone()));
     let retry = reopened.accept_handover_reminder(&address, flow_ethos::Message::HardAbrupt(flow_ethos::Request::Notice("x".into())), advanced.clone()).unwrap();
     assert!(matches!(retry, signal_flow::PrivateSendResponse::Refused(_)));
     drop(reopened);

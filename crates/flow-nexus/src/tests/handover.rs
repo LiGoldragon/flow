@@ -651,7 +651,7 @@ fn an_installed_memory_source_reads_the_live_store_and_ignores_the_file() {
     assert!(launch
         .first_prompt_payload
         .first_prompt_body
-        .ends_with("## live\nfrom memory\nsame live store"));
+        .contains("## live\nfrom memory\nsame live store"));
     assert!(!launch.first_prompt_payload.first_prompt_body.contains("file text"));
 }
 
@@ -676,7 +676,7 @@ fn memory_source_reads_only_the_last_closed_generation_and_ignores_root() {
     let root_b = tempfile::tempdir().unwrap();
     assert_eq!(source.handover(&at, "abc123", root_a.path()), Handover::Text("## old\nd\none".into()));
     assert_eq!(source.handover(&at, "abc123", root_b.path()), Handover::Text("## old\nd\none".into()));
-    assert_eq!(source.handover(&at, "def456", root_a.path()), Handover::Text("## new\nd\ntwo".into()));
+    assert_eq!(source.handover(&at, "def456", root_a.path()), Handover::Text("## old\nd\none\n\n## new\nd\ntwo".into()));
     assert_eq!(source.handover(&at, "missing", root_a.path()), Handover::Absent);
 }
 

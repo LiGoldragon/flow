@@ -240,6 +240,35 @@ impl RemindsHandoverCallers for crate::RunningNexus {
                     .close_handover_reminder(&reminder.address, reminder.generation);
                 continue;
             }
+            let Some(flow_id) = live.current_flow_id.as_deref() else {
+                continue;
+            };
+            let Ok(Some(model_name)) = self.store.flow_model(flow_id) else {
+                continue;
+            };
+            let Ok(configuration) = self.store.handover_policies() else {
+                continue;
+            };
+            let meta_signal_flow::HandoverPoliciesConfiguration::Configured(policies) =
+                configuration
+            else {
+                continue;
+            };
+            let Some(policy) = policies
+                .iter()
+                .find(|policy| policy.model_name == model_name)
+            else {
+                continue;
+            };
+            let Ok(Some(refresh)) = self.store.configured_threshold(&model_name) else {
+                continue;
+            };
+            let Ok(Some(tokens)) = self.store.context_size(flow_id) else {
+                continue;
+            };
+            if !HandoverReminder::warning_open(refresh.refresh, policy.warning_share_left, tokens) {
+                continue;
+            }
             // Admission is deliberately ordinary. In particular this does
             // not use DeliveryPurpose::Heartbeat or any refresh hold bypass.
             let sections = match self.store.handover(&reminder.address) {

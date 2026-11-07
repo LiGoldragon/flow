@@ -224,6 +224,24 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
         &entry.message,
         flow_ethos::Message::HardAbrupt(flow_ethos::Request::Notice(_))
     )));
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::HandoverPolicies(
+            vec![],
+        ))
+        .unwrap();
+    fixture.nexus.send_due_handover_reminders(310);
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .handover_reminder(&address, 0)
+            .unwrap()
+            .unwrap()
+            .sent,
+        1
+    );
 }
 
 #[test]

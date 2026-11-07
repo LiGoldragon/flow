@@ -78,6 +78,11 @@ pub trait HoldsHandovers {
     /// Reads the complete Memory row. `None` means no handover has ever been
     /// written; `Some(Unknown)` means a successful write had no measurement.
     fn handover_memory(&self, address: &Address) -> Result<Option<HandoverMemory>, StoreError>;
+    fn ensure_live_handover(
+        &self,
+        address: &Address,
+        flow_id: &str,
+    ) -> Result<HandoverMemory, StoreError>;
     fn handover(&self, address: &Address) -> Result<Vec<Section>, StoreError>;
     fn handover_for_flow(
         &self,
@@ -145,6 +150,29 @@ impl RegistersHandoverTable for FlowStore {
 impl HoldsHandovers for FlowStore {
     fn handover_memory(&self, address: &Address) -> Result<Option<HandoverMemory>, StoreError> {
         self.handover_row(address)
+    }
+
+    fn ensure_live_handover(
+        &self,
+        address: &Address,
+        flow_id: &str,
+    ) -> Result<HandoverMemory, StoreError> {
+        if let Some(row) = self.handover_row(address)? {
+            if row.current_flow_id.as_deref() == Some(flow_id) {
+                return Ok(row);
+            }
+            return Err(StoreError::StateInvariant);
+        }
+        let row = HandoverMemory {
+            address: address.clone(),
+            current: Vec::new(),
+            touch: None,
+            generation: 0,
+            current_flow_id: Some(flow_id.into()),
+            closed: Vec::new(),
+        };
+        self.write_handover(row.clone())?;
+        Ok(row)
     }
 
     fn handover(&self, address: &Address) -> Result<Vec<Section>, StoreError> {
@@ -259,14 +287,30 @@ impl HoldsHandovers for FlowStore {
         touch: Touch,
     ) -> Result<Touch, HandoverRefusal> {
         ensure_live_writer(self, &writer.address, &writer.flow_id)?;
-        let result = self.keep_handover(&writer.address, &writer.address, section, touch)?;
         let mut row = self
             .handover_row(&writer.address)
             .map_err(store_refusal)?
-            .ok_or_else(|| HandoverRefusal::Store("handover row disappeared".into()))?;
+            .unwrap_or_else(|| HandoverMemory {
+                address: writer.address.clone(),
+                current: Vec::new(),
+                touch: None,
+                generation: 0,
+                current_flow_id: Some(writer.flow_id.clone()),
+                closed: Vec::new(),
+            });
+        if let Some(existing) = row
+            .current
+            .iter_mut()
+            .find(|item| item.title == section.title)
+        {
+            *existing = section;
+        } else {
+            row.current.push(section);
+        }
         row.current_flow_id = Some(writer.flow_id.clone());
+        row.touch = Some(touch.clone());
         self.write_handover(row).map_err(store_refusal)?;
-        Ok(result)
+        Ok(touch)
     }
 
     fn drop_handover(
@@ -304,14 +348,18 @@ impl HoldsHandovers for FlowStore {
         touch: Touch,
     ) -> Result<Touch, HandoverRefusal> {
         ensure_live_writer(self, &writer.address, &writer.flow_id)?;
-        let result = self.drop_handover(&writer.address, &writer.address, title, touch)?;
         let mut row = self
             .handover_row(&writer.address)
             .map_err(store_refusal)?
             .ok_or_else(|| HandoverRefusal::Store("handover row disappeared".into()))?;
+        if !row.current.iter().any(|section| section.title == title) {
+            return Err(HandoverRefusal::MissingTitle);
+        }
+        row.current.retain(|section| section.title != title);
         row.current_flow_id = Some(writer.flow_id.clone());
+        row.touch = Some(touch.clone());
         self.write_handover(row).map_err(store_refusal)?;
-        Ok(result)
+        Ok(touch)
     }
 
     fn close_handover_for_successor(

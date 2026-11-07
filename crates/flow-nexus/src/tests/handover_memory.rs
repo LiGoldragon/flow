@@ -1,5 +1,5 @@
 use super::NexusFixture;
-use crate::store::handover::HoldsHandovers;
+use crate::store::handover::{HandoverWriter, HoldsHandovers};
 use signal_flow::{Address, Aspect, Model, Section, Title, Touch};
 
 fn address(topic: &str) -> Address {
@@ -163,5 +163,34 @@ fn only_owner_edits_but_read_apis_cross_addresses() {
     assert_eq!(
         store.handover_headings(&owner).unwrap()[0].title,
         Title::from("one")
+    );
+}
+
+#[test]
+fn authenticated_unknown_write_sets_live_owner_atomically() {
+    let fixture = NexusFixture::new();
+    let address = address("handoverWriter");
+    let store = &fixture.nexus.store;
+    let writer = HandoverWriter {
+        address: address.clone(),
+        flow_id: "flow01".into(),
+    };
+    store
+        .keep_handover_for_flow(&writer, section("one", "d", "b"), Touch::Unknown)
+        .unwrap();
+    assert_eq!(
+        store.handover_for_flow(&address, "flow01").unwrap(),
+        Some(vec![section("one", "d", "b")])
+    );
+    assert_eq!(
+        store.keep_handover_for_flow(
+            &HandoverWriter {
+                address,
+                flow_id: "stale".into()
+            },
+            section("two", "d", "b"),
+            Touch::Unknown
+        ),
+        Err(signal_flow::HandoverRefusal::NotOwner)
     );
 }

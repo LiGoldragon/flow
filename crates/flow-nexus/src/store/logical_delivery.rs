@@ -288,6 +288,16 @@ pub(crate) trait RecordsLogicalDeliveries {
         message: Message,
         reminder: crate::store::handover_reminders::HandoverReminder,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError>;
+    fn accept_logical_delivery_for_with_transition(
+        &self,
+        address: &Address,
+        sent_by: SentBy,
+        delivery: Delivery,
+        message: Message,
+        held_lock: Option<VerifiedDeliveryLock>,
+        purpose: crate::heartbeat::DeliveryPurpose,
+        handover_reminder: Option<crate::store::handover_reminders::HandoverReminder>,
+    ) -> Result<signal_flow::PrivateSendResponse, StoreError>;
     #[cfg(test)]
     fn transition_logical_delivery(
         &self,

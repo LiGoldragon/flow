@@ -2156,7 +2156,6 @@ mod tests {
         current: TableReference<PriorCurrentLogicalDelivery>,
         events: TableReference<PriorLogicalDeliveryEvent>,
         requests: TableReference<PriorStoredDeliveryRequest>,
-        heartbeat: TableReference<StoredHeartbeatStanding>,
     }
 
     fn old_engine(
@@ -2209,7 +2208,7 @@ mod tests {
                 &descriptors.send_calls,
             ))
             .expect("old calls register");
-        let heartbeat = engine
+        engine
             .register_table(heartbeat.clone())
             .expect("unchanged heartbeat registers");
         (
@@ -2218,7 +2217,6 @@ mod tests {
                 current,
                 events,
                 requests,
-                heartbeat,
             },
         )
     }
@@ -2290,7 +2288,7 @@ mod tests {
         let path = directory.path().join("flow.sema");
         let descriptors = evolution_descriptors();
         let heartbeat = StoredHeartbeatStanding::descriptor();
-        let (mut predecessor, tables) = old_engine(&path, &descriptors, &heartbeat);
+        let (predecessor, tables) = old_engine(&path, &descriptors, &heartbeat);
         let sender = old_address(old_flow::Aspect::Mind, "sender");
         let recipient = old_address(old_flow::Aspect::Field, "recipient");
         let native = old_signal::NativeReceipt {

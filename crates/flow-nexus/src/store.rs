@@ -6095,6 +6095,60 @@ mod tests {
             queued,
             "Uncertain never admits another Notice"
         );
+
+        store
+            .transition_logical_delivery(
+                &notice,
+                signal_flow::DeliveryState::Failed(signal_flow::Refusal::Direct(
+                    "placement absent".into(),
+                )),
+            )
+            .expect("failed placement records");
+        store
+            .run_request_id_announcements()
+            .expect("failed Notice is made pending");
+        let rows = store
+            .engine
+            .match_records(QueryPlan::all(store.request_id_upgrade.task_announcements))
+            .expect("pending announcement reads");
+        assert_eq!(rows.records()[0].tries, 1);
+        assert_eq!(
+            rows.records()[0].status,
+            TaskAnnouncementStatus::Pending(None)
+        );
+        store
+            .run_request_id_announcements()
+            .expect("pending announcement retries");
+        let rows = store
+            .engine
+            .match_records(QueryPlan::all(store.request_id_upgrade.task_announcements))
+            .expect("retried announcement reads");
+        let TaskAnnouncementStatus::Admitted(retried) = &rows.records()[0].status else {
+            panic!("second Notice admitted")
+        };
+        assert_ne!(retried, &notice);
+        assert_eq!(rows.records()[0].tries, 2);
+        store
+            .transition_logical_delivery(
+                retried,
+                signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                    harness_kind: flow_ethos::HarnessKind::Codex,
+                    native_session_id: "successor".into(),
+                    native_prompt_id: "prompt".into(),
+                }),
+            )
+            .expect("retried Notice delivers");
+        store
+            .run_request_id_announcements()
+            .expect("delivered Notice settles row");
+        let rows = store
+            .engine
+            .match_records(QueryPlan::all(store.request_id_upgrade.task_announcements))
+            .expect("delivered announcement reads");
+        assert_eq!(
+            rows.records()[0].status,
+            TaskAnnouncementStatus::Delivered(retried.clone())
+        );
     }
 
     #[test]

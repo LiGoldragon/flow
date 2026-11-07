@@ -13,7 +13,9 @@ use crate::generated::send_tool::{
     HandlesSendCall, ReadsToolCall, SendCall, SendOutcome, SendRefusal, ToolCall, ToolCallKey,
 };
 use crate::heartbeat::DeliveryPurpose;
-use crate::send_tool::{DescribesSendInvocation, RespondsToSendCalls, SendTool, ServesSendTool};
+use crate::send_tool::{
+    DescribesSendInvocation, HandlesSendCallAnswers, RespondsToSendCalls, SendTool, ServesSendTool,
+};
 use crate::sending::{MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
 use crate::store::logical_delivery::{MintsRequestIds, RecordsLogicalDeliveries};
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
@@ -679,6 +681,49 @@ fn a_call_queued_before_a_crash_is_answered_from_its_record_when_replayed() {
     assert_eq!(
         fixture.target_queue(),
         vec![sent(sender_a(), "exactly once")]
+    );
+}
+
+#[test]
+fn an_admitted_send_tool_call_holds_archive_until_its_answer_object_is_released() {
+    use crate::store::queue_delivery::AccountsQueueDelivery;
+
+    let mut fixture = NexusFixture::new();
+    fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
+    fixture.awake_target();
+    let answer = fixture.nexus.handle_send_call_answer(tool_call(
+        THREAD_A,
+        "answer-hold",
+        "hold the tool answer",
+    ));
+    let SendOutcome::Accepted(accepted) = &answer.outcome else {
+        panic!("the send-tool call is admitted")
+    };
+    let accepted = accepted.clone();
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .withdraw_queued(&target(), &accepted.send_acceptance.logical_delivery_id)
+            .unwrap(),
+        Ok(())
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .archive_request(&accepted.send_acceptance.request_id, &sender_a())
+            .unwrap(),
+        Err(signal_flow::ArchiveRejection::NotYet)
+    );
+    drop(answer);
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .archive_request(&accepted.send_acceptance.request_id, &sender_a())
+            .unwrap(),
+        Ok(())
     );
 }
 

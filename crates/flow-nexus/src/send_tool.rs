@@ -401,12 +401,12 @@ trait RefusesSendCall {
 
 impl RefusesSendCall for RunningNexus {}
 
-struct SendCallAnswer {
-    outcome: SendOutcome,
+pub(crate) struct SendCallAnswer {
+    pub(crate) outcome: SendOutcome,
     _pending_answer: Option<crate::store::logical_delivery::PendingAnswerHold>,
 }
 
-trait HandlesSendCallAnswers {
+pub(crate) trait HandlesSendCallAnswers {
     fn handle_send_call_answer<N: ToolCallCarrying>(&self, input: N) -> SendCallAnswer;
 }
 

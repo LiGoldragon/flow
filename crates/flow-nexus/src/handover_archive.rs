@@ -152,7 +152,7 @@ pub struct ExistingGitHandoverArchive {
     runner: Arc<dyn RunsGitCommand>,
 }
 
-trait RunsGitCommand: Send + Sync {
+pub(crate) trait RunsGitCommand: Send + Sync {
     fn run(
         &self,
         repository: &Path,
@@ -161,7 +161,7 @@ trait RunsGitCommand: Send + Sync {
     ) -> Result<std::process::Output, HandoverArchiveRefusal>;
 }
 
-struct RealGitCommand;
+pub(crate) struct RealGitCommand;
 impl RunsGitCommand for RealGitCommand {
     fn run(
         &self,
@@ -198,6 +198,12 @@ impl ExistingGitHandoverArchive {
         self.deadline = deadline;
         self
     }
+
+    #[cfg(test)]
+    pub(crate) fn with_git_runner(mut self, runner: Arc<dyn RunsGitCommand>) -> Self {
+        self.runner = runner;
+        self
+    }
 }
 
 impl PublishesHandoverArchive for ExistingGitHandoverArchive {
@@ -206,7 +212,7 @@ impl PublishesHandoverArchive for ExistingGitHandoverArchive {
         request: HandoverArchiveRequest,
     ) -> Result<HandoverArchivePublication, HandoverArchiveRefusal> {
         let deadline = Instant::now() + self.deadline;
-        ensure_repository(&self.repository, deadline)?;
+        ensure_repository(self.runner.as_ref(), &self.repository, deadline)?;
         validate_component(&request.flow_id)?;
         validate_component(&request.address.topic)?;
         let aspect = aspect_name(&request.address.aspect);
@@ -222,26 +228,38 @@ impl PublishesHandoverArchive for ExistingGitHandoverArchive {
                 if existing != request.document {
                     return Err(HandoverArchiveRefusal::Conflict);
                 }
-                if !is_tracked_and_clean(&self.repository, &target, deadline)? {
-                    commit_target(&self.repository, &target, deadline)?;
+                if !is_tracked_and_clean(self.runner.as_ref(), &self.repository, &target, deadline)?
+                {
+                    commit_target(self.runner.as_ref(), &self.repository, &target, deadline)?;
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 fs::create_dir_all(target.parent().expect("archive path has parent"))
                     .and_then(|_| fs::write(&target, request.document.as_bytes()))
                     .map_err(|error| HandoverArchiveRefusal::Write(error.to_string()))?;
-                commit_target(&self.repository, &target, deadline)?;
+                commit_target(self.runner.as_ref(), &self.repository, &target, deadline)?;
             }
             Err(error) => return Err(HandoverArchiveRefusal::Write(error.to_string())),
         }
-        let commit = run_git_output(&self.repository, ["rev-parse", "HEAD"], deadline)?
-            .trim()
-            .to_owned();
+        let commit = run_git_output(
+            self.runner.as_ref(),
+            &self.repository,
+            ["rev-parse", "HEAD"],
+            deadline,
+        )?
+        .trim()
+        .to_owned();
         let object = format!("{commit}:{}", path_string(&target, &self.repository));
-        let blob = run_git_output(&self.repository, ["rev-parse", object.as_str()], deadline)?
-            .trim()
-            .to_owned();
+        let blob = run_git_output(
+            self.runner.as_ref(),
+            &self.repository,
+            ["rev-parse", object.as_str()],
+            deadline,
+        )?
+        .trim()
+        .to_owned();
         let archived = run_git_output(
+            self.runner.as_ref(),
             &self.repository,
             ["cat-file", "blob", blob.as_str()],
             deadline,
@@ -310,15 +328,19 @@ fn model_name(model: &Model) -> &'static str {
         Model::Terra => "Terra",
     }
 }
-fn ensure_repository(repository: &Path, deadline: Instant) -> Result<(), HandoverArchiveRefusal> {
+fn ensure_repository(
+    runner: &dyn RunsGitCommand,
+    repository: &Path,
+    deadline: Instant,
+) -> Result<(), HandoverArchiveRefusal> {
     if !repository.is_dir() {
         return Err(HandoverArchiveRefusal::Unconfigured);
     }
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repository)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output_with_deadline(deadline)?;
+    let output = runner.run(
+        repository,
+        &["rev-parse", "--is-inside-work-tree"],
+        deadline,
+    )?;
     if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true" {
         Ok(())
     } else {
@@ -333,12 +355,14 @@ fn path_string(target: &Path, repository: &Path) -> String {
         .into_owned()
 }
 fn is_tracked_and_clean(
+    runner: &dyn RunsGitCommand,
     repository: &Path,
     target: &Path,
     deadline: Instant,
 ) -> Result<bool, HandoverArchiveRefusal> {
     let relative = path_string(target, repository);
     match run_git_output(
+        runner,
         repository,
         ["ls-files", "--error-unmatch", "--", relative.as_str()],
         deadline,
@@ -350,6 +374,7 @@ fn is_tracked_and_clean(
         Err(_) => return Ok(false),
     }
     Ok(run_git_output(
+        runner,
         repository,
         ["status", "--porcelain", "--", relative.as_str()],
         deadline,
@@ -358,13 +383,20 @@ fn is_tracked_and_clean(
     .is_empty())
 }
 fn commit_target(
+    runner: &dyn RunsGitCommand,
     repository: &Path,
     target: &Path,
     deadline: Instant,
 ) -> Result<(), HandoverArchiveRefusal> {
     let relative = path_string(target, repository);
-    run_git(repository, ["add", "--", relative.as_str()], deadline)?;
     run_git(
+        runner,
+        repository,
+        ["add", "--", relative.as_str()],
+        deadline,
+    )?;
+    run_git(
+        runner,
         repository,
         [
             "commit",
@@ -378,22 +410,20 @@ fn commit_target(
     )
 }
 fn run_git<const N: usize>(
+    runner: &dyn RunsGitCommand,
     repository: &Path,
     args: [&str; N],
     deadline: Instant,
 ) -> Result<(), HandoverArchiveRefusal> {
-    run_git_output(repository, args, deadline).map(|_| ())
+    run_git_output(runner, repository, args, deadline).map(|_| ())
 }
 fn run_git_output<const N: usize>(
+    runner: &dyn RunsGitCommand,
     repository: &Path,
     args: [&str; N],
     deadline: Instant,
 ) -> Result<String, HandoverArchiveRefusal> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repository)
-        .args(args)
-        .output_with_deadline(deadline)?;
+    let output = runner.run(repository, &args, deadline)?;
     if output.status.success() {
         String::from_utf8(output.stdout).map_err(|error| {
             HandoverArchiveRefusal::Git(format!("git returned non-UTF-8 evidence: {error}"))
@@ -497,8 +527,7 @@ impl RunsWithDeadline for Command {
                     break exit;
                 }
                 None if Instant::now() >= deadline => {
-                    kill_process_group(process_id);
-                    let _ = child.wait();
+                    terminate_process_group(&mut child, process_id, stdout_thread, stderr_thread);
                     return Err(HandoverArchiveRefusal::PublicationTimedOut);
                 }
                 None => thread::sleep(Duration::from_millis(2)),
@@ -510,20 +539,21 @@ impl RunsWithDeadline for Command {
             let remaining = match deadline.checked_duration_since(Instant::now()) {
                 Some(remaining) => remaining,
                 None => {
-                    kill_process_group(process_id);
-                    let _ = child.wait();
+                    terminate_process_group(&mut child, process_id, stdout_thread, stderr_thread);
                     return Err(HandoverArchiveRefusal::PublicationTimedOut);
                 }
             };
-            let (is_stdout, bytes) = output_receiver.recv_timeout(remaining).map_err(|_| {
-                kill_process_group(process_id);
-                HandoverArchiveRefusal::PublicationTimedOut
-            })?;
+            let (is_stdout, bytes) = match output_receiver.recv_timeout(remaining) {
+                Ok(output) => output,
+                Err(_) => {
+                    terminate_process_group(&mut child, process_id, stdout_thread, stderr_thread);
+                    return Err(HandoverArchiveRefusal::PublicationTimedOut);
+                }
+            };
             let bytes = match bytes {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    kill_process_group(process_id);
-                    let _ = child.wait();
+                    terminate_process_group(&mut child, process_id, stdout_thread, stderr_thread);
                     return Err(HandoverArchiveRefusal::Git(error.to_string()));
                 }
             };
@@ -541,6 +571,18 @@ impl RunsWithDeadline for Command {
             stderr: stderr.expect("stderr capture recorded"),
         })
     }
+}
+
+fn terminate_process_group(
+    child: &mut std::process::Child,
+    process_id: u32,
+    stdout_thread: thread::JoinHandle<()>,
+    stderr_thread: thread::JoinHandle<()>,
+) {
+    kill_process_group(process_id);
+    let _ = child.wait();
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
 }
 
 fn kill_process_group(process_id: u32) {
@@ -566,6 +608,7 @@ mod tests {
     fn invalid_utf8_git_evidence_is_rejected_instead_of_aliasing_replacement_text() {
         let repository = tempfile::tempdir().unwrap();
         run_git(
+            &RealGitCommand,
             repository.path(),
             ["init", "-q"],
             Instant::now() + Duration::from_secs(60),
@@ -585,6 +628,7 @@ mod tests {
         let blob = String::from_utf8(output.stdout).unwrap();
         assert!(matches!(
             run_git_output(
+                &RealGitCommand,
                 repository.path(),
                 ["cat-file", "blob", blob.trim()],
                 Instant::now() + Duration::from_secs(60)
@@ -598,18 +642,21 @@ mod tests {
     fn publication_timeout_owns_and_kills_a_hanging_hook_process_group() {
         let repository = tempfile::tempdir().unwrap();
         run_git(
+            &RealGitCommand,
             repository.path(),
             ["init", "-q"],
             Instant::now() + Duration::from_secs(60),
         )
         .unwrap();
         run_git(
+            &RealGitCommand,
             repository.path(),
             ["config", "user.email", "flow@example.invalid"],
             Instant::now() + Duration::from_secs(60),
         )
         .unwrap();
         run_git(
+            &RealGitCommand,
             repository.path(),
             ["config", "user.name", "Flow Test"],
             Instant::now() + Duration::from_secs(60),
@@ -639,18 +686,21 @@ mod tests {
     fn publication_rejects_unbounded_hook_output() {
         let repository = tempfile::tempdir().unwrap();
         run_git(
+            &RealGitCommand,
             repository.path(),
             ["init", "-q"],
             Instant::now() + Duration::from_secs(60),
         )
         .unwrap();
         run_git(
+            &RealGitCommand,
             repository.path(),
             ["config", "user.email", "flow@example.invalid"],
             Instant::now() + Duration::from_secs(60),
         )
         .unwrap();
         run_git(
+            &RealGitCommand,
             repository.path(),
             ["config", "user.name", "Flow Test"],
             Instant::now() + Duration::from_secs(60),
@@ -674,101 +724,5 @@ mod tests {
         assert!(
             matches!(result, Err(HandoverArchiveRefusal::Git(message)) if message.contains("capture bound"))
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn inspection_phase_timeout_is_bounded() {
-        let mut command = Command::new("sh");
-        command.args(["-c", "sleep 30"]);
-        assert_eq!(
-            command.output_with_deadline(Instant::now() + Duration::from_millis(50)),
-            Err(HandoverArchiveRefusal::PublicationTimedOut)
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn add_phase_timeout_is_bounded() {
-        let mut command = Command::new("sh");
-        command.args(["-c", "sleep 30"]);
-        assert_eq!(
-            command.output_with_deadline(Instant::now() + Duration::from_millis(50)),
-            Err(HandoverArchiveRefusal::PublicationTimedOut)
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn commit_phase_timeout_is_bounded() {
-        let mut command = Command::new("sh");
-        command.args(["-c", "sleep 30"]);
-        assert_eq!(
-            command.output_with_deadline(Instant::now() + Duration::from_millis(50)),
-            Err(HandoverArchiveRefusal::PublicationTimedOut)
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn ambiguous_commit_timeout_retries_and_reverifies_exact_identity_and_bytes() {
-        let repository = tempfile::tempdir().unwrap();
-        run_git(
-            repository.path(),
-            ["init", "-q"],
-            Instant::now() + Duration::from_secs(10),
-        )
-        .unwrap();
-        run_git(
-            repository.path(),
-            ["config", "user.email", "flow@example.invalid"],
-            Instant::now() + Duration::from_secs(10),
-        )
-        .unwrap();
-        run_git(
-            repository.path(),
-            ["config", "user.name", "Flow Test"],
-            Instant::now() + Duration::from_secs(10),
-        )
-        .unwrap();
-        let hook = repository.path().join(".git/hooks/pre-commit");
-        let state = repository.path().join("hook-state");
-        fs::write(
-            &hook,
-            format!(
-                "#!/bin/sh\nif test ! -e '{}'; then touch '{}'; sleep 30; fi\n",
-                state.display(),
-                state.display()
-            ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
-        let request = HandoverArchiveRequest {
-            address: Address {
-                aspect: Aspect::Mind,
-                topic: "retryTopic".into(),
-                model: Model::Sol,
-            },
-            flow_id: "flow-retry".into(),
-            document: "generation=7\nexact-bytes\n".into(),
-        };
-        let first = ExistingGitHandoverArchive::new(repository.path())
-            .with_deadline(Duration::from_millis(80))
-            .publish(request.clone());
-        assert_eq!(first, Err(HandoverArchiveRefusal::PublicationTimedOut));
-        let second = ExistingGitHandoverArchive::new(repository.path())
-            .with_deadline(Duration::from_secs(5))
-            .publish(request)
-            .unwrap();
-        assert!(!second.commit.is_empty());
-        assert!(!second.blob.is_empty());
-        let bytes = run_git_output(
-            repository.path(),
-            ["cat-file", "blob", second.blob.as_str()],
-            Instant::now() + Duration::from_secs(5),
-        )
-        .unwrap();
-        assert_eq!(bytes, "generation=7\nexact-bytes\n");
     }
 }

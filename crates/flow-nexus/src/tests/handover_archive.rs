@@ -1,8 +1,8 @@
 use super::NexusFixture;
 use crate::handover_archive::{
     AccessesExistingGitHandoverArchive, ExistingGitHandoverArchive, HandoverArchivePublication,
-    HandoverArchiveRefusal, HandoverArchiveRequest, PublishesHandoverArchive,
-    RetiresHandoverGenerations,
+    HandoverArchiveRefusal, HandoverArchiveRequest, HandoverRetirementRefusal,
+    PublishesHandoverArchive, RealGitCommand, RetiresHandoverGenerations, RunsGitCommand,
 };
 use crate::handover_observation::{ObservesHandoverRetirement, ReadsRetirementSubscription};
 use crate::reminding::ArchivesHandoverOnTick;
@@ -11,15 +11,67 @@ use crate::store::handover::HoldsHandovers;
 use crate::{Connection, ServesConnection};
 use meta_signal_flow::ConfigurationChange;
 use signal_flow::{Address, Aspect, Model, Response, RetirementObservationFailure};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
 use std::{
     fs,
     net::Shutdown,
     os::unix::{fs::PermissionsExt, net::UnixStream},
     path::Path,
     process::Command,
+    time::{Duration, Instant},
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DelayedGitPhase {
+    Inspection,
+    Add,
+    Commit,
+}
+
+struct DelayingRealGit {
+    phase: DelayedGitPhase,
+    entered: AtomicBool,
+    deadlines: Mutex<Vec<Instant>>,
+}
+
+impl DelayingRealGit {
+    fn new(phase: DelayedGitPhase) -> Self {
+        Self {
+            phase,
+            entered: AtomicBool::new(false),
+            deadlines: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn is_selected(&self, args: &[&str]) -> bool {
+        match self.phase {
+            DelayedGitPhase::Inspection => args == ["rev-parse", "--is-inside-work-tree"],
+            DelayedGitPhase::Add => args.first() == Some(&"add"),
+            DelayedGitPhase::Commit => args.first() == Some(&"commit"),
+        }
+    }
+}
+
+impl RunsGitCommand for DelayingRealGit {
+    fn run(
+        &self,
+        repository: &Path,
+        args: &[&str],
+        deadline: Instant,
+    ) -> Result<std::process::Output, HandoverArchiveRefusal> {
+        self.deadlines.lock().unwrap().push(deadline);
+        let output = RealGitCommand.run(repository, args, deadline)?;
+        if self.is_selected(args) {
+            self.entered.store(true, Ordering::SeqCst);
+            if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+                std::thread::sleep(remaining + Duration::from_millis(5));
+            }
+            return Err(HandoverArchiveRefusal::PublicationTimedOut);
+        }
+        Ok(output)
+    }
+}
 
 struct RecordingPublisher {
     calls: AtomicUsize,
@@ -90,6 +142,145 @@ fn request(_path: &Path) -> HandoverArchiveRequest {
         document: "handover\n".into(),
     }
 }
+
+fn timed_retirement_at_phase(
+    phase: DelayedGitPhase,
+) -> (
+    NexusFixture,
+    tempfile::TempDir,
+    Address,
+    Arc<DelayingRealGit>,
+) {
+    let fixture = NexusFixture::new();
+    let archive = repo();
+    let address = Address {
+        aspect: Aspect::Mind,
+        topic: format!("{:?}Deadline", phase),
+        model: Model::Sol,
+    };
+    fixture
+        .nexus
+        .store
+        .close_handover_for_successor(&address, "before", "after")
+        .unwrap();
+    let runner = Arc::new(DelayingRealGit::new(phase));
+    let publisher = ExistingGitHandoverArchive::new(archive.path())
+        .with_deadline(Duration::from_millis(250))
+        .with_git_runner(runner.clone());
+
+    assert_eq!(
+        fixture
+            .nexus
+            .retire_handover_generations(&address, 0, &publisher),
+        Err(HandoverRetirementRefusal::Archive(
+            HandoverArchiveRefusal::PublicationTimedOut
+        ))
+    );
+    assert!(runner.entered.load(Ordering::SeqCst));
+    let deadlines = runner.deadlines.lock().unwrap();
+    assert!(deadlines.windows(2).all(|pair| pair[0] == pair[1]));
+    drop(deadlines);
+    let retained = fixture.nexus.store.closed_handovers(&address, 0).unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].predecessor, "before");
+    (fixture, archive, address, runner)
+}
+
+#[test]
+fn inspection_phase_uses_whole_publication_budget_and_retains_generation() {
+    let (_fixture, archive, address, runner) =
+        timed_retirement_at_phase(DelayedGitPhase::Inspection);
+    assert_eq!(runner.deadlines.lock().unwrap().len(), 1);
+    assert!(
+        !archive
+            .path()
+            .join(format!("Mind/{}/Sol/before.md", address.topic))
+            .exists()
+    );
+}
+
+#[test]
+fn add_phase_uses_whole_publication_budget_and_retains_generation() {
+    let (_fixture, archive, address, runner) = timed_retirement_at_phase(DelayedGitPhase::Add);
+    assert!(runner.deadlines.lock().unwrap().len() >= 2);
+    let relative = format!("Mind/{}/Sol/before.md", address.topic);
+    assert!(archive.path().join(&relative).exists());
+    assert_eq!(
+        runout(archive.path(), &["diff", "--cached", "--name-only"]),
+        relative
+    );
+    assert!(
+        !Command::new("git")
+            .arg("-C")
+            .arg(archive.path())
+            .args(["rev-parse", "--verify", "HEAD"])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+fn post_commit_timeout_reverifies_same_generation_before_removal() {
+    let (fixture, archive, address, runner) = timed_retirement_at_phase(DelayedGitPhase::Commit);
+    assert!(runner.deadlines.lock().unwrap().len() >= 3);
+    let relative = format!("Mind/{}/Sol/before.md", address.topic);
+    let commit = runout(archive.path(), &["rev-parse", "HEAD"]);
+    let blob = runout(
+        archive.path(),
+        &["rev-parse", &format!("{commit}:{relative}")],
+    );
+    let committed = Command::new("git")
+        .arg("-C")
+        .arg(archive.path())
+        .args(["cat-file", "blob", &blob])
+        .output()
+        .unwrap();
+    assert!(committed.status.success());
+    assert_eq!(
+        committed.stdout,
+        fs::read(archive.path().join(&relative)).unwrap()
+    );
+    assert_eq!(
+        runout(archive.path(), &["rev-list", "--count", "HEAD"]),
+        "1"
+    );
+
+    let subscription = fixture
+        .nexus
+        .store
+        .observe_handover_retirement(&address)
+        .unwrap();
+    let publisher =
+        ExistingGitHandoverArchive::new(archive.path()).with_deadline(Duration::from_secs(5));
+    assert_eq!(
+        fixture
+            .nexus
+            .retire_handover_generations(&address, 0, &publisher),
+        Ok(1)
+    );
+    assert_eq!(
+        runout(archive.path(), &["rev-list", "--count", "HEAD"]),
+        "1"
+    );
+    assert!(matches!(
+        subscription.next_response().unwrap(),
+        Response::RetirementChanged(signal_flow::RetirementChange::ArchiveCommitted(_))
+    ));
+    assert!(matches!(
+        subscription.next_response().unwrap(),
+        Response::RetirementChanged(signal_flow::RetirementChange::GenerationRemoved(_))
+    ));
+    assert!(
+        fixture
+            .nexus
+            .store
+            .closed_handovers(&address, 0)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[test]
 fn archives_and_is_idempotent() {
     let d = repo();

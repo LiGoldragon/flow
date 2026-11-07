@@ -113,13 +113,36 @@ pub trait RemindsHandoverCallers {
 
 impl RemindsHandoverCallers for crate::RunningNexus {
     fn send_due_handover_reminders(&self, now: i64) {
-        use crate::store::handover_reminders::{HandoverReminderRules, SchedulesHandoverReminders};
+        use crate::store::handover_reminders::{HandoverReminderRules, SchedulesHandoverReminders, OpensHandoverReminder};
+        use crate::store::{ManagesMetaflowState, ReadsFlowMemory};
+        use crate::store::context::{NamesFlowModel, RecordsContextSize};
+        use crate::store::handover::{HoldsHandovers};
+        use crate::store::handover_configuration::ReadsHandoverConfiguration;
+        use meta_signal_flow::HandoverPoliciesConfiguration;
         use crate::store::logical_delivery::RecordsLogicalDeliveries;
         use flow_ethos::Delivery;
         use signal_flow::{Message, Request, SentBy};
-        let Ok(due) = self.store.due_handover_reminders(now) else {
-            return;
-        };
+        // Discover warning windows from every awake metaflow before reading
+        // due rows. All inputs are durable Memory observations.
+        let Ok(metaflows) = self.store.list_metaflows() else { return };
+        let Ok(configuration) = self.store.handover_policies() else { return };
+        let HandoverPoliciesConfiguration::Configured(policies) = configuration else { return };
+        for metaflow in metaflows {
+            let signal_flow::State::Awake(flow_id) = metaflow.state else { continue };
+            let Ok(Some(model_name)) = self.store.flow_model(&flow_id) else { continue };
+            let Some(policy) = policies.iter().find(|p| p.model_name == model_name) else { continue };
+            let Ok(Some(refresh)) = self.store.configured_threshold(&model_name) else { continue };
+            let Ok(Some(tokens)) = self.store.context_size(&flow_id) else { continue };
+            let Ok(green) = self.store.handover_green(&metaflow.address, &flow_id, refresh.refresh) else { continue };
+            let existing = self.store.handover_reminder(&metaflow.address, 0).ok().flatten();
+            if green { if existing.is_some() { let _ = self.store.close_handover_reminder(&metaflow.address, 0); } continue; }
+            if !HandoverReminder::warning_open(refresh.refresh, policy.warning_share_left, tokens) { continue; }
+            if existing.is_none() {
+                let Ok(reminder) = HandoverReminder::open_handover_reminder(metaflow.address.clone(), 0, model_name, now, policy.every_minutes, policy.reminder_text.clone()) else { continue };
+                let _ = self.store.hold_handover_reminder(reminder);
+            }
+        }
+        let Ok(due) = self.store.due_handover_reminders(now) else { return; };
         for reminder in due {
             // Admission is deliberately ordinary. In particular this does
             // not use DeliveryPurpose::Heartbeat or any refresh hold bypass.

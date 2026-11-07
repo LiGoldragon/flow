@@ -5868,6 +5868,14 @@ mod tests {
         else {
             panic!("order accepted")
         };
+        fixture
+            .nexus
+            .store
+            .transition_logical_delivery(
+                &accepted.logical_delivery_id,
+                signal_flow::DeliveryState::Uncertain,
+            )
+            .expect("order reaches an answerable state");
         let result = |request_id: String| {
             SendableMessage::Soft(SendableRequest::Result(
                 signal_flow::SendableRequest_Result_Data {
@@ -5951,6 +5959,14 @@ mod tests {
         else {
             panic!("task accepted")
         };
+        fixture
+            .nexus
+            .store
+            .transition_logical_delivery(
+                &accepted.logical_delivery_id,
+                signal_flow::DeliveryState::Uncertain,
+            )
+            .expect("task reaches an answerable state");
         let done = || {
             SendableMessage::Soft(SendableRequest::Done(
                 signal_flow::SendableRequest_Done_Data {

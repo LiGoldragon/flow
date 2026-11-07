@@ -1,6 +1,7 @@
 //! Durable current and closed handover generations.
 
-use super::context::{NamesFlowModel, RecordsContextSize};
+use super::context::NamesFlowModel;
+use super::handover_configuration::ReadsHandoverConfiguration;
 use super::metaflow::SleepsMetaflows;
 use super::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -131,15 +132,11 @@ impl HoldsHandovers for FlowStore {
         flow_id: &str,
         refresh: i64,
     ) -> Result<bool, StoreError> {
-        let Some(snapshot) = self.configuration_snapshot()? else {
-            return Ok(false);
-        };
+        let policies = self.handover_policies()?;
         let Some(model_name) = self.flow_model(flow_id)? else {
             return Ok(false);
         };
-        let meta_signal_flow::HandoverPoliciesConfiguration::Configured(policies) =
-            snapshot.handover_policies
-        else {
+        let meta_signal_flow::HandoverPoliciesConfiguration::Configured(policies) = policies else {
             return Ok(false);
         };
         let Some(policy) = policies

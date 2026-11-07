@@ -47,3 +47,22 @@ pub(crate) fn unconfigured() -> StoredHandoverConfiguration {
         count: HandoverCountConfiguration::Unconfigured,
     }
 }
+
+pub(crate) trait ReadsHandoverConfiguration {
+    fn handover_policies(&self) -> Result<HandoverPoliciesConfiguration, super::StoreError>;
+}
+
+impl ReadsHandoverConfiguration for super::FlowStore {
+    fn handover_policies(&self) -> Result<HandoverPoliciesConfiguration, super::StoreError> {
+        use sema_engine::{QueryPlan, RecordKey};
+        let rows = self
+            .engine
+            .match_records(QueryPlan::key(self.handover, RecordKey::new("handover")))?
+            .records()
+            .to_vec();
+        Ok(rows
+            .first()
+            .map(|row| row.policies.clone())
+            .unwrap_or(HandoverPoliciesConfiguration::Unconfigured))
+    }
+}

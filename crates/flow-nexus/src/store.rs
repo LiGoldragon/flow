@@ -112,6 +112,14 @@ const META_DEFAULT_MINUTES_CONFIGURATION_FAMILY: &str =
     "flow-nexus-meta-default-minutes-configuration";
 const META_DEFAULT_MINUTES_CONFIGURATION_SCHEMA: &str =
     "flow-nexus-meta-default-minutes-configuration-v1";
+const META_REQUEST_POLICY_CONFIGURATION_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_meta_request_policy_configuration");
+const META_REQUEST_POLICY_CONFIGURATION_FAMILY: &str =
+    "flow-nexus-meta-request-policy-configuration";
+const META_REQUEST_POLICY_CONFIGURATION_SCHEMA: &str =
+    "flow-nexus-meta-request-policy-configuration-v1";
+const SEEDED_REQUEST_ID_DRAWS: i64 = 64;
+const SEEDED_ANNOUNCEMENT_TRIES: i64 = 3;
 const META_HARNESS_FLAGS_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_harness_flags_configuration");
 const META_HARNESS_FLAGS_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-harness-flags-configuration";
@@ -135,6 +143,7 @@ const OPTIONAL_HANDOVER_RUNTIME_TABLE: &str = "flow_nexus_handovers";
 const OPTIONAL_HANDOVER_REMINDER_TABLE: &str = "flow_nexus_handover_reminders";
 const OPTIONAL_REQUEST_ID_TABLE: &str = "flow_nexus_request_ids";
 const OPTIONAL_STORE_IDENTITY_TABLE: &str = "flow_nexus_store_identity";
+const OPTIONAL_REQUEST_POLICY_TABLE: &str = "flow_nexus_meta_request_policy_configuration";
 const HEARTBEAT_STANDING_TABLE_NAME: TableName = TableName::new("flow_nexus_heartbeat_standings");
 const HEARTBEAT_STANDING_FAMILY: &str = "flow-nexus-heartbeat-standing";
 const HEARTBEAT_STANDING_SCHEMA: &str = "flow-nexus-heartbeat-standing-v2";
@@ -805,6 +814,32 @@ impl DescribesDefaultMinutesTable for StoredMetaDefaultMinutesConfiguration {
     }
 }
 
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredMetaRequestPolicyConfiguration {
+    request_id_draws: meta_signal_flow::DrawBound,
+    announcement_tries: meta_signal_flow::TryBound,
+}
+
+impl EngineRecord for StoredMetaRequestPolicyConfiguration {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new("request-policy")
+    }
+}
+
+trait DescribesRequestPolicyTable {
+    fn descriptor() -> TableDescriptor<StoredMetaRequestPolicyConfiguration>;
+}
+
+impl DescribesRequestPolicyTable for StoredMetaRequestPolicyConfiguration {
+    fn descriptor() -> TableDescriptor<StoredMetaRequestPolicyConfiguration> {
+        TableDescriptor::new(
+            META_REQUEST_POLICY_CONFIGURATION_TABLE_NAME,
+            FamilyName::new(META_REQUEST_POLICY_CONFIGURATION_FAMILY),
+            SchemaHash::for_label(META_REQUEST_POLICY_CONFIGURATION_SCHEMA),
+        )
+    }
+}
+
 /// Extra native harness arguments for one metaflow, keyed by Address. An
 /// absent row means the empty argument string.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -1454,6 +1489,10 @@ pub enum StoreError {
     MinutesRefused(signal_flow::MinutesRefusal),
     #[error("the counters are refused: {0:?}")]
     CountersRefused(CountersRefusal),
+    #[error("request id draws must be positive")]
+    RequestIdDrawsRefused,
+    #[error("announcement tries must be positive")]
+    AnnouncementTriesRefused,
     #[error("store {path} is held by another open; its lock cannot be acquired")]
     StoreHeld { path: String },
     #[error("the store's open could not be staged: {0}")]
@@ -1476,6 +1515,7 @@ pub(crate) struct MetaConfigurationTables {
     pub(crate) metaflows: TableReference<metaflow_declaration::StoredMetaMetaflowConfiguration>,
     investigation: TableReference<StoredMetaInvestigationConfiguration>,
     default_minutes: TableReference<StoredMetaDefaultMinutesConfiguration>,
+    request_policy: TableReference<StoredMetaRequestPolicyConfiguration>,
     harness_flags: TableReference<StoredMetaHarnessFlagsConfiguration>,
     heartbeat: TableReference<StoredMetaHeartbeatConfiguration>,
     protected_addresses: TableReference<StoredMetaProtectedAddressConfiguration>,
@@ -1500,6 +1540,8 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
                 .register_table(StoredMetaInvestigationConfiguration::descriptor())?,
             default_minutes: engine
                 .register_table(StoredMetaDefaultMinutesConfiguration::descriptor())?,
+            request_policy: engine
+                .register_table(StoredMetaRequestPolicyConfiguration::descriptor())?,
             harness_flags: engine
                 .register_table(StoredMetaHarnessFlagsConfiguration::descriptor())?,
             heartbeat: engine.register_table(StoredMetaHeartbeatConfiguration::descriptor())?,
@@ -1510,6 +1552,11 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             )?,
         })
     }
+}
+
+trait ReadsRequestPolicy {
+    fn seed_request_policy(&self) -> Result<(), StoreError>;
+    fn request_id_draws(&self) -> Result<usize, StoreError>;
 }
 
 pub struct FlowStore {
@@ -1557,6 +1604,37 @@ pub struct FlowStore {
     #[cfg(test)]
     pub(crate) fail_next_retirement_completion_read: Mutex<bool>,
     pub launch_changes: LaunchChanges,
+}
+
+impl ReadsRequestPolicy for FlowStore {
+    fn seed_request_policy(&self) -> Result<(), StoreError> {
+        let rows = self.engine.match_records(QueryPlan::all(
+            self.meta_configuration_tables.request_policy,
+        ))?;
+        match rows.records() {
+            [] => self.engine.assert(Assertion::new(
+                self.meta_configuration_tables.request_policy,
+                StoredMetaRequestPolicyConfiguration {
+                    request_id_draws: SEEDED_REQUEST_ID_DRAWS,
+                    announcement_tries: SEEDED_ANNOUNCEMENT_TRIES,
+                },
+            )),
+            [stored] if stored.request_id_draws >= 1 && stored.announcement_tries >= 1 => Ok(()),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn request_id_draws(&self) -> Result<usize, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::all(
+            self.meta_configuration_tables.request_policy,
+        ))?;
+        match rows.records() {
+            [stored] if stored.request_id_draws >= 1 => {
+                usize::try_from(stored.request_id_draws).map_err(|_| StoreError::StateInvariant)
+            }
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
 }
 
 pub(crate) trait TracksHeartbeat {
@@ -1632,6 +1710,8 @@ pub struct ConfiguredFamilies {
     pub handover_archive: meta_signal_flow::HandoverArchiveConfiguration,
     pub handover_count: meta_signal_flow::HandoverCountConfiguration,
     pub publication_deadline: meta_signal_flow::Duration,
+    pub request_id_draws: meta_signal_flow::DrawBound,
+    pub announcement_tries: meta_signal_flow::TryBound,
 }
 
 pub trait CompletesSnapshot {
@@ -1658,8 +1738,8 @@ impl CompletesSnapshot for ConfiguredFamilies {
             handover_count: self.handover_count,
             publication_deadline: self.publication_deadline,
             counters,
-            request_id_draws: 64,
-            announcement_tries: 3,
+            request_id_draws: self.request_id_draws,
+            announcement_tries: self.announcement_tries,
         }
     }
 }
@@ -1724,6 +1804,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
         let meta_handover_descriptor = <handover_configuration::StoredHandoverConfiguration as handover_configuration::DescribesHandoverConfiguration>::descriptor();
         let meta_default_minutes_descriptor = StoredMetaDefaultMinutesConfiguration::descriptor();
+        let meta_request_policy_descriptor = StoredMetaRequestPolicyConfiguration::descriptor();
         let meta_harness_flags_descriptor = StoredMetaHarnessFlagsConfiguration::descriptor();
         let meta_heartbeat_descriptor = StoredMetaHeartbeatConfiguration::descriptor();
         let meta_protected_addresses_descriptor =
@@ -1747,6 +1828,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_send_servers_descriptor)
                 .with_family(&meta_investigation_descriptor)
                 .with_family(&meta_default_minutes_descriptor)
+                .with_family(&meta_request_policy_descriptor)
                 .with_family(&meta_harness_flags_descriptor)
                 .with_family(&meta_heartbeat_descriptor)
                 .with_family(&meta_protected_addresses_descriptor)
@@ -1767,6 +1849,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
             investigation: engine.register_table(meta_investigation_descriptor)?,
             default_minutes: engine.register_table(meta_default_minutes_descriptor)?,
+            request_policy: engine.register_table(meta_request_policy_descriptor)?,
             harness_flags: engine.register_table(meta_harness_flags_descriptor)?,
             heartbeat: engine.register_table(meta_heartbeat_descriptor)?,
             protected_addresses: engine.register_table(meta_protected_addresses_descriptor)?,
@@ -1783,6 +1866,19 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 meta_configuration_tables.handover,
                 handover_configuration::unconfigured(),
             ))?;
+        }
+        let policy_rows =
+            engine.match_records(QueryPlan::all(meta_configuration_tables.request_policy))?;
+        match policy_rows.records() {
+            [] => engine.assert(Assertion::new(
+                meta_configuration_tables.request_policy,
+                StoredMetaRequestPolicyConfiguration {
+                    request_id_draws: SEEDED_REQUEST_ID_DRAWS,
+                    announcement_tries: SEEDED_ANNOUNCEMENT_TRIES,
+                },
+            ))?,
+            [stored] if stored.request_id_draws >= 1 && stored.announcement_tries >= 1 => {}
+            _ => return Err(StoreError::StateInvariant),
         }
         Ok(Self {
             engine,
@@ -2426,6 +2522,7 @@ impl OpensFlowStore for FlowStore {
         // these reads require the complete committed configuration before any
         // runtime adapter is constructed by RunningNexus.
         store.state()?;
+        store.seed_request_policy()?;
         store.archive_legacy_queue()?;
         store.align_followed_requests()?;
         store.seed_store_identity()?;
@@ -2597,6 +2694,7 @@ impl OpensFlowStore for FlowStore {
             fail_next_retirement_completion_read: Mutex::new(false),
             launch_changes: LaunchChanges::default(),
         };
+        store.seed_request_policy()?;
         store.archive_legacy_queue()?;
         store.align_followed_requests()?;
         store.seed_missing_queued_deliveries()?;
@@ -4701,6 +4799,10 @@ pub(crate) trait ReadsFlowMemory {
                 META_DEFAULT_MINUTES_CONFIGURATION_FAMILY,
                 META_DEFAULT_MINUTES_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_meta_request_policy_configuration" => (
+                META_REQUEST_POLICY_CONFIGURATION_FAMILY,
+                META_REQUEST_POLICY_CONFIGURATION_SCHEMA,
+            ),
             "flow_nexus_meta_harness_flags_configuration" => (
                 META_HARNESS_FLAGS_CONFIGURATION_FAMILY,
                 META_HARNESS_FLAGS_CONFIGURATION_SCHEMA,
@@ -4842,6 +4944,7 @@ pub(crate) trait ReadsFlowMemory {
                     || *name == OPTIONAL_HANDOVER_RUNTIME_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
                     || *name == OPTIONAL_STORE_IDENTITY_TABLE
+                    || *name == OPTIONAL_REQUEST_POLICY_TABLE
             }) && tables.iter().all(|name| {
                 actual.contains(*name)
                     || ADDED_IN_0531.contains(name)
@@ -4850,6 +4953,7 @@ pub(crate) trait ReadsFlowMemory {
                     || *name == OPTIONAL_HANDOVER_REMINDER_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
                     || *name == OPTIONAL_STORE_IDENTITY_TABLE
+                    || *name == OPTIONAL_REQUEST_POLICY_TABLE
             }) && (actual.contains(OPTIONAL_REQUEST_ID_TABLE)
                 == actual.contains(OPTIONAL_STORE_IDENTITY_TABLE))
                 && (ADDED_IN_0531.iter().all(|name| actual.contains(*name))
@@ -5050,6 +5154,7 @@ pub(crate) trait ReadsFlowMemory {
         let send_server_rows = engine.match_records(QueryPlan::all(tables.send_servers))?;
         let investigation_rows = engine.match_records(QueryPlan::all(tables.investigation))?;
         let default_minutes_rows = engine.match_records(QueryPlan::all(tables.default_minutes))?;
+        let request_policy_rows = engine.match_records(QueryPlan::all(tables.request_policy))?;
         let harness_flags_rows = engine.match_records(QueryPlan::all(tables.harness_flags))?;
         let heartbeat_rows = engine.match_records(QueryPlan::all(tables.heartbeat))?;
         let protected_address_rows =
@@ -5067,6 +5172,7 @@ pub(crate) trait ReadsFlowMemory {
             || send_server_rows.database_marker() != marker
             || investigation_rows.database_marker() != marker
             || default_minutes_rows.database_marker() != marker
+            || request_policy_rows.database_marker() != marker
             || harness_flags_rows.database_marker() != marker
             || heartbeat_rows.database_marker() != marker
             || protected_address_rows.database_marker() != marker
@@ -5098,6 +5204,13 @@ pub(crate) trait ReadsFlowMemory {
         let default_minutes = match default_minutes_rows.records() {
             [] => SEEDED_DEFAULT_MINUTES,
             [stored] => stored.default_minutes,
+            _ => return Err(StoreError::StateInvariant),
+        };
+        let (request_id_draws, announcement_tries) = match request_policy_rows.records() {
+            [] => (SEEDED_REQUEST_ID_DRAWS, SEEDED_ANNOUNCEMENT_TRIES),
+            [stored] if stored.request_id_draws >= 1 && stored.announcement_tries >= 1 => {
+                (stored.request_id_draws, stored.announcement_tries)
+            }
             _ => return Err(StoreError::StateInvariant),
         };
         let heartbeat = match heartbeat_rows.records() {
@@ -5157,6 +5270,8 @@ pub(crate) trait ReadsFlowMemory {
             handover_archive: handover.archive,
             handover_count: handover.count,
             publication_deadline: handover.publication_deadline,
+            request_id_draws,
+            announcement_tries,
         }))
     }
 
@@ -5519,15 +5634,41 @@ pub(crate) trait ReadsFlowMemory {
             }
             ConfigurationChange::RequestIdDraws(value) => {
                 if value < 1 {
-                    return Err(StoreError::StateInvariant);
+                    return Err(StoreError::RequestIdDrawsRefused);
                 }
-                Ok(ConfigureOutcome::Unchanged)
+                let sibling = engine.match_records(QueryPlan::all(tables.request_policy))?;
+                let announcement_tries = match sibling.records() {
+                    [] => SEEDED_ANNOUNCEMENT_TRIES,
+                    [stored] if stored.announcement_tries >= 1 => stored.announcement_tries,
+                    _ => return Err(StoreError::StateInvariant),
+                };
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.request_policy,
+                    vec![StoredMetaRequestPolicyConfiguration {
+                        request_id_draws: value,
+                        announcement_tries,
+                    }],
+                )
             }
             ConfigurationChange::AnnouncementTries(value) => {
                 if value < 1 {
-                    return Err(StoreError::StateInvariant);
+                    return Err(StoreError::AnnouncementTriesRefused);
                 }
-                Ok(ConfigureOutcome::Unchanged)
+                let sibling = engine.match_records(QueryPlan::all(tables.request_policy))?;
+                let request_id_draws = match sibling.records() {
+                    [] => SEEDED_REQUEST_ID_DRAWS,
+                    [stored] if stored.request_id_draws >= 1 => stored.request_id_draws,
+                    _ => return Err(StoreError::StateInvariant),
+                };
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.request_policy,
+                    vec![StoredMetaRequestPolicyConfiguration {
+                        request_id_draws,
+                        announcement_tries: value,
+                    }],
+                )
             }
         }
     }

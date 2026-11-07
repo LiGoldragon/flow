@@ -386,14 +386,14 @@ impl MintsRequestIds for FlowStore {
     }
     fn mint_request_id(&self) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError> {
         const SPACE: usize = 36usize.pow(4);
-        const DRAWS: usize = 64;
+        let draws = self.request_id_draws()?;
         let held = self
             .engine
             .match_records(QueryPlan::all(self.logical_deliveries.request_ids))?;
         if held.records().len() == SPACE {
             return Ok(Err(Refusal::RequestIdSpaceFull));
         }
-        for _ in 0..DRAWS {
+        for _ in 0..draws {
             let mut bytes = [0_u8; 4];
             getrandom::fill(&mut bytes).map_err(|_| StoreError::StateInvariant)?;
             let id: String = bytes

@@ -27,11 +27,10 @@ Library
   ; or closes an Order.
   Minutes.Integer
   AnswerableTask.{ Minutes String }
-  Answerable.[ Order.String
-               Task.AnswerableTask ]
-  ResultPayload.[ Answered.{ Answerable String }
+  RequestId.String
+  ResultPayload.[ Answered.{ LogicalDeliveryId RequestId String }
                   Historical.String ]
-  DonePayload.[ Answered.{ LogicalDeliveryId Answerable String }
+  DonePayload.[ Answered.{ LogicalDeliveryId RequestId String }
                 Historical.{ LogicalDeliveryId String } ]
   Request.[ Order.String
             Question.String
@@ -40,7 +39,8 @@ Library
             Result.ResultPayload
             Notice.String
             Task.AnswerableTask
-            Done.DonePayload ]
+            Done.DonePayload
+            Reminder.{ RequestId String } ]
   ; A logical delivery keeps one identity across queue retries and native
   ; submission; the id names the living's request, not a delivery attempt.
   LogicalDeliveryId.String
@@ -57,7 +57,7 @@ Library
   ; investigation).
   SentBy.[ Sender Unknown Flow ]
   ; The durable queue entry is the identity-bearing logical request.
-  QueueEntry.{ LogicalDeliveryId SentBy Delivery Message }
+  QueueEntry.{ LogicalDeliveryId RequestId SentBy Delivery Message }
   ; What the native surface receives after selection: identity and origin
   ; remain observable, but policy and delivery-attempt metadata do not.
   NativeInput.{ LogicalDeliveryId SentBy Message }

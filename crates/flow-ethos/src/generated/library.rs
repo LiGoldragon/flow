@@ -73,17 +73,13 @@ pub struct AnswerableTask {
     pub string: String,
 }
 #[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub enum Answerable {
-    Order(String),
-    Task(AnswerableTask),
-}
+pub type RequestId = String;
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct ResultPayload_Answered_Data {
-    pub answerable: Answerable,
+    pub logical_delivery_id: LogicalDeliveryId,
+    pub request_id: RequestId,
     pub string: String,
 }
 #[rustfmt::skip]
@@ -98,7 +94,7 @@ pub enum ResultPayload {
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct DonePayload_Answered_Data {
     pub logical_delivery_id: LogicalDeliveryId,
-    pub answerable: Answerable,
+    pub request_id: RequestId,
     pub string: String,
 }
 #[rustfmt::skip]
@@ -118,6 +114,13 @@ pub enum DonePayload {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Reminder_Data {
+    pub request_id: RequestId,
+    pub string: String,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Request {
     Order(String),
     Question(String),
@@ -127,6 +130,7 @@ pub enum Request {
     Notice(String),
     Task(AnswerableTask),
     Done(DonePayload),
+    Reminder(Reminder_Data),
 }
 #[rustfmt::skip]
 pub type LogicalDeliveryId = String;
@@ -161,6 +165,7 @@ pub enum SentBy {
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct QueueEntry {
     pub logical_delivery_id: LogicalDeliveryId,
+    pub request_id: RequestId,
     pub sent_by: SentBy,
     pub delivery: crate::Delivery,
     pub message: crate::Message,

@@ -119,7 +119,6 @@ impl RemindsCallers for RunningNexus {
         }
     }
 
-
     fn keep_reminding(&self) {
         while !self.stopping.requested() {
             self.send_due_reminders();
@@ -132,38 +131,48 @@ impl RemindsCallers for RunningNexus {
     }
 }
 
-
-pub trait ArchivesHandoverOnTick { fn retire_handover_archives(&self); }
+pub trait ArchivesHandoverOnTick {
+    fn retire_handover_archives(&self);
+}
 
 impl ArchivesHandoverOnTick for RunningNexus {
     fn retire_handover_archives(&self) {
         use crate::handover_archive::{ExistingGitHandoverArchive, RetiresHandoverGenerations};
-        use crate::store::handover_configuration::ReadsHandoverConfiguration;
-        use crate::store::metaflow::SleepsMetaflows;
         use crate::store::ManagesMetaflowState;
-        let Ok(archive) = self.store.handover_archive() else { eprintln!("flow-nexus: handover archive configuration unreadable"); return };
-        let meta_signal_flow::HandoverArchiveConfiguration::Configured(path) = archive else {
-            eprintln!("flow-nexus: handover archive is ArchiveUnconfigured; closed generations retained");
+        use crate::store::handover::HoldsHandovers;
+        use crate::store::handover_configuration::ReadsHandoverConfiguration;
+        let Ok(addresses) = self.store.handover_addresses_with_closed() else {
             return;
         };
-        let Ok(count_configuration) = self.store.handover_count() else { eprintln!("flow-nexus: handover count configuration unreadable"); return };
-        let meta_signal_flow::HandoverCountConfiguration::Configured(count) = count_configuration else {
+        if addresses.is_empty() {
+            return;
+        }
+        let Ok(archive) = self.store.handover_archive() else {
+            eprintln!("flow-nexus: handover archive configuration unreadable");
+            return;
+        };
+        let meta_signal_flow::HandoverArchiveConfiguration::Configured(path) = archive else {
+            eprintln!(
+                "flow-nexus: handover archive is ArchiveUnconfigured; closed generations retained"
+            );
+            return;
+        };
+        let Ok(count_configuration) = self.store.handover_count() else {
+            eprintln!("flow-nexus: handover count configuration unreadable");
+            return;
+        };
+        let meta_signal_flow::HandoverCountConfiguration::Configured(count) = count_configuration
+        else {
             eprintln!("flow-nexus: handover count is Unconfigured; closed generations retained");
             return;
         };
-        let Ok(metaflows) = self.store.list_metaflows() else { return };
         let publisher = ExistingGitHandoverArchive::new(path);
-        let mut addresses = Vec::new();
-        for metaflow in metaflows {
-            if !addresses.contains(&metaflow.address) {
-                addresses.push(metaflow.address);
-            }
-        }
         for address in addresses {
-            if let Err(error) = self.retire_handover_generations(&address, count as usize, &publisher) {
+            if let Err(error) =
+                self.retire_handover_generations(&address, count as usize, &publisher)
+            {
                 eprintln!("flow-nexus: handover archive retry refused for {address:?}: {error}");
             }
         }
     }
-
 }

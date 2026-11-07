@@ -3,7 +3,10 @@ use crate::handover_archive::{
     ExistingGitHandoverArchive, HandoverArchivePublication, HandoverArchiveRefusal,
     HandoverArchiveRequest, PublishesHandoverArchive, RetiresHandoverGenerations,
 };
+use crate::reminding::ArchivesHandoverOnTick;
+use crate::store::ManagesMetaflowState;
 use crate::store::handover::HoldsHandovers;
+use meta_signal_flow::ConfigurationChange;
 use signal_flow::{Address, Aspect, Model};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
@@ -34,13 +37,15 @@ fn repo() -> tempfile::TempDir {
     d
 }
 fn run(path: &Path, args: &[&str]) {
-    assert!(Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(args)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .status()
+            .unwrap()
+            .success()
+    );
 }
 fn request(_path: &Path) -> HandoverArchiveRequest {
     HandoverArchiveRequest {
@@ -147,10 +152,12 @@ fn retirement_publishes_before_removal_and_retries_failures() {
         calls: AtomicUsize::new(0),
         fail: true,
     };
-    assert!(fixture
-        .nexus
-        .retire_handover_generations(&address, 1, &failed)
-        .is_err());
+    assert!(
+        fixture
+            .nexus
+            .retire_handover_generations(&address, 1, &failed)
+            .is_err()
+    );
     assert_eq!(
         fixture
             .nexus
@@ -232,13 +239,70 @@ fn retention_boundary_and_zero_count_are_explicit() {
             .unwrap(),
         2
     );
-    assert!(fixture
+    assert!(
+        fixture
+            .nexus
+            .store
+            .closed_handovers(&address, 0)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(fixture.nexus.store.handover(&address).unwrap(), Vec::new());
+}
+
+#[test]
+fn archive_tick_finds_closed_handover_without_a_metaflow_row() {
+    let fixture = NexusFixture::new();
+    let archive = repo();
+    let address = Address {
+        aspect: Aspect::Mind,
+        topic: "orphaned".into(),
+        model: Model::Sol,
+    };
+    fixture
         .nexus
         .store
-        .closed_handovers(&address, 0)
-        .unwrap()
-        .is_empty());
-    assert_eq!(fixture.nexus.store.handover(&address).unwrap(), Vec::new());
+        .close_handover_for_successor(&address, "predecessor", "successor")
+        .unwrap();
+    assert!(
+        fixture
+            .nexus
+            .store
+            .list_metaflows()
+            .unwrap()
+            .iter()
+            .all(|row| row.address != address)
+    );
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::HandoverArchive(
+            archive.path().to_string_lossy().into_owned(),
+        ))
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::HandoverCount(0))
+        .unwrap();
+
+    fixture.nexus.retire_handover_archives();
+
+    assert!(
+        archive
+            .path()
+            .join("Mind/orphaned/Sol/predecessor.md")
+            .exists()
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .closed_handovers(&address, 0)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(fixture.nexus.store.handover(&address).unwrap().is_empty());
 }
 fn runout(path: &Path, args: &[&str]) -> String {
     String::from_utf8(

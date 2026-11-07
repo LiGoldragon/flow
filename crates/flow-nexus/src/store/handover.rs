@@ -75,6 +75,7 @@ impl DescribesHandoverTable for HandoverMemory {
 
 /// The Memory operations required by the runtime handover path.
 pub trait HoldsHandovers {
+    fn handover_addresses_with_closed(&self) -> Result<Vec<Address>, StoreError>;
     /// Reads the complete Memory row. `None` means no handover has ever been
     /// written; `Some(Unknown)` means a successful write had no measurement.
     fn handover_memory(&self, address: &Address) -> Result<Option<HandoverMemory>, StoreError>;
@@ -132,7 +133,7 @@ pub trait HoldsHandovers {
         successor: &str,
     ) -> Result<(), StoreError>;
     fn handover_headings(&self, address: &Address)
-        -> Result<Vec<signal_flow::Heading>, StoreError>;
+    -> Result<Vec<signal_flow::Heading>, StoreError>;
     /// Whether the current flow has a policy-qualified measured handover touch
     /// and may be automatically refreshed at its threshold.
     fn handover_green(
@@ -158,6 +159,17 @@ impl RegistersHandoverTable for FlowStore {
 }
 
 impl HoldsHandovers for FlowStore {
+    fn handover_addresses_with_closed(&self) -> Result<Vec<Address>, StoreError> {
+        Ok(self
+            .engine
+            .match_records(sema_engine::QueryPlan::all(self.handovers))?
+            .records()
+            .iter()
+            .filter(|row| !row.closed.is_empty())
+            .map(|row| row.address.clone())
+            .collect())
+    }
+
     fn handover_memory(&self, address: &Address) -> Result<Option<HandoverMemory>, StoreError> {
         self.handover_row(address)
     }

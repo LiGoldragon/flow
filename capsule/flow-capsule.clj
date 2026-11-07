@@ -917,6 +917,11 @@
           {:source path :destination path :present true :sha256 (sha256-file path)})
       {:source path :destination path :present false :reason "evidence absent"})))
 
+(defn persist-preservation-receipt! [receipt-name receipt]
+  (keep-text! receipt-name
+              (json/generate-string {:time (str (java.time.Instant/now)) :files receipt} {:pretty true}))
+  (fs/set-posix-file-permissions (str @witness-dir "/" receipt-name) "rw-------"))
+
 (defn preserve-handover-evidence!
   "Keeps only the ruled native session/index and handover log evidence.
   Every absence and preservation error becomes evidence; none escapes to
@@ -943,12 +948,11 @@
         (swap! receipt conj (inventory-h0-evidence name)))
       (catch Exception e
         (swap! receipt conj {:present false :error (.getMessage e) :stage "preservation"})))
-    (try
-      (keep-text! receipt-name
-                  (json/generate-string {:time (str (java.time.Instant/now)) :files @receipt} {:pretty true}))
-      (fs/set-posix-file-permissions (str @witness-dir "/" receipt-name) "rw-------")
-      (catch Exception _ nil))
-    @receipt))
+    {:files @receipt
+     :persistence
+     (try (persist-preservation-receipt! receipt-name @receipt)
+          {:persisted true}
+          (catch Exception e {:persisted false :error (.getMessage e)}))}))
 
 (defn preserve-h0-diagnostic! []
   (preserve-handover-evidence!
@@ -972,11 +976,9 @@
   []
   (try
     (if handover-mode
-      (let [receipt (if h0-diagnostic-mode (preserve-h0-diagnostic!) (preserve-full-handover!))
-            receipt-name (if h0-diagnostic-mode "handover-H0-preservation.json"
-                             "handover-full-preservation.json")
-            success (and (not-any? :error receipt)
-                         (fs/regular-file? (str @witness-dir "/" receipt-name)))]
+      (let [outcome (if h0-diagnostic-mode (preserve-h0-diagnostic!) (preserve-full-handover!))
+            success (and (get-in outcome [:persistence :persisted])
+                         (not-any? :error (:files outcome)))]
         (reset! handover-evidence-preserved (boolean success))
         (str "handover witnesses " (if success "preserved" "incomplete") " in " @witness-dir))
       (do (keep-witnesses! @witness-dir
@@ -991,9 +993,14 @@
 (defn finish-h0-diagnostic! []
   (try (stop-h0-sampler!)
        (catch Exception e
-         (append-h0-json! h0-sampler-record-name
-                          {:time (str (java.time.Instant/now)) :kind "sampler-stop-error"
-                           :error (.getMessage e)}))))
+         (try (append-h0-json! h0-sampler-record-name
+                               {:time (str (java.time.Instant/now)) :kind "sampler-stop-error"
+                                :error (.getMessage e)})
+              (catch Exception _ nil))
+         (throw e))))
+
+(defn record-handover-finish-error! [error]
+  (keep-text! "handover-finish-error.txt" (.getMessage error)))
 
 (defn run-with-teardown!
   "Runs the selected scenarios, quiesces their diagnostic sampler, then
@@ -1005,11 +1012,12 @@
     (try
       (body)
       (finally
-        (try (finish!)
-             (catch Exception e
-               (reset! handover-finish-succeeded false)
-               (keep-text! "handover-finish-error.txt" (.getMessage e))))
-        (reset! clean (teardown!))))
+        (try
+          (try (finish!)
+               (catch Exception e
+                 (reset! handover-finish-succeeded false)
+                 (record-handover-finish-error! e)))
+          (finally (reset! clean (teardown!))))))
     @clean))
 
 ;; ---------------------------------------------------------------- readings

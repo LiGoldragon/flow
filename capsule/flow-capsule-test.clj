@@ -242,23 +242,73 @@
     (let [kept (with-redefs [flow-capsule/handover-mode true
                              flow-capsule/h0-diagnostic-mode false
                              flow-capsule/preserve-full-handover!
-                             (fn [] [{:present true :destination "existing"}
-                                     {:present false :error "partial copy"}])]
+                             (fn [] {:files [{:present true :destination "existing"}
+                                             {:present false :error "partial copy"}]
+                                     :persistence {:persisted true}})]
                  (flow-capsule/preserve-teardown-witnesses!))]
       (check "a destination plus a partial preservation error is capture-incomplete"
              (and (str/includes? kept "incomplete")
                   (not @flow-capsule/handover-evidence-preserved))))
     (finally (reset! flow-capsule/witness-dir saved) (fs/delete-tree scratch))))
 
+(let [scratch (str (fs/create-temp-dir))
+      witness (str scratch "/witness")
+      codex (str scratch "/codex")
+      log (str scratch "/nexus.log")
+      saved-witness @flow-capsule/witness-dir
+      saved-log @flow-capsule/run-log]
+  (try
+    (doseq [dir [(str codex "/sessions") (str codex "/archived_sessions") witness]]
+      (fs/create-dirs dir))
+    (spit (str codex "/sessions/live.jsonl") "live\n")
+    (spit (str codex "/archived_sessions/archived.jsonl") "archived\n")
+    (spit (str codex "/session_index.jsonl") "index\n")
+    (spit log "native log\n")
+    ;; This receipt is deliberately stale. A failure to persist the receipt
+    ;; for this invocation must not accept it as current evidence.
+    (spit (str witness "/handover-full-preservation.json") "stale\n")
+    (reset! flow-capsule/witness-dir witness)
+    (reset! flow-capsule/run-log log)
+    (let [kept (with-redefs [flow-capsule/handover-mode true
+                             flow-capsule/h0-diagnostic-mode false
+                             flow-capsule/codex-home codex
+                             flow-capsule/h0-herdr-stdout (str scratch "/absent.stdout")
+                             flow-capsule/h0-herdr-stderr (str scratch "/absent.stderr")
+                             flow-capsule/persist-preservation-receipt!
+                             (fn [& _] (throw (ex-info "current receipt persistence failed" {})))]
+                 (flow-capsule/preserve-teardown-witnesses!))]
+      (check "a stale receipt cannot mask current persistence failure after real leaf copies"
+             (and (fs/exists? (str witness "/codex-sessions/live.jsonl"))
+                  (fs/exists? (str witness "/codex-archived-sessions/archived.jsonl"))
+                  (= "stale\n" (slurp (str witness "/handover-full-preservation.json")))
+                  (str/includes? kept "incomplete")
+                  (not @flow-capsule/handover-evidence-preserved))))
+    (finally
+      (reset! flow-capsule/witness-dir saved-witness)
+      (reset! flow-capsule/run-log saved-log)
+      (fs/delete-tree scratch))))
+
 (let [events (atom [])
-      clean (flow-capsule/run-with-teardown!
-             #(swap! events conj :body)
-             #(do (swap! events conj :sampler-stop-failed)
-                  (throw (ex-info "sampler stop failed" {})))
-             #(do (swap! events conj :teardown) true))]
-  (check "a sampler-stop failure still tears down once and is capture-incomplete"
-         (and clean
-              (= [:body :sampler-stop-failed :teardown] @events)
+      threw (with-redefs [flow-capsule/stop-h0-sampler!
+                          #(do (swap! events conj :sampler-stop)
+                               (throw (ex-info "sampler stop failed" {})))
+                          flow-capsule/append-h0-json!
+                          (fn [& _] (swap! events conj :stop-failure-evidence))
+                          flow-capsule/record-handover-finish-error!
+                          (fn [_]
+                            (swap! events conj :finish-report-failed)
+                            (throw (ex-info "finish report failed" {})))]
+              (try
+                (flow-capsule/run-with-teardown!
+                 #(swap! events conj :body)
+                 flow-capsule/finish-h0-diagnostic!
+                 #(do (swap! events conj :teardown) true))
+                false
+                (catch Exception _ true)))]
+  (check "a real sampler-stop and finish-report failure still tears down exactly once"
+         (and threw
+              (= [:body :sampler-stop :stop-failure-evidence :finish-report-failed :teardown]
+                 @events)
               (not @flow-capsule/handover-finish-succeeded))))
 
 (let [calls (atom 0)
@@ -348,7 +398,7 @@
                                 (fn [& _] (throw (ex-info "preservation failed" {})))]
                     (flow-capsule/preserve-h0-diagnostic!))]
       (check "a preservation error is recorded and returned without blocking teardown"
-             (= "preservation failed" (:error (first receipt)))))
+             (= "preservation failed" (:error (first (:files receipt))))))
     (finally (reset! flow-capsule/witness-dir saved) (fs/delete-tree scratch))))
 
 ;; Optional Claude state is absent before any Claude seat starts. Teardown

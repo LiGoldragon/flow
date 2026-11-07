@@ -173,6 +173,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         predecessor_revision,
         "f7d2336a7380206728cbd5aef2ebb3656d0cfd87"
     );
+    #[allow(clippy::manual_unwrap_or)]
     let stamped_revision = match option_env!("FLOW_MIGRATION_SOURCE_REV") {
         Some(revision) => revision,
         None => "unstamped",

@@ -317,22 +317,19 @@ impl HoldsHandovers for FlowStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         #[cfg(test)]
-        if std::mem::take(
+        let row_read = if std::mem::take(
             &mut *self
                 .fail_next_retirement_completion_read
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         ) {
-            let error = StoreError::StateInvariant;
-            self.handover_observations.fail(
-                address,
-                RetirementObservationFailure::MissingEvidence(format!(
-                    "the archived generation could not be read from Memory: {error}"
-                )),
-            );
-            return Err(error);
-        }
-        let row = match self.handover_row(address) {
+            Err(StoreError::StateInvariant)
+        } else {
+            self.handover_row(address)
+        };
+        #[cfg(not(test))]
+        let row_read = self.handover_row(address);
+        let row = match row_read {
             Ok(row) => row,
             Err(error) => {
                 self.handover_observations.fail(
@@ -383,25 +380,21 @@ impl HoldsHandovers for FlowStore {
                 handover_generation_key: key.clone(),
                 handover_archive_identity: archive_identity,
             }));
+        row.closed.remove(position);
         #[cfg(test)]
-        {
-            let mut fail = self
+        let write = if std::mem::take(
+            &mut *self
                 .fail_next_handover_removal
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if std::mem::take(&mut *fail) {
-                let error = StoreError::StateInvariant;
-                self.handover_observations.fail(
-                    address,
-                    RetirementObservationFailure::MissingEvidence(format!(
-                        "the archived generation could not be removed from Memory: {error}"
-                    )),
-                );
-                return Err(error);
-            }
-        }
-        row.closed.remove(position);
-        if let Err(error) = self.write_handover(row) {
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        ) {
+            Err(StoreError::StateInvariant)
+        } else {
+            self.write_handover(row)
+        };
+        #[cfg(not(test))]
+        let write = self.write_handover(row);
+        if let Err(error) = write {
             self.handover_observations.fail(
                 address,
                 RetirementObservationFailure::MissingEvidence(format!(

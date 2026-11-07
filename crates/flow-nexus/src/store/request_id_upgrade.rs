@@ -2573,7 +2573,11 @@ mod tests {
         .expect("predecessor catalog opens for validation");
         let heartbeat_table = engine.register_table(heartbeat).expect("heartbeat opens");
         let before = std::fs::read(&path).expect("Memory bytes read before evolution");
-        let draws = vec!["same"; super::super::SEEDED_REQUEST_ID_DRAWS + 1];
+        let draws = vec![
+            "same";
+            usize::try_from(super::super::SEEDED_REQUEST_ID_DRAWS + 1)
+                .expect("configured draw bound fits memory")
+        ];
         assert!(matches!(
             evolve_request_id_memory(
                 &mut engine,

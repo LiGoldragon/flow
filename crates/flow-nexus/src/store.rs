@@ -7142,7 +7142,7 @@ mod tests {
                     registration_bytes.as_slice(),
                 )
                 .unwrap();
-            let table = redb::TableDefinition::<&str, &[u8]>::new(super::OPTIONAL_HANDOVER_TABLE);
+            let table = redb::TableDefinition::<String, &[u8]>::new(super::OPTIONAL_HANDOVER_TABLE);
             let mut rows = write.open_table(table).unwrap();
             rows.insert("handover", predecessor_bytes.as_slice())
                 .unwrap();
@@ -7381,7 +7381,7 @@ mod tests {
                     .remove("flow_nexus_metaflows")
                     .expect("metaflow family removes");
             }
-            let _ = write.delete_table(redb::TableDefinition::<&str, &[u8]>::new(
+            let _ = write.delete_table(redb::TableDefinition::<String, &[u8]>::new(
                 "flow_nexus_metaflows",
             ));
             write.commit().expect("catalog commits");
@@ -7934,7 +7934,7 @@ mod tests {
                 );
             }
             write
-                .delete_table(redb::TableDefinition::<&str, &[u8]>::new(table))
+                .delete_table(redb::TableDefinition::<String, &[u8]>::new(table))
                 .expect("empty family table drops");
             write.commit().expect("strip commits");
         };
@@ -8007,7 +8007,7 @@ mod tests {
                     .expect("reminder family removes");
             }
             write
-                .delete_table(redb::TableDefinition::<&str, &[u8]>::new(
+                .delete_table(redb::TableDefinition::<String, &[u8]>::new(
                     super::OPTIONAL_HANDOVER_REMINDER_TABLE,
                 ))
                 .expect("reminder table drops");
@@ -8071,7 +8071,7 @@ mod tests {
             // A family no row was written to has no table of its own yet;
             // one that has is dropped with its rows.
             write
-                .delete_table(redb::TableDefinition::<&str, &[u8]>::new(table))
+                .delete_table(redb::TableDefinition::<String, &[u8]>::new(table))
                 .expect("table dropped");
             write.commit().expect("strip commits");
         };

@@ -201,6 +201,20 @@ dependencies = [
 
 [[package]]
 name = "ethos-zero"
+version = "16.0.0"
+source = "git+https://github.com/LiGoldragon/ethos-zero?rev=c2653dd82adbdb1f1f2f654405c6620e0d06fd58#c2653dd82adbdb1f1f2f654405c6620e0d06fd58"
+dependencies = [
+ "datom-codec 0.32.2",
+ "prettyplease",
+ "proc-macro2",
+ "protos 0.32.2",
+ "quote",
+ "rkyv",
+ "syn 3.0.6",
+]
+
+[[package]]
+name = "ethos-zero"
 version = "17.0.0"
 source = "git+https://github.com/LiGoldragon/ethos-zero?rev=07714b0171802787bea1eefe4caa2d826d9c4030#07714b0171802787bea1eefe4caa2d826d9c4030"
 dependencies = [
@@ -301,7 +315,6 @@ dependencies = [
 name = "flow-nexus"
 version = "0.53.3"
 dependencies = [
- "getrandom 0.3.4",
  "base64",
  "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
@@ -310,7 +323,9 @@ dependencies = [
  "flow-ethos",
  "flow-ethos-before-request-ids",
  "flow-native",
+ "getrandom 0.3.4",
  "libc",
+ "message-nexus",
  "meta-signal-flow",
  "meta-signal-flow-before-request-ids",
  "notify",
@@ -319,12 +334,13 @@ dependencies = [
  "rkyv",
  "rustix",
  "sema",
- "sema-engine",
+ "sema-engine 0.19.0",
  "serde_json",
  "sha1",
  "sha2",
  "signal-flow",
  "signal-flow-before-request-ids",
+ "signal-message",
  "tempfile",
  "thiserror",
  "tungstenite",
@@ -510,6 +526,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "message-defaults"
+version = "0.22.0"
+source = "git+https://github.com/LiGoldragon/message?rev=bb329ba8230e02aa2e310b730c6ec0dabd8fdadf#bb329ba8230e02aa2e310b730c6ec0dabd8fdadf"
+
+[[package]]
+name = "message-nexus"
+version = "0.22.0"
+source = "git+https://github.com/LiGoldragon/message?rev=bb329ba8230e02aa2e310b730c6ec0dabd8fdadf#bb329ba8230e02aa2e310b730c6ec0dabd8fdadf"
+dependencies = [
+ "ethos-zero 16.0.0",
+ "getrandom 0.4.3",
+ "libc",
+ "message-defaults",
+ "meta-signal-flow",
+ "meta-signal-message",
+ "redb",
+ "rkyv",
+ "rustix",
+ "sema-engine 0.18.0",
+ "signal-flow",
+ "signal-message",
+ "thiserror",
+]
+
+[[package]]
 name = "meta-signal-flow"
 version = "69.0.0"
 source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=bc090753a24ee56bd689da954815f7115afa2c4d#bc090753a24ee56bd689da954815f7115afa2c4d"
@@ -532,6 +573,17 @@ dependencies = [
  "rkyv",
  "signal",
  "signal-flow-before-request-ids",
+]
+
+[[package]]
+name = "meta-signal-message"
+version = "3.0.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-message?rev=12d7373f0a9edfab6c3d2ec96431e518a333edd9#12d7373f0a9edfab6c3d2ec96431e518a333edd9"
+dependencies = [
+ "ethos-zero 19.2.0",
+ "rkyv",
+ "signal",
+ "signal-message",
 ]
 
 [[package]]
@@ -816,6 +868,18 @@ dependencies = [
 
 [[package]]
 name = "sema-engine"
+version = "0.18.0"
+source = "git+https://github.com/LiGoldragon/sema-engine?rev=9884905ff9c660ad97a35c524e42532d5c7bac90#9884905ff9c660ad97a35c524e42532d5c7bac90"
+dependencies = [
+ "blake3",
+ "rkyv",
+ "sema",
+ "signal-sema",
+ "thiserror",
+]
+
+[[package]]
+name = "sema-engine"
 version = "0.19.0"
 source = "git+https://github.com/LiGoldragon/sema-engine?rev=6a95a0925c9e6a6a144037ffdbad8c7d3cc126f2#6a95a0925c9e6a6a144037ffdbad8c7d3cc126f2"
 dependencies = [
@@ -929,6 +993,17 @@ dependencies = [
  "flow-ethos-before-request-ids",
  "rkyv",
  "signal",
+]
+
+[[package]]
+name = "signal-message"
+version = "21.0.0"
+source = "git+https://github.com/LiGoldragon/signal-message?rev=8b6faff411d7325b6c3196952a15ee7c903d35cc#8b6faff411d7325b6c3196952a15ee7c903d35cc"
+dependencies = [
+ "ethos-zero 17.0.0",
+ "rkyv",
+ "signal",
+ "signal-flow",
 ]
 
 [[package]]

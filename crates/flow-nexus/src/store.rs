@@ -17,6 +17,8 @@ pub(crate) mod handover_configuration;
 pub(crate) mod handover_reminders;
 pub(crate) mod launch_cleanup;
 pub(crate) mod logical_delivery;
+#[cfg(test)]
+mod message_joint;
 pub(crate) mod metaflow;
 pub(crate) mod metaflow_declaration;
 pub(crate) mod nexus_configuration;

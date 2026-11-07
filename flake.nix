@@ -16,6 +16,7 @@
     # The public default remains the last unconfigured Flow artifact while
     # callers move explicitly to lib.<system>.mkFlowPackage.
     unconfigured-flow.url = "github:LiGoldragon/flow/d3ab87ee18b1dd30947d5f0089f5abb4bafa80d5";
+    message.url = "github:LiGoldragon/message/bb329ba8230e02aa2e310b730c6ec0dabd8fdadf";
   };
 
   outputs =
@@ -25,6 +26,7 @@
       fenix,
       crane,
       curriculum,
+      message,
       unconfigured-flow,
     }:
     let
@@ -296,6 +298,36 @@
             // {
               inherit (context) cargoArtifacts;
               cargoClippyExtraArgs = "--workspace --all-targets --features flow-ethos/datom -- -D warnings";
+            }
+          );
+          message-joint = context.craneLib.mkCargoDerivation (
+            context.commonArgs
+            // {
+              inherit (context) cargoArtifacts;
+              pnameSuffix = "-message-joint";
+              doCheck = true;
+              buildPhaseCargoCommand = ''
+                cargoWithProfile build --locked -p flow-nexus --bin flow-nexus
+              '';
+              checkPhaseCargoCommand = ''
+                export FLOW_MESSAGE_JOINT_FLOW_BIN="$PWD/target/release/flow-nexus"
+                export FLOW_MESSAGE_JOINT_MESSAGE_BIN="${message.packages.${system}.default}/bin/message-nexus"
+                export FLOW_MESSAGE_JOINT_FLOW_REV="f37d4470afc8d923752ac77d9a32d0ebfe9c99a9"
+                export FLOW_MESSAGE_JOINT_MESSAGE_REV="bb329ba8230e02aa2e310b730c6ec0dabd8fdadf"
+                sha256sum "$FLOW_MESSAGE_JOINT_FLOW_BIN" "$FLOW_MESSAGE_JOINT_MESSAGE_BIN"
+                cargoWithProfile test --locked -p flow-nexus --lib \
+                  store::message_joint::real_flow_and_message_share_the_durable_delivery_ledger \
+                  -- --exact --ignored --nocapture 2>&1 | tee message-joint.log
+                status=''${PIPESTATUS[0]}
+                if [ "$status" -ne 0 ]; then
+                  exit "$status"
+                fi
+                ran=$(grep -cFx "test store::message_joint::real_flow_and_message_share_the_durable_delivery_ledger ... ok" message-joint.log || true)
+                if [ "$ran" -ne 1 ]; then
+                  echo "joint Flow/Message test ran $ran times; it must run once" >&2
+                  exit 1
+                fi
+              '';
             }
           );
           flow-codex-thread-opened-lean-before-attach = context.exactTest "flow-nexus"

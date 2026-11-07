@@ -178,8 +178,20 @@ impl ArchivesHandoverOnTick for RunningNexus {
             );
             return;
         };
-        let publisher = ExistingGitHandoverArchive::new(path)
-            .with_deadline(Duration::from_millis(deadline_ms as u64));
+        let Ok(deadline_ms) = u64::try_from(deadline_ms) else {
+            eprintln!(
+                "flow-nexus: publication deadline is unrepresentable; closed generations retained"
+            );
+            return;
+        };
+        if deadline_ms == 0 {
+            eprintln!(
+                "flow-nexus: publication deadline is non-positive; closed generations retained"
+            );
+            return;
+        }
+        let publisher =
+            ExistingGitHandoverArchive::new(path).with_deadline(Duration::from_millis(deadline_ms));
         for address in addresses {
             if let Err(error) =
                 self.retire_handover_generations(&address, count as usize, &publisher)

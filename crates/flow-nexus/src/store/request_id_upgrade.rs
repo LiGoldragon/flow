@@ -2086,7 +2086,7 @@ mod tests {
         DescribesHeartbeatStandingTable, DescribesRequestPolicyTable, StoredHeartbeatStanding,
         StoredMetaRequestPolicyConfiguration,
     };
-    use sema_engine::{EngineOpen, QueryPlan, SchemaVersion};
+    use sema_engine::{Assertion, EngineOpen, QueryPlan, SchemaVersion};
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
@@ -2152,6 +2152,121 @@ mod tests {
         }
     }
 
+    struct OldTables {
+        current: TableReference<PriorCurrentLogicalDelivery>,
+        events: TableReference<PriorLogicalDeliveryEvent>,
+        requests: TableReference<PriorStoredDeliveryRequest>,
+        heartbeat: TableReference<StoredHeartbeatStanding>,
+    }
+
+    fn old_engine(
+        path: &std::path::Path,
+        descriptors: &RequestIdEvolutionDescriptors,
+        heartbeat: &TableDescriptor<StoredHeartbeatStanding>,
+    ) -> (Engine, OldTables) {
+        let mut engine = Engine::open(EngineOpen::new(
+            path,
+            SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION),
+        ))
+        .expect("predecessor Memory opens");
+        let current = engine
+            .register_table(predecessor_descriptor::<PriorCurrentLogicalDelivery, _>(
+                &descriptors.current,
+            ))
+            .expect("old current registers");
+        let events = engine
+            .register_table(predecessor_descriptor::<PriorLogicalDeliveryEvent, _>(
+                &descriptors.events,
+            ))
+            .expect("old events register");
+        engine
+            .register_table(predecessor_descriptor::<PriorStoredMetaflow, _>(
+                &descriptors.metaflows,
+            ))
+            .expect("old metaflows register");
+        engine
+            .register_table(predecessor_descriptor::<PriorAddressHold, _>(
+                &descriptors.address_holds,
+            ))
+            .expect("old holds register");
+        let requests = engine
+            .register_table(predecessor_descriptor::<PriorStoredDeliveryRequest, _>(
+                &descriptors.requests,
+            ))
+            .expect("old requests register");
+        engine
+            .register_table(predecessor_descriptor::<PriorQueueDeliveryAttempt, _>(
+                &descriptors.attempts,
+            ))
+            .expect("old attempts register");
+        engine
+            .register_table(predecessor_descriptor::<PriorStoredSendOutcome, _>(
+                &descriptors.outcomes,
+            ))
+            .expect("old outcomes register");
+        engine
+            .register_table(predecessor_descriptor::<PriorSendCall, _>(
+                &descriptors.send_calls,
+            ))
+            .expect("old calls register");
+        let heartbeat = engine
+            .register_table(heartbeat.clone())
+            .expect("unchanged heartbeat registers");
+        (
+            engine,
+            OldTables {
+                current,
+                events,
+                requests,
+                heartbeat,
+            },
+        )
+    }
+
+    fn old_address(aspect: old_flow::Aspect, topic: &str) -> old_flow::Address {
+        old_flow::Address {
+            aspect,
+            topic: topic.into(),
+            model: old_flow::Model::Sol,
+        }
+    }
+
+    fn old_snapshot(
+        cursor: i64,
+        logical_id: &str,
+        sender: &old_flow::Address,
+        recipient: &old_flow::Address,
+        state: old_signal::DeliveryState,
+    ) -> old_signal::DeliverySnapshot {
+        old_signal::DeliverySnapshot {
+            delivery_cursor: cursor,
+            logical_delivery_id: logical_id.into(),
+            sent_by: old_flow::SentBy::Sender(sender.clone()),
+            address: recipient.clone(),
+            delivery_state: state,
+        }
+    }
+
+    fn old_request(
+        logical_id: &str,
+        sender: &old_flow::Address,
+        recipient: &old_flow::Address,
+        request: old_flow::Request,
+        state: PriorRequestState,
+    ) -> PriorStoredDeliveryRequest {
+        PriorStoredDeliveryRequest {
+            request_id: logical_id.into(),
+            address: recipient.clone(),
+            queue_evidence: old_meta::QueueEvidence::Logical(old_flow::QueueEntry {
+                logical_delivery_id: logical_id.into(),
+                sent_by: old_flow::SentBy::Sender(sender.clone()),
+                delivery: old_flow::Delivery::Queue,
+                message: old_flow::Message::Soft(request),
+            }),
+            state,
+        }
+    }
+
     #[test]
     fn upgrade_report_lines_are_utf8_safe_and_parts_stay_inside_the_prompt_budget() {
         let words = "é".repeat(crate::sending::MAX_SEND_PAYLOAD_BYTES);
@@ -2167,6 +2282,176 @@ mod tests {
             [("first", first), ("second", second)],
         );
         assert_eq!(parts, vec![vec!["first"], vec!["second"]]);
+    }
+
+    #[test]
+    fn evolution_uses_first_delivery_order_and_keeps_original_order_words() {
+        let directory = tempfile::tempdir().expect("temporary Memory");
+        let path = directory.path().join("flow.sema");
+        let descriptors = evolution_descriptors();
+        let heartbeat = StoredHeartbeatStanding::descriptor();
+        let (mut predecessor, tables) = old_engine(&path, &descriptors, &heartbeat);
+        let sender = old_address(old_flow::Aspect::Mind, "sender");
+        let recipient = old_address(old_flow::Aspect::Field, "recipient");
+        let native = old_signal::NativeReceipt {
+            harness_kind: old_flow::HarnessKind::Codex,
+            native_session_id: "session".into(),
+            native_prompt_id: "prompt".into(),
+        };
+        let first_queued = old_snapshot(
+            1,
+            "order-first",
+            &sender,
+            &recipient,
+            old_signal::DeliveryState::Queued,
+        );
+        let first_delivered = old_snapshot(
+            2,
+            "order-first",
+            &sender,
+            &recipient,
+            old_signal::DeliveryState::Delivered(native.clone()),
+        );
+        let second_queued = old_snapshot(
+            3,
+            "order-second",
+            &sender,
+            &recipient,
+            old_signal::DeliveryState::Queued,
+        );
+        let answer_queued = old_snapshot(
+            4,
+            "answer",
+            &recipient,
+            &sender,
+            old_signal::DeliveryState::Queued,
+        );
+        let answer_delivered = old_snapshot(
+            5,
+            "answer",
+            &recipient,
+            &sender,
+            old_signal::DeliveryState::Delivered(native),
+        );
+        for snapshot in [
+            first_delivered.clone(),
+            second_queued.clone(),
+            answer_delivered.clone(),
+        ] {
+            predecessor
+                .assert(Assertion::new(
+                    tables.current,
+                    PriorCurrentLogicalDelivery { snapshot },
+                ))
+                .expect("old current stores");
+        }
+        for snapshot in [
+            first_queued,
+            first_delivered,
+            second_queued,
+            answer_queued,
+            answer_delivered,
+        ] {
+            predecessor
+                .assert(Assertion::new(
+                    tables.events,
+                    PriorLogicalDeliveryEvent { snapshot },
+                ))
+                .expect("old event stores");
+        }
+        for request in [
+            old_request(
+                "order-first",
+                &sender,
+                &recipient,
+                old_flow::Request::Order("same original words".into()),
+                PriorRequestState::Settled,
+            ),
+            old_request(
+                "order-second",
+                &sender,
+                &recipient,
+                old_flow::Request::Order("same original words".into()),
+                PriorRequestState::Queued,
+            ),
+            old_request(
+                "answer",
+                &recipient,
+                &sender,
+                old_flow::Request::Result(old_flow::ResultPayload::Answered(
+                    old_flow::ResultPayload_Answered_Data {
+                        answerable: old_flow::Answerable::Order("same original words".into()),
+                        string: "answer words".into(),
+                    },
+                )),
+                PriorRequestState::Settled,
+            ),
+        ] {
+            predecessor
+                .assert(Assertion::new(tables.requests, request))
+                .expect("old request stores");
+        }
+        drop(predecessor);
+
+        let mut engine = Engine::open(
+            EngineOpen::new(&path, SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION))
+                .with_family(&descriptors.current)
+                .with_family(&descriptors.events)
+                .with_family(&descriptors.metaflows)
+                .with_family(&descriptors.address_holds)
+                .with_family(&descriptors.requests)
+                .with_family(&descriptors.attempts)
+                .with_family(&descriptors.outcomes)
+                .with_family(&descriptors.send_calls)
+                .with_family(&heartbeat),
+        )
+        .expect("predecessor catalog opens for evolution");
+        let heartbeat_table = engine.register_table(heartbeat).expect("heartbeat opens");
+        evolve_request_id_memory(
+            &mut engine,
+            descriptors,
+            &[],
+            &[],
+            &[],
+            heartbeat_table,
+            &[],
+            &ScriptedDrawer::new(&["a001", "0000", "0001", "0002", "0003"]),
+        )
+        .expect("R6 evolution commits");
+        let descriptors = evolution_descriptors();
+        let assignment_table = engine
+            .register_table(descriptors.upgrade_assignments)
+            .expect("assignments register");
+        let assignments = engine
+            .match_records(QueryPlan::all(assignment_table))
+            .expect("assignments read");
+        let [assignment] = assignments.records() else {
+            panic!("one assignment part")
+        };
+        assert_eq!(assignment.decisions.len(), 2);
+        assert_eq!(assignment.decisions[0].assigned[0].order, "order-first");
+        assert_eq!(assignment.decisions[0].assigned[0].order_id, None);
+        assert_eq!(assignment.decisions[1].open[0].order, "order-second");
+        assert_eq!(assignment.decisions[1].open[0].order_id, "a001");
+        let prior_table = engine
+            .register_table(descriptors.prior_deliveries)
+            .expect("prior deliveries register");
+        let prior = engine
+            .match_records(QueryPlan::all(prior_table))
+            .expect("prior deliveries read");
+        assert_eq!(prior.records().len(), 2);
+        assert_eq!(
+            prior_order_words(
+                &prior
+                    .records()
+                    .iter()
+                    .find(|row| row.logical_delivery_id == "order-first")
+                    .expect("first Order archived")
+                    .request
+            )
+            .as_deref(),
+            Some("same original words")
+        );
     }
 
     #[test]

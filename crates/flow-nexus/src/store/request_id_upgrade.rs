@@ -2774,12 +2774,11 @@ mod tests {
         .expect("classification evolution commits");
 
         let descriptors = evolution_descriptors();
+        let current_table = engine
+            .register_table(descriptors.current)
+            .expect("current registers");
         let current = engine
-            .match_records(QueryPlan::all(
-                engine
-                    .register_table(descriptors.current)
-                    .expect("current registers"),
-            ))
+            .match_records(QueryPlan::all(current_table))
             .expect("current reads");
         assert_eq!(current.records().len(), 3);
         assert!(current.records().iter().all(|row| {
@@ -2787,29 +2786,26 @@ mod tests {
                 && row.admission
                     == super::super::logical_delivery::DeliveryAdmission::HistoricalUnknown
         }));
+        let prior_table = engine
+            .register_table(descriptors.prior_deliveries)
+            .expect("prior deliveries register");
         let prior = engine
-            .match_records(QueryPlan::all(
-                engine
-                    .register_table(descriptors.prior_deliveries)
-                    .expect("prior deliveries register"),
-            ))
+            .match_records(QueryPlan::all(prior_table))
             .expect("prior deliveries read");
         assert_eq!(prior.records().len(), 1);
         assert_eq!(prior.records()[0].logical_delivery_id, "delivered-moved");
+        let binding_table = engine
+            .register_table(descriptors.request_ids)
+            .expect("bindings register");
         let bindings = engine
-            .match_records(QueryPlan::all(
-                engine
-                    .register_table(descriptors.request_ids)
-                    .expect("bindings register"),
-            ))
+            .match_records(QueryPlan::all(binding_table))
             .expect("bindings read");
         assert_eq!(bindings.records().len(), 3);
+        let announcement_table = engine
+            .register_table(descriptors.task_announcements)
+            .expect("announcements register");
         let announcements = engine
-            .match_records(QueryPlan::all(
-                engine
-                    .register_table(descriptors.task_announcements)
-                    .expect("announcements register"),
-            ))
+            .match_records(QueryPlan::all(announcement_table))
             .expect("announcements read");
         assert_eq!(announcements.records().len(), 1);
         assert_eq!(

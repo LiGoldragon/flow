@@ -1043,6 +1043,21 @@ fn first_delivered_cursor(events: &[PriorLogicalDeliveryEvent]) -> Option<i64> {
         .min()
 }
 
+fn answer_group_key(
+    recipient: &old_flow::Address,
+    sender: &old_flow::Address,
+    words: &str,
+) -> String {
+    let recipient = address_key(recipient);
+    let sender = address_key(sender);
+    format!(
+        "{}:{recipient}:{}:{sender}:{}:{words}",
+        recipient.len(),
+        sender.len(),
+        words.len()
+    )
+}
+
 /// Evolves the exact accepted 0.53.2 running Memory in one engine commit.
 /// Every check and projection is completed before the commit is built.
 #[allow(clippy::too_many_arguments)]
@@ -1297,6 +1312,117 @@ pub(crate) fn evolve_request_id_memory(
         }
     }
 
+    // Reconstruct the 0.53.2 answer matcher by immutable delivery order.  Its
+    // mutable current cursor is deliberately not an ordering key here.
+    let mut order_groups: BTreeMap<
+        String,
+        (
+            old_flow::Address,
+            old_flow::Address,
+            Vec<(String, Option<i64>, i64)>,
+        ),
+    > = BTreeMap::new();
+    let mut answer_groups: BTreeMap<String, Vec<(String, i64)>> = BTreeMap::new();
+    for (logical_id, request) in &requests {
+        let admission =
+            first_event_cursor(events.get(logical_id).ok_or(StoreError::StateInvariant)?)
+                .ok_or(StoreError::StateInvariant)?;
+        match prior_request(request) {
+            Some(old_flow::Request::Order(words)) => {
+                let Some(sender) = prior_sender(request) else {
+                    continue;
+                };
+                let recipient = &request.address;
+                order_groups
+                    .entry(answer_group_key(recipient, sender, words))
+                    .or_insert_with(|| (recipient.clone(), sender.clone(), Vec::new()))
+                    .2
+                    .push((
+                        logical_id.clone(),
+                        first_delivered_cursor(&events[logical_id]),
+                        admission,
+                    ));
+            }
+            Some(old_flow::Request::Result(old_flow::ResultPayload::Answered(answer))) => {
+                let old_flow::Answerable::Order(words) = &answer.answerable else {
+                    continue;
+                };
+                let Some(recipient) = prior_sender(request) else {
+                    continue;
+                };
+                let sender = &request.address;
+                answer_groups
+                    .entry(answer_group_key(recipient, sender, words))
+                    .or_default()
+                    .push((logical_id.clone(), admission));
+            }
+            _ => {}
+        }
+    }
+    let mut assignment_decisions: BTreeMap<String, (Address, Vec<(String, AssignmentDecision)>)> =
+        BTreeMap::new();
+    for (group_key, (recipient, sender, mut orders)) in order_groups {
+        let mut answers = answer_groups.remove(&group_key).unwrap_or_default();
+        if orders.len() < 2 || answers.is_empty() {
+            continue;
+        }
+        orders.sort_by_key(|(_, delivered, admission)| {
+            (
+                delivered.is_none(),
+                delivered.unwrap_or(*admission),
+                *admission,
+            )
+        });
+        answers.sort_by_key(|(_, admission)| *admission);
+        let mut used = BTreeSet::new();
+        let mut assigned = Vec::new();
+        for (answer, answer_key) in answers {
+            let selected = orders
+                .iter()
+                .find(|(order, _, admission)| *admission < answer_key && !used.contains(order));
+            let Some((order, _, _)) = selected else {
+                continue;
+            };
+            used.insert(order.clone());
+            if held.contains(order) {
+                closures.insert(order.clone(), RequestClosure::Answered(answer.clone()));
+            }
+            assigned.push(AssignedAnswer {
+                answer,
+                order: order.clone(),
+                order_id: request_ids.get(order).cloned(),
+            });
+        }
+        let open = orders
+            .iter()
+            .filter(|(order, _, _)| held.contains(order) && !used.contains(order))
+            .map(|(order, _, _)| OpenOrder {
+                order: order.clone(),
+                order_id: request_ids[order].clone(),
+            })
+            .collect();
+        let sender = current_address(&sender)?;
+        let recipient = current_address(&recipient)?;
+        let first_order = orders
+            .iter()
+            .map(|(order, _, _)| order)
+            .min()
+            .cloned()
+            .ok_or(StoreError::StateInvariant)?;
+        assignment_decisions
+            .entry(current_address_key(&sender))
+            .or_insert_with(|| (sender, Vec::new()))
+            .1
+            .push((
+                first_order,
+                AssignmentDecision {
+                    recipient,
+                    assigned,
+                    open,
+                },
+            ));
+    }
+
     let current_rows = held
         .iter()
         .map(|logical_id| {
@@ -1463,6 +1589,22 @@ pub(crate) fn evolve_request_id_memory(
             }
         })
         .collect::<Vec<_>>();
+    let upgrade_assignments = assignment_decisions
+        .into_iter()
+        .map(|(_, (sender, mut decisions))| {
+            decisions.sort_by(|left, right| left.0.cmp(&right.0));
+            UpgradeAssignment {
+                sender,
+                part: 0,
+                decisions: decisions
+                    .into_iter()
+                    .map(|(_, decision)| decision)
+                    .collect(),
+                tries: 0,
+                status: TaskAnnouncementStatus::Pending(None),
+            }
+        })
+        .collect::<Vec<_>>();
 
     let mut identity = String::with_capacity(16);
     for _ in 0..4 {
@@ -1496,7 +1638,7 @@ pub(crate) fn evolve_request_id_memory(
         )
         .register(descriptors.prior_deliveries, prior_rows)
         .register(descriptors.task_announcements, task_announcements)
-        .register(descriptors.upgrade_assignments, Vec::new())
+        .register(descriptors.upgrade_assignments, upgrade_assignments)
         .register(
             descriptors.request_policy,
             vec![super::StoredMetaRequestPolicyConfiguration {

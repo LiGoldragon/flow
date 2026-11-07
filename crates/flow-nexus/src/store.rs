@@ -837,6 +837,16 @@ impl EngineRecord for StoredMetaRequestPolicyConfiguration {
     }
 }
 
+impl MemoryDefinition for StoredMetaRequestPolicyConfiguration {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(META_REQUEST_POLICY_CONFIGURATION_SCHEMA)
+    }
+}
+
 trait DescribesRequestPolicyTable {
     fn descriptor() -> TableDescriptor<StoredMetaRequestPolicyConfiguration>;
 }

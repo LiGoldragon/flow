@@ -144,15 +144,37 @@ fn typed_keep_and_drop_commands_are_shell_single_argument_forms() {
 fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
     use super::NexusFixture;
     use crate::handover_reminding::RemindsHandoverCallers;
-    use crate::handover_reminding::RemindsHandoverCallers;
-    use crate::store::SeedsRole;
+    use crate::store::context::RecordsContextSize;
     use crate::store::handover_reminders::{
         HandoverReminder, OpensHandoverReminder, SchedulesHandoverReminders,
     };
     use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+    use crate::store::{ManagesMetaflowState, SeedsRole};
     use flow_ethos::{Metaflow, State};
     let fixture = NexusFixture::new();
     let address = address();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Thresholds(vec![
+            meta_signal_flow::ConfigureThreshold {
+                model_name: "m".into(),
+                refresh: 101,
+            },
+        ]))
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::HandoverPolicies(
+            vec![meta_signal_flow::HandoverPolicy {
+                model_name: "m".into(),
+                warning_share_left: 15,
+                reminder_text: "configured".into(),
+                every_minutes: 5,
+            }],
+        ))
+        .unwrap();
     fixture.nexus.store.seed_role(signal_flow::Caller {
         flow_id: "fixture-seat".into(),
         aspect: Aspect::Field,
@@ -168,6 +190,11 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
         .nexus
         .store
         .ensure_live_handover(&address, "fixture-seat")
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .record_context_size("fixture-seat", 86)
         .unwrap();
     let reminder = HandoverReminder::open_handover_reminder(
         address.clone(),
@@ -192,6 +219,11 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
         .unwrap();
     assert_eq!(held.sent, 1);
     assert_eq!(held.next_due, 310);
+    let metaflow = fixture.nexus.store.metaflow(&address).unwrap().unwrap();
+    assert!(metaflow.queue.iter().any(|entry| matches!(
+        &entry.message,
+        flow_ethos::Message::HardAbrupt(flow_ethos::Request::Notice(_))
+    )));
 }
 
 #[test]

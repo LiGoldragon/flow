@@ -1889,6 +1889,39 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
             }),
         )
         .expect("request ends");
+    let failing = fixture.nexus.store.engine.begin_atomic_commit().retract(
+        fixture.nexus.store.logical_deliveries.current,
+        sema_engine::RecordKey::new("missing-archive-row"),
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .commit_archive_request(&request_id, &core(), failing)
+            .is_err(),
+        "a fault in the archive commit is returned"
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .request_binding(&request_id)
+            .expect("binding reads after failed archive")
+            .expect("failed archive keeps the binding")
+            .logical_delivery_id,
+        logical_id
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .read_logical_delivery_snapshots(&core(), Some(0))
+            .expect("history reads after failed archive")
+            .delivery_snapshot_vector
+            .iter()
+            .all(|snapshot| snapshot.delivery_state != signal_flow::DeliveryState::Archived),
+        "the failed commit writes no Archived event"
+    );
     assert_eq!(
         fixture
             .nexus

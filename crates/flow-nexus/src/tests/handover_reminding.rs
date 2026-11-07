@@ -129,6 +129,39 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
 }
 
 #[test]
+fn reminder_admission_waits_for_handover_gate_before_commit() {
+    use super::NexusFixture;
+    use crate::store::logical_delivery::RecordsLogicalDeliveries;
+    use signal_flow::{Message, Request};
+    let fixture = NexusFixture::new();
+    let address = address();
+    fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+        address: address.clone(), state: flow_ethos::State::Awake("fixture-seat".into()),
+        past: vec![], queue: vec![],
+    });
+    fixture.nexus.store.ensure_live_handover(&address, "fixture-seat").unwrap();
+    let reminder = HandoverReminder::open_handover_reminder(address.clone(), 0, "m".into(), 10, 5, "configured".into()).unwrap();
+    let gate = fixture.nexus.store.handover_write_gate.lock().unwrap();
+    let store = fixture.nexus.store.clone();
+    let (started, started_receiver) = std::sync::mpsc::channel();
+    let (finished_sender, finished) = std::sync::mpsc::channel();
+    let join = std::thread::spawn(move || {
+        started.send(()).unwrap();
+        let result = store.accept_handover_reminder(
+            &address,
+            Message::HardAbrupt(Request::Notice("notice".into())),
+            reminder,
+        ).unwrap();
+        finished_sender.send(result).unwrap();
+    });
+    started_receiver.recv().unwrap();
+    assert!(finished.try_recv().is_err());
+    drop(gate);
+    assert!(join.join().is_ok());
+    assert!(finished.try_recv().is_ok());
+}
+
+#[test]
 fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
     const CLAUDE_MODEL: &str = "fixture-model";
     const CLAUDE_SEAT: &str = "fixture-seat";

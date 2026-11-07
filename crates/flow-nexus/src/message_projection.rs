@@ -199,25 +199,35 @@ pub(crate) trait ProjectsQueueEntry {
 
 impl ProjectsQueueEntry for flow_ethos::QueueEntry {
     fn visible_input(&self, _recipient: &flow_ethos::Address) -> VisibleNativeInput {
-        let visible_sender = match &self.sent_by {
+        visible_input(&self.request_id, &self.sent_by, &self.message)
+    }
+}
+
+/// Projects one admitted message into the exact public form typed to its
+/// recipient. Admission uses this before minting with a four-character
+/// placeholder, so its byte budget and delivery use one projection.
+pub(crate) fn visible_input(
+    request_id: &flow_ethos::RequestId,
+    sent_by: &SentBy,
+    message: &Message,
+) -> VisibleNativeInput {
+    VisibleNativeInput {
+        visible_sender: match sent_by {
             SentBy::Sender(address) => VisibleSender::Sender(address.clone()),
             SentBy::Unknown => VisibleSender::Unknown,
             SentBy::Flow => VisibleSender::Notification,
-        };
-        VisibleNativeInput {
-            visible_sender,
-            delivered_message: match &self.message {
-                Message::HardAbrupt(request) => {
-                    DeliveredMessage::HardAbrupt(delivered_request(&self.request_id, request))
-                }
-                Message::MiddleAbrupt(request) => {
-                    DeliveredMessage::MiddleAbrupt(delivered_request(&self.request_id, request))
-                }
-                Message::Soft(request) => {
-                    DeliveredMessage::Soft(delivered_request(&self.request_id, request))
-                }
-            },
-        }
+        },
+        delivered_message: match message {
+            Message::HardAbrupt(request) => {
+                DeliveredMessage::HardAbrupt(delivered_request(request_id, request))
+            }
+            Message::MiddleAbrupt(request) => {
+                DeliveredMessage::MiddleAbrupt(delivered_request(request_id, request))
+            }
+            Message::Soft(request) => {
+                DeliveredMessage::Soft(delivered_request(request_id, request))
+            }
+        },
     }
 }
 

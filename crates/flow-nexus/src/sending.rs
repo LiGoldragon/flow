@@ -20,7 +20,6 @@ use crate::caller::{
     LocatesCodexThread, NamesRootThread, ProcessAuthority, ReadsProcess,
 };
 use crate::composition::JoinsPurpose;
-use crate::delivery::body::RendersNativeContent;
 use crate::generated::operation::{Failed_Data, Operation, Outcome};
 use crate::harness_command::{
     HarnessCommandResources, RehearsesHarnessResources, RendersShellCommand,
@@ -71,8 +70,17 @@ impl MeasuresSendPayload for Request {
 
 impl MeasuresSendPayload for Message {
     fn native_prompt_bytes(&self, sender: &Address) -> usize {
-        let _ = sender;
-        self.native_content().len()
+        const PLACEHOLDER_REQUEST_ID: &str = "0000";
+        let request_id = PLACEHOLDER_REQUEST_ID.to_owned();
+        vec![crate::message_projection::visible_input(
+            &request_id,
+            &SentBy::Sender(sender.clone()),
+            self,
+        )]
+        .datomize(Vec::new())
+        .protosize()
+        .compact()
+        .len()
     }
 }
 

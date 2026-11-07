@@ -621,8 +621,6 @@
             "tests::restarting::restart_close_refused_flow_unchanged";
           flow-restart-resume-refused-custody-kept = context.exactTest "flow-nexus"
             "tests::restarting::restart_resume_refused_custody_kept";
-          flow-restart-harness-already-dead = context.exactTest "flow-nexus"
-            "tests::restarting::restart_harness_already_dead";
           flow-restart-unknown-flow = context.exactTest "flow-nexus"
             "tests::restarting::restart_unknown_flow";
           flow-restart-no-held-session = context.exactTest "flow-nexus"
@@ -690,6 +688,38 @@
             "tests::restarting::restart_pid_reused_exited_by_birth_only";
           flow-restart-startup-recovery-uses-recorded-identity = context.exactTest "flow-nexus"
             "tests::restarting::restart_startup_recovery_uses_recorded_identity";
+          # 0.53.1: an exit is proven only by a pid not found, another birth
+          # at the pid, or a Z or X state; anything else is unproven. A
+          # first restart whose old pane is gone needs its recorded harness
+          # so proven, before any write.
+          flow-restart-exit-proof-not-found = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_not_found_proves_exit";
+          flow-restart-exit-proof-other-birth = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_other_birth_proves_exit";
+          flow-restart-exit-proof-zombie-and-dead = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_zombie_and_dead_prove_exit";
+          flow-restart-exit-proof-permission-denied-unproven = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_permission_denied_unproven";
+          flow-restart-exit-proof-io-error-unproven = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_io_error_unproven";
+          flow-restart-exit-proof-malformed-stat-unproven = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_malformed_stat_unproven";
+          flow-restart-exit-proof-unparseable-start-time-unproven = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_unparseable_start_time_unproven";
+          flow-restart-exit-proof-invalid-pid-unproven = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_invalid_pid_unproven";
+          flow-restart-exit-proof-unparsed-birth-unproven = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_unparsed_birth_unproven";
+          flow-restart-exit-proof-live-states-running = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_live_states_same_birth_running";
+          flow-restart-exit-proof-proc-reads-the-kernel = context.exactTest "flow-nexus"
+            "tests::restarting::restart_exit_proof_proc_reads_the_kernel";
+          flow-restart-first-old-pane-gone-harness-alive-refused = context.exactTest "flow-nexus"
+            "tests::restarting::restart_first_old_pane_gone_harness_alive_refused";
+          flow-restart-first-old-pane-gone-unrecorded-refused-unwitnessed = context.exactTest "flow-nexus"
+            "tests::restarting::restart_first_old_pane_gone_unrecorded_refused_unwitnessed";
+          flow-restart-first-old-pane-gone-harness-exited-proceeds = context.exactTest "flow-nexus"
+            "tests::restarting::restart_first_old_pane_gone_harness_exited_proceeds";
           # The cutover with both Nexuses live: the old side cannot take or end
           # the custody a new Nexus Adopted and Restarted.
           flow-restart-cutover-two-nexus = context.exactTest "flow-nexus"

@@ -12,7 +12,15 @@
 //! composed and validated in full: its launch composed, its root and
 //! harness flags read, its title, settings and command line built as the
 //! spawn builds them. A refusal there closes nothing and writes nothing:
-//! the old harness runs on and its record stays as it was. Each phase is
+//! the old harness runs on and its record stays as it was.
+//!
+//! A harness's exit is proven only positively: `/proc/<pid>` not found, a
+//! parsed start time other than its recorded birth, or a parsed state of Z
+//! or X. Anything else read, or not read, is unproven, and nothing proceeds
+//! on it. A first restart names its old harness before any write: the one
+//! the old pane shows, else the birth a restart recorded for that route.
+//! None is refused `ExitUnwitnessed`; with the old pane gone, a harness not
+//! proven exited is refused `ExitUnproven`. Each phase is
 //! written before the effect it names: Closing before the old pane is
 //! closed, Closed once the old pane is gone and its harness process proven
 //! exited, Opening before the new pane is created, Spawning with that pane
@@ -180,19 +188,87 @@ trait FindsSeatProcesses {
     fn panes_holding(&self, herdr_session_name: &str, session: &str) -> Option<Vec<HerdrRoute>>;
 }
 
-/// Whether a process the kernel knew has ended.
-trait ProvesExit {
-    /// Gone from `/proc`, another process at its pid, or a zombie.
-    fn has_exited(&self) -> bool;
-    /// Exited now or within `wait`.
-    fn exited_within(&self, wait: Duration) -> bool {
+/// What the kernel shows of a process Flow recorded by its birth. Only
+/// `Exited` lets anything proceed on that process's end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExitProof {
+    /// The process is proven ended.
+    Exited(ExitEvidence),
+    /// Born when the record says and in a live state: running.
+    Running,
+    /// Nothing read proves the process ended, nor that it runs.
+    Unproven(ExitDoubt),
+}
+
+/// What proves a recorded process ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExitEvidence {
+    /// `/proc/<pid>` is not found.
+    Gone,
+    /// The process at its pid was born at another time.
+    Reborn,
+    /// The process at its pid, born when the record says, is a zombie (Z)
+    /// or dead (X).
+    Defunct,
+}
+
+/// Why what was read proves no exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExitDoubt {
+    /// The pid is not positive, beyond the kernel's pid_max, or the
+    /// pid_max is unread.
+    InvalidPid,
+    /// The recorded birth is not a start time the kernel gives.
+    BirthUnparsed,
+    /// `/proc/<pid>/stat` refused for permission.
+    PermissionDenied,
+    /// `/proc/<pid>/stat` failed otherwise than not found.
+    Unreadable,
+    /// The stat names no state after its command.
+    Malformed,
+    /// The stat's start time does not parse.
+    StartUnparsed,
+}
+
+/// The kernel's view of processes, read through `/proc` in production and
+/// fed case by case in tests.
+pub(crate) trait ReadsProcessStatus {
+    /// `/proc/<pid>/stat` whole, or the error reading it gave.
+    fn process_stat(&self, pid: u32) -> std::io::Result<String>;
+    /// The kernel's pid_max; None when unread.
+    fn pid_max(&self) -> Option<u32>;
+}
+
+/// The kernel's `/proc`.
+pub(crate) struct ProcFs;
+
+impl ReadsProcessStatus for ProcFs {
+    fn process_stat(&self, pid: u32) -> std::io::Result<String> {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+    }
+
+    fn pid_max(&self) -> Option<u32> {
+        std::fs::read_to_string("/proc/sys/kernel/pid_max")
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+}
+
+/// Whether a process the kernel knew has ended, proven only positively.
+pub(crate) trait ProvesExit {
+    /// Exited only when `/proc/<pid>` is not found, its parsed start time
+    /// differs from the recorded birth, or its parsed state is Z or X.
+    fn exit_proof(&self, kernel: &impl ReadsProcessStatus) -> ExitProof;
+    /// The proof now, or within `wait` once it is Exited; the last one read
+    /// otherwise.
+    fn exit_proof_within(&self, kernel: &impl ReadsProcessStatus, wait: Duration) -> ExitProof {
         let deadline = std::time::Instant::now() + wait;
         loop {
-            if self.has_exited() {
-                return true;
-            }
-            if std::time::Instant::now() >= deadline {
-                return false;
+            let proof = self.exit_proof(kernel);
+            if matches!(proof, ExitProof::Exited(_)) || std::time::Instant::now() >= deadline {
+                return proof;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -200,20 +276,46 @@ trait ProvesExit {
 }
 
 impl ProvesExit for Process {
-    fn has_exited(&self) -> bool {
-        let Ok(pid) = u32::try_from(self.pid) else {
-            return true;
+    fn exit_proof(&self, kernel: &impl ReadsProcessStatus) -> ExitProof {
+        let Some(pid) = u32::try_from(self.pid)
+            .ok()
+            .filter(|pid| *pid > 0)
+            .filter(|pid| kernel.pid_max().is_some_and(|pid_max| *pid <= pid_max))
+        else {
+            return ExitProof::Unproven(ExitDoubt::InvalidPid);
         };
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-            return true;
+        if self.started < 0 {
+            return ExitProof::Unproven(ExitDoubt::BirthUnparsed);
+        }
+        let stat = match kernel.process_stat(pid) {
+            Ok(stat) => stat,
+            Err(error) => {
+                return match error.kind() {
+                    std::io::ErrorKind::NotFound => ExitProof::Exited(ExitEvidence::Gone),
+                    std::io::ErrorKind::PermissionDenied => {
+                        ExitProof::Unproven(ExitDoubt::PermissionDenied)
+                    }
+                    _ => ExitProof::Unproven(ExitDoubt::Unreadable),
+                };
+            }
         };
         let Some((_, fields)) = stat.rsplit_once(") ") else {
-            return true;
+            return ExitProof::Unproven(ExitDoubt::Malformed);
         };
         let mut fields = fields.split_whitespace();
-        let state = fields.next();
-        let started = fields.nth(18).and_then(|field| field.parse::<i64>().ok());
-        matches!(state, Some("Z" | "X")) || started != Some(self.started)
+        let Some(state) = fields.next().filter(|state| state.chars().count() == 1) else {
+            return ExitProof::Unproven(ExitDoubt::Malformed);
+        };
+        let Some(started) = fields.nth(18).and_then(|field| field.parse::<u64>().ok()) else {
+            return ExitProof::Unproven(ExitDoubt::StartUnparsed);
+        };
+        if i64::try_from(started) != Ok(self.started) {
+            ExitProof::Exited(ExitEvidence::Reborn)
+        } else if matches!(state, "Z" | "X") {
+            ExitProof::Exited(ExitEvidence::Defunct)
+        } else {
+            ExitProof::Running
+        }
     }
 }
 
@@ -630,12 +732,55 @@ impl RestartsInSteps for RunningNexus {
             }
             PanePresence::Bare | PanePresence::Absent => {}
         }
-        let process_option = match presence {
+        // The harness the old pane shows running the session, else the
+        // birth a restart recorded for the seat at this route. None proves
+        // no exit; nor does a pane's absence: a harness can outlive its
+        // pane. Refused here, nothing is written and the old state stands.
+        let shown = match presence {
             PanePresence::Present | PanePresence::Bare => {
                 self.herdr.harness_process(&route, &node.session_id)
             }
             PanePresence::Absent | PanePresence::Unknown => None,
         };
+        let recorded = match self.store.seat_birth(flow_id) {
+            Ok(birth) => birth
+                .filter(|birth| {
+                    birth.herdr_route.herdr_session_name == route.herdr_session_name
+                        && birth.herdr_route.herdr_pane_id == route.herdr_pane_id
+                        && birth.herdr_route.herdr_terminal_id == route.herdr_terminal_id
+                })
+                .map(|birth| birth.process),
+            Err(error) => return Err(Box::new(error.refused())),
+        };
+        let Some(process) = shown.or(recorded) else {
+            eprintln!(
+                "flow-nexus: restart of flow {flow_id} refused: {:?}: no harness of pane {} is seen or recorded",
+                MissingExit::ExitUnwitnessed,
+                route.herdr_pane_id
+            );
+            return Err(Box::new(
+                RestartFailure::ResumeRefused(format!("{:?}", MissingExit::ExitUnwitnessed))
+                    .answer(flow_id),
+            ));
+        };
+        // With its pane gone there is nothing to close: the harness is
+        // proven exited by its birth now, or the restart is refused.
+        if presence == PanePresence::Absent {
+            let proof = process.exit_proof(&ProcFs);
+            if !matches!(proof, ExitProof::Exited(_)) {
+                eprintln!(
+                    "flow-nexus: restart of flow {flow_id} refused: {:?}: its pane is gone and its harness, pid {} started {}, is {proof:?}",
+                    MissingExit::ExitUnproven,
+                    process.pid,
+                    process.started
+                );
+                return Err(Box::new(
+                    RestartFailure::ResumeRefused(format!("{:?}", MissingExit::ExitUnproven))
+                        .answer(flow_id),
+                ));
+            }
+        }
+        let process_option = Some(process);
         let record = RestartRecord {
             flow_id: flow_id.to_owned(),
             native_session_id: node.session_id.clone(),
@@ -698,7 +843,8 @@ impl RestartsInSteps for RunningNexus {
             }
         }
         // Closed only by positive identity: the pane gone, no pane holding
-        // the session, and the harness process it showed exited.
+        // the session, and the recorded harness proven exited by its birth;
+        // a seat with no harness recorded is never Closed.
         let gone = self.herdr.pane_presence(&old) == PanePresence::Absent
             && self
                 .seat_sessions(&record)
@@ -710,7 +856,7 @@ impl RestartsInSteps for RunningNexus {
                 .old_seat
                 .process_option
                 .as_ref()
-                .is_none_or(ProvesExit::has_exited);
+                .is_some_and(|process| matches!(process.exit_proof(&ProcFs), ExitProof::Exited(_)));
         if !gone {
             return Err(Box::new(self.failed(record, RestartFailure::CloseUnproven)));
         }
@@ -847,7 +993,7 @@ impl RestartsInSteps for RunningNexus {
             let pane = &failed.old_seat.herdr_route.herdr_pane_id;
             match &failed.old_seat.process_option {
                 Some(process) => eprintln!(
-                    "flow-nexus: restart of flow {flow_id} stays Failed: {missing:?}: the harness of pane {pane}, pid {} started {}, has not exited",
+                    "flow-nexus: restart of flow {flow_id} stays Failed: {missing:?}: the harness of pane {pane}, pid {} started {}, is not proven exited",
                     process.pid, process.started
                 ),
                 None => eprintln!(
@@ -908,8 +1054,10 @@ impl RestartsInSteps for RunningNexus {
     fn exit_witness(&self, record: &RestartRecord, patience: Duration) -> Result<(), MissingExit> {
         match &record.old_seat.process_option {
             None => Err(MissingExit::ExitUnwitnessed),
-            Some(process) if process.exited_within(patience) => Ok(()),
-            Some(_) => Err(MissingExit::ExitUnproven),
+            Some(process) => match process.exit_proof_within(&ProcFs, patience) {
+                ExitProof::Exited(_) => Ok(()),
+                ExitProof::Running | ExitProof::Unproven(_) => Err(MissingExit::ExitUnproven),
+            },
         }
     }
 

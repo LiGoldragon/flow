@@ -72,9 +72,9 @@ that pane. No Memory schema changes.
 
 - A reopen by itself, after a failure in this Nexus or at a Nexus start,
   needs that harness recorded and proven exited by its birth, exactly as the
-  old seat's exit is proven: gone from `/proc`, another process at its pid
-  (same pid, another start), or a zombie. The failed pane gone and no pane
-  holding the session are needed as well, and never enough alone.
+  old seat's exit is proven; see "An exit is proven, never assumed" below.
+  The failed pane gone and no pane holding the session are needed as well,
+  and never enough alone.
 - A harness never seen is `ExitUnwitnessed`; one seen and still running is
   `ExitUnproven`. Either way the record stays Failed, logged with that word,
   the session, the queue and the Address held. A resume refused before any
@@ -88,6 +88,44 @@ that pane. No Memory schema changes.
   Retire takes a Failed record as before. A record with no harness seen is
   never retried, after a Stop either; what frees it besides Retire is
   undecided.
+
+## An exit is proven, never assumed
+
+A recorded harness's exit is proven by three readings of the kernel, and by
+nothing else: `/proc/<pid>/stat` not found; a parsed start time other than
+the recorded birth; or a parsed state of Z or X with the recorded birth.
+Until this change every failure to read was taken as an exit.
+
+- Permission refused, any other I/O error, a stat with no state after its
+  command, a start time that does not parse, a pid not positive or beyond
+  the kernel's `pid_max` (or `pid_max` unread), and a negative recorded
+  birth are unproven. A stat is used only when its state and its start time
+  both parse; a Z or X with an unparseable start time is unproven. R, S, D
+  or any other state with the recorded birth is running.
+- The answer is a type, `ExitProof.[ Exited.ExitEvidence Running
+  Unproven.ExitDoubt ]`, `ExitEvidence.[ Gone Reborn Defunct ]`,
+  `ExitDoubt.[ InvalidPid BirthUnparsed PermissionDenied Unreadable
+  Malformed StartUnparsed ]`, internal to `restarting.rs`. Only `Exited`
+  lets a restart write Closed, reopen by itself, or retry. A reopen's wait
+  ends early only on `Exited`.
+- `/proc` is read through the `ReadsProcessStatus` seam: `ProcFs` in
+  production, a fed kernel in tests.
+- A first restart names its old harness before anything is written: the one
+  the old pane shows running the session, else the birth a restart bound
+  for the seat at the flow's current route (its `SeatBirth`, same Herdr
+  session, pane and terminal). None is refused
+  `RestartRefused.ResumeRefused` with `ExitUnwitnessed`, whatever the pane
+  shows. With the old pane gone, that harness must already be proven
+  exited, or the restart is refused with `ExitUnproven`. Either refusal
+  writes no record and closes, opens and starts nothing.
+- Closed is never written for an old seat with no harness recorded: a
+  pane's absence alone proves nothing. 0.53.1 before this change closed a
+  pane with no harness seen, or took a gone pane, as proof.
+- A flow whose pane is gone and that was never restarted has no recorded
+  harness, so its restart is now refused `ExitUnwitnessed`; the owner's
+  Stop and Retire stand. What else frees it is undecided.
+- The test `restart_harness_already_dead` and its check
+  `flow-restart-harness-already-dead` are gone: their case is now refused.
 
 ## Curriculum 478c's schema
 

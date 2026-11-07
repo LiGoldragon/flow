@@ -18,7 +18,10 @@ use crate::generated::memory::SeatBirth;
 use crate::generated::operation::{Operation, Outcome, Record_Data};
 use crate::performing::Performs;
 use crate::reporting::RecordsReports;
-use crate::restarting::{FencesSeatEvents, SeatWitness};
+use crate::restarting::{
+    ExitDoubt, ExitEvidence, ExitProof, FencesSeatEvents, ProcFs, ProvesExit, ReadsProcessStatus,
+    SeatWitness,
+};
 use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow};
 use crate::store::restart::RecordsRestarts;
 use crate::store::successor::OwesSuccessors;
@@ -764,13 +767,60 @@ fn restart_resume_refused_custody_kept() {
     assert_eq!(record(&fixture), None);
 }
 
-/// The old pane is already gone and no spawn is recorded: the restart
-/// closes nothing and resumes.
+/// The old pane is already gone and no harness of it is seen or recorded:
+/// a pane's absence proves no exit, so the restart is refused
+/// ExitUnwitnessed before any write: no record, nothing closed or started,
+/// abc123 Active and Awake in w1:p3 as it was.
 #[test]
-fn restart_harness_already_dead() {
+fn restart_first_old_pane_gone_unrecorded_refused_unwitnessed() {
     let mut fixture = NexusFixture::new();
     let world = fixture.restart_world(false);
-    assert_eq!(record(&fixture), None, "no spawn is in flight");
+    let before = node(&fixture);
+    assert_eq!(restarted(&fixture), resume_refused("ExitUnwitnessed"));
+    assert_eq!(record(&fixture), None, "nothing written");
+    assert_eq!(fixture.nexus.store.seat_birth(FLOW).unwrap(), None);
+    assert_eq!(node(&fixture), before);
+    assert_eq!(route_pane(&fixture), OLD_PANE);
+    assert!(world.resumes().is_empty(), "{}", world.fresh.calls());
+    assert!(
+        world.calls_naming("pane close").is_empty(),
+        "{}",
+        world.fresh.calls()
+    );
+}
+
+/// The old pane is gone and the harness recorded for its seat still runs,
+/// born when the record says: refused ExitUnproven before any write, the
+/// harness untouched, no record, nothing closed or started, abc123 and its
+/// recorded birth as they were.
+#[test]
+fn restart_first_old_pane_gone_harness_alive_refused() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(false);
+    let running = live_process();
+    let birth = born_at_route(&fixture, running.1.clone());
+    let before = node(&fixture);
+    assert_eq!(restarted(&fixture), resume_refused("ExitUnproven"));
+    assert_eq!(record(&fixture), None, "nothing written");
+    assert_eq!(fixture.nexus.store.seat_birth(FLOW).unwrap(), Some(birth));
+    assert_eq!(node(&fixture), before);
+    assert!(FlowStore::process_is_live(&running.1), "harness untouched");
+    assert!(world.resumes().is_empty(), "{}", world.fresh.calls());
+    assert!(
+        world.calls_naming("pane close").is_empty(),
+        "{}",
+        world.fresh.calls()
+    );
+}
+
+/// The old pane is gone and the harness recorded for its seat is proven
+/// exited by its birth: the restart closes nothing and resumes the same
+/// session.
+#[test]
+fn restart_first_old_pane_gone_harness_exited_proceeds() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(false);
+    born_at_route(&fixture, exited_process());
     assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
     assert!(
         world.calls_naming("pane close").is_empty(),
@@ -779,6 +829,58 @@ fn restart_harness_already_dead() {
     );
     assert_eq!(world.resumes().len(), 1);
     assert_eq!(route_pane(&fixture), NEW_PANE);
+    assert_eq!(node(&fixture).session_id, world.seat.session);
+    assert_eq!(record(&fixture), None);
+}
+
+/// A restart bound abc123's seat at the route it runs in now, `process` its
+/// harness: its SeatBirth, recorded as a bind records it.
+fn born_at_route(fixture: &NexusFixture, process: Process) -> SeatBirth {
+    let HerdrRouteSelection::Available(route) = node(fixture).herdr_route_selection else {
+        panic!("abc123 is routed")
+    };
+    let pane = HerdrPaneBinding {
+        launch_request_id: "restart-earlier".into(),
+        herdr_session_name: route.herdr_session_name.clone(),
+        herdr_agent_name: route.herdr_agent_name.clone(),
+        herdr_workspace_id: "w1".into(),
+        herdr_pane_id: route.herdr_pane_id.clone(),
+        herdr_terminal_id: route.herdr_terminal_id.clone(),
+    };
+    let store = &fixture.nexus.store;
+    store
+        .record_restart(RestartRecord {
+            restart_phase: RestartPhase::Spawning(pane),
+            ..spawning_record_at(fixture)
+        })
+        .unwrap();
+    let birth = SeatBirth {
+        flow_id: FLOW.into(),
+        herdr_route: route,
+        process,
+    };
+    assert!(store.rebind_restarted(birth.clone()).unwrap());
+    assert_eq!(record(fixture), None);
+    birth
+}
+
+/// abc123's restart record, its old seat its current route, no harness.
+fn spawning_record_at(fixture: &NexusFixture) -> RestartRecord {
+    let node = node(fixture);
+    let HerdrRouteSelection::Available(route) = node.herdr_route_selection else {
+        panic!("abc123 is routed")
+    };
+    RestartRecord {
+        flow_id: FLOW.into(),
+        native_session_id: node.session_id,
+        address: address(Model::Sol),
+        old_seat: OldSeat {
+            herdr_route: route,
+            process_option: None,
+        },
+        restart_phase: RestartPhase::Closing,
+        attempts: 1,
+    }
 }
 
 /// A flow Flow does not hold is refused UnknownFlow, and nothing is closed.
@@ -1797,6 +1899,7 @@ fn restart_failure_every_time_spends_bound_custody_kept() {
 fn restart_start_in_flight_not_respawned() {
     let mut fixture = NexusFixture::new();
     let world = fixture.restart_world(false);
+    born_at_route(&fixture, exited_process());
     fs::write(world.fresh.state.join("close-refused"), "").unwrap();
     fs::write(world.fresh.state.join("resume-refused"), "").unwrap();
 
@@ -3459,4 +3562,210 @@ fn restart_composition_against_curriculum_socket() {
         }
     }
     eprintln!("expect {expect}: {composed} composed");
+}
+
+// The proof of a recorded harness's exit, fed case by case through the
+// process-status seam: only a pid not found, another birth at the pid, or a
+// zombie or dead state proves it; everything else is unproven.
+
+/// A kernel fed one answer for every stat read, with `pid_max` as given,
+/// counting the reads.
+struct FedKernel {
+    stat: Result<String, std::io::ErrorKind>,
+    pid_max: Option<u32>,
+    reads: std::cell::Cell<usize>,
+}
+
+impl ReadsProcessStatus for FedKernel {
+    fn process_stat(&self, _pid: u32) -> std::io::Result<String> {
+        self.reads.set(self.reads.get() + 1);
+        self.stat.clone().map_err(std::io::Error::from)
+    }
+
+    fn pid_max(&self) -> Option<u32> {
+        self.pid_max
+    }
+}
+
+/// The pid_max the fed kernel reports unless a case says otherwise.
+const FED_PID_MAX: u32 = 4_194_304;
+
+/// The recorded harness every case asks about: pid 4242, born at tick 777.
+const RECORDED: Process = Process {
+    pid: 4242,
+    started: 777,
+};
+
+/// A kernel whose stat read answers `stat`.
+fn fed(stat: Result<String, std::io::ErrorKind>) -> FedKernel {
+    FedKernel {
+        stat,
+        pid_max: Some(FED_PID_MAX),
+        reads: std::cell::Cell::new(0),
+    }
+}
+
+/// `/proc/4242/stat` as the kernel writes it, in `state`, started at
+/// `started`; the command holds a `) ` as a command may.
+fn stat_line(state: &str, started: &str) -> String {
+    format!(
+        "4242 (claude) x) {state} 1 4242 4242 0 -1 4194560 10 0 0 0 5 2 0 0 20 0 3 0 {started} 1000 200 18446744073709551615"
+    )
+}
+
+#[test]
+fn restart_exit_proof_not_found_proves_exit() {
+    let kernel = fed(Err(std::io::ErrorKind::NotFound));
+    assert_eq!(
+        RECORDED.exit_proof(&kernel),
+        ExitProof::Exited(ExitEvidence::Gone)
+    );
+    assert_eq!(kernel.reads.get(), 1);
+}
+
+#[test]
+fn restart_exit_proof_other_birth_proves_exit() {
+    for state in ["R", "S", "D", "Z"] {
+        assert_eq!(
+            RECORDED.exit_proof(&fed(Ok(stat_line(state, "778")))),
+            ExitProof::Exited(ExitEvidence::Reborn),
+            "{state}"
+        );
+    }
+}
+
+#[test]
+fn restart_exit_proof_zombie_and_dead_prove_exit() {
+    for state in ["Z", "X"] {
+        assert_eq!(
+            RECORDED.exit_proof(&fed(Ok(stat_line(state, "777")))),
+            ExitProof::Exited(ExitEvidence::Defunct),
+            "{state}"
+        );
+    }
+}
+
+#[test]
+fn restart_exit_proof_permission_denied_unproven() {
+    assert_eq!(
+        RECORDED.exit_proof(&fed(Err(std::io::ErrorKind::PermissionDenied))),
+        ExitProof::Unproven(ExitDoubt::PermissionDenied)
+    );
+}
+
+#[test]
+fn restart_exit_proof_io_error_unproven() {
+    for kind in [
+        std::io::ErrorKind::Interrupted,
+        std::io::ErrorKind::InvalidData,
+        std::io::ErrorKind::UnexpectedEof,
+        std::io::ErrorKind::Other,
+    ] {
+        assert_eq!(
+            RECORDED.exit_proof(&fed(Err(kind))),
+            ExitProof::Unproven(ExitDoubt::Unreadable),
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn restart_exit_proof_malformed_stat_unproven() {
+    for stat in [
+        "",
+        "4242 claude Z 777",
+        "4242 (claude) ",
+        "4242 (claude) Zz 1 2",
+    ] {
+        assert_eq!(
+            RECORDED.exit_proof(&fed(Ok(stat.into()))),
+            ExitProof::Unproven(ExitDoubt::Malformed),
+            "{stat:?}"
+        );
+    }
+}
+
+#[test]
+fn restart_exit_proof_unparseable_start_time_unproven() {
+    for state in ["S", "Z", "X"] {
+        for started in ["", "seven", "-777", "7.77"] {
+            let stat = if started.is_empty() {
+                "4242 (claude) Z 1 4242".replace('Z', state)
+            } else {
+                stat_line(state, started)
+            };
+            assert_eq!(
+                RECORDED.exit_proof(&fed(Ok(stat.clone()))),
+                ExitProof::Unproven(ExitDoubt::StartUnparsed),
+                "{stat:?}"
+            );
+        }
+    }
+}
+
+/// A pid that cannot name a process is never read: the kernel here would
+/// answer not found, which would otherwise prove the exit.
+#[test]
+fn restart_exit_proof_invalid_pid_unproven() {
+    let beyond = i64::from(FED_PID_MAX) + 1;
+    for pid in [0, -1, -4242, beyond, i64::from(u32::MAX) + 1, i64::MAX] {
+        let kernel = fed(Err(std::io::ErrorKind::NotFound));
+        let process = Process { pid, started: 777 };
+        assert_eq!(
+            process.exit_proof(&kernel),
+            ExitProof::Unproven(ExitDoubt::InvalidPid),
+            "{pid}"
+        );
+        assert_eq!(kernel.reads.get(), 0, "{pid}");
+    }
+    let unread = FedKernel {
+        pid_max: None,
+        ..fed(Err(std::io::ErrorKind::NotFound))
+    };
+    assert_eq!(
+        RECORDED.exit_proof(&unread),
+        ExitProof::Unproven(ExitDoubt::InvalidPid)
+    );
+    assert_eq!(unread.reads.get(), 0);
+}
+
+/// A recorded birth no kernel start time can be is never compared: the
+/// kernel here would answer not found.
+#[test]
+fn restart_exit_proof_unparsed_birth_unproven() {
+    let kernel = fed(Err(std::io::ErrorKind::NotFound));
+    let process = Process {
+        pid: 4242,
+        started: -1,
+    };
+    assert_eq!(
+        process.exit_proof(&kernel),
+        ExitProof::Unproven(ExitDoubt::BirthUnparsed)
+    );
+    assert_eq!(kernel.reads.get(), 0);
+}
+
+#[test]
+fn restart_exit_proof_live_states_same_birth_running() {
+    for state in ["R", "S", "D"] {
+        assert_eq!(
+            RECORDED.exit_proof(&fed(Ok(stat_line(state, "777")))),
+            ExitProof::Running,
+            "{state}"
+        );
+    }
+}
+
+/// The production reader is the kernel's /proc: a running process is
+/// Running, and once ended and reaped it is Gone.
+#[test]
+fn restart_exit_proof_proc_reads_the_kernel() {
+    let running = live_process();
+    assert_eq!(running.1.exit_proof(&ProcFs), ExitProof::Running);
+    let ended = exited_process();
+    assert!(
+        matches!(ended.exit_proof(&ProcFs), ExitProof::Exited(_)),
+        "{:?}",
+        ended.exit_proof(&ProcFs)
+    );
 }

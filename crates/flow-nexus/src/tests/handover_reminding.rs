@@ -195,3 +195,23 @@ fn atomic_same_expected_reminder_state_rejects_duplicate_admission() {
     let second = fixture.nexus.store.accept_handover_reminder(&address, message, advanced).unwrap();
     assert!(matches!(second, PrivateSendResponse::Refused(_)));
 }
+
+#[test]
+fn reminder_state_reopens_with_anchored_due_without_duplicate_initial() {
+    use crate::store::handover_reminders::{HandoverReminder, OpensHandoverReminder, SchedulesHandoverReminders};
+    use crate::store::{ConfiguredStore, OpensFlowStore};
+    let configured = ConfiguredStore::new();
+    let path = configured.path();
+    let store = crate::store::FlowStore::open_configured(path).unwrap();
+    let address = address();
+    let reminder = HandoverReminder::open_handover_reminder(address.clone(), 4, "m".into(), 100, 5, "x".into()).unwrap();
+    store.hold_handover_reminder(reminder.clone()).unwrap();
+    let mut advanced = reminder.clone(); advanced.sent = 1; advanced.next_due = 400;
+    drop(store);
+    let reopened = crate::store::FlowStore::open_configured(path).unwrap();
+    assert_eq!(reopened.handover_reminder(&address, 4).unwrap(), Some(reminder));
+    reopened.hold_handover_reminder(advanced.clone()).unwrap();
+    drop(reopened);
+    let reopened = crate::store::FlowStore::open_configured(path).unwrap();
+    assert_eq!(reopened.handover_reminder(&address, 4).unwrap().unwrap().next_due, 400);
+}

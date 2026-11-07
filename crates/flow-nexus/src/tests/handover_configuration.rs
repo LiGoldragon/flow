@@ -71,6 +71,31 @@ fn invalid_handover_policy_and_count_are_typed_and_atomic() {
 }
 
 #[test]
+fn invalid_interval_and_duplicate_policy_are_typed_and_atomic() {
+    let fixture = ConfiguredStore::new();
+    let configuration = crate::store::ConfigurationOnlyStore::open(fixture.path()).unwrap();
+    let before = configuration.configuration_snapshot().unwrap();
+    let mut interval = policy();
+    interval.every_minutes = 0;
+    assert!(matches!(
+        configuration.configure_change(ConfigurationChange::HandoverPolicies(vec![interval])),
+        Err(crate::store::StoreError::HandoverConfigurationRefused(
+            meta_signal_flow::HandoverConfigurationRefusal::InvalidEveryMinutes
+        ))
+    ));
+    assert!(matches!(
+        configuration.configure_change(ConfigurationChange::HandoverPolicies(vec![
+            policy(),
+            policy()
+        ])),
+        Err(crate::store::StoreError::HandoverConfigurationRefused(
+            meta_signal_flow::HandoverConfigurationRefusal::DuplicatePolicy
+        ))
+    ));
+    assert_eq!(configuration.configuration_snapshot().unwrap(), before);
+}
+
+#[test]
 fn handover_count_zero_persists_through_configuration_and_running_reopen() {
     let fixture = ConfiguredStore::new();
     let path = fixture.path();

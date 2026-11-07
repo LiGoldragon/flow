@@ -1687,6 +1687,24 @@ impl SetsNativeOwnerEnvironmentForTests for FlowStore {
     }
 }
 
+#[cfg(test)]
+pub(crate) trait SetsRequestIdDrawerForTests {
+    fn set_request_id_drawer_for_tests(
+        &mut self,
+        drawer: Arc<dyn logical_delivery::DrawsRequestId>,
+    );
+}
+
+#[cfg(test)]
+impl SetsRequestIdDrawerForTests for FlowStore {
+    fn set_request_id_drawer_for_tests(
+        &mut self,
+        drawer: Arc<dyn logical_delivery::DrawsRequestId>,
+    ) {
+        self.request_id_drawer = drawer;
+    }
+}
+
 /// Every configuration family a store opened for configuration only
 /// holds: the Configuration snapshot but for the counters, which only the
 /// running store holds.

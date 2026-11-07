@@ -318,6 +318,10 @@ pub(crate) struct RetainedLogicalRequest {
 }
 
 pub trait AccountsQueueDelivery {
+    fn delivery_attempts_for(
+        &self,
+        logical_delivery_id: &str,
+    ) -> Result<Vec<QueueDeliveryAttempt>, StoreError>;
     /// Every admission whose complete typed logical request is retained.
     /// Legacy evidence is intentionally absent: it has no authoritative
     /// logical identity or chronology for answer correlation.
@@ -515,6 +519,25 @@ impl ReadsQueueDelivery for FlowStore {
 }
 
 impl AccountsQueueDelivery for FlowStore {
+    fn delivery_attempts_for(
+        &self,
+        logical_delivery_id: &str,
+    ) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
+        Ok(self
+            .engine
+            .match_records(QueryPlan::all(self.queue_delivery.attempts))?
+            .records()
+            .iter()
+            .filter(|attempt| {
+                matches!(
+                    &attempt.queue_evidence,
+                    QueueEvidence::Logical(entry)
+                        if entry.logical_delivery_id == logical_delivery_id
+                )
+            })
+            .cloned()
+            .collect())
+    }
     fn retained_logical_requests(&self) -> Result<Vec<RetainedLogicalRequest>, StoreError> {
         Ok(self
             .engine

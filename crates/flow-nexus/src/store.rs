@@ -24,6 +24,7 @@ pub(crate) mod opened_thread;
 pub(crate) mod queue_delivery;
 pub mod reminder;
 pub(crate) mod repair;
+pub(crate) mod request_id_upgrade;
 pub(crate) mod restart;
 pub(crate) mod send_call;
 pub(crate) mod send_outcome;

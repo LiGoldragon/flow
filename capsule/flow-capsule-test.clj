@@ -125,6 +125,90 @@
                   (= refusals (:h0-refusals failure)))))
     (finally (reset! flow-capsule/handover-h0-refusals saved))))
 
+;; The H0-only diagnostic keeps its bounded evidence before teardown, even
+;; when the launch body or an evidence probe fails. Credential/configuration
+;; files are outside the preservation allowlist.
+(let [scratch (str (fs/create-temp-dir))
+      private (str scratch "/private")
+      codex (str private "/codex")
+      witness (str scratch "/witness")
+      log (str private "/nexus.log")
+      saved-witness @flow-capsule/witness-dir
+      saved-log @flow-capsule/run-log]
+  (try
+    (doseq [dir [(str codex "/sessions/2026/11") (str codex "/archived_sessions")]]
+      (fs/create-dirs dir))
+    (spit (str codex "/sessions/2026/11/live.jsonl") "session\n")
+    (spit (str codex "/archived_sessions/archived.jsonl") "archived\n")
+    (spit (str codex "/session_index.jsonl") "index\n")
+    (spit (str codex "/auth.json") "credential-must-not-copy\n")
+    (spit (str codex "/config.toml") "configuration-must-not-copy\n")
+    (spit log "native server log\n")
+    (reset! flow-capsule/witness-dir witness)
+    (reset! flow-capsule/run-log log)
+    (with-redefs [flow-capsule/codex-home codex
+                  flow-capsule/h0-herdr-stdout (str private "/absent-herdr-stdout.log")
+                  flow-capsule/h0-herdr-stderr (str private "/absent-herdr-stderr.log")]
+      (flow-capsule/preserve-h0-diagnostic!))
+    (fs/delete-tree private)
+    (check "H0 preservation keeps live and archived native JSONL before private teardown"
+           (and (fs/exists? (str witness "/codex-sessions/2026/11/live.jsonl"))
+                (fs/exists? (str witness "/codex-archived-sessions/archived.jsonl"))
+                (fs/exists? (str witness "/codex-session-index/session_index.jsonl"))
+                (fs/exists? (str witness "/nexus-and-native.log"))))
+    (check "H0 preservation excludes login and configuration trees"
+           (and (not (fs/exists? (str witness "/auth.json")))
+                (not (fs/exists? (str witness "/config.toml")))
+                (not (str/includes? (slurp (str witness "/handover-H0-preservation.json"))
+                                    "credential-must-not-copy"))))
+    (finally
+      (reset! flow-capsule/witness-dir saved-witness)
+      (reset! flow-capsule/run-log saved-log)
+      (fs/delete-tree scratch))))
+
+(let [finished (atom false)
+      threw (try
+              (with-redefs [flow-capsule/finish-h0-diagnostic! #(reset! finished true)]
+                (flow-capsule/with-h0-diagnostic-finish
+                 #(throw (ex-info "launch failure" {}))))
+              false
+              (catch Exception _ true))]
+  (check "an H0 launch exception still runs preservation before it escapes"
+         (and threw @finished)))
+
+(let [header (str "#!/bin/sh\nexport CODEX_HOME=" flow-capsule/codex-home "\n")
+      exec (str "exec " flow-capsule/codex-binary " \"$@\"\n")
+      original (str header exec)
+      diagnostic (flow-capsule/codex-client-script true "/private/telemetry.py" "/witness/exec.jsonl")]
+  (check "the ordinary Codex wrapper bytes remain the original direct exec"
+         (= original (flow-capsule/codex-client-script false nil nil)))
+  (check "the diagnostic wrapper records once then retains the original exec bytes"
+         (and (str/starts-with? diagnostic header)
+              (str/includes? diagnostic "FLOW_CAPSULE_EXEC_PID=$$ python3")
+              (str/ends-with? diagnostic exec))))
+
+(let [request (str "Launch.{ { Mind test Terra } Predecessors.0 «" flow-capsule/brief "» }")]
+  (check "the H0 diagnostic freezes the original exact Terra Launch request"
+         (= request (flow-capsule/launch-query "Launch" flow-capsule/ho-seat)))
+  (check "the H0 diagnostic selects exactly one scenario"
+         (= 1 (count flow-capsule/h0-diagnostic-scenarios))))
+
+(let [scratch (str (fs/create-temp-dir))
+      saved @flow-capsule/witness-dir]
+  (try
+    (reset! flow-capsule/witness-dir scratch)
+    (with-redefs [flow-capsule/h0-herdr-command! (fn [& _] (throw (ex-info "probe failed" {})))]
+      (flow-capsule/h0-sample!))
+    (check "a sampler probe error is retained as evidence"
+           (str/includes? (slurp (str scratch "/" flow-capsule/h0-sampler-record-name))
+                          "sampler-error"))
+    (let [receipt (with-redefs [flow-capsule/preserve-h0-jsonl-tree!
+                                (fn [& _] (throw (ex-info "preservation failed" {})))]
+                    (flow-capsule/preserve-h0-diagnostic!))]
+      (check "a preservation error is recorded and returned without blocking teardown"
+             (= "preservation failed" (:error (first receipt)))))
+    (finally (reset! flow-capsule/witness-dir saved) (fs/delete-tree scratch))))
+
 ;; Optional Claude state is absent before any Claude seat starts. Teardown
 ;; therefore reads no directory and finds no trace.
 (let [scratch (str (fs/create-temp-dir))]

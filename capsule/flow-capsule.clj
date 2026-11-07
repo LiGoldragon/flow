@@ -1,6 +1,6 @@
 ;; flow-capsule: the real-world test of a Flow package in a capsule of its own.
 ;;
-;; Usage: flow-capsule <flow-package> [--workspace-only | --handover] [--keep-going] [--log <path>]
+;; Usage: flow-capsule <flow-package> [--workspace-only | --handover | --handover-h0-diagnostic] [--keep-going] [--log <path>]
 ;;        flow-capsule --takeover <old flow package> <new flow package> [--log <path>]
 ;;
 ;; --handover runs only the handover canary (the handover section) after the
@@ -48,7 +48,8 @@
 
 ;; ---------------------------------------------------------------- places
 
-(def handover-mode (boolean (some #{"--handover"} *command-line-args*)))
+(def h0-diagnostic-mode (boolean (some #{"--handover-h0-diagnostic"} *command-line-args*)))
+(def handover-mode (boolean (some #{"--handover" "--handover-h0-diagnostic"} *command-line-args*)))
 (def private-root "/tmp/flow-0532-01e4a4-capsule")
 (def operator-home (System/getenv "HOME"))
 (def session "flow-testing")
@@ -63,6 +64,10 @@
 ;; The capsule's own XDG_CONFIG_HOME: Herdr reads its config and keeps its
 ;; sessions there, so the capsule's Herdr shares nothing with the user's.
 (def herdr-session-dir (str config-home "/herdr/sessions/" session))
+(def h0-wrapper-record-name "handover-H0-exec-wrapper.jsonl")
+(def h0-sampler-record-name "handover-H0-herdr-sampler.jsonl")
+(def h0-herdr-stdout (str state-root "/herdr-server.stdout.log"))
+(def h0-herdr-stderr (str state-root "/herdr-server.stderr.log"))
 ;; The capsule's own Codex app-server: a private CODEX_HOME holding only a
 ;; copy of the user's Codex login, a private control socket, and a client
 ;; that runs Codex in that home. The Codex executable, its model and the
@@ -242,6 +247,96 @@
 (defn herdr-json [& args]
   (let [{:keys [out]} (apply herdr args)]
     (try (json/parse-string out true) (catch Exception _ nil))))
+
+(def h0-diagnostic-record-lock (Object.))
+(def h0-diagnostic-sampler (atom nil))
+(declare witness-dir)
+
+(defn append-h0-json! [name value]
+  (when-let [dir @witness-dir]
+    (locking h0-diagnostic-record-lock
+      (fs/create-dirs dir)
+      (let [path (str dir "/" name)]
+        (spit path (str (json/generate-string value) "\n") :append true)
+        (fs/set-posix-file-permissions path "rw-------")))))
+
+(defn h0-herdr-command! [label & args]
+  (let [result (apply run {:timeout 5000} "herdr" "--session" session args)]
+    (append-h0-json! h0-sampler-record-name
+                     (merge {:time (str (java.time.Instant/now)) :kind "herdr"
+                             :label label :arguments (vec args)} result))
+    result))
+
+(defn h0-matching-pane-ids [text]
+  (let [parsed (try (json/parse-string (or text "") true) (catch Exception _ nil))]
+    (set (keep (fn [pane]
+                 (when (some #(str/includes? (str %) "Mind test Terra") (vals pane))
+                   (some-> (:pane_id pane) str)))
+               (get-in parsed [:result :panes])))))
+
+(defn h0-matching-agent-pane-ids [text]
+  (let [parsed (try (json/parse-string (or text "") true) (catch Exception _ nil))
+        agents (or (get-in parsed [:result :agents]) (:result parsed))]
+    (set (keep (fn [agent]
+                 (when (and (map? agent)
+                            (some #(str/includes? (str %) "Mind test Terra") (vals agent)))
+                   (some-> (or (:pane_id agent) (:pane agent)) str)))
+               (when (sequential? agents) agents)))))
+
+(defn h0-process-stat! [pid]
+  (let [path (str "/proc/" pid "/stat")]
+    (try
+      (let [stat (slurp path)
+            close (.lastIndexOf stat ")")
+            fields (str/split (str/trim (subs stat (inc close))) #"\s+")]
+        (append-h0-json! h0-sampler-record-name
+                         {:time (str (java.time.Instant/now)) :kind "process-stat"
+                          :pid pid :state (first fields) :starttime (nth fields 19 nil)}))
+      (catch Exception e
+        (append-h0-json! h0-sampler-record-name
+                         {:time (str (java.time.Instant/now)) :kind "process-stat"
+                          :pid pid :state "gone" :error (.getMessage e)})))))
+
+(defn h0-recorded-pids []
+  (let [path (str @witness-dir "/" h0-wrapper-record-name)]
+    (set (keep (fn [line]
+                 (try (some-> (json/parse-string line true) :pid long)
+                      (catch Exception _ nil)))
+               (when (fs/exists? path) (str/split-lines (slurp path)))))))
+
+(defn h0-sample! []
+  (try
+    (let [panes (h0-herdr-command! "pane-list" "pane" "list")
+          agents (h0-herdr-command! "agent-list" "agent" "list")
+          ids (into (h0-matching-pane-ids (:out panes)) (h0-matching-agent-pane-ids (:out agents)))]
+      (doseq [pane ids]
+        (h0-herdr-command! "pane-get" "pane" "get" pane)
+        (h0-herdr-command! "pane-process-info" "pane" "process-info" "--pane" pane)
+        (h0-herdr-command! "pane-read" "pane" "read" pane "--source" "recent-unwrapped"
+                           "--lines" "200" "--format" "text")
+        (h0-herdr-command! "agent-get" "agent" "get" pane)
+        (h0-herdr-command! "agent-explain" "agent" "explain" pane "--json" "--verbose"))
+      (doseq [pid (h0-recorded-pids)] (h0-process-stat! pid)))
+    (catch Exception e
+      (append-h0-json! h0-sampler-record-name
+                       {:time (str (java.time.Instant/now)) :kind "sampler-error"
+                        :error (.getMessage e)}))))
+
+(defn start-h0-sampler! []
+  (h0-sample!)
+  (let [running (atom true)
+        worker (future
+                 (while @running
+                   (Thread/sleep 500)
+                   (when @running (h0-sample!))))]
+    (reset! h0-diagnostic-sampler {:running running :worker worker})))
+
+(defn stop-h0-sampler! []
+  (when-let [{:keys [running worker]} @h0-diagnostic-sampler]
+    (reset! running false)
+    (deref worker 10000 nil))
+  (h0-sample!)
+  (reset! h0-diagnostic-sampler nil))
 
 (defn marks
   "Herdr's pane marks: the Nexus places a caller by them, so every client
@@ -446,7 +541,10 @@
 (defn secondary-workspace-configuration [root]
   (workspace-configuration [[secondary root]]))
 
-(defn launch [addr] (flow (str "Launch.{ " addr " Predecessors.0 «" brief "» }")))
+(defn launch-query [head addr]
+  (str head ".{ " addr " Predecessors.0 «" brief "» }"))
+
+(defn launch [addr] (flow (launch-query "Launch" addr)))
 
 (defn awake-flow [addr] (let [m (current addr)] (when (= :awake (:state m)) (:flow m))))
 
@@ -740,6 +838,89 @@
     (fs/create-dirs dir)
     (spit (str dir "/" name) (or text ""))))
 
+(defn sha256-file [path]
+  (let [digest (java.security.MessageDigest/getInstance "SHA-256")]
+    (with-open [in (java.io.BufferedInputStream. (java.io.FileInputStream. (str path)))]
+      (let [buffer (byte-array 8192)]
+        (loop []
+          (let [n (.read in buffer)]
+            (when (pos? n)
+              (.update digest buffer 0 n)
+              (recur))))))
+    (format "%064x" (java.math.BigInteger. 1 (.digest digest)))))
+
+(defn preserve-h0-file! [source relative]
+  (let [destination (str @witness-dir "/" relative)]
+    (if (and source (fs/regular-file? source))
+      (do (fs/create-dirs (fs/parent destination))
+          (fs/copy source destination {:replace-existing true})
+          (fs/set-posix-file-permissions destination "rw-------")
+          {:source (str source) :destination destination :present true
+           :sha256 (sha256-file destination)})
+      {:source (str source) :destination destination :present false})))
+
+(defn preserve-h0-jsonl-tree! [source relative]
+  (if (fs/directory? source)
+    (let [files (vec (distinct (concat (fs/glob source "*.jsonl")
+                                       (fs/glob source "**/*.jsonl"))))]
+      (if (seq files)
+        (mapv #(preserve-h0-file! % (str relative "/" (fs/relativize source %))) files)
+        [{:source (str source) :destination (str @witness-dir "/" relative)
+          :present false :reason "no JSONL files"}]))
+    [{:source (str source) :destination (str @witness-dir "/" relative)
+      :present false :reason "directory absent"}]))
+
+(defn inventory-h0-evidence [name]
+  (let [path (str @witness-dir "/" name)]
+    (if (fs/regular-file? path)
+      (do (fs/set-posix-file-permissions path "rw-------")
+          {:source path :destination path :present true :sha256 (sha256-file path)})
+      {:source path :destination path :present false :reason "evidence absent"})))
+
+(defn preserve-h0-diagnostic!
+  "Keeps only the ruled native session/index and diagnostic log evidence.
+  Every absence and preservation error becomes evidence; none escapes to
+  prevent the outer teardown."
+  []
+  (let [receipt (atom [])
+        keep #(try (swap! receipt conj (preserve-h0-file! %1 %2))
+                   (catch Exception e
+                     (swap! receipt conj {:source (str %1) :destination (str %2)
+                                          :present false :error (.getMessage e)})))]
+    (try
+      (swap! receipt into (preserve-h0-jsonl-tree! (str codex-home "/sessions") "codex-sessions"))
+      (swap! receipt into (preserve-h0-jsonl-tree! (str codex-home "/archived_sessions") "codex-archived-sessions"))
+      (let [indices (vec (fs/glob codex-home "session_index*"))]
+        (if (seq indices)
+          (doseq [index indices] (keep index (str "codex-session-index/" (fs/file-name index))))
+          (swap! receipt conj {:source (str codex-home "/session_index*")
+                               :destination (str @witness-dir "/codex-session-index")
+                               :present false :reason "session index absent"})))
+      (keep @run-log "nexus-and-native.log")
+      (keep h0-herdr-stdout "herdr-server.stdout.log")
+      (keep h0-herdr-stderr "herdr-server.stderr.log")
+      (doseq [name [h0-wrapper-record-name h0-sampler-record-name
+                    "handover-H0-model-catalog.json"
+                    "handover-H0-diagnostic-prelaunch.json"
+                    "handover-H0-diagnostic-launch.txt"]]
+        (swap! receipt conj (inventory-h0-evidence name)))
+      (catch Exception e
+        (swap! receipt conj {:present false :error (.getMessage e) :stage "preservation"})))
+    (try
+      (keep-text! "handover-H0-preservation.json"
+                  (json/generate-string {:time (str (java.time.Instant/now)) :files @receipt} {:pretty true}))
+      (fs/set-posix-file-permissions (str @witness-dir "/handover-H0-preservation.json") "rw-------")
+      (catch Exception _ nil))
+    @receipt))
+
+(defn finish-h0-diagnostic! []
+  (try (stop-h0-sampler!)
+       (catch Exception e
+         (append-h0-json! h0-sampler-record-name
+                          {:time (str (java.time.Instant/now)) :kind "sampler-stop-error"
+                           :error (.getMessage e)})))
+  (preserve-h0-diagnostic!))
+
 ;; ---------------------------------------------------------------- readings
 
 (defn waking-entries
@@ -959,8 +1140,12 @@
   (when handover-mode
     (fs/set-posix-file-permissions private-root "rwx------")
     (prepare-private-flow-wrapper!))
-  (reset! herdr-server (p/process ["herdr" "--session" session "server"]
-                                  {:env (clean-env) :out :discard :err :discard :in ""}))
+  (reset! herdr-server
+          (p/process ["herdr" "--session" session "server"]
+                     (if h0-diagnostic-mode
+                       {:env (clean-env) :out :append :out-file (fs/file h0-herdr-stdout)
+                        :err :append :err-file (fs/file h0-herdr-stderr) :in ""}
+                       {:env (clean-env) :out :discard :err :discard :in ""})))
   (swap! capsule-ownership conj :herdr-session)
   (when-not (watch 15 #(get-in (herdr-json "workspace" "list") [:result :workspaces]))
     (throw (ex-info "Herdr session did not answer" {})))
@@ -1034,6 +1219,30 @@
 
 (def codex-server (atom nil))
 
+(defn prepare-h0-exec-wrapper-telemetry! []
+  (let [telemetry (str private-root "/bin/codex-exec-telemetry.py")
+        record (str @witness-dir "/" h0-wrapper-record-name)]
+    (fs/create-dirs @witness-dir)
+    (spit telemetry
+          (str "import datetime, json, os, pathlib, sys\n"
+               "record, argv = sys.argv[1], sys.argv[2:]\n"
+               "allowed = ['HOME','CODEX_HOME','PATH','TERM','LANG','SHELL','XDG_RUNTIME_DIR','XDG_CONFIG_HOME','HERDR_SESSION','HERDR_PANE_ID']\n"
+               "entry = {'time': datetime.datetime.now(datetime.timezone.utc).isoformat(), "
+               "'pid': int(os.environ['FLOW_CAPSULE_EXEC_PID']), 'cwd': os.getcwd(), "
+               "'argv': argv, 'environment': {k: os.environ[k] for k in allowed if k in os.environ}}\n"
+               "pathlib.Path(record).parent.mkdir(parents=True, exist_ok=True)\n"
+               "with open(record, 'a', encoding='utf-8') as out: out.write(json.dumps(entry, ensure_ascii=False) + '\\n')\n"
+               "os.chmod(record, 0o600)\n"))
+    (fs/set-posix-file-permissions telemetry "rw-------")
+    {:script telemetry :record record}))
+
+(defn codex-client-script [diagnostic telemetry record]
+  (str "#!/bin/sh\nexport CODEX_HOME=" codex-home "\n"
+       (when diagnostic
+         (str "FLOW_CAPSULE_EXEC_PID=$$ python3 '" telemetry "' '" record "' '"
+              codex-binary "' \"$@\"\n"))
+       "exec " codex-binary " \"$@\"\n"))
+
 (defn start-codex! [log]
   (when-not codex-binary (throw (ex-info "no Codex executable: set FLOW_CAPSULE_CODEX" {})))
   (fs/create-dirs codex-home)
@@ -1043,7 +1252,8 @@
   (fs/set-posix-file-permissions (str codex-home "/auth.json") "rw-------")
   (spit (str codex-home "/config.toml")
         (str "approval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"\nmodel = \"" codex-model "\"\n"))
-  (spit codex-client (str "#!/bin/sh\nexport CODEX_HOME=" codex-home "\nexec " codex-binary " \"$@\"\n"))
+  (let [{:keys [script record]} (when h0-diagnostic-mode (prepare-h0-exec-wrapper-telemetry!))]
+    (spit codex-client (codex-client-script h0-diagnostic-mode script record)))
   (fs/set-posix-file-permissions codex-client "rwx------")
   (reset! codex-server (p/process [codex-binary "app-server" "--remote-control" "--listen" (str "unix://" codex-socket)]
                                   {:env (clean-env {"CODEX_HOME" codex-home}) :dir source-root
@@ -1856,6 +2066,62 @@
     (let [result @frames]
       (p/destroy-tree process)
       result)))
+
+(defn with-h0-diagnostic-finish [body]
+  (try (body) (finally (finish-h0-diagnostic!))))
+
+(defn h0-diagnostic-scenario []
+  (when (fs/exists? ho-archive)
+    (throw (ex-info "archive must be new" {:path ho-archive})))
+  (let [catalog (observer-model-catalog)
+              native-models (set (map :model (:models catalog)))
+              catalogued (contains? native-models codex-model)
+              _ (keep-text! "handover-H0-model-catalog.json"
+                            (json/generate-string catalog {:pretty true}))
+              metaflows-line (str/replace-first (configure-line "Metaflows")
+                                                "Regular Default OnDemand" "Regular Default Maintained")
+              metaflows (flow-meta metaflows-line)
+              _ (fs/create-dirs ho-archive)
+              git-init [(ho-git "init" "-q") (ho-git "config" "user.name" "flow-capsule")
+                        (ho-git "config" "user.email" "flow-capsule@localhost")
+                        (ho-git "commit" "-q" "--allow-empty" "-m" "Initial empty commit")]
+              _ (spit ho-hook (str "#!/bin/sh\n"
+                                   "if [ ! -e " ho-hook-refused " ]; then\n"
+                                   "  : > " ho-hook-refused "\n"
+                                   "  echo flow-capsule canary hook refuses once >&2\n"
+                                   "  exit 1\n"
+                                   "fi\n"
+                                   ": > " ho-hook-waiting "\n"
+                                   "while [ ! -e " ho-hook-release " ]; do sleep 0.1; done\n"))
+              _ (fs/set-posix-file-permissions ho-hook "rwxr-xr-x")
+              policy (flow-meta (ho-policy ho-share))
+              archive (flow-meta (str "Configure.HandoverArchive." ho-archive))
+              handover-count (flow-meta "Configure.HandoverCount.0")
+              configuration (flow-meta "Configuration")
+              launch-request (launch-query "Launch" ho-seat)
+              rehearse-request (launch-query "Rehearse" ho-seat)
+              rehearsal (flow rehearse-request)
+              profile {:address ho-seat :brief brief :launch launch-request
+                       :rehearse rehearse-request :configuration-lines (configure-lines)
+                       :maintained-metaflows metaflows-line}]
+          (keep-text! "handover-H0-diagnostic-prelaunch.json"
+                      (json/generate-string {:profile profile :configuration configuration
+                                             :rehearsal rehearsal :modelCatalogued catalogued}
+                                            {:pretty true}))
+          (start-h0-sampler!)
+          (let [launched (flow launch-request)]
+            (reset! handover-h0-refusals {:terra launched})
+            (keep-text! "handover-H0-diagnostic-launch.txt" launched)
+            {:reply launched
+             :pass (str/starts-with? launched "Started.")
+             :watched (str "one exact Terra Launch after Configuration and Rehearse; model catalogued "
+                           catalogued "; configuration " configuration "; Metaflows " metaflows
+                           "; policy " policy "; archive " archive "; count " handover-count
+                           "; git init exits " (mapv :exit git-init))})))
+
+(def h0-diagnostic-scenarios
+  [["H0 diagnostic: exact Terra request rehearsed, launched once, and preserved before teardown"
+    h0-diagnostic-scenario]])
 
 (def handover-scenarios
   [["H0 setup: Terra re-declared Maintained; archive repo with a refusing pre-commit hook; policy, archive, count; Luna and Terra launched"
@@ -3026,13 +3292,15 @@
     (apply takeover-main (rest args)))
   (let [[pkg & options] args]
     (when-not (and pkg (not (str/starts-with? pkg "--")))
-      (refuse "usage: flow-capsule <flow-package> [--workspace-only | --handover] [--keep-going] [--log <path>]"))
+      (refuse "usage: flow-capsule <flow-package> [--workspace-only | --handover | --handover-h0-diagnostic] [--keep-going] [--log <path>]"))
     (reset! package (str (fs/canonicalize pkg)))
     (reset! package-interface {@package :invocation})
     (reset! keep-going (boolean (some #{"--keep-going"} options)))
     (let [workspace-only (boolean (some #{"--workspace-only"} options))
           handover-only (boolean (some #{"--handover"} options))
+          h0-diagnostic-only (boolean (some #{"--handover-h0-diagnostic"} options))
           selected-scenarios (cond workspace-only (subvec base-scenarios 0 2)
+                                   h0-diagnostic-only h0-diagnostic-scenarios
                                    handover-only handover-scenarios
                                    :else scenarios)
           log (or (second (drop-while #(not= % "--log") options)) (str state-root "/nexus.log"))
@@ -3047,25 +3315,30 @@
       (println (str "flow-capsule " @package " | " version
                     " | curriculum " curriculum-package))
       (println (str "witnesses | " @witness-dir))
-      (try
-        (verify-private-handover-places!)
-        (start-capsule! log)
-        (start-curriculum! log)
-        (if skip-codex
-          (println "codex | FLOW_CAPSULE_SKIP_CODEX=1: app-server not started, Codex scenarios skipped")
-          (start-codex! log))
-        (configure! log)
-        (reset! nexus-log log)
-        (start-nexus! log)
-        (println (str "configuration | " (flow-meta "Configuration")))
-        (loop [[[name f] & more] selected-scenarios]
-          (when name
-            (let [ok (scenario name f)]
-              (when-not ok (reset! passed false))
-              (if (or ok @keep-going) (recur more) (println "stopped after a failure")))))
-        (catch Exception e
-          (reset! passed false)
-          (println (str "stopped: " (.getMessage e) " " (pr-str (ex-data e))))))
+      (let [run-capsule
+            (fn []
+              (try
+                (verify-private-handover-places!)
+                (start-capsule! log)
+                (start-curriculum! log)
+                (if skip-codex
+                  (println "codex | FLOW_CAPSULE_SKIP_CODEX=1: app-server not started, Codex scenarios skipped")
+                  (start-codex! log))
+                (configure! log)
+                (reset! nexus-log log)
+                (start-nexus! log)
+                (println (str "configuration | " (flow-meta "Configuration")))
+                (loop [[[name f] & more] selected-scenarios]
+                  (when name
+                    (let [ok (scenario name f)]
+                      (when-not ok (reset! passed false))
+                      (if (or ok @keep-going) (recur more) (println "stopped after a failure")))))
+                (catch Exception e
+                  (reset! passed false)
+                  (println (str "stopped: " (.getMessage e) " " (pr-str (ex-data e)))))))]
+        (if h0-diagnostic-only
+          (with-h0-diagnostic-finish run-capsule)
+          (run-capsule)))
       (let [clean (teardown!)
             contract-complete (or (not handover-only)
                                   (not-any? #(false? (:contract-pass %)) @results))]

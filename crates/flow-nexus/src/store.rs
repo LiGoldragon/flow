@@ -6316,6 +6316,19 @@ mod tests {
         };
         let assigned = accept("first original Order words");
         let open = accept("second original Order words");
+        for accepted in [&assigned, &open] {
+            store
+                .transition_logical_delivery(
+                    &accepted.logical_delivery_id,
+                    signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                        harness_kind: flow_ethos::HarnessKind::Codex,
+                        native_session_id: "assignment-recipient".into(),
+                        native_prompt_id: accepted.logical_delivery_id.clone(),
+                    }),
+                )
+                .expect("Order delivery ends");
+        }
+        let assigned_request_id = assigned.request_id.clone();
         store
             .engine
             .assert(Assertion::new(
@@ -6361,6 +6374,41 @@ mod tests {
         assert!(notice.contains("open second original Order words"));
         assert!(!notice.contains(&assigned.logical_delivery_id));
         assert!(!notice.contains(&open.logical_delivery_id));
+
+        let assignments = store
+            .engine
+            .match_records(QueryPlan::all(store.request_id_upgrade.upgrade_assignments))
+            .expect("assignment reads");
+        let TaskAnnouncementStatus::Admitted(announcement) = &assignments.records()[0].status
+        else {
+            panic!("assignment Notice admitted")
+        };
+        assert_eq!(
+            store
+                .archive_request(&assigned_request_id, &sender)
+                .expect("archive checks assignment Notice"),
+            Err(signal_flow::ArchiveRejection::NotYet),
+            "an unended assignment Notice holds every Order it lists"
+        );
+        store
+            .transition_logical_delivery(
+                announcement,
+                signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                    harness_kind: flow_ethos::HarnessKind::Codex,
+                    native_session_id: "assignment-sender".into(),
+                    native_prompt_id: "assignment-notice".into(),
+                }),
+            )
+            .expect("assignment Notice ends");
+        store
+            .run_request_id_announcements()
+            .expect("ended assignment settles");
+        assert_eq!(
+            store
+                .archive_request(&assigned_request_id, &sender)
+                .expect("settled assignment releases Order"),
+            Ok(())
+        );
     }
 
     #[test]

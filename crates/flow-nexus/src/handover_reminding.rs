@@ -4,6 +4,7 @@
 //! message to ordinary logical admission, exactly as any other Notice.
 
 use crate::store::handover_reminders::{HandoverReminder, HandoverReminderRules};
+use signal_flow::{Keep_Data, Query, Section};
 
 /// One due reminder is admitted through the ordinary delivery machinery.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +22,21 @@ pub trait DecidesHandoverReminder {
     fn advanced_due(&self) -> Option<i64>;
     fn advanced(&self) -> Option<HandoverReminder>;
 }
+/// Typed command rendering: the reminder contains copyable Keep input rather
+/// than a hand-written path or URI. The datom codec is the sole printer.
+pub trait RendersHandoverCommands {
+    fn keep_commands(&self, sections: &[Section]) -> Option<String>;
+}
+impl RendersHandoverCommands for HandoverReminderNotice {
+    fn keep_commands(&self, sections: &[Section]) -> Option<String> {
+        use datom_codec::{Datomizable, Composing};
+        use protos::{Compactable, Protosizable};
+        let section = sections.first()?.clone();
+        let query = Query::Keep(Keep_Data { address: self.address.clone(), section });
+        Some(query.datomize(vec![]).protosize().compact())
+    }
+}
+
 impl DecidesHandoverReminder for HandoverReminder {
     fn notice_if_due(&self, now: i64) -> Option<HandoverReminderNotice> {
         (now >= self.next_due).then(|| HandoverReminderNotice {
@@ -58,7 +74,10 @@ impl RemindsHandoverCallers for crate::RunningNexus {
                 &reminder.address,
                 SentBy::Flow,
                 Delivery::Queue,
-                Message::HardAbrupt(Request::Notice(reminder.reminder_text.clone())),
+                Message::HardAbrupt(Request::Notice({
+                    let base = HandoverReminderNotice { address: reminder.address.clone(), text: reminder.reminder_text.clone(), generation: reminder.generation };
+                    base.keep_commands(&self.store.handover(&reminder.address).unwrap_or_default()).unwrap_or(reminder.reminder_text.clone())
+                })),
                 None,
             );
             if !matches!(accepted, Ok(signal_flow::PrivateSendResponse::SendAccepted(_))) { continue; }

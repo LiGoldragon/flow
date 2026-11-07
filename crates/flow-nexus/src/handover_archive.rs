@@ -84,7 +84,7 @@ impl RetiresHandoverGenerations for RunningNexus {
                 document: render_closed(&closed),
             })?;
             self.store
-                .remove_closed_handover(address, closed.generation)
+                .remove_closed_handover(address, &closed)
                 .map_err(|e| HandoverRetirementRefusal::Memory(e.to_string()))?;
             retired += 1;
         }

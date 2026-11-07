@@ -94,7 +94,11 @@ pub trait HoldsHandovers {
         address: &Address,
         count: usize,
     ) -> Result<Vec<ClosedHandover>, StoreError>;
-    fn remove_closed_handover(&self, address: &Address, generation: i64) -> Result<(), StoreError>;
+    fn remove_closed_handover(
+        &self,
+        address: &Address,
+        expected: &ClosedHandover,
+    ) -> Result<(), StoreError>;
     fn keep_handover(
         &self,
         address: &Address,
@@ -163,6 +167,10 @@ impl HoldsHandovers for FlowStore {
         address: &Address,
         flow_id: &str,
     ) -> Result<HandoverMemory, StoreError> {
+        let _gate = self
+            .handover_write_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(row) = self.handover_row(address)? {
             if row.current_flow_id.as_deref() == Some(flow_id) {
                 return Ok(row);
@@ -221,11 +229,22 @@ impl HoldsHandovers for FlowStore {
         Ok(row.closed.into_iter().take(excess).collect())
     }
 
-    fn remove_closed_handover(&self, address: &Address, generation: i64) -> Result<(), StoreError> {
+    fn remove_closed_handover(
+        &self,
+        address: &Address,
+        expected: &ClosedHandover,
+    ) -> Result<(), StoreError> {
+        let _gate = self
+            .handover_write_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(mut row) = self.handover_row(address)? else {
             return Ok(());
         };
-        row.closed.retain(|closed| closed.generation != generation);
+        if !row.closed.iter().any(|closed| closed == expected) {
+            return Err(StoreError::StateInvariant);
+        }
+        row.closed.retain(|closed| closed != expected);
         self.write_handover(row)
     }
 
@@ -283,6 +302,10 @@ impl HoldsHandovers for FlowStore {
         section: Section,
         touch: Touch,
     ) -> Result<Touch, HandoverRefusal> {
+        let _gate = self
+            .handover_write_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         ensure_owner(address, caller)?;
         let mut row = self
             .handover_row(address)
@@ -315,6 +338,10 @@ impl HoldsHandovers for FlowStore {
         section: Section,
         touch: Touch,
     ) -> Result<Touch, HandoverRefusal> {
+        let _gate = self
+            .handover_write_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         ensure_live_writer(self, &writer.address, &writer.flow_id)?;
         let mut row = self
             .handover_row(&writer.address)
@@ -349,6 +376,10 @@ impl HoldsHandovers for FlowStore {
         title: signal_flow::Title,
         touch: Touch,
     ) -> Result<Touch, HandoverRefusal> {
+        let _gate = self
+            .handover_write_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         ensure_owner(address, caller)?;
         let mut row = self
             .handover_row(address)
@@ -376,6 +407,10 @@ impl HoldsHandovers for FlowStore {
         title: signal_flow::Title,
         touch: Touch,
     ) -> Result<Touch, HandoverRefusal> {
+        let _gate = self
+            .handover_write_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         ensure_live_writer(self, &writer.address, &writer.flow_id)?;
         let mut row = self
             .handover_row(&writer.address)
@@ -397,6 +432,10 @@ impl HoldsHandovers for FlowStore {
         predecessor: &str,
         successor: &str,
     ) -> Result<(), StoreError> {
+        let _gate = self
+            .handover_write_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(mut row) = self.handover_row(address)? else {
             if predecessor == successor {
                 return Ok(());

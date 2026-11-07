@@ -498,7 +498,12 @@ impl HoldsHandovers for FlowStore {
     }
 }
 
-impl FlowStore {
+trait ReadsAndWritesHandoverRows {
+    fn handover_row(&self, address: &Address) -> Result<Option<HandoverMemory>, StoreError>;
+    fn write_handover(&self, row: HandoverMemory) -> Result<(), StoreError>;
+}
+
+impl ReadsAndWritesHandoverRows for FlowStore {
     fn handover_row(&self, address: &Address) -> Result<Option<HandoverMemory>, StoreError> {
         let rows = self
             .engine

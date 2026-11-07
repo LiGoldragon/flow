@@ -1,7 +1,8 @@
 use super::NexusFixture;
 use crate::handover_archive::{
-    ExistingGitHandoverArchive, HandoverArchivePublication, HandoverArchiveRefusal,
-    HandoverArchiveRequest, PublishesHandoverArchive, RetiresHandoverGenerations,
+    AccessesExistingGitHandoverArchive, ExistingGitHandoverArchive, HandoverArchivePublication,
+    HandoverArchiveRefusal, HandoverArchiveRequest, PublishesHandoverArchive,
+    RetiresHandoverGenerations,
 };
 use crate::reminding::ArchivesHandoverOnTick;
 use crate::store::ManagesMetaflowState;

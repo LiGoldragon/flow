@@ -105,13 +105,18 @@ pub struct ExistingGitHandoverArchive {
     repository: PathBuf,
 }
 
-impl ExistingGitHandoverArchive {
-    pub fn new(repository: impl Into<PathBuf>) -> Self {
+pub trait AccessesExistingGitHandoverArchive: Sized {
+    fn new(repository: impl Into<PathBuf>) -> Self;
+    fn repository(&self) -> &Path;
+}
+
+impl AccessesExistingGitHandoverArchive for ExistingGitHandoverArchive {
+    fn new(repository: impl Into<PathBuf>) -> Self {
         Self {
             repository: repository.into(),
         }
     }
-    pub fn repository(&self) -> &Path {
+    fn repository(&self) -> &Path {
         &self.repository
     }
 }

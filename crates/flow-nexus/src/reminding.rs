@@ -6,6 +6,7 @@
 
 use crate::HoldsStopRequest;
 use crate::RunningNexus;
+use crate::handover_archive::AccessesExistingGitHandoverArchive;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::reminder::{AdvancesReminder, RecordsReminders};

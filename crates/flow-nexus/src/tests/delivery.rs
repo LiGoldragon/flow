@@ -3,7 +3,8 @@
 //! shapes; what each test expects is written out by hand.
 
 use super::{
-    ControlsHerdrSnapshot, NexusFixture, PromptFixture, Sent, middle_abrupt, prompts, rendered,
+    ControlsHerdrSnapshot, NexusFixture, PromptFixture, Sent, adoption_resolver, existing_binding,
+    flow_container, middle_abrupt, prompts, rendered, with_bound_world,
 };
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::{Dispatches, peer::AdmitsMetaPeer};
@@ -998,4 +999,109 @@ fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
         after,
         signal_flow::Response::RefreshRejected(RefreshRejection::Locked)
     ));
+}
+
+/// The public meta dispatcher serializes a direct Deliver and a real
+/// MetaBindExisting.  Binding cannot create custody while pane input is in
+/// flight; once that input completes, the same public route performs the
+/// verified binding.
+#[test]
+fn public_direct_delivery_finishes_before_a_concurrent_existing_bind() {
+    use crate::DispatchesSerially;
+    use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+    use std::os::unix::net::UnixListener;
+    use std::time::{Duration, Instant};
+
+    let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
+    fixture.register_with(FlowLifecycle::Active);
+    let mut binding = existing_binding("908786", "w1:p3");
+    binding.native_session_id = "01a0b22c-e24f-7452-9940-64490878680f".into();
+    binding.herdr_workspace_id = "w1".into();
+    binding.herdr_tab_id = "w1:t1".into();
+    binding.herdr_terminal_id = "term_65bb7f87270cb3".into();
+    binding.herdr_agent_name = "psyche-mind-astra".into();
+    let socket_path = fixture.directory.path().join("serial-bind.sock");
+    let _listener = UnixListener::bind(&socket_path).expect("live fixture container");
+    let reached = fixture.directory.path().join("serial-deliver-reached");
+    let release = fixture.directory.path().join("serial-deliver-release");
+
+    let (delivered, bound) = with_bound_world(fixture, &[&binding], || {
+        let body = fs::read_to_string(&fixture.snapshot_program).expect("bound Herdr world");
+        let pattern = "  *) exit 64 ;;";
+        assert!(body.contains(pattern), "{body}");
+        FixtureExecutable {
+            path: fixture.snapshot_program.clone(),
+        }
+        .install(&body.replacen(
+            pattern,
+            &format!(
+                "  \"agent prompt\") : > '{reached}'; while [ ! -e '{release}' ]; do sleep 0.02; done; printf '%s' \"$6\" > '{typed}'; printf '%s\\n' '{{\"id\":\"cli:agent:prompt\",\"result\":{{\"type\":\"agent_prompted\",\"agent\":{{\"pane_id\":\"w1:p3\"}}}}}}' ;;\n{pattern}",
+                reached = reached.display(),
+                release = release.display(),
+                typed = fixture.directory.path().join("pane-typed.txt").display(),
+            ),
+            1,
+        ));
+        std::thread::scope(|scope| {
+            let delivering = scope.spawn(|| {
+                fixture.nexus.dispatch_meta_serially(
+                    MetaQuery::Deliver(DeliveryRequest {
+                        delivery_id: "public-serial-delivery".into(),
+                        flow_id: "908786".into(),
+                        message: middle_abrupt("serialized delivery"),
+                    }),
+                    None,
+                )
+            });
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !reached.exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "public Deliver never entered Herdr"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(fixture.nexus.dispatch_gate.try_lock().is_err());
+            let binding_for_thread = binding.clone();
+            let socket_for_thread = socket_path.clone();
+            let (attempted, observe_attempt) = std::sync::mpsc::channel();
+            let binding_attempt = scope.spawn(move || {
+                attempted.send(()).expect("Bind attempt observed");
+                fixture.nexus.dispatch_meta_serially(
+                    MetaQuery::MetaBindExisting(meta_signal_flow::MetaBindExisting {
+                        flow_container: flow_container(&socket_for_thread),
+                        address: signal_flow::Address {
+                            aspect: signal_flow::Aspect::Mind,
+                            topic: "core".into(),
+                            model: signal_flow::Model::Sol,
+                        },
+                        flow_binding: binding_for_thread,
+                    }),
+                    Some(adoption_resolver()),
+                )
+            });
+            observe_attempt
+                .recv_timeout(Duration::from_secs(2))
+                .expect("Bind reached public dispatcher");
+            assert!(fixture.nexus.dispatch_gate.try_lock().is_err());
+            fs::write(&release, "").expect("release public Deliver");
+            (
+                delivering.join().expect("Deliver answered"),
+                binding_attempt.join().expect("Bind answered"),
+            )
+        })
+    });
+    assert!(
+        matches!(delivered, MetaResponse::Delivered(_)),
+        "{delivered:?}"
+    );
+    assert!(
+        matches!(bound, MetaResponse::BoundExisting(ref answer)
+            if matches!(answer.flow_binding_result, meta_signal_flow::FlowBindingResult::Bound(_))),
+        "{bound:?}"
+    );
+    assert_eq!(
+        fixture.typed(),
+        Some("MiddleAbrupt.{ Notification Text.«serialized delivery» }".into())
+    );
 }

@@ -190,7 +190,15 @@ impl crate::handover::YieldsHandover for MemoryHandoverSource {
     }
 }
 
-impl MemoryHandoverSource {
+trait ReadsMemoryHandoverSource {
+    fn store_handover(
+        &self,
+        address: &signal_flow::Address,
+        predecessor: &str,
+    ) -> Result<Option<Vec<signal_flow::Section>>, StoreError>;
+}
+
+impl ReadsMemoryHandoverSource for MemoryHandoverSource {
     fn store_handover(
         &self,
         address: &signal_flow::Address,

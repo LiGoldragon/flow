@@ -18,8 +18,13 @@ use super::{
     codex_agent_in,
 };
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+use crate::handover_reminding::RemindsHandoverCallers;
 use crate::sending::{IdentifiesSender, SendsRequests};
+use crate::store::SeedsRole;
 use crate::store::context::{JudgesThreshold, RecordsContextSize};
+use crate::store::handover::HoldsHandovers as _;
+use crate::store::handover_reminders::SchedulesHandoverReminders as _;
+use crate::store::logical_delivery::RecordsLogicalDeliveries as _;
 use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow, SleepsMetaflows};
 use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, ReadsFlowRows};
@@ -27,7 +32,9 @@ use crate::waking::{HoldsWakingMetaflows, SleepsAndWakesSeats};
 use crate::{Dispatches, DispatchesSerially};
 use flow_ethos::Delivery;
 use flow_ethos::State;
-use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, Continuity};
+use meta_signal_flow::{
+    ConfigurationChange, ConfigureMetaflow, ConfigureThreshold, Continuity, HandoverPolicy,
+};
 use signal_flow::{
     Address, FlowLifecycle, HerdrRouteSelection, Message, Metaflow, Model, Origin, Query,
     RefreshRejection, Refreshed, Refusal, ReplaceRejection, Request, Response, SendRequest, SentBy,
@@ -1018,6 +1025,150 @@ fn a_launch_ordered_replace_holds_the_metaflow_and_types_nothing_into_its_predec
         "nothing is typed into the predecessor"
     );
     assert!(!fixture.nexus.waking.is_waking(&seat_address()));
+}
+
+/// A timer created by the production scheduler remains durable while an
+/// actual replacement holds the metaflow. Its next warning is admitted and
+/// advanced before that hold is released, then the same logical delivery is
+/// drained exactly once to the successor rather than typed into the ending
+/// predecessor.
+#[test]
+fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
+    let (fixture, profile) =
+        refreshable_with_successor(Continuity::OnDemand, flow_ethos::Delivery::Queue);
+    fixture.nexus.store.seed_role(signal_flow::Caller {
+        flow_id: CLAUDE_SEAT.into(),
+        aspect: signal_flow::Aspect::Mind,
+        model_name: "fixture-model".into(),
+    });
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::Thresholds(vec![ConfigureThreshold {
+            model_name: "fixture-model".into(),
+            refresh: 100,
+        }]))
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::HandoverPolicies(vec![
+            HandoverPolicy {
+                model_name: "fixture-model".into(),
+                warning_share_left: 20,
+                reminder_text: "flow Keep.{ WhatIAmStillTryingToDo «…» }".into(),
+                every_minutes: 5,
+            },
+        ]))
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .record_context_size(CLAUDE_SEAT, 81)
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .ensure_live_handover(&seat_address(), CLAUDE_SEAT)
+        .unwrap();
+
+    fixture.nexus.send_due_handover_reminders(10);
+    let first = fixture
+        .nexus
+        .store
+        .handover_reminder(&seat_address(), 0)
+        .unwrap()
+        .expect("the scheduler created the timer");
+    assert_eq!((first.sent, first.next_due), (1, 310));
+    let predecessor_calls = typing_calls(&fixture).len();
+
+    let closing = fixture.directory.path().join("warning-close-reached");
+    let release = fixture.directory.path().join("warning-close-release");
+    let _release_on_unwind = ReleasesFixtureOnDrop(release.clone());
+    let script = fs::read_to_string(&fixture.snapshot_program).expect("fixture Herdr");
+    let pattern = "  *\" pane close \"*) exit 0 ;;";
+    assert!(script.contains(pattern), "{script}");
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&script.replacen(
+        pattern,
+        &format!(
+            "  *\" pane close \"*) : > '{closing}'; while [ ! -e '{release}' ]; do sleep 0.02; done; exit 0 ;;",
+            closing = closing.display(),
+            release = release.display(),
+        ),
+        1,
+    ));
+
+    let (replaced, warning_id) = std::thread::scope(|scope| {
+        let replacing = scope.spawn(|| fixture.nexus.dispatch(Query::Replace(profile.clone())));
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !closing.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the reap never reached close"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let reminding = scope.spawn(|| fixture.nexus.send_due_handover_reminders(310));
+        let warning_id = loop {
+            let metaflow = stored(&fixture);
+            if let Some(entry) = metaflow.queue.iter().find(|entry| {
+                matches!(&entry.message, Message::HardAbrupt(Request::Notice(text))
+                    if text.contains("flow Keep."))
+            }) {
+                break entry.logical_delivery_id.clone();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "warning was not durably admitted"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let timer = fixture
+            .nexus
+            .store
+            .handover_reminder(&seat_address(), 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!((timer.sent, timer.next_due), (2, 610));
+        let queued = fixture
+            .nexus
+            .store
+            .logical_delivery_snapshot(&warning_id)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            queued.delivery_state,
+            signal_flow::DeliveryState::Queued
+        ));
+        assert_eq!(typing_calls(&fixture).len(), predecessor_calls);
+        fs::write(&release, "").expect("release replacement");
+        reminding.join().expect("reminder tick completed");
+        (replacing.join().expect("replacement answered"), warning_id)
+    });
+
+    assert!(matches!(replaced, Response::Replaced(_)), "{replaced:?}");
+    let delivered = fixture
+        .nexus
+        .store
+        .logical_delivery_snapshot(&warning_id)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        delivered.delivery_state,
+        signal_flow::DeliveryState::Delivered(_)
+    ));
+    assert_eq!(typing_calls(&fixture).len(), predecessor_calls + 1);
+    assert_eq!(
+        stored(&fixture)
+            .queue
+            .iter()
+            .filter(|entry| entry.logical_delivery_id == warning_id)
+            .count(),
+        0
+    );
 }
 
 /// A refresh owed a successor that cannot start answers Refresh's own

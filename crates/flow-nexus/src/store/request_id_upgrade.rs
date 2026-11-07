@@ -3045,6 +3045,247 @@ mod tests {
     }
 
     #[test]
+    fn every_resolved_reference_family_refuses_a_missing_current_without_writing() {
+        for family in [
+            "request",
+            "attempt",
+            "outcome",
+            "send-call",
+            "metaflow",
+            "address-hold",
+            "reminder",
+            "simplified-reply",
+            "purpose",
+            "heartbeat",
+        ] {
+            let directory = tempfile::tempdir().expect("temporary Memory");
+            let path = directory.path().join("flow.sema");
+            let descriptors = evolution_descriptors();
+            let heartbeat = StoredHeartbeatStanding::descriptor();
+            let (mut predecessor, tables) = old_engine(&path, &descriptors, &heartbeat);
+            let heartbeat_table = predecessor
+                .register_table(heartbeat.clone())
+                .expect("old heartbeat registers again");
+            let sender = old_address(old_flow::Aspect::Mind, "sender");
+            let recipient = old_address(old_flow::Aspect::Field, "recipient");
+            let missing_request = old_request(
+                "missing",
+                &sender,
+                &recipient,
+                old_flow::Request::Notice("missing".into()),
+                PriorRequestState::Queued,
+            );
+            let old_meta::QueueEvidence::Logical(queue_entry) = &missing_request.queue_evidence
+            else {
+                panic!("helper creates logical evidence")
+            };
+            match family {
+                "request" => predecessor
+                    .assert(Assertion::new(tables.requests, missing_request.clone()))
+                    .expect("orphan request stores"),
+                "attempt" => predecessor
+                    .assert(Assertion::new(
+                        tables.attempts,
+                        PriorQueueDeliveryAttempt {
+                            request_id: "missing".into(),
+                            attempt_id: "attempt".into(),
+                            native_request_id: 1,
+                            flow_id: "flow".into(),
+                            thread_id: "thread".into(),
+                            harness_kind: old_flow::HarnessKind::Codex,
+                            history_anchor: PriorNativeHistoryAnchor::CodexTurns(None),
+                            address: recipient.clone(),
+                            queue_evidence: missing_request.queue_evidence.clone(),
+                            phase: PriorQueueDeliveryPhase::Prepared,
+                        },
+                    ))
+                    .expect("orphan attempt stores"),
+                "outcome" => predecessor
+                    .assert(Assertion::new(
+                        tables.outcomes,
+                        PriorStoredSendOutcome {
+                            record: old_meta::SendOutcomeRecord {
+                                send_outcome_id: "outcome".into(),
+                                process_option: None,
+                                first_address_option: Some(sender.clone()),
+                                second_address_option: Some(recipient.clone()),
+                                request_digest: "digest".into(),
+                                ordinary_send_outcome: old_meta::OrdinarySendOutcome::Accepted(
+                                    old_signal::SendAcceptance {
+                                        logical_delivery_id: "missing".into(),
+                                        delivery_cursor: 1,
+                                        delivery_state: old_signal::DeliveryState::Queued,
+                                    },
+                                ),
+                            },
+                        },
+                    ))
+                    .expect("orphan outcome stores"),
+                "send-call" => predecessor
+                    .assert(Assertion::new(
+                        tables.send_calls,
+                        PriorSendCall {
+                            tool_call_key:
+                                crate::generated::send_tool_before_request_ids::ToolCallKey {
+                                    thread_id: "thread".into(),
+                                    turn_id: "turn".into(),
+                                    call_id: "call".into(),
+                                },
+                            content_sha256: "sha".into(),
+                            send_outcome: crate::generated::send_tool_before_request_ids::SendOutcome::Accepted(
+                                crate::generated::send_tool_before_request_ids::Accepted_Data {
+                                    sender: sender.clone(),
+                                    target: recipient.clone(),
+                                    send_acceptance: old_signal::SendAcceptance {
+                                        logical_delivery_id: "missing".into(),
+                                        delivery_cursor: 1,
+                                        delivery_state: old_signal::DeliveryState::Queued,
+                                    },
+                                },
+                            ),
+                        },
+                    ))
+                    .expect("orphan send call stores"),
+                "metaflow" => predecessor
+                    .assert(Assertion::new(
+                        tables.metaflows,
+                        PriorStoredMetaflow {
+                            metaflow: old_flow::Metaflow {
+                                address: recipient.clone(),
+                                state: old_flow::State::Asleep,
+                                past: Vec::new(),
+                                queue: vec![queue_entry.clone()],
+                            },
+                        },
+                    ))
+                    .expect("orphan metaflow queue stores"),
+                "address-hold" => predecessor
+                    .assert(Assertion::new(
+                        tables.address_holds,
+                        PriorAddressHold {
+                            flow_id: "flow".into(),
+                            address: recipient.clone(),
+                            found: Some(old_flow::Metaflow {
+                                address: recipient.clone(),
+                                state: old_flow::State::Asleep,
+                                past: Vec::new(),
+                                queue: vec![queue_entry.clone()],
+                            }),
+                        },
+                    ))
+                    .expect("orphan address hold stores"),
+                "heartbeat" => predecessor
+                    .assert(Assertion::new(
+                        heartbeat_table,
+                        StoredHeartbeatStanding {
+                            address: current_address(&recipient).expect("address recodes"),
+                            baseline_awake: 0,
+                            baseline_working: None,
+                            baseline_working_complete: true,
+                            baseline_sent: 0,
+                            baseline_queue: 0,
+                            latest_awake: 0,
+                            latest_working: None,
+                            latest_working_complete: true,
+                            latest_sent: 0,
+                            latest_queue: 0,
+                            outstanding: Some("missing".into()),
+                        },
+                    ))
+                    .expect("orphan heartbeat stores"),
+                "reminder" | "simplified-reply" | "purpose" => {}
+                _ => unreachable!(),
+            }
+            drop(predecessor);
+
+            let reminder = super::super::reminder::Reminder {
+                key: "missing".into(),
+                address: current_address(&sender).expect("address recodes"),
+                recipient: current_address(&recipient).expect("address recodes"),
+                minutes: 1,
+                due: Some(1),
+                sent: 0,
+            };
+            let reply = super::super::logical_delivery::SimplifiedReplyBinding {
+                flow_id: "flow".into(),
+                input_delivery_id: "missing".into(),
+                source: current_address(&sender).expect("address recodes"),
+                recipient: current_address(&recipient).expect("address recodes"),
+                completed: false,
+            };
+            let purpose = super::super::logical_delivery::LogicalDeliveryPurpose {
+                logical_delivery_id: "missing".into(),
+                address: current_address(&recipient).expect("address recodes"),
+                purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
+            };
+            let heartbeat_row = StoredHeartbeatStanding {
+                address: current_address(&recipient).expect("address recodes"),
+                baseline_awake: 0,
+                baseline_working: None,
+                baseline_working_complete: true,
+                baseline_sent: 0,
+                baseline_queue: 0,
+                latest_awake: 0,
+                latest_working: None,
+                latest_working_complete: true,
+                latest_sent: 0,
+                latest_queue: 0,
+                outstanding: Some("missing".into()),
+            };
+            let mut engine = Engine::open(
+                EngineOpen::new(&path, SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION))
+                    .with_family(&descriptors.current)
+                    .with_family(&descriptors.events)
+                    .with_family(&descriptors.metaflows)
+                    .with_family(&descriptors.address_holds)
+                    .with_family(&descriptors.requests)
+                    .with_family(&descriptors.attempts)
+                    .with_family(&descriptors.outcomes)
+                    .with_family(&descriptors.send_calls)
+                    .with_family(&heartbeat),
+            )
+            .expect("predecessor catalog opens for validation");
+            let heartbeat_table = engine.register_table(heartbeat).expect("heartbeat opens");
+            let before = std::fs::read(&path).expect("Memory reads before refusal");
+            let result = evolve_request_id_memory(
+                &mut engine,
+                descriptors,
+                if family == "reminder" {
+                    std::slice::from_ref(&reminder)
+                } else {
+                    &[]
+                },
+                if family == "simplified-reply" {
+                    std::slice::from_ref(&reply)
+                } else {
+                    &[]
+                },
+                if family == "purpose" {
+                    std::slice::from_ref(&purpose)
+                } else {
+                    &[]
+                },
+                heartbeat_table,
+                if family == "heartbeat" {
+                    std::slice::from_ref(&heartbeat_row)
+                } else {
+                    &[]
+                },
+                &ScriptedDrawer::new(&["0000", "0001", "0002", "0003"]),
+            );
+            assert!(
+                matches!(result, Err(StoreError::StateInvariant)),
+                "{family} refuses its missing current"
+            );
+            assert_eq!(
+                std::fs::read(&path).expect("Memory reads after refusal"),
+                before,
+                "{family} refusal writes nothing"
+            );
+        }
+    }
+
+    #[test]
     fn orphaned_predecessor_event_refuses_evolution_without_changing_memory() {
         let directory = tempfile::tempdir().expect("temporary Memory");
         let path = directory.path().join("flow.sema");

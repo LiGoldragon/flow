@@ -4,17 +4,46 @@ use crate::handover_archive::{
     HandoverArchiveRefusal, HandoverArchiveRequest, PublishesHandoverArchive,
     RetiresHandoverGenerations,
 };
+use crate::handover_observation::{ObservesHandoverRetirement, ReadsRetirementSubscription};
 use crate::reminding::ArchivesHandoverOnTick;
 use crate::store::ManagesMetaflowState;
 use crate::store::handover::HoldsHandovers;
+use crate::{Connection, ServesConnection};
 use meta_signal_flow::ConfigurationChange;
 use signal_flow::{Address, Aspect, Model};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
+use std::sync::{Arc, Barrier};
+use std::{
+    fs,
+    net::Shutdown,
+    os::unix::{fs::PermissionsExt, net::UnixStream},
+    path::Path,
+    process::Command,
+};
 
 struct RecordingPublisher {
     calls: AtomicUsize,
     fail: bool,
+}
+
+struct BlockingPublisher {
+    entered: Arc<Barrier>,
+    proceed: Arc<Barrier>,
+}
+
+impl PublishesHandoverArchive for BlockingPublisher {
+    fn publish(
+        &self,
+        request: HandoverArchiveRequest,
+    ) -> Result<HandoverArchivePublication, HandoverArchiveRefusal> {
+        self.entered.wait();
+        self.proceed.wait();
+        Ok(HandoverArchivePublication {
+            path: request.address.topic.into(),
+            commit: "commit".into(),
+            blob: "blob".into(),
+        })
+    }
 }
 impl PublishesHandoverArchive for RecordingPublisher {
     fn publish(
@@ -27,6 +56,8 @@ impl PublishesHandoverArchive for RecordingPublisher {
         }
         Ok(HandoverArchivePublication {
             path: request.address.topic.into(),
+            commit: "test-commit".into(),
+            blob: "test-blob".into(),
         })
     }
 }
@@ -63,9 +94,31 @@ fn request(_path: &Path) -> HandoverArchiveRequest {
 fn archives_and_is_idempotent() {
     let d = repo();
     let p = ExistingGitHandoverArchive::new(d.path());
-    p.publish(request(d.path())).unwrap();
-    p.publish(request(d.path())).unwrap();
+    let first = p.publish(request(d.path())).unwrap();
+    let second = p.publish(request(d.path())).unwrap();
     assert_eq!(runout(d.path(), &["rev-list", "--count", "HEAD"]), "1");
+    assert_eq!(first, second);
+    assert_eq!(first.commit, runout(d.path(), &["rev-parse", "HEAD"]));
+    assert_eq!(
+        first.blob,
+        runout(
+            d.path(),
+            &[
+                "rev-parse",
+                &format!("{}:{}", first.commit, first.path.display())
+            ]
+        )
+    );
+    assert_eq!(
+        Command::new("git")
+            .arg("-C")
+            .arg(d.path())
+            .args(["cat-file", "blob", &first.blob])
+            .output()
+            .unwrap()
+            .stdout,
+        b"handover\n"
+    );
 }
 #[test]
 fn preserves_foreign_index_and_worktree() {
@@ -189,6 +242,101 @@ fn retirement_publishes_before_removal_and_retries_failures() {
         0
     );
     assert_eq!(fixture.nexus.store.handover(&address).unwrap(), Vec::new());
+}
+
+#[test]
+fn attaching_during_publication_sees_closed_then_archive_then_removed() {
+    let fixture = NexusFixture::new();
+    let address = Address {
+        aspect: Aspect::Mind,
+        topic: "attachDuringPublication".into(),
+        model: Model::Sol,
+    };
+    fixture
+        .nexus
+        .store
+        .close_handover_for_successor(&address, "before", "after")
+        .unwrap();
+    let entered = Arc::new(Barrier::new(2));
+    let proceed = Arc::new(Barrier::new(2));
+    let publisher = BlockingPublisher {
+        entered: Arc::clone(&entered),
+        proceed: Arc::clone(&proceed),
+    };
+    std::thread::scope(|scope| {
+        let nexus = &fixture.nexus;
+        let address_for_retirement = address.clone();
+        let retirement = scope.spawn(move || {
+            nexus.retire_handover_generations(&address_for_retirement, 0, &publisher)
+        });
+        entered.wait();
+        let subscription = fixture
+            .nexus
+            .store
+            .observe_handover_retirement(&address)
+            .unwrap();
+        assert_eq!(
+            subscription.snapshot.handover_generation_key_vector.len(),
+            1
+        );
+        proceed.wait();
+        assert_eq!(retirement.join().unwrap(), Ok(1));
+        assert!(matches!(
+            subscription.next_response().unwrap(),
+            signal_flow::Response::RetirementChanged(
+                signal_flow::RetirementChange::ArchiveCommitted(_)
+            )
+        ));
+        assert!(matches!(
+            subscription.next_response().unwrap(),
+            signal_flow::Response::RetirementChanged(
+                signal_flow::RetirementChange::GenerationRemoved(_)
+            )
+        ));
+    });
+}
+
+#[test]
+fn initial_snapshot_write_failure_detaches_the_ephemeral_subscription() {
+    let fixture = NexusFixture::new();
+    let address = Address {
+        aspect: Aspect::Mind,
+        topic: "initialWriteFailure".into(),
+        model: Model::Sol,
+    };
+    let subscription = fixture
+        .nexus
+        .store
+        .observe_handover_retirement(&address)
+        .unwrap();
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .handover_observations
+            .subscription_count(),
+        1
+    );
+    let (server, client) = UnixStream::pair().unwrap();
+    client.shutdown(Shutdown::Both).unwrap();
+    drop(client);
+    let mut connection = Connection {
+        peer: server,
+        process: None,
+    };
+    assert!(
+        connection
+            .serve_retirement(&fixture.nexus, subscription)
+            .is_err()
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .handover_observations
+            .subscription_count(),
+        0
+    );
 }
 
 #[test]

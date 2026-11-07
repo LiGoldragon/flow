@@ -3,12 +3,16 @@
 use super::context::NamesFlowModel;
 use super::handover_configuration::ReadsHandoverConfiguration;
 use super::{FlowStore, ReadsFlowMemory, StoreError};
+use crate::handover_observation::{ObservesHandoverRetirement, RetirementSubscription};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,
     RecordKey, SchemaHash, TableDescriptor, TableName, TableReference,
 };
-use signal_flow::{Address, HandoverRefusal, Section, Touch};
+use signal_flow::{
+    Address, ArchiveCommitted, HandoverArchiveIdentity, HandoverGenerationKey, HandoverRefusal,
+    RetirementChange, RetirementObservationFailure, Section, Touch,
+};
 
 pub(super) const HANDOVER_TABLE_NAME: TableName = TableName::new("flow_nexus_handovers");
 pub(super) const HANDOVER_FAMILY: &str = "flow-nexus-handover";
@@ -40,6 +44,28 @@ pub struct ClosedHandover {
 pub struct HandoverWriter {
     pub address: Address,
     pub flow_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoverRemovalOutcome {
+    Removed,
+    AlreadyAbsent,
+    IdentityMismatch,
+}
+
+trait IdentifiesClosedHandover {
+    fn generation_key(&self, address: &Address) -> HandoverGenerationKey;
+}
+
+impl IdentifiesClosedHandover for ClosedHandover {
+    fn generation_key(&self, address: &Address) -> HandoverGenerationKey {
+        HandoverGenerationKey {
+            address: address.clone(),
+            handover_generation: self.generation,
+            predecessor: self.predecessor.clone(),
+            successor: self.successor.clone(),
+        }
+    }
 }
 
 impl EngineRecord for HandoverMemory {
@@ -94,11 +120,19 @@ pub trait HoldsHandovers {
         address: &Address,
         count: usize,
     ) -> Result<Vec<ClosedHandover>, StoreError>;
-    fn remove_closed_handover(
+    fn observe_handover_retirement(
+        &self,
+        address: &Address,
+    ) -> Result<RetirementSubscription, StoreError>;
+    fn complete_closed_handover_retirement(
         &self,
         address: &Address,
         expected: &ClosedHandover,
-    ) -> Result<(), StoreError>;
+        archive_identity: HandoverArchiveIdentity,
+    ) -> Result<HandoverRemovalOutcome, StoreError>;
+    fn fail_handover_retirement(&self, address: &Address, detail: String);
+    #[cfg(test)]
+    fn fail_next_handover_removal(&self);
     #[cfg(test)]
     fn keep_handover(
         &self,
@@ -242,23 +276,121 @@ impl HoldsHandovers for FlowStore {
         Ok(row.closed.into_iter().take(excess).collect())
     }
 
-    fn remove_closed_handover(
+    fn observe_handover_retirement(
+        &self,
+        address: &Address,
+    ) -> Result<RetirementSubscription, StoreError> {
+        let _gate = self
+            .handover_write_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let keys = self.handover_row(address)?.map_or_else(Vec::new, |row| {
+            row.closed
+                .iter()
+                .map(|closed| closed.generation_key(address))
+                .collect()
+        });
+        Ok(self.handover_observations.attach(address.clone(), keys))
+    }
+
+    fn complete_closed_handover_retirement(
         &self,
         address: &Address,
         expected: &ClosedHandover,
-    ) -> Result<(), StoreError> {
+        archive_identity: HandoverArchiveIdentity,
+    ) -> Result<HandoverRemovalOutcome, StoreError> {
         let _gate = self
             .handover_write_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(mut row) = self.handover_row(address)? else {
-            return Ok(());
+            self.handover_observations.fail(
+                address,
+                RetirementObservationFailure::MissingEvidence(
+                    "the archived generation is already absent".into(),
+                ),
+            );
+            return Ok(HandoverRemovalOutcome::AlreadyAbsent);
         };
-        if !row.closed.iter().any(|closed| closed == expected) {
-            return Err(StoreError::StateInvariant);
+        let Some(position) = row.closed.iter().position(|closed| closed == expected) else {
+            let outcome = if row
+                .closed
+                .iter()
+                .any(|closed| closed.generation == expected.generation)
+            {
+                HandoverRemovalOutcome::IdentityMismatch
+            } else {
+                HandoverRemovalOutcome::AlreadyAbsent
+            };
+            self.handover_observations.fail(
+                address,
+                RetirementObservationFailure::MissingEvidence(match outcome {
+                    HandoverRemovalOutcome::IdentityMismatch => {
+                        "the archived generation identity does not match Memory".into()
+                    }
+                    HandoverRemovalOutcome::AlreadyAbsent => {
+                        "the archived generation is already absent".into()
+                    }
+                    HandoverRemovalOutcome::Removed => unreachable!(),
+                }),
+            );
+            return Ok(outcome);
+        };
+        let key = expected.generation_key(address);
+        self.handover_observations
+            .change(RetirementChange::ArchiveCommitted(ArchiveCommitted {
+                handover_generation_key: key.clone(),
+                handover_archive_identity: archive_identity,
+            }));
+        #[cfg(test)]
+        {
+            let mut fail = self
+                .fail_next_handover_removal
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if std::mem::take(&mut *fail) {
+                let error = StoreError::StateInvariant;
+                self.handover_observations.fail(
+                    address,
+                    RetirementObservationFailure::MissingEvidence(format!(
+                        "the archived generation could not be removed from Memory: {error}"
+                    )),
+                );
+                return Err(error);
+            }
         }
-        row.closed.retain(|closed| closed != expected);
-        self.write_handover(row)
+        row.closed.remove(position);
+        if let Err(error) = self.write_handover(row) {
+            self.handover_observations.fail(
+                address,
+                RetirementObservationFailure::MissingEvidence(format!(
+                    "the archived generation could not be removed from Memory: {error}"
+                )),
+            );
+            return Err(error);
+        }
+        self.handover_observations
+            .change(RetirementChange::GenerationRemoved(key));
+        Ok(HandoverRemovalOutcome::Removed)
+    }
+
+    fn fail_handover_retirement(&self, address: &Address, detail: String) {
+        let _gate = self
+            .handover_write_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.handover_observations.fail(
+            address,
+            RetirementObservationFailure::MissingEvidence(detail),
+        );
+    }
+
+    #[cfg(test)]
+    fn fail_next_handover_removal(&self) {
+        *self
+            .fail_next_handover_removal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
     }
 
     fn handover_green(
@@ -455,20 +587,26 @@ impl HoldsHandovers for FlowStore {
             if predecessor == successor {
                 return Ok(());
             }
-            return self.write_handover(HandoverMemory {
+            let closed = ClosedHandover {
+                generation: 0,
+                predecessor: predecessor.into(),
+                successor: successor.into(),
+                sections: Vec::new(),
+                touch: None,
+            };
+            self.write_handover(HandoverMemory {
                 address: address.clone(),
                 current: Vec::new(),
                 touch: None,
                 generation: 1,
                 current_flow_id: Some(successor.into()),
-                closed: vec![ClosedHandover {
-                    generation: 0,
-                    predecessor: predecessor.into(),
-                    successor: successor.into(),
-                    sections: Vec::new(),
-                    touch: None,
-                }],
-            });
+                closed: vec![closed.clone()],
+            })?;
+            self.handover_observations
+                .change(RetirementChange::GenerationClosed(
+                    closed.generation_key(address),
+                ));
+            return Ok(());
         };
         if predecessor == successor {
             return Ok(());
@@ -483,18 +621,24 @@ impl HoldsHandovers for FlowStore {
         }
         let sections = row.current.clone();
         let touch = row.touch.take();
-        row.closed.push(ClosedHandover {
+        let closed = ClosedHandover {
             generation: row.generation,
             predecessor: predecessor.into(),
             successor: successor.into(),
             sections: sections.clone(),
             touch,
-        });
+        };
+        row.closed.push(closed.clone());
         row.current = sections;
         row.touch = None;
         row.current_flow_id = Some(successor.into());
         row.generation += 1;
-        self.write_handover(row)
+        self.write_handover(row)?;
+        self.handover_observations
+            .change(RetirementChange::GenerationClosed(
+                closed.generation_key(address),
+            ));
+        Ok(())
     }
 }
 

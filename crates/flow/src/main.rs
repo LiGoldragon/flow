@@ -1,7 +1,7 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
 use flow::Invocation;
 use protos::{Compactable, Protosizable, ReaderBudget};
-use signal_flow::{Query, Response};
+use signal_flow::{ObserveSelection, Query, Response};
 use std::{
     env,
     io::{Read, Write},
@@ -63,12 +63,22 @@ impl CallsFlowNexus for FlowClient {
             query,
             Query::Observe(_) | Query::ObserveSends(_) | Query::ObserveSender(_)
         );
+        let retirement_stream = matches!(query, Query::Observe(ObserveSelection::Retirement(_)));
         loop {
             let mut length = [0; 4];
             match peer.read_exact(&mut length) {
                 Ok(()) => {}
-                Err(error) if streams && error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                Err(error)
+                    if streams
+                        && !retirement_stream
+                        && error.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
                     return Ok(());
+                }
+                Err(error)
+                    if retirement_stream && error.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    return Err("retirement observation ended without a terminal failure; its evidence is incomplete".into());
                 }
                 Err(error) => return Err(error.to_string()),
             }
@@ -78,10 +88,13 @@ impl CallsFlowNexus for FlowClient {
             }
             let mut reply = vec![0; length];
             peer.read_exact(&mut reply).map_err(|e| e.to_string())?;
-            each(
-                rkyv::from_bytes::<Response, rkyv::rancor::Error>(&reply)
-                    .map_err(|e| e.to_string())?,
-            );
+            let response = rkyv::from_bytes::<Response, rkyv::rancor::Error>(&reply)
+                .map_err(|e| e.to_string())?;
+            let retirement_failed = matches!(response, Response::RetirementObservationFailed(_));
+            each(response);
+            if retirement_failed {
+                return Err("retirement observation failed; its evidence is incomplete".into());
+            }
             if !streams {
                 return Ok(());
             }
@@ -135,8 +148,12 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{AnswersVersion, FlowClient, ParsesFlowCommand, TextualizesFlowReply};
+    use super::{
+        AnswersVersion, CallsFlowNexus, FlowClient, ParsesFlowCommand, TextualizesFlowReply,
+    };
     use flow::Invocation;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
 
     trait ParsesTestQuery {
         fn parse_query(
@@ -160,7 +177,9 @@ mod tests {
                 .map(|Invocation { query, .. }| query)
         }
     }
-    use signal_flow::{Address, Aspect, Model, Query, Response, SendableMessage, SendableRequest};
+    use signal_flow::{
+        Address, Aspect, Model, ObserveSelection, Query, Response, SendableMessage, SendableRequest,
+    };
 
     #[test]
     fn send_priority_and_deliver_all_are_typed() {
@@ -420,5 +439,93 @@ mod tests {
                 "{text} reads"
             );
         }
+    }
+
+    #[test]
+    fn retirement_eof_and_truncated_frames_are_incomplete() {
+        for reply in [Vec::new(), vec![0, 0], vec![0, 0, 0, 8, 1, 2]] {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("ordinary.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut peer, _) = listener.accept().unwrap();
+                let mut length = [0_u8; 4];
+                peer.read_exact(&mut length).unwrap();
+                let mut query = vec![0_u8; u32::from_be_bytes(length) as usize];
+                peer.read_exact(&mut query).unwrap();
+                peer.write_all(&reply).unwrap();
+            });
+            let invocation = Invocation {
+                ordinary_socket_path: socket.to_string_lossy().into_owned(),
+                query: Query::Observe(ObserveSelection::Retirement(Address {
+                    aspect: Aspect::Mind,
+                    topic: "retirementCli".into(),
+                    model: Model::Sol,
+                })),
+            };
+            assert!(FlowClient.call(&invocation, &mut |_| {}).is_err());
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn launch_observation_keeps_its_existing_clean_eof_semantics() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("ordinary.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let mut length = [0_u8; 4];
+            peer.read_exact(&mut length).unwrap();
+            let mut query = vec![0_u8; u32::from_be_bytes(length) as usize];
+            peer.read_exact(&mut query).unwrap();
+        });
+        let invocation = Invocation {
+            ordinary_socket_path: socket.to_string_lossy().into_owned(),
+            query: Query::Observe(ObserveSelection::Launch("request".into())),
+        };
+        assert!(FlowClient.call(&invocation, &mut |_| {}).is_ok());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_terminal_retirement_failure_is_printed_and_fails_the_call() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("ordinary.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let response = Response::RetirementObservationFailed(
+            signal_flow::RetirementObservationFailure::Overflow,
+        );
+        let server = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let mut length = [0_u8; 4];
+            peer.read_exact(&mut length).unwrap();
+            let mut query = vec![0_u8; u32::from_be_bytes(length) as usize];
+            peer.read_exact(&mut query).unwrap();
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&response).unwrap();
+            peer.write_all(&(bytes.len() as u32).to_be_bytes()).unwrap();
+            peer.write_all(&bytes).unwrap();
+        });
+        let invocation = Invocation {
+            ordinary_socket_path: socket.to_string_lossy().into_owned(),
+            query: Query::Observe(ObserveSelection::Retirement(Address {
+                aspect: Aspect::Mind,
+                topic: "retirementCli".into(),
+                model: Model::Sol,
+            })),
+        };
+        let mut seen = Vec::new();
+        assert!(
+            FlowClient
+                .call(&invocation, &mut |response| seen.push(response))
+                .is_err()
+        );
+        assert_eq!(
+            seen,
+            vec![Response::RetirementObservationFailed(
+                signal_flow::RetirementObservationFailure::Overflow
+            )]
+        );
+        server.join().unwrap();
     }
 }

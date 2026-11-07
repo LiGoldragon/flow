@@ -1,6 +1,10 @@
 use super::NexusFixture;
-use crate::store::handover::{HandoverWriter, HoldsHandovers};
-use signal_flow::{Address, Aspect, Model, Section, Title, Touch};
+use crate::handover_observation::ReadsRetirementSubscription;
+use crate::store::handover::{HandoverRemovalOutcome, HandoverWriter, HoldsHandovers};
+use signal_flow::{
+    Address, Aspect, HandoverArchiveIdentity, Model, Response, RetirementChange,
+    RetirementObservationFailure, Section, Title, Touch,
+};
 
 fn address(topic: &str) -> Address {
     Address {
@@ -15,6 +19,14 @@ fn section(title: &str, description: &str, body: &str) -> Section {
         title: title.into(),
         description: description.into(),
         body: body.into(),
+    }
+}
+
+fn archive_identity() -> HandoverArchiveIdentity {
+    HandoverArchiveIdentity {
+        git_commit: "commit".into(),
+        archive_document_path: "Mind/topic/Sol/pred.md".into(),
+        git_blob: "blob".into(),
     }
 }
 
@@ -286,6 +298,11 @@ fn exact_retirement_identity_preserves_new_live_and_closed_rows() {
         .close_handover_for_successor(&address, "pred", "succ")
         .unwrap();
     let published = store.closed_handovers(&address, 0).unwrap().pop().unwrap();
+    let subscription = store.observe_handover_retirement(&address).unwrap();
+    assert_eq!(
+        subscription.snapshot.handover_generation_key_vector.len(),
+        1
+    );
     store
         .keep_handover_for_flow(
             &HandoverWriter {
@@ -299,7 +316,24 @@ fn exact_retirement_identity_preserves_new_live_and_closed_rows() {
     store
         .close_handover_for_successor(&address, "succ", "next")
         .unwrap();
-    assert!(store.remove_closed_handover(&address, &published).is_ok());
+    assert_eq!(
+        store
+            .complete_closed_handover_retirement(&address, &published, archive_identity())
+            .unwrap(),
+        HandoverRemovalOutcome::Removed
+    );
+    assert!(matches!(
+        subscription.next_response().unwrap(),
+        Response::RetirementChanged(RetirementChange::GenerationClosed(_))
+    ));
+    assert!(matches!(
+        subscription.next_response().unwrap(),
+        Response::RetirementChanged(RetirementChange::ArchiveCommitted(_))
+    ));
+    assert!(matches!(
+        subscription.next_response().unwrap(),
+        Response::RetirementChanged(RetirementChange::GenerationRemoved(_))
+    ));
     let row = store.handover_memory(&address).unwrap().unwrap();
     assert_eq!(row.current, vec![section("live", "d", "new")]);
     assert_eq!(row.closed.len(), 1);
@@ -315,12 +349,176 @@ fn changed_published_snapshot_is_retained() {
         .close_handover_for_successor(&address, "pred", "succ")
         .unwrap();
     let mut published = store.closed_handovers(&address, 0).unwrap().pop().unwrap();
+    let subscription = store.observe_handover_retirement(&address).unwrap();
     published.successor = "changed".into();
+    assert_eq!(
+        store
+            .complete_closed_handover_retirement(&address, &published, archive_identity())
+            .unwrap(),
+        HandoverRemovalOutcome::IdentityMismatch
+    );
     assert!(matches!(
-        store.remove_closed_handover(&address, &published),
-        Err(crate::store::StoreError::StateInvariant)
+        subscription.next_response().unwrap(),
+        Response::RetirementObservationFailed(RetirementObservationFailure::MissingEvidence(_))
     ));
     assert_eq!(store.closed_handovers(&address, 0).unwrap().len(), 1);
+}
+
+#[test]
+fn already_absent_is_explicitly_incomplete_and_never_emits_removed() {
+    let fixture = NexusFixture::new();
+    let address = address("handoverRetirementAbsent");
+    let store = &fixture.nexus.store;
+    store
+        .close_handover_for_successor(&address, "pred", "succ")
+        .unwrap();
+    let closed = store.closed_handovers(&address, 0).unwrap().pop().unwrap();
+    assert_eq!(
+        store
+            .complete_closed_handover_retirement(&address, &closed, archive_identity())
+            .unwrap(),
+        HandoverRemovalOutcome::Removed
+    );
+    let subscription = store.observe_handover_retirement(&address).unwrap();
+    assert!(
+        subscription
+            .snapshot
+            .handover_generation_key_vector
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .complete_closed_handover_retirement(&address, &closed, archive_identity())
+            .unwrap(),
+        HandoverRemovalOutcome::AlreadyAbsent
+    );
+    assert!(matches!(
+        subscription.next_response().unwrap(),
+        Response::RetirementObservationFailed(RetirementObservationFailure::MissingEvidence(_))
+    ));
+}
+
+#[test]
+fn verified_archive_then_memory_failure_reports_archive_and_incomplete_without_removed() {
+    let fixture = NexusFixture::new();
+    let address = address("handoverRemovalWriteFailure");
+    let store = &fixture.nexus.store;
+    store
+        .close_handover_for_successor(&address, "pred", "succ")
+        .unwrap();
+    let closed = store.closed_handovers(&address, 0).unwrap().pop().unwrap();
+    let subscription = store.observe_handover_retirement(&address).unwrap();
+    store.fail_next_handover_removal();
+    assert!(
+        store
+            .complete_closed_handover_retirement(&address, &closed, archive_identity())
+            .is_err()
+    );
+    assert!(matches!(
+        subscription.next_response().unwrap(),
+        Response::RetirementChanged(RetirementChange::ArchiveCommitted(_))
+    ));
+    assert!(matches!(
+        subscription.next_response().unwrap(),
+        Response::RetirementObservationFailed(RetirementObservationFailure::MissingEvidence(_))
+    ));
+    assert_eq!(store.closed_handovers(&address, 0).unwrap(), vec![closed]);
+}
+
+#[test]
+fn concurrent_attach_and_close_places_the_generation_exactly_once_in_snapshot_or_fifo() {
+    let fixture = NexusFixture::new();
+    let address = address("handoverAttachCloseRace");
+    let store = fixture.nexus.store.clone();
+    let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let observing = {
+        let address = address.clone();
+        let store = store.clone();
+        let start = start.clone();
+        std::thread::spawn(move || {
+            start.wait();
+            store.observe_handover_retirement(&address).unwrap()
+        })
+    };
+    let closing = {
+        let address = address.clone();
+        let store = store.clone();
+        let start = start.clone();
+        std::thread::spawn(move || {
+            start.wait();
+            store
+                .close_handover_for_successor(&address, "pred", "succ")
+                .unwrap();
+        })
+    };
+    start.wait();
+    let subscription = observing.join().unwrap();
+    closing.join().unwrap();
+    let in_snapshot = subscription
+        .snapshot
+        .handover_generation_key_vector
+        .iter()
+        .filter(|key| key.predecessor == "pred" && key.successor == "succ")
+        .count();
+    assert_eq!(in_snapshot + subscription.queued_change_count(), 1);
+    if in_snapshot == 0 {
+        assert!(matches!(
+            subscription.next_response().unwrap(),
+            Response::RetirementChanged(RetirementChange::GenerationClosed(key))
+                if key.predecessor == "pred" && key.successor == "succ"
+        ));
+    }
+}
+
+#[test]
+fn two_closes_are_observed_in_their_durable_mutation_order() {
+    let fixture = NexusFixture::new();
+    let address = address("handoverTwoCloseOrder");
+    let store = &fixture.nexus.store;
+    let subscription = store.observe_handover_retirement(&address).unwrap();
+    store
+        .close_handover_for_successor(&address, "pred", "succ")
+        .unwrap();
+    store
+        .close_handover_for_successor(&address, "succ", "next")
+        .unwrap();
+    for (generation, predecessor, successor) in [(0, "pred", "succ"), (1, "succ", "next")] {
+        assert!(matches!(
+            subscription.next_response().unwrap(),
+            Response::RetirementChanged(RetirementChange::GenerationClosed(key))
+                if key.handover_generation == generation
+                    && key.predecessor == predecessor
+                    && key.successor == successor
+        ));
+    }
+}
+
+#[test]
+fn queued_delivery_completes_while_the_handover_mutation_gate_is_held() {
+    let fixture = NexusFixture::new();
+    let address = address("handoverDeliveryOutsideGate");
+    let store = &fixture.nexus.store;
+    let subscription = store.observe_handover_retirement(&address).unwrap();
+    store
+        .close_handover_for_successor(&address, "pred", "succ")
+        .unwrap();
+    let gate = store
+        .handover_write_gate
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (sent, received) = std::sync::mpsc::channel();
+    let delivery = std::thread::spawn(move || {
+        sent.send(subscription.next_response()).unwrap();
+    });
+    assert!(matches!(
+        received
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap()
+            .unwrap(),
+        Response::RetirementChanged(RetirementChange::GenerationClosed(_))
+    ));
+    drop(gate);
+    delivery.join().unwrap();
 }
 
 #[test]

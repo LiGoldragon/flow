@@ -15,6 +15,9 @@ flow = { path = "../flow" }
 flow-defaults = { path = "../flow-defaults" }
 flow-native = { path = "../flow-native" }
 flow-ethos.workspace = true
+flow-ethos-before-request-ids = { package = "flow-ethos", git = "https://github.com/LiGoldragon/flow", rev = "85bf0f1be9997ed2b1c46a8814750a77704ea40f" }
+signal-flow-before-request-ids = { package = "signal-flow", git = "https://github.com/LiGoldragon/signal-flow", rev = "3596923778f452b141a6af57f0aebf470ff9d926" }
+meta-signal-flow-before-request-ids = { package = "meta-signal-flow", git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "b36597a8b18b97b9f97f7702535399b57e3108aa" }
 base64 = "0.22"
 # The Nexus renders one typed value as text, the Message it types into a
 # pane (F6: Flow textualizes the letter so its Priority head comes first).

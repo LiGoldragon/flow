@@ -48,6 +48,84 @@
        (= "capsule-0.40.7-20261029T201500Z"
           (flow-capsule/witness-name "flow-nexus 0.40.7" (java.time.Instant/parse "2026-10-29T20:15:00.123Z"))))
 
+;; A typed invocation failure keeps the exact controlled query and composer
+;; refusal, while the scenario renderer emits only the four diagnostic fields.
+(let [saved @flow-capsule/package-interface]
+  (try
+    (reset! flow-capsule/package-interface {flow-package :invocation})
+    (let [failure (try
+                    (with-redefs [flow-capsule/run (fn [& _] {:exit 2 :out "" :err "typed refusal"})]
+                      (flow-capsule/client-argument flow-package "flow-meta" "/private/meta.sock" "Inspect.{ Mind test Terra }")
+                      nil)
+                    (catch Exception e (ex-data e)))]
+      (check "a typed composer refusal keeps its client, query, and exact stderr"
+             (= {:package flow-package :client "flow-meta" :query "Inspect.{ Mind test Terra }" :error "typed refusal"}
+                failure)))
+    (finally (reset! flow-capsule/package-interface saved))))
+
+(let [saved @flow-capsule/results]
+  (try
+    (reset! flow-capsule/results [])
+    (with-out-str
+      (flow-capsule/scenario "typed diagnostic"
+                             #(throw (ex-info "typed client invocation composition failed"
+                                              {:package flow-package :client "flow" :query "Metaflows"
+                                               :error "typed refusal" :credential "must-not-print"}))))
+    (let [reply (:reply (last @flow-capsule/results))]
+      (check "a scenario prints the controlled typed diagnostic"
+             (and (str/includes? reply ":query \"Metaflows\"")
+                  (str/includes? reply ":error \"typed refusal\"")))
+      (check "a scenario omits unrelated exception data"
+             (not (str/includes? reply "must-not-print"))))
+    (finally (reset! flow-capsule/results saved))))
+
+;; Optional Claude state is absent before any Claude seat starts. Teardown
+;; therefore reads no directory and finds no trace.
+(let [scratch (str (fs/create-temp-dir))]
+  (try
+    (with-redefs [flow-capsule/claude-root (str scratch "/absent-claude")
+                  flow-capsule/default-flows (str scratch "/absent-flows")
+                  flow-capsule/capsule-flows (str scratch "/absent-capsule-flows")
+                  flow-capsule/capsule-transcripts (str scratch "/absent-transcripts")]
+      (check "traces accepts absent optional Claude state"
+             (= [] (flow-capsule/traces #{}))))
+    (finally (fs/delete-tree scratch))))
+
+;; Socket diagnostics serialize path metadata only and refuse both an absent
+;; endpoint and a symlink whose canonical target escapes the capsule root.
+(let [scratch (str (fs/create-temp-dir))
+      root (str scratch "/root")
+      witness (str scratch "/witness")
+      inside (str root "/inside.sock")
+      outside (str scratch "/outside.sock")
+      alias (str root "/alias.sock")]
+  (try
+    (fs/create-dirs root)
+    (fs/create-dirs witness)
+    (spit inside "inside")
+    (spit outside "outside")
+    (with-redefs [flow-capsule/private-root root
+                  flow-capsule/codex-socket inside
+                  flow-capsule/witness-dir (atom witness)]
+      (flow-capsule/codex-socket-path-witness!)
+      (let [text (slurp (str witness "/handover-codex-socket-path.edn"))]
+        (check "socket diagnostics keep bounded path metadata"
+               (and (str/includes? text ":canonical-socket")
+                    (str/includes? text ":socket-lstat-mode")
+                    (not (str/includes? text "auth"))))))
+    (fs/create-sym-link alias outside)
+    (with-redefs [flow-capsule/private-root root
+                  flow-capsule/codex-socket alias
+                  flow-capsule/witness-dir (atom (str scratch "/escape-witness"))]
+      (check "socket diagnostics refuse a canonical escape"
+             (try (flow-capsule/codex-socket-path-witness!) false (catch Exception _ true))))
+    (with-redefs [flow-capsule/private-root root
+                  flow-capsule/codex-socket (str root "/missing.sock")
+                  flow-capsule/witness-dir (atom (str scratch "/missing-witness"))]
+      (check "socket diagnostics refuse an absent endpoint"
+             (try (flow-capsule/codex-socket-path-witness!) false (catch Exception _ true))))
+    (finally (fs/delete-tree scratch))))
+
 ;; A wake hands an asleep seat its whole queue as one vector datom, each
 ;; entry its own id, sender and priority, oldest first; the flow's first
 ;; turn holds it after the context it is composed into.

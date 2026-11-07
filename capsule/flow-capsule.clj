@@ -233,7 +233,7 @@
                   (if (zero? exit)
                     (str/trim out)
                     (throw (ex-info "typed client invocation composition failed"
-                                    {:package pkg :client client :error (str/trim err)}))))
+                                    {:package pkg :client client :query query :error (str/trim err)}))))
     (throw (ex-info "package client interface is undeclared" {:package pkg}))))
 
 (defn herdr [& args]
@@ -411,7 +411,14 @@
   "Runs one scenario; f answers {:reply :pass :watched}. Answers whether it passed."
   [name f]
   (let [start (System/currentTimeMillis)
-        outcome (try (f) (catch Exception e {:reply (str "exception: " (.getMessage e)) :pass false :watched "the scenario threw"}))
+        outcome (try
+                  (f)
+                  (catch Exception e
+                    (let [typed (select-keys (ex-data e) [:package :client :query :error])]
+                      {:reply (str "exception: " (.getMessage e)
+                                   (when (seq typed) (str " " (pr-str typed))))
+                       :pass false
+                       :watched "the scenario threw"})))
         line (assoc outcome :name name :ms (- (System/currentTimeMillis) start))]
     (swap! results conj line)
     (print-line line)
@@ -860,7 +867,10 @@
   flows directory named by a capsule flow, the capsule's flows directory, and
   each Claude entry, two levels under ~/.claude, named by a capsule session."
   [natives]
-  (let [flows @seen-flows]
+  (let [flows @seen-flows
+        claude-entries (when (fs/exists? claude-root)
+                         (let [top (vec (fs/list-dir claude-root))]
+                           (concat top (mapcat #(when (fs/directory? %) (fs/list-dir %)) top))))]
     (vec (concat
           (for [entry (when (fs/exists? default-flows) (fs/list-dir default-flows))
                 :let [n (str (fs/file-name entry))]
@@ -868,8 +878,7 @@
             (str entry))
           (when (fs/exists? capsule-flows) [capsule-flows])
           (when (fs/exists? capsule-transcripts) [capsule-transcripts])
-          (for [entry (concat (fs/list-dir claude-root)
-                              (mapcat #(when (fs/directory? %) (fs/list-dir %)) (fs/list-dir claude-root)))
+          (for [entry claude-entries
                 :let [n (str (fs/file-name entry))]
                 :when (some #(str/includes? n %) natives)]
             (str entry))))))
@@ -1024,6 +1033,31 @@
 
 (def codex-server (atom nil))
 
+(defn codex-socket-path-witness!
+  "Records only path and Unix metadata needed to prove whether the Codex
+  socket stayed inside the private capsule. Refuses a canonical escape before
+  an observer or scenario runs."
+  []
+  (let [socket-path (fs/path codex-socket)
+        no-follow (into-array java.nio.file.LinkOption [java.nio.file.LinkOption/NOFOLLOW_LINKS])
+        symbolic (java.nio.file.Files/isSymbolicLink socket-path)
+        canonical-root (fs/path (fs/canonicalize private-root))
+        canonical-socket (fs/path (fs/canonicalize codex-socket))
+        contained (.startsWith canonical-socket canonical-root)
+        witness {:root private-root
+                 :socket codex-socket
+                 :socket-symbolic-link symbolic
+                 :socket-link-target (when symbolic (str (java.nio.file.Files/readSymbolicLink socket-path)))
+                 :canonical-root (str canonical-root)
+                 :canonical-socket (str canonical-socket)
+                 :contained contained
+                 :socket-lstat-mode (java.nio.file.Files/getAttribute socket-path "unix:mode" no-follow)
+                 :socket-lstat-uid (java.nio.file.Files/getAttribute socket-path "unix:uid" no-follow)
+                 :socket-lstat-gid (java.nio.file.Files/getAttribute socket-path "unix:gid" no-follow)}]
+    (keep-text! "handover-codex-socket-path.edn" (pr-str witness))
+    (when-not contained
+      (throw (ex-info "Codex socket canonical path escaped private root" witness)))))
+
 (defn start-codex! [log]
   (when-not codex-binary (throw (ex-info "no Codex executable: set FLOW_CAPSULE_CODEX" {})))
   (fs/create-dirs codex-home)
@@ -1040,6 +1074,7 @@
                                    :out :append :out-file (fs/file log) :err :append :err-file (fs/file log) :in ""}))
   (when-not (watch 30 #(fs/exists? codex-socket))
     (throw (ex-info "the capsule's Codex app-server opened no socket" {})))
+  (codex-socket-path-witness!)
   (println (str "codex | " codex-binary " | " codex-model " | " codex-socket)))
 
 (defn start-text

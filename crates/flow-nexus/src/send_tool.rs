@@ -174,6 +174,7 @@ impl JournalsSendInvocations for RunningNexus {
         let status = match &outcome {
             SendOutcome::Accepted(_) => "Accepted",
             SendOutcome::LegacyUnknown(_) => "LegacyUnknown",
+            SendOutcome::Archived(_) => "Archived",
             SendOutcome::Refused(_) => "Refused",
         };
         eprintln!("flow-nexus: send tool invocation {status}");

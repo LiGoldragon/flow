@@ -19,7 +19,7 @@ use crate::compacting::WatchesCompactions;
 use crate::generated::operation::{Operation, Record_Data};
 use crate::herdr::pane::{Interruption, PaneAgent, Placement, Submission, WritesPane};
 use crate::performing::Performs;
-use crate::store::context::{JudgesCompaction, JudgesThreshold};
+use crate::store::context::JudgesCompaction;
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
 use crate::store::{ReadsFlowRows, RecordsReplacement};
 use crate::waking::{HoldsWakingMetaflows, WakingLease};

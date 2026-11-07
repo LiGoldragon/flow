@@ -133,17 +133,22 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             let Some(policy) = policies.iter().find(|p| p.model_name == model_name) else { continue };
             let Ok(Some(refresh)) = self.store.configured_threshold(&model_name) else { continue };
             let Ok(Some(tokens)) = self.store.context_size(&flow_id) else { continue };
+            let Ok(live) = self.store.ensure_live_handover(&metaflow.address, &flow_id) else { continue };
+            let generation = live.generation;
             let Ok(green) = self.store.handover_green(&metaflow.address, &flow_id, refresh.refresh) else { continue };
-            let existing = self.store.handover_reminder(&metaflow.address, 0).ok().flatten();
-            if green { if existing.is_some() { let _ = self.store.close_handover_reminder(&metaflow.address, 0); } continue; }
-            if !HandoverReminder::warning_open(refresh.refresh, policy.warning_share_left, tokens) { continue; }
+            let existing = self.store.handover_reminder(&metaflow.address, generation).ok().flatten();
+            if green { if existing.is_some() { let _ = self.store.close_handover_reminder(&metaflow.address, generation); } continue; }
+            if !HandoverReminder::warning_open(refresh.refresh, policy.warning_share_left, tokens) { if existing.is_some() { let _ = self.store.close_handover_reminder(&metaflow.address, generation); } continue; }
             if existing.is_none() {
-                let Ok(reminder) = HandoverReminder::open_handover_reminder(metaflow.address.clone(), 0, model_name, now, policy.every_minutes, policy.reminder_text.clone()) else { continue };
+                let Ok(reminder) = HandoverReminder::open_handover_reminder(metaflow.address.clone(), generation, model_name, now, policy.every_minutes, policy.reminder_text.clone()) else { continue };
                 let _ = self.store.hold_handover_reminder(reminder);
             }
         }
         let Ok(due) = self.store.due_handover_reminders(now) else { return; };
         for reminder in due {
+            let Ok(live) = self.store.handover_memory(&reminder.address) else { continue };
+            let Some(live) = live else { continue };
+            if live.generation != reminder.generation || live.current_flow_id.is_none() { let _ = self.store.close_handover_reminder(&reminder.address, reminder.generation); continue; }
             // Admission is deliberately ordinary. In particular this does
             // not use DeliveryPurpose::Heartbeat or any refresh hold bypass.
             let sections = match self.store.handover(&reminder.address) {

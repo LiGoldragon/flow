@@ -7606,14 +7606,14 @@ mod tests {
         drop(database);
         let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("legacy opens");
         configuration
-            .configure_change(meta_signal_flow::ConfigurationChange::HandoverPolicies(vec![
-                meta_signal_flow::HandoverPolicy {
+            .configure_change(meta_signal_flow::ConfigurationChange::HandoverPolicies(
+                vec![meta_signal_flow::HandoverPolicy {
                     model_name: "claude-opus-5-5".into(),
                     warning_share_left: 15,
                     reminder_text: "Continue every five minutes.".into(),
                     every_minutes: 5,
-                },
-            ]))
+                }],
+            ))
             .expect("policy config commits");
         configuration
             .configure_change(meta_signal_flow::ConfigurationChange::HandoverArchive(
@@ -7654,10 +7654,7 @@ mod tests {
         drop(configuration);
         for _ in 0..2 {
             let reopened = ConfigurationOnlyStore::open(&fixture.path()).expect("legacy reopens");
-            let snapshot = reopened
-                .configuration_snapshot()
-                .unwrap()
-                .unwrap();
+            let snapshot = reopened.configuration_snapshot().unwrap().unwrap();
             assert_eq!(snapshot, configured);
             drop(reopened);
         }

@@ -292,7 +292,7 @@
               presentationPrompt = null;
             };
           }).overrideAttrs (old: {
-            nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [ pkgs.util-linux ];
+            nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [ context.pkgs.util-linux ];
           });
         in
         {

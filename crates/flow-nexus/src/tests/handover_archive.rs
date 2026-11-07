@@ -26,7 +26,6 @@ use std::{
 enum DelayedGitPhase {
     Inspection,
     Add,
-    Commit,
 }
 
 struct DelayingRealGit {
@@ -48,7 +47,6 @@ impl DelayingRealGit {
         match self.phase {
             DelayedGitPhase::Inspection => args == ["rev-parse", "--is-inside-work-tree"],
             DelayedGitPhase::Add => args.first() == Some(&"add"),
-            DelayedGitPhase::Commit => args.first() == Some(&"commit"),
         }
     }
 }
@@ -222,8 +220,43 @@ fn add_phase_uses_whole_publication_budget_and_retains_generation() {
 
 #[test]
 fn post_commit_timeout_reverifies_same_generation_before_removal() {
-    let (fixture, archive, address, runner) = timed_retirement_at_phase(DelayedGitPhase::Commit);
-    assert!(runner.deadlines.lock().unwrap().len() >= 3);
+    let fixture = NexusFixture::new();
+    let archive = repo();
+    let address = Address {
+        aspect: Aspect::Mind,
+        topic: "RealPostCommitDeadline".into(),
+        model: Model::Sol,
+    };
+    fixture
+        .nexus
+        .store
+        .close_handover_for_successor(&address, "before", "after")
+        .unwrap();
+    let hook_entered = archive.path().join("post-commit-entered");
+    let hook = archive.path().join(".git/hooks/post-commit");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\necho entered > '{}'\nsleep 30\n",
+            hook_entered.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let timed =
+        ExistingGitHandoverArchive::new(archive.path()).with_deadline(Duration::from_millis(500));
+    assert_eq!(
+        fixture
+            .nexus
+            .retire_handover_generations(&address, 0, &timed),
+        Err(HandoverRetirementRefusal::Archive(
+            HandoverArchiveRefusal::PublicationTimedOut
+        ))
+    );
+    assert!(hook_entered.exists(), "the real post-commit hook entered");
+    let retained = fixture.nexus.store.closed_handovers(&address, 0).unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].predecessor, "before");
     let relative = format!("Mind/{}/Sol/before.md", address.topic);
     let commit = runout(archive.path(), &["rev-parse", "HEAD"]);
     let blob = runout(
@@ -246,6 +279,7 @@ fn post_commit_timeout_reverifies_same_generation_before_removal() {
         "1"
     );
 
+    fs::remove_file(hook).unwrap();
     let subscription = fixture
         .nexus
         .store
@@ -279,6 +313,57 @@ fn post_commit_timeout_reverifies_same_generation_before_removal() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn separate_session_pipe_holder_cannot_extend_the_budget_or_remove_the_generation() {
+    let fixture = NexusFixture::new();
+    let archive = repo();
+    let address = Address {
+        aspect: Aspect::Mind,
+        topic: "SeparateSessionPipes".into(),
+        model: Model::Sol,
+    };
+    fixture
+        .nexus
+        .store
+        .close_handover_for_successor(&address, "before", "after")
+        .unwrap();
+    let pid_path = archive.path().join("separate-session-pid");
+    let hook = archive.path().join(".git/hooks/pre-commit");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nsetsid sh -c 'echo $$ > \"{}\"; sleep 30' &\nexit 0\n",
+            pid_path.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let publisher =
+        ExistingGitHandoverArchive::new(archive.path()).with_deadline(Duration::from_millis(300));
+    let started = Instant::now();
+    assert_eq!(
+        fixture
+            .nexus
+            .retire_handover_generations(&address, 0, &publisher),
+        Err(HandoverRetirementRefusal::Archive(
+            HandoverArchiveRefusal::PublicationTimedOut
+        ))
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let retained = fixture.nexus.store.closed_handovers(&address, 0).unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].predecessor, "before");
+    let pid = fs::read_to_string(pid_path)
+        .unwrap()
+        .trim()
+        .parse::<libc::pid_t>()
+        .unwrap();
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+    // The regression owns its deliberately detached fixture process.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
 }
 
 #[test]

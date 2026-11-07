@@ -1629,7 +1629,7 @@ pub struct ConfiguredFamilies {
     pub handover_policies: meta_signal_flow::HandoverPoliciesConfiguration,
     pub handover_archive: meta_signal_flow::HandoverArchiveConfiguration,
     pub handover_count: meta_signal_flow::HandoverCountConfiguration,
-    pub publication_deadline: meta_signal_flow::PublicationDeadlineConfiguration,
+    pub publication_deadline: meta_signal_flow::Duration,
 }
 
 pub trait CompletesSnapshot {
@@ -4807,12 +4807,12 @@ pub(crate) trait ReadsFlowMemory {
     fn is_current_flow_registration(table_key: &str, registration: &TableRegistration) -> bool {
         let identity = registration.identity();
         FlowStore::current_flow_family_identity(table_key).is_some_and(|(family, schema_hash)| {
-            let legacy_handover = table_key == OPTIONAL_HANDOVER_TABLE
+            let predecessor_handover = table_key == OPTIONAL_HANDOVER_TABLE
                 && identity.schema_hash()
-                    == SchemaHash::for_label("flow-nexus-handover-configuration-v2");
+                    == SchemaHash::for_label("flow-nexus-handover-configuration-v1");
             identity.table_name() == table_key
                 && identity.family().as_str() == family
-                && (identity.schema_hash() == schema_hash || legacy_handover)
+                && (identity.schema_hash() == schema_hash || predecessor_handover)
         })
     }
 
@@ -5345,8 +5345,7 @@ pub(crate) trait ReadsFlowMemory {
                         policies: old.policies,
                         archive: old.archive,
                         count: old.count,
-                        publication_deadline:
-                            meta_signal_flow::PublicationDeadlineConfiguration::Configured(duration),
+                        publication_deadline: duration,
                     }],
                 )
             }
@@ -7020,11 +7019,166 @@ mod tests {
                 .match_records(QueryPlan::all(store.meta_configuration_tables.handover))
                 .expect("handover configuration reads");
             assert_eq!(rows.records().len(), 1, "open {open} has one durable row");
-            assert_eq!(
-                rows.records()[0].publication_deadline,
-                meta_signal_flow::PublicationDeadlineConfiguration::Configured(60_000)
-            );
+            assert_eq!(rows.records()[0].publication_deadline, 60_000);
             drop(store);
+        }
+    }
+
+    #[test]
+    fn actual_configuration_and_flow_openers_admit_and_upgrade_the_exact_v1_handover_family() {
+        use crate::store::handover::{DescribesHandoverTable, HandoverMemory};
+        use crate::store::handover_configuration::StoredHandoverConfigurationV1;
+        use sema_engine::{
+            Assertion, FamilyIdentity, FamilyName, MemoryDefinition, TableRegistration,
+        };
+        use signal_flow::{Address, Aspect, ClosedHandover, Model, Section, Touch};
+
+        let fixture = StoreFixture::new();
+        let path = fixture.path();
+        let defaults = super::DefaultConfiguration {
+            home: fixture.directory.path().join("home"),
+            runtime_directory: fixture.directory.path().join("runtime"),
+        };
+        let configuration = ConfigurationOnlyStore::open(&path).expect("fresh Memory opens");
+        let settings = defaults.configuration();
+        configuration
+            .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
+                meta_signal_flow::ConfigureNexus {
+                    source_root: settings.source_root,
+                    stable_codex: settings.stable_codex,
+                    next_codex: settings.next_codex,
+                    harness_profiles: settings.harness_profile_vector,
+                    meta_aspects: settings.meta_aspects,
+                    message_nexus_path_option: Some(settings.message_nexus_path),
+                    message_nexus_binary_option: Some("/fixture/message-nexus".into()),
+                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
+                    lease: 60,
+                    presentation_prompt_option: None,
+                },
+            ))
+            .expect("nexus configuration commits");
+        let policy = meta_signal_flow::HandoverPolicy {
+            model_name: "claude-opus-5-5".into(),
+            warning_share_left: 15,
+            reminder_text: "Continue every five minutes.".into(),
+            every_minutes: 5,
+        };
+        configuration
+            .configure_change(meta_signal_flow::ConfigurationChange::HandoverPolicies(
+                vec![policy.clone()],
+            ))
+            .unwrap();
+        configuration
+            .configure_change(meta_signal_flow::ConfigurationChange::HandoverArchive(
+                "/archive/v1".into(),
+            ))
+            .unwrap();
+        configuration
+            .configure_change(meta_signal_flow::ConfigurationChange::HandoverCount(3))
+            .unwrap();
+        drop(configuration);
+
+        let address = Address {
+            aspect: Aspect::Mind,
+            topic: "upgradeSibling".into(),
+            model: Model::Sol,
+        };
+        let sibling = HandoverMemory {
+            address: address.clone(),
+            current: vec![Section {
+                title: "Live".into(),
+                description: "current generation".into(),
+                body: "live bytes".into(),
+            }],
+            touch: Some(Touch::Unknown),
+            generation: 8,
+            current_flow_id: Some("successor".into()),
+            closed: vec![ClosedHandover {
+                generation: 7,
+                predecessor: "predecessor".into(),
+                successor: "successor".into(),
+                sections: vec![Section {
+                    title: "Closed".into(),
+                    description: "archived generation".into(),
+                    body: "closed bytes".into(),
+                }],
+                touch: Some(Touch::Unknown),
+            }],
+        };
+        {
+            let descriptor = HandoverMemory::descriptor();
+            let mut engine = Engine::open(
+                EngineOpen::new(&path, SchemaVersion::new(super::FLOW_SCHEMA_VERSION))
+                    .with_family(&descriptor),
+            )
+            .unwrap();
+            let handovers = engine.register_table(descriptor).unwrap();
+            engine
+                .assert(Assertion::new(handovers, sibling.clone()))
+                .unwrap();
+        }
+
+        let predecessor = StoredHandoverConfigurationV1 {
+            policies: meta_signal_flow::HandoverPoliciesConfiguration::Configured(vec![policy]),
+            archive: meta_signal_flow::HandoverArchiveConfiguration::Configured(
+                "/archive/v1".into(),
+            ),
+            count: meta_signal_flow::HandoverCountConfiguration::Configured(3),
+        };
+        let registration = TableRegistration::new(FamilyIdentity::new(
+            FamilyName::new("flow-nexus-handover-configuration"),
+            StoredHandoverConfigurationV1::schema_hash(),
+            TableName::new(super::OPTIONAL_HANDOVER_TABLE),
+        ));
+        let registration_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&registration).unwrap();
+        let predecessor_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&predecessor).unwrap();
+        let database = redb::Database::open(&path).unwrap();
+        let write = database.begin_write().unwrap();
+        {
+            let mut catalog = write.open_table(super::SEMA_CATALOG_TABLE).unwrap();
+            catalog
+                .insert(
+                    super::OPTIONAL_HANDOVER_TABLE,
+                    registration_bytes.as_slice(),
+                )
+                .unwrap();
+            let table = redb::TableDefinition::<&str, &[u8]>::new(super::OPTIONAL_HANDOVER_TABLE);
+            let mut rows = write.open_table(table).unwrap();
+            rows.insert("handover", predecessor_bytes.as_slice())
+                .unwrap();
+        }
+        write.commit().unwrap();
+        drop(database);
+
+        let upgraded = ConfigurationOnlyStore::open(&path)
+            .expect("the actual configuration opener admits and upgrades v1");
+        let snapshot = upgraded.configuration_snapshot().unwrap().unwrap();
+        assert_eq!(snapshot.publication_deadline, 60_000);
+        assert_eq!(snapshot.handover_policies, predecessor.policies);
+        assert_eq!(snapshot.handover_archive, predecessor.archive);
+        assert_eq!(snapshot.handover_count, predecessor.count);
+        drop(upgraded);
+
+        for _ in 0..2 {
+            let running = FlowStore::open_configured(&path)
+                .expect("the actual Flow opener admits the upgraded family");
+            assert_eq!(
+                running
+                    .engine
+                    .match_records(QueryPlan::key(running.handovers, sibling.record_key()))
+                    .unwrap()
+                    .records(),
+                std::slice::from_ref(&sibling)
+            );
+            assert_eq!(
+                running
+                    .configuration_snapshot()
+                    .unwrap()
+                    .unwrap()
+                    .publication_deadline,
+                60_000
+            );
+            drop(running);
         }
     }
 

@@ -822,11 +822,13 @@
           flow-publication-deadline-post-commit = context.exactGitTest "flow-nexus"
             "tests::handover_archive::post_commit_timeout_reverifies_same_generation_before_removal";
           flow-publication-deadline-upgrade = context.exactTest "flow-nexus"
-            "store::handover_configuration::tests::persisted_v1_upgrades_once_and_preserves_configuration_and_handover_rows";
+            "store::tests::actual_configuration_and_flow_openers_admit_and_upgrade_the_exact_v1_handover_family";
           flow-publication-deadline-new-memory = context.exactTest "flow-nexus"
             "store::tests::new_memory_persists_the_publication_deadline_default_before_configuration";
           flow-publication-deadline-descendant-pipes = context.exactGitTest "flow-nexus"
-            "handover_archive::tests::publication_timeout_kills_a_descendant_holding_capture_pipes_after_git_exits";
+            "tests::handover_archive::separate_session_pipe_holder_cannot_extend_the_budget_or_remove_the_generation";
+          flow-publication-deadline-expired-spawn = context.exactGitTest "flow-nexus"
+            "handover_archive::tests::expired_deadline_never_spawns_the_command";
           flow-retirement-preserves-current-and-sibling = context.exactTest "flow-nexus"
             "tests::handover_memory::exact_retirement_identity_preserves_new_live_and_closed_rows";
           flow-retirement-identity-mismatch-incomplete = context.exactTest "flow-nexus"
@@ -850,9 +852,9 @@
             { nativeBuildInputs = [ context.pkgs.gnugrep ]; }
             ''
               grep -F 'rev = "e050c8fbf334d859391cb64f6a47663a2c689c11"' ${./Cargo.toml}
-              grep -F 'rev = "af0cf42ffe4a3147f2cb463438d8b9cb3c9b027f"' ${./Cargo.toml}
+              grep -F 'rev = "b8f7953c7be44740b49364b965abd35a7919ecab"' ${./Cargo.toml}
               grep -F 'signal-flow?rev=e050c8fbf334d859391cb64f6a47663a2c689c11#e050c8fbf334d859391cb64f6a47663a2c689c11' ${./Cargo.lock}
-              grep -F 'meta-signal-flow?rev=af0cf42ffe4a3147f2cb463438d8b9cb3c9b027f#af0cf42ffe4a3147f2cb463438d8b9cb3c9b027f' ${./Cargo.lock}
+              grep -F 'meta-signal-flow?rev=b8f7953c7be44740b49364b965abd35a7919ecab#b8f7953c7be44740b49364b965abd35a7919ecab' ${./Cargo.lock}
               touch "$out"
             '';
           flow-handover-permission-denied-unreadable = context.exactTest "flow-nexus"

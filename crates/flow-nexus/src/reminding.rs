@@ -170,14 +170,7 @@ impl ArchivesHandoverOnTick for RunningNexus {
             eprintln!("flow-nexus: publication deadline configuration unreadable");
             return;
         };
-        let meta_signal_flow::PublicationDeadlineConfiguration::Configured(deadline_ms) =
-            deadline_configuration
-        else {
-            eprintln!(
-                "flow-nexus: publication deadline is Unconfigured; closed generations retained"
-            );
-            return;
-        };
+        let deadline_ms = deadline_configuration;
         let Ok(deadline_ms) = u64::try_from(deadline_ms) else {
             eprintln!(
                 "flow-nexus: publication deadline is unrepresentable; closed generations retained"

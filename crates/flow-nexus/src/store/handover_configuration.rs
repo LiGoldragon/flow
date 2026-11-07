@@ -1,6 +1,6 @@
 use meta_signal_flow::{
-    HandoverArchiveConfiguration, HandoverCountConfiguration, HandoverPoliciesConfiguration,
-    PublicationDeadlineConfiguration,
+    Duration, HandoverArchiveConfiguration, HandoverCountConfiguration,
+    HandoverPoliciesConfiguration,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::TableName;
@@ -35,7 +35,7 @@ pub(crate) struct StoredHandoverConfiguration {
     pub policies: HandoverPoliciesConfiguration,
     pub archive: HandoverArchiveConfiguration,
     pub count: HandoverCountConfiguration,
-    pub publication_deadline: PublicationDeadlineConfiguration,
+    pub publication_deadline: Duration,
 }
 impl UpgradeFrom<StoredHandoverConfigurationV1> for StoredHandoverConfiguration {
     type Refusal = std::convert::Infallible;
@@ -44,7 +44,7 @@ impl UpgradeFrom<StoredHandoverConfigurationV1> for StoredHandoverConfiguration 
             policies: predecessor.policies,
             archive: predecessor.archive,
             count: predecessor.count,
-            publication_deadline: PublicationDeadlineConfiguration::Configured(60_000),
+            publication_deadline: 60_000,
         })
     }
 }
@@ -80,7 +80,7 @@ pub(crate) fn unconfigured() -> StoredHandoverConfiguration {
         policies: HandoverPoliciesConfiguration::Unconfigured,
         archive: HandoverArchiveConfiguration::Unconfigured,
         count: HandoverCountConfiguration::Unconfigured,
-        publication_deadline: PublicationDeadlineConfiguration::Configured(60_000),
+        publication_deadline: 60_000,
     }
 }
 
@@ -88,7 +88,7 @@ pub(crate) trait ReadsHandoverConfiguration {
     fn handover_policies(&self) -> Result<HandoverPoliciesConfiguration, super::StoreError>;
     fn handover_archive(&self) -> Result<HandoverArchiveConfiguration, super::StoreError>;
     fn handover_count(&self) -> Result<HandoverCountConfiguration, super::StoreError>;
-    fn publication_deadline(&self) -> Result<PublicationDeadlineConfiguration, super::StoreError>;
+    fn publication_deadline(&self) -> Result<Duration, super::StoreError>;
 }
 
 impl ReadsHandoverConfiguration for super::FlowStore {
@@ -139,7 +139,7 @@ impl ReadsHandoverConfiguration for super::FlowStore {
             .map(|row| row.count.clone())
             .unwrap_or(HandoverCountConfiguration::Unconfigured))
     }
-    fn publication_deadline(&self) -> Result<PublicationDeadlineConfiguration, super::StoreError> {
+    fn publication_deadline(&self) -> Result<Duration, super::StoreError> {
         use sema_engine::{QueryPlan, RecordKey};
         let rows = self
             .engine
@@ -152,7 +152,7 @@ impl ReadsHandoverConfiguration for super::FlowStore {
         Ok(rows
             .first()
             .map(|row| row.publication_deadline.clone())
-            .unwrap_or(PublicationDeadlineConfiguration::Configured(60_000)))
+            .unwrap_or(60_000))
     }
 }
 
@@ -194,10 +194,7 @@ mod tests {
             HandoverArchiveConfiguration::Configured("/archive".into())
         );
         assert_eq!(current.count, HandoverCountConfiguration::Configured(3));
-        assert_eq!(
-            current.publication_deadline,
-            PublicationDeadlineConfiguration::Configured(60_000)
-        );
+        assert_eq!(current.publication_deadline, 60_000);
     }
 
     #[test]
@@ -273,10 +270,7 @@ mod tests {
                 assert_eq!(current.policies, predecessor.policies);
                 assert_eq!(current.archive, predecessor.archive);
                 assert_eq!(current.count, predecessor.count);
-                assert_eq!(
-                    current.publication_deadline,
-                    PublicationDeadlineConfiguration::Configured(60_000)
-                );
+                assert_eq!(current.publication_deadline, 60_000);
                 assert_eq!(
                     engine
                         .match_records(QueryPlan::key(handovers, sibling.record_key()))

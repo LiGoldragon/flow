@@ -446,6 +446,11 @@ impl RunsWithDeadline for Command {
         &mut self,
         deadline: Instant,
     ) -> Result<std::process::Output, HandoverArchiveRefusal> {
+        // File preparation may have consumed the entire publication budget.
+        // An expired budget never starts a Git process or any of its hooks.
+        if Instant::now() >= deadline {
+            return Err(HandoverArchiveRefusal::PublicationTimedOut);
+        }
         // Git hooks are allowed to create descendants.  Put the command and
         // all of its descendants in one owned process group so a publication
         // timeout has one cleanup boundary rather than killing only git.
@@ -480,109 +485,106 @@ impl RunsWithDeadline for Command {
             .stderr
             .take()
             .ok_or_else(|| HandoverArchiveRefusal::Git("git stderr was not piped".into()))?;
-        let (output_sender, output_receiver) = std::sync::mpsc::channel();
-        let stdout_thread = thread::spawn({
-            let sender = output_sender.clone();
-            move || {
-                let mut bytes = Vec::new();
-                let result = io::Read::read_to_end(
-                    &mut io::BufReader::new(stdout).take((MAX_CAPTURE_BYTES + 1) as u64),
-                    &mut bytes,
-                )
-                .and_then(|_| {
-                    if bytes.len() > MAX_CAPTURE_BYTES {
-                        Err(io::Error::other("git output exceeded capture bound"))
-                    } else {
-                        Ok(())
-                    }
-                });
-                let _ = sender.send((true, result.map(|_| bytes)));
-            }
-        });
-        let stderr_thread = thread::spawn({
-            let sender = output_sender;
-            move || {
-                let mut bytes = Vec::new();
-                let result = io::Read::read_to_end(
-                    &mut io::BufReader::new(stderr).take((MAX_CAPTURE_BYTES + 1) as u64),
-                    &mut bytes,
-                )
-                .and_then(|_| {
-                    if bytes.len() > MAX_CAPTURE_BYTES {
-                        Err(io::Error::other("git output exceeded capture bound"))
-                    } else {
-                        Ok(())
-                    }
-                });
-                let _ = sender.send((false, result.map(|_| bytes)));
-            }
-        });
+        let mut stdout = stdout;
+        let mut stderr = stderr;
         let process_id = child.id();
-        let status = loop {
-            match child
-                .try_wait()
-                .map_err(|e| HandoverArchiveRefusal::Git(e.to_string()))?
-            {
-                Some(exit) => {
-                    break exit;
-                }
-                None if Instant::now() >= deadline => {
-                    terminate_process_group(&mut child, process_id, stdout_thread, stderr_thread);
-                    return Err(HandoverArchiveRefusal::PublicationTimedOut);
-                }
-                None => thread::sleep(Duration::from_millis(2)),
-            }
-        };
-        let mut stdout = None;
-        let mut stderr = None;
-        while stdout.is_none() || stderr.is_none() {
-            let remaining = match deadline.checked_duration_since(Instant::now()) {
-                Some(remaining) => remaining,
-                None => {
-                    terminate_process_group(&mut child, process_id, stdout_thread, stderr_thread);
-                    return Err(HandoverArchiveRefusal::PublicationTimedOut);
-                }
-            };
-            let (is_stdout, bytes) = match output_receiver.recv_timeout(remaining) {
-                Ok(output) => output,
-                Err(_) => {
-                    terminate_process_group(&mut child, process_id, stdout_thread, stderr_thread);
-                    return Err(HandoverArchiveRefusal::PublicationTimedOut);
-                }
-            };
-            let bytes = match bytes {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    terminate_process_group(&mut child, process_id, stdout_thread, stderr_thread);
-                    return Err(HandoverArchiveRefusal::Git(error.to_string()));
-                }
-            };
-            if is_stdout {
-                stdout = Some(bytes);
-            } else {
-                stderr = Some(bytes);
-            }
+        if let Err(error) = make_nonblocking(&stdout).and_then(|_| make_nonblocking(&stderr)) {
+            terminate_process_group(&mut child, process_id);
+            return Err(error);
         }
-        let _ = stdout_thread.join();
-        let _ = stderr_thread.join();
+        let mut stdout_bytes = Vec::new();
+        let mut stderr_bytes = Vec::new();
+        let mut stdout_eof = false;
+        let mut stderr_eof = false;
+        let mut status = None;
+        while status.is_none() || !stdout_eof || !stderr_eof {
+            if !stdout_eof {
+                stdout_eof = match drain_capture(&mut stdout, &mut stdout_bytes) {
+                    Ok(eof) => eof,
+                    Err(error) => {
+                        terminate_process_group(&mut child, process_id);
+                        return Err(error);
+                    }
+                };
+            }
+            if !stderr_eof {
+                stderr_eof = match drain_capture(&mut stderr, &mut stderr_bytes) {
+                    Ok(eof) => eof,
+                    Err(error) => {
+                        terminate_process_group(&mut child, process_id);
+                        return Err(error);
+                    }
+                };
+            }
+            if status.is_none() {
+                status = child
+                    .try_wait()
+                    .map_err(|error| HandoverArchiveRefusal::Git(error.to_string()))?;
+            }
+            if status.is_some() && stdout_eof && stderr_eof {
+                break;
+            }
+            if Instant::now() >= deadline {
+                terminate_process_group(&mut child, process_id);
+                // Dropping our nonblocking read ends is sufficient even when a
+                // hook deliberately moved a pipe-holding descendant into a
+                // different session. There is no reader thread left to join.
+                return Err(HandoverArchiveRefusal::PublicationTimedOut);
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
         Ok(std::process::Output {
-            status,
-            stdout: stdout.expect("stdout capture recorded"),
-            stderr: stderr.expect("stderr capture recorded"),
+            status: status.expect("Git exited before both pipes reached EOF"),
+            stdout: stdout_bytes,
+            stderr: stderr_bytes,
         })
     }
 }
 
-fn terminate_process_group(
-    child: &mut std::process::Child,
-    process_id: u32,
-    stdout_thread: thread::JoinHandle<()>,
-    stderr_thread: thread::JoinHandle<()>,
-) {
+#[cfg(unix)]
+fn make_nonblocking(reader: &impl std::os::fd::AsRawFd) -> Result<(), HandoverArchiveRefusal> {
+    let descriptor = std::os::fd::AsRawFd::as_raw_fd(reader);
+    // SAFETY: fcntl reads and updates flags on this live, owned descriptor.
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
+        return Err(HandoverArchiveRefusal::Git(
+            io::Error::last_os_error().to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_nonblocking(_reader: &impl Sized) -> Result<(), HandoverArchiveRefusal> {
+    Ok(())
+}
+
+fn drain_capture(
+    reader: &mut impl Read,
+    bytes: &mut Vec<u8>,
+) -> Result<bool, HandoverArchiveRefusal> {
+    let mut chunk = [0_u8; 8192];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => return Ok(true),
+            Ok(count) => {
+                if bytes.len().saturating_add(count) > MAX_CAPTURE_BYTES {
+                    return Err(HandoverArchiveRefusal::Git(
+                        "git output exceeded capture bound".into(),
+                    ));
+                }
+                bytes.extend_from_slice(&chunk[..count]);
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => return Err(HandoverArchiveRefusal::Git(error.to_string())),
+        }
+    }
+}
+
+fn terminate_process_group(child: &mut std::process::Child, process_id: u32) {
     kill_process_group(process_id);
     let _ = child.wait();
-    let _ = stdout_thread.join();
-    let _ = stderr_thread.join();
 }
 
 fn kill_process_group(process_id: u32) {
@@ -603,6 +605,21 @@ fn kill_process_group(process_id: u32) {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn expired_deadline_never_spawns_the_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("spawned");
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!("printf spawned > '{}'", marker.display()));
+        assert!(matches!(
+            command.output_with_deadline(Instant::now()),
+            Err(HandoverArchiveRefusal::PublicationTimedOut)
+        ));
+        assert!(!marker.exists(), "an expired command had no side effect");
+    }
 
     #[test]
     fn invalid_utf8_git_evidence_is_rejected_instead_of_aliasing_replacement_text() {

@@ -214,7 +214,7 @@ fn publication_deadline_defaults_positive_and_persists_override() {
             .unwrap()
             .unwrap()
             .publication_deadline,
-        meta_signal_flow::PublicationDeadlineConfiguration::Configured(60_000)
+        60_000
     );
     configuration
         .configure_change(ConfigurationChange::PublicationDeadline(125))
@@ -225,7 +225,7 @@ fn publication_deadline_defaults_positive_and_persists_override() {
             .unwrap()
             .unwrap()
             .publication_deadline,
-        meta_signal_flow::PublicationDeadlineConfiguration::Configured(125)
+        125
     );
     drop(configuration);
     let reopened = crate::store::ConfigurationOnlyStore::open(path).unwrap();
@@ -235,7 +235,7 @@ fn publication_deadline_defaults_positive_and_persists_override() {
             .unwrap()
             .unwrap()
             .publication_deadline,
-        meta_signal_flow::PublicationDeadlineConfiguration::Configured(125)
+        125
     );
 }
 

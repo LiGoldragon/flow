@@ -119,8 +119,8 @@ const META_REQUEST_POLICY_CONFIGURATION_FAMILY: &str =
     "flow-nexus-meta-request-policy-configuration";
 const META_REQUEST_POLICY_CONFIGURATION_SCHEMA: &str =
     "flow-nexus-meta-request-policy-configuration-v1";
-const SEEDED_REQUEST_ID_DRAWS: i64 = 64;
-const SEEDED_ANNOUNCEMENT_TRIES: i64 = 3;
+pub(crate) const SEEDED_REQUEST_ID_DRAWS: i64 = 64;
+pub(crate) const SEEDED_ANNOUNCEMENT_TRIES: i64 = 3;
 const META_HARNESS_FLAGS_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_harness_flags_configuration");
 const META_HARNESS_FLAGS_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-harness-flags-configuration";
@@ -826,9 +826,9 @@ impl DescribesDefaultMinutesTable for StoredMetaDefaultMinutesConfiguration {
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredMetaRequestPolicyConfiguration {
-    request_id_draws: meta_signal_flow::DrawBound,
-    announcement_tries: meta_signal_flow::TryBound,
+pub(crate) struct StoredMetaRequestPolicyConfiguration {
+    pub(crate) request_id_draws: meta_signal_flow::DrawBound,
+    pub(crate) announcement_tries: meta_signal_flow::TryBound,
 }
 
 impl EngineRecord for StoredMetaRequestPolicyConfiguration {
@@ -2401,6 +2401,7 @@ impl OpensFlowStore for FlowStore {
         let send_outcome_descriptors = SendOutcomeTables::descriptors();
         let logical_delivery_descriptors = LogicalDeliveryTables::descriptors();
         let request_id_upgrade_descriptors = <request_id_upgrade::RequestIdUpgradeTables as request_id_upgrade::DeclaresRequestIdUpgradeTables>::descriptors();
+        let request_policy_descriptor = StoredMetaRequestPolicyConfiguration::descriptor();
         let heartbeat_standing_descriptor = StoredHeartbeatStanding::descriptor();
         let restart_descriptor =
             <FlowStore as restart::DescribesRestartTables>::restart_descriptor();
@@ -2466,13 +2467,53 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&logical_delivery_descriptors.store_identity)
                 .with_family(&request_id_upgrade_descriptors.prior_deliveries)
                 .with_family(&request_id_upgrade_descriptors.task_announcements)
-                .with_family(&request_id_upgrade_descriptors.upgrade_assignments);
+                .with_family(&request_id_upgrade_descriptors.upgrade_assignments)
+                .with_family(&request_policy_descriptor);
         }
         let mut engine = Engine::open(engine_open)?;
         if era == FlowMemoryEra::RequestIdPredecessor {
-            // The atomic evolution is assembled before any current-family registration.
-            // Until that plan is complete, refuse the predecessor without writing it.
-            return Err(StoreError::StateInvariant);
+            let reminders = engine.register_table(reminders_descriptor.clone())?;
+            let simplified_replies =
+                engine.register_table(logical_delivery_descriptors.simplified_replies.clone())?;
+            let heartbeat_standings =
+                engine.register_table(heartbeat_standing_descriptor.clone())?;
+            let reminder_rows = engine
+                .match_records(QueryPlan::all(reminders))?
+                .records()
+                .to_vec();
+            let simplified_reply_rows = engine
+                .match_records(QueryPlan::all(simplified_replies))?
+                .records()
+                .to_vec();
+            let heartbeat_rows = engine
+                .match_records(QueryPlan::all(heartbeat_standings))?
+                .records()
+                .to_vec();
+            request_id_upgrade::evolve_request_id_memory(
+                &mut engine,
+                request_id_upgrade::RequestIdEvolutionDescriptors {
+                    metaflows: metaflows_descriptor.clone(),
+                    address_holds: address_holds_descriptor.clone(),
+                    send_calls: send_calls_descriptor.clone(),
+                    requests: queue_delivery_descriptors.1.clone(),
+                    attempts: queue_delivery_descriptors.2.clone(),
+                    outcomes: send_outcome_descriptors.outcomes.clone(),
+                    current: logical_delivery_descriptors.current.clone(),
+                    events: logical_delivery_descriptors.events.clone(),
+                    request_ids: logical_delivery_descriptors.request_ids.clone(),
+                    deliver_calls: logical_delivery_descriptors.deliver_calls.clone(),
+                    store_identity: logical_delivery_descriptors.store_identity.clone(),
+                    prior_deliveries: request_id_upgrade_descriptors.prior_deliveries.clone(),
+                    task_announcements: request_id_upgrade_descriptors.task_announcements.clone(),
+                    upgrade_assignments: request_id_upgrade_descriptors.upgrade_assignments.clone(),
+                    request_policy: request_policy_descriptor.clone(),
+                },
+                &reminder_rows,
+                &simplified_reply_rows,
+                heartbeat_standings,
+                &heartbeat_rows,
+                &logical_delivery::SystemRequestIdDrawer,
+            )?;
         }
 
         let flows = engine.register_table(flows_descriptor)?;

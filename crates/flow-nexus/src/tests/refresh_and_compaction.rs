@@ -78,7 +78,7 @@ pub(super) fn seat_refreshing_at(fixture: &NexusFixture, refresh: i64) {
             },
             signal_flow::Touch::Known(signal_flow::Known_Data {
                 flow_id: CLAUDE_SEAT.into(),
-                tokens: 40_000,
+                tokens: refresh,
                 timestamp: 1,
             }),
         )

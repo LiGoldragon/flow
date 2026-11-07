@@ -102,6 +102,7 @@ fn seat_metaflow_with(queue: Vec<Request>) -> Metaflow {
             .enumerate()
             .map(|(index, request)| signal_flow::QueueEntry {
                 logical_delivery_id: format!("refresh-test-{index}"),
+                request_id: "test".into(),
                 sent_by: SentBy::Unknown,
                 delivery: flow_ethos::Delivery::Queue,
                 message: Message::Soft(request),

@@ -261,8 +261,8 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                 .dispatch_metaflow_peer(
                     signal_flow::Query::Deliver(signal_flow::Deliver_Data {
                         lock,
-                        deliver_key: format!("test-deliver-{index}"),
-                        sendable_message: message,
+                        deliver_key: format!("test-deliver-{hard}-{duplicate}-{privileged}"),
+                        sendable_message: super::sendable_message(message),
                     }),
                     Some(&message_peer),
                 )
@@ -318,8 +318,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                 answer
             )
         };
-        assert!(!receipt.logical_delivery_id.is_empty());
-        assert_eq!(receipt.request_id.len(), 4);
+        assert_eq!(receipt.len(), 4);
         assert!(
             fixture
                 .nexus

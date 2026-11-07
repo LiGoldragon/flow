@@ -94,6 +94,7 @@ fn awake_seat(fixture: &NexusFixture, queue: Vec<Request>) {
             .enumerate()
             .map(|(index, request)| signal_flow::QueueEntry {
                 logical_delivery_id: format!("refreshing-test-{index}"),
+                request_id: "test".into(),
                 sent_by: SentBy::Unknown,
                 delivery: flow_ethos::Delivery::Queue,
                 message: Message::Soft(request),
@@ -578,6 +579,7 @@ fn refreshable_with_staged_successor(
         past: vec![],
         queue: vec![signal_flow::QueueEntry {
             logical_delivery_id: "refreshing-successor-0".into(),
+            request_id: "test".into(),
             request_id: "test".into(),
             sent_by: SentBy::Unknown,
             delivery: delivery.clone(),
@@ -1312,6 +1314,7 @@ fn a_successor_that_cannot_start_answers_refresh_s_own_rejection() {
     let mut waking = stored(&fixture);
     waking.queue = vec![signal_flow::QueueEntry {
         logical_delivery_id: "refreshing-wake-0".into(),
+        request_id: "test".into(),
         request_id: "test".into(),
         sent_by: SentBy::Unknown,
         delivery: flow_ethos::Delivery::Wake,

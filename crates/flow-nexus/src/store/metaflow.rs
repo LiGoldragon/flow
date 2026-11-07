@@ -813,7 +813,13 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock: forged,
-                        sendable_message: flow_ethos::Message::Soft(body.clone())
+                        deliver_key: "forged".into(),
+                        sendable_message: signal_flow::SendableMessage::Soft(
+                            signal_flow::SendableRequest::Psyche(match body.clone() {
+                                Request::Psyche(value) => value,
+                                _ => unreachable!(),
+                            })
+                        )
                     },
                     101
                 )
@@ -835,7 +841,13 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock: lock.clone(),
-                        sendable_message: flow_ethos::Message::Soft(body.clone())
+                        deliver_key: "accepted".into(),
+                        sendable_message: signal_flow::SendableMessage::Soft(
+                            signal_flow::SendableRequest::Psyche(match body.clone() {
+                                Request::Psyche(value) => value,
+                                _ => unreachable!(),
+                            })
+                        )
                     },
                     101
                 )
@@ -864,9 +876,10 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock,
-                        sendable_message: flow_ethos::Message::Soft(Request::Notice(
-                            "duplicate".into()
-                        ))
+                        deliver_key: "duplicate".into(),
+                        sendable_message: signal_flow::SendableMessage::Soft(
+                            signal_flow::SendableRequest::Notice("duplicate".into())
+                        )
                     },
                     102
                 )
@@ -911,9 +924,10 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock,
-                        sendable_message: flow_ethos::Message::Soft(Request::Notice(
-                            "expired".into()
-                        ))
+                        deliver_key: "expired".into(),
+                        sendable_message: signal_flow::SendableMessage::Soft(
+                            signal_flow::SendableRequest::Notice("expired".into())
+                        )
                     },
                     40
                 )

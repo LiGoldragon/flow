@@ -2435,7 +2435,8 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
             .dispatch_metaflow_peer(
                 signal_flow::Query::Deliver(Deliver_Data {
                     lock: lock.clone(),
-                    sendable_message: Message::Soft(oversized),
+                    deliver_key: "oversized".into(),
+                    sendable_message: super::sendable_message(Message::Soft(oversized)),
                 }),
                 Some(&message),
             )
@@ -2489,7 +2490,8 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     let answer = fixture.nexus.dispatch_metaflow_peer(
         signal_flow::Query::Deliver(Deliver_Data {
             lock,
-            sendable_message: Message::MiddleAbrupt(order.clone()),
+            deliver_key: "wake-order".into(),
+            sendable_message: super::sendable_message(Message::MiddleAbrupt(order.clone())),
         }),
         Some(&message),
     );
@@ -2945,7 +2947,8 @@ fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
     let response = fixture.nexus.dispatch_metaflow_peer(
         signal_flow::Query::Deliver(Deliver_Data {
             lock,
-            sendable_message: Message::Soft(order.clone()),
+            deliver_key: "queue-order".into(),
+            sendable_message: super::sendable_message(Message::Soft(order.clone())),
         }),
         Some(&message),
     );

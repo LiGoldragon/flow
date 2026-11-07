@@ -625,7 +625,7 @@ impl Dispatches for RunningNexus {
         match query {
             meta_signal_flow::Query::DebugDelivery(_) => {
                 meta_signal_flow::Response::DebugDeliveryRejected(
-                    meta_signal_flow::DebugDeliveryRejection::StoreRefused,
+                    meta_signal_flow::DebugDeliveryRejected_Data::StoreRefused,
                 )
             }
             meta_signal_flow::Query::Configuration => match self.store.configuration_snapshot() {

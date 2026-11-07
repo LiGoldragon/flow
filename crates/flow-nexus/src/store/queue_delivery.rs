@@ -1502,6 +1502,7 @@ mod tests {
     fn queued(body: &str) -> QueueEntry {
         QueueEntry {
             logical_delivery_id: format!("logical-{body}"),
+            request_id: "test".into(),
             sent_by: SentBy::Sender(Address {
                 aspect: Aspect::Psyche,
                 topic: "core".into(),

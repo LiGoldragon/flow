@@ -146,6 +146,9 @@ const OPTIONAL_REQUEST_ID_TABLE: &str = "flow_nexus_request_ids";
 const OPTIONAL_STORE_IDENTITY_TABLE: &str = "flow_nexus_store_identity";
 const OPTIONAL_DELIVER_CALL_TABLE: &str = "flow_nexus_deliver_calls";
 const OPTIONAL_REQUEST_POLICY_TABLE: &str = "flow_nexus_meta_request_policy_configuration";
+const OPTIONAL_PRIOR_DELIVERY_TABLE: &str = "flow_nexus_deliveries_before_ids";
+const OPTIONAL_TASK_ANNOUNCEMENT_TABLE: &str = "flow_nexus_task_announcements";
+const OPTIONAL_UPGRADE_ASSIGNMENT_TABLE: &str = "flow_nexus_upgrade_assignments";
 const HEARTBEAT_STANDING_TABLE_NAME: TableName = TableName::new("flow_nexus_heartbeat_standings");
 const HEARTBEAT_STANDING_FAMILY: &str = "flow-nexus-heartbeat-standing";
 const HEARTBEAT_STANDING_SCHEMA: &str = "flow-nexus-heartbeat-standing-v2";
@@ -1591,6 +1594,7 @@ pub struct FlowStore {
     queue_delivery: QueueDeliveryTables,
     send_outcomes: SendOutcomeTables,
     logical_deliveries: LogicalDeliveryTables,
+    request_id_upgrade: request_id_upgrade::RequestIdUpgradeTables,
     heartbeat_standings: TableReference<StoredHeartbeatStanding>,
     restarts: TableReference<restart::StoredRestart>,
     seat_births: TableReference<crate::generated::memory::SeatBirth>,
@@ -2382,6 +2386,7 @@ impl OpensFlowStore for FlowStore {
         let queue_delivery_descriptors = QueueDeliveryTables::descriptors();
         let send_outcome_descriptors = SendOutcomeTables::descriptors();
         let logical_delivery_descriptors = LogicalDeliveryTables::descriptors();
+        let request_id_upgrade_descriptors = <request_id_upgrade::RequestIdUpgradeTables as request_id_upgrade::DeclaresRequestIdUpgradeTables>::descriptors();
         let heartbeat_standing_descriptor = StoredHeartbeatStanding::descriptor();
         let restart_descriptor =
             <FlowStore as restart::DescribesRestartTables>::restart_descriptor();
@@ -2440,6 +2445,9 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&logical_delivery_descriptors.request_ids)
                 .with_family(&logical_delivery_descriptors.deliver_calls)
                 .with_family(&logical_delivery_descriptors.store_identity)
+                .with_family(&request_id_upgrade_descriptors.prior_deliveries)
+                .with_family(&request_id_upgrade_descriptors.task_announcements)
+                .with_family(&request_id_upgrade_descriptors.upgrade_assignments)
                 .with_family(&heartbeat_standing_descriptor)
                 .with_family(&restart_descriptor)
                 .with_family(&seat_birth_descriptor)
@@ -2476,6 +2484,7 @@ impl OpensFlowStore for FlowStore {
         let send_outcomes = SendOutcomeTables::register(&mut engine, send_outcome_descriptors)?;
         let logical_deliveries =
             LogicalDeliveryTables::register(&mut engine, logical_delivery_descriptors)?;
+        let request_id_upgrade = <request_id_upgrade::RequestIdUpgradeTables as request_id_upgrade::DeclaresRequestIdUpgradeTables>::register(&mut engine, request_id_upgrade_descriptors)?;
         let heartbeat_standings = engine.register_table(heartbeat_standing_descriptor)?;
         let restarts = engine.register_table(restart_descriptor)?;
         let seat_births = engine.register_table(seat_birth_descriptor)?;
@@ -2516,6 +2525,7 @@ impl OpensFlowStore for FlowStore {
             queue_delivery,
             send_outcomes,
             logical_deliveries,
+            request_id_upgrade,
             heartbeat_standings,
             restarts,
             seat_births,
@@ -2644,6 +2654,10 @@ impl OpensFlowStore for FlowStore {
             SendOutcomeTables::register(&mut engine, SendOutcomeTables::descriptors())?;
         let logical_deliveries =
             LogicalDeliveryTables::register(&mut engine, LogicalDeliveryTables::descriptors())?;
+        let request_id_upgrade = <request_id_upgrade::RequestIdUpgradeTables as request_id_upgrade::DeclaresRequestIdUpgradeTables>::register(
+            &mut engine,
+            <request_id_upgrade::RequestIdUpgradeTables as request_id_upgrade::DeclaresRequestIdUpgradeTables>::descriptors(),
+        )?;
         let heartbeat_standings = engine.register_table(StoredHeartbeatStanding::descriptor())?;
         let restarts = engine
             .register_table(<FlowStore as restart::DescribesRestartTables>::restart_descriptor())?;
@@ -2687,6 +2701,7 @@ impl OpensFlowStore for FlowStore {
             queue_delivery,
             send_outcomes,
             logical_deliveries,
+            request_id_upgrade,
             heartbeat_standings,
             restarts,
             seat_births,
@@ -4848,6 +4863,18 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_store_identity" => {
                 ("flow-nexus-store-identity", "flow-nexus-store-identity-v1")
             }
+            "flow_nexus_deliveries_before_ids" => (
+                "flow-nexus-delivery-before-ids",
+                "flow-nexus-delivery-before-ids-v1",
+            ),
+            "flow_nexus_task_announcements" => (
+                "flow-nexus-task-announcement",
+                "flow-nexus-task-announcement-v1",
+            ),
+            "flow_nexus_upgrade_assignments" => (
+                "flow-nexus-upgrade-assignment",
+                "flow-nexus-upgrade-assignment-v1",
+            ),
             "flow_nexus_restarts" => (restart::RESTART_FAMILY, restart::RESTART_SCHEMA),
             "flow_nexus_seat_births" => (restart::SEAT_BIRTH_FAMILY, restart::SEAT_BIRTH_SCHEMA),
             "flow_nexus_heartbeat_standings" => {
@@ -4946,6 +4973,9 @@ pub(crate) trait ReadsFlowMemory {
                     || *name == OPTIONAL_DELIVER_CALL_TABLE
                     || *name == OPTIONAL_STORE_IDENTITY_TABLE
                     || *name == OPTIONAL_REQUEST_POLICY_TABLE
+                    || *name == OPTIONAL_PRIOR_DELIVERY_TABLE
+                    || *name == OPTIONAL_TASK_ANNOUNCEMENT_TABLE
+                    || *name == OPTIONAL_UPGRADE_ASSIGNMENT_TABLE
             }) && tables.iter().all(|name| {
                 actual.contains(*name)
                     || ADDED_IN_0531.contains(name)
@@ -4956,8 +4986,19 @@ pub(crate) trait ReadsFlowMemory {
                     || *name == OPTIONAL_DELIVER_CALL_TABLE
                     || *name == OPTIONAL_STORE_IDENTITY_TABLE
                     || *name == OPTIONAL_REQUEST_POLICY_TABLE
+                    || *name == OPTIONAL_PRIOR_DELIVERY_TABLE
+                    || *name == OPTIONAL_TASK_ANNOUNCEMENT_TABLE
+                    || *name == OPTIONAL_UPGRADE_ASSIGNMENT_TABLE
             }) && (actual.contains(OPTIONAL_REQUEST_ID_TABLE)
                 == actual.contains(OPTIONAL_STORE_IDENTITY_TABLE))
+                && (actual.contains(OPTIONAL_REQUEST_ID_TABLE)
+                    == actual.contains(OPTIONAL_DELIVER_CALL_TABLE))
+                && (actual.contains(OPTIONAL_REQUEST_ID_TABLE)
+                    == actual.contains(OPTIONAL_PRIOR_DELIVERY_TABLE))
+                && (actual.contains(OPTIONAL_REQUEST_ID_TABLE)
+                    == actual.contains(OPTIONAL_TASK_ANNOUNCEMENT_TABLE))
+                && (actual.contains(OPTIONAL_REQUEST_ID_TABLE)
+                    == actual.contains(OPTIONAL_UPGRADE_ASSIGNMENT_TABLE))
                 && (ADDED_IN_0531.iter().all(|name| actual.contains(*name))
                     || ADDED_IN_0531.iter().all(|name| !actual.contains(*name)))
         };

@@ -4,12 +4,14 @@
 //! Flow 85bf0f1, signal-flow 3596923 and meta-signal-flow b36597a.  They are
 //! data only: no predecessor behavior is linked into the Nexus.
 
+use super::StoreError;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, RecordKey, SchemaHash,
-    TableDescriptor, TableName,
+    Engine, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, RecordKey, SchemaHash,
+    TableDescriptor, TableName, TableReference,
 };
 
+use flow_ethos::{Address, LogicalDeliveryId, RequestId};
 use flow_ethos_before_request_ids as old_flow;
 use meta_signal_flow_before_request_ids as old_meta;
 use signal_flow_before_request_ids as old_signal;
@@ -286,16 +288,16 @@ fn model_key(model: &old_flow::Model) -> &'static str {
 /// A bounded part of the post-upgrade notice for tasks that were already open.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TaskAnnouncement {
-    pub(crate) recipient: old_flow::Address,
+    pub(crate) recipient: Address,
     pub(crate) part: u64,
-    pub(crate) tasks: Vec<String>,
+    pub(crate) tasks: Vec<LogicalDeliveryId>,
     pub(crate) tries: u64,
     pub(crate) status: TaskAnnouncementStatus,
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TaskAnnouncementStatus {
-    Pending(Option<old_signal::Refusal>),
+    Pending(Option<signal_flow::Refusal>),
     Admitted(String),
     Delivered(String),
     Failed(String),
@@ -318,27 +320,27 @@ impl MemoryDefinition for TaskAnnouncement {
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AssignedAnswer {
-    pub(crate) answer: String,
-    pub(crate) order: String,
-    pub(crate) order_id: Option<String>,
+    pub(crate) answer: LogicalDeliveryId,
+    pub(crate) order: LogicalDeliveryId,
+    pub(crate) order_id: Option<RequestId>,
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OpenOrder {
-    pub(crate) order: String,
-    pub(crate) order_id: String,
+    pub(crate) order: LogicalDeliveryId,
+    pub(crate) order_id: RequestId,
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AssignmentDecision {
-    pub(crate) recipient: old_flow::Address,
+    pub(crate) recipient: Address,
     pub(crate) assigned: Vec<AssignedAnswer>,
     pub(crate) open: Vec<OpenOrder>,
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UpgradeAssignment {
-    pub(crate) sender: old_flow::Address,
+    pub(crate) sender: Address,
     pub(crate) part: u64,
     pub(crate) decisions: Vec<AssignmentDecision>,
     pub(crate) tries: u64,
@@ -380,7 +382,62 @@ pub(crate) fn upgrade_assignment_descriptor() -> TableDescriptor<UpgradeAssignme
     )
 }
 
-fn part_key(address: &old_flow::Address, part: u64) -> String {
-    let address = address_key(address);
+fn part_key(address: &Address, part: u64) -> String {
+    let address = current_address_key(address);
     format!("{}:{address}:{part:020}", address.len())
+}
+
+fn current_address_key(address: &Address) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        match address.aspect {
+            flow_ethos::Aspect::Psyche => "Psyche",
+            flow_ethos::Aspect::Mind => "Mind",
+            flow_ethos::Aspect::Field => "Field",
+        },
+        address.topic.len(),
+        address.topic,
+        address.model.name()
+    )
+}
+
+pub(crate) struct RequestIdUpgradeDescriptors {
+    pub(crate) prior_deliveries: TableDescriptor<PriorDelivery>,
+    pub(crate) task_announcements: TableDescriptor<TaskAnnouncement>,
+    pub(crate) upgrade_assignments: TableDescriptor<UpgradeAssignment>,
+}
+
+pub(crate) struct RequestIdUpgradeTables {
+    pub(crate) prior_deliveries: TableReference<PriorDelivery>,
+    pub(crate) task_announcements: TableReference<TaskAnnouncement>,
+    pub(crate) upgrade_assignments: TableReference<UpgradeAssignment>,
+}
+
+pub(crate) trait DeclaresRequestIdUpgradeTables: Sized {
+    fn descriptors() -> RequestIdUpgradeDescriptors;
+    fn register(
+        engine: &mut Engine,
+        descriptors: RequestIdUpgradeDescriptors,
+    ) -> Result<Self, StoreError>;
+}
+
+impl DeclaresRequestIdUpgradeTables for RequestIdUpgradeTables {
+    fn descriptors() -> RequestIdUpgradeDescriptors {
+        RequestIdUpgradeDescriptors {
+            prior_deliveries: prior_delivery_descriptor(),
+            task_announcements: task_announcement_descriptor(),
+            upgrade_assignments: upgrade_assignment_descriptor(),
+        }
+    }
+
+    fn register(
+        engine: &mut Engine,
+        descriptors: RequestIdUpgradeDescriptors,
+    ) -> Result<Self, StoreError> {
+        Ok(Self {
+            prior_deliveries: engine.register_table(descriptors.prior_deliveries)?,
+            task_announcements: engine.register_table(descriptors.task_announcements)?,
+            upgrade_assignments: engine.register_table(descriptors.upgrade_assignments)?,
+        })
+    }
 }

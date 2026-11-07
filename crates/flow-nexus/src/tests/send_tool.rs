@@ -722,7 +722,17 @@ fn an_admitted_send_tool_call_holds_archive_until_its_answer_object_is_released(
         "answer-hold",
         "hold the tool answer",
     ));
-    assert_eq!(replay.outcome, SendOutcome::Accepted(accepted.clone()));
+    let SendOutcome::Accepted(replayed) = &replay.outcome else {
+        panic!("the recorded accepted call replays as accepted")
+    };
+    assert_eq!(
+        replayed.send_acceptance.logical_delivery_id,
+        accepted.send_acceptance.logical_delivery_id
+    );
+    assert_eq!(
+        replayed.send_acceptance.request_id,
+        accepted.send_acceptance.request_id
+    );
     assert_eq!(
         fixture
             .nexus

@@ -2421,7 +2421,7 @@ mod tests {
             &[],
             heartbeat_table,
             &[],
-            &ScriptedDrawer::new(&["s001"]),
+            &ScriptedDrawer::new(&["s001", "0000", "0001", "0002", "0003"]),
         )
         .expect("singleton evolution commits");
 
@@ -2538,7 +2538,6 @@ mod tests {
             .expect("old address hold stores");
         drop(predecessor);
 
-        let before = std::fs::read(&path).expect("Memory reads before refusal");
         let mut engine = Engine::open(
             EngineOpen::new(&path, SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION))
                 .with_family(&descriptors.current)
@@ -2553,6 +2552,10 @@ mod tests {
         )
         .expect("predecessor catalog opens for validation");
         let heartbeat_table = engine.register_table(heartbeat).expect("heartbeat opens");
+        // Opening the predecessor and registering its existing heartbeat
+        // family may advance engine bookkeeping.  The refusal oracle begins
+        // after that ordinary open work, immediately before evolution.
+        let before = std::fs::read(&path).expect("Memory reads before refusal");
         assert!(matches!(
             evolve_request_id_memory(
                 &mut engine,

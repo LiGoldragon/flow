@@ -1,6 +1,6 @@
 //! Durable current and closed handover generations.
 
-use super::context::NamesFlowModel;
+use super::context::{NamesFlowModel, RecordsContextSize};
 use super::handover_configuration::ReadsHandoverConfiguration;
 use super::metaflow::SleepsMetaflows;
 use super::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, StoreError};

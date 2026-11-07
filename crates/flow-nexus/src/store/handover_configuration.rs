@@ -57,7 +57,10 @@ impl ReadsHandoverConfiguration for super::FlowStore {
         use sema_engine::{QueryPlan, RecordKey};
         let rows = self
             .engine
-            .match_records(QueryPlan::key(self.handover, RecordKey::new("handover")))?
+            .match_records(QueryPlan::key(
+                self.meta_configuration_tables.handover,
+                RecordKey::new("handover"),
+            ))?
             .records()
             .to_vec();
         Ok(rows

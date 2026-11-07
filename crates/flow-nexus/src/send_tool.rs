@@ -72,7 +72,7 @@ impl DeclaresSendTool for SendTool {
         serde_json::json!({
             "type": "function",
             "name": Self::tool_name(),
-            "description": "Send one request from this flow to the flow at a metaflow Address. Priority determines interruption and whether an asleep recipient wakes. The answer is a durable logical-delivery outcome or a typed refusal.",
+            "description": "Send one request from this flow to the flow at a metaflow Address. Priority determines interruption and whether an asleep recipient wakes. Result answers the request id supplied in request. The answer is a durable logical-delivery outcome or a typed refusal.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -100,9 +100,22 @@ impl DeclaresSendTool for SendTool {
                         "enum": ["Order", "Question", "Result", "Notice"],
                         "description": "Order: work for the target. Question: a question it answers. Result: a result it awaits. Notice: an error or blocker affecting its work."
                     },
-                    "body": { "type": "string", "minLength": 1 }
+                    "body": { "type": "string", "minLength": 1 },
+                    "request": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The request id answered by a Result. Present exactly for Result."
+                    }
                 },
                 "required": ["target", "priority", "kind", "body"],
+                "allOf": [{
+                    "if": {
+                        "properties": { "kind": { "const": "Result" } },
+                        "required": ["kind"]
+                    },
+                    "then": { "required": ["request"] },
+                    "else": { "not": { "required": ["request"] } }
+                }],
                 "additionalProperties": false
             }
         })
@@ -264,6 +277,11 @@ impl ReadsSendArguments for ToolCall {
             .get("body")?
             .as_str()
             .filter(|body| !body.is_empty())?;
+        let request = arguments.get("request");
+        let send_kind = Self::kind(arguments.get("kind")?, request)?;
+        if matches!(send_kind, SendKind::Result(_)) != request.is_some() {
+            return None;
+        }
         Some(SendArguments {
             target: Address {
                 aspect: Self::aspect(target.get("aspect")?)?,
@@ -271,7 +289,7 @@ impl ReadsSendArguments for ToolCall {
                 model: Self::model(target.get("model")?)?,
             },
             send_priority: Self::priority(arguments.get("priority")?)?,
-            send_kind: Self::kind(arguments.get("kind")?, arguments.get("request"))?,
+            send_kind,
             body: body.to_owned(),
         })
     }
@@ -425,16 +443,12 @@ impl HandlesSendCallAnswers for RunningNexus {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let outcome = self.handle_held_send_call(call);
-            let pending_answer = if !previously_recorded {
-                if let SendOutcome::Accepted(accepted) = &outcome {
-                    use crate::store::logical_delivery::HoldsAdmissionAnswers;
-                    Some(
-                        self.store
-                            .hold_admission_answer(&accepted.send_acceptance.request_id),
-                    )
-                } else {
-                    None
-                }
+            let pending_answer = if let SendOutcome::Accepted(accepted) = &outcome {
+                use crate::store::logical_delivery::HoldsAdmissionAnswers;
+                Some(
+                    self.store
+                        .hold_admission_answer(&accepted.send_acceptance.request_id),
+                )
             } else {
                 None
             };
@@ -901,23 +915,13 @@ impl ServesLaunchCalls for RunningNexus {
             .and_then(ToolCall::read_tool_call::<serde_json::Value>)
         {
             Some(call) => {
-                let previously_recorded = self
-                    .store
-                    .send_call(&call.tool_call_key)
-                    .ok()
-                    .flatten()
-                    .is_some();
                 let outcome = self.handle_held_send_call(call);
-                let pending_answer = if !previously_recorded {
-                    if let SendOutcome::Accepted(accepted) = &outcome {
-                        use crate::store::logical_delivery::HoldsAdmissionAnswers;
-                        Some(
-                            self.store
-                                .hold_admission_answer(&accepted.send_acceptance.request_id),
-                        )
-                    } else {
-                        None
-                    }
+                let pending_answer = if let SendOutcome::Accepted(accepted) = &outcome {
+                    use crate::store::logical_delivery::HoldsAdmissionAnswers;
+                    Some(
+                        self.store
+                            .hold_admission_answer(&accepted.send_acceptance.request_id),
+                    )
                 } else {
                     None
                 };

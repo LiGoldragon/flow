@@ -498,6 +498,26 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
 }
 
 #[test]
+fn a_direct_send_read_by_its_answer_returns_sent_without_a_native_receipt() {
+    let acceptance = signal_flow::SendAcceptance {
+        logical_delivery_id: "read-direct".into(),
+        request_id: "r3ad".into(),
+        delivery_cursor: 7,
+        delivery_state: signal_flow::DeliveryState::Uncertain,
+    };
+    assert_eq!(
+        crate::sending::completed_direct_response(&signal_flow::DeliveryState::Read, &acceptance,),
+        Some(signal_flow::PrivateSendResponse::Sent(
+            signal_flow::SendReceipt {
+                logical_delivery_id: acceptance.logical_delivery_id,
+                request_id: acceptance.request_id,
+            },
+        )),
+        "authenticated Read is positive completion evidence without a fabricated receipt"
+    );
+}
+
+#[test]
 fn a_task_is_admitted_only_with_minutes_above_zero_and_a_reachable_deadline() {
     use super::NexusFixture;
     use crate::store::logical_delivery::RecordsLogicalDeliveries;

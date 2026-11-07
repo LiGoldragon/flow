@@ -188,8 +188,12 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     use crate::store::logical_delivery::RecordsLogicalDeliveries;
                     match self.store.deliver_call(&request.deliver_key) {
                         Ok(Some(call)) if call.sender == sender && call.digest == digest => {
-                            return signal_flow::PrivateSendResponse::SendAccepted(call.answer)
-                                .into();
+                            use crate::store::logical_delivery::HoldsAdmissionAnswers;
+                            let pending = self.store.hold_admission_answer(&call.answer.request_id);
+                            let mut answer: MetaflowAnswer =
+                                signal_flow::PrivateSendResponse::SendAccepted(call.answer).into();
+                            answer._pending_answer = Some(pending);
+                            return answer;
                         }
                         Ok(Some(_)) => return Response::DeliverKeyReused.into(),
                         Ok(None) => {}

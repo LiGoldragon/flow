@@ -177,6 +177,27 @@ impl From<PrivateSendResponse> for SendAnswer {
     }
 }
 
+/// Positive completion evidence for a synchronous direct send. `Read` is
+/// stronger than native placement: the authenticated answer already named
+/// this request. It therefore answers Sent without inventing a native
+/// receipt, just as Delivered does.
+pub(crate) fn completed_direct_response(
+    state: &signal_flow::DeliveryState,
+    acceptance: &signal_flow::SendAcceptance,
+) -> Option<PrivateSendResponse> {
+    if matches!(
+        state,
+        signal_flow::DeliveryState::Delivered(_) | signal_flow::DeliveryState::Read
+    ) {
+        Some(PrivateSendResponse::Sent(signal_flow::SendReceipt {
+            logical_delivery_id: acceptance.logical_delivery_id.clone(),
+            request_id: acceptance.request_id.clone(),
+        }))
+    } else {
+        None
+    }
+}
+
 pub trait SendsRequests {
     /// Answers a Send from `peer`, under the dispatch gate.
     fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer;
@@ -1285,7 +1306,7 @@ impl CompletesDirectSends for RunningNexus {
         lease: &crate::waking::WakingLease<'_>,
     ) -> SendAnswer {
         use crate::store::AnnouncesLaunchChanges;
-        use signal_flow::{DeliveryState, SendFailure, SendFailureReason, SendReceipt};
+        use signal_flow::{DeliveryState, SendFailure, SendFailureReason};
         use std::time::{Duration, Instant};
         // A configured sleeping recipient starts through the existing
         // fresh Curriculum composition. The Address lease prevents another
@@ -1340,15 +1361,12 @@ impl CompletesDirectSends for RunningNexus {
                 self.store.logical_delivery_snapshot(&logical_id)
             };
             if let Ok(Some(snapshot)) = state {
+                if let Some(response) =
+                    completed_direct_response(&snapshot.delivery_state, &acceptance)
+                {
+                    return response.into();
+                }
                 match snapshot.delivery_state {
-                    DeliveryState::Delivered(_native_receipt) => {
-                        let request_id = snapshot.request_id;
-                        return PrivateSendResponse::Sent(SendReceipt {
-                            logical_delivery_id: logical_id,
-                            request_id,
-                        })
-                        .into();
-                    }
                     DeliveryState::Attempting | DeliveryState::Uncertain
                         if Instant::now() < deadline && changes.until(seen, deadline) =>
                     {
@@ -1405,14 +1423,12 @@ impl CompletesDirectSends for RunningNexus {
             self.store
                 .finish_failed_direct(address, &logical_id, &observed)
         };
+        if let Ok(delivery_state) = &state
+            && let Some(response) = completed_direct_response(delivery_state, &acceptance)
+        {
+            return response.into();
+        }
         let reason = match state {
-            Ok(DeliveryState::Delivered(_)) => {
-                return PrivateSendResponse::Sent(SendReceipt {
-                    logical_delivery_id: logical_id,
-                    request_id: acceptance.request_id.clone(),
-                })
-                .into();
-            }
             Ok(delivery_state @ (DeliveryState::Uncertain | DeliveryState::Attempting)) => {
                 return PrivateSendResponse::SendAccepted(signal_flow::SendAcceptance {
                     logical_delivery_id: logical_id,

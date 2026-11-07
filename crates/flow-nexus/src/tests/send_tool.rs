@@ -717,6 +717,22 @@ fn an_admitted_send_tool_call_holds_archive_until_its_answer_object_is_released(
         Err(signal_flow::ArchiveRejection::NotYet)
     );
     drop(answer);
+    let replay = fixture.nexus.handle_send_call_answer(tool_call(
+        THREAD_A,
+        "answer-hold",
+        "hold the tool answer",
+    ));
+    assert_eq!(replay.outcome, SendOutcome::Accepted(accepted.clone()));
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .archive_request(&accepted.send_acceptance.request_id, &sender_a())
+            .unwrap(),
+        Err(signal_flow::ArchiveRejection::NotYet),
+        "the replayed answer object holds archive until its write completes"
+    );
+    drop(replay);
     assert_eq!(
         fixture
             .nexus
@@ -809,6 +825,60 @@ fn dynamic_send_requires_priority() {
     })
     .to_string();
     assert!(old_shape.send_arguments().is_none());
+}
+
+#[test]
+fn the_declared_result_shape_names_and_requires_the_request_id_the_parser_reads() {
+    use crate::generated::send_tool::{ReadsSendArguments, SendKind};
+
+    let specification = SendTool::tool_spec();
+    let schema = &specification["inputSchema"];
+    assert_eq!(schema["properties"]["request"]["type"], "string");
+    assert_eq!(
+        schema["allOf"][0]["if"]["properties"]["kind"]["const"],
+        "Result"
+    );
+    assert_eq!(schema["allOf"][0]["then"]["required"][0], "request");
+
+    let mut result = tool_call(THREAD_A, "result-shape", "reviewed");
+    result.arguments = serde_json::json!({
+        "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
+        "priority": "Soft",
+        "kind": "Result",
+        "body": "reviewed",
+        "request": "a001"
+    })
+    .to_string();
+    assert_eq!(
+        result
+            .send_arguments()
+            .expect("declared Result parses")
+            .send_kind,
+        SendKind::Result("a001".into())
+    );
+
+    for malformed in [
+        serde_json::json!({
+            "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
+            "priority": "Soft", "kind": "Result", "body": "missing id"
+        }),
+        serde_json::json!({
+            "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
+            "priority": "Soft", "kind": "Result", "body": "wrong id", "request": 1
+        }),
+        serde_json::json!({
+            "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
+            "priority": "Soft", "kind": "Order", "body": "extra id", "request": "a001"
+        }),
+        serde_json::json!({
+            "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
+            "priority": "Soft", "kind": "Result", "body": "extra field",
+            "request": "a001", "unknown": true
+        }),
+    ] {
+        result.arguments = malformed.to_string();
+        assert!(result.send_arguments().is_none());
+    }
 }
 
 #[test]

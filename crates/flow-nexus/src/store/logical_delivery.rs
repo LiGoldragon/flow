@@ -106,6 +106,18 @@ impl MemoryDefinition for RequestIdBinding {
     }
 }
 
+/// The durable binding an answer may still close. This check is pure and
+/// precedes every answer mutation, so a delayed duplicate against an
+/// evolved closed binding is `Unresolved` and writes nothing.
+pub(crate) fn open_answer_binding(
+    binding: Option<RequestIdBinding>,
+) -> Result<RequestIdBinding, Refusal> {
+    match binding {
+        Some(binding) if binding.closure == RequestClosure::Open => Ok(binding),
+        _ => Err(Refusal::Unresolved),
+    }
+}
+
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeliverCall {
     pub key: signal_flow::DeliverKey,
@@ -819,7 +831,10 @@ impl RecordsLogicalDeliveries for FlowStore {
             .unwrap_or_else(|error| error.into_inner());
         let mut commit = self.engine.begin_atomic_commit();
         for key in keys {
-            if self.deliver_call(key)?.is_some() {
+            if let Some(call) = self.deliver_call(key)? {
+                if self.admission_answer_is_pending(&call.answer.request_id) {
+                    return Err(StoreError::AdmissionAnswerPending);
+                }
                 commit = commit.retract(
                     self.logical_deliveries.deliver_calls,
                     key.deliver_call_record_key(),
@@ -1745,12 +1760,11 @@ impl RecordsLogicalDeliveries for FlowStore {
             SendableRequest::Notice(value) => Request::Notice(value),
             SendableRequest::Task(value) => Request::Task(value),
             SendableRequest::Result(result) => {
-                let Some(binding) = self.request_binding(&result.request_id)? else {
-                    return Ok(Err(Refusal::Unresolved));
+                let binding = match open_answer_binding(self.request_binding(&result.request_id)?) {
+                    Ok(binding) => binding,
+                    Err(refusal) => return Ok(Err(refusal)),
                 };
-                if binding.closure != RequestClosure::Open
-                    || !self.answerable_by(&binding, sender, recipient, false)?
-                {
+                if !self.answerable_by(&binding, sender, recipient, false)? {
                     return Ok(Err(Refusal::Unresolved));
                 }
                 Request::Result(ResultPayload::Answered(ResultPayload_Answered_Data {
@@ -1760,12 +1774,11 @@ impl RecordsLogicalDeliveries for FlowStore {
                 }))
             }
             SendableRequest::Done(done) => {
-                let Some(binding) = self.request_binding(&done.request_id)? else {
-                    return Ok(Err(Refusal::Unresolved));
+                let binding = match open_answer_binding(self.request_binding(&done.request_id)?) {
+                    Ok(binding) => binding,
+                    Err(refusal) => return Ok(Err(refusal)),
                 };
-                if binding.closure != RequestClosure::Open
-                    || !self.answerable_by(&binding, sender, recipient, true)?
-                {
+                if !self.answerable_by(&binding, sender, recipient, true)? {
                     return Ok(Err(Refusal::Unresolved));
                 }
                 Request::Done(flow_ethos::DonePayload::Answered(

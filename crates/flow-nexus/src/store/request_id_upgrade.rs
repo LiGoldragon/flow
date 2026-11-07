@@ -1573,14 +1573,26 @@ pub(crate) fn evolve_request_id_memory(
             return Err(StoreError::StateInvariant);
         }
     }
-    for (_, metaflow) in metaflow_inventory.rows() {
-        for entry in &metaflow.metaflow.queue {
+    let queue_is_live = |metaflow: &old_flow::Metaflow| -> Result<(), StoreError> {
+        for entry in &metaflow.queue {
             let current = currents
                 .get(&entry.logical_delivery_id)
                 .ok_or(StoreError::StateInvariant)?;
             if !state_is_held(&current.snapshot.delivery_state) {
                 return Err(StoreError::StateInvariant);
             }
+        }
+        Ok(())
+    };
+    for (_, metaflow) in metaflow_inventory.rows() {
+        queue_is_live(&metaflow.metaflow)?;
+    }
+    // A launch hold carries the metaflow exactly as it was found.  Giving
+    // that snapshot back would restore its queue, so it obeys the same live
+    // queue invariant as the ordinary metaflow row.
+    for (_, hold) in hold_inventory.rows() {
+        if let Some(found) = &hold.found {
+            queue_is_live(found)?;
         }
     }
 
@@ -1707,9 +1719,10 @@ pub(crate) fn evolve_request_id_memory(
         BTreeMap::new();
     for (group_key, (recipient, sender, mut orders)) in order_groups {
         let mut answers = answer_groups.remove(&group_key).unwrap_or_default();
-        if orders.len() < 2 || answers.is_empty() {
-            continue;
-        }
+        // Every historical answer closes the one earlier Order it matched,
+        // including a singleton group.  Only the ambiguity report needs two
+        // or more Orders; closure reconstruction is independent of it.
+        let reports_ambiguity = orders.len() >= 2 && !answers.is_empty();
         orders.sort_by_key(|(_, delivered, admission)| {
             (
                 delivered.is_none(),
@@ -1736,6 +1749,9 @@ pub(crate) fn evolve_request_id_memory(
                 order: order.clone(),
                 order_id: request_ids.get(order).cloned(),
             });
+        }
+        if !reports_ambiguity {
+            continue;
         }
         let open = orders
             .iter()
@@ -2289,6 +2305,272 @@ mod tests {
             [("first", first), ("second", second)],
         );
         assert_eq!(parts, vec![vec!["first"], vec!["second"]]);
+    }
+
+    #[test]
+    fn a_single_uncertain_order_with_a_historical_result_evolves_closed() {
+        use crate::store::logical_delivery::{RequestClosure, open_answer_binding};
+
+        let directory = tempfile::tempdir().expect("temporary Memory");
+        let path = directory.path().join("flow.sema");
+        let descriptors = evolution_descriptors();
+        let heartbeat = StoredHeartbeatStanding::descriptor();
+        let (predecessor, tables) = old_engine(&path, &descriptors, &heartbeat);
+        let sender = old_address(old_flow::Aspect::Mind, "singletonSender");
+        let recipient = old_address(old_flow::Aspect::Field, "singletonRecipient");
+        let native = old_signal::NativeReceipt {
+            harness_kind: old_flow::HarnessKind::Codex,
+            native_session_id: "answer-session".into(),
+            native_prompt_id: "answer-turn".into(),
+        };
+        let order_queued = old_snapshot(
+            1,
+            "singleton-order",
+            &sender,
+            &recipient,
+            old_signal::DeliveryState::Queued,
+        );
+        let order_uncertain = old_snapshot(
+            2,
+            "singleton-order",
+            &sender,
+            &recipient,
+            old_signal::DeliveryState::Uncertain,
+        );
+        let answer_queued = old_snapshot(
+            3,
+            "singleton-answer",
+            &recipient,
+            &sender,
+            old_signal::DeliveryState::Queued,
+        );
+        let answer_delivered = old_snapshot(
+            4,
+            "singleton-answer",
+            &recipient,
+            &sender,
+            old_signal::DeliveryState::Delivered(native),
+        );
+        for snapshot in [order_uncertain.clone(), answer_delivered.clone()] {
+            predecessor
+                .assert(Assertion::new(
+                    tables.current,
+                    PriorCurrentLogicalDelivery { snapshot },
+                ))
+                .expect("old current stores");
+        }
+        for snapshot in [
+            order_queued,
+            order_uncertain,
+            answer_queued,
+            answer_delivered,
+        ] {
+            predecessor
+                .assert(Assertion::new(
+                    tables.events,
+                    PriorLogicalDeliveryEvent { snapshot },
+                ))
+                .expect("old event stores");
+        }
+        for request in [
+            old_request(
+                "singleton-order",
+                &sender,
+                &recipient,
+                old_flow::Request::Order("one historical order".into()),
+                PriorRequestState::Settled,
+            ),
+            old_request(
+                "singleton-answer",
+                &recipient,
+                &sender,
+                old_flow::Request::Result(old_flow::ResultPayload::Answered(
+                    old_flow::ResultPayload_Answered_Data {
+                        answerable: old_flow::Answerable::Order("one historical order".into()),
+                        string: "already answered".into(),
+                    },
+                )),
+                PriorRequestState::Settled,
+            ),
+        ] {
+            predecessor
+                .assert(Assertion::new(tables.requests, request))
+                .expect("old request stores");
+        }
+        drop(predecessor);
+
+        let mut engine = Engine::open(
+            EngineOpen::new(&path, SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION))
+                .with_family(&descriptors.current)
+                .with_family(&descriptors.events)
+                .with_family(&descriptors.metaflows)
+                .with_family(&descriptors.address_holds)
+                .with_family(&descriptors.requests)
+                .with_family(&descriptors.attempts)
+                .with_family(&descriptors.outcomes)
+                .with_family(&descriptors.send_calls)
+                .with_family(&heartbeat),
+        )
+        .expect("predecessor catalog opens for evolution");
+        let heartbeat_table = engine.register_table(heartbeat).expect("heartbeat opens");
+        evolve_request_id_memory(
+            &mut engine,
+            descriptors,
+            &[],
+            &[],
+            &[],
+            heartbeat_table,
+            &[],
+            &ScriptedDrawer::new(&["s001"]),
+        )
+        .expect("singleton evolution commits");
+
+        let binding_table = engine
+            .register_table(evolution_descriptors().request_ids)
+            .expect("request bindings register");
+        let before = engine
+            .match_records(QueryPlan::all(binding_table))
+            .expect("request bindings read")
+            .records()
+            .to_vec();
+        let [binding] = before.as_slice() else {
+            panic!("only the held singleton Order receives a request id")
+        };
+        assert_eq!(binding.request_id, "s001");
+        assert_eq!(
+            binding.closure,
+            RequestClosure::Answered("singleton-answer".into())
+        );
+        assert_eq!(
+            open_answer_binding(Some(binding.clone())),
+            Err(signal_flow::Refusal::Unresolved),
+            "a duplicate Result after upgrade is unresolved"
+        );
+        assert_eq!(
+            engine
+                .match_records(QueryPlan::all(binding_table))
+                .expect("request bindings reread")
+                .records(),
+            before,
+            "duplicate resolution is a pure refusal and writes nothing"
+        );
+    }
+
+    #[test]
+    fn an_address_hold_cannot_restore_an_ended_queue_entry_retained_by_an_attempt() {
+        let directory = tempfile::tempdir().expect("temporary Memory");
+        let path = directory.path().join("flow.sema");
+        let descriptors = evolution_descriptors();
+        let heartbeat = StoredHeartbeatStanding::descriptor();
+        let (predecessor, tables) = old_engine(&path, &descriptors, &heartbeat);
+        let sender = old_address(old_flow::Aspect::Mind, "holdSender");
+        let recipient = old_address(old_flow::Aspect::Field, "holdRecipient");
+        let native = old_signal::NativeReceipt {
+            harness_kind: old_flow::HarnessKind::Codex,
+            native_session_id: "ended-session".into(),
+            native_prompt_id: "ended-turn".into(),
+        };
+        let snapshot = old_snapshot(
+            1,
+            "ended-but-attempting",
+            &sender,
+            &recipient,
+            old_signal::DeliveryState::Delivered(native),
+        );
+        let request = old_request(
+            "ended-but-attempting",
+            &sender,
+            &recipient,
+            old_flow::Request::Order("never restore this queue entry".into()),
+            PriorRequestState::Settled,
+        );
+        let old_meta::QueueEvidence::Logical(queue_entry) = request.queue_evidence.clone() else {
+            panic!("the authentic old request carries its queue entry")
+        };
+        predecessor
+            .assert(Assertion::new(
+                tables.current,
+                PriorCurrentLogicalDelivery {
+                    snapshot: snapshot.clone(),
+                },
+            ))
+            .expect("old current stores");
+        predecessor
+            .assert(Assertion::new(
+                tables.events,
+                PriorLogicalDeliveryEvent { snapshot },
+            ))
+            .expect("old event stores");
+        predecessor
+            .assert(Assertion::new(tables.requests, request.clone()))
+            .expect("old request stores");
+        predecessor
+            .assert(Assertion::new(
+                tables.attempts,
+                PriorQueueDeliveryAttempt {
+                    request_id: "ended-but-attempting".into(),
+                    attempt_id: "unfinished-attempt".into(),
+                    native_request_id: 7,
+                    flow_id: "held-flow".into(),
+                    thread_id: "held-thread".into(),
+                    harness_kind: old_flow::HarnessKind::Codex,
+                    history_anchor: PriorNativeHistoryAnchor::CodexTurns(None),
+                    address: recipient.clone(),
+                    queue_evidence: request.queue_evidence,
+                    phase: PriorQueueDeliveryPhase::Prepared,
+                },
+            ))
+            .expect("unfinished old attempt stores");
+        predecessor
+            .assert(Assertion::new(
+                tables.address_holds,
+                PriorAddressHold {
+                    flow_id: "held-flow".into(),
+                    address: recipient.clone(),
+                    found: Some(old_flow::Metaflow {
+                        address: recipient,
+                        state: old_flow::State::Asleep,
+                        past: Vec::new(),
+                        queue: vec![queue_entry],
+                    }),
+                },
+            ))
+            .expect("old address hold stores");
+        drop(predecessor);
+
+        let before = std::fs::read(&path).expect("Memory reads before refusal");
+        let mut engine = Engine::open(
+            EngineOpen::new(&path, SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION))
+                .with_family(&descriptors.current)
+                .with_family(&descriptors.events)
+                .with_family(&descriptors.metaflows)
+                .with_family(&descriptors.address_holds)
+                .with_family(&descriptors.requests)
+                .with_family(&descriptors.attempts)
+                .with_family(&descriptors.outcomes)
+                .with_family(&descriptors.send_calls)
+                .with_family(&heartbeat),
+        )
+        .expect("predecessor catalog opens for validation");
+        let heartbeat_table = engine.register_table(heartbeat).expect("heartbeat opens");
+        assert!(matches!(
+            evolve_request_id_memory(
+                &mut engine,
+                descriptors,
+                &[],
+                &[],
+                &[],
+                heartbeat_table,
+                &[],
+                &ScriptedDrawer::new(&["h001"]),
+            ),
+            Err(StoreError::StateInvariant)
+        ));
+        assert_eq!(
+            std::fs::read(&path).expect("Memory reads after refusal"),
+            before,
+            "the rejected address-hold queue leaves predecessor Memory unchanged"
+        );
     }
 
     #[test]

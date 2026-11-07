@@ -2537,10 +2537,27 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     let replay = fixture
         .nexus
         .dispatch_metaflow_peer(signal_flow::Query::Deliver(deliver.clone()), Some(&message));
-    let signal_flow::PrivateSendResponse::SendAccepted(replayed) = replay.private_response else {
+    let signal_flow::PrivateSendResponse::SendAccepted(replayed) = &replay.private_response else {
         panic!("a lost Deliver answer is recovered from its key alone")
     };
-    assert_eq!(replayed, accepted, "replay returns the exact admission");
+    assert_eq!(*replayed, accepted, "replay returns the exact admission");
+    assert!(matches!(
+        fixture
+            .nexus
+            .store
+            .acknowledge_deliver_calls(std::slice::from_ref(&deliver.deliver_key)),
+        Err(crate::store::StoreError::AdmissionAnswerPending)
+    ));
+    assert!(
+        fixture
+            .nexus
+            .store
+            .deliver_call(&deliver.deliver_key)
+            .expect("Deliver key reads while replay answer is held")
+            .is_some(),
+        "Acknowledge cannot retract the key before the replay answer write"
+    );
+    drop(replay);
     let mut changed = deliver.clone();
     changed.sendable_message =
         super::sendable_message(Message::MiddleAbrupt(Request::Order("Different".into())));

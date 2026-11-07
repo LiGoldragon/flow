@@ -6,7 +6,7 @@
 
 use super::{FlowStore, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema_engine::{EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, RecordKey, SchemaHash, TableDescriptor, TableName};
+use sema_engine::{Assertion, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, RecordKey, SchemaHash, TableDescriptor, TableName};
 use signal_flow::Address;
 
 pub(super) const HANDOVER_REMINDER_TABLE_NAME: TableName = TableName::new("flow_nexus_handover_reminders");
@@ -24,6 +24,8 @@ pub struct HandoverReminder {
     pub opened_at: i64,
     /// The first reminder is due at `opened_at` (inclusive).
     pub next_due: i64,
+    /// Number of successfully admitted reminders.
+    pub sent: i64,
     pub every_minutes: i64,
     pub reminder_text: String,
 }
@@ -62,6 +64,30 @@ pub trait SchedulesHandoverReminders {
     fn close_handover_reminder(&self, address: &Address, generation: i64) -> Result<bool, StoreError>;
 }
 
+impl SchedulesHandoverReminders for FlowStore {
+    fn handover_reminder(&self, address: &Address, generation: i64) -> Result<Option<HandoverReminder>, StoreError> {
+        let key = RecordKey::new(format!("{}:{}", Self::address_record_key(address), generation));
+        Ok(self.engine.match_records(sema_engine::QueryPlan::key(self.handover_reminders, key))?.records().first().cloned())
+    }
+    fn due_handover_reminders(&self, now: i64) -> Result<Vec<HandoverReminder>, StoreError> {
+        Ok(self.engine.match_records(sema_engine::QueryPlan::all(self.handover_reminders))?.records().iter().filter(|row| row.next_due <= now).cloned().collect())
+    }
+    fn hold_handover_reminder(&self, reminder: HandoverReminder) -> Result<(), StoreError> {
+        let key = reminder.record_key();
+        if self.engine.match_records(sema_engine::QueryPlan::key(self.handover_reminders, key.clone()))?.records().is_empty() {
+            self.engine.assert(Assertion::new(self.handover_reminders, reminder))?;
+        } else {
+            self.engine.mutate_keyed(sema_engine::KeyedMutation::new(self.handover_reminders, key, reminder))?;
+        }
+        Ok(())
+    }
+    fn close_handover_reminder(&self, address: &Address, generation: i64) -> Result<bool, StoreError> {
+        let Some(row) = self.handover_reminder(address, generation)? else { return Ok(false); };
+        self.engine.retract(sema_engine::Retraction::new(self.handover_reminders, row.record_key()))?;
+        Ok(true)
+    }
+}
+
 /// Pure scheduling rules, kept on the data-bearing record so policy/window
 /// arithmetic is shared by store and tests without a competing free function.
 pub trait HandoverReminderRules {
@@ -78,7 +104,7 @@ impl HandoverReminderRules for HandoverReminder {
     }
     fn next_due(&self) -> Result<i64, StoreError> {
         let seconds = self.every_minutes.checked_mul(60).ok_or(StoreError::StateInvariant)?;
-        self.opened_at.checked_add(seconds).ok_or(StoreError::StateInvariant)
+        self.next_due.checked_add(seconds).ok_or(StoreError::StateInvariant)
     }
 }
 
@@ -90,6 +116,6 @@ pub trait OpensHandoverReminder {
 impl OpensHandoverReminder for HandoverReminder {
     fn open_handover_reminder(address: Address, generation: i64, model_name: String, opened_at: i64, every_minutes: i64, reminder_text: String) -> Result<HandoverReminder, StoreError> {
         if every_minutes <= 0 { return Err(StoreError::StateInvariant); }
-        Ok(Self { address, generation, model_name, opened_at, next_due: opened_at, every_minutes, reminder_text })
+        Ok(Self { address, generation, model_name, opened_at, next_due: opened_at, sent: 0, every_minutes, reminder_text })
     }
 }

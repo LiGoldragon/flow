@@ -1075,7 +1075,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             .write_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let Some(mut stored) = self.stored_metaflow(address)? else {        // A retry may present the same pre-commit snapshot after the prior
+        // A retry may present the same pre-commit snapshot after the prior
         // atomic commit succeeded. The durable sent count is the expected
         // state witness; refuse the stale attempt before creating a second
         // logical Notice.
@@ -1088,7 +1088,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 }
             }
         }
-
+        let Some(mut stored) = self.stored_metaflow(address)? else {
             return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
                 Unknown_Data::Address(address.clone()),
             )));

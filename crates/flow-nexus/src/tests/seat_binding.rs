@@ -15,6 +15,8 @@ use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory};
 use signal_flow::{Address, Aspect, Model, Refusal, Response};
 use std::fs;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 const ROOT: &str = "01a15071-6dd2-76c3-8ab7-945877549a01";
 const SUBAGENT: &str = "01a15580-745e-7711-8d69-9636ed43d23e";
@@ -88,6 +90,227 @@ fn command_of(thread: &str) -> (SpawnedProcess, signal_flow::Process) {
     );
     let process = FlowStore::process_identity_for_pid(command.0.id()).unwrap();
     (command, process)
+}
+
+/// One real `flow` CLI invocation below three live shell hops. The outer
+/// shell is the configured app-server's child and carries the Codex thread;
+/// the wrapper writes its PID, then execs the CLI without changing it.
+struct CodexCliWorld {
+    fixture: &'static NexusFixture,
+    socket: PathBuf,
+    flow: PathBuf,
+    shell: PathBuf,
+    next_call: std::cell::Cell<u64>,
+    _tui: SpawnedProcess,
+}
+
+struct CodexCliCall {
+    process: signal_flow::Process,
+    answer: String,
+    codex_thread: Option<String>,
+    sending_address: Option<Address>,
+}
+
+impl CodexCliWorld {
+    fn new(configured_app_server: bool, seat_model: Model) -> Self {
+        use crate::ServesOrdinary;
+
+        let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
+        fixture
+            .nexus
+            .store
+            .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
+                meta_signal_flow::ConfigureModel {
+                    model: Model::Terra,
+                    native: "gpt-6.1-terra".into(),
+                },
+                meta_signal_flow::ConfigureModel {
+                    model: Model::Luna,
+                    native: "gpt-6.1-luna".into(),
+                },
+            ]))
+            .unwrap();
+        if configured_app_server {
+            fixture.serves_codex_commands();
+        }
+        fixture.list_herdr_sessions(&[(
+            "messaging-build",
+            fixture
+                .directory
+                .path()
+                .join("herdr-config/sessions/messaging-build/herdr.sock"),
+        )]);
+        fixture.claims_the_root_only();
+        fixture.rollout(ROOT, ROOT);
+        let tui = SpawnedProcess(
+            Command::new("sh")
+                .args(["-c", "sleep 30; :", "codex", "resume", ROOT])
+                .spawn()
+                .unwrap(),
+        );
+        super::herdr_world(fixture, vec![unreported_codex("w12:p1")], tui.0.id());
+
+        let executable = std::env::current_exe().expect("test executable");
+        let binaries = executable
+            .ancestors()
+            .skip(1)
+            .find(|directory| directory.join("flow").is_file())
+            .unwrap_or_else(|| panic!("no flow CLI above {}", executable.display()));
+        let flow = fs::canonicalize(binaries.join("flow")).unwrap();
+        let shell = fixture.directory.path().join("caller-shell.sh");
+        let script = fixture.directory.path().join("caller-script.sh");
+        let wrapper = fixture.directory.path().join("caller-wrapper.sh");
+        FixtureExecutable {
+            path: shell.clone(),
+        }
+        .install(&format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$1/shell.pid\"\nsh '{}' \"$@\"\n",
+            script.display()
+        ));
+        FixtureExecutable { path: script }.install(&format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$1/script.pid\"\nsh '{}' \"$@\"\n",
+            wrapper.display()
+        ));
+        FixtureExecutable { path: wrapper }.install(&format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$1/wrapper.pid\"\n: > \"$1/ready\"\nwhile [ ! -e \"$1/go\" ]; do sleep 0.01; done\nexec '{}' \"$2\"\n",
+            flow.display()
+        ));
+
+        let socket = fixture.directory.path().join(format!(
+            "ordinary-{}.sock",
+            match seat_model {
+                Model::Terra => "terra",
+                Model::Luna => "luna",
+                _ => "other",
+            }
+        ));
+        let served = socket.clone();
+        std::thread::spawn(move || fixture.nexus.serve_ordinary(&served));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !socket.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ordinary socket listens"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Self {
+            fixture,
+            socket,
+            flow,
+            shell,
+            next_call: std::cell::Cell::new(0),
+            _tui: tui,
+        }
+    }
+
+    /// Runs the production client while the dispatch gate keeps its kernel
+    /// peer alive. Returns that exact peer identity and its printed answer.
+    fn call(&self, query: signal_flow::Query, thread: Option<&str>) -> CodexCliCall {
+        use crate::caller::{CallerProcess, LocatesCodexThread, ReadsProcess};
+        use crate::sending::IdentifiesSender;
+        use crate::store::sent::NamesCodexAppServers;
+        use datom_codec::Datomizable;
+        use protos::{Compactable, Protosizable};
+
+        let number = self.next_call.get() + 1;
+        self.next_call.set(number);
+        let call = self
+            .fixture
+            .directory
+            .path()
+            .join(format!("cli-call-{number}"));
+        fs::create_dir(&call).unwrap();
+        let invocation = flow::Invocation {
+            ordinary_socket_path: self.socket.to_string_lossy().into_owned(),
+            query,
+        }
+        .datomize(vec![])
+        .protosize()
+        .compact();
+        let gate = self.fixture.nexus.dispatch_gate.lock().unwrap();
+        let mut command = Command::new("sh");
+        command
+            .arg(&self.shell)
+            .arg(&call)
+            .arg(invocation)
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_SESSION")
+            .env_remove("FLOW_ID")
+            .env_remove("FLOW_DIRECTORY")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        match thread {
+            Some(thread) => {
+                command.env("CODEX_THREAD_ID", thread);
+            }
+            None => {
+                command.env_remove("CODEX_THREAD_ID");
+            }
+        }
+        let child = command.spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !call.join("ready").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "wrapper becomes ready"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let pid = |name: &str| {
+            fs::read_to_string(call.join(name))
+                .unwrap()
+                .trim()
+                .parse::<u32>()
+                .unwrap()
+        };
+        let shell_pid = pid("shell.pid");
+        let script_pid = pid("script.pid");
+        let wrapper_pid = pid("wrapper.pid");
+        fs::write(call.join("go"), b"").unwrap();
+        let cli = CallerProcess {
+            process_id: wrapper_pid,
+        };
+        loop {
+            if cli.executable().as_ref() == Some(&self.flow) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "wrapper execs the real flow CLI"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            cli.parent().map(|parent| parent.process_id),
+            Some(script_pid)
+        );
+        let script = cli.parent().unwrap();
+        assert_eq!(
+            script.parent().map(|parent| parent.process_id),
+            Some(shell_pid)
+        );
+        let shell = script.parent().unwrap();
+        assert_eq!(
+            shell.parent().map(|parent| parent.process_id),
+            Some(std::process::id()),
+            "the configured test executable is the real kernel ancestor"
+        );
+        let process = FlowStore::process_identity_for_pid(wrapper_pid).unwrap();
+        let app_servers = self.fixture.nexus.store.codex_app_servers().unwrap();
+        let codex_thread = cli.codex_thread(&app_servers);
+        let sending_address = self.fixture.nexus.sending_address(&process).ok();
+        drop(gate);
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "real flow CLI failed: {output:?}");
+        assert!(output.stderr.is_empty(), "real flow CLI stderr: {output:?}");
+        CodexCliCall {
+            process,
+            answer: String::from_utf8(output.stdout).unwrap().trim().to_owned(),
+            codex_thread,
+            sending_address,
+        }
+    }
 }
 
 #[test]
@@ -185,6 +408,234 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
     );
     let awake = fixture.nexus.store.metaflow_awake_as("877549").unwrap();
     assert_eq!(awake.map(|metaflow| metaflow.address), Some(address));
+}
+
+/// Diagnostic of the current handover caller split. The same real CLI peer
+/// that Send attributes through its configured Codex app-server ancestry is
+/// still passed to Keep and Drop as Unbound on the ordinary connection.
+#[test]
+fn ordinary_codex_cli_keep_and_drop_remain_unknown_after_real_sender_attribution() {
+    use crate::store::ReadsFlowRows;
+    use crate::store::handover::HoldsHandovers;
+    use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+    use crate::store::send_outcome::RecordsSendOutcomes;
+    use crate::store::sent::NamesCodexAppServers;
+    use flow_ethos::State;
+    use signal_flow::{Message, Query, Request, Section, SendRequest};
+
+    let terra = super::waking::address(Model::Terra);
+    let luna = super::waking::address(Model::Luna);
+    let configured = CodexCliWorld::new(true, Model::Terra);
+    let app_servers = configured.fixture.nexus.store.codex_app_servers().unwrap();
+    assert_eq!(
+        app_servers,
+        [fs::canonicalize(std::env::current_exe().unwrap()).unwrap()]
+            .into_iter()
+            .collect()
+    );
+
+    let bind = configured.call(Query::BindSeat(terra.clone()), Some(ROOT));
+    assert_eq!(bind.answer, "Bound.877549");
+    assert_eq!(bind.codex_thread.as_deref(), Some(ROOT));
+    let node = configured
+        .fixture
+        .nexus
+        .store
+        .flow_node("877549")
+        .unwrap()
+        .expect("BindSeat registered the live Codex seat");
+    assert_eq!(node.session_id, ROOT);
+    assert_eq!(node.harness_kind, signal_flow::HarnessKind::Codex);
+    assert_eq!(
+        configured.fixture.nexus.live_awake_flow(&terra).as_deref(),
+        Some("877549")
+    );
+
+    configured
+        .fixture
+        .nexus
+        .store
+        .seed_metaflow(super::waking::metaflow(
+            Model::Luna,
+            State::Asleep,
+            vec![],
+            vec![],
+        ));
+    let send_query = Query::Send(SendRequest {
+        recipient: luna.clone(),
+        sendable_message: super::sendable_message(Message::Soft(Request::Notice(
+            "caller attribution diagnostic".into(),
+        ))),
+    });
+    let send = configured.call(send_query, Some(ROOT));
+    assert!(send.answer.starts_with("SendAccepted."), "{}", send.answer);
+    assert_eq!(send.sending_address, Some(terra.clone()));
+    let outcomes = configured.fixture.nexus.store.read_send_outcomes().unwrap();
+    assert_eq!(
+        outcomes
+            .last()
+            .and_then(|outcome| outcome.process_option.clone()),
+        Some(send.process.clone()),
+        "the production ordinary socket recorded the exact live kernel peer"
+    );
+
+    let keep = |address: Address| {
+        Query::Keep(signal_flow::Keep_Data {
+            address,
+            section: Section {
+                title: "diagnostic".into(),
+                description: "caller attribution".into(),
+                body: "test only".into(),
+            },
+        })
+    };
+    let keep_call = configured.call(keep(terra.clone()), Some(ROOT));
+    assert_eq!(keep_call.sending_address, Some(terra.clone()));
+    assert_eq!(keep_call.answer, "KeepRefused.UnknownCaller");
+    let drop_call = configured.call(
+        Query::Drop(signal_flow::Drop_Data {
+            address: terra.clone(),
+            title: "diagnostic".into(),
+        }),
+        Some(ROOT),
+    );
+    assert_eq!(drop_call.sending_address, Some(terra.clone()));
+    assert_eq!(drop_call.answer, "DropRefused.UnknownCaller");
+    assert!(
+        configured
+            .fixture
+            .nexus
+            .store
+            .handover_headings(&terra)
+            .unwrap()
+            .is_empty()
+    );
+
+    // No SendServers authority: the identical real ancestry has no Codex
+    // thread, BindSeat and Send refuse it, and neither registers a seat nor
+    // mutates the target handover.
+    let unconfigured = CodexCliWorld::new(false, Model::Terra);
+    let unconfigured_bind = unconfigured.call(Query::BindSeat(terra.clone()), Some(ROOT));
+    assert!(
+        unconfigured_bind
+            .answer
+            .starts_with("Refused.Unidentified."),
+        "{}",
+        unconfigured_bind.answer
+    );
+    assert_eq!(unconfigured_bind.codex_thread, None);
+    assert_eq!(unconfigured_bind.sending_address, None);
+    unconfigured
+        .fixture
+        .nexus
+        .store
+        .seed_metaflow(super::waking::metaflow(
+            Model::Luna,
+            State::Asleep,
+            vec![],
+            vec![],
+        ));
+    let unconfigured_send = unconfigured.call(
+        Query::Send(SendRequest {
+            recipient: luna.clone(),
+            sendable_message: super::sendable_message(Message::Soft(Request::Notice(
+                "unconfigured authority diagnostic".into(),
+            ))),
+        }),
+        Some(ROOT),
+    );
+    assert!(
+        unconfigured_send
+            .answer
+            .starts_with("SendRefused.Unidentified."),
+        "{}",
+        unconfigured_send.answer
+    );
+    let unconfigured_outcomes = unconfigured
+        .fixture
+        .nexus
+        .store
+        .read_send_outcomes()
+        .unwrap();
+    assert_eq!(
+        unconfigured_outcomes
+            .last()
+            .and_then(|outcome| outcome.process_option.clone()),
+        Some(unconfigured_send.process)
+    );
+    assert_eq!(unconfigured.fixture.nexus.live_awake_flow(&terra), None);
+    assert!(
+        unconfigured
+            .fixture
+            .nexus
+            .store
+            .handover_headings(&terra)
+            .unwrap()
+            .is_empty()
+    );
+
+    // A configured caller cannot adopt a different native session.
+    let mismatched = CodexCliWorld::new(true, Model::Terra);
+    let mismatch = mismatched.call(
+        Query::Adopt(signal_flow::Adopt_Data {
+            address: terra.clone(),
+            native_session_id: "different-native-session".into(),
+        }),
+        Some(ROOT),
+    );
+    assert!(
+        mismatch.answer.starts_with("Refused.Unidentified."),
+        "{}",
+        mismatch.answer
+    );
+    assert_eq!(mismatch.codex_thread.as_deref(), Some(ROOT));
+    assert_eq!(mismatched.fixture.nexus.live_awake_flow(&terra), None);
+    assert!(
+        mismatched
+            .fixture
+            .nexus
+            .store
+            .handover_headings(&terra)
+            .unwrap()
+            .is_empty()
+    );
+
+    // A real Luna seat asking to Keep Terra is isolated from the positive
+    // Terra case. Its exact peer authenticates as Luna, while current Keep
+    // still loses that caller before the ownership check.
+    let wrong_seat = CodexCliWorld::new(true, Model::Luna);
+    let luna_bind = wrong_seat.call(Query::BindSeat(luna.clone()), Some(ROOT));
+    assert_eq!(luna_bind.answer, "Bound.877549");
+    let luna_keep = wrong_seat.call(keep(terra.clone()), Some(ROOT));
+    assert_eq!(luna_keep.sending_address, Some(luna.clone()));
+    assert_eq!(luna_keep.answer, "KeepRefused.UnknownCaller");
+    assert!(
+        wrong_seat
+            .fixture
+            .nexus
+            .store
+            .handover_headings(&terra)
+            .unwrap()
+            .is_empty()
+    );
+
+    // A driver carrying neither a pane nor a Codex thread stays unbound and
+    // cannot mutate the Terra handover.
+    let unbound = CodexCliWorld::new(true, Model::Terra);
+    let unbound_keep = unbound.call(keep(terra.clone()), None);
+    assert_eq!(unbound_keep.sending_address, None);
+    assert_eq!(unbound_keep.codex_thread, None);
+    assert_eq!(unbound_keep.answer, "KeepRefused.UnknownCaller");
+    assert_eq!(unbound.fixture.nexus.live_awake_flow(&terra), None);
+    assert!(
+        unbound
+            .fixture
+            .nexus
+            .store
+            .handover_headings(&terra)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

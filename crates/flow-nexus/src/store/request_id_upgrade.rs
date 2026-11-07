@@ -2458,7 +2458,7 @@ mod tests {
             .match_records(QueryPlan::all(current_table))
             .expect("current deliveries read");
         assert!(evolved_current.records().iter().all(|row| {
-            row.admission == super::logical_delivery::DeliveryAdmission::HistoricalUnknown
+            row.admission == crate::store::logical_delivery::DeliveryAdmission::HistoricalUnknown
         }));
     }
 

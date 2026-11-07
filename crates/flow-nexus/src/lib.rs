@@ -117,6 +117,7 @@ use std::{
 #[cfg(feature = "executable-default-configuration")]
 use store::ConfiguresOnlyStore;
 use store::logical_delivery::RecordsLogicalDeliveries;
+use store::metaflow::MutatesMetaflows;
 use store::{
     AppliesFlowQuery, FlowStore, NamesLiveFlow, OpensFlowStore, ReadsFlowRows,
     RegistersExistingFlow, RegistersFlowIdentity,

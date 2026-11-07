@@ -77,6 +77,23 @@ fn missing_drop_is_atomic_for_content_and_touch() {
 }
 
 #[test]
+fn authenticated_drop_before_first_keep_is_missing_title_and_stays_absent() {
+    let fixture = NexusFixture::new();
+    let address = address("handoverDropBeforeKeep");
+    let store = &fixture.nexus.store;
+    let writer = HandoverWriter {
+        address: address.clone(),
+        flow_id: "current-flow".into(),
+    };
+    assert_eq!(
+        store.drop_handover_for_flow(&writer, Title::from("missing"), Touch::Unknown),
+        Err(signal_flow::HandoverRefusal::MissingTitle)
+    );
+    assert!(store.handover_memory(&address).unwrap().is_none());
+    assert!(store.handover(&address).unwrap().is_empty());
+}
+
+#[test]
 fn successor_closes_an_immutable_snapshot_and_starts_with_unknown_touch() {
     let fixture = NexusFixture::new();
     let address = address("handoverSuccessor");

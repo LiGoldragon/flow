@@ -427,7 +427,7 @@ impl HoldsHandovers for FlowStore {
         let mut row = self
             .handover_row(&writer.address)
             .map_err(store_refusal)?
-            .ok_or_else(|| HandoverRefusal::Store("handover row disappeared".into()))?;
+            .ok_or(HandoverRefusal::MissingTitle)?;
         if !row.current.iter().any(|section| section.title == title) {
             return Err(HandoverRefusal::MissingTitle);
         }

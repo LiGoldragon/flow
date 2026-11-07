@@ -9413,13 +9413,8 @@ mod tests {
             .expect("Order debug reads")
             .expect("Order remains held");
         assert_eq!(
-            debugged.receipt,
-            Some(NativeReceipt {
-                harness_kind: signal_flow::HarnessKind::Codex,
-                native_session_id: "first-order-session".into(),
-                native_prompt_id: "first-order-turn".into(),
-            }),
-            "delivery evidence stays separate from answer evidence"
+            debugged.receipt, None,
+            "a direct lifecycle transition invents no queue-attempt receipt"
         );
         assert_eq!(
             debugged.read_by,

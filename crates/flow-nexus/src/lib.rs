@@ -1863,7 +1863,15 @@ impl DispatchesSerially for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.dispatch_asked(query, asker)
+            let response = self.dispatch_asked(query, asker);
+            if let Err(error) =
+                store::request_id_upgrade::RunsRequestIdAnnouncements::run_request_id_announcements(
+                    &*self.store,
+                )
+            {
+                eprintln!("flow-nexus: request-id announcement pass failed: {error}");
+            }
+            response
         };
         self.wake_deferred();
         response
@@ -1888,7 +1896,15 @@ impl DispatchesSerially for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.dispatch_meta_from(query, resolver)
+            let response = self.dispatch_meta_from(query, resolver);
+            if let Err(error) =
+                store::request_id_upgrade::RunsRequestIdAnnouncements::run_request_id_announcements(
+                    &*self.store,
+                )
+            {
+                eprintln!("flow-nexus: request-id announcement pass failed: {error}");
+            }
+            response
         };
         // A resolution that committed leaves the oldest request queued (Absent)
         // or the next one oldest (Delivered), and a withdrawal may leave

@@ -360,9 +360,10 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
 /// Mutations are assembled into the caller's AtomicCommit so metaflow queue
 /// changes and lifecycle transitions have one durability boundary.
 pub(crate) struct LogicalDeliveryTransition {
-    purpose: crate::heartbeat::DeliveryPurpose,
-    handover_reminder: Option<crate::store::handover_reminders::HandoverReminder>,
-    deliver_call: Option<DeliverCallSpec>,
+    pub(crate) purpose: crate::heartbeat::DeliveryPurpose,
+    pub(crate) handover_reminder: Option<crate::store::handover_reminders::HandoverReminder>,
+    pub(crate) deliver_call: Option<DeliverCallSpec>,
+    pub(crate) upgrade_notice: Option<crate::store::request_id_upgrade::UpgradeNoticeAdmission>,
 }
 
 #[derive(Clone)]
@@ -736,6 +737,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
                 handover_reminder: None,
                 deliver_call: Some(spec),
+                upgrade_notice: None,
             },
         )
     }
@@ -816,6 +818,37 @@ impl RecordsLogicalDeliveries for FlowStore {
                     })
         });
         if request_named {
+            return Ok(Err(ArchiveRejection::NotYet));
+        }
+        let task_announcements = self
+            .engine
+            .match_records(QueryPlan::all(self.request_id_upgrade.task_announcements))?;
+        if task_announcements.records().iter().any(|row| {
+            matches!(
+                row.status,
+                super::request_id_upgrade::TaskAnnouncementStatus::Admitted(_)
+            ) && row.tasks.contains(&binding.logical_delivery_id)
+        }) {
+            return Ok(Err(ArchiveRejection::NotYet));
+        }
+        let assignments = self
+            .engine
+            .match_records(QueryPlan::all(self.request_id_upgrade.upgrade_assignments))?;
+        if assignments.records().iter().any(|row| {
+            matches!(
+                row.status,
+                super::request_id_upgrade::TaskAnnouncementStatus::Admitted(_)
+            ) && row.decisions.iter().any(|decision| {
+                decision
+                    .assigned
+                    .iter()
+                    .any(|assigned| assigned.order == binding.logical_delivery_id)
+                    || decision
+                        .open
+                        .iter()
+                        .any(|order| order.order == binding.logical_delivery_id)
+            })
+        }) {
             return Ok(Err(ArchiveRejection::NotYet));
         }
         let deliver_calls = self
@@ -1648,6 +1681,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 purpose,
                 handover_reminder: None,
                 deliver_call: None,
+                upgrade_notice: None,
             },
         )
     }
@@ -1667,6 +1701,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
                 handover_reminder: Some(reminder),
                 deliver_call: None,
+                upgrade_notice: None,
             },
         )
     }
@@ -1695,6 +1730,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             purpose,
             handover_reminder,
             deliver_call,
+            upgrade_notice,
         } = transition;
         // A retry may present the same pre-commit snapshot after the prior
         // atomic commit succeeded. The durable sent count is the expected
@@ -1985,6 +2021,21 @@ impl RecordsLogicalDeliveries for FlowStore {
             }
         } else {
             commit
+        };
+        let commit = match upgrade_notice {
+            Some(crate::store::request_id_upgrade::UpgradeNoticeAdmission::Task(mut row)) => {
+                row.tries = row.tries.checked_add(1).ok_or(StoreError::StateInvariant)?;
+                row.status =
+                    crate::store::request_id_upgrade::TaskAnnouncementStatus::Admitted(id.clone());
+                commit.mutate(self.request_id_upgrade.task_announcements, row)
+            }
+            Some(crate::store::request_id_upgrade::UpgradeNoticeAdmission::Assignment(mut row)) => {
+                row.tries = row.tries.checked_add(1).ok_or(StoreError::StateInvariant)?;
+                row.status =
+                    crate::store::request_id_upgrade::TaskAnnouncementStatus::Admitted(id.clone());
+                commit.mutate(self.request_id_upgrade.upgrade_assignments, row)
+            }
+            None => commit,
         };
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();

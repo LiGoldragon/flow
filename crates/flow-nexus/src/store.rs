@@ -2633,6 +2633,7 @@ impl OpensFlowStore for FlowStore {
         store.align_followed_requests()?;
         store.seed_store_identity()?;
         store.seed_missing_queued_deliveries()?;
+        request_id_upgrade::RunsRequestIdAnnouncements::run_request_id_announcements(&store)?;
         store
             .configuration_snapshot()?
             .ok_or(StoreError::NotConfigured)?;

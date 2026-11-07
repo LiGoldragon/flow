@@ -426,6 +426,252 @@ pub(crate) struct RequestIdUpgradeTables {
     pub(crate) upgrade_assignments: TableReference<UpgradeAssignment>,
 }
 
+#[derive(Clone)]
+pub(crate) enum UpgradeNoticeAdmission {
+    Task(TaskAnnouncement),
+    Assignment(UpgradeAssignment),
+}
+
+pub(crate) trait RunsRequestIdAnnouncements {
+    fn run_request_id_announcements(&self) -> Result<(), StoreError>;
+}
+
+impl RunsRequestIdAnnouncements for super::FlowStore {
+    fn run_request_id_announcements(&self) -> Result<(), StoreError> {
+        use super::logical_delivery::{RecordsLogicalDeliveries, RequestClosure};
+        use super::queue_delivery::AccountsQueueDelivery;
+        use sema_engine::{KeyedMutation, QueryPlan};
+
+        let policy = self.engine.match_records(QueryPlan::all(
+            self.meta_configuration_tables.request_policy,
+        ))?;
+        let [policy] = policy.records() else {
+            return Err(StoreError::StateInvariant);
+        };
+        let retained = self.retained_logical_requests()?;
+        let bindings = self
+            .engine
+            .match_records(QueryPlan::all(self.logical_deliveries.request_ids))?;
+        let currents = self
+            .engine
+            .match_records(QueryPlan::all(self.logical_deliveries.current))?;
+        let open = |logical_id: &str| {
+            bindings.records().iter().any(|binding| {
+                binding.logical_delivery_id == logical_id && binding.closure == RequestClosure::Open
+            }) && currents.records().iter().any(|current| {
+                current.snapshot.logical_delivery_id == logical_id && current.archived.is_none()
+            })
+        };
+        let request_id = |logical_id: &str| {
+            bindings
+                .records()
+                .iter()
+                .find(|binding| binding.logical_delivery_id == logical_id)
+                .map(|binding| binding.request_id.clone())
+        };
+        let task_words = |logical_id: &str| {
+            retained.iter().find_map(|value| {
+                if value.entry.logical_delivery_id != logical_id {
+                    return None;
+                }
+                match &value.entry.message {
+                    flow_ethos::Message::HardAbrupt(flow_ethos::Request::Task(task))
+                    | flow_ethos::Message::MiddleAbrupt(flow_ethos::Request::Task(task))
+                    | flow_ethos::Message::Soft(flow_ethos::Request::Task(task)) => {
+                        Some(task.string.clone())
+                    }
+                    _ => None,
+                }
+            })
+        };
+
+        let task_rows = self
+            .engine
+            .match_records(QueryPlan::all(self.request_id_upgrade.task_announcements))?;
+        for mut row in task_rows.records().to_vec() {
+            if settle_notice_status(self, &mut row.status, row.tries, policy.announcement_tries)? {
+                self.engine.mutate_keyed(KeyedMutation::new(
+                    self.request_id_upgrade.task_announcements,
+                    row.record_key(),
+                    row,
+                ))?;
+                continue;
+            }
+            if !matches!(row.status, TaskAnnouncementStatus::Pending(_)) {
+                continue;
+            }
+            let mut lines = Vec::new();
+            for logical_id in &row.tasks {
+                if open(logical_id) {
+                    let id = request_id(logical_id).ok_or(StoreError::StateInvariant)?;
+                    let words = task_words(logical_id).ok_or(StoreError::StateInvariant)?;
+                    lines.push(format!("{id} {words}"));
+                }
+            }
+            if lines.is_empty() {
+                row.status = TaskAnnouncementStatus::Closed;
+                self.engine.mutate_keyed(KeyedMutation::new(
+                    self.request_id_upgrade.task_announcements,
+                    row.record_key(),
+                    row,
+                ))?;
+                continue;
+            }
+            let text = format!(
+                "Your open tasks; close each with Done by its id:\n{}",
+                lines.join("\n")
+            );
+            admit_upgrade_notice(
+                self,
+                row.recipient.clone(),
+                text,
+                UpgradeNoticeAdmission::Task(row),
+            )?;
+        }
+
+        let assignment_rows = self
+            .engine
+            .match_records(QueryPlan::all(self.request_id_upgrade.upgrade_assignments))?;
+        for mut row in assignment_rows.records().to_vec() {
+            if settle_notice_status(self, &mut row.status, row.tries, policy.announcement_tries)? {
+                self.engine.mutate_keyed(KeyedMutation::new(
+                    self.request_id_upgrade.upgrade_assignments,
+                    row.record_key(),
+                    row,
+                ))?;
+                continue;
+            }
+            if !matches!(row.status, TaskAnnouncementStatus::Pending(_)) {
+                continue;
+            }
+            let has_open = row.decisions.iter().any(|decision| {
+                decision
+                    .assigned
+                    .iter()
+                    .any(|assigned| open(&assigned.order))
+                    || decision.open.iter().any(|order| open(&order.order))
+            });
+            if !has_open {
+                row.status = TaskAnnouncementStatus::Closed;
+                self.engine.mutate_keyed(KeyedMutation::new(
+                    self.request_id_upgrade.upgrade_assignments,
+                    row.record_key(),
+                    row,
+                ))?;
+                continue;
+            }
+            let mut lines = Vec::new();
+            for decision in &row.decisions {
+                for assigned in &decision.assigned {
+                    let id = request_id(&assigned.order)
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "archived".into());
+                    lines.push(format!("{id} answered {}", assigned.order));
+                }
+                for order in &decision.open {
+                    let id = request_id(&order.order)
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "archived".into());
+                    lines.push(format!("{id} open {}", order.order));
+                }
+            }
+            let text = format!(
+                "Identical Orders answered before ids; each answer was given to the earliest delivered. If one is wrong, archive the open one or send it again:\n{}",
+                lines.join("\n")
+            );
+            admit_upgrade_notice(
+                self,
+                row.sender.clone(),
+                text,
+                UpgradeNoticeAdmission::Assignment(row),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn settle_notice_status(
+    store: &super::FlowStore,
+    status: &mut TaskAnnouncementStatus,
+    tries: u64,
+    bound: i64,
+) -> Result<bool, StoreError> {
+    use super::logical_delivery::RecordsLogicalDeliveries;
+    let TaskAnnouncementStatus::Admitted(logical_id) = status else {
+        return Ok(false);
+    };
+    let Some(snapshot) = store.logical_delivery_snapshot(logical_id)? else {
+        return Err(StoreError::StateInvariant);
+    };
+    match snapshot.delivery_state {
+        signal_flow::DeliveryState::Delivered(_) | signal_flow::DeliveryState::Read => {
+            *status = TaskAnnouncementStatus::Delivered(logical_id.clone());
+            Ok(true)
+        }
+        signal_flow::DeliveryState::Failed(_) | signal_flow::DeliveryState::Withdrawn => {
+            *status = if i64::try_from(tries).map_err(|_| StoreError::StateInvariant)? < bound {
+                TaskAnnouncementStatus::Pending(None)
+            } else {
+                TaskAnnouncementStatus::Failed(logical_id.clone())
+            };
+            Ok(true)
+        }
+        signal_flow::DeliveryState::Queued
+        | signal_flow::DeliveryState::Attempting
+        | signal_flow::DeliveryState::Retryable(_)
+        | signal_flow::DeliveryState::Uncertain
+        | signal_flow::DeliveryState::Archived => Ok(false),
+    }
+}
+
+fn admit_upgrade_notice(
+    store: &super::FlowStore,
+    address: Address,
+    text: String,
+    transition: UpgradeNoticeAdmission,
+) -> Result<(), StoreError> {
+    use super::logical_delivery::{LogicalDeliveryTransition, RecordsLogicalDeliveries};
+    use sema_engine::KeyedMutation;
+    let response = store.accept_logical_delivery_for_with_transition(
+        &address,
+        flow_ethos::SentBy::Flow,
+        flow_ethos::Delivery::Queue,
+        flow_ethos::Message::Soft(flow_ethos::Request::Notice(text)),
+        None,
+        LogicalDeliveryTransition {
+            purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
+            handover_reminder: None,
+            deliver_call: None,
+            upgrade_notice: Some(transition.clone()),
+        },
+    )?;
+    if let signal_flow::PrivateSendResponse::Refused(refusal) = response {
+        match transition {
+            UpgradeNoticeAdmission::Task(mut row) => {
+                if row.status != TaskAnnouncementStatus::Pending(Some(refusal.clone())) {
+                    row.status = TaskAnnouncementStatus::Pending(Some(refusal));
+                    store.engine.mutate_keyed(KeyedMutation::new(
+                        store.request_id_upgrade.task_announcements,
+                        row.record_key(),
+                        row,
+                    ))?;
+                }
+            }
+            UpgradeNoticeAdmission::Assignment(mut row) => {
+                if row.status != TaskAnnouncementStatus::Pending(Some(refusal.clone())) {
+                    row.status = TaskAnnouncementStatus::Pending(Some(refusal));
+                    store.engine.mutate_keyed(KeyedMutation::new(
+                        store.request_id_upgrade.upgrade_assignments,
+                        row.record_key(),
+                        row,
+                    ))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) trait DeclaresRequestIdUpgradeTables: Sized {
     fn descriptors() -> RequestIdUpgradeDescriptors;
     fn register(

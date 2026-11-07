@@ -56,6 +56,7 @@ mod executable_default_configuration {
     include!(env!("FLOW_NEXUS_DEFAULT_CONFIGURATION_RS"));
 }
 pub mod handover_archive;
+pub mod handover_reminding;
 pub(crate) mod harness_command;
 pub mod heartbeat;
 pub mod herdr;

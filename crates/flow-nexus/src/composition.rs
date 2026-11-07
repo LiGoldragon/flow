@@ -21,15 +21,18 @@ pub use crate::generated::starter::{
     RendersBrief, RendersLeanStart, ResolvesLeaveOuts, SegmentListing, SplitsStartupMessage,
     SystemPrompted, Textual,
 };
+use crate::handover::{Handover, HandoverFile, YieldsHandover};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
 use signal_flow::{
     Address, Aspect, ComposedLaunch, CompositionRefusal, ContextRefusal, FirstPromptPayload,
-    HarnessKind, LaunchProfile, Layer, LeaveOut, LeaveOutRefusal, PromptPart, QueueEntry,
-    SystemPrompt, TargetReceiptRequest,
+    HandoverFault, HarnessKind, LaunchProfile, LeaveOut, LeaveOutRefusal, Model, PromptPart,
+    QueueEntry, SystemPrompt, TargetReceiptRequest,
 };
 use std::collections::HashSet;
+use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CompositionError {
@@ -41,6 +44,11 @@ pub enum CompositionError {
     LeaveOut(LeaveOutRefusal),
     #[error("the Psyche core presentation prompt is unavailable: {0}")]
     PresentationPromptUnavailable(String),
+    #[error("the handover of {predecessor} could not be read: {fault:?}")]
+    HandoverUnreadable {
+        predecessor: String,
+        fault: HandoverFault,
+    },
 }
 
 impl From<ContextRefusal> for CompositionError {
@@ -54,6 +62,7 @@ impl From<ContextRefusal> for CompositionError {
 pub struct LaunchComposer {
     context: ContextComposer,
     presentation_prompt_option: Option<String>,
+    handover: Arc<dyn YieldsHandover>,
 }
 
 trait ComposesPresentationRole {
@@ -71,7 +80,7 @@ impl ComposesPresentationRole for LaunchComposer {
     fn presentation_prompt(&self, address: &Address) -> Result<Option<String>, CompositionError> {
         if address.aspect != Aspect::Psyche
             || address.topic != "core"
-            || address.layer != Layer::Primary
+            || address.model != Model::Fable
         {
             return Ok(None);
         }
@@ -125,6 +134,9 @@ pub trait OpensLaunchComposer {
         context: ContextComposer,
         presentation_prompt_option: Option<String>,
     ) -> Self;
+    /// The composer with another source of predecessors' handovers, in place
+    /// of the files of [`HandoverFile`].
+    fn with_handover_source(self, handover: Arc<dyn YieldsHandover>) -> Self;
 }
 
 impl OpensLaunchComposer for LaunchComposer {
@@ -132,6 +144,7 @@ impl OpensLaunchComposer for LaunchComposer {
         Self {
             context,
             presentation_prompt_option: None,
+            handover: Arc::new(HandoverFile),
         }
     }
 
@@ -142,6 +155,65 @@ impl OpensLaunchComposer for LaunchComposer {
         Self {
             context,
             presentation_prompt_option,
+            handover: Arc::new(HandoverFile),
+        }
+    }
+
+    fn with_handover_source(mut self, handover: Arc<dyn YieldsHandover>) -> Self {
+        self.handover = handover;
+        self
+    }
+}
+
+/// The root a launch's predecessor's handover is read under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandoverRoot<'a> {
+    /// A composition with no root ([`ComposesLaunch::compose`]): no handover
+    /// is read.
+    Unread,
+    /// The root the launch runs in.
+    At(&'a Path),
+    /// The launch's root could not be resolved: a launch given a handover
+    /// is refused `RootUnresolved`.
+    Unresolved,
+}
+
+trait ReadsHandover {
+    fn handover_text(
+        &self,
+        profile: &LaunchProfile,
+        launch_root: HandoverRoot<'_>,
+    ) -> Result<Option<String>, CompositionError>;
+}
+
+impl ReadsHandover for LaunchComposer {
+    /// The text of a successor's handover, placed last in its first prompt:
+    /// what the source yields for the launch's predecessor. None for a
+    /// launch with no predecessor, for one composed with no root, and when
+    /// the source holds none. A handover the source could not read whole,
+    /// or a root that could not be resolved, refuses the launch
+    /// `HandoverUnreadable`, naming the predecessor and the fault.
+    fn handover_text(
+        &self,
+        profile: &LaunchProfile,
+        launch_root: HandoverRoot<'_>,
+    ) -> Result<Option<String>, CompositionError> {
+        let Some(predecessor) = profile.flow_id_option.as_deref() else {
+            return Ok(None);
+        };
+        let refused = |fault| CompositionError::HandoverUnreadable {
+            predecessor: predecessor.to_owned(),
+            fault,
+        };
+        let launch_root = match launch_root {
+            HandoverRoot::Unread => return Ok(None),
+            HandoverRoot::At(root) => root,
+            HandoverRoot::Unresolved => return Err(refused(HandoverFault::RootUnresolved)),
+        };
+        match self.handover.handover(predecessor, launch_root) {
+            Handover::Text(text) => Ok(Some(text)),
+            Handover::Absent => Ok(None),
+            Handover::Unreadable(fault) => Err(refused(fault)),
         }
     }
 }
@@ -243,7 +315,17 @@ impl SplitsStartupMessage for HarnessKind {
         input_0: N,
         input_1: O,
     ) -> Result<Vec<String>, ContextRefusal> {
-        let pieces = input_0.segments().joined_with(input_1.text());
+        self.parts_of(input_0.segments().joined_with(input_1.text()))
+    }
+}
+
+/// A first USER message already cut into pieces, cut into parts.
+trait CutsIntoParts {
+    fn parts_of(&self, pieces: Vec<String>) -> Result<Vec<String>, ContextRefusal>;
+}
+
+impl CutsIntoParts for HarnessKind {
+    fn parts_of(&self, pieces: Vec<String>) -> Result<Vec<String>, ContextRefusal> {
         let whole = pieces.concat();
         if self.fits_one_message(&whole) {
             return Ok(vec![whole]);
@@ -525,6 +607,58 @@ impl ComposesLaunch for LaunchComposer {
         input_0: N,
         input_1: O,
     ) -> Result<ComposedLaunch, CompositionError> {
+        self.compose_in_root(input_0, input_1, HandoverRoot::Unread)
+    }
+}
+
+/// A first USER message with a text placed last, whole, after a blank line
+/// (a line end when the message already ends in one).
+trait PlacesLast {
+    fn placed_last(self, text: &str) -> Vec<String>;
+}
+
+impl PlacesLast for Vec<String> {
+    fn placed_last(mut self, text: &str) -> Vec<String> {
+        let so_far = self.concat();
+        let separator = if so_far.is_empty() || so_far.ends_with("\n\n") {
+            ""
+        } else if so_far.ends_with('\n') {
+            "\n"
+        } else {
+            "\n\n"
+        };
+        self.push(format!("{separator}{text}"));
+        self
+    }
+}
+
+/// Composes a launch that runs in a root.
+pub trait ComposesInRoot {
+    /// As [`ComposesLaunch::compose`], for a launch that runs in
+    /// `launch_root`. A launch that names a predecessor (a refresh's or a
+    /// waking's successor) is given the predecessor's handover, whole and
+    /// last in its first prompt: after the brief, the final bytes of the
+    /// message, or is refused `HandoverUnreadable` when it cannot be read
+    /// whole. A launch composed with [`HandoverRoot::Unread`] reads none; a
+    /// Restart names no predecessor, has no first prompt and is given none.
+    /// A simplified flow with no first message is given no handover either,
+    /// and reads none, since the handover alone would create a context-only
+    /// startup turn.
+    fn compose_in_root<N: Profiled, O: LeaveOutListing>(
+        &self,
+        input_0: N,
+        input_1: O,
+        launch_root: HandoverRoot<'_>,
+    ) -> Result<ComposedLaunch, CompositionError>;
+}
+
+impl ComposesInRoot for LaunchComposer {
+    fn compose_in_root<N: Profiled, O: LeaveOutListing>(
+        &self,
+        input_0: N,
+        input_1: O,
+        launch_root: HandoverRoot<'_>,
+    ) -> Result<ComposedLaunch, CompositionError> {
         let harnessed = HarnessedProfile {
             remembered_flows: input_0.remembered_flows(),
             launch_profile: input_0.profile(),
@@ -552,6 +686,15 @@ impl ComposesLaunch for LaunchComposer {
             // instruction remains the first user message; an empty one does
             // not create a context-only startup turn.
             let system_prompt = self.launch_system_prompt(&harnessed, &verified, &segments)?;
+            let handover = if brief.is_empty() {
+                None
+            } else {
+                self.handover_text(&harnessed.launch_profile, launch_root)?
+            };
+            let brief = match &handover {
+                Some(handover) => vec![brief].placed_last(handover).concat(),
+                None => brief,
+            };
             let parts = if brief.is_empty() {
                 Vec::new()
             } else {
@@ -573,8 +716,13 @@ impl ComposesLaunch for LaunchComposer {
         // another, so the start is one model call.
         let system_prompt =
             self.launch_system_prompt(&harnessed, &verified, Vec::<String>::new())?;
-        let body = segments.joined_with(&brief).concat();
-        let parts = harnessed.harness_kind.startup_parts(&segments, &brief)?;
+        // The handover is the last piece of the message, after the brief.
+        let mut pieces = segments.joined_with(&brief);
+        if let Some(handover) = &self.handover_text(&harnessed.launch_profile, launch_root)? {
+            pieces = pieces.placed_last(handover);
+        }
+        let body = pieces.concat();
+        let parts = harnessed.harness_kind.parts_of(pieces)?;
         Ok(Self::assembled(
             &harnessed,
             &system_prompt,
@@ -607,8 +755,8 @@ impl RendersQueuedWork for [QueueEntry] {
 }
 
 /// Everything a fresh wake knows of the flow it starts, all of it read from
-/// the meta configuration and the metaflow's last flow: its Address, the
-/// layer's Model, the module identities and leave-outs the last launch
+/// the meta configuration and the metaflow's last flow: its Address, its
+/// Model's native model, the module identities and leave-outs the last launch
 /// named, the Herdr session its last flow ran in, and the queued work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FreshSeat {
@@ -693,8 +841,8 @@ pub(crate) mod tests {
     };
     use crate::context::FixtureComposer;
     use signal_flow::{
-        Address, Aspect, CompositionRefusal, ContextRefusal, HarnessKind, LaunchProfile, Layer,
-        LeaveOut, Remembering,
+        Address, Aspect, CompositionRefusal, ContextRefusal, HarnessKind, LaunchProfile, LeaveOut,
+        Model, Remembering,
     };
 
     /// A launch profile and a composer holding its modules, for tests.
@@ -706,7 +854,7 @@ pub(crate) mod tests {
             address: Address {
                 aspect: Aspect::Field,
                 topic: "flow".into(),
-                layer: Layer::Secondary,
+                model: Model::Sol,
             },
             model_name: "gpt-6-astra".into(),
             effort: "medium".into(),
@@ -845,7 +993,7 @@ pub(crate) mod tests {
         let address = Address {
             aspect: Aspect::Psyche,
             topic: "core".into(),
-            layer: Layer::Primary,
+            model: Model::Fable,
         };
         let exact = "  Exact role line\nsecond line\n  ".to_owned();
         assert_eq!(
@@ -872,7 +1020,7 @@ pub(crate) mod tests {
                 .presentation_prompt(&Address {
                     aspect: Aspect::Field,
                     topic: "core".into(),
-                    layer: Layer::Primary,
+                    model: Model::Astra,
                 })
                 .unwrap(),
             None
@@ -882,7 +1030,7 @@ pub(crate) mod tests {
                 .presentation_prompt(&Address {
                     aspect: Aspect::Psyche,
                     topic: "core".into(),
-                    layer: Layer::Primary,
+                    model: Model::Fable,
                 })
                 .unwrap(),
             None
@@ -961,7 +1109,7 @@ pub(crate) mod tests {
         let system = &composed.system_prompt.system_prompt_text;
         assert!(system.contains("<!-- module: spirit-core -->\nSpirit body.\n"));
         assert!(system.ends_with(
-            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
+            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
         ));
         assert!(!system.contains("Knowledge body."));
         let body = &composed.first_prompt_payload.first_prompt_body;
@@ -984,7 +1132,7 @@ pub(crate) mod tests {
         let carried = composed.carrying_flow_id("a1b2c3");
         let system = &carried.system_prompt.system_prompt_text;
         assert!(system.ends_with(
-            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
+            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
         ));
         assert_eq!(carried.first_prompt_payload, composed.first_prompt_payload);
         // A launch with no predecessor and no memory gains the section.
@@ -1005,7 +1153,7 @@ pub(crate) mod tests {
         assert!(
             bare.system_prompt
                 .system_prompt_text
-                .ends_with("<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\n")
+                .ends_with("<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\n")
         );
         assert!(!system.contains("This flow belongs to metaflow"));
     }
@@ -1073,7 +1221,7 @@ pub(crate) mod tests {
             "Carry the bounded task."
         )));
         assert!(composed.system_prompt.system_prompt_text.contains(
-            "Metaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
+            "Metaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
         ));
         assert!(!body.contains("Role: Field Medium"));
         assert!(!body.contains('$'));
@@ -1086,18 +1234,22 @@ pub(crate) mod tests {
             (Aspect::Mind, "Mind"),
             (Aspect::Field, "Field"),
         ] {
-            for (layer, layer_name) in [
-                (Layer::Primary, "Primary"),
-                (Layer::Secondary, "Secondary"),
-                (Layer::Tertiary, "Tertiary"),
-                (Layer::Quaternary, "Quaternary"),
+            for (model, model_name) in [
+                (Model::Fable, "Fable"),
+                (Model::Opus, "Opus"),
+                (Model::Sonnet, "Sonnet"),
+                (Model::Haiku, "Haiku"),
+                (Model::Astra, "Astra"),
+                (Model::Sol, "Sol"),
+                (Model::Luna, "Luna"),
+                (Model::Terra, "Terra"),
             ] {
                 for harness_kind in [HarnessKind::Claude, HarnessKind::Codex] {
                     let mut profile = fixture_profile();
                     profile.address = Address {
                         aspect: aspect.clone(),
                         topic: "coreTopic".into(),
-                        layer: layer.clone(),
+                        model: model.clone(),
                     };
                     let composed = fixture_composer()
                         .compose(
@@ -1110,7 +1262,7 @@ pub(crate) mod tests {
                         )
                         .unwrap();
                     let identity = format!(
-                        "Metaflow: {{ {aspect_name} coreTopic {layer_name} }}\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
+                        "Metaflow: {{ {aspect_name} coreTopic {model_name} }}\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
                     );
                     assert!(
                         composed
@@ -1393,7 +1545,7 @@ pub(crate) mod tests {
             [order].prompt_text(&signal_flow::Address {
                 aspect: signal_flow::Aspect::Psyche,
                 topic: "flow".into(),
-                layer: signal_flow::Layer::Secondary
+                model: signal_flow::Model::Opus
             }),
             "[ { Notification Soft.Order.investigate } ]"
         );

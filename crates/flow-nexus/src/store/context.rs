@@ -5,9 +5,6 @@
 //! per flow, keyed by its FlowId, rewritten at each reading. It is judged
 //! against the refresh threshold of the flow's model: a flow at or past it
 //! is given no new message and is replaced as it goes idle.
-//!
-//! The row lives in its own table, so a store written before context sizes
-//! were kept opens with the table added and its flows simply have none.
 
 use super::{FlowStore, ManagesMetaflowState, ReadsFlowRoles, ReadsLaunchAttempt, StoreError};
 use meta_signal_flow::{CompactionRefusal, ContextBelowThreshold};
@@ -140,6 +137,10 @@ pub enum ThresholdStanding {
     /// At or past the threshold: it is given no new message and is
     /// replaced as it goes idle.
     Past { context: i64, refresh: i64 },
+    /// At or past the threshold, its Address protected: it is handed its
+    /// messages and never refreshed for it, and a Compact of it is refused
+    /// as below the threshold.
+    Protected { context: i64, refresh: i64 },
 }
 
 pub trait JudgesThreshold {
@@ -165,9 +166,12 @@ impl JudgesThreshold for FlowStore {
         let Some(context) = self.context_size(flow_id)? else {
             return Ok(ThresholdStanding::Unmeasured);
         };
+        use crate::protecting::ProtectsFlows;
         let refresh = threshold.refresh;
         Ok(if context < refresh {
             ThresholdStanding::Below { context, refresh }
+        } else if self.protected_address(flow_id)?.is_some() {
+            ThresholdStanding::Protected { context, refresh }
         } else {
             ThresholdStanding::Past { context, refresh }
         })
@@ -188,7 +192,8 @@ impl JudgesCompaction for FlowStore {
         Ok(match self.threshold_standing(flow_id)? {
             ThresholdStanding::NoThreshold => Some(CompactionRefusal::NoThreshold),
             ThresholdStanding::Unmeasured => Some(CompactionRefusal::Unmeasured),
-            ThresholdStanding::Below { context, refresh } => {
+            ThresholdStanding::Below { context, refresh }
+            | ThresholdStanding::Protected { context, refresh } => {
                 Some(CompactionRefusal::BelowThreshold(ContextBelowThreshold {
                     context_tokens: context,
                     refresh_tokens: refresh,

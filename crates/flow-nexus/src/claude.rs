@@ -710,7 +710,7 @@ mod tests {
         let transcript = directory.path().join("queued.jsonl");
         fs::write(&transcript, "").unwrap();
         let cursor = transcript.claude_cursor().unwrap();
-        let text = "{ Sender.{ Psyche core Secondary } Order.do }";
+        let text = "{ Sender.{ Psyche core Opus } Order.do }";
         let queued = format!("<pasted_content id=\"00df\">\n{text}\n</pasted_content id=\"00df\">");
         let mut append = fs::OpenOptions::new()
             .append(true)

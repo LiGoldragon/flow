@@ -87,7 +87,7 @@ impl ReadsHookInput for HarnessHook {
             configuration: env::args().nth(1).and_then(|source| {
                 let mut budget = Budget {
                     remaining: 65_536,
-                    reader: ReaderBudget { remaining: 65_536 },
+                    reader: ReaderBudget::try_from(65_536).expect("a constant reader budget"),
                     depth: 0,
                     maximum_depth: 1_024,
                 };
@@ -225,7 +225,7 @@ mod tests {
     fn report(source: String) -> HookCall {
         let mut budget = Budget {
             remaining: 65_536,
-            reader: ReaderBudget { remaining: 65_536 },
+            reader: ReaderBudget::try_from(65_536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1_024,
         };

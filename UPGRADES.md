@@ -1,3 +1,294 @@
+# Flow 0.53.1
+
+A Restart composes and validates its resume before it closes anything: the
+launch composed from the Address's current declaration, its root and harness
+flags read, and its title, hook settings and command line built and checked
+as the spawn builds them. Only then is Closing written, the old harness
+closed, and the same native session resumed with that launch. 0.53.0
+composed only after the old harness was closed, so a refused composition
+(`NotComposed`) left the flow with no harness until a retry.
+
+- A refusal before the close answers `RestartRefused.ResumeRefused` with its
+  category (`NotComposed`, `RootRefused`, `MalformedHarnessFlags`,
+  `TitleRefused`, `CommandTooLong`, `ControlCharacter`, `CommandUnformed`,
+  `HarnessMismatch`) and writes nothing: no record for a first restart, and
+  a Failed record left as it was for a retry. The old harness runs on, its
+  pane untouched, nothing typed.
+- The composed launch is held in memory through Closing, Closed and
+  Opening. A Nexus that takes up a restart left at Closing or Closed
+  composes again by the same steps first; refused at Closing, the record is
+  Failed and the old pane is not touched.
+- A Failed record 0.53.0 left (the old harness closed, `NotComposed`) is
+  retried as any Failed record: once composition works, the same session
+  resumes.
+
+## A failed resume reopens by itself
+
+A resume that fails after the old harness is closed (the spawn refused, the
+seat not bound, the session reported wrong) no longer leaves the flow with
+no harness until the owner retries. Once its pane is discarded and the
+record written Failed, the restart reopens the same session by itself,
+`claude --resume <session>` with the launch it already composed.
+
+- It reopens only once the seat is proven quiescent, under the gate: the
+  record still the Failed one written, the harness the failed pane showed
+  recorded and proven exited by its birth (given 3 seconds after the
+  discard), the failed pane gone, and no pane of the old seat's, the flow's
+  or the resume's Herdr session holding the session. Closed is written with
+  the run counted, then Opening, Spawning and the bind as in any restart.
+  See "A reopen needs the failed harness proven exited" below.
+- A pane Herdr does not show closed is Interrupted, as before: a start may
+  be in flight there, and nothing is respawned from an observed absence.
+- The bound is a constant, `AUTOMATIC_REOPENS` = 1, in
+  `crates/flow-nexus/src/restarting.rs`: a restart reopens by itself while
+  its Attempts number no more than 1, so its first run gets one reopen.
+  Every run counts, the owner's retries included, so a retry of a Failed
+  restart (Attempts 2 or more) gets none. A configured bound needs a
+  configuration family of its own (a ruling); none is added.
+- The bound spent, the record is Failed as before: the session, the queue
+  and the Address held, `RestartRefused.ResumeRefused` answered, an owner
+  retry and the owner's Stop as before. Stopped is never reopened. A Stop
+  while a reopen's spawn runs answers `Restarting`, as during any restart
+  step.
+- At its start a Nexus takes up a Failed record under the same bound and
+  proof, read from the record, composing its launch again: a Nexus that
+  died after a failure past the close reopens the flow by itself once the
+  harness its record names is proven exited. A Failed record from before the
+  close (0.53.0's `CloseRefused` or `CloseUnproven`) is taken up only once
+  Herdr shows its old pane gone and its harness exited; until then it is
+  left as it is, only reads reaching Herdr.
+- A Working seat is still refused `RestartRefused.Unsupported`, unchanged.
+
+## A reopen needs the failed harness proven exited
+
+A harness can outlive its pane, so a pane's absence, or a pid, proves no
+exit. Before a run's pane is abandoned, the record's `OldSeat` is rewritten
+to that pane's route and the harness Flow saw running the session there,
+`Process.{ pid started }`, or none when it saw none; the old harness was
+proven exited before Closed was written, so the failed pane is now the seat
+to reconcile. The Stop of an Interrupted restart rewrites it alike, to the
+pane it quiesces and the harness it sees there, else the one recorded for
+that pane. No Memory schema changes.
+
+- A reopen by itself, after a failure in this Nexus or at a Nexus start,
+  needs that harness recorded and proven exited by its birth, exactly as the
+  old seat's exit is proven; see "An exit is proven, never assumed" below.
+  The failed pane gone and no pane holding the session are needed as well,
+  and never enough alone.
+- A harness never seen is `ExitUnwitnessed`; one seen and still running is
+  `ExitUnproven`. Either way the record stays Failed, logged with that word,
+  the session, the queue and the Address held. A resume refused before any
+  harness ran (`SpawnRefused` with nothing in the pane) is
+  `ExitUnwitnessed` and is no longer reopened by itself.
+- The owner's retry of a Failed record applies the same proof before it
+  writes anything: refused `RestartRefused.ResumeRefused` with
+  `ExitUnwitnessed`, or with `ExitUnproven` when the old seat's pane is gone,
+  the record left as it was. A retry whose old seat's pane still stands
+  closes it and proves the exit, as before. The owner's Stop stands, and
+  Retire takes a Failed record as before. A record with no harness seen is
+  never retried, after a Stop either; what frees it besides Retire is
+  undecided.
+
+## An exit is proven, never assumed
+
+A recorded harness's exit is proven by three readings of the kernel, and by
+nothing else: `/proc/<pid>/stat` not found; a parsed start time other than
+the recorded birth; or a parsed state of Z or X with the recorded birth.
+Until this change every failure to read was taken as an exit.
+
+- Permission refused, any other I/O error, a stat with no state after its
+  command, a start time that does not parse, a pid not positive or beyond
+  the kernel's `pid_max` (or `pid_max` unread), and a negative recorded
+  birth are unproven. A stat is used only when its state and its start time
+  both parse; a Z or X with an unparseable start time is unproven. R, S, D
+  or any other state with the recorded birth is running.
+- The answer is a type, `ExitProof.[ Exited.ExitEvidence Running
+  Unproven.ExitDoubt ]`, `ExitEvidence.[ Gone Reborn Defunct ]`,
+  `ExitDoubt.[ InvalidPid BirthUnparsed PermissionDenied Unreadable
+  Malformed StartUnparsed ]`, internal to `restarting.rs`. Only `Exited`
+  lets a restart write Closed, reopen by itself, or retry. A reopen's wait
+  ends early only on `Exited`.
+- `/proc` is read through the `ReadsProcessStatus` seam: `ProcFs` in
+  production, a fed kernel in tests.
+- A first restart names its old harness before anything is written: the one
+  the old pane shows running the session, else the birth a restart bound
+  for the seat at the flow's current route (its `SeatBirth`, same Herdr
+  session, pane and terminal). None is refused
+  `RestartRefused.ResumeRefused` with `ExitUnwitnessed`, whatever the pane
+  shows. With the old pane gone, that harness must already be proven
+  exited, or the restart is refused with `ExitUnproven`. Either refusal
+  writes no record and closes, opens and starts nothing.
+- Closed is never written for an old seat with no harness recorded: a
+  pane's absence alone proves nothing. 0.53.1 before this change closed a
+  pane with no harness seen, or took a gone pane, as proof.
+- A flow whose pane is gone and that was never restarted has no recorded
+  harness, so its restart is now refused `ExitUnwitnessed`; the owner's
+  Stop and Retire stand. What else frees it is undecided.
+- The test `restart_harness_already_dead` and its check
+  `flow-restart-harness-already-dead` are gone: their case is now refused.
+
+## Curriculum 478c's schema
+
+Pins signal-flow 51.0.0 (9f159d9) and meta-signal-flow 64.0.0 (efc0bf5); the
+flake's Curriculum, which the capsule runs, is 478cbc5.
+
+- `ethos/curriculum.ethos` is Curriculum 478cbc5's schema byte for byte
+  (SHA-256 26011a94…48e28): its Outcome has five variants, the fifth
+  `Rejected.String`. Flow's earlier copy carried a sixth, `ModuleMissing`,
+  at that place, so it read 478c's `Rejected` as `ModuleMissing`.
+- A `Rejected` answer is `ContextRefusal.ComposerRejected.String`, the text
+  kept whole, as in `StartRejected.ContextRefused.ComposerRejected.«missing
+  module knowledge:absent»`; one naming a remembered flow's records missing
+  stays `RecordMissing`. A Restart whose resume is so refused still answers
+  `ResumeRefused.{ <flow> NotComposed }`, and logs the text.
+
+## protos 0.33, datom-codec 0.33, signal 10.3
+
+Pins signal-flow 50.0.0 (8143240) and meta-signal-flow 63.0.0 (6fe04a7),
+both rebuilt on signal 10.3.0 (7afb68b), datom-codec 0.33.0 (eabead4) and
+protos 0.33.0 (3c7ade3). Flow pins datom-codec and protos by the revs signal
+names, so a build holds one of each.
+
+- A guillemet string is read by balance: `«Title «The Belief Nexus made
+  small»»` is one string, its inner pair content; an unbalanced guillemet
+  inside one is escaped, `«an unbalanced \» inside»`. Each goes from the
+  flow CLI through the Nexus and back out of flow-meta byte for byte.
+- A bare String prints bare: `«!»` prints `!`, `«Begin.»` prints `Begin.`;
+  both forms read the same.
+
+## A protected Address
+
+Pins signal-flow 49.0.0 (3030a8c) and meta-signal-flow 62.0.0 (1d0b314).
+
+- `Configure.ProtectedAddresses.[ { Psyche core Fable } ]` declares the
+  Addresses whose flows Flow keeps, one entry per Address, none by default,
+  read back in the Configuration snapshot before the counters and kept with
+  the configuration.
+- A protected Address's flow past its model's threshold stands `Protected`:
+  none of the automatic refresh paths refreshes it, it is handed its
+  messages, and a Compact of it is refused as below the threshold. Every
+  other Address, a Fable one included, and every threshold are unchanged.
+- On the ordinary socket a Restart, Refresh, Replace or Launch of a
+  protected Address answers `Protected` unless the flow's own seat asks,
+  read from the calling process as a restart's origin is; its Stop also
+  from the owner, a process in no flow's pane. The restart's check is the
+  first in `begun`, before anything is written. A self-asked Restart passes
+  it and is still answered `Unsupported`, as this slice answers every
+  restart a flow asks for itself.
+- The meta socket takes `Restart.FlowId` and `Refresh.Address` from any
+  peer it admits, a protected Address's included; a Refused answer there is
+  `OrdinaryRefused`. Its Retire of a protected Address's flow by another
+  flow answers `RetireRejected.Protected`.
+
+Memory gains one family, the ProtectedAddresses configuration. 0.53.1 opens
+the store 0.53.0 wrote: every other family as it was, that one registered
+empty, so nothing is protected until it is declared. A 0.53.0 Nexus refuses
+a store 0.53.1 has opened.
+
+## A successor is given its predecessor's handover
+
+A successor flow of a refresh, and a flow a waking starts after a
+predecessor, is given the predecessor's handover file,
+`flows/<predecessor FlowId>/handover.md`, resolved against the launch root
+the flow runs in (the metaflow's declared root, else the Nexus's source
+root). The file is placed whole, byte for byte, as the last bytes of the
+successor's first prompt: after the brief, after a blank line.
+
+- A refresh's successor (a Refresh, a Replace, a Launch to an Awake
+  metaflow, the automatic refreshes) names the flow it replaces as its
+  predecessor. A waking names the metaflow's last flow, and its launch
+  profile now carries that flow in `flow_id_option`, as the Replace's does;
+  its system prompt gains the `Predecessor:` line. The metaflow is Asleep
+  then, so the predecessor takes no part in taking the Address.
+- A predecessor that left no file, or an empty one, leaves the prompt as it
+  was. Otherwise the handover is given whole or the launch is refused
+  `CompositionRefused.HandoverUnreadable.{ <flow> <fault> }`, the fault one
+  of `NotUtf8`, `Unreadable.«<path>: <error>»` (a permission refusal, an I/O
+  error, not a file), `InvalidPredecessor` (the predecessor names no flow)
+  or `RootUnresolved` (its launch root could not be resolved). Nothing is
+  decoded lossily and nothing is dropped.
+- A refused Refresh answers `SuccessorRefused.LaunchRefused` with it: the
+  predecessor runs on, Awake and holding its Address, its pane and harness
+  untouched, no successor owed. A refused waking leaves the metaflow Asleep
+  with its queue, each request `Retryable.WakeRefused` with it. An OnDemand
+  seat whose successor is so refused is not closed or put to sleep.
+- A Restart resumes the same session and has no first prompt: it names no
+  predecessor, reads none and is given none. A simplified flow with no
+  first message is given none either, since the handover alone would be a
+  context-only turn, and reads none.
+- Pins signal-flow 52.0.0 (2f9e2bf) and meta-signal-flow 65.0.0 (baaa5bd),
+  which add `CompositionRefusal.HandoverUnreadable` and `HandoverFault`. A
+  rejection the store holds from before reads the same.
+- A message too large for one part keeps the handover as a piece of its
+  own, in the last part; one larger than a part refuses `ModuleTooLarge`
+  as any module does.
+- The source is one typed value in the composition:
+  `composition::LaunchComposer` holds an `Arc<dyn handover::YieldsHandover>`,
+  `handover::HandoverFile` by default, and
+  `OpensLaunchComposer::with_handover_source` replaces it. The composer
+  places whatever the source yields; where the text lives is the source's.
+
+# Flow 0.53.0
+
+Frozen 0.52.0 plus Restart. Pins signal-flow 46.0.0 and meta-signal-flow
+58.0.0.
+
+- `Restart.FlowId` closes a flow's harness and resumes the same native
+  session in a new pane: the FlowId, session, model and transcript stay. No
+  first prompt is typed. Answers `Restarted`, or a typed `RestartRefused`.
+- The intent is durable Memory, a new family `RestartRecord`, written before
+  each effect; while it stands the address is held and arrivals queue.
+  `Bound` commits the new binding and removes the record in one write; the
+  queue then drains through the existing delivery custody.
+- A late event from the old seat is fenced by the bound seat's birth
+  identity; the new seat's real exit ends the flow as before.
+- A spawn whose outcome a Nexus death left unproven is `Interrupted`, never
+  respawned; Stop clears it only once the spawn is proven quiet.
+- Inspect shows the record, read-only.
+
+0.53.0 opens no earlier store, as 0.52.0 does not; it starts from a new store.
+
+# Flow 0.52.0
+
+An Address names its Model: `Address.{ Aspect Topic Model }`,
+`Model.[ Fable Opus Sonnet Haiku Astra Sol Luna Terra ]`, in place of its
+Layer; any model stands in any aspect. No model ranks above another. Pins
+signal-flow 45.0.0 (9abc022) and meta-signal-flow 57.0.0 (31e3979); the
+capsule runs Curriculum 3f74f77, whose callers name their Model.
+
+- A recipient is the Address a Send names: `Send.{ { Mind core Sol }
+  Soft.Order.«…» }`. `Up` is gone, and with it `NoneAbove` and `NoLayer`; no
+  route is inferred from the sender's model.
+- A launch carries no power: `PowerLevel` leaves `Caller`, `FlowBinding` and
+  the launch. A seat is bound only when its aspect is its Address's and its
+  model is the native model configured for its Address's Model; otherwise
+  `RoleMismatch`.
+- No Start waits for another model's seat, and nothing starts first:
+  `NoSecondary` is gone.
+- A task's reminders, and with the last its failure, go to the sender Flow
+  recorded when it admitted the task.
+- A successor whose start is refused keeps its predecessor, its typed
+  refusal standing as before; no flow is sent a notice of it.
+- Effort is unchanged: low for Terra, medium for every other Model.
+- `Configure.Models` holds one native model per Model, in every aspect:
+  `{ Sol gpt-6.1-sol }`.
+- The send tool's target names `model` in place of `layer`. A title is
+  `{ <Aspect> <Topic> <Model> <FlowId> }`.
+
+0.52.0 opens no earlier store. Its Memory is Flow Memory v3: a store any
+earlier Flow wrote is refused `EarlierMemory` before anything is written, and
+stays byte for byte as it was; a store holding a family under an earlier or a
+later identity is refused `UnrecognizedMemory`. No family is upgraded on open.
+0.52.0 starts from a new store; moving flows into it is a later release.
+
+Live addresses move: `{ Psyche core Primary }` is `{ Psyche core Fable }`,
+`{ Mind core Primary }` is `{ Mind core Astra }`,
+`{ Mind versionZero Primary }` is `{ Mind versionZero Astra }`. Consumers
+that write addresses or model configuration move with this release: the
+deployment's `Configure.Models` datom, Curriculum role callers named by
+Layer, the Message Nexus's `Bind` of `{ Field message Primary }` (now
+`{ Field message Astra }`), and knowledge:flow-messaging.
+
 # Flow 0.51.2
 
 A flow past its model's refresh threshold is refreshed when its Stop hook

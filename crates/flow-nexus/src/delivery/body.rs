@@ -371,7 +371,7 @@ mod tests {
     fn budget() -> datom_codec::Budget {
         datom_codec::Budget {
             remaining: 65536,
-            reader: protos::ReaderBudget { remaining: 65536 },
+            reader: protos::ReaderBudget::try_from(65536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1024,
         }
@@ -390,7 +390,7 @@ mod tests {
             sent_by: signal_flow::SentBy::Sender(signal_flow::Address {
                 aspect: signal_flow::Aspect::Psyche,
                 topic: "flow".into(),
-                layer: signal_flow::Layer::Secondary,
+                model: signal_flow::Model::Opus,
             }),
             message: signal_flow::Message::HardAbrupt(signal_flow::Request::Task(
                 flow_ethos::AnswerableTask {
@@ -411,7 +411,7 @@ mod tests {
                 .visible_input(&signal_flow::Address {
                     aspect: signal_flow::Aspect::Psyche,
                     topic: "flow".into(),
-                    layer: signal_flow::Layer::Secondary,
+                    model: signal_flow::Model::Opus,
                 }),
             ]),
         });
@@ -419,7 +419,7 @@ mod tests {
         assert!(
             typed
                 .as_str()
-                .starts_with("[ { Sender.{ Psyche flow Secondary } ")
+                .starts_with("[ { Sender.{ Psyche flow Opus } ")
         );
         assert_eq!(
             Potential::<Vec<signal_flow::VisibleNativeInput>>::from(typed.as_str().to_owned())
@@ -449,7 +449,7 @@ mod tests {
         let cohort = entries.prompt_text(&signal_flow::Address {
             aspect: signal_flow::Aspect::Psyche,
             topic: "flow".into(),
-            layer: signal_flow::Layer::Secondary,
+            model: signal_flow::Model::Opus,
         });
         assert!(cohort.starts_with("[ { "));
         assert_eq!(
@@ -464,7 +464,7 @@ mod tests {
                         &signal_flow::Address {
                             aspect: signal_flow::Aspect::Psyche,
                             topic: "flow".into(),
-                            layer: signal_flow::Layer::Secondary,
+                            model: signal_flow::Model::Opus,
                         },
                     )
                 })
@@ -489,7 +489,7 @@ mod tests {
                     .visible_input(&signal_flow::Address {
                         aspect: signal_flow::Aspect::Psyche,
                         topic: "flow".into(),
-                        layer: signal_flow::Layer::Secondary,
+                        model: signal_flow::Model::Opus,
                     }),
                 ]),
             })

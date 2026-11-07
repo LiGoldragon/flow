@@ -1,8 +1,6 @@
 //! The send servers Flow trusts to name the Codex thread they serve: the meta
 //! SendServers family, one row per Codex app-server executable, each paired
-//! with the MCP send-server executable that app-server's child must run. A
-//! store written before send servers were configured opens with the table
-//! added and holds none.
+//! with the MCP send-server executable that app-server's child must run.
 //!
 //! A process is a trusted send server when the executable the kernel reports
 //! for it is a configured MCP send-server executable and the executable the

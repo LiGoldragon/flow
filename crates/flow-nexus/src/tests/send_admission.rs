@@ -1,13 +1,13 @@
 use crate::sending::{AdmitsSendPayload, MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
 use crate::store::ReadsFlowMemory;
 use crate::store::metaflow::SleepsMetaflows;
-use flow_ethos::{Address, Aspect, Layer, Request};
+use flow_ethos::{Address, Aspect, Model, Request};
 
 fn sender() -> Address {
     Address {
         aspect: Aspect::Mind,
         topic: "send-admission-test".into(),
-        layer: Layer::Primary,
+        model: Model::Astra,
     }
 }
 
@@ -62,14 +62,14 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
     use crate::sending::SendsRequests;
     use crate::store::FlowStore;
     use crate::store::metaflow::SeedsMetaflow;
-    use signal_flow::{Message, Metaflow, Recipient, Response, SendRequest};
+    use signal_flow::{Message, Metaflow, Response, SendRequest};
     let fixture = NexusFixture::new();
     bind_existing_caller(&fixture, "a001", "pane-1");
     fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
     let target = Address {
         aspect: Aspect::Mind,
         topic: "directTarget".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     };
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: target.clone(),
@@ -81,7 +81,7 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
     let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
     let answer = fixture.nexus.send_request(
         SendRequest {
-            recipient: Recipient::Address(target.clone()),
+            recipient: target.clone(),
             sendable_message: super::sendable_message(Message::MiddleAbrupt(Request::Order(
                 "wake when configured".into(),
             ))),
@@ -116,7 +116,7 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
     };
     let answer = fixture.nexus.send_request(
         SendRequest {
-            recipient: Recipient::Address(unknown.clone()),
+            recipient: unknown.clone(),
             sendable_message: signal_flow::SendableMessage::HardAbrupt(
                 signal_flow::SendableRequest::Notice("no hidden queue".into()),
             ),
@@ -133,7 +133,7 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
     assert!(fixture.nexus.store.metaflow(&unknown).unwrap().is_none());
     let queued = fixture.nexus.send_request(
         SendRequest {
-            recipient: Recipient::Address(target.clone()),
+            recipient: target.clone(),
             sendable_message: signal_flow::SendableMessage::Soft(
                 signal_flow::SendableRequest::Notice("explicit durable queue".into()),
             ),
@@ -167,7 +167,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
     use crate::sending::SendsRequests;
     use crate::store::FlowStore;
     use crate::store::metaflow::SeedsMetaflow;
-    use signal_flow::{Message, Metaflow, Recipient, Response, SendRequest};
+    use signal_flow::{Message, Metaflow, Response, SendRequest};
     use std::io::Write;
     use std::time::{Duration, Instant};
     for (hard, duplicate, privileged) in [
@@ -194,7 +194,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         let target = Address {
             aspect: Aspect::Mind,
             topic: "flow".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         fixture.nexus.store.seed_metaflow(Metaflow {
             address: target.clone(),
@@ -244,9 +244,9 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                         sender: Address {
                             aspect: Aspect::Mind,
                             topic: "core".into(),
-                            layer: Layer::Secondary,
+                            model: Model::Sol,
                         },
-                        recipient: Recipient::Address(target.clone()),
+                        recipient: target.clone(),
                     }),
                     Some(&message_peer),
                 )
@@ -264,7 +264,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         } else {
             let answer = fixture.nexus.send_request(
                 SendRequest {
-                    recipient: Recipient::Address(target.clone()),
+                    recipient: target.clone(),
                     sendable_message: super::sendable_message(message),
                 },
                 Some(&peer),
@@ -336,7 +336,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
     let target = Address {
         aspect: Aspect::Mind,
         topic: "newConfiguredDirect".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     };
     assert!(fixture.nexus.direct_send_lease(&target).is_err());
     assert!(fixture.nexus.store.metaflow(&target).unwrap().is_none());
@@ -356,8 +356,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
             meta_signal_flow::ConfigureModel {
-                layer: Layer::Secondary,
-                aspect: Aspect::Mind,
+                model: Model::Sol,
                 native: "gpt-6-sol".into(),
             },
         ]))
@@ -394,7 +393,7 @@ fn a_task_is_admitted_only_with_minutes_above_zero_and_a_reachable_deadline() {
     let target = Address {
         aspect: Aspect::Mind,
         topic: "minutesTarget".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     };
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: target.clone(),
@@ -448,6 +447,170 @@ fn a_task_is_admitted_only_with_minutes_above_zero_and_a_reachable_deadline() {
     ));
 }
 
+/// The world a CLI send runs in: the flow CLI built beside this test, the
+/// sending seat 5e4de7 Awake as `{ Field flow Terra }` in pane w5:p1, which
+/// Herdr shows, and the recipient `{ Mind flow Sol }` Asleep; the Nexus
+/// serving its ordinary socket, and its meta socket, in the fixture
+/// directory.
+struct CliWorld {
+    fixture: &'static super::NexusFixture,
+    /// The directory the flow and flow-meta CLIs are built in.
+    binaries: std::path::PathBuf,
+    socket: std::path::PathBuf,
+    meta_socket: std::path::PathBuf,
+}
+
+trait ServesCliWorld: Sized {
+    fn serving() -> Self;
+    /// The flow CLI run in the sender's pane, its pane ID alone marked:
+    /// its one line of output.
+    fn flow(&self, text: &str) -> String;
+    /// The flow-meta CLI run in no pane, the owner: its one line of output.
+    fn flow_meta(&self, text: &str) -> String;
+}
+
+impl ServesCliWorld for CliWorld {
+    fn serving() -> Self {
+        use super::NexusFixture;
+        use super::waking::{ended_claude, metaflow};
+        use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+        use crate::store::RegistersFlowIdentity;
+        use crate::store::metaflow::{SeedsMetaflow, TakesLaunchAddress};
+        use crate::{ServesMeta, ServesOrdinary};
+        use signal_flow::{
+            EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
+            HerdrRouteSelection, Origin,
+        };
+
+        // The flow CLI is built in the profile directory this test
+        // executable lies under: `target/<profile>/flow`, whatever depth
+        // cargo gives the test itself.
+        let executable = std::env::current_exe().expect("test executable");
+        let binaries = executable
+            .ancestors()
+            .skip(1)
+            .find(|directory| directory.join("flow").is_file())
+            .unwrap_or_else(|| {
+                panic!(
+                    "no flow CLI above {}: cargo test --workspace builds it",
+                    executable.display()
+                )
+            })
+            .to_path_buf();
+
+        let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
+        ended_claude(fixture);
+        // The sending seat: a flow Flow launched into pane w5:p1, Awake as
+        // Field flow Terra.
+        let sender_address = Address {
+            aspect: Aspect::Field,
+            topic: "flow".into(),
+            model: Model::Terra,
+        };
+        fixture
+            .nexus
+            .store
+            .register_flow_in_role(
+                FlowNode {
+                    flow_id: "5e4de7".into(),
+                    session_id: "5e4de700-0000-4000-8000-000000000001".into(),
+                    harness_kind: HarnessKind::Claude,
+                    endpoint_selection: EndpointSelection::Unavailable,
+                    herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
+                        herdr_session_name: "messaging-build".into(),
+                        herdr_agent_name: "sender-agent".into(),
+                        herdr_pane_id: "w5:p1".into(),
+                        herdr_terminal_id: "term-sender".into(),
+                    }),
+                    origin: Origin::Flow(FlowOrigin {
+                        flow_id: "da2038".into(),
+                        session_id: "field-session".into(),
+                    }),
+                    flow_lifecycle: FlowLifecycle::Active,
+                },
+                signal_flow::Caller {
+                    flow_id: "5e4de7".into(),
+                    aspect: Aspect::Field,
+                    model_name: "haiku".into(),
+                },
+            )
+            .expect("sender registered");
+        assert!(matches!(
+            fixture
+                .nexus
+                .store
+                .address_taking(&sender_address, "5e4de7", None, 0)
+                .unwrap(),
+            crate::store::metaflow::AddressTaking::Takes(_)
+        ));
+        assert!(
+            fixture
+                .nexus
+                .store
+                .awaken_metaflow(&sender_address, "5e4de7", 0)
+                .unwrap()
+        );
+        // Herdr shows the sender's pane.
+        let script = std::fs::read_to_string(&fixture.snapshot_program).unwrap();
+        let sender_agent = r#"{"agent":"claude","agent_status":"working","name":"sender-agent","pane_id":"w5:p1","terminal_id":"term-sender","workspace_id":"w5"}"#;
+        FixtureExecutable {
+            path: fixture.snapshot_program.clone(),
+        }
+        .install(&script.replace(r#""agents":[]"#, &format!(r#""agents":[{sender_agent}]"#)));
+        // The recipient: Mind flow Sol, Asleep.
+        fixture.nexus.store.seed_metaflow(metaflow(
+            Model::Sol,
+            flow_ethos::State::Asleep,
+            vec!["abc123"],
+            vec![],
+        ));
+
+        let socket = fixture.directory.path().join("ordinary.sock");
+        let meta_socket = fixture.directory.path().join("meta.sock");
+        let (served, meta_served) = (socket.clone(), meta_socket.clone());
+        std::thread::spawn(move || fixture.nexus.serve_ordinary(&served));
+        std::thread::spawn(move || fixture.nexus.serve_meta(&meta_served));
+        for path in [&socket, &meta_socket] {
+            for _ in 0..200 {
+                if std::os::unix::net::UnixStream::connect(path).is_ok() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        CliWorld {
+            fixture,
+            binaries,
+            socket,
+            meta_socket,
+        }
+    }
+
+    fn flow(&self, text: &str) -> String {
+        let output = std::process::Command::new(self.binaries.join("flow"))
+            .env_clear()
+            .env("HERDR_PANE_ID", "w5:p1")
+            .arg(format!("{{ «{}» {text} }}", self.socket.to_string_lossy()))
+            .output()
+            .expect("flow runs");
+        assert!(output.status.success(), "{text}: {output:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn flow_meta(&self, text: &str) -> String {
+        let output = std::process::Command::new(self.binaries.join("flow-meta"))
+            .env_clear()
+            .arg(format!(
+                "{{ «{}» {text} }}",
+                self.meta_socket.to_string_lossy()
+            ))
+            .output()
+            .expect("flow-meta runs");
+        assert!(output.status.success(), "{text}: {output:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+}
+
 /// A Task whose Minutes the Nexus refuses makes the whole trip: the flow
 /// CLI, standing in a flow's pane, reads the datom text and sends it over
 /// the ordinary socket; the Nexus names the sender by its pane, refuses
@@ -455,132 +618,20 @@ fn a_task_is_admitted_only_with_minutes_above_zero_and_a_reachable_deadline() {
 /// The refused Task is never queued.
 #[test]
 fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
-    use super::NexusFixture;
-    use super::waking::{address, ended_claude, metaflow};
-    use crate::ServesOrdinary;
-    use crate::fixture_executable::{FixtureExecutable, InstallsScript};
-    use crate::store::RegistersFlowIdentity;
-    use crate::store::metaflow::{SeedsMetaflow, TakesLaunchAddress};
-    use signal_flow::{
-        EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
-        HerdrRouteSelection, Origin, PowerLevel,
-    };
-
-    // The flow CLI is built in the profile directory this test executable
-    // lies under: `target/<profile>/flow`, whatever depth cargo gives the
-    // test itself.
-    let executable = std::env::current_exe().expect("test executable");
-    let cli = executable
-        .ancestors()
-        .skip(1)
-        .map(|directory| directory.join("flow"))
-        .find(|path| path.is_file())
-        .unwrap_or_else(|| {
-            panic!(
-                "no flow CLI above {}: cargo test --workspace builds it",
-                executable.display()
-            )
-        });
-
-    let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
-    ended_claude(fixture);
-    // The sending seat: a flow Flow launched into pane w5:p1, Awake as
-    // Field flow Quaternary.
-    let sender_address = Address {
-        aspect: Aspect::Field,
-        topic: "flow".into(),
-        layer: Layer::Quaternary,
-    };
-    fixture
-        .nexus
-        .store
-        .register_flow_in_role(
-            FlowNode {
-                flow_id: "5e4de7".into(),
-                session_id: "5e4de700-0000-4000-8000-000000000001".into(),
-                harness_kind: HarnessKind::Claude,
-                endpoint_selection: EndpointSelection::Unavailable,
-                herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
-                    herdr_session_name: "messaging-build".into(),
-                    herdr_agent_name: "sender-agent".into(),
-                    herdr_pane_id: "w5:p1".into(),
-                    herdr_terminal_id: "term-sender".into(),
-                }),
-                origin: Origin::Flow(FlowOrigin {
-                    flow_id: "da2038".into(),
-                    session_id: "field-session".into(),
-                }),
-                flow_lifecycle: FlowLifecycle::Active,
-            },
-            signal_flow::Caller {
-                flow_id: "5e4de7".into(),
-                aspect: Aspect::Field,
-                power_level: PowerLevel::UltraLow,
-                model_name: "haiku".into(),
-            },
-        )
-        .expect("sender registered");
-    assert!(matches!(
-        fixture
-            .nexus
-            .store
-            .address_taking(&sender_address, "5e4de7", None, 0)
-            .unwrap(),
-        crate::store::metaflow::AddressTaking::Takes(_)
-    ));
-    assert!(
-        fixture
-            .nexus
-            .store
-            .awaken_metaflow(&sender_address, "5e4de7", 0)
-            .unwrap()
-    );
-    // Herdr shows the sender's pane.
-    let script = std::fs::read_to_string(&fixture.snapshot_program).unwrap();
-    let sender_agent = r#"{"agent":"claude","agent_status":"working","name":"sender-agent","pane_id":"w5:p1","terminal_id":"term-sender","workspace_id":"w5"}"#;
-    FixtureExecutable {
-        path: fixture.snapshot_program.clone(),
-    }
-    .install(&script.replace(r#""agents":[]"#, &format!(r#""agents":[{sender_agent}]"#)));
-    // The recipient: Mind flow Secondary, Asleep.
-    let recipient = address(Layer::Secondary);
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
-        flow_ethos::State::Asleep,
-        vec!["abc123"],
-        vec![],
-    ));
-
-    let socket = fixture.directory.path().join("ordinary.sock");
-    let served = socket.clone();
-    std::thread::spawn(move || fixture.nexus.serve_ordinary(&served));
-    for _ in 0..200 {
-        if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    // The CLI runs in the sender's pane, its pane ID alone marked.
-    let flow = |text: &str| -> String {
-        let output = std::process::Command::new(&cli)
-            .env_clear()
-            .env("HERDR_PANE_ID", "w5:p1")
-            .arg(format!("{{ «{}» {text} }}", socket.to_string_lossy()))
-            .output()
-            .expect("flow runs");
-        assert!(output.status.success(), "{text}: {output:?}");
-        String::from_utf8_lossy(&output.stdout).trim().to_owned()
-    };
+    use super::waking::address;
+    let world = CliWorld::serving();
+    let recipient = address(Model::Sol);
     assert_eq!(
-        flow("Send.{ Address.{ Mind flow Secondary } Soft.Task.{ 0 «Draft the proposal.» } }"),
+        world.flow("Send.{ { Mind flow Sol } Soft.Task.{ 0 «Draft the proposal.» } }"),
         "SendRefused.MinutesRefused.Zero"
     );
     assert_eq!(
-        flow("Send.{ Address.{ Mind flow Secondary } Soft.Task.{ -5 «Draft the proposal.» } }"),
+        world.flow("Send.{ { Mind flow Sol } Soft.Task.{ -5 «Draft the proposal.» } }"),
         "SendRefused.MinutesRefused.Negative"
     );
     assert!(
-        fixture
+        world
+            .fixture
             .nexus
             .store
             .metaflow(&recipient)
@@ -592,7 +643,60 @@ fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
     );
     // The same CLI and Nexus admit a Task whose Minutes stand.
     assert!(
-        flow("Send.{ Address.{ Mind flow Secondary } Soft.Task.{ 30 «Draft the proposal.» } }")
+        world
+            .flow("Send.{ { Mind flow Sol } Soft.Task.{ 30 «Draft the proposal.» } }")
             .starts_with("SendAccepted."),
     );
+}
+
+/// A Send whose text holds a nested guillemet pair, and one holding an
+/// escaped unbalanced guillemet, round-trips byte for byte: the flow CLI in
+/// the sender's pane reads the datom text and sends it on the ordinary
+/// socket; the Nexus names the sender, admits the Send and queues it for
+/// the recipient, Asleep; the queue holds the string as written; and the
+/// flow-meta CLI, reading the recipient over the meta socket, prints each
+/// message back as the very text sent.
+#[test]
+fn a_send_with_nested_and_escaped_guillemets_round_trips_through_the_cli_and_the_nexus() {
+    use super::waking::address;
+    let world = CliWorld::serving();
+    let sent = [
+        (
+            "Soft.Order.«Title «The Belief Nexus made small»»",
+            "Title «The Belief Nexus made small»",
+        ),
+        (
+            "Soft.Order.«an unbalanced \\» inside»",
+            "an unbalanced » inside",
+        ),
+    ];
+    for (message, _) in sent {
+        let answer = world.flow(&format!("Send.{{ {{ Mind flow Sol }} {message} }}"));
+        assert!(answer.starts_with("SendAccepted."), "{message}: {answer}");
+    }
+    let queued: Vec<signal_flow::Message> = world
+        .fixture
+        .nexus
+        .store
+        .metaflow(&address(Model::Sol))
+        .unwrap()
+        .unwrap()
+        .queue
+        .into_iter()
+        .map(|entry| entry.message)
+        .collect();
+    assert_eq!(
+        queued,
+        sent.iter()
+            .map(|(_, order)| signal_flow::Message::Soft(Request::Order((*order).into())))
+            .collect::<Vec<_>>(),
+        "the Nexus holds each string as written"
+    );
+    let inspected = world.flow_meta("Inspect.{ Mind flow Sol }");
+    for (message, _) in sent {
+        assert!(
+            inspected.contains(message),
+            "{message} is printed back as sent: {inspected}"
+        );
+    }
 }

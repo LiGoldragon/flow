@@ -5,8 +5,8 @@ use super::*;
 use crate::sending::AdmitsSendPayload;
 use crate::sending::RefusesUnidentified;
 use signal_flow::{
-    Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, Recipient, Refusal, SentBy,
-    StartRejection, Unknown_Data,
+    Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, Refusal, SentBy, StartRejection,
+    Unknown_Data,
 };
 
 /// Materializes working state for a configured Address, never policy.
@@ -95,7 +95,7 @@ impl MutatesMetaflows for FlowStore {
         let address = Address {
             aspect: Aspect::Field,
             topic: "message".into(),
-            layer: Layer::Primary,
+            model: Model::Astra,
         };
         Ok(
             FlowStore::process_is_live(peer)
@@ -117,7 +117,7 @@ impl MutatesMetaflows for FlowStore {
             == (Address {
                 aspect: Aspect::Field,
                 topic: "message".into(),
-                layer: Layer::Primary,
+                model: Model::Astra,
             })
         {
             let Some(configuration) = self.configuration_snapshot()? else {
@@ -208,22 +208,7 @@ impl MutatesMetaflows for FlowStore {
             MetaflowState::Asleep => return Ok(Response::Refused(Refusal::Asleep)),
             MetaflowState::Awake(_) => {}
         }
-        let address = match request.recipient {
-            Recipient::Address(address) => address,
-            Recipient::Up => {
-                let layer = match request.sender.layer {
-                    Layer::Primary => return Ok(Response::Refused(Refusal::NoneAbove)),
-                    Layer::Secondary => Layer::Primary,
-                    Layer::Tertiary => Layer::Secondary,
-                    Layer::Quaternary => Layer::Tertiary,
-                };
-                Address {
-                    aspect: request.sender.aspect.clone(),
-                    topic: request.sender.topic.clone(),
-                    layer,
-                }
-            }
-        };
+        let address = request.recipient;
         if !self.prepare_declared_metaflow(&address)? {
             return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
                 address,
@@ -613,43 +598,6 @@ impl ForgetsEndedBindings for FlowStore {
     }
 }
 
-/// One metaflow row written back in its own atomic commit.
-/// Queues a request Flow itself raises for a metaflow it holds.
-#[cfg(test)]
-pub(crate) trait QueuesFlowRequest {
-    /// Appends the request to the metaflow's queue; false when Flow holds
-    /// no such metaflow.
-    fn queue_flow_request(
-        &self,
-        address: &Address,
-        request: flow_ethos::QueueEntry,
-    ) -> Result<bool, StoreError>;
-}
-
-#[cfg(test)]
-impl QueuesFlowRequest for FlowStore {
-    fn queue_flow_request(
-        &self,
-        address: &Address,
-        request: flow_ethos::QueueEntry,
-    ) -> Result<bool, StoreError> {
-        if self.stored_metaflow(address)?.is_none() {
-            return Ok(false);
-        }
-        let response = self.accept_logical_delivery(
-            address,
-            request.sent_by,
-            request.delivery,
-            request.message,
-            None,
-        )?;
-        Ok(matches!(
-            response,
-            signal_flow::PrivateSendResponse::SendAccepted(_)
-        ))
-    }
-}
-
 /// Seeds a metaflow row directly, for tests of what reads and moves it.
 #[cfg(test)]
 pub(crate) trait SeedsMetaflow {
@@ -765,7 +713,7 @@ mod tests {
                 message: Address {
                     aspect: Aspect::Field,
                     topic: "message".into(),
-                    layer: Layer::Primary,
+                    model: Model::Astra,
                 },
             }
         }
@@ -823,7 +771,7 @@ mod tests {
         );
         assert!(fixture.store.message_peer(&fixture.peer).unwrap());
         let target = Address {
-            layer: Layer::Secondary,
+            model: Model::Sol,
             ..fixture.message.clone()
         };
         fixture.store.seed_metaflow(Metaflow {
@@ -834,7 +782,7 @@ mod tests {
         });
         let request = Lock_Data {
             sender: fixture.message.clone(),
-            recipient: Recipient::Address(target.clone()),
+            recipient: target.clone(),
         };
         let Response::Locked(lock) = fixture.store.lock_metaflow(request.clone(), 100).unwrap()
         else {
@@ -927,7 +875,7 @@ mod tests {
         );
         let request = Lock_Data {
             sender: fixture.message.clone(),
-            recipient: Recipient::Address(fixture.message.clone()),
+            recipient: fixture.message.clone(),
         };
         assert!(matches!(
             fixture.store.lock_metaflow(request.clone(), 10).unwrap(),

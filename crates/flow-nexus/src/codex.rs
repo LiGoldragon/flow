@@ -2164,7 +2164,7 @@ mod tests {
                 address: signal_flow::Address {
                     aspect: signal_flow::Aspect::Field,
                     topic: "flow".into(),
-                    layer: signal_flow::Layer::Secondary,
+                    model: signal_flow::Model::Sol,
                 },
                 model_name: "gpt-5.6".into(),
                 effort: "medium".into(),
@@ -2567,7 +2567,7 @@ mod tests {
             launch.system_prompt.system_prompt_text
         );
         assert!(start["baseInstructions"].as_str().unwrap().contains(
-            "Metaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
+            "Metaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
         ));
         assert_eq!(start["config"]["project_doc_max_bytes"], 0);
         assert_eq!(start["config"]["skills.include_instructions"], false);

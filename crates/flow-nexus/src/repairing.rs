@@ -87,7 +87,7 @@ impl RepairsFromMeta for RunningNexus {
             Ok(Ok(())) => {
                 eprintln!(
                     "flow-nexus: {:?} {} {:?} rebound by the owner",
-                    address.aspect, address.topic, address.layer
+                    address.aspect, address.topic, address.model
                 );
                 Response::Rebound(address)
             }

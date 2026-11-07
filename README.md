@@ -11,7 +11,7 @@ The wire contracts are independent repositories:
 
 - `signal-flow` defines `Start`, `Refresh`, `Stop`,
   `List`, `ResolveRecipient` for Message Nexus routing, `ResolveCaller`,
-  which names the flow, aspect, power and model of the process that calls,
+  which names the flow, aspect and model of the process that calls,
   and `Observe.Agent`, a flow's Herdr agent state on open and on each change.
   Nothing on the ordinary socket writes into a pane.
 - `meta-signal-flow` defines `Configure`, reset-credit consumption, `Retire`,
@@ -68,10 +68,10 @@ flow-meta 'Command.{ 00f95a Compact }'
 
 Compaction is an emergency measure: `Command.{ 00f95a Compact }` is refused,
 before anything reaches the pane, unless the flow's context at its last Stop
-reached the Refresh threshold configured for its layer
+reached the Refresh threshold configured for its model
 (`CommandRejected.CompactionRefused.BelowThreshold.{ 120000 200000 }`,
 `.Unmeasured` with no context recorded, `.NoThreshold` with no threshold for
-its layer).
+its model).
 
 Flow renders the Message itself, so the pane text always begins
 `HardAbrupt.`, `MiddleAbrupt.` or `Soft.`, then the letter's MessageId:
@@ -127,18 +127,17 @@ Awake as; that metaflow's declaration is changed to `OnDemand` first.
 
 `Start` carries a typed `LaunchProfile` alone. A profile names the module
 identities of its system prompt and of its first USER message, the launched
-flow's Address (aspect, topic, layer), model, effort, predecessor, remembered
+flow's Address (aspect, topic, Model), model, effort, predecessor, remembered
 flows, Herdr target session, leave-outs, flow kind, tool set, and first
 instruction. The Nexus
 derives the rest: the origin from the calling process, as Identify reads a
 caller (the one flow bound in its Herdr pane, with that flow's native
 session, or `Unbound` for any other caller, which is recorded and not
-refused); the power from the Address layer; the harness from the model,
-Codex when a configured Codex endpoint serves it and Claude otherwise. Once the seat's native binding is witnessed and its flow
+refused); and the harness from the model, Codex when a configured Codex endpoint serves it and Claude otherwise. Once the seat's native binding is witnessed and its flow
 registered, before its first prompt, the launch records that Address's
 metaflow Awake as the launched flow, so the seat's first tool call is
 identified and sends through Message; confirmation keeps it, so the seat,
-of any layer and either harness, stays Awake in its pane when its turn ends
+of any Model and either harness, stays Awake in its pane when its turn ends
 with nothing queued, and work queued for it is handed into that pane; once
 its pane is gone (closed by the living, crashed, or replaced) the metaflow is
 Asleep and a queued request wakes a fresh flow for it, and a launch refused,
@@ -148,10 +147,9 @@ names, answers `StartRejected.AddressAwake`. A metaflow is Awake or Asleep:
 a topic never dies. A wake whose start is refused leaves its queue as it
 was, each waiting request's delivery `Retryable.WakeRefused` with the
 refusal, so its sender's `ObserveSends` shows why; the next waking request
-tries the start again. A Primary starts after its Secondary: a
-Start of a Primary whose Secondary metaflow (the same aspect and topic) is
-not recorded, Awake or Asleep, answers `StartRejected.NoSecondary` before
-anything is written. Profile producers should use the
+tries the start again. No model ranks above another: a Start is admitted by
+its own Address alone, waits for no other model's seat, and starts nothing
+before itself. Profile producers should use the
 generated `signal-flow` Datom types rather than assembling positional text.
 The old `flow start ...`, `flow restart ...`, and `flow resolve ...` argument
 forms are rejected.
@@ -171,8 +169,8 @@ Flow passes no tool restriction of its own: every tool list is
 configuration, and a seat declared `Regular Default` launches with every
 tool and subagent.
 
-For the `Psyche core Primary` simplified presentation, the witnessed final source is queued
-unchanged as one Order to `Psyche book Tertiary`; Secondary receives only a
+For the `Psyche core Fable` simplified presentation, the witnessed final source is queued
+unchanged as one Order to `Psyche book Sonnet`; Psyche core Opus receives only a
 notification. Completion and both queues commit atomically, so replayed
 Stop hooks create no second publication path.
 
@@ -237,13 +235,12 @@ family whole, `Nexus`, `Models`, `Thresholds` or `LeaveOuts`, and replaces
 the committed family in one commit, so the effective configuration is always
 the last declaration of each family: an entry the declaration leaves out is
 removed. It answers `Configured.Replaced`, or `Configured.Unchanged` when
-nothing differs; `ConfigureRejected.DuplicateEntry` (one Layer and Aspect,
-one Layer, or one Address and harness, named twice),
+nothing differs; `ConfigureRejected.DuplicateEntry` (one Model, or one Address and harness, named twice),
 `ConfigureRejected.CodexModelsOverlap` and
 `ConfigureRejected.LeaveOutNotForHarness` change nothing. `Models` holds one
-model per Layer and Aspect, `{ Secondary Mind gpt-6-sol }`; a Start or
+native model per Model, `{ Sol gpt-6-sol }`; a Start or
 Replace naming any other model than the one configured for its Address's
-layer and aspect, compared name for name, is
+Model, compared name for name, is
 `StartRejected.ModelRefused.Differs.<configured>`, or
 `ModelRefused.Unconfigured` when none is, before anything is written,
 composed or opened, and a fresh wake launches on that model. A model,
@@ -252,7 +249,7 @@ configured endpoint lists, or a Claude model's full name as its transcript
 records it (`claude-haiku-5-5`); a launch naming an alias (`haiku`) or a
 suffixed name (`claude-opus-5-5[1m]`) is `StartRejected.CompositionRefused`.
 A `LeaveOuts` entry names one metaflow's default leave-outs on one harness,
-`{ { Psyche flow Secondary } Claude [ SkillTool WorkflowTool ] }`, and is
+`{ { Psyche flow Opus } Claude [ SkillTool WorkflowTool ] }`, and is
 refused `LeaveOutNotForHarness` when it names a leave-out of the other
 harness. A Start takes its own leave-outs, otherwise the default for its
 Address and the harness its model derives, otherwise none. A
@@ -310,9 +307,9 @@ not pasted into the composed first prompt.
 
 After the Flow ID is claimed and registered, and before any prompt, Start
 sets the canonical native title, the seat's Datom
-`{ <Aspect> <Topic> <Layer> <FlowId> }` (for example
-`{ Field flow Quaternary 2712d3 }`), built from the profile's Address and the
-claimed Flow ID; the model never enters it. Claude is named at launch: it
+`{ <Aspect> <Topic> <Model> <FlowId> }` (for example
+`{ Field flow Terra 2712d3 }`), built from the profile's Address and the
+claimed Flow ID; the native model never enters it. Claude is named at launch: it
 starts with `--name <title>`, which Claude records in its transcript and shows
 in the prompt box, the resume picker and the terminal title. `/rename` is a
 slash command, and a launch leaving out the Skill tool starts with
@@ -388,6 +385,5 @@ deployment. Its final compilation and test gate must run on the configured
 remote Nix builder; local fallback is not an acceptance path. Nix exposes
 the full `checks.<system>.default` gate plus focused
 `flow-v5-row-preservation`, `flow-herdr-route-durability`,
-`flow-stale-route-unavailable`, `flow-conflicting-registration-refusal`,
-`flow-herdr-registration-binding`, and
+`flow-stale-route-unavailable`, `flow-conflicting-registration-refusal`, and
 `flow-native-resolution-serialization` checks.

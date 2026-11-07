@@ -24,20 +24,20 @@ use meta_signal_flow::{
     WithdrawRejected_Data,
 };
 use signal_flow::{
-    Address, Aspect, DeliveryState, HarnessKind, HerdrRoute, HerdrRouteSelection, Layer, Lock_Data,
-    Message, Metaflow, QueueEntry, Recipient, Request, Response, SentBy,
+    Address, Aspect, DeliveryState, HarnessKind, HerdrRoute, HerdrRouteSelection, Lock_Data,
+    Message, Metaflow, Model, QueueEntry, Request, Response, SentBy,
 };
 use std::fs;
 
 fn seat_address() -> Address {
-    address(Layer::Secondary)
+    address(Model::Sol)
 }
 
 fn elsewhere() -> Address {
     Address {
         aspect: Aspect::Field,
         topic: "nowhere".into(),
-        layer: Layer::Tertiary,
+        model: Model::Luna,
     }
 }
 
@@ -116,7 +116,7 @@ fn inspect_answers_the_metaflow_whole() {
     let sender = Address {
         aspect: Aspect::Psyche,
         topic: "core".into(),
-        layer: Layer::Secondary,
+        model: Model::Opus,
     };
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: sender.clone(),
@@ -158,7 +158,7 @@ fn inspect_answers_the_metaflow_whole() {
         .lock_metaflow(
             Lock_Data {
                 sender,
-                recipient: Recipient::Address(seat_address()),
+                recipient: seat_address(),
             },
             1_790_000_000,
         )

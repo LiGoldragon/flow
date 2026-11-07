@@ -13,6 +13,7 @@ pub(crate) struct Inspection {
     pub(crate) binding: Binding,
     pub(crate) lock_vector: Vec<Lock>,
     pub(crate) attempt_vector: Vec<Attempt>,
+    pub(crate) restart_record_option: Option<meta_signal_flow::RestartRecord>,
 }
 
 pub(crate) trait RepairsMetaflows {
@@ -79,6 +80,7 @@ impl RepairsMetaflows for FlowStore {
                 flow_node_option,
                 process_option: self.bound_process(address)?,
             },
+            restart_record_option: super::restart::RecordsRestarts::restart_at(self, address)?,
             metaflow,
             lock_vector,
             attempt_vector,

@@ -11,7 +11,6 @@ use meta_signal_flow::{
 };
 use signal_flow::{
     Address, EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, Origin,
-    PowerLevel,
 };
 use std::{
     fs,
@@ -136,16 +135,7 @@ impl VerifiesAdoptedSeat for RunningNexus {
         address: &Address,
         binding: &FlowBinding,
     ) -> Result<FlowNode, FlowBindingRefusalReason> {
-        if !binding.is_well_formed()
-            || binding.aspect != address.aspect
-            || binding.power_level
-                != match address.layer {
-                    signal_flow::Layer::Primary => PowerLevel::High,
-                    signal_flow::Layer::Secondary => PowerLevel::Medium,
-                    signal_flow::Layer::Tertiary => PowerLevel::Low,
-                    signal_flow::Layer::Quaternary => PowerLevel::UltraLow,
-                }
-        {
+        if !binding.is_well_formed() || binding.aspect != address.aspect {
             return Err(FlowBindingRefusalReason::RoleMismatch);
         }
         if !binding.process_identity.is_live_process() {

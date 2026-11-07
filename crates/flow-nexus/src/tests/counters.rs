@@ -19,14 +19,14 @@ use crate::store::queue_delivery::{
 };
 use crate::store::send_outcome::RecordsSendOutcomes;
 use flow_ethos::State;
-use signal_flow::{Layer, Message, Metaflow, Request, SendAcceptance, SentBy};
+use signal_flow::{Message, Metaflow, Model, Request, SendAcceptance, SentBy};
 
 fn ask(fixture: &NexusFixture, text: &str) -> String {
     use datom_codec::{Actualizing, Budget, Datomizable, Potential};
     use protos::{Compactable, Protosizable, ReaderBudget};
     let mut budget = Budget {
         remaining: 65536,
-        reader: ReaderBudget { remaining: 65536 },
+        reader: ReaderBudget::try_from(65536).expect("a constant reader budget"),
         depth: 0,
         maximum_depth: 1024,
     };
@@ -153,7 +153,7 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
         "ConfigureRejected.CountersRefused.NotEmpty"
     );
 
-    let seat = address(Layer::Secondary);
+    let seat = address(Model::Sol);
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: seat.clone(),
         state: State::Asleep,

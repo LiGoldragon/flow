@@ -13,7 +13,7 @@ use crate::sending::{BindsSeats, IdentifiesSender};
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory};
-use signal_flow::{Address, Aspect, Layer, Refusal, Response};
+use signal_flow::{Address, Aspect, Model, Refusal, Response};
 use std::fs;
 
 const ROOT: &str = "01a15071-6dd2-76c3-8ab7-945877549a01";
@@ -98,8 +98,7 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
             meta_signal_flow::ConfigureModel {
-                layer: Layer::Secondary,
-                aspect: Aspect::Mind,
+                model: Model::Sol,
                 native: "gpt-6-sol".into(),
             },
         ]))
@@ -121,7 +120,7 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
     let address = Address {
         aspect: Aspect::Mind,
         topic: "context".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     };
     // The TUI in the seat's pane resumes the root thread.
     let tui = SpawnedProcess(
@@ -206,7 +205,7 @@ fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
         .unwrap();
     fixture.set_agents(vec![claude_agent(&fixture)]);
     fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
+        Model::Sol,
         flow_ethos::State::Awake(CLAUDE_SEAT.into()),
         vec![],
         vec![],
@@ -214,7 +213,7 @@ fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
     let address = Address {
         aspect: Aspect::Mind,
         topic: "flow".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     };
     let child_file = fixture.directory.path().join("claude-command-child");
     let script = format!("sleep 30 & echo $! > {}; wait; :", child_file.display());
@@ -323,8 +322,7 @@ impl NexusFixture {
             .store
             .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
                 meta_signal_flow::ConfigureModel {
-                    layer: Layer::Secondary,
-                    aspect: Aspect::Psyche,
+                    model: Model::Opus,
                     native: "claude-opus-5-5".into(),
                 },
             ]))
@@ -337,7 +335,7 @@ impl NexusFixture {
 fn claude_in_pane(session: Option<&str>) -> serde_json::Value {
     let mut agent = serde_json::json!({
         "agent":"claude","agent_status":"idle","executable":"claude",
-        "name":"claude-6aafcaae640d8089d70ae839","display_agent":"{ Psyche flow Secondary }",
+        "name":"claude-6aafcaae640d8089d70ae839","display_agent":"{ Psyche flow Opus }",
         "pane_id":"w1:p3","terminal_id":"term_c1a0de","workspace_id":"w1","tab_id":"w1:t1"
     });
     if let Some(session) = session {
@@ -352,7 +350,7 @@ fn psyche_flow_secondary() -> Address {
     Address {
         aspect: Aspect::Psyche,
         topic: "flow".into(),
-        layer: Layer::Secondary,
+        model: Model::Opus,
     }
 }
 
@@ -375,7 +373,7 @@ fn a_claude_seat_binds_on_an_empty_store_under_its_sessions_flow_id() {
         fixture.claude_session_file(claude.0.id(), HARNESS_SESSION);
         fixture.herdr_panes(
             vec![claude_in_pane(reported)],
-            "{ Psyche flow Secondary }",
+            "{ Psyche flow Opus }",
             claude.0.id(),
         );
         let stranger = MarkedProcess::spawn("sleep", &["30"], "w1:p3");
@@ -425,7 +423,7 @@ fn an_unbound_claude_seat_adopts_only_its_authenticated_session() {
     fixture.claude_session_file(claude.0.id(), HARNESS_SESSION);
     fixture.herdr_panes(
         vec![claude_in_pane(Some(HARNESS_SESSION))],
-        "{ Psyche flow Secondary }",
+        "{ Psyche flow Opus }",
         claude.0.id(),
     );
     let peer = FlowStore::process_identity_for_pid(claude.0.id()).unwrap();

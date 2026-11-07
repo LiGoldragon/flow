@@ -84,7 +84,7 @@ impl NexusFixture {
         fs::read_to_string(self.directory.path().join("herdr-operations.log")).unwrap_or_default()
     }
 
-    /// The fixture flow Awake as { Psyche flow Secondary }, running
+    /// The fixture flow Awake as { Psyche flow Opus }, running
     /// claude-opus-5-5, whose refresh threshold is `refresh` tokens.
     fn at_secondary_refreshing_at(&self, refresh: i64) {
         use crate::store::ManagesMetaflowState as _;
@@ -93,14 +93,13 @@ impl NexusFixture {
         self.nexus.store.seed_role(signal_flow::Caller {
             flow_id: "908786".into(),
             aspect: signal_flow::Aspect::Psyche,
-            power_level: signal_flow::PowerLevel::Medium,
             model_name: "claude-opus-5-5".into(),
         });
         self.nexus.store.seed_metaflow(signal_flow::Metaflow {
             address: signal_flow::Address {
                 aspect: signal_flow::Aspect::Psyche,
                 topic: "flow".into(),
-                layer: signal_flow::Layer::Secondary,
+                model: signal_flow::Model::Opus,
             },
             state: flow_ethos::State::Awake("908786".into()),
             past: vec![],

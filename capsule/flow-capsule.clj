@@ -87,9 +87,9 @@
 (def curriculum-package (str (fs/canonicalize (fs/file libexec "curriculum"))))
 
 (def brief "Answer with one word and stop.")
-(def quaternary "{ Psyche test Quaternary }")
-(def secondary "{ Psyche test Secondary }")
-(def tertiary-address "{ Psyche test Tertiary }")
+(def quaternary "{ Psyche test Haiku }")
+(def secondary "{ Psyche test Opus }")
+(def tertiary-address "{ Psyche test Sonnet }")
 
 ;; ---------------------------------------------------------------- datom reading
 
@@ -368,7 +368,7 @@
     (boolean (or (:pass outcome) (:skipped outcome)))))
 
 (defn on-demand-secondary
-  "The capsule's Configure.Metaflows with the Secondary declared OnDemand."
+  "The capsule's Configure.Metaflows with the Opus declared OnDemand."
   []
   (let [line (first (filter #(str/starts-with? % "Configure.Metaflows.")
                             (str/split-lines (slurp (fs/file libexec "configure.datom")))))]
@@ -392,25 +392,25 @@
 (defn awake-flow [addr] (let [m (current addr)] (when (= :awake (:state m)) (:flow m))))
 
 (defn sender-pane
-  "The pane the Secondary seat lives in: a Send stands in it, so Flow names
-  the Secondary as its sender."
+  "The pane the Opus seat lives in: a Send stands in it, so Flow names
+  the Opus as its sender."
   [] (bound-pane (inspect secondary)))
 
 (defn send [delivery message pane]
-  (flow (str "Send.{ Address." quaternary " " delivery " " message " }") pane))
+  (flow (str "Send.{ " quaternary " " delivery " " message " }") pane))
 
 (defn send-to [addr delivery message pane]
-  (flow (str "Send.{ Address." addr " " delivery " " message " }") pane))
+  (flow (str "Send.{ " addr " " delivery " " message " }") pane))
 
 (declare nexus nexus-log start-nexus!)
 
 (def base-scenarios
-  [["0 sender seat: Launch { Psyche test Secondary } (Maintained)"
+  [["0 sender seat: Launch { Psyche test Opus } (Maintained)"
     (fn []
       (let [reply (launch secondary)
             awake (when (str/starts-with? reply "Started.") (watch 30 #(awake-flow secondary)))]
         {:reply reply :pass (boolean (and (str/starts-with? reply "Started.") awake))
-         :watched (str "Metaflows: Secondary Awake as " awake "; it is the sender of every Send below")}))]
+         :watched (str "Metaflows: Opus Awake as " awake "; it is the sender of every Send below")}))]
 
    ["0a workspace: default, continuation, invalid replacement, updated replacement"
     (fn []
@@ -482,7 +482,7 @@
                        ", default flow " flow-default " cwd " cwd-default
                        "; records remain under " source-root " " records-stay)}))]
 
-   ["1 launch Quaternary"
+   ["1 launch Haiku"
     (fn []
       (let [before (pane-ids)
             reply (launch quaternary)
@@ -490,7 +490,7 @@
             m (current quaternary)]
         {:reply reply
          :pass (boolean (and (str/starts-with? reply "Started.") (seq (remove before after)) (= :awake (:state m))))
-         :watched (str "new panes in flow-testing " (vec (remove before after)) "; Metaflows Quaternary " (name (:state m)) " as " (:flow m))}))]
+         :watched (str "new panes in flow-testing " (vec (remove before after)) "; Metaflows Haiku " (name (:state m)) " as " (:flow m))}))]
 
    ["2 OnDemand sleep"
     (fn []
@@ -498,7 +498,7 @@
             pane (bound-pane (inspect quaternary))
             asleep (watch 90 #(let [m (current quaternary)] (when (= :asleep (:state m)) m)))
             gone (not (contains? (pane-ids) pane))]
-        {:reply (str "Metaflows Quaternary " (if asleep "Asleep" "still Awake") ", Past " (:past asleep))
+        {:reply (str "Metaflows Haiku " (if asleep "Asleep" "still Awake") ", Past " (:past asleep))
          :pass (boolean (and asleep gone (some #{flow-id} (map str (:past asleep)))))
          :watched (str "flow " flow-id " pane " pane (if gone " closed" " still open") ", 90 s watch")}))]
 
@@ -511,7 +511,7 @@
         {:reply reply
          :pass (boolean (and (str/starts-with? reply "SendAccepted.") woke (not= (str woke) old)
                              (some #{old} (map str (:past m)))))
-         :watched (str "Metaflows Quaternary Awake as " woke ", Past " (:past m))}))]
+         :watched (str "Metaflows Haiku Awake as " woke ", Past " (:past m))}))]
 
    ["4 Refresh.Address"
     (fn []
@@ -526,7 +526,7 @@
                              (= :asleep (:state m))
                              (or (nil? after) (<= (occurrences after "Tag s") (occurrences before "Tag s")))))
          :watched (str "old pane " pane (if after " still readable" " gone after the refresh")
-                       "; Metaflows Quaternary " (name (:state m)))}))]
+                       "; Metaflows Haiku " (name (:state m)))}))]
 
    ["5 Send during Refresh"
     (fn []
@@ -534,7 +534,7 @@
             old (str (watch 60 #(awake-flow quaternary)))
             old-pane (bound-pane (inspect quaternary))
             refresh (flow-process (str "Refresh." quaternary) @driver-pane)
-            sending (flow-process (str "Send.{ Address." quaternary " Wake Soft.Order.«" brief " Tag s5b.» }") (sender-pane))
+            sending (flow-process (str "Send.{ " quaternary " Wake Soft.Order.«" brief " Tag s5b.» }") (sender-pane))
             refresh-reply (str/trim (:out @refresh))
             send-reply (str/trim (:out @sending))
             old-text (pane-text old-pane)
@@ -556,7 +556,7 @@
         {:reply reply
          :pass (boolean (and (str/starts-with? reply "Refreshed.") (= :awake (:state m))
                              (not= (str (:flow m)) old) (some #{old} (map str (:past m)))))
-         :watched (str "Metaflows straight after: Secondary " (name (:state m)) " as " (:flow m) ", Past " (:past m))}))]
+         :watched (str "Metaflows straight after: Opus " (name (:state m)) " as " (:flow m) ", Past " (:past m))}))]
 
    ["7 Launch at an Awake metaflow"
     (fn []
@@ -573,7 +573,7 @@
                              (= (occurrences @last-seen brief) (occurrences before brief))))
          :watched (str "predecessor " old " pane " pane " polled every 200 ms until gone: the brief appears "
                        (occurrences before brief) " times before, " (occurrences @last-seen brief)
-                       " in its last reading; Secondary Awake as " (:flow m))}))]
+                       " in its last reading; Opus Awake as " (:flow m))}))]
 
    ["8 Inspect.Address"
     (fn []
@@ -605,12 +605,12 @@
         {:reply (str "Flow.ffffff: " unknown-flow " / Pane.w999:p9: " absent-pane " / Pane." pane ": " own-pane)
          :pass (boolean (and (str/includes? unknown-flow "FlowUnknown") (str/includes? absent-pane "PaneAbsent")
                              (str/starts-with? own-pane "Rebound.")))
-         :watched "three Rebinds of the Secondary"}))]
+         :watched "three Rebinds of the Opus"}))]
 
    ["11 topic refusal"
     (fn []
       (let [before (pane-ids)
-            reply (flow (str "Launch.{ { Psyche Test Quaternary } Predecessors.0 «" brief "» }"))]
+            reply (flow (str "Launch.{ { Psyche Test Haiku } Predecessors.0 «" brief "» }"))]
         {:reply reply
          :pass (boolean (and (str/includes? reply "TopicRefused") (= before (pane-ids))))
          :watched "no pane opened"}))]
@@ -625,13 +625,13 @@
             reply (flow-meta (str "Retire." flow-id))
             gone (watch 10 #(not (contains? (pane-ids) pane)))
             m (watch 20 #(let [m (current secondary)] (when (not= (str (:flow m)) flow-id) m)))]
-        {:reply (str "Retire while Maintained: " refused " / Configure.Metaflows (Secondary OnDemand): "
+        {:reply (str "Retire while Maintained: " refused " / Configure.Metaflows (Opus OnDemand): "
                      declared " / Retire: " reply)
          :pass (boolean (and (= refused "RetireRejected.Maintained") kept
                              (str/starts-with? declared "Configured.")
                              (str/starts-with? reply "FlowRetired.") gone))
-         :watched (str "after the refused Retire, pane " pane (if kept " open and Secondary Awake as " " changed; Secondary ")
-                       flow-id "; after the second, pane " (if gone "closed" "still open") "; Secondary afterwards "
+         :watched (str "after the refused Retire, pane " pane (if kept " open and Opus Awake as " " changed; Opus ")
+                       flow-id "; after the second, pane " (if gone "closed" "still open") "; Opus afterwards "
                        (if m (str (name (:state m)) " " (:flow m)) "unchanged after 20 s"))}))]])
 
 
@@ -1140,9 +1140,9 @@
   context repository holds, so its successor cannot compose."
   [addr]
   (let [line (configure-line "Metaflows")
-        [_ aspect topic layer] (re-find #"\{ (\w+) (\w+) (\w+) \}" addr)
-        seat (re-pattern (str "\\{ \\{ " aspect " " topic " " layer " \\} \\[ spirit:core intent:models \\]"))]
-    (str/replace-first line seat (str "{ { " aspect " " topic " " layer " } [ spirit:core " missing-module " ]"))))
+        [_ aspect topic model] (re-find #"\{ (\w+) (\w+) (\w+) \}" addr)
+        seat (re-pattern (str "\\{ \\{ " aspect " " topic " " model " \\} \\[ spirit:core intent:models \\]"))]
+    (str/replace-first line seat (str "{ { " aspect " " topic " " model " } [ spirit:core " missing-module " ]"))))
 
 (defn restore-configuration! []
   [(flow-meta (configure-line "Metaflows")) (flow-meta (configure-line "Thresholds"))])
@@ -1177,7 +1177,7 @@
 (def waking-seat tertiary-address)
 
 (def night-scenarios
-  [["13 OnDemand seat whose successor cannot compose is kept, told and handed its queue"
+  [["13 OnDemand seat whose successor cannot compose is kept and handed its queue, and no flow is told"
     (fn []
       (let [_ (flow (str "Launch.{ " tertiary-address " Predecessors.0 «Run the shell command sleep 30, then answer with one word and stop. Tag ra1.» }"))
             flow-id (str (watch 90 #(awake-flow tertiary-address)))
@@ -1188,14 +1188,14 @@
             kept (= (str (awake-flow tertiary-address)) flow-id)
             open (contains? (pane-ids) pane)
             kept-line (some #(when (and (str/includes? % flow-id) (str/includes? % "kept at its Stop")) %) (str/split-lines (log-text)))
-            told (pane-holds (sender-pane) (str "(flow " flow-id ") was refused") 60)
+            untold (not (pane-holds (sender-pane) (str "(flow " flow-id ") was refused") 60))
             queued (send-to tertiary-address "Queue" "Soft.Notice.«Answer with one word and stop. Tag ra2.»" (sender-pane))
             handed (pane-holds pane "Tag ra2" 90)
             restored (restore-configuration!)]
         {:reply (str "Configure broken: " broken " / Send Tag ra2: " queued " / restore: " restored)
-         :pass (boolean (and (str/starts-with? broken "Configured.") rested kept open kept-line told handed))
-         :watched (str "Tertiary flow " flow-id " rested " rested "; still Awake " kept ", pane " pane (if open " open" " closed")
-                       "; log: " kept-line "; its Up, the Secondary, shows the refusal " (boolean told)
+         :pass (boolean (and (str/starts-with? broken "Configured.") rested kept open kept-line untold handed))
+         :watched (str "Sonnet flow " flow-id " rested " rested "; still Awake " kept ", pane " pane (if open " open" " closed")
+                       "; log: " kept-line "; the sender's pane shows no refusal " untold
                        "; Tag ra2 typed into the kept seat " (boolean handed))}))]
 
    ["14 Maintained seat whose successor cannot compose is kept and handed its queue"
@@ -1205,12 +1205,12 @@
             before (stops-of flow-id)
             broken (flow-meta (broken-metaflows secondary))
             low (flow-meta "Configure.Thresholds.[ { claude-haiku-5-5 1000 } ]")
-            sent (flow (str "Send.{ Address." secondary " Wake Soft.Notice.«Answer with one word and stop. Tag rb1.» }") pane)
+            sent (flow (str "Send.{ " secondary " Wake Soft.Notice.«Answer with one word and stop. Tag rb1.» }") pane)
             rested (watch 120 #(> (stops-of flow-id) before))
             _ (Thread/sleep 8000)
             kept (= (str (awake-flow secondary)) flow-id)
             kept-line (some #(when (and (str/includes? % flow-id) (str/includes? % "RefreshLaunchRefused")) %) (str/split-lines (log-text)))
-            queued (flow (str "Send.{ Address." secondary " Queue Soft.Notice.«Answer with one word and stop. Tag rb2.» }") pane)
+            queued (flow (str "Send.{ " secondary " Queue Soft.Notice.«Answer with one word and stop. Tag rb2.» }") pane)
             handed (pane-holds pane "Tag rb2" 90)
             restored (restore-configuration!)]
         {:reply (str "Send Tag rb1: " sent " / Send Tag rb2: " queued " / restore: " restored)
@@ -1231,7 +1231,7 @@
                              (= negative "Refused.MinutesRefused.Negative")
                              (str/starts-with? unreadable "exit 2")
                              (= before after)))
-         :watched (str "Psyche test Quaternary's queue held " before " before and " after
+         :watched (str "Psyche test Haiku's queue held " before " before and " after
                        " after; the unreadable Minutes never left the CLI")}))]
 
    ["16 Task reminder held across a Nexus restart; the Task leaves no queued entry"
@@ -1246,7 +1246,7 @@
             _ (fs/delete-if-exists meta-socket)
             _ (start-nexus! @nexus-log)
             reminded (transcript-holds secondary (str "Reminder 1 of 4: task " id) 150)
-            done (flow (str "Send.{ Address." secondary " Queue Soft.Done.{ " id " «closed» } }") pane)
+            done (flow (str "Send.{ " secondary " Queue Soft.Done.{ " id " «closed» } }") pane)
             ;; The Task was queued at an asleep seat that nothing wakes here:
             ;; its entry is withdrawn, so no later scenario finds it queued.
             queued (some #{id} (queued-ids (:datom (metaflows)) quaternary))
@@ -1258,18 +1258,18 @@
                              (str/starts-with? done "SendAccepted.")
                              (or (not queued) (str/starts-with? withdrawn "Withdrawn."))
                              (not (some #{id} left))))
-         :watched (str "Secondary transcript shows Reminder 1 of 4 for " id " after the restart "
+         :watched (str "Opus transcript shows Reminder 1 of 4 for " id " after the restart "
                        (boolean reminded) "; the Done closes it; the Task " (if queued "withdrawn" "not queued")
-                       ", Quaternary queue after " left)}))]
+                       ", Haiku queue after " left)}))]
 
    ["17 Task reminded at its minutes; Done closes it; Done again refused"
     (fn []
       (let [pane (sender-pane)
-            sent (flow (str "Send.{ Address." quaternary " Wake Soft.Task.{ 1 «Answer with one word and stop. Tag re1.» } }") pane)
+            sent (flow (str "Send.{ " quaternary " Wake Soft.Task.{ 1 «Answer with one word and stop. Tag re1.» } }") pane)
             id (some-> (read-datom sent) body items first str)
             reminded (transcript-holds secondary (str "Reminder 1 of 4: task " id) 150)
-            done (flow (str "Send.{ Address." secondary " Queue Soft.Done.{ " id " «closed» } }") pane)
-            again (flow (str "Send.{ Address." secondary " Queue Soft.Done.{ " id " «again» } }") pane)
+            done (flow (str "Send.{ " secondary " Queue Soft.Done.{ " id " «closed» } }") pane)
+            again (flow (str "Send.{ " secondary " Queue Soft.Done.{ " id " «again» } }") pane)
             deadline (when id (admitted-deadline (log-text) id))
             stamp (when id (first (reminder-stamps secondary (str "Reminder 1 of 4: task " id))))
             lag (when (and deadline stamp) (reminder-lag deadline stamp))
@@ -1279,7 +1279,7 @@
          :pass (boolean (and id reminded (str/starts-with? done "SendAccepted.")
                              (str/includes? again "NoOpenTask") (not second-reminder)
                              lag (on-time? lag)))
-         :watched (str "Secondary transcript shows Reminder 1 of 4 for " id " " (boolean reminded)
+         :watched (str "Opus transcript shows Reminder 1 of 4 for " id " " (boolean reminded)
                        "; Nexus log deadline " deadline ", Reminder 1 stamped " stamp ", " lag
                        " s after it (on time: 0 to " reminder-tolerance-seconds " s)"
                        "; no Reminder 2 in the 75 s after Done " (not second-reminder))}))]
@@ -1309,7 +1309,7 @@
                        " shows both ids oldest first " ordered
                        ", its text kept as scenario-20-pane.txt")}))]])
 
-(def codex-quaternary "{ Mind test Quaternary }")
+(def codex-quaternary "{ Mind test Terra }")
 
 (defn codex-sessions-hold
   "Whether any Codex session the capsule's app-server wrote holds needle."
@@ -1326,7 +1326,7 @@
             handed (watch 120 #(codex-sessions-hold "Tag c1"))]
         {:reply (str "Launch: " reply " / Send: " queued)
          :pass (boolean (and awake (str/starts-with? queued "SendAccepted.") handed))
-         :watched (str "Mind test Quaternary Awake as " awake "; a session under " codex-home
+         :watched (str "Mind test Terra Awake as " awake "; a session under " codex-home
                        (if handed " holds" " lacks") " Tag c1 within 120 s")}))]
 
    ["19 Codex and Claude exchange one Task and one Done; one reminder at the deadline"
@@ -1381,8 +1381,8 @@
 ;; and after the new store is refused. Arm A keeps the sender silent through
 ;; the window (the gate); Arm B, the control, keeps it sending.
 
-(def codex-secondary "{ Mind test Secondary }")
-(def asleep-primary "{ Psyche test Primary }")
+(def codex-secondary "{ Mind test Sol }")
+(def asleep-primary "{ Psyche test Fable }")
 ;; The margin ruled for the counters: the old maximum plus this.
 (def counter-margin 10000)
 ;; The night's seat count the window is extrapolated to.
@@ -1408,12 +1408,12 @@
 
 (defn takeover-configuration
   "The takeover's declarations from the capsule's Configure lines: every
-  seat it keeps Awake is Maintained, a Codex Secondary on the Codex
-  Quaternary's model and an OnDemand Primary that stays asleep are added.
+  seat it keeps Awake is Maintained, a Codex Sol on the Codex
+  Haiku's model and an OnDemand Fable that stays asleep are added.
   :old omits DefaultMinutes, which the old Nexus does not know; :replay is
   every line, in the file's order."
   [lines]
-  (let [codex-model (some #(second (re-find #"\{ Quaternary Mind (\S+) \}" %)) lines)
+  (let [codex-model (some #(second (re-find #"\{ Terra (\S+) \}" %)) lines)
         line-of (fn [line]
                   (cond
                     (str/starts-with? line "Configure.Metaflows.")
@@ -1421,10 +1421,10 @@
                                     [(str "{ " codex-secondary " None [ spirit:core intent:models ] [] Simplified Explicit.[] Maintained «» [] }")
                                      (str "{ " asleep-primary " None [ spirit:core intent:models ] [] Regular Default OnDemand «» [] }")])
                     (and codex-model (str/starts-with? line "Configure.Models."))
-                    (append-entries line [(str "{ Secondary Mind " codex-model " }")])
+                    (append-entries line [(str "{ Sol " codex-model " }")])
                     (str/starts-with? line "Configure.LeaveOuts.")
-                    (if-let [entry (re-find #"\{ \{ Mind test Quaternary \} Codex \[[^\]]*\] \}" line)]
-                      (append-entries line [(str/replace entry "Quaternary" "Secondary")])
+                    (if-let [entry (re-find #"\{ \{ Mind test Terra \} Codex \[[^\]]*\] \}" line)]
+                      (append-entries line [(str/replace entry "Terra" "Sol")])
                       line)
                     :else line))
         replay (mapv line-of lines)]
@@ -1517,9 +1517,9 @@
   in pane order; a pane with no seat label is not typed to."
   [pane-list pkg tracker?]
   (let [rows (keep (fn [{:keys [pane_id label]}]
-                     (when-let [[_ aspect topic layer flow-id]
+                     (when-let [[_ aspect topic model flow-id]
                                 (re-matches #"\{ (\w+) (\S+) (\w+) ([0-9a-f]{6}) \}" (str label))]
-                       (let [words (str aspect " " topic " " layer)]
+                       (let [words (str aspect " " topic " " model)]
                          (let [query (str "BindSeat.{ " words " }")
                                {:keys [exit out err]}
                                (run {} (str pkg "/bin/flow-compose-invocation") ordinary-socket query)]
@@ -1668,7 +1668,7 @@
 
 (defn start-sender!
   "The trackers' cron, stood in for: every 15 s a Wake Notice to the
-  Quaternary and the Tertiary, sent from pane by the client in charge."
+  Haiku and the Sonnet, sent from pane by the client in charge."
   [pane]
   (let [running (atom true)
         sent (atom [])]
@@ -1862,7 +1862,7 @@
 (defn rebind-step []
   (fn []
     (let [{:keys [window last pane-count]} @takeover
-          lines (rebind-lines (panes) @new-package #(str/ends-with? % "Quaternary"))
+          lines (rebind-lines (panes) @new-package #(or (str/ends-with? % "Haiku") (str/ends-with? % "Terra")))
           _ (keep-text! "takeover-arm-a-rebind.lines" (str/join "\n" (map #(str (:pane %) " " (:flow-id %) " " (:line %)) lines)))
           bound (rebind! lines)
           readback-start (now)
@@ -1902,7 +1902,7 @@
           carried (notice-queued? (:metaflows reads) asleep-primary queued-id)
           listed (read-datom (:metaflows reads))
           pasts (into {} (for [m (items (body listed))] [(address-text (first (items m))) (vec (items (nth (items m) 2)))]))]
-      {:reply (str "new Primary queue " primary-queue)
+      {:reply (str "new Fable queue " primary-queue)
        :pass (boolean (and (not (str/blank? queued-id)) (not carried)
                            (every? empty? (vals pasts))))
        :watched (str "the old Nexus's queued Notice " (if (str/blank? queued-id) "(none was queued)" queued-id)
@@ -2024,7 +2024,7 @@
          :pass (= serving :serving)
          :watched (str (str/join " " (:argv command)) "; its command kept as takeover-old-nexus.command")}))]
 
-   ["T1 seats Awake, a Codex seat in a long turn, a Notice queued at an asleep Primary, the sender sending"
+   ["T1 seats Awake, a Codex seat in a long turn, a Notice queued at an asleep Fable, the sender sending"
     (fn []
       (let [seats (concat [secondary quaternary tertiary-address] (when-not skip-codex [codex-quaternary]))
             launched (into {} (for [addr seats]
@@ -2032,7 +2032,7 @@
             sender-pane (or (some-> (get-in launched [secondary 1]) str pane-of-flow) (sender-pane))
             _ (swap! takeover assoc :sender-pane sender-pane)
             ;; A Send reaches only an Address that has a metaflow, which its
-            ;; first launch makes: the Primary takes one turn and, OnDemand,
+            ;; first launch makes: the Fable takes one turn and, OnDemand,
             ;; falls asleep before the Notice is queued to it.
             primary-launch (launch asleep-primary)
             primary-woke (watch 90 #(awake-flow asleep-primary))
@@ -2046,7 +2046,7 @@
                      [reply (watch 90 #(awake-flow codex-secondary))]))
             sends (watch 45 #(let [s @(:sent @sender)] (when (>= (count s) 4) s)))
             primary (current asleep-primary)]
-        {:reply (str (pr-str launched) " / Primary " primary-launch " / Codex Secondary " (if skip-codex "SKIPPED" (pr-str busy))
+        {:reply (str (pr-str launched) " / Fable " primary-launch " / Codex Sol " (if skip-codex "SKIPPED" (pr-str busy))
                      " / queued " queued)
          :pass (boolean (and (every? (comp second val) launched) (or skip-codex (second busy))
                              sender-pane primary-woke primary-slept queued-id
@@ -2054,7 +2054,7 @@
                              (seq sends) (every? #(str/starts-with? (:reply %) "SendAccepted.") sends)))
          :watched (str "Awake " (pr-str (into {} (for [[a [_ f]] launched] [a f])))
                        (if skip-codex "; Codex seats SKIPPED (FLOW_CAPSULE_SKIP_CODEX=1)" "")
-                       "; sender pane " sender-pane "; Primary awake as " primary-woke ", then "
+                       "; sender pane " sender-pane "; Fable awake as " primary-woke ", then "
                        (some-> (:state primary) name) " with the Notice " queued-id
                        (if (holds-id? (pr-str (:queue primary)) queued-id) " queued" " not queued")
                        "; " (count sends) " sends by the loop")}))]

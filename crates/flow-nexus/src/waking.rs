@@ -41,8 +41,8 @@
 //! closed by the living, its harness crashed, or the flow replaced. Work queued for an
 //! Awake seat whose pane Herdr shows gone records that flow Exited, which
 //! puts its metaflow Asleep. A request queued for an Asleep metaflow wakes
-//! it (`Operation::Wake`): a fresh flow is launched from the configured
-//! layer Model and the module identities the metaflow's last launch named,
+//! it (`Operation::Wake`): a fresh flow is launched from the native model
+//! configured for its Model and the module identities the metaflow's last launch named,
 //! composed again as any Start is, with the whole queue, oldest first, as
 //! its brief. The requests leave the queue only in the write that records
 //! the started flow Awake, so a Nexus that dies mid-wake loses none: at its
@@ -108,7 +108,7 @@ use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
 use signal_flow::{
     Address, AgentState, Event, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
-    Layer, Metaflow, NativePrompt, NativeStop, Origin, PowerLevel, QueueEntry, Response,
+    Metaflow, NativePrompt, NativeStop, Origin, QueueEntry, Response,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -119,16 +119,6 @@ pub trait WakePolicy {
     /// or Done. Working, Blocked or unreadable is not resting.
     fn rests_at(agent_state: &AgentState) -> bool {
         matches!(agent_state, AgentState::Idle | AgentState::Done)
-    }
-
-    /// The power a fresh seat is registered with, by its layer.
-    fn power_of(layer: &Layer) -> PowerLevel {
-        match layer {
-            Layer::Primary => PowerLevel::High,
-            Layer::Secondary => PowerLevel::Medium,
-            Layer::Tertiary => PowerLevel::Low,
-            Layer::Quaternary => PowerLevel::UltraLow,
-        }
     }
 }
 
@@ -218,7 +208,7 @@ impl RestsEndedAwake for RunningNexus {
                 if matches!(self.store.forget_ended_binding(address, &flow_id), Ok(true)) {
                     eprintln!(
                         "flow-nexus: {:?} {} {:?} held only through ended binding {flow_id} is forgotten",
-                        address.aspect, address.topic, address.layer
+                        address.aspect, address.topic, address.model
                     );
                     return true;
                 }
@@ -403,6 +393,8 @@ pub enum KeptAtStop {
     /// closed: a closed seat whose successor cannot compose would leave its
     /// Address with no flow. It stays Awake and is handed its queue.
     SuccessorUncomposable(Box<Outcome>),
+    /// A restart holds the flow: nothing is settled at a Stop of it.
+    Restarting,
 }
 
 /// Whether the seat was kept because its successor could not be placed,
@@ -424,16 +416,16 @@ impl JudgesSuccessorRefusal for KeptAtStop {
 }
 
 /// The flows owed a successor whose successor was refused. Each is handed
-/// its queue meanwhile, though past its threshold, and its refusal is told
-/// once, until a successor stands.
+/// its queue meanwhile, though past its threshold, until a successor
+/// stands.
 #[derive(Debug, Default)]
 pub struct RefreshRefusals {
     flows: Mutex<HashSet<FlowId>>,
 }
 
 pub trait NotesRefreshRefusals {
-    /// Notes the flow's successor refused; true the first time.
-    fn note(&self, flow_id: &str) -> bool;
+    /// Notes the flow's successor refused.
+    fn note(&self, flow_id: &str);
     /// Whether the flow's successor stands refused.
     fn holds(&self, flow_id: &str) -> bool;
     /// Forgets the flow: its successor stands, or it has ended.
@@ -441,11 +433,11 @@ pub trait NotesRefreshRefusals {
 }
 
 impl NotesRefreshRefusals for RefreshRefusals {
-    fn note(&self, flow_id: &str) -> bool {
+    fn note(&self, flow_id: &str) {
         self.flows
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(flow_id.to_owned())
+            .insert(flow_id.to_owned());
     }
 
     fn holds(&self, flow_id: &str) -> bool {
@@ -576,111 +568,6 @@ pub trait PerformsWakeAndDrain {
     fn drain_all(&self, address: Address) -> Outcome;
 }
 
-/// Short term, the Secondary starts first: a caller's new Primary whose
-/// Secondary of the same aspect and topic is not Awake has that Secondary
-/// started by Flow itself, OnDemand or Maintained, from its declaration, and
-/// the Primary's launch goes on once the Secondary is confirmed. A Secondary
-/// with no declaration is not started, and the Primary is then refused
-/// NoSecondary by its admission.
-pub(crate) trait StartsSecondaryFirst {
-    /// Runs off the dispatch gate, taking it per step as a wake does.
-    /// Refuses only when the declared Secondary could not be started.
-    fn secondary_first(&self, profile: &LaunchProfile) -> Result<(), signal_flow::StartRejection>;
-}
-
-impl StartsSecondaryFirst for RunningNexus {
-    fn secondary_first(&self, profile: &LaunchProfile) -> Result<(), signal_flow::StartRejection> {
-        use crate::launching::NamesTopic;
-        use crate::store::ReadsLaunchAttempt;
-        use crate::store::metaflow::TakesLaunchAddress;
-        use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
-        let address = &profile.address;
-        if address.layer != Layer::Primary
-            || profile.flow_id_option.is_some()
-            || !address.topic.as_str().is_camel_case_topic()
-        {
-            return Ok(());
-        }
-        let secondary = Address {
-            aspect: address.aspect.clone(),
-            topic: address.topic.clone(),
-            layer: Layer::Secondary,
-        };
-        let Some(lease) = self.waking.hold(&secondary) else {
-            // A wake of the Secondary already runs; the Primary's admission
-            // reads what it came to.
-            return Ok(());
-        };
-        let metaflow = {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let new_launch = matches!(
-                self.store.launch_attempt(&profile.launch_request_id),
-                Ok(None)
-            );
-            let owed = matches!(self.store.successor_intent(address), Ok(Some(_)));
-            if !new_launch || owed {
-                return Ok(());
-            }
-            if !matches!(self.store.metaflow_declaration(&secondary), Ok(Some(_))) {
-                return Ok(());
-            }
-            self.rest_ended_awake(&secondary);
-            match self.store.metaflow(&secondary) {
-                Ok(Some(metaflow)) => match &metaflow.state {
-                    flow_ethos::State::Awake(flow_id)
-                        if matches!(self.store.flow_is_live(flow_id), Ok(true)) =>
-                    {
-                        return Ok(());
-                    }
-                    _ => metaflow,
-                },
-                Ok(None) => Metaflow {
-                    address: secondary.clone(),
-                    state: flow_ethos::State::Asleep,
-                    past: vec![],
-                    queue: vec![],
-                },
-                Err(_) => return Err(signal_flow::StartRejection::LaunchPersistenceRefused),
-            }
-        };
-        let WakePlan::Fresh(fresh) = self.wake_plan(&metaflow) else {
-            return Err(signal_flow::StartRejection::NoSecondary);
-        };
-        let started = self.start_fresh(&metaflow, fresh, "").map_err(|failure| {
-            eprintln!(
-                "flow-nexus: the Secondary of {:?} {} did not start: {failure:?}",
-                secondary.aspect, secondary.topic
-            );
-            signal_flow::StartRejection::NoSecondary
-        })?;
-        let flow_id = started.flow_id;
-        {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if self.perform(Operation::Record(Record_Data::Awoken(
-                Record_Data_Awoken_Data {
-                    address: secondary.clone(),
-                    flow_id: flow_id.clone(),
-                    delivered: 0,
-                },
-            ))) != Outcome::Recorded
-            {
-                return Err(signal_flow::StartRejection::LaunchPersistenceRefused);
-            }
-        }
-        // Work queued for the Secondary is handed to it, as to any woken
-        // flow.
-        self.drain_woken(&secondary, lease);
-        self.settle_stops_at_confirmation();
-        Ok(())
-    }
-}
-
 /// Why a flow the Nexus starts itself did not start: its start was refused
 /// for a reason, or it failed before or after the start was asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -805,11 +692,11 @@ trait WakesInParts {
     /// once its successor composes.
     fn successor_composes(&self, flow_id: &str, metaflow: &Metaflow) -> Result<(), KeptAtStop>;
     /// A seat kept because its successor was refused: notes it, so it is
-    /// handed its queue though past its threshold; tells the refusal once,
-    /// as a Notice to the metaflow's Up (Psyche core Secondary for a
-    /// Primary); and hands it what is queued now, as its rest's drain
-    /// would. Takes the dispatch gate; the caller holds none.
-    fn successor_refused(&self, flow_id: &str, reason: &KeptAtStop);
+    /// handed its queue though past its threshold, and hands it what is
+    /// queued now, as its rest's drain would. The refusal is told to no
+    /// flow: it stands as Flow recorded it. Takes the dispatch gate; the
+    /// caller holds none.
+    fn successor_refused(&self, flow_id: &str);
 }
 
 pub(crate) trait ReadsClaudeDelivery {
@@ -1346,11 +1233,22 @@ impl MarksUndecided for RunningNexus {
 
 impl SleepsAndWakesSeats for RunningNexus {
     fn settle_stopped(&self, flow_id: &str) -> AtStop {
+        // A restart holds the Address: no drain, sleep or refresh of it.
+        if !matches!(
+            crate::store::restart::RecordsRestarts::restart_record(&self.store, flow_id),
+            Ok(None)
+        ) {
+            eprintln!(
+                "flow-nexus: flow {flow_id} kept at its Stop: {:?}",
+                KeptAtStop::Restarting
+            );
+            return AtStop::Kept(KeptAtStop::Restarting);
+        }
         let at_stop = self.settle_rested(flow_id);
         match &at_stop {
             AtStop::Kept(reason) if reason.successor_refused() => {
                 eprintln!("flow-nexus: flow {flow_id} kept at its Stop: {reason:?}");
-                self.successor_refused(flow_id, reason);
+                self.successor_refused(flow_id);
             }
             AtStop::Kept(reason) => {
                 eprintln!("flow-nexus: flow {flow_id} kept at its Stop: {reason:?}");
@@ -1391,6 +1289,10 @@ impl SleepsAndWakesSeats for RunningNexus {
             if metaflow.queue.is_empty()
                 || self.waking.is_waking(address)
                 || !matches!(self.store.address_hold(&flow_id), Ok(None))
+                || !matches!(
+                    crate::store::restart::RecordsRestarts::restart_record(&self.store, &flow_id),
+                    Ok(None)
+                )
             {
                 return;
             }
@@ -1505,6 +1407,9 @@ impl SleepsAndWakesSeats for RunningNexus {
 
     fn recover_wakes(&self) {
         self.recover_deliveries();
+        // A restart an earlier Nexus left is taken up first, so a seat it
+        // binds is handed its queue below.
+        crate::restarting::RestartsFlows::recover_restarts(self);
         // What an earlier Nexus left queued for an Awake seat is handed
         // over now, each address's whole queue as one payload.
         let awake = {
@@ -1672,6 +1577,15 @@ impl RefreshesMetaflows for RunningNexus {
             }
             Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
         };
+        // A restart holds the flow's Address as a refresh would.
+        if let flow_ethos::State::Awake(current) = &metaflow.state
+            && !matches!(
+                crate::store::restart::RecordsRestarts::restart_record(&self.store, current),
+                Ok(None)
+            )
+        {
+            return Response::RefreshRejected(RefreshRejection::Locked);
+        }
         let flow_ethos::State::Awake(flow_id) = metaflow.state.clone() else {
             return Response::RefreshRejected(RefreshRejection::NotAwake);
         };
@@ -1738,7 +1652,7 @@ impl RefreshesMetaflows for RunningNexus {
                 AtStop::Refreshed(_) => {
                     eprintln!(
                         "flow-nexus: flow {flow_id} refreshed; {:?} {} {:?} runs its successor",
-                        address.aspect, address.topic, address.layer
+                        address.aspect, address.topic, address.model
                     );
                     // What queued while the lock stood is handed to the
                     // successor, oldest first.
@@ -1781,7 +1695,7 @@ impl RefreshesMetaflows for RunningNexus {
         drop(turn);
         eprintln!(
             "flow-nexus: flow {flow_id} refreshed; {:?} {} {:?} sleeps until a waking request",
-            address.aspect, address.topic, address.layer
+            address.aspect, address.topic, address.model
         );
         refreshed
     }
@@ -1797,6 +1711,12 @@ impl RefreshesMetaflows for RunningNexus {
             let Some(lock) = self.waking.hold(&address) else {
                 return Response::ReplaceRejected(ReplaceRejection::Locked);
             };
+            // A restart holds the Address its predecessor runs at.
+            if let Ok(Some(_)) =
+                crate::store::restart::RecordsRestarts::restart_at(&self.store, &address)
+            {
+                return Response::ReplaceRejected(ReplaceRejection::Locked);
+            }
             // The successor is owed until it is confirmed, so a Nexus that
             // stops before then starts it at its next start.
             if let Some(predecessor) = profile.flow_id_option.clone()
@@ -1834,7 +1754,7 @@ impl PerformsWakeAndDrain for RunningNexus {
             Err(refusal) => {
                 eprintln!(
                     "flow-nexus: wake of {:?} {} {:?} refused: {refusal:?}",
-                    address.aspect, address.topic, address.layer
+                    address.aspect, address.topic, address.model
                 );
                 // Nothing was taken: the work is still queued, oldest first.
                 Outcome::Failed(refusal.failure())
@@ -2616,7 +2536,7 @@ impl WakesInParts for RunningNexus {
                 ) {
                     eprintln!(
                         "flow-nexus: the queue of {:?} {} {:?} is not marked WakeRefused: {error}",
-                        address.aspect, address.topic, address.layer
+                        address.aspect, address.topic, address.model
                     );
                 }
                 return Err(WakeRefusal::StartRejected(rejection));
@@ -2665,7 +2585,7 @@ impl WakesInParts for RunningNexus {
         text: &str,
     ) -> Result<FreshStarted, FreshRefusal> {
         let address = &metaflow.address;
-        // The seat's model is the one configured for its layer and aspect.
+        // The seat's model is the one configured for its Model.
         let model = match self.store.configured_model(address) {
             Ok(Some(model)) => model,
             Ok(None) => {
@@ -2698,11 +2618,15 @@ impl WakesInParts for RunningNexus {
             tool_set: fresh.tool_set,
             prompt: text.with_purpose(&fresh.purpose),
         };
-        self.start_unbound(seat.fresh_profile())
-            .map(|flow_id| FreshStarted {
-                flow_id,
-                launch_request_id,
-            })
+        // The metaflow's last flow is the predecessor this wake succeeds, and
+        // its handover is given to the new flow. The metaflow is Asleep, so
+        // the predecessor takes no part in taking its Address.
+        let mut profile = seat.fresh_profile();
+        profile.flow_id_option = metaflow.past.last().cloned();
+        self.start_unbound(profile).map(|flow_id| FreshStarted {
+            flow_id,
+            launch_request_id,
+        })
     }
 
     fn last_launch_profile(&self, flow_id: &str) -> Option<LaunchProfile> {
@@ -2895,55 +2819,12 @@ impl WakesInParts for RunningNexus {
         }
     }
 
-    fn successor_refused(&self, flow_id: &str, reason: &KeptAtStop) {
+    fn successor_refused(&self, flow_id: &str) {
         let address = match self.store.metaflow_awake_as(flow_id) {
             Ok(Some(metaflow)) => metaflow.address,
             _ => return,
         };
-        if self.refresh_refusals.note(flow_id) {
-            let up = match address.layer {
-                Layer::Primary => Address {
-                    aspect: signal_flow::Aspect::Psyche,
-                    topic: "core".into(),
-                    layer: Layer::Secondary,
-                },
-                Layer::Secondary => Address {
-                    layer: Layer::Primary,
-                    ..address.clone()
-                },
-                Layer::Tertiary => Address {
-                    layer: Layer::Secondary,
-                    ..address.clone()
-                },
-                Layer::Quaternary => Address {
-                    layer: Layer::Tertiary,
-                    ..address.clone()
-                },
-            };
-            let notice = format!(
-                "Flow: the successor of {:?} {} {:?} (flow {flow_id}) was refused: {reason:?}. Flow {flow_id} stays its flow and is handed its queue; its successor is tried again at its next rest.",
-                address.aspect, address.topic, address.layer
-            );
-            let told = {
-                let _turn = self
-                    .dispatch_gate
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                self.store.accept_logical_delivery(
-                    &up,
-                    signal_flow::SentBy::Flow,
-                    flow_ethos::Delivery::Wake,
-                    signal_flow::Message::Soft(signal_flow::Request::Notice(notice)),
-                    None,
-                )
-            };
-            match told {
-                Ok(signal_flow::PrivateSendResponse::SendAccepted(_)) => self.wake_due(up),
-                _answer => eprintln!(
-                    "flow-nexus: the refused successor of flow {flow_id} was not told to {up:?}"
-                ),
-            }
-        }
+        self.refresh_refusals.note(flow_id);
         // The seat rests now: what is queued is handed to it here, as its
         // turn's end would, under the gate.
         let _turn = self

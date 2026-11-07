@@ -17,3 +17,11 @@ pub struct Replacement {
     pub launch_request_id: signal_flow::LaunchRequestId,
     pub predecessor: Predecessor,
 }
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct SeatBirth {
+    pub flow_id: signal_flow::FlowId,
+    pub herdr_route: signal_flow::HerdrRoute,
+    pub process: signal_flow::Process,
+}

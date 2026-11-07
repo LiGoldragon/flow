@@ -26,7 +26,7 @@ impl ParsesMetaDatom for FlowMetaClient {
     fn parse_datom<T: datom_codec::Composing>(source: String, subject: &str) -> Result<T, String> {
         let mut budget = Budget {
             remaining: 65_536,
-            reader: ReaderBudget { remaining: 65_536 },
+            reader: ReaderBudget::try_from(65_536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1_024,
         };
@@ -49,7 +49,7 @@ impl ParsesMetaCommand for FlowMetaClient {
         }
         let mut budget = Budget {
             remaining: 65_536,
-            reader: ReaderBudget { remaining: 65_536 },
+            reader: ReaderBudget::try_from(65_536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1_024,
         };
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn a_family_declaration_is_one_inline_datom_carrying_the_whole_family() {
         let client = FlowMetaClient;
-        let datom = "Configure.LeaveOuts.[ { { Field core Primary } Codex [ CodexAgentsMd CodexSkillListing ] } { { Psyche flow Secondary } Claude [ SkillTool ClaudeMd ] } ]";
+        let datom = "Configure.LeaveOuts.[ { { Field core Astra } Codex [ CodexAgentsMd CodexSkillListing ] } { { Psyche flow Opus } Claude [ SkillTool ClaudeMd ] } ]";
         let query = client
             .parse_query([datom.to_owned()].into_iter())
             .expect("LeaveOuts declaration parses");
@@ -191,8 +191,10 @@ mod tests {
         assert!(
             client
                 .parse_query(
-                    ["Configure.LeaveOuts.[ { { Psyche flow Secondary } [ SkillTool ClaudeMd ] } ]"
-                        .to_owned()]
+                    [
+                        "Configure.LeaveOuts.[ { { Psyche flow Opus } [ SkillTool ClaudeMd ] } ]"
+                            .to_owned()
+                    ]
                     .into_iter()
                 )
                 .is_err()
@@ -206,13 +208,25 @@ mod tests {
     }
 
     #[test]
-    fn refresh_is_not_a_request() {
-        // Every wake is fresh, so no request marks one.
+    fn refresh_and_restart_are_the_meta_surface_s_own() {
+        // The meta surface refreshes an Address and restarts a flow, a
+        // protected Address's included.
         let client = FlowMetaClient;
-        assert!(
+        assert_eq!(
             client
-                .parse_query(["Refresh.{ Mind flow Secondary }".to_owned()].into_iter())
-                .is_err()
+                .parse_query(["Refresh.{ Mind flow Sol }".to_owned()].into_iter())
+                .expect("Refresh parses"),
+            Query::Refresh(signal_flow::Address {
+                aspect: signal_flow::Aspect::Mind,
+                topic: "flow".into(),
+                model: signal_flow::Model::Sol,
+            })
+        );
+        assert_eq!(
+            client
+                .parse_query(["Restart.c1a0de".to_owned()].into_iter())
+                .expect("Restart parses"),
+            Query::Restart("c1a0de".into())
         );
     }
 
@@ -240,7 +254,7 @@ mod tests {
     fn thirty_one_printed_metaflows_roundtrip_without_head_whitespace() {
         use super::ParsesMetaDatom;
         use meta_signal_flow::{ConfigurationSnapshot, ConfigureMetaflow, Response};
-        use signal_flow::{Address, Aspect, FlowKind, Layer, ToolSet};
+        use signal_flow::{Address, Aspect, FlowKind, Model, ToolSet};
         let endpoint = || meta_signal_flow::CodexEndpoint {
             client_path: "/opt/codex".into(),
             home: "/tmp/codex".into(),
@@ -253,7 +267,7 @@ mod tests {
                 address: Address {
                     aspect: Aspect::Mind,
                     topic: format!("printer{index}"),
-                    layer: Layer::Secondary,
+                    model: Model::Sol,
                 },
                 system_modules: vec!["spirit-core".into()],
                 user_modules: vec![],
@@ -292,6 +306,7 @@ mod tests {
             investigation: None,
             default_minutes: 30,
             heartbeat: None,
+            protected_addresses: vec![],
             counters: meta_signal_flow::ConfigureCounters {
                 logical_delivery: 1,
                 queue_attempt: 3,

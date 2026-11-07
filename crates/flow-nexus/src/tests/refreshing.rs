@@ -29,9 +29,9 @@ use flow_ethos::Delivery;
 use flow_ethos::State;
 use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, Continuity};
 use signal_flow::{
-    Address, FlowLifecycle, HerdrRouteSelection, Layer, Message, Metaflow, Origin, Query,
-    Recipient, RefreshRejection, Refreshed, Refusal, ReplaceRejection, Request, Response,
-    SendRequest, SentBy, Unknown_Data,
+    Address, FlowLifecycle, HerdrRouteSelection, Message, Metaflow, Model, Origin, Query,
+    RefreshRejection, Refreshed, Refusal, ReplaceRejection, Request, Response, SendRequest, SentBy,
+    Unknown_Data,
 };
 use std::fs;
 use std::time::Duration;
@@ -48,7 +48,7 @@ impl Drop for ReleasesFixtureOnDrop {
 }
 
 fn seat_address() -> Address {
-    address(Layer::Secondary)
+    address(Model::Sol)
 }
 
 /// The seat's metaflow is declared OnDemand, with modules the fixture
@@ -148,7 +148,7 @@ fn a_refresh_ends_the_awake_flow_without_a_turn_and_leaves_the_metaflow_asleep()
     assert_eq!(
         fixture
             .nexus
-            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound),
+            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound.into()),
         Response::Refreshed(Refreshed {
             address: seat_address(),
             flow_id: CLAUDE_SEAT.into(),
@@ -198,14 +198,14 @@ fn a_refresh_of_a_metaflow_not_awake_is_refused_not_awake() {
     );
     assert_eq!(stored(&fixture), asleep, "nothing is written");
 
-    let declared = address(Layer::Tertiary);
+    let declared = address(Model::Luna);
     declare(&fixture, declared.clone());
     assert_eq!(
         fixture.nexus.dispatch(Query::Refresh(declared)),
         Response::RefreshRejected(RefreshRejection::NotAwake)
     );
 
-    let unknown = address(Layer::Quaternary);
+    let unknown = address(Model::Terra);
     assert_eq!(
         fixture.nexus.dispatch(Query::Refresh(unknown.clone())),
         Response::Refused(Refusal::Unknown(Unknown_Data::Address(unknown)))
@@ -232,7 +232,7 @@ fn a_refresh_is_refused_locked_while_another_holds_the_metaflow() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound),
+            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound.into()),
         Response::RefreshRejected(RefreshRejection::Locked)
     );
     assert!(!closed(&fixture), "nothing is closed while the hold stands");
@@ -243,7 +243,7 @@ fn a_refresh_is_refused_locked_while_another_holds_the_metaflow() {
     assert!(matches!(
         fixture
             .nexus
-            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound),
+            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound.into()),
         Response::Refreshed(_)
     ));
     assert_eq!(stored(&fixture).state, State::Asleep);
@@ -286,7 +286,7 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
     let sender_address = Address {
         aspect: signal_flow::Aspect::Mind,
         topic: "sender".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     };
     let peer = FlowStore::process_identity_for_pid(std::process::id()).unwrap();
     assert_eq!(
@@ -359,7 +359,7 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
         let refreshing = scope.spawn(|| {
             fixture
                 .nexus
-                .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound)
+                .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound.into())
         });
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while !closing.exists() {
@@ -374,7 +374,7 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
         let sending = scope.spawn(move || {
             let answer = nexus.send_request(
                 SendRequest {
-                    recipient: Recipient::Address(seat_address()),
+                    recipient: seat_address(),
                     sendable_message: super::sendable_message(Message::MiddleAbrupt(
                         request.clone(),
                     )),
@@ -694,7 +694,7 @@ fn an_abrupt_send_to_a_held_metaflow_is_queued_never_refused_busy() {
         .expect("the holder takes the metaflow");
     let sent = fixture.nexus.send_request(
         SendRequest {
-            recipient: Recipient::Address(seat_address()),
+            recipient: seat_address(),
             sendable_message: super::sendable_message(Message::HardAbrupt(request.clone())),
         },
         Some(&peer),
@@ -799,7 +799,7 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
             let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
             let sent = fixture.nexus.send_request(
                 SendRequest {
-                    recipient: Recipient::Address(seat_address()),
+                    recipient: seat_address(),
                     sendable_message: super::sendable_message(abrupt(Request::Order(
                         "Arrived while busy.".into(),
                     ))),
@@ -843,7 +843,7 @@ fn a_send_to_a_primary_is_accepted_from_a_primary_and_from_a_secondary() {
     let primary = |topic: &str| Address {
         aspect: signal_flow::Aspect::Mind,
         topic: topic.into(),
-        layer: Layer::Primary,
+        model: Model::Astra,
     };
     let target = primary("flow");
     fixture.nexus.store.seed_metaflow(Metaflow {
@@ -1006,7 +1006,7 @@ fn a_successor_that_cannot_start_answers_refresh_s_own_rejection() {
         )),
     }];
     fixture.nexus.store.seed_metaflow(waking);
-    // Declared, with no model configured for its layer and aspect.
+    // Declared, with no model configured for its model and aspect.
     declare(&fixture, seat_address());
     assert_eq!(
         fixture.nexus.dispatch(Query::Refresh(seat_address())),

@@ -30,6 +30,7 @@ use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::herdr::launch::ConstructsHarnessCommand;
 use crate::launching::ReadsHarnessArguments;
 use crate::metaflow::IdentifiesPeerProcess;
+use crate::model::RunsModel;
 use crate::performing::Performs;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
@@ -45,14 +46,14 @@ use crate::store::{
 };
 use crate::waking::{
     HoldsWakingMetaflows, PerformsWakeAndDrain, ReconcilesQueueDelivery, RestsEndedAwake,
-    SleepsAndWakesSeats, WakePolicy,
+    SleepsAndWakesSeats,
 };
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
-    Address, Aspect, Caller, HarnessKind, HerdrRoute, LaunchProfile, LaunchRequest, Layer, Message,
-    PrivateSendResponse, Process, Recipient, Refusal, Request, Response, SendPayloadSize,
-    SendRequest, SendableMessage, SentBy, StartRejection, Unknown_Data,
+    Address, Caller, HarnessKind, HerdrRoute, LaunchProfile, LaunchRequest, Message,
+    PrivateSendResponse, Process, Refusal, Request, Response, SendPayloadSize, SendRequest,
+    SendableMessage, SentBy, StartRejection, Unknown_Data,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -161,22 +162,6 @@ impl MintsId for str {
     }
 }
 
-/// The layer above, in the same aspect and topic.
-pub trait NamesLayerAbove {
-    fn above(&self) -> Option<Layer>;
-}
-
-impl NamesLayerAbove for Layer {
-    fn above(&self) -> Option<Layer> {
-        match self {
-            Layer::Primary => None,
-            Layer::Secondary => Some(Layer::Primary),
-            Layer::Tertiary => Some(Layer::Secondary),
-            Layer::Quaternary => Some(Layer::Tertiary),
-        }
-    }
-}
-
 /// What a Send answers.
 pub struct PendingSend {
     pub address: Address,
@@ -223,16 +208,7 @@ impl SendsRequests for RunningNexus {
             .as_ref()
             .and_then(|result| result.as_ref().ok())
             .cloned();
-        let recipient = match &send.recipient {
-            Recipient::Address(address) => Some(address.clone()),
-            Recipient::Up => sender.as_ref().and_then(|sender| {
-                sender.layer.above().map(|layer| Address {
-                    aspect: sender.aspect.clone(),
-                    topic: sender.topic.clone(),
-                    layer,
-                })
-            }),
-        };
+        let recipient = Some(send.recipient.clone());
         let mut answer = (|| -> SendAnswer {
             let _turn = self
                 .dispatch_gate
@@ -240,11 +216,11 @@ impl SendsRequests for RunningNexus {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             // The recipient's topic is input, checked before anything else:
             // an uncapitalized camelCase identifier, kept as written.
-            if let Recipient::Address(address) = &send.recipient {
+            {
                 use crate::launching::NamesTopic;
-                if !address.topic.as_str().is_camel_case_topic() {
+                if !send.recipient.topic.as_str().is_camel_case_topic() {
                     return PrivateSendResponse::Refused(Refusal::TopicRefused(
-                        address.topic.clone(),
+                        send.recipient.topic.clone(),
                     ))
                     .into();
                 }
@@ -286,17 +262,7 @@ impl SendsRequests for RunningNexus {
             } else {
                 flow_ethos::Delivery::Queue
             };
-            let recipient = match send.recipient {
-                Recipient::Address(address) => address,
-                Recipient::Up => match sender.layer.above() {
-                    Some(layer) => Address {
-                        aspect: sender.aspect.clone(),
-                        topic: sender.topic.clone(),
-                        layer,
-                    },
-                    None => return PrivateSendResponse::Refused(Refusal::NoneAbove).into(),
-                },
-            };
+            let recipient = send.recipient.clone();
             let message = match self.store.resolve_sendable_message(
                 &sender,
                 &recipient,
@@ -469,14 +435,10 @@ impl SendsRequests for RunningNexus {
     }
 }
 
-/// The effort a seat of one Address runs at: medium everywhere, low for an
-/// OpenAI Quaternary.
+/// The effort a seat of one Address runs at: its model's.
 pub trait ChoosesEffort {
     fn effort_of(address: &Address) -> &'static str {
-        match (&address.layer, &address.aspect) {
-            (Layer::Quaternary, Aspect::Mind | Aspect::Field) => "low",
-            _ => "medium",
-        }
+        address.model.effort()
     }
 }
 
@@ -1003,6 +965,13 @@ impl RunningNexus {
         let Some(peer) = peer else {
             return Response::Refused(Refusal::unidentified(Process { pid: 0, started: 0 }));
         };
+        // A restart holds the Address: no seat binds to it meanwhile.
+        if !matches!(
+            crate::store::restart::RecordsRestarts::restart_at(&self.store, &address),
+            Ok(None)
+        ) {
+            return Response::Refused(Refusal::Locked);
+        }
         let unidentified = || Response::Refused(Refusal::unidentified(peer.clone()));
         if !FlowStore::process_is_live(peer) {
             return unidentified();
@@ -1128,7 +1097,6 @@ impl RunningNexus {
         let binding = meta_signal_flow::FlowBinding {
             flow_id: flow_id.clone(),
             aspect: address.aspect.clone(),
-            power_level: Self::power_of(&address.layer),
             model_name: model_name.clone(),
             harness_kind: harness_kind.clone(),
             native_session_id: native_session_id.clone(),
@@ -1143,7 +1111,6 @@ impl RunningNexus {
         let role = Caller {
             flow_id: flow_id.clone(),
             aspect: address.aspect.clone(),
-            power_level: Self::power_of(&address.layer),
             model_name,
         };
         match self.verified_seat_node(&seat.herdr_session_name, &address, &binding) {
@@ -1286,6 +1253,15 @@ impl CompletesDirectSends for RunningNexus {
         if !matches!(self.store.outstanding_delivery(address), Ok(None))
             || flow_id.as_ref().is_some_and(|flow_id| {
                 !matches!(self.store.address_hold(flow_id), Ok(None))
+                    // A restart holds the Address: the request queues for
+                    // the resumed seat.
+                    || !matches!(
+                        crate::store::restart::RecordsRestarts::restart_record(
+                            &self.store,
+                            flow_id
+                        ),
+                        Ok(None)
+                    )
                     || (!matches!(self.store.past_threshold(flow_id), Ok(false))
                         && !crate::waking::NotesRefreshRefusals::holds(
                             &self.refresh_refusals,

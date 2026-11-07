@@ -23,13 +23,14 @@
 
 use crate::RunningNexus;
 use crate::generated::operation::{Operation, Outcome, Record_Data, Record_Data_Context_Data};
+use crate::model::RunsModel;
 use crate::performing::Performs;
 use crate::store::compaction::{Compaction, Investigation, RecordsCompactions};
 use crate::store::context::RecordsContextSize;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use crate::waking::ReadsClaudeDelivery;
-use signal_flow::{Address, Aspect, FlowNode, HarnessKind, Layer};
+use signal_flow::{Address, Aspect, FlowNode, HarnessKind};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -255,7 +256,7 @@ impl RendersCompactionWarning for CompactionWarning<'_> {
     }
 }
 
-/// An Address as a title writes it: `{ Mind flow Secondary }`.
+/// An Address as a title writes it: `{ Mind flow Sol }`.
 pub trait WritesSeat {
     fn seat_text(&self) -> String;
 }
@@ -267,13 +268,7 @@ impl WritesSeat for Address {
             Aspect::Mind => "Mind",
             Aspect::Field => "Field",
         };
-        let layer = match self.layer {
-            Layer::Primary => "Primary",
-            Layer::Secondary => "Secondary",
-            Layer::Tertiary => "Tertiary",
-            Layer::Quaternary => "Quaternary",
-        };
-        format!("{{ {aspect} {} {layer} }}", self.topic)
+        format!("{{ {aspect} {} {} }}", self.topic, self.model.name())
     }
 }
 
@@ -451,7 +446,7 @@ mod tests {
         ClaudeCompaction, CodexContextSignal, CompactionWarning, ReadsClaudeCompactions,
         ReadsCodexContextSignal, RendersCompactionWarning, WritesTranscriptTime,
     };
-    use signal_flow::{Address, Aspect, HarnessKind, Layer};
+    use signal_flow::{Address, Aspect, HarnessKind, Model};
     use std::io::Write;
 
     fn boundary(uuid: &str, trigger: &str, timestamp: &str) -> String {
@@ -575,7 +570,7 @@ mod tests {
         let address = Address {
             aspect: Aspect::Mind,
             topic: "flow".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         let transcript = std::path::PathBuf::from("/home/li/.claude/projects/p/s.jsonl");
         let text = CompactionWarning {
@@ -588,7 +583,7 @@ mod tests {
         }
         .text();
         assert!(text.starts_with(
-            "Flow warning: flow 5a4d0b ({ Mind flow Secondary }) compacted its context at 219141 tokens while it kept working without being given more work."
+            "Flow warning: flow 5a4d0b ({ Mind flow Sol }) compacted its context at 219141 tokens while it kept working without being given more work."
         ));
         assert!(text.contains("Its transcript is /home/li/.claude/projects/p/s.jsonl."));
         assert!(!text.contains("Investigate"));

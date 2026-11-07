@@ -14,7 +14,6 @@ pub mod delivery;
 pub mod events;
 pub(crate) mod launch_cleanup;
 pub(crate) mod logical_delivery;
-pub(crate) mod message_v41;
 pub(crate) mod metaflow;
 pub(crate) mod metaflow_declaration;
 pub(crate) mod nexus_configuration;
@@ -22,15 +21,12 @@ pub(crate) mod opened_thread;
 pub(crate) mod queue_delivery;
 pub mod reminder;
 pub(crate) mod repair;
+pub(crate) mod restart;
 pub(crate) mod send_call;
 pub(crate) mod send_outcome;
 pub(crate) mod send_server;
-pub(crate) mod send_v31;
-pub(crate) mod send_v32;
-pub(crate) mod send_v34;
-pub(crate) mod send_v41;
 pub(crate) mod sent;
-mod staged_upgrade;
+mod staged_open;
 pub(crate) mod successor;
 use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
@@ -39,15 +35,13 @@ use flow_ethos::State as MetaflowState;
 pub(crate) use logical_delivery::RecordsLogicalDeliveries;
 use logical_delivery::{DeclaresLogicalDeliveryTables, LogicalDeliveryTables};
 use metaflow::{TakesLaunchAddress, WritesTakenAddress};
-use metaflow_declaration::UpgradesMetaflowDeclarations;
-use nexus_configuration::{
-    DescribesNexusConfigurationTable, StoredMetaNexusConfiguration, UpgradesNexusConfiguration,
-};
+use nexus_configuration::{DescribesNexusConfigurationTable, StoredMetaNexusConfiguration};
 use queue_delivery::{AccountsQueueDelivery, QueueDeliveryPhase};
 use queue_delivery::{DeclaresQueueDeliveryTables, QueueDeliveryTables};
 use send_outcome::{DeclaresSendOutcomeTables, SendOutcomeTables};
-use staged_upgrade::{StagedUpgrade, StagesUpgrade, UpgradeScope};
+use staged_open::{StagedOpen, StagesOpen};
 
+use crate::model::RunsModel;
 use delivery::{DeliveryConfiguration, DeliveryTables, RecordsDeliveries};
 use std::{
     fs,
@@ -56,7 +50,6 @@ use std::{
     sync::{Arc, Condvar, Mutex},
 };
 
-use message_v41::{MetaflowV41, RequestV41};
 use meta_signal_flow::{
     ConfigurationChange, ConfigurationSnapshot, ConfigureCounters, ConfigureHarnessFlags,
     ConfigureLeaveOut, ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureOutcome,
@@ -64,21 +57,19 @@ use meta_signal_flow::{
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, Decision, Engine, EngineOpen, EngineRecord, FamilyName, KeyedMutation,
-    MemoryDefinition, MemoryUpgrades, MemoryVersion, QueryPlan, RecordKey, Retraction, SchemaHash,
-    SchemaVersion, TableDescriptor, TableName, TableReference, TableRegistration, UpgradeFrom,
-    UpgradeOutcome,
+    Assertion, Engine, EngineOpen, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition,
+    MemoryVersion, QueryPlan, RecordKey, Retraction, SchemaHash, SchemaVersion, TableDescriptor,
+    TableName, TableReference, TableRegistration,
 };
 #[cfg(test)]
 use signal_flow::Request;
 use signal_flow::{
     Address, Aspect, Caller, CallerResolutionRejection, ComposedLaunch, EndpointSelection,
-    FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding, HerdrRoute,
-    HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
-    LaunchProfile, Launched, Layer, LeaveOut, Lock, Metaflow, NativeLaunchBinding,
-    NativeLaunchIntent, NativeTranscriptBoundary, Origin, PowerLevel, Process,
+    FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
+    LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, Launched, LeaveOut,
+    Lock, Metaflow, Model, NativeLaunchBinding, NativeLaunchIntent, Origin, Process,
     PromptDeliveryIntent, PromptDeliveryResult, Query, RecipientResolutionRejection,
-    RegistrationAcknowledgement, Remembering, ReplaceRejection, Replaced, Response, RouteReadiness,
+    RegistrationAcknowledgement, ReplaceRejection, Replaced, Response, RouteReadiness,
     StartRejection,
 };
 
@@ -95,8 +86,6 @@ const FLOW_RUNTIME_CONFIGURATION_TABLE_NAME: TableName =
 const FLOW_LAUNCH_OUTCOME_TABLE_NAME: TableName = TableName::new("flow_nexus_launch_outcomes");
 const FLOW_REPLACEMENT_TABLE_NAME: TableName = TableName::new("flow_nexus_replacements");
 const FLOW_ROLE_TABLE_NAME: TableName = TableName::new("flow_nexus_roles");
-const FLOW_QUARANTINED_LAUNCH_ATTEMPT_TABLE_NAME: TableName =
-    TableName::new("flow_nexus_quarantined_launch_attempts");
 const METAFLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_metaflows");
 const METAFLOW_PROCESS_TABLE_NAME: TableName = TableName::new("flow_nexus_metaflow_processes");
 const METAFLOW_LOCK_TABLE_NAME: TableName = TableName::new("flow_nexus_metaflow_locks");
@@ -113,7 +102,7 @@ const META_INVESTIGATION_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_investigation_configuration");
 const META_INVESTIGATION_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-investigation-configuration";
 const META_INVESTIGATION_CONFIGURATION_SCHEMA: &str =
-    "flow-nexus-meta-investigation-configuration-v1";
+    "flow-nexus-meta-investigation-configuration-v2";
 const META_DEFAULT_MINUTES_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_default_minutes_configuration");
 const META_DEFAULT_MINUTES_CONFIGURATION_FAMILY: &str =
@@ -124,60 +113,28 @@ const META_HARNESS_FLAGS_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_harness_flags_configuration");
 const META_HARNESS_FLAGS_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-harness-flags-configuration";
 const META_HARNESS_FLAGS_CONFIGURATION_SCHEMA: &str =
-    "flow-nexus-meta-harness-flags-configuration-v1";
+    "flow-nexus-meta-harness-flags-configuration-v2";
 const META_HEARTBEAT_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_heartbeat_configuration");
 const META_HEARTBEAT_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-heartbeat-configuration";
-const META_HEARTBEAT_CONFIGURATION_SCHEMA: &str = "flow-nexus-meta-heartbeat-configuration-v1";
+const META_HEARTBEAT_CONFIGURATION_SCHEMA: &str = "flow-nexus-meta-heartbeat-configuration-v2";
+const META_PROTECTED_ADDRESS_CONFIGURATION_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_meta_protected_address_configuration");
+const META_PROTECTED_ADDRESS_CONFIGURATION_FAMILY: &str =
+    "flow-nexus-meta-protected-address-configuration";
+const META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA: &str =
+    "flow-nexus-meta-protected-address-configuration-v1";
+/// The families 0.53.1 added. A store 0.53.0 wrote holds every other
+/// family and none of these; it is opened, and each is registered empty.
+const ADDED_IN_0531: &[&str] = &["flow_nexus_meta_protected_address_configuration"];
 const HEARTBEAT_STANDING_TABLE_NAME: TableName = TableName::new("flow_nexus_heartbeat_standings");
 const HEARTBEAT_STANDING_FAMILY: &str = "flow-nexus-heartbeat-standing";
-const HEARTBEAT_STANDING_SCHEMA: &str = "flow-nexus-heartbeat-standing-v1";
+const HEARTBEAT_STANDING_SCHEMA: &str = "flow-nexus-heartbeat-standing-v2";
 /// The default Minutes a new Memory holds until Configure declares one:
 /// the Minutes Flow gives a request that carries none of its own.
 pub(crate) const SEEDED_DEFAULT_MINUTES: i64 = 30;
 const META_LEAVE_OUT_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_leave_out_configuration");
-/// The tables an older store kept and an open drops: the meta
-/// configuration's topic modules, which meta-signal-flow 20.0.0 no longer
-/// configures, and the system-prompt bundle 0.34.6 kept for each Address,
-/// both dropped from 0.35.0 on; and the fresh-wake marks, which chose
-/// between resuming a sleeping flow and waking it fresh, dropped from
-/// 0.35.22 on, since every wake is fresh; and the thresholds kept one per
-/// layer with a handover, dropped from 0.35.25 on, since a threshold
-/// belongs to a model and no flow writes a handover. Each is named with the
-/// family identity it was registered under.
-const RETIRED_TABLES: &[(&str, &str, &str)] = &[
-    (
-        "flow_nexus_meta_module_configuration",
-        "flow-nexus-meta-module-configuration",
-        "flow-nexus-meta-module-configuration-v1",
-    ),
-    (
-        "flow_nexus_start_bundles",
-        "flow-nexus-start-bundle",
-        "flow-nexus-start-bundle-v1",
-    ),
-    (
-        "flow_nexus_metaflow_refreshes",
-        "flow-nexus-metaflow-refresh",
-        "flow-nexus-metaflow-refresh-v1",
-    ),
-    (
-        "flow_nexus_meta_threshold_configuration",
-        "flow-nexus-meta-threshold-configuration",
-        "flow-nexus-meta-threshold-configuration-v1",
-    ),
-    (
-        "flow_nexus_landings",
-        "flow-nexus-landing",
-        "flow-nexus-landing-v1",
-    ),
-    (
-        "flow_nexus_refresh_due",
-        "flow-nexus-refresh-due",
-        "flow-nexus-refresh-due-v1",
-    ),
-];
 /// The tables a configuration-only store holds, all of them.
 const CONFIGURATION_ONLY_TABLES: &[&str] = &[
     "flow_nexus_state",
@@ -186,8 +143,17 @@ const CONFIGURATION_ONLY_TABLES: &[&str] = &[
     "flow_nexus_delivery_configuration",
     "flow_nexus_meta_nexus_configuration",
     "flow_nexus_meta_model_configuration",
+    "flow_nexus_meta_leave_out_configuration",
+    "flow_nexus_meta_send_server_configuration",
+    "flow_nexus_meta_model_threshold_configuration",
+    "flow_nexus_meta_investigation_configuration",
+    "flow_nexus_meta_default_minutes_configuration",
+    "flow_nexus_meta_harness_flags_configuration",
+    "flow_nexus_meta_heartbeat_configuration",
+    "flow_nexus_meta_metaflow_configuration",
+    "flow_nexus_meta_protected_address_configuration",
 ];
-/// The tables every running store holds.
+/// The tables a running store holds, all of them.
 const RUNNING_TABLES: &[&str] = &[
     "flow_nexus_flows",
     "flow_nexus_state",
@@ -202,27 +168,13 @@ const RUNNING_TABLES: &[&str] = &[
     "flow_nexus_launch_outcomes",
     "flow_nexus_replacements",
     "flow_nexus_roles",
-    "flow_nexus_quarantined_launch_attempts",
     "flow_nexus_deliveries",
     "flow_nexus_pane_leases",
     "flow_nexus_delivery_configuration",
     "flow_nexus_meta_nexus_configuration",
     "flow_nexus_meta_model_configuration",
     "flow_nexus_flow_events",
-];
-const RUNNING_ADDED_TABLES: &[&str] = &["flow_nexus_native_owner_proofs"];
-// A running store keeps each flow's context size from 0.28.0 on, and
-// each launch's Address hold from 0.32.0 on; a running store written
-// before either opens, and its first full open adds the table, as
-// the first full open of a configuration-only store adds the running
-// tables.
-// A store keeps its metaflows' default leave-outs from 0.35.0 on, the
-// Codex thread each launch opened from 0.35.6 on, the send tool's calls from 0.35.7
-// on, the cleanup of each interrupted launch from 0.35.11 on, and
-// its trusted send servers and queued-delivery accounting from
-// 0.35.19 on. It records each ordinary Send outcome from 0.38.1 on.
-/// The tables a running store holds once this Flow has opened it.
-const ADDED_LATER_TABLES: &[&str] = &[
+    "flow_nexus_native_owner_proofs",
     "flow_nexus_flow_context_sizes",
     "flow_nexus_address_holds",
     "flow_nexus_meta_leave_out_configuration",
@@ -250,23 +202,16 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_simplified_reply_bindings",
     "flow_nexus_logical_delivery_purposes",
     "flow_nexus_heartbeat_standings",
-];
-/// The tables a configuration-only store may hold beside its own, each
-/// added by a later Flow.
-const CONFIGURATION_ONLY_ADDED_TABLES: &[&str] = &[
-    "flow_nexus_meta_leave_out_configuration",
-    "flow_nexus_meta_send_server_configuration",
-    "flow_nexus_meta_model_threshold_configuration",
-    "flow_nexus_meta_investigation_configuration",
-    "flow_nexus_meta_default_minutes_configuration",
-    "flow_nexus_meta_harness_flags_configuration",
-    "flow_nexus_meta_heartbeat_configuration",
-    "flow_nexus_meta_metaflow_configuration",
+    "flow_nexus_restarts",
+    "flow_nexus_seat_births",
+    "flow_nexus_meta_protected_address_configuration",
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
 // identity and its identity record must both match before a path is resumed.
-const FLOW_SCHEMA_VERSION: u32 = 2;
+// Flow Memory v3 begins with 0.52.0, which opens no earlier store.
+// Restart (0.53.0) adds one family, RestartRecord; 0.53.0 also opens no earlier store.
+pub(crate) const FLOW_SCHEMA_VERSION: u32 = 3;
 const FLOW_MEMORY_SCHEMA_VERSION: u64 = 2;
 const STATE_KEY: &str = "identity";
 const CONFIGURATION_KEY: &str = "configured";
@@ -669,328 +614,11 @@ impl EngineRecord for StoredMetaflow {
 
 impl MemoryDefinition for StoredMetaflow {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(6)
+        MemoryVersion::new(7)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-metaflow-v6")
-    }
-}
-
-/// The metaflow shape Flow 0.41 stored, before Result carried its typed
-/// answerable request. Historical Results are preserved by the upgrade as
-/// unresolved payloads; the upgrade never invents an Order for them.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredMetaflowV5 {
-    metaflow: MetaflowV41,
-}
-
-impl EngineRecord for StoredMetaflowV5 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
-    }
-}
-
-impl MemoryDefinition for StoredMetaflowV5 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(5)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-metaflow-v5")
-    }
-}
-
-impl UpgradeFrom<StoredMetaflowV5> for StoredMetaflow {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: StoredMetaflowV5) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            metaflow: previous.metaflow.into(),
-        })
-    }
-}
-
-/// Queue shape from before logical-delivery identities. Keep this mirror
-/// distinct: the new QueueEntry has a different archived representation.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct QueuedRequestBeforeLogicalId {
-    sent_by: flow_ethos::SentBy,
-    request: RequestV41,
-}
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum SentByBeforeFlow {
-    Sender(flow_ethos::Sender),
-    Unknown,
-}
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct QueuedRequestBeforeFlow {
-    sent_by: SentByBeforeFlow,
-    request: RequestV41,
-}
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct MetaflowBeforeFlow {
-    address: Address,
-    state: MetaflowState,
-    past: Vec<String>,
-    queue: Vec<QueuedRequestBeforeFlow>,
-}
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct MetaflowBeforeLogicalIds {
-    address: Address,
-    state: MetaflowState,
-    past: Vec<String>,
-    queue: Vec<QueuedRequestBeforeLogicalId>,
-}
-trait LogicalQueueConvertible {
-    fn into_logical_queue(self, address: &Address) -> Vec<flow_ethos::QueueEntry>;
-}
-impl LogicalQueueConvertible for Vec<QueuedRequestBeforeLogicalId> {
-    fn into_logical_queue(self, address: &Address) -> Vec<flow_ethos::QueueEntry> {
-        self.into_iter()
-            .enumerate()
-            .map(|(index, old)| flow_ethos::QueueEntry {
-                logical_delivery_id: format!(
-                    "legacy:{}:{index:016x}",
-                    FlowStore::address_record_key(address)
-                ),
-                sent_by: old.sent_by,
-                delivery: flow_ethos::Delivery::Queue,
-                message: flow_ethos::Message::Soft(old.request.into()),
-            })
-            .collect()
-    }
-}
-trait LogicalMetaflowConvertible {
-    fn into_logical_metaflow(self) -> Metaflow;
-}
-impl LogicalMetaflowConvertible for MetaflowBeforeLogicalIds {
-    fn into_logical_metaflow(self) -> Metaflow {
-        let queue = self.queue.into_logical_queue(&self.address);
-        Metaflow {
-            address: self.address,
-            state: self.state,
-            past: self.past,
-            queue,
-        }
-    }
-}
-impl LogicalMetaflowConvertible for MetaflowBeforeFlow {
-    fn into_logical_metaflow(self) -> Metaflow {
-        let queue = self
-            .queue
-            .into_iter()
-            .map(|entry| QueuedRequestBeforeLogicalId {
-                sent_by: match entry.sent_by {
-                    SentByBeforeFlow::Sender(sender) => flow_ethos::SentBy::Sender(sender),
-                    SentByBeforeFlow::Unknown => flow_ethos::SentBy::Unknown,
-                },
-                request: entry.request,
-            })
-            .collect();
-        MetaflowBeforeLogicalIds {
-            address: self.address,
-            state: self.state,
-            past: self.past,
-            queue,
-        }
-        .into_logical_metaflow()
-    }
-}
-
-/// The last metaflow shape before stable logical identities, stored at
-/// memory v4. Historical queue entries retain their payload and sender,
-/// but receive deterministic migration IDs and are not linked to attempts.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredMetaflowV3 {
-    metaflow: MetaflowBeforeFlow,
-}
-
-impl EngineRecord for StoredMetaflowV3 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
-    }
-}
-
-impl MemoryDefinition for StoredMetaflowV3 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-metaflow-v3")
-    }
-}
-
-impl UpgradeFrom<StoredMetaflowV3> for StoredMetaflow {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: StoredMetaflowV3) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            metaflow: (previous.metaflow).into_logical_metaflow(),
-        })
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredMetaflowV4 {
-    metaflow: MetaflowBeforeLogicalIds,
-}
-impl EngineRecord for StoredMetaflowV4 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
-    }
-}
-impl MemoryDefinition for StoredMetaflowV4 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
-    }
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-metaflow-v4")
-    }
-}
-impl UpgradeFrom<StoredMetaflowV4> for StoredMetaflow {
-    type Refusal = std::convert::Infallible;
-    fn upgrade_from(previous: StoredMetaflowV4) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            metaflow: (previous.metaflow).into_logical_metaflow(),
-        })
-    }
-}
-
-/// A metaflow's state as Flow kept it before 0.35.22, when a metaflow
-/// could be ended. It is read only by the upgrades of the metaflows and of
-/// the Address holds that keep a metaflow as found.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) enum StateBeforeIdle {
-    Awake(String),
-    Asleep,
-    Ended,
-}
-
-/// A topic never dies; it goes idle. An ended metaflow is carried Asleep,
-/// its past and its queue kept.
-impl From<StateBeforeIdle> for MetaflowState {
-    fn from(previous: StateBeforeIdle) -> Self {
-        match previous {
-            StateBeforeIdle::Awake(flow_id) => Self::Awake(flow_id),
-            StateBeforeIdle::Asleep | StateBeforeIdle::Ended => Self::Asleep,
-        }
-    }
-}
-
-/// A metaflow as Flow 0.35.7 to 0.35.21 kept it, its state possibly Ended.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MetaflowBeforeIdle {
-    address: Address,
-    state: StateBeforeIdle,
-    past: Vec<String>,
-    queue: Vec<QueuedRequestBeforeFlow>,
-}
-
-impl From<MetaflowBeforeIdle> for Metaflow {
-    fn from(previous: MetaflowBeforeIdle) -> Self {
-        (MetaflowBeforeFlow {
-            address: previous.address,
-            state: previous.state.into(),
-            past: previous.past,
-            queue: previous.queue,
-        })
-        .into_logical_metaflow()
-    }
-}
-
-/// A metaflow as Flow kept it before 0.35.7, its queue of bare requests
-/// with no sender. It is read only by the v1 family upgrades of the
-/// metaflows and of the Address holds that keep a metaflow as found.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MetaflowBeforeSenders {
-    address: Address,
-    state: StateBeforeIdle,
-    past: Vec<String>,
-    queue: Vec<RequestV41>,
-}
-
-/// Each request queued before Flow kept senders is carried with its sender
-/// Unknown, and an ended metaflow Asleep; nothing else changes.
-impl From<MetaflowBeforeSenders> for Metaflow {
-    fn from(previous: MetaflowBeforeSenders) -> Self {
-        (MetaflowBeforeFlow {
-            address: previous.address,
-            state: previous.state.into(),
-            past: previous.past,
-            queue: previous
-                .queue
-                .into_iter()
-                .map(|request| QueuedRequestBeforeFlow {
-                    sent_by: SentByBeforeFlow::Unknown,
-                    request,
-                })
-                .collect(),
-        })
-        .into_logical_metaflow()
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredMetaflowV1 {
-    metaflow: MetaflowBeforeSenders,
-}
-
-impl EngineRecord for StoredMetaflowV1 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
-    }
-}
-
-impl MemoryDefinition for StoredMetaflowV1 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-metaflow-v1")
-    }
-}
-
-impl UpgradeFrom<StoredMetaflowV1> for StoredMetaflow {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: StoredMetaflowV1) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            metaflow: previous.metaflow.into(),
-        })
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredMetaflowV2 {
-    metaflow: MetaflowBeforeIdle,
-}
-
-impl EngineRecord for StoredMetaflowV2 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
-    }
-}
-
-impl MemoryDefinition for StoredMetaflowV2 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(2)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-metaflow-v2")
-    }
-}
-
-impl UpgradeFrom<StoredMetaflowV2> for StoredMetaflow {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: StoredMetaflowV2) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            metaflow: previous.metaflow.into(),
-        })
+        SchemaHash::for_label("flow-nexus-metaflow-v7")
     }
 }
 
@@ -1008,6 +636,16 @@ impl EngineRecord for StoredMetaflowProcess {
     }
 }
 
+impl MemoryDefinition for StoredMetaflowProcess {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-metaflow-process-v2")
+    }
+}
+
 /// At most one lock is held for a recipient address.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredMetaflowLock {
@@ -1020,7 +658,17 @@ impl EngineRecord for StoredMetaflowLock {
     }
 }
 
-/// The model one layer and aspect runs, keyed by both.
+impl MemoryDefinition for StoredMetaflowLock {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-metaflow-lock-v2")
+    }
+}
+
+/// The native model one Model runs, keyed by the Model.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredMetaModelConfiguration {
     model: ConfigureModel,
@@ -1028,69 +676,17 @@ pub(crate) struct StoredMetaModelConfiguration {
 
 impl EngineRecord for StoredMetaModelConfiguration {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::model_record_key(
-            &self.model.layer,
-            &self.model.aspect,
-        ))
+        RecordKey::new(FlowStore::model_record_key(&self.model.model))
     }
 }
 
 impl MemoryDefinition for StoredMetaModelConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(2)
+        MemoryVersion::new(3)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-meta-model-configuration-v2")
-    }
-}
-
-/// A layer's model as Flow kept it before 0.35.19, keyed by its Layer
-/// alone and naming no aspect. It is read only by the v1-to-v2 upgrade of
-/// the model family.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ModelBeforeAspect {
-    layer: Layer,
-    native: String,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredMetaModelConfigurationV1 {
-    model: ModelBeforeAspect,
-}
-
-impl EngineRecord for StoredMetaModelConfigurationV1 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::layer_key(&self.model.layer))
-    }
-}
-
-impl MemoryDefinition for StoredMetaModelConfigurationV1 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-meta-model-configuration-v1")
-    }
-}
-
-/// A layer's one model was the Psyche seat's: before 0.35.19 every
-/// configured model was a Claude model and only Psyche runs on Claude. Each
-/// is carried whole as that layer's Psyche model; Mind and Field have no
-/// model until one is declared for them.
-impl UpgradeFrom<StoredMetaModelConfigurationV1> for StoredMetaModelConfiguration {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: StoredMetaModelConfigurationV1) -> Decision<Self, Self::Refusal> {
-        let ModelBeforeAspect { layer, native } = previous.model;
-        Decision::Ready(Self {
-            model: ConfigureModel {
-                layer,
-                aspect: Aspect::Psyche,
-                native,
-            },
-        })
+        SchemaHash::for_label("flow-nexus-meta-model-configuration-v3")
     }
 }
 
@@ -1106,7 +702,6 @@ impl DescribesModelTable for StoredMetaModelConfiguration {
             FamilyName::new("flow-nexus-meta-model-configuration"),
             StoredMetaModelConfiguration::schema_hash(),
         )
-        .with_predecessor::<StoredMetaModelConfigurationV1>()
     }
 }
 
@@ -1145,6 +740,16 @@ struct StoredMetaInvestigationConfiguration {
 impl EngineRecord for StoredMetaInvestigationConfiguration {
     fn record_key(&self) -> RecordKey {
         RecordKey::new("investigation")
+    }
+}
+
+impl MemoryDefinition for StoredMetaInvestigationConfiguration {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(META_INVESTIGATION_CONFIGURATION_SCHEMA)
     }
 }
 
@@ -1203,7 +808,7 @@ impl EngineRecord for StoredMetaHarnessFlagsConfiguration {
 
 impl MemoryDefinition for StoredMetaHarnessFlagsConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
+        MemoryVersion::new(2)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -1237,6 +842,16 @@ impl EngineRecord for StoredMetaHeartbeatConfiguration {
     }
 }
 
+impl MemoryDefinition for StoredMetaHeartbeatConfiguration {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(META_HEARTBEAT_CONFIGURATION_SCHEMA)
+    }
+}
+
 trait DescribesHeartbeatTable {
     fn descriptor() -> TableDescriptor<StoredMetaHeartbeatConfiguration>;
 }
@@ -1247,6 +862,42 @@ impl DescribesHeartbeatTable for StoredMetaHeartbeatConfiguration {
             META_HEARTBEAT_CONFIGURATION_TABLE_NAME,
             FamilyName::new(META_HEARTBEAT_CONFIGURATION_FAMILY),
             SchemaHash::for_label(META_HEARTBEAT_CONFIGURATION_SCHEMA),
+        )
+    }
+}
+
+/// One protected Address, one row per Address; none by default.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredMetaProtectedAddressConfiguration {
+    address: Address,
+}
+
+impl EngineRecord for StoredMetaProtectedAddressConfiguration {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.address))
+    }
+}
+
+impl MemoryDefinition for StoredMetaProtectedAddressConfiguration {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA)
+    }
+}
+
+trait DescribesProtectedAddressTable {
+    fn descriptor() -> TableDescriptor<StoredMetaProtectedAddressConfiguration>;
+}
+
+impl DescribesProtectedAddressTable for StoredMetaProtectedAddressConfiguration {
+    fn descriptor() -> TableDescriptor<StoredMetaProtectedAddressConfiguration> {
+        TableDescriptor::new(
+            META_PROTECTED_ADDRESS_CONFIGURATION_TABLE_NAME,
+            FamilyName::new(META_PROTECTED_ADDRESS_CONFIGURATION_FAMILY),
+            SchemaHash::for_label(META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA),
         )
     }
 }
@@ -1281,9 +932,10 @@ impl EngineRecord for StoredHeartbeatStanding {
         RecordKey::new(FlowStore::address_record_key(&self.address))
     }
 }
+
 impl MemoryDefinition for StoredHeartbeatStanding {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
+        MemoryVersion::new(2)
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(HEARTBEAT_STANDING_SCHEMA)
@@ -1320,101 +972,30 @@ impl EngineRecord for StoredMetaLeaveOutConfiguration {
 
 impl MemoryDefinition for StoredMetaLeaveOutConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(2)
+        MemoryVersion::new(3)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v2")
+        SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v3")
     }
 }
 
-/// A metaflow's default leave-outs as Flow kept them before 0.35.19, keyed
-/// by its Address alone and naming no harness. It is read only by the
-/// v1-to-v2 upgrade of the leave-out family.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LeaveOutDefaultBeforeHarness {
-    address: Address,
-    leave_outs: Vec<LeaveOut>,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredMetaLeaveOutConfigurationV1 {
-    leave_out: LeaveOutDefaultBeforeHarness,
-}
-
-impl EngineRecord for StoredMetaLeaveOutConfigurationV1 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.leave_out.address))
-    }
-}
-
-/// The model a seat runs is the one configured for its Address's layer and
-/// aspect, named exactly; nothing else is launched.
+/// The native model a seat runs is the one configured for its Address's
+/// Model, named exactly; nothing else is launched.
 pub(crate) trait NamesConfiguredModel {
-    /// The model configured for the Address's layer and aspect, if any.
+    /// The native model configured for the Address's Model, if any.
     fn configured_model(&self, address: &Address) -> Result<Option<String>, StoreError>;
 }
 
 impl NamesConfiguredModel for FlowStore {
     fn configured_model(&self, address: &Address) -> Result<Option<String>, StoreError> {
-        let key = RecordKey::new(FlowStore::model_record_key(&address.layer, &address.aspect));
+        let key = RecordKey::new(FlowStore::model_record_key(&address.model));
         Ok(self
             .engine
             .match_records(QueryPlan::key(self.meta_configuration_tables.models, key))?
             .records()
             .first()
             .map(|stored| stored.model.native.clone()))
-    }
-}
-
-impl MemoryDefinition for StoredMetaLeaveOutConfigurationV1 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1")
-    }
-}
-
-/// Why a v1 leave-out default names no one harness to carry it under.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LeaveOutUpgradeRefusal {
-    /// Its leave-outs belong to more than one harness.
-    MixedHarnesses,
-    /// It names no leave-out, so no harness is derived.
-    NoHarness,
-}
-
-/// A v1 default is carried whole under the one harness every leave-out it
-/// names belongs to; a default naming leave-outs of both harnesses, or
-/// none, is refused, and the upgrade with it.
-impl UpgradeFrom<StoredMetaLeaveOutConfigurationV1> for StoredMetaLeaveOutConfiguration {
-    type Refusal = LeaveOutUpgradeRefusal;
-
-    fn upgrade_from(previous: StoredMetaLeaveOutConfigurationV1) -> Decision<Self, Self::Refusal> {
-        use crate::lean::BelongsToHarness;
-        let LeaveOutDefaultBeforeHarness {
-            address,
-            leave_outs,
-        } = previous.leave_out;
-        let Some(first) = leave_outs.first() else {
-            return Decision::Refused(LeaveOutUpgradeRefusal::NoHarness);
-        };
-        let harness_kind = first.harness();
-        if leave_outs
-            .iter()
-            .any(|leave_out| leave_out.harness() != harness_kind)
-        {
-            return Decision::Refused(LeaveOutUpgradeRefusal::MixedHarnesses);
-        }
-        Decision::Ready(Self {
-            leave_out: ConfigureLeaveOut {
-                address,
-                harness_kind,
-                leave_outs,
-            },
-        })
     }
 }
 
@@ -1430,7 +1011,6 @@ impl DescribesLeaveOutTable for StoredMetaLeaveOutConfiguration {
             FamilyName::new("flow-nexus-meta-leave-out-configuration"),
             StoredMetaLeaveOutConfiguration::schema_hash(),
         )
-        .with_predecessor::<StoredMetaLeaveOutConfigurationV1>()
     }
 }
 
@@ -1485,81 +1065,7 @@ impl MemoryDefinition for FlowRecord {
     }
 }
 
-/// Who asked for a launch, as signal-flow 16.0.0 archived it: the calling
-/// flow, its session and its turn, as the caller named them. A flow row,
-/// an outcome and a launch attempt written before 17.0.0 carry it.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct OriginClueBeforeOrigin {
-    flow_id: String,
-    session_id: String,
-    turn_id: String,
-}
-
-/// The Nexus's own wake named itself with this session; every other clue
-/// named a calling flow.
-const WAKE_ORIGIN_SESSION: &str = "flow-nexus-wake";
-
-impl From<OriginClueBeforeOrigin> for Origin {
-    fn from(clue: OriginClueBeforeOrigin) -> Self {
-        if clue.session_id == WAKE_ORIGIN_SESSION || clue.flow_id.is_empty() {
-            Self::Unbound
-        } else {
-            Self::Flow(signal_flow::FlowOrigin {
-                flow_id: clue.flow_id,
-                session_id: clue.session_id,
-            })
-        }
-    }
-}
-
-/// A flow row as Flow 0.34 archived it, its origin the clue the caller
-/// named. It is read only by the v5-to-v6 family upgrade.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FlowRecordV5 {
-    flow_id: String,
-    flow_type: String,
-    origin: OriginClueBeforeOrigin,
-    thread_id: Option<String>,
-    harness_kind: HarnessKind,
-    endpoint_selection: EndpointSelection,
-    lifecycle: FlowLifecycle,
-    generation: u64,
-}
-
-impl EngineRecord for FlowRecordV5 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.flow_id.clone())
-    }
-}
-
-impl MemoryDefinition for FlowRecordV5 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(5)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-flow-v5")
-    }
-}
-
-impl UpgradeFrom<FlowRecordV5> for FlowRecord {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: FlowRecordV5) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            flow_id: previous.flow_id,
-            flow_type: previous.flow_type,
-            origin: previous.origin.into(),
-            thread_id: previous.thread_id,
-            harness_kind: previous.harness_kind,
-            endpoint_selection: previous.endpoint_selection,
-            lifecycle: previous.lifecycle,
-            generation: previous.generation,
-        })
-    }
-}
-
-/// A flow's role: its aspect, power and model, keyed by its FlowId. It is
+/// A flow's role: its aspect and model, keyed by its FlowId. It is
 /// exactly what ResolveCaller answers, so the Caller is stored as it is.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct StoredRole {
@@ -1621,9 +1127,7 @@ impl EngineRecord for FlowStoreState {
     }
 }
 
-/// The socket half of the meta `Configuration`. Its archive is the one the
-/// former two-field `Configuration` record had, so a store written before
-/// the contract grew its runtime fields still reads.
+/// The socket half of the meta `Configuration`.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FlowStoreConfiguration {
     ordinary_socket_path: String,
@@ -1675,12 +1179,11 @@ impl EngineRecord for FlowStoreConfiguration {
     }
 }
 
-/// A launch attempt, and what it knows of the context its seat started
-/// with: named by module identity, or kept from a launch before 0.35.0.
+/// A launch attempt; its profile names its seat's context by module
+/// identity.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredLaunchAttempt {
     attempt: LaunchAttempt,
-    context: LaunchContext,
 }
 
 impl EngineRecord for StoredLaunchAttempt {
@@ -1691,716 +1194,11 @@ impl EngineRecord for StoredLaunchAttempt {
 
 impl MemoryDefinition for StoredLaunchAttempt {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
+        MemoryVersion::new(5)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-launch-attempt-v4")
-    }
-}
-
-/// A remembered flow as signal-flow 30.0.0 and earlier archived it in a
-/// launch profile, before a launch named its remembering as `Remembering`.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RememberedFlow {
-    pub(crate) flow_id: String,
-    pub(crate) remembering_depth: i64,
-}
-
-/// The remembering an archived launch named: the flows it named, one by
-/// one, or none.
-pub(crate) trait RemembersArchivedFlows {
-    fn remembering(self) -> Remembering;
-}
-
-impl RemembersArchivedFlows for Vec<RememberedFlow> {
-    fn remembering(self) -> Remembering {
-        if self.is_empty() {
-            return Remembering::Predecessors(0);
-        }
-        Remembering::Custom(self.into_iter().map(|flow| flow.flow_id).collect())
-    }
-}
-
-/// The v3 attempt layout, before the launch profile named its remembering
-/// as `Remembering`.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredLaunchAttemptV3 {
-    attempt: LaunchAttemptV3,
-    context: LaunchContext,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct LaunchAttemptV3 {
-    launch_request_id: String,
-    launch_profile: LaunchProfileV3,
-    prompt_sha256: String,
-    origin: Origin,
-    launch_attempt_phase: LaunchAttemptPhase,
-    native_launch_intent_option: Option<NativeLaunchIntent>,
-    native_launch_binding_option: Option<NativeLaunchBinding>,
-    registration_acknowledgement_option: Option<RegistrationAcknowledgement>,
-    prompt_delivery_intent_option: Option<PromptDeliveryIntent>,
-    prompt_delivery_result_option: Option<PromptDeliveryResult>,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct LaunchProfileV3 {
-    launch_request_id: String,
-    system_modules: Vec<String>,
-    user_modules: Vec<String>,
-    address: Address,
-    model_name: String,
-    effort: String,
-    flow_id_option: Option<String>,
-    remembered_flow_vector: Vec<RememberedFlow>,
-    herdr_session_name: String,
-    leave_outs_option: Option<Vec<LeaveOut>>,
-    flow_kind: signal_flow::FlowKind,
-    tool_set: signal_flow::ToolSet,
-    instruction_prompt: String,
-}
-
-impl EngineRecord for StoredLaunchAttemptV3 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.attempt.launch_request_id.clone())
-    }
-}
-
-impl MemoryDefinition for StoredLaunchAttemptV3 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-launch-attempt-v3")
-    }
-}
-
-impl UpgradeFrom<StoredLaunchAttemptV3> for StoredLaunchAttempt {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: StoredLaunchAttemptV3) -> Decision<Self, Self::Refusal> {
-        let attempt = previous.attempt;
-        let profile = attempt.launch_profile;
-        Decision::Ready(Self {
-            attempt: LaunchAttempt {
-                launch_request_id: attempt.launch_request_id,
-                launch_profile: LaunchProfile {
-                    launch_request_id: profile.launch_request_id,
-                    system_modules: profile.system_modules,
-                    user_modules: profile.user_modules,
-                    remembering: profile.remembered_flow_vector.remembering(),
-                    address: profile.address,
-                    model_name: profile.model_name,
-                    effort: profile.effort,
-                    flow_id_option: profile.flow_id_option,
-                    herdr_session_name: profile.herdr_session_name,
-                    leave_outs_option: profile.leave_outs_option,
-                    flow_kind: profile.flow_kind,
-                    tool_set: profile.tool_set,
-                    instruction_prompt: profile.instruction_prompt,
-                },
-                prompt_sha256: attempt.prompt_sha256,
-                origin: attempt.origin,
-                launch_attempt_phase: attempt.launch_attempt_phase,
-                native_launch_intent_option: attempt.native_launch_intent_option,
-                native_launch_binding_option: attempt.native_launch_binding_option,
-                registration_acknowledgement_option: attempt.registration_acknowledgement_option,
-                prompt_delivery_intent_option: attempt.prompt_delivery_intent_option,
-                prompt_delivery_result_option: attempt.prompt_delivery_result_option,
-            },
-            context: previous.context,
-        })
-    }
-}
-
-/// The v2 attempt layout, before the launch profile named its simplified
-/// kind and declared tool set.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredLaunchAttemptV2 {
-    attempt: LaunchAttemptV2,
-    context: LaunchContext,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct LaunchAttemptV2 {
-    launch_request_id: String,
-    launch_profile: LaunchProfileV2,
-    prompt_sha256: String,
-    origin: Origin,
-    launch_attempt_phase: LaunchAttemptPhase,
-    native_launch_intent_option: Option<NativeLaunchIntent>,
-    native_launch_binding_option: Option<NativeLaunchBinding>,
-    registration_acknowledgement_option: Option<RegistrationAcknowledgement>,
-    prompt_delivery_intent_option: Option<PromptDeliveryIntent>,
-    prompt_delivery_result_option: Option<PromptDeliveryResult>,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct LaunchProfileV2 {
-    launch_request_id: String,
-    system_modules: Vec<String>,
-    user_modules: Vec<String>,
-    address: Address,
-    model_name: String,
-    effort: String,
-    flow_id_option: Option<String>,
-    remembered_flow_vector: Vec<RememberedFlow>,
-    herdr_session_name: String,
-    leave_outs_option: Option<Vec<LeaveOut>>,
-    instruction_prompt: String,
-}
-
-impl EngineRecord for StoredLaunchAttemptV2 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.attempt.launch_request_id.clone())
-    }
-}
-
-impl MemoryDefinition for StoredLaunchAttemptV2 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(2)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-launch-attempt-v2")
-    }
-}
-
-impl UpgradeFrom<StoredLaunchAttemptV2> for StoredLaunchAttempt {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: StoredLaunchAttemptV2) -> Decision<Self, Self::Refusal> {
-        let attempt = previous.attempt;
-        let profile = attempt.launch_profile;
-        Decision::Ready(Self {
-            attempt: LaunchAttempt {
-                launch_request_id: attempt.launch_request_id,
-                launch_profile: LaunchProfile {
-                    launch_request_id: profile.launch_request_id,
-                    system_modules: profile.system_modules,
-                    user_modules: profile.user_modules,
-                    remembering: profile.remembered_flow_vector.remembering(),
-                    address: profile.address,
-                    model_name: profile.model_name,
-                    effort: profile.effort,
-                    flow_id_option: profile.flow_id_option,
-                    herdr_session_name: profile.herdr_session_name,
-                    leave_outs_option: profile.leave_outs_option,
-                    flow_kind: signal_flow::FlowKind::Regular,
-                    tool_set: signal_flow::ToolSet::Default,
-                    instruction_prompt: profile.instruction_prompt,
-                },
-                prompt_sha256: attempt.prompt_sha256,
-                origin: attempt.origin,
-                launch_attempt_phase: attempt.launch_attempt_phase,
-                native_launch_intent_option: attempt.native_launch_intent_option,
-                native_launch_binding_option: attempt.native_launch_binding_option,
-                registration_acknowledgement_option: attempt.registration_acknowledgement_option,
-                prompt_delivery_intent_option: attempt.prompt_delivery_intent_option,
-                prompt_delivery_result_option: attempt.prompt_delivery_result_option,
-            },
-            context: previous.context,
-        })
-    }
-}
-
-/// The launch types as signal-flow 16.0.0 archived them, before 17.0.0
-/// named a launch's context by module identity. A Flow 0.34 launch-attempt
-/// row is read in them by the v1-to-v2 family upgrade; every earlier shape
-/// carried them too, and is only read to recognize a row set aside.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct LaunchSourceBeforeModules {
-    source_path: String,
-    source_sha256: String,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct NativeSkillSelectionBeforeModules {
-    skill_name: String,
-    native_skill_path: String,
-    native_skill_sha256: String,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct NativeLaunchIntentBeforeModules {
-    launch_request_id: String,
-    prompt_sha256: String,
-    harness_kind: HarnessKind,
-    model_name: String,
-    effort: String,
-    skill_name_vector: Vec<String>,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct PromptDeliveryIntentBeforeModules {
-    launch_request_id: String,
-    prompt_sha256: String,
-    flow_id: String,
-    native_session_id: String,
-    harness_kind: HarnessKind,
-    model_name: String,
-    effort: String,
-    native_skill_selection_vector: Vec<NativeSkillSelectionBeforeModules>,
-    herdr_pane_binding: HerdrPaneBinding,
-    native_transcript_boundary: NativeTranscriptBoundary,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct NativeTargetReceiptBeforeModules {
-    launch_request_id: String,
-    prompt_sha256: String,
-    flow_id: String,
-    native_session_id: String,
-    native_turn_id: String,
-    receipt_sha256: String,
-    model_name: String,
-    effort: String,
-    native_skill_selection_vector: Vec<NativeSkillSelectionBeforeModules>,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::large_enum_variant)] // mirrors the archived 16.0.0 layout
-enum PromptDeliveryResultBeforeModules {
-    Observed(NativeTargetReceiptBeforeModules),
-    Ambiguous(PromptDeliveryIntentBeforeModules),
-}
-
-/// A launch attempt as Flow 0.34 archived it with signal-flow 16.0.0,
-/// before 17.0.0 named a launch's context by module identity. It is read
-/// only by the v1-to-v2 family upgrade.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredLaunchAttemptV1 {
-    attempt: LaunchAttemptBeforeModules,
-}
-
-impl EngineRecord for StoredLaunchAttemptV1 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.attempt.launch_request_id.clone())
-    }
-}
-
-impl MemoryDefinition for StoredLaunchAttemptV1 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-launch-attempt-v1")
-    }
-}
-
-impl From<NativeSkillSelectionBeforeModules> for NativeSkill {
-    fn from(selection: NativeSkillSelectionBeforeModules) -> Self {
-        Self {
-            skill_name: selection.skill_name,
-            skill_path: selection.native_skill_path,
-            skill_sha256: selection.native_skill_sha256,
-        }
-    }
-}
-
-/// A 0.34 launch's one first message was its one part: the part's hash is
-/// the prompt's. It recorded no system-prompt hash and no Stop count, and
-/// left nothing out.
-impl From<PromptDeliveryIntentBeforeModules> for PromptDeliveryIntent {
-    fn from(intent: PromptDeliveryIntentBeforeModules) -> Self {
-        Self {
-            prompt_sha256_vector: vec![intent.prompt_sha256.clone()],
-            launch_request_id: intent.launch_request_id,
-            prompt_sha256: intent.prompt_sha256,
-            flow_id: intent.flow_id,
-            native_session_id: intent.native_session_id,
-            harness_kind: intent.harness_kind,
-            model_name: intent.model_name,
-            effort: intent.effort,
-            parts_submitted: 1,
-            stops_reported: 0,
-            leave_outs: Vec::new(),
-            herdr_pane_binding: intent.herdr_pane_binding,
-            native_transcript_boundary: intent.native_transcript_boundary,
-        }
-    }
-}
-
-impl From<PromptDeliveryResultBeforeModules> for PromptDeliveryResult {
-    fn from(result: PromptDeliveryResultBeforeModules) -> Self {
-        match result {
-            PromptDeliveryResultBeforeModules::Observed(receipt) => {
-                Self::Observed(signal_flow::NativeTargetReceipt {
-                    prompt_sha256_vector: vec![receipt.prompt_sha256.clone()],
-                    launch_request_id: receipt.launch_request_id,
-                    prompt_sha256: receipt.prompt_sha256,
-                    flow_id: receipt.flow_id,
-                    native_session_id: receipt.native_session_id,
-                    native_turn_id: receipt.native_turn_id,
-                    receipt_sha256: receipt.receipt_sha256,
-                    model_name: receipt.model_name,
-                    effort: receipt.effort,
-                })
-            }
-            PromptDeliveryResultBeforeModules::Ambiguous(intent) => Self::Ambiguous(intent.into()),
-        }
-    }
-}
-
-/// Every value a 0.34 launch-attempt row held is carried: what the current
-/// shape names, into it; what it no longer names (the skill sources, the
-/// skills, the power, the harness, the bundle file, the native skill
-/// selections and the origin clue whole), into `LaunchContext::BeforeModules`.
-impl UpgradeFrom<StoredLaunchAttemptV1> for StoredLaunchAttempt {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: StoredLaunchAttemptV1) -> Decision<Self, Self::Refusal> {
-        let previous = previous.attempt;
-        let profile = previous.launch_profile;
-        let skills_of = |selections: &Vec<NativeSkillSelectionBeforeModules>| {
-            selections
-                .iter()
-                .cloned()
-                .map(NativeSkill::from)
-                .collect::<Vec<_>>()
-        };
-        let intent_skills = previous
-            .prompt_delivery_intent_option
-            .as_ref()
-            .map(|intent| skills_of(&intent.native_skill_selection_vector));
-        let result_skills = previous
-            .prompt_delivery_result_option
-            .as_ref()
-            .map(|result| match result {
-                PromptDeliveryResultBeforeModules::Observed(receipt) => {
-                    skills_of(&receipt.native_skill_selection_vector)
-                }
-                PromptDeliveryResultBeforeModules::Ambiguous(intent) => {
-                    skills_of(&intent.native_skill_selection_vector)
-                }
-            });
-        let launch_intent_skills = previous
-            .native_launch_intent_option
-            .as_ref()
-            .map(|intent| intent.skill_name_vector.clone());
-        let context = LaunchContext::BeforeModules(ContextBeforeModules {
-            launch_sources: profile
-                .launch_source_vector
-                .into_iter()
-                .map(|source| LaunchSource {
-                    source_path: source.source_path,
-                    source_sha256: source.source_sha256,
-                })
-                .collect(),
-            skills: profile.skill_name_vector,
-            power_level: profile.power_level,
-            harness_kind: profile.harness_kind,
-            bundle_file: profile.system_prompt_bundle_file,
-            origin_clue: OriginClue {
-                flow_id: previous.origin_clue.flow_id.clone(),
-                session_id: previous.origin_clue.session_id.clone(),
-                turn_id: previous.origin_clue.turn_id.clone(),
-            },
-            launch_intent_skills,
-            intent_skills,
-            result_skills,
-        });
-        Decision::Ready(Self {
-            attempt: LaunchAttempt {
-                launch_request_id: previous.launch_request_id,
-                launch_profile: LaunchProfile {
-                    launch_request_id: profile.launch_request_id,
-                    system_modules: Vec::new(),
-                    user_modules: Vec::new(),
-                    remembering: profile.remembered_flow_vector.remembering(),
-                    address: profile.address,
-                    model_name: profile.model_name,
-                    effort: profile.effort,
-                    flow_id_option: profile.flow_id_option,
-                    herdr_session_name: profile.herdr_session_name,
-                    leave_outs_option: Some(Vec::new()),
-                    flow_kind: signal_flow::FlowKind::Regular,
-                    tool_set: signal_flow::ToolSet::Default,
-                    instruction_prompt: profile.instruction_prompt,
-                },
-                origin: previous.origin_clue.into(),
-                launch_attempt_phase: previous.launch_attempt_phase,
-                native_launch_intent_option: previous.native_launch_intent_option.map(|intent| {
-                    NativeLaunchIntent {
-                        prompt_sha256_vector: vec![intent.prompt_sha256.clone()],
-                        launch_request_id: intent.launch_request_id,
-                        prompt_sha256: intent.prompt_sha256,
-                        system_prompt_sha256: String::new(),
-                        harness_kind: intent.harness_kind,
-                        model_name: intent.model_name,
-                        effort: intent.effort,
-                    }
-                }),
-                native_launch_binding_option: previous.native_launch_binding_option,
-                registration_acknowledgement_option: previous.registration_acknowledgement_option,
-                prompt_delivery_intent_option: previous
-                    .prompt_delivery_intent_option
-                    .map(PromptDeliveryIntent::from),
-                prompt_delivery_result_option: previous
-                    .prompt_delivery_result_option
-                    .map(PromptDeliveryResult::from),
-                prompt_sha256: previous.prompt_sha256,
-            },
-            context,
-        })
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct LaunchAttemptBeforeModules {
-    launch_request_id: String,
-    launch_profile: LaunchProfileBeforeModules,
-    prompt_sha256: String,
-    origin_clue: OriginClueBeforeOrigin,
-    launch_attempt_phase: LaunchAttemptPhase,
-    native_launch_intent_option: Option<NativeLaunchIntentBeforeModules>,
-    native_launch_binding_option: Option<NativeLaunchBinding>,
-    registration_acknowledgement_option: Option<RegistrationAcknowledgement>,
-    prompt_delivery_intent_option: Option<PromptDeliveryIntentBeforeModules>,
-    prompt_delivery_result_option: Option<PromptDeliveryResultBeforeModules>,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct LaunchProfileBeforeModules {
-    launch_request_id: String,
-    launch_source_vector: Vec<LaunchSourceBeforeModules>,
-    skill_name_vector: Vec<String>,
-    address: Address,
-    power_level: PowerLevel,
-    harness_kind: HarnessKind,
-    model_name: String,
-    effort: String,
-    flow_id_option: Option<String>,
-    remembered_flow_vector: Vec<RememberedFlow>,
-    herdr_session_name: String,
-    system_prompt_bundle_file: String,
-    instruction_prompt: String,
-}
-
-/// A launch attempt as Flow archived it before signal-flow 3.0.0 (ab70332)
-/// added `SystemPromptBundleFile` to the launch profile: the same fields in
-/// the same order without it. Rows of this shape are only recognized and
-/// kept aside; nothing is written in it.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredLaunchAttemptBeforeBundle {
-    attempt: LaunchAttemptBeforeBundle,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct LaunchAttemptBeforeBundle {
-    launch_request_id: String,
-    launch_profile: LaunchProfileBeforeBundle,
-    prompt_sha256: String,
-    origin_clue: OriginClueBeforeOrigin,
-    launch_attempt_phase: LaunchAttemptPhase,
-    native_launch_intent_option: Option<NativeLaunchIntentBeforeModules>,
-    native_launch_binding_option: Option<NativeLaunchBinding>,
-    registration_acknowledgement_option: Option<RegistrationAcknowledgement>,
-    prompt_delivery_intent_option: Option<PromptDeliveryIntentBeforeModules>,
-    prompt_delivery_result_option: Option<PromptDeliveryResultBeforeModules>,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct LaunchProfileBeforeBundle {
-    launch_request_id: String,
-    launch_source_vector: Vec<LaunchSourceBeforeModules>,
-    skill_name_vector: Vec<String>,
-    aspect: Aspect,
-    power_level: PowerLevel,
-    harness_kind: HarnessKind,
-    model_name: String,
-    effort: String,
-    flow_id_option: Option<String>,
-    remembered_flow_vector: Vec<RememberedFlow>,
-    herdr_session_name: String,
-    instruction_prompt: String,
-}
-
-/// A launch attempt as Flow archived it before signal-flow 16.0.0 put the
-/// launched seat's `Address` where the launch profile named its `Aspect`.
-/// Its profile names no topic or layer, so it cannot become a current row;
-/// it is only recognized and kept aside.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredLaunchAttemptBeforeAddress {
-    attempt: LaunchAttemptBeforeAddress,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct LaunchAttemptBeforeAddress {
-    launch_request_id: String,
-    launch_profile: LaunchProfileBeforeAddress,
-    prompt_sha256: String,
-    origin_clue: OriginClueBeforeOrigin,
-    launch_attempt_phase: LaunchAttemptPhase,
-    native_launch_intent_option: Option<NativeLaunchIntentBeforeModules>,
-    native_launch_binding_option: Option<NativeLaunchBinding>,
-    registration_acknowledgement_option: Option<RegistrationAcknowledgement>,
-    prompt_delivery_intent_option: Option<PromptDeliveryIntentBeforeModules>,
-    prompt_delivery_result_option: Option<PromptDeliveryResultBeforeModules>,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct LaunchProfileBeforeAddress {
-    launch_request_id: String,
-    launch_source_vector: Vec<LaunchSourceBeforeModules>,
-    skill_name_vector: Vec<String>,
-    aspect: Aspect,
-    power_level: PowerLevel,
-    harness_kind: HarnessKind,
-    model_name: String,
-    effort: String,
-    flow_id_option: Option<String>,
-    remembered_flow_vector: Vec<RememberedFlow>,
-    herdr_session_name: String,
-    system_prompt_bundle_file: String,
-    instruction_prompt: String,
-}
-
-/// A launch-attempt row named to the engine only so it can be retracted when
-/// it no longer reads in the current shape. Its archive is empty, so it
-/// checks against any bytes; it is never asserted and never read for
-/// content. An exception to typed rows, taken only for moving such a row
-/// aside.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct UnreadLaunchAttempt;
-
-/// The shape a launch-attempt row that no longer reads in the current shape
-/// was found to have. New shapes are appended, so a kept row's shape keeps
-/// reading.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub enum ArchivedLaunchAttemptShape {
-    /// Written before signal-flow 3.0.0 added `SystemPromptBundleFile`.
-    BeforeSystemPromptBundle,
-    /// No known shape reads it; the text is the current shape's decode error.
-    Unknown(String),
-    /// Written before signal-flow 16.0.0 named the launched seat's Address.
-    BeforeAddress,
-}
-
-/// A launch-attempt row moved out of the attempts table when the store
-/// opened, kept whole: its stored key, its original archive bytes, and the
-/// shape it was found to have. No earlier shape names the launched seat's
-/// Address, so none is carried into the attempts table.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct QuarantinedLaunchAttempt {
-    pub launch_request_id: String,
-    /// 1 for the first row of this launch request set aside, then 2, ...
-    pub quarantine_number: u64,
-    pub archive: Vec<u8>,
-    pub shape: ArchivedLaunchAttemptShape,
-}
-
-impl EngineRecord for QuarantinedLaunchAttempt {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(format!(
-            "{}/{}",
-            self.launch_request_id, self.quarantine_number
-        ))
-    }
-}
-
-/// The role a kept launch-attempt row of a known shape names for the flow
-/// its native launch bound: what a store written before roles adopts.
-trait NamesKeptLaunchRole {
-    fn kept_role(&self, flow_id: &str) -> Option<Caller>;
-}
-
-impl NamesKeptLaunchRole for QuarantinedLaunchAttempt {
-    fn kept_role(&self, flow_id: &str) -> Option<Caller> {
-        let (binding, aspect, power_level, model_name) = match self.shape {
-            ArchivedLaunchAttemptShape::BeforeAddress => {
-                let kept =
-                    rkyv::from_bytes::<StoredLaunchAttemptBeforeAddress, rkyv::rancor::Error>(
-                        &self.archive,
-                    )
-                    .ok()?
-                    .attempt;
-                let profile = kept.launch_profile;
-                (
-                    kept.native_launch_binding_option,
-                    profile.aspect,
-                    profile.power_level,
-                    profile.model_name,
-                )
-            }
-            ArchivedLaunchAttemptShape::BeforeSystemPromptBundle => {
-                let kept =
-                    rkyv::from_bytes::<StoredLaunchAttemptBeforeBundle, rkyv::rancor::Error>(
-                        &self.archive,
-                    )
-                    .ok()?
-                    .attempt;
-                let profile = kept.launch_profile;
-                (
-                    kept.native_launch_binding_option,
-                    profile.aspect,
-                    profile.power_level,
-                    profile.model_name,
-                )
-            }
-            ArchivedLaunchAttemptShape::Unknown(_) => return None,
-        };
-        binding
-            .filter(|binding| binding.flow_id == flow_id)
-            .map(|_| Caller {
-                flow_id: flow_id.into(),
-                aspect,
-                power_level,
-                model_name,
-            })
-    }
-}
-
-/// What opening the store did with a launch-attempt row that no longer read
-/// in the current shape. Its Display is the line the Nexus logs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LaunchAttemptSettlement {
-    /// Of a known earlier shape: moved aside whole into the quarantine
-    /// table, where its shape is named.
-    SetAside {
-        launch_request_id: String,
-        from: ArchivedLaunchAttemptShape,
-    },
-    /// Moved aside into the quarantine table; no known shape reads it.
-    Quarantined {
-        launch_request_id: String,
-        decode_error: String,
-    },
-    /// The attempts could not be settled; the store opened without it.
-    Unsettled { store_error: String },
-}
-
-impl std::fmt::Display for LaunchAttemptSettlement {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SetAside {
-                launch_request_id,
-                from,
-            } => write!(
-                formatter,
-                "LaunchAttemptSetAside.{{ {launch_request_id} {} }}",
-                match from {
-                    ArchivedLaunchAttemptShape::BeforeSystemPromptBundle => {
-                        "BeforeSystemPromptBundle"
-                    }
-                    ArchivedLaunchAttemptShape::BeforeAddress => "BeforeAddress",
-                    ArchivedLaunchAttemptShape::Unknown(_) => "Unknown",
-                }
-            ),
-            Self::Quarantined {
-                launch_request_id,
-                decode_error,
-            } => write!(
-                formatter,
-                "LaunchAttemptQuarantined.{{ {launch_request_id} «{decode_error}» }}"
-            ),
-            Self::Unsettled { store_error } => {
-                write!(formatter, "LaunchAttemptsUnsettled.«{store_error}»")
-            }
-        }
+        SchemaHash::for_label("flow-nexus-launch-attempt-v5")
     }
 }
 
@@ -2408,9 +1206,6 @@ impl std::fmt::Display for LaunchAttemptSettlement {
 // types the Memory root declares (`ethos/memory.ethos`).
 pub use crate::generated::memory::{LaunchOutcome, Replacement};
 
-use crate::generated::starter::{
-    ContextBeforeModules, LaunchContext, LaunchSource, NativeSkill, OriginClue,
-};
 pub use crate::generated::starter::{LaunchedRecord, ReplacedRecord};
 use crate::generated::starter::{LaunchedRecording, NamesLaunchedRoute};
 
@@ -2532,903 +1327,6 @@ impl MemoryDefinition for StoredLaunchOutcome {
     }
 }
 
-/// The v8 outcome before a missing-module context refusal carried its
-/// identity. Its Start and Replace rejection nesting is frozen here rather
-/// than borrowed from the current Signal.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredLaunchOutcomeV8 {
-    launch_request_id: String,
-    launch_outcome: LaunchOutcomeV8,
-}
-
-impl EngineRecord for StoredLaunchOutcomeV8 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.launch_request_id.clone())
-    }
-}
-
-impl MemoryDefinition for StoredLaunchOutcomeV8 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(8)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-launch-outcome-v8")
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum ContextRefusalV38 {
-    ComposerUnavailable,
-    ComposerRejected,
-    MetaflowMismatch,
-    PayloadMismatch,
-    ModuleMissing,
-    RecordMissing,
-    SystemTooLarge,
-    ModuleTooLarge,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum StartRejectionV38 {
-    CompositionRefused(signal_flow::CompositionRefusal),
-    LaunchRequestConflict,
-    LaunchPersistenceRefused,
-    NativeLaunchRefused(signal_flow::NativeLaunchRefusal),
-    BindingRefused(signal_flow::BindingRefusal),
-    RegistrationRefused(signal_flow::RegistrationRefusal),
-    IntentPersistenceRefused,
-    OriginUnavailable,
-    AddressAwake,
-    ContextRefused(ContextRefusalV38),
-    LeaveOutRefused(signal_flow::LeaveOutRefusal),
-    HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
-    ModelRefused(signal_flow::ModelRefusal),
-    NoSecondary,
-    Undeclared,
-    TopicRefused(String),
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum ReplaceRejectionV38 {
-    PredecessorAbsent,
-    UnknownPredecessor,
-    PredecessorStopped,
-    LaunchRefused(StartRejectionV38),
-    ReapRefused(signal_flow::StopRejection),
-    Locked,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum LaunchOutcomeV8 {
-    Started(LaunchedRecord),
-    Replaced(ReplacedRecord),
-    StartRejected(StartRejectionV38),
-    ReplaceRejected(ReplaceRejectionV38),
-}
-
-impl From<ContextRefusalV38> for signal_flow::ContextRefusal {
-    fn from(refusal: ContextRefusalV38) -> Self {
-        match refusal {
-            ContextRefusalV38::ComposerUnavailable => Self::ComposerUnavailable,
-            ContextRefusalV38::ComposerRejected => Self::ComposerRejected,
-            ContextRefusalV38::MetaflowMismatch => Self::MetaflowMismatch,
-            ContextRefusalV38::PayloadMismatch => Self::PayloadMismatch,
-            ContextRefusalV38::ModuleMissing => Self::ModuleMissing(None),
-            ContextRefusalV38::RecordMissing => Self::RecordMissing,
-            ContextRefusalV38::SystemTooLarge => Self::SystemTooLarge,
-            ContextRefusalV38::ModuleTooLarge => Self::ModuleTooLarge,
-        }
-    }
-}
-
-impl From<StartRejectionV38> for StartRejection {
-    fn from(rejection: StartRejectionV38) -> Self {
-        match rejection {
-            StartRejectionV38::CompositionRefused(value) => Self::CompositionRefused(value),
-            StartRejectionV38::LaunchRequestConflict => Self::LaunchRequestConflict,
-            StartRejectionV38::LaunchPersistenceRefused => Self::LaunchPersistenceRefused,
-            StartRejectionV38::NativeLaunchRefused(value) => Self::NativeLaunchRefused(value),
-            StartRejectionV38::BindingRefused(value) => Self::BindingRefused(value),
-            StartRejectionV38::RegistrationRefused(value) => Self::RegistrationRefused(value),
-            StartRejectionV38::IntentPersistenceRefused => Self::IntentPersistenceRefused,
-            StartRejectionV38::OriginUnavailable => Self::OriginUnavailable,
-            StartRejectionV38::AddressAwake => Self::AddressAwake,
-            StartRejectionV38::ContextRefused(value) => Self::ContextRefused(value.into()),
-            StartRejectionV38::LeaveOutRefused(value) => Self::LeaveOutRefused(value),
-            StartRejectionV38::HarnessSpawnRefused(value) => Self::HarnessSpawnRefused(value),
-            StartRejectionV38::ModelRefused(value) => Self::ModelRefused(value),
-            StartRejectionV38::NoSecondary => Self::NoSecondary,
-            StartRejectionV38::Undeclared => Self::Undeclared,
-            StartRejectionV38::TopicRefused(value) => Self::TopicRefused(value),
-        }
-    }
-}
-
-impl From<ReplaceRejectionV38> for ReplaceRejection {
-    fn from(rejection: ReplaceRejectionV38) -> Self {
-        match rejection {
-            ReplaceRejectionV38::PredecessorAbsent => Self::PredecessorAbsent,
-            ReplaceRejectionV38::UnknownPredecessor => Self::UnknownPredecessor,
-            ReplaceRejectionV38::PredecessorStopped => Self::PredecessorStopped,
-            ReplaceRejectionV38::LaunchRefused(value) => Self::LaunchRefused(value.into()),
-            ReplaceRejectionV38::ReapRefused(value) => Self::ReapRefused(value),
-            ReplaceRejectionV38::Locked => Self::Locked,
-        }
-    }
-}
-
-impl From<LaunchOutcomeV8> for LaunchOutcome {
-    fn from(outcome: LaunchOutcomeV8) -> Self {
-        match outcome {
-            LaunchOutcomeV8::Started(value) => Self::Started(value),
-            LaunchOutcomeV8::Replaced(value) => Self::Replaced(value),
-            LaunchOutcomeV8::StartRejected(value) => Self::StartRejected(value.into()),
-            LaunchOutcomeV8::ReplaceRejected(value) => Self::ReplaceRejected(value.into()),
-        }
-    }
-}
-
-impl UpgradeFrom<StoredLaunchOutcomeV8> for StoredLaunchOutcome {
-    type Refusal = EndedAddressOutcome;
-
-    fn upgrade_from(previous: StoredLaunchOutcomeV8) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            launch_request_id: previous.launch_request_id,
-            launch_outcome: previous.launch_outcome.into(),
-        })
-    }
-}
-
-/// An outcome as Flow 0.40 archived it before a composition refusal kept
-/// its reason, its rejections signal-flow 32's before CompositionRefusal.
-/// This shape is read by the v7-to-v8 family upgrade.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredLaunchOutcomeV7 {
-    launch_request_id: String,
-    launch_outcome: LaunchOutcomeV7,
-}
-
-impl EngineRecord for StoredLaunchOutcomeV7 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.launch_request_id.clone())
-    }
-}
-
-impl MemoryDefinition for StoredLaunchOutcomeV7 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(7)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-launch-outcome-v7")
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum LaunchOutcomeV7 {
-    Started(LaunchedRecord),
-    Replaced(ReplacedRecord),
-    StartRejected(StartRejectionV32),
-    ReplaceRejected(ReplaceRejectionV32),
-}
-
-/// A start rejection as signal-flow 32.0.0 archived it before
-/// CompositionRefused carried its reason.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum StartRejectionV32 {
-    CompositionRefused,
-    LaunchRequestConflict,
-    LaunchPersistenceRefused,
-    NativeLaunchRefused(signal_flow::NativeLaunchRefusal),
-    BindingRefused(signal_flow::BindingRefusal),
-    RegistrationRefused(signal_flow::RegistrationRefusal),
-    IntentPersistenceRefused,
-    OriginUnavailable,
-    AddressAwake,
-    ContextRefused(ContextRefusalV38),
-    LeaveOutRefused(signal_flow::LeaveOutRefusal),
-    HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
-    ModelRefused(signal_flow::ModelRefusal),
-    NoSecondary,
-    Undeclared,
-    TopicRefused(String),
-}
-
-/// A replace rejection as signal-flow 32.0.0 archived it, its launch's
-/// rejection before CompositionRefused carried its reason.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum ReplaceRejectionV32 {
-    PredecessorAbsent,
-    UnknownPredecessor,
-    PredecessorStopped,
-    LaunchRefused(StartRejectionV32),
-    ReapRefused(signal_flow::StopRejection),
-    Locked,
-}
-
-impl From<StartRejectionV32> for StartRejection {
-    fn from(rejection: StartRejectionV32) -> Self {
-        match rejection {
-            StartRejectionV32::CompositionRefused => {
-                Self::CompositionRefused(signal_flow::CompositionRefusal::Unrecorded)
-            }
-            StartRejectionV32::LaunchRequestConflict => Self::LaunchRequestConflict,
-            StartRejectionV32::LaunchPersistenceRefused => Self::LaunchPersistenceRefused,
-            StartRejectionV32::NativeLaunchRefused(refusal) => Self::NativeLaunchRefused(refusal),
-            StartRejectionV32::BindingRefused(refusal) => Self::BindingRefused(refusal),
-            StartRejectionV32::RegistrationRefused(refusal) => Self::RegistrationRefused(refusal),
-            StartRejectionV32::IntentPersistenceRefused => Self::IntentPersistenceRefused,
-            StartRejectionV32::OriginUnavailable => Self::OriginUnavailable,
-            StartRejectionV32::AddressAwake => Self::AddressAwake,
-            StartRejectionV32::ContextRefused(refusal) => Self::ContextRefused(refusal.into()),
-            StartRejectionV32::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
-            StartRejectionV32::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
-            StartRejectionV32::ModelRefused(refusal) => Self::ModelRefused(refusal),
-            StartRejectionV32::NoSecondary => Self::NoSecondary,
-            StartRejectionV32::Undeclared => Self::Undeclared,
-            StartRejectionV32::TopicRefused(topic) => Self::TopicRefused(topic),
-        }
-    }
-}
-
-impl From<ReplaceRejectionV32> for ReplaceRejection {
-    fn from(rejection: ReplaceRejectionV32) -> Self {
-        match rejection {
-            ReplaceRejectionV32::PredecessorAbsent => Self::PredecessorAbsent,
-            ReplaceRejectionV32::UnknownPredecessor => Self::UnknownPredecessor,
-            ReplaceRejectionV32::PredecessorStopped => Self::PredecessorStopped,
-            ReplaceRejectionV32::LaunchRefused(rejection) => Self::LaunchRefused(rejection.into()),
-            ReplaceRejectionV32::ReapRefused(rejection) => Self::ReapRefused(rejection),
-            ReplaceRejectionV32::Locked => Self::Locked,
-        }
-    }
-}
-
-impl From<LaunchOutcomeV7> for LaunchOutcome {
-    fn from(outcome: LaunchOutcomeV7) -> Self {
-        match outcome {
-            LaunchOutcomeV7::Started(launched) => Self::Started(launched),
-            LaunchOutcomeV7::Replaced(replaced) => Self::Replaced(replaced),
-            LaunchOutcomeV7::StartRejected(rejection) => Self::StartRejected(rejection.into()),
-            LaunchOutcomeV7::ReplaceRejected(rejection) => Self::ReplaceRejected(rejection.into()),
-        }
-    }
-}
-
-impl UpgradeFrom<StoredLaunchOutcomeV7> for StoredLaunchOutcome {
-    type Refusal = EndedAddressOutcome;
-
-    fn upgrade_from(previous: StoredLaunchOutcomeV7) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            launch_request_id: previous.launch_request_id,
-            launch_outcome: previous.launch_outcome.into(),
-        })
-    }
-}
-
-/// An outcome as Flow 0.35.22 to 0.39 archived it, its rejections
-/// signal-flow 30's: before a Start could be refused for its topic or a
-/// missing record, and a Replace for a held metaflow. This shape is read by
-/// the v6-to-v7 family upgrade, and every older shape is carried through it.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredLaunchOutcomeV6 {
-    launch_request_id: String,
-    launch_outcome: LaunchOutcomeV6,
-}
-
-impl EngineRecord for StoredLaunchOutcomeV6 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.launch_request_id.clone())
-    }
-}
-
-impl MemoryDefinition for StoredLaunchOutcomeV6 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(6)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-launch-outcome-v6")
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum LaunchOutcomeV6 {
-    Started(LaunchedRecord),
-    Replaced(ReplacedRecord),
-    StartRejected(StartRejectionV30),
-    ReplaceRejected(ReplaceRejectionV30),
-}
-
-/// A context refusal as signal-flow 30.0.0 and every earlier one archived
-/// it, before RecordMissing was placed after ModuleMissing: SystemTooLarge
-/// and ModuleTooLarge archived one place earlier.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum ContextRefusalV30 {
-    ComposerUnavailable,
-    ComposerRejected,
-    MetaflowMismatch,
-    PayloadMismatch,
-    ModuleMissing,
-    SystemTooLarge,
-    ModuleTooLarge,
-}
-
-/// A start rejection as signal-flow 30.0.0 archived it, before
-/// TopicRefused, its context refusal before RecordMissing.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum StartRejectionV30 {
-    CompositionRefused,
-    LaunchRequestConflict,
-    LaunchPersistenceRefused,
-    NativeLaunchRefused(signal_flow::NativeLaunchRefusal),
-    BindingRefused(signal_flow::BindingRefusal),
-    RegistrationRefused(signal_flow::RegistrationRefusal),
-    IntentPersistenceRefused,
-    OriginUnavailable,
-    AddressAwake,
-    ContextRefused(ContextRefusalV30),
-    LeaveOutRefused(signal_flow::LeaveOutRefusal),
-    HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
-    ModelRefused(signal_flow::ModelRefusal),
-    NoSecondary,
-    Undeclared,
-}
-
-/// A replace rejection as signal-flow 30.0.0 archived it, before Locked.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum ReplaceRejectionV30 {
-    PredecessorAbsent,
-    UnknownPredecessor,
-    PredecessorStopped,
-    LaunchRefused(StartRejectionV30),
-    ReapRefused(signal_flow::StopRejection),
-}
-
-impl From<ContextRefusalV30> for signal_flow::ContextRefusal {
-    fn from(refusal: ContextRefusalV30) -> Self {
-        match refusal {
-            ContextRefusalV30::ComposerUnavailable => Self::ComposerUnavailable,
-            ContextRefusalV30::ComposerRejected => Self::ComposerRejected,
-            ContextRefusalV30::MetaflowMismatch => Self::MetaflowMismatch,
-            ContextRefusalV30::PayloadMismatch => Self::PayloadMismatch,
-            ContextRefusalV30::ModuleMissing => Self::ModuleMissing(None),
-            ContextRefusalV30::SystemTooLarge => Self::SystemTooLarge,
-            ContextRefusalV30::ModuleTooLarge => Self::ModuleTooLarge,
-        }
-    }
-}
-
-impl From<StartRejectionV30> for StartRejection {
-    fn from(rejection: StartRejectionV30) -> Self {
-        match rejection {
-            StartRejectionV30::CompositionRefused => {
-                Self::CompositionRefused(signal_flow::CompositionRefusal::Unrecorded)
-            }
-            StartRejectionV30::LaunchRequestConflict => Self::LaunchRequestConflict,
-            StartRejectionV30::LaunchPersistenceRefused => Self::LaunchPersistenceRefused,
-            StartRejectionV30::NativeLaunchRefused(refusal) => Self::NativeLaunchRefused(refusal),
-            StartRejectionV30::BindingRefused(refusal) => Self::BindingRefused(refusal),
-            StartRejectionV30::RegistrationRefused(refusal) => Self::RegistrationRefused(refusal),
-            StartRejectionV30::IntentPersistenceRefused => Self::IntentPersistenceRefused,
-            StartRejectionV30::OriginUnavailable => Self::OriginUnavailable,
-            StartRejectionV30::AddressAwake => Self::AddressAwake,
-            StartRejectionV30::ContextRefused(refusal) => Self::ContextRefused(refusal.into()),
-            StartRejectionV30::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
-            StartRejectionV30::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
-            StartRejectionV30::ModelRefused(refusal) => Self::ModelRefused(refusal),
-            StartRejectionV30::NoSecondary => Self::NoSecondary,
-            StartRejectionV30::Undeclared => Self::Undeclared,
-        }
-    }
-}
-
-impl From<ReplaceRejectionV30> for ReplaceRejection {
-    fn from(rejection: ReplaceRejectionV30) -> Self {
-        match rejection {
-            ReplaceRejectionV30::PredecessorAbsent => Self::PredecessorAbsent,
-            ReplaceRejectionV30::UnknownPredecessor => Self::UnknownPredecessor,
-            ReplaceRejectionV30::PredecessorStopped => Self::PredecessorStopped,
-            ReplaceRejectionV30::LaunchRefused(rejection) => Self::LaunchRefused(rejection.into()),
-            ReplaceRejectionV30::ReapRefused(rejection) => Self::ReapRefused(rejection),
-        }
-    }
-}
-
-impl From<LaunchOutcomeV6> for LaunchOutcome {
-    fn from(outcome: LaunchOutcomeV6) -> Self {
-        match outcome {
-            LaunchOutcomeV6::Started(launched) => Self::Started(launched),
-            LaunchOutcomeV6::Replaced(replaced) => Self::Replaced(replaced),
-            LaunchOutcomeV6::StartRejected(rejection) => Self::StartRejected(rejection.into()),
-            LaunchOutcomeV6::ReplaceRejected(rejection) => Self::ReplaceRejected(rejection.into()),
-        }
-    }
-}
-
-impl UpgradeFrom<StoredLaunchOutcomeV6> for StoredLaunchOutcome {
-    type Refusal = EndedAddressOutcome;
-
-    fn upgrade_from(previous: StoredLaunchOutcomeV6) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            launch_request_id: previous.launch_request_id,
-            launch_outcome: previous.launch_outcome.into(),
-        })
-    }
-}
-
-/// An outcome as Flow 0.35.6 to 0.35.21 archived it, its rejections
-/// signal-flow 22's, when a Start could be refused for an ended Address.
-/// This shape is read by the v5-to-v7 family upgrade, and every older
-/// shape is carried through it.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredLaunchOutcomeV5 {
-    launch_request_id: String,
-    launch_outcome: LaunchOutcomeV5,
-}
-
-impl EngineRecord for StoredLaunchOutcomeV5 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.launch_request_id.clone())
-    }
-}
-
-impl MemoryDefinition for StoredLaunchOutcomeV5 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(5)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-launch-outcome-v5")
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum LaunchOutcomeV5 {
-    Started(LaunchedRecord),
-    Replaced(ReplacedRecord),
-    StartRejected(StartRejectionV22),
-    ReplaceRejected(ReplaceRejectionV22),
-}
-
-/// A start rejection as signal-flow 22.0.0 archived it, AddressEnded
-/// between AddressAwake and ContextRefused.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum StartRejectionV22 {
-    CompositionRefused,
-    LaunchRequestConflict,
-    LaunchPersistenceRefused,
-    NativeLaunchRefused(signal_flow::NativeLaunchRefusal),
-    BindingRefused(signal_flow::BindingRefusal),
-    RegistrationRefused(signal_flow::RegistrationRefusal),
-    IntentPersistenceRefused,
-    OriginUnavailable,
-    AddressAwake,
-    AddressEnded,
-    ContextRefused(ContextRefusalV30),
-    LeaveOutRefused(signal_flow::LeaveOutRefusal),
-    HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
-    ModelRefused(signal_flow::ModelRefusal),
-}
-
-/// A replace rejection as signal-flow 22.0.0 archived it.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum ReplaceRejectionV22 {
-    PredecessorAbsent,
-    UnknownPredecessor,
-    PredecessorStopped,
-    LaunchRefused(StartRejectionV22),
-    ReapRefused(signal_flow::StopRejection),
-}
-
-/// A kept outcome that refused a Start for an ended Address. No metaflow
-/// is ended any more and no current rejection says what it said, so the
-/// upgrade refuses it rather than name another reason, and the store is
-/// left as it was.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EndedAddressOutcome;
-
-impl TryFrom<StartRejectionV22> for StartRejectionV30 {
-    type Error = EndedAddressOutcome;
-
-    fn try_from(rejection: StartRejectionV22) -> Result<Self, Self::Error> {
-        Ok(match rejection {
-            StartRejectionV22::CompositionRefused => Self::CompositionRefused,
-            StartRejectionV22::LaunchRequestConflict => Self::LaunchRequestConflict,
-            StartRejectionV22::LaunchPersistenceRefused => Self::LaunchPersistenceRefused,
-            StartRejectionV22::NativeLaunchRefused(refusal) => Self::NativeLaunchRefused(refusal),
-            StartRejectionV22::BindingRefused(refusal) => Self::BindingRefused(refusal),
-            StartRejectionV22::RegistrationRefused(refusal) => Self::RegistrationRefused(refusal),
-            StartRejectionV22::IntentPersistenceRefused => Self::IntentPersistenceRefused,
-            StartRejectionV22::OriginUnavailable => Self::OriginUnavailable,
-            StartRejectionV22::AddressAwake => Self::AddressAwake,
-            StartRejectionV22::AddressEnded => return Err(EndedAddressOutcome),
-            StartRejectionV22::ContextRefused(refusal) => Self::ContextRefused(refusal),
-            StartRejectionV22::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
-            StartRejectionV22::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
-            StartRejectionV22::ModelRefused(refusal) => Self::ModelRefused(refusal),
-        })
-    }
-}
-
-impl TryFrom<ReplaceRejectionV22> for ReplaceRejectionV30 {
-    type Error = EndedAddressOutcome;
-
-    fn try_from(rejection: ReplaceRejectionV22) -> Result<Self, Self::Error> {
-        Ok(match rejection {
-            ReplaceRejectionV22::PredecessorAbsent => Self::PredecessorAbsent,
-            ReplaceRejectionV22::UnknownPredecessor => Self::UnknownPredecessor,
-            ReplaceRejectionV22::PredecessorStopped => Self::PredecessorStopped,
-            ReplaceRejectionV22::LaunchRefused(rejection) => {
-                Self::LaunchRefused(rejection.try_into()?)
-            }
-            ReplaceRejectionV22::ReapRefused(rejection) => Self::ReapRefused(rejection),
-        })
-    }
-}
-
-impl TryFrom<LaunchOutcomeV5> for LaunchOutcomeV6 {
-    type Error = EndedAddressOutcome;
-
-    fn try_from(outcome: LaunchOutcomeV5) -> Result<Self, Self::Error> {
-        Ok(match outcome {
-            LaunchOutcomeV5::Started(launched) => Self::Started(launched),
-            LaunchOutcomeV5::Replaced(replaced) => Self::Replaced(replaced),
-            LaunchOutcomeV5::StartRejected(rejection) => Self::StartRejected(rejection.try_into()?),
-            LaunchOutcomeV5::ReplaceRejected(rejection) => {
-                Self::ReplaceRejected(rejection.try_into()?)
-            }
-        })
-    }
-}
-
-/// Every older outcome is carried as a v5 one, then as a v6 one, then into
-/// the current shape.
-trait UpgradesThroughV5: Into<LaunchOutcomeV5> {
-    fn stored(
-        launch_request_id: String,
-        outcome: Self,
-    ) -> Decision<StoredLaunchOutcome, EndedAddressOutcome> {
-        match LaunchOutcomeV6::try_from(outcome.into()) {
-            Ok(launch_outcome) => Decision::Ready(StoredLaunchOutcome {
-                launch_request_id,
-                launch_outcome: launch_outcome.into(),
-            }),
-            Err(refusal) => Decision::Refused(refusal),
-        }
-    }
-}
-
-impl UpgradesThroughV5 for LaunchOutcomeV5 {}
-impl UpgradesThroughV5 for LaunchOutcomeV4 {}
-impl UpgradesThroughV5 for LaunchOutcomeV3 {}
-impl UpgradesThroughV5 for LaunchOutcomeV2 {}
-
-impl UpgradeFrom<StoredLaunchOutcomeV5> for StoredLaunchOutcome {
-    type Refusal = EndedAddressOutcome;
-
-    fn upgrade_from(previous: StoredLaunchOutcomeV5) -> Decision<Self, Self::Refusal> {
-        LaunchOutcomeV5::stored(previous.launch_request_id, previous.launch_outcome)
-    }
-}
-
-/// An outcome as Flow 0.35.3 to 0.35.5 archived it, its rejections
-/// signal-flow 18's, before a refused registration or native step carried
-/// its stage. This shape is read only by the v4-to-v5 family upgrade.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredLaunchOutcomeV4 {
-    launch_request_id: String,
-    launch_outcome: LaunchOutcomeV4,
-}
-
-impl EngineRecord for StoredLaunchOutcomeV4 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.launch_request_id.clone())
-    }
-}
-
-impl MemoryDefinition for StoredLaunchOutcomeV4 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-launch-outcome-v4")
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum LaunchOutcomeV4 {
-    Started(LaunchedRecord),
-    Replaced(ReplacedRecord),
-    StartRejected(StartRejectionV18),
-    ReplaceRejected(ReplaceRejectionV18),
-}
-
-/// A start rejection as signal-flow 18.0.0 archived it: a refused native
-/// step and a refused registration carry no stage, in the same order.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum StartRejectionV18 {
-    CompositionRefused,
-    LaunchRequestConflict,
-    LaunchPersistenceRefused,
-    NativeLaunchRefused,
-    BindingRefused(signal_flow::BindingRefusal),
-    RegistrationRefused,
-    IntentPersistenceRefused,
-    OriginUnavailable,
-    AddressAwake,
-    AddressEnded,
-    ContextRefused(ContextRefusalV30),
-    LeaveOutRefused(signal_flow::LeaveOutRefusal),
-    HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
-}
-
-/// A replace rejection as signal-flow 18.0.0 archived it.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum ReplaceRejectionV18 {
-    PredecessorAbsent,
-    UnknownPredecessor,
-    PredecessorStopped,
-    LaunchRefused(StartRejectionV18),
-    ReapRefused(signal_flow::StopRejection),
-}
-
-impl From<StartRejectionV18> for StartRejectionV22 {
-    fn from(rejection: StartRejectionV18) -> Self {
-        match rejection {
-            StartRejectionV18::CompositionRefused => Self::CompositionRefused,
-            StartRejectionV18::LaunchRequestConflict => Self::LaunchRequestConflict,
-            StartRejectionV18::LaunchPersistenceRefused => Self::LaunchPersistenceRefused,
-            // The stage was not kept.
-            StartRejectionV18::NativeLaunchRefused => {
-                Self::NativeLaunchRefused(signal_flow::NativeLaunchRefusal {
-                    native_launch_stage: signal_flow::NativeLaunchStage::Unclassified,
-                    native_launch_failure: signal_flow::NativeLaunchFailure::Unclassified,
-                })
-            }
-            StartRejectionV18::BindingRefused(refusal) => Self::BindingRefused(refusal),
-            StartRejectionV18::RegistrationRefused => {
-                Self::RegistrationRefused(signal_flow::RegistrationRefusal::Unclassified)
-            }
-            StartRejectionV18::IntentPersistenceRefused => Self::IntentPersistenceRefused,
-            StartRejectionV18::OriginUnavailable => Self::OriginUnavailable,
-            StartRejectionV18::AddressAwake => Self::AddressAwake,
-            StartRejectionV18::AddressEnded => Self::AddressEnded,
-            StartRejectionV18::ContextRefused(refusal) => Self::ContextRefused(refusal),
-            StartRejectionV18::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
-            StartRejectionV18::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
-        }
-    }
-}
-
-impl From<ReplaceRejectionV18> for ReplaceRejectionV22 {
-    fn from(rejection: ReplaceRejectionV18) -> Self {
-        match rejection {
-            ReplaceRejectionV18::PredecessorAbsent => Self::PredecessorAbsent,
-            ReplaceRejectionV18::UnknownPredecessor => Self::UnknownPredecessor,
-            ReplaceRejectionV18::PredecessorStopped => Self::PredecessorStopped,
-            ReplaceRejectionV18::LaunchRefused(rejection) => Self::LaunchRefused(rejection.into()),
-            ReplaceRejectionV18::ReapRefused(rejection) => Self::ReapRefused(rejection),
-        }
-    }
-}
-
-impl From<LaunchOutcomeV4> for LaunchOutcomeV5 {
-    fn from(outcome: LaunchOutcomeV4) -> Self {
-        match outcome {
-            LaunchOutcomeV4::Started(launched) => Self::Started(launched),
-            LaunchOutcomeV4::Replaced(replaced) => Self::Replaced(replaced),
-            LaunchOutcomeV4::StartRejected(rejection) => Self::StartRejected(rejection.into()),
-            LaunchOutcomeV4::ReplaceRejected(rejection) => Self::ReplaceRejected(rejection.into()),
-        }
-    }
-}
-
-impl UpgradeFrom<StoredLaunchOutcomeV4> for StoredLaunchOutcome {
-    type Refusal = EndedAddressOutcome;
-
-    fn upgrade_from(previous: StoredLaunchOutcomeV4) -> Decision<Self, Self::Refusal> {
-        LaunchOutcomeV4::stored(previous.launch_request_id, previous.launch_outcome)
-    }
-}
-
-/// An outcome as Flow 0.35.2 archived it, its rejections signal-flow 17's,
-/// before a refused harness start carried its cause. This shape is read
-/// only by the v3-to-v5 family upgrade.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredLaunchOutcomeV3 {
-    launch_request_id: String,
-    launch_outcome: LaunchOutcomeV3,
-}
-
-impl EngineRecord for StoredLaunchOutcomeV3 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.launch_request_id.clone())
-    }
-}
-
-impl MemoryDefinition for StoredLaunchOutcomeV3 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-launch-outcome-v3")
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum LaunchOutcomeV3 {
-    Started(LaunchedRecord),
-    Replaced(ReplacedRecord),
-    StartRejected(StartRejectionV17),
-    ReplaceRejected(ReplaceRejectionV17),
-}
-
-/// A start rejection as signal-flow 17.0.0 archived it: every variant of
-/// the current one but the refused harness start, in the same order.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum StartRejectionV17 {
-    CompositionRefused,
-    LaunchRequestConflict,
-    LaunchPersistenceRefused,
-    NativeLaunchRefused,
-    BindingRefused(signal_flow::BindingRefusal),
-    RegistrationRefused,
-    IntentPersistenceRefused,
-    OriginUnavailable,
-    AddressAwake,
-    AddressEnded,
-    ContextRefused(ContextRefusalV30),
-    LeaveOutRefused(signal_flow::LeaveOutRefusal),
-}
-
-/// A replace rejection as signal-flow 17.0.0 archived it.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum ReplaceRejectionV17 {
-    PredecessorAbsent,
-    UnknownPredecessor,
-    PredecessorStopped,
-    LaunchRefused(StartRejectionV17),
-    ReapRefused(signal_flow::StopRejection),
-}
-
-impl From<StartRejectionV17> for StartRejectionV22 {
-    fn from(rejection: StartRejectionV17) -> Self {
-        StartRejectionV18::from(rejection).into()
-    }
-}
-
-impl From<StartRejectionV17> for StartRejectionV18 {
-    fn from(rejection: StartRejectionV17) -> Self {
-        match rejection {
-            StartRejectionV17::CompositionRefused => Self::CompositionRefused,
-            StartRejectionV17::LaunchRequestConflict => Self::LaunchRequestConflict,
-            StartRejectionV17::LaunchPersistenceRefused => Self::LaunchPersistenceRefused,
-            StartRejectionV17::NativeLaunchRefused => Self::NativeLaunchRefused,
-            StartRejectionV17::BindingRefused(refusal) => Self::BindingRefused(refusal),
-            StartRejectionV17::RegistrationRefused => Self::RegistrationRefused,
-            StartRejectionV17::IntentPersistenceRefused => Self::IntentPersistenceRefused,
-            StartRejectionV17::OriginUnavailable => Self::OriginUnavailable,
-            StartRejectionV17::AddressAwake => Self::AddressAwake,
-            StartRejectionV17::AddressEnded => Self::AddressEnded,
-            StartRejectionV17::ContextRefused(refusal) => Self::ContextRefused(refusal),
-            StartRejectionV17::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
-        }
-    }
-}
-
-impl From<ReplaceRejectionV17> for ReplaceRejectionV22 {
-    fn from(rejection: ReplaceRejectionV17) -> Self {
-        match rejection {
-            ReplaceRejectionV17::PredecessorAbsent => Self::PredecessorAbsent,
-            ReplaceRejectionV17::UnknownPredecessor => Self::UnknownPredecessor,
-            ReplaceRejectionV17::PredecessorStopped => Self::PredecessorStopped,
-            ReplaceRejectionV17::LaunchRefused(rejection) => Self::LaunchRefused(rejection.into()),
-            ReplaceRejectionV17::ReapRefused(rejection) => Self::ReapRefused(rejection),
-        }
-    }
-}
-
-impl From<LaunchOutcomeV3> for LaunchOutcomeV5 {
-    fn from(outcome: LaunchOutcomeV3) -> Self {
-        match outcome {
-            LaunchOutcomeV3::Started(launched) => Self::Started(launched),
-            LaunchOutcomeV3::Replaced(replaced) => Self::Replaced(replaced),
-            LaunchOutcomeV3::StartRejected(rejection) => Self::StartRejected(rejection.into()),
-            LaunchOutcomeV3::ReplaceRejected(rejection) => Self::ReplaceRejected(rejection.into()),
-        }
-    }
-}
-
-impl UpgradeFrom<StoredLaunchOutcomeV3> for StoredLaunchOutcome {
-    type Refusal = EndedAddressOutcome;
-
-    fn upgrade_from(previous: StoredLaunchOutcomeV3) -> Decision<Self, Self::Refusal> {
-        LaunchOutcomeV3::stored(previous.launch_request_id, previous.launch_outcome)
-    }
-}
-
-/// An outcome as Flow 0.34 archived it, each launched flow's origin the
-/// clue its caller named. This shape is read only by the v2-to-v3 family
-/// upgrade.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredLaunchOutcomeV2 {
-    launch_request_id: String,
-    launch_outcome: LaunchOutcomeV2,
-}
-
-impl EngineRecord for StoredLaunchOutcomeV2 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.launch_request_id.clone())
-    }
-}
-
-impl MemoryDefinition for StoredLaunchOutcomeV2 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(2)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-launch-outcome-v2")
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum LaunchOutcomeV2 {
-    Started(LaunchedRecordV2),
-    Replaced(ReplacedRecordV2),
-    StartRejected(StartRejectionV17),
-    ReplaceRejected(ReplaceRejectionV17),
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct LaunchedRecordV2 {
-    flow_id: String,
-    session_id: String,
-    origin_clue: OriginClueBeforeOrigin,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct ReplacedRecordV2 {
-    flow_id: String,
-    launched_record: LaunchedRecordV2,
-}
-
-impl From<LaunchedRecordV2> for LaunchedRecord {
-    fn from(launched: LaunchedRecordV2) -> Self {
-        Self {
-            flow_id: launched.flow_id,
-            session_id: launched.session_id,
-            origin: launched.origin_clue.into(),
-        }
-    }
-}
-
-impl From<LaunchOutcomeV2> for LaunchOutcomeV5 {
-    fn from(outcome: LaunchOutcomeV2) -> Self {
-        match outcome {
-            LaunchOutcomeV2::Started(launched) => Self::Started(launched.into()),
-            LaunchOutcomeV2::Replaced(replaced) => Self::Replaced(ReplacedRecord {
-                flow_id: replaced.flow_id,
-                launched_record: replaced.launched_record.into(),
-            }),
-            LaunchOutcomeV2::StartRejected(rejection) => Self::StartRejected(rejection.into()),
-            LaunchOutcomeV2::ReplaceRejected(rejection) => Self::ReplaceRejected(rejection.into()),
-        }
-    }
-}
-
-impl UpgradeFrom<StoredLaunchOutcomeV2> for StoredLaunchOutcome {
-    type Refusal = EndedAddressOutcome;
-
-    fn upgrade_from(previous: StoredLaunchOutcomeV2) -> Decision<Self, Self::Refusal> {
-        LaunchOutcomeV2::stored(previous.launch_request_id, previous.launch_outcome)
-    }
-}
-
 /// A launch request that replaces a predecessor. While it stands without a
 /// Replaced outcome, the flow its launch binds is held out of routing.
 impl EngineRecord for Replacement {
@@ -3510,32 +1408,6 @@ impl AnnouncesLaunchChanges for LaunchChanges {
 pub enum StoreError {
     #[error("sema-engine operation failed: {0}")]
     Engine(#[from] sema_engine::Error),
-    #[error("launch outcome family upgrade failed: {0}")]
-    LaunchOutcomeUpgrade(String),
-    #[error("flow family upgrade failed: {0}")]
-    FlowUpgrade(String),
-    #[error("launch attempt family upgrade failed: {0}")]
-    LaunchAttemptUpgrade(String),
-    #[error("metaflow family upgrade failed: {0}")]
-    MetaflowUpgrade(String),
-    #[error("send call family upgrade failed: {0}")]
-    SendCallUpgrade(String),
-    #[error("queue delivery family upgrade failed: {0}")]
-    QueueDeliveryUpgrade(String),
-    #[error("logical delivery family upgrade failed: {0}")]
-    LogicalDeliveryUpgrade(String),
-    #[error("the model family could not be upgraded: {0}")]
-    ModelUpgrade(String),
-    #[error("the Nexus configuration family could not be upgraded: {0}")]
-    NexusUpgrade(String),
-    #[error("the delivery configuration family could not be upgraded: {0}")]
-    DeliveryConfigurationUpgrade(String),
-    #[error("flow events upgrade failed: {0}")]
-    EventUpgrade(String),
-    #[error("successor intent family upgrade failed: {0}")]
-    SuccessorUpgrade(String),
-    #[error("retired tables could not be dropped: {0}")]
-    RetiredTableDrop(String),
     #[error("flow nexus state record is absent or duplicated")]
     StateInvariant,
     #[error("launch inspection rows changed while being read")]
@@ -3566,518 +1438,16 @@ pub enum StoreError {
     MinutesRefused(signal_flow::MinutesRefusal),
     #[error("the counters are refused: {0:?}")]
     CountersRefused(CountersRefusal),
-    #[error("the leave-out default of {entry} cannot be carried under one harness: {reason:?}")]
-    LeaveOutUpgrade {
-        entry: String,
-        reason: LeaveOutUpgradeRefusal,
-    },
-    #[error("the leave-out family could not be upgraded: {0}")]
-    LeaveOutUpgradeFailed(String),
     #[error("store {path} is held by another open; its lock cannot be acquired")]
     StoreHeld { path: String },
-    #[error("the store upgrade could not be staged: {0}")]
-    StagedUpgrade(String),
-    #[error("store {path} is not a recognized Flow Memory v2 store: {reason}")]
+    #[error("the store's open could not be staged: {0}")]
+    StagedOpen(String),
+    #[error("store {path} is not a recognized Flow Memory v3 store: {reason}")]
     UnrecognizedMemory { path: String, reason: String },
-}
-
-/// The families whose rows change shape in 0.35, upgraded from their 0.34
-/// predecessor when the store opens: a flow's origin and a launched
-/// outcome's origin are derived, no longer the clue the caller named; a
-/// launch attempt names its context by module identity, or keeps what a
-/// 0.34 launch named instead.
-trait UpgradesFlowFamilies {
-    /// A store before 0.35.7 keeps queues of bare requests; each is carried
-    /// with its sender Unknown. A store before 0.35.22 may keep an ended
-    /// metaflow; it is carried Asleep.
-    fn upgraded_metaflows(
-        &mut self,
-        descriptor: TableDescriptor<StoredMetaflow>,
-    ) -> Result<TableReference<StoredMetaflow>, StoreError>;
-    /// A store before 0.35.19 keeps one model per Layer; each is carried as
-    /// that layer's Psyche model and re-keyed by its Layer and Aspect.
-    fn upgraded_models(
-        &mut self,
-        descriptor: TableDescriptor<StoredMetaModelConfiguration>,
-    ) -> Result<TableReference<StoredMetaModelConfiguration>, StoreError>;
-    /// The metaflow an Address hold found is carried the same way.
-    fn upgraded_address_holds(
-        &mut self,
-        descriptor: TableDescriptor<address_hold::AddressHold>,
-    ) -> Result<TableReference<address_hold::AddressHold>, StoreError>;
-    /// A store before 0.35.22 keeps send calls whose refusal could name an
-    /// ended recipient; such a call refuses the upgrade.
-    fn upgraded_send_calls(
-        &mut self,
-        descriptor: TableDescriptor<crate::generated::send_tool::SendCall>,
-    ) -> Result<TableReference<crate::generated::send_tool::SendCall>, StoreError>;
-    fn upgraded_flows(
-        &mut self,
-        descriptor: TableDescriptor<FlowRecord>,
-    ) -> Result<TableReference<FlowRecord>, StoreError>;
-    fn upgraded_launch_outcomes(
-        &mut self,
-        descriptor: TableDescriptor<StoredLaunchOutcome>,
-    ) -> Result<TableReference<StoredLaunchOutcome>, StoreError>;
-    /// A 0.34 attempts table first moves aside whole each row older than
-    /// 0.34's shape, then every row left is carried into the current shape.
-    fn upgraded_launch_attempts(
-        &mut self,
-        descriptor: TableDescriptor<StoredLaunchAttempt>,
-        quarantine: TableReference<QuarantinedLaunchAttempt>,
-    ) -> Result<
-        (
-            TableReference<StoredLaunchAttempt>,
-            Vec<LaunchAttemptSettlement>,
-        ),
-        StoreError,
-    >;
-    /// A store before 0.35.19 keeps each metaflow's default leave-outs
-    /// under its Address alone; each is carried under the harness its
-    /// leave-outs belong to, and re-keyed by its Address and that harness.
-    /// A default whose leave-outs mix harnesses, or name none, refuses the
-    /// upgrade by its entry; the open is staged, so the store stays as it
-    /// was, every family with it.
-    fn upgraded_leave_out_defaults(
-        &mut self,
-        descriptor: TableDescriptor<StoredMetaLeaveOutConfiguration>,
-    ) -> Result<TableReference<StoredMetaLeaveOutConfiguration>, StoreError>;
-}
-
-impl UpgradesFlowFamilies for Engine {
-    fn upgraded_models(
-        &mut self,
-        descriptor: TableDescriptor<StoredMetaModelConfiguration>,
-    ) -> Result<TableReference<StoredMetaModelConfiguration>, StoreError> {
-        let table = match self
-            .upgrade_table::<StoredMetaModelConfigurationV1, StoredMetaModelConfiguration>(
-                descriptor,
-            ) {
-            UpgradeOutcome::Upgraded(receipt) => receipt.table(),
-            UpgradeOutcome::AlreadyCurrent(table) => table,
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::ModelUpgrade(format!("{failure:?}")));
-            }
-        };
-        // The upgrade carries each row under the key it was stored by. A
-        // row still under its Layer alone moves to its Layer and Aspect in
-        // one commit. The open runs on a staged copy, so the store never
-        // holds the upgrade without the move.
-        let mut commit = self.begin_atomic_commit();
-        let mut moved = false;
-        for row in self.match_records(QueryPlan::all(table))?.records() {
-            let layer_key = RecordKey::new(FlowStore::layer_key(&row.model.layer));
-            if self
-                .match_records(QueryPlan::key(table, layer_key.clone()))?
-                .records()
-                .is_empty()
-            {
-                continue;
-            }
-            commit = commit.retract(table, layer_key).assert(table, row.clone());
-            moved = true;
-        }
-        if moved {
-            self.commit_atomic(commit)?;
-        }
-        Ok(table)
-    }
-
-    fn upgraded_leave_out_defaults(
-        &mut self,
-        descriptor: TableDescriptor<StoredMetaLeaveOutConfiguration>,
-    ) -> Result<TableReference<StoredMetaLeaveOutConfiguration>, StoreError> {
-        let table = match self
-            .upgrade_table::<StoredMetaLeaveOutConfigurationV1, StoredMetaLeaveOutConfiguration>(
-                descriptor,
-            ) {
-            UpgradeOutcome::Upgraded(receipt) => receipt.table(),
-            UpgradeOutcome::AlreadyCurrent(table) => table,
-            UpgradeOutcome::Refused(refusal) => {
-                return Err(StoreError::LeaveOutUpgrade {
-                    entry: refusal.key().to_owned_string(),
-                    reason: refusal.reason().clone(),
-                });
-            }
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::LeaveOutUpgradeFailed(format!("{failure:?}")));
-            }
-        };
-        // The upgrade carries each row under the key it was stored by. A
-        // row still under its Address alone moves to its Address and
-        // harness in one commit. The open runs on a staged copy, so the
-        // store never holds the upgrade without the move.
-        let mut commit = self.begin_atomic_commit();
-        let mut moved = false;
-        for row in self.match_records(QueryPlan::all(table))?.records() {
-            let address_key = RecordKey::new(FlowStore::address_record_key(&row.leave_out.address));
-            if self
-                .match_records(QueryPlan::key(table, address_key.clone()))?
-                .records()
-                .is_empty()
-            {
-                continue;
-            }
-            commit = commit
-                .retract(table, address_key)
-                .assert(table, row.clone());
-            moved = true;
-        }
-        if moved {
-            self.commit_atomic(commit)?;
-        }
-        Ok(table)
-    }
-
-    fn upgraded_metaflows(
-        &mut self,
-        descriptor: TableDescriptor<StoredMetaflow>,
-    ) -> Result<TableReference<StoredMetaflow>, StoreError> {
-        let from_v4 = descriptor.clone();
-        match self.upgrade_table::<StoredMetaflowV5, StoredMetaflow>(descriptor) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
-            }
-        }
-        // v4 predates stable queue identities; older families are tried only
-        // after each newer archived shape declines admission.
-        let from_v3 = from_v4.clone();
-        let from_v2 = from_v4.clone();
-        let from_v1 = from_v4.clone();
-        match self.upgrade_table::<StoredMetaflowV4, StoredMetaflow>(from_v4) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
-            }
-        }
-        // The newest edge is tried first and an admission refusal writes
-        // nothing; legacy rows are converted only by their matching mirror.
-        match self.upgrade_table::<StoredMetaflowV3, StoredMetaflow>(from_v3) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
-            }
-        }
-        match self.upgrade_table::<StoredMetaflowV2, StoredMetaflow>(from_v2) {
-            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission =>
-            {
-                match self.upgrade_table::<StoredMetaflowV1, StoredMetaflow>(from_v1) {
-                    UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-                    UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-                    UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-                    UpgradeOutcome::Failed(failure) => {
-                        Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
-                    }
-                }
-            }
-            UpgradeOutcome::Failed(failure) => {
-                Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
-            }
-        }
-    }
-
-    fn upgraded_address_holds(
-        &mut self,
-        descriptor: TableDescriptor<address_hold::AddressHold>,
-    ) -> Result<TableReference<address_hold::AddressHold>, StoreError> {
-        let from_v3 = descriptor.clone();
-        match self
-            .upgrade_table::<address_hold::AddressHoldV4, address_hold::AddressHold>(descriptor)
-        {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
-            }
-        }
-        let from_v2 = from_v3.clone();
-        let from_v1 = from_v3.clone();
-        match self.upgrade_table::<address_hold::AddressHoldV3, address_hold::AddressHold>(from_v3)
-        {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
-            }
-        }
-        match self.upgrade_table::<address_hold::AddressHoldV2, address_hold::AddressHold>(from_v2)
-        {
-            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission =>
-            {
-                match self.upgrade_table::<address_hold::AddressHoldV1, address_hold::AddressHold>(
-                    from_v1,
-                ) {
-                    UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-                    UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-                    UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-                    UpgradeOutcome::Failed(failure) => {
-                        Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
-                    }
-                }
-            }
-            UpgradeOutcome::Failed(failure) => {
-                Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
-            }
-        }
-    }
-
-    fn upgraded_send_calls(
-        &mut self,
-        descriptor: TableDescriptor<crate::generated::send_tool::SendCall>,
-    ) -> Result<TableReference<crate::generated::send_tool::SendCall>, StoreError> {
-        // A v5 family upgrades from v5; one refused at admission names an
-        // older family, tried next.
-        match self.upgrade_table::<send_call::SendCallV5, crate::generated::send_tool::SendCall>(
-            descriptor.clone(),
-        ) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::SendCallUpgrade(format!("{failure:?}")));
-            }
-        }
-        match self.upgrade_table::<send_call::SendCallV4, crate::generated::send_tool::SendCall>(
-            descriptor.clone(),
-        ) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::SendCallUpgrade(format!("{failure:?}")));
-            }
-        }
-        match self.upgrade_table::<send_call::SendCallV3, crate::generated::send_tool::SendCall>(
-            descriptor.clone(),
-        ) {
-            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission =>
-            {
-                match self.upgrade_table::<send_call::SendCallV2, crate::generated::send_tool::SendCall>(descriptor.clone()) {
-            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-            UpgradeOutcome::Refused(refusal) => Err(StoreError::SendCallUpgrade(format!(
-                "call {:?} was refused for an ended recipient, which no longer exists",
-                refusal.key()
-            ))),
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission =>
-            {
-                match self
-                    .upgrade_table::<send_call::SendCallV1, crate::generated::send_tool::SendCall>(
-                        descriptor,
-                    ) {
-                    UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-                    UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-                    UpgradeOutcome::Refused(refusal) => Err(StoreError::SendCallUpgrade(format!(
-                        "call {:?} was refused for an ended recipient, which no longer exists",
-                        refusal.key()
-                    ))),
-                    UpgradeOutcome::Failed(failure) => {
-                        Err(StoreError::SendCallUpgrade(format!("{failure:?}")))
-                    }
-                }
-            }
-                    UpgradeOutcome::Failed(failure) => {
-                        Err(StoreError::SendCallUpgrade(format!("{failure:?}")))
-                    }
-                }
-            }
-            UpgradeOutcome::Failed(failure) => Err(StoreError::SendCallUpgrade(format!("{failure:?}"))),
-        }
-    }
-
-    fn upgraded_flows(
-        &mut self,
-        descriptor: TableDescriptor<FlowRecord>,
-    ) -> Result<TableReference<FlowRecord>, StoreError> {
-        match self.upgrade_table::<FlowRecordV5, FlowRecord>(descriptor) {
-            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure) => Err(StoreError::FlowUpgrade(format!("{failure:?}"))),
-        }
-    }
-
-    fn upgraded_launch_outcomes(
-        &mut self,
-        descriptor: TableDescriptor<StoredLaunchOutcome>,
-    ) -> Result<TableReference<StoredLaunchOutcome>, StoreError> {
-        // A 0.40 store before CompositionRefusal holds v7 rows, a 0.35.22
-        // to 0.39 store v6 rows, a 0.35.6 to 0.35.21 store v5
-        // rows, a 0.35.3 to 0.35.5 store v4 rows, a 0.35.2 store v3 rows and
-        // a 0.34 store v2 rows; the
-        // newest edge is tried first, and a store it does not admit is tried
-        // on the next. An admission refusal writes nothing. An outcome that
-        // refused a Start for an ended Address refuses the upgrade.
-        let failed = |failure| StoreError::LaunchOutcomeUpgrade(format!("{failure:?}"));
-        let refused = |key: &RecordKey| {
-            StoreError::LaunchOutcomeUpgrade(format!(
-                "launch {key:?} was refused for an ended Address, which no longer exists"
-            ))
-        };
-        let admission = |failure: &sema_engine::StorageFailure| {
-            failure.phase() == sema_engine::StoragePhase::Admission
-        };
-        let from_v7 = descriptor.clone();
-        let from_v6 = descriptor.clone();
-        let from_v5 = descriptor.clone();
-        let from_v4 = descriptor.clone();
-        let from_v3 = descriptor.clone();
-        let from_v2 = descriptor.clone();
-        match self.upgrade_table::<StoredLaunchOutcomeV8, StoredLaunchOutcome>(descriptor) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
-            UpgradeOutcome::Failed(failure) if admission(&failure) => {}
-            UpgradeOutcome::Failed(failure) => return Err(failed(failure)),
-        }
-        match self.upgrade_table::<StoredLaunchOutcomeV7, StoredLaunchOutcome>(from_v7) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
-            UpgradeOutcome::Failed(failure) if admission(&failure) => {}
-            UpgradeOutcome::Failed(failure) => return Err(failed(failure)),
-        }
-        match self.upgrade_table::<StoredLaunchOutcomeV6, StoredLaunchOutcome>(from_v6) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
-            UpgradeOutcome::Failed(failure) if admission(&failure) => {}
-            UpgradeOutcome::Failed(failure) => return Err(failed(failure)),
-        }
-        match self.upgrade_table::<StoredLaunchOutcomeV5, StoredLaunchOutcome>(from_v5) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
-            UpgradeOutcome::Failed(failure) if admission(&failure) => {}
-            UpgradeOutcome::Failed(failure) => return Err(failed(failure)),
-        }
-        match self.upgrade_table::<StoredLaunchOutcomeV4, StoredLaunchOutcome>(from_v4) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
-            UpgradeOutcome::Failed(failure) if admission(&failure) => {}
-            UpgradeOutcome::Failed(failure) => return Err(failed(failure)),
-        }
-        match self.upgrade_table::<StoredLaunchOutcomeV3, StoredLaunchOutcome>(from_v3) {
-            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
-            UpgradeOutcome::Failed(failure) if admission(&failure) => {}
-            UpgradeOutcome::Failed(failure) => return Err(failed(failure)),
-        }
-        match self.upgrade_table::<StoredLaunchOutcomeV2, StoredLaunchOutcome>(from_v2) {
-            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-            UpgradeOutcome::Refused(refusal) => Err(refused(refusal.key())),
-            UpgradeOutcome::Failed(failure) => Err(failed(failure)),
-        }
-    }
-
-    fn upgraded_launch_attempts(
-        &mut self,
-        descriptor: TableDescriptor<StoredLaunchAttempt>,
-        quarantine: TableReference<QuarantinedLaunchAttempt>,
-    ) -> Result<
-        (
-            TableReference<StoredLaunchAttempt>,
-            Vec<LaunchAttemptSettlement>,
-        ),
-        StoreError,
-    > {
-        let predecessor = TableDescriptor::<StoredLaunchAttemptV1>::new(
-            FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
-            FamilyName::new("flow-nexus-launch-attempt"),
-            StoredLaunchAttemptV1::schema_hash(),
-        )
-        .family_identity();
-        let second_predecessor = TableDescriptor::<StoredLaunchAttemptV2>::new(
-            FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
-            FamilyName::new("flow-nexus-launch-attempt"),
-            StoredLaunchAttemptV2::schema_hash(),
-        )
-        .family_identity();
-        let current_predecessor = TableDescriptor::<StoredLaunchAttemptV3>::new(
-            FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
-            FamilyName::new("flow-nexus-launch-attempt"),
-            StoredLaunchAttemptV3::schema_hash(),
-        )
-        .family_identity();
-        let family = self
-            .catalog()
-            .family_identity(&FLOW_LAUNCH_ATTEMPT_TABLE_NAME)
-            .cloned();
-        let settlements = if family.as_ref() == Some(&predecessor) {
-            // Opening never fails on a row older than 0.34's shape: each is
-            // moved aside whole, and every such move is logged.
-            self.settle_launch_attempts(quarantine)
-                .unwrap_or_else(|error| {
-                    vec![LaunchAttemptSettlement::Unsettled {
-                        store_error: error.to_string(),
-                    }]
-                })
-        } else {
-            Vec::new()
-        };
-        let upgrade = if family.as_ref() == Some(&predecessor) {
-            self.upgrade_table::<StoredLaunchAttemptV1, StoredLaunchAttempt>(descriptor)
-        } else if family.as_ref() == Some(&second_predecessor) {
-            self.upgrade_table::<StoredLaunchAttemptV2, StoredLaunchAttempt>(descriptor)
-        } else {
-            debug_assert!(
-                family.is_none()
-                    || family.as_ref() == Some(&current_predecessor)
-                    || family.as_ref() == Some(&descriptor.family_identity()),
-                "launch-attempt family has an undeclared identity"
-            );
-            self.upgrade_table::<StoredLaunchAttemptV3, StoredLaunchAttempt>(descriptor)
-        };
-        let table = match upgrade {
-            UpgradeOutcome::Upgraded(receipt) => receipt.table(),
-            UpgradeOutcome::AlreadyCurrent(table) => table,
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::LaunchAttemptUpgrade(format!("{failure:?}")));
-            }
-        };
-        Ok((table, settlements))
-    }
+    /// The store is an earlier Flow's, of Flow Memory `version`: this Flow
+    /// opens no earlier store, and leaves it as it is.
+    #[error("store {path} is an earlier Flow's Memory v{version}; this Flow opens Memory v3 alone")]
+    EarlierMemory { path: String, version: u64 },
 }
 
 pub(crate) struct MetaConfigurationTables {
@@ -4091,6 +1461,7 @@ pub(crate) struct MetaConfigurationTables {
     default_minutes: TableReference<StoredMetaDefaultMinutesConfiguration>,
     harness_flags: TableReference<StoredMetaHarnessFlagsConfiguration>,
     heartbeat: TableReference<StoredMetaHeartbeatConfiguration>,
+    protected_addresses: TableReference<StoredMetaProtectedAddressConfiguration>,
 }
 
 trait RegistersMetaConfigurationTables: Sized {
@@ -4100,12 +1471,10 @@ trait RegistersMetaConfigurationTables: Sized {
 impl RegistersMetaConfigurationTables for MetaConfigurationTables {
     fn register(engine: &mut Engine) -> Result<Self, StoreError> {
         Ok(Self {
-            nexus: engine
-                .upgraded_nexus_configuration(StoredMetaNexusConfiguration::descriptor())?,
-            models: engine.upgraded_models(StoredMetaModelConfiguration::descriptor())?,
+            nexus: engine.register_table(StoredMetaNexusConfiguration::descriptor())?,
+            models: engine.register_table(StoredMetaModelConfiguration::descriptor())?,
             thresholds: engine.register_table(StoredMetaThresholdConfiguration::descriptor())?,
-            leave_outs: engine
-                .upgraded_leave_out_defaults(StoredMetaLeaveOutConfiguration::descriptor())?,
+            leave_outs: engine.register_table(StoredMetaLeaveOutConfiguration::descriptor())?,
             send_servers: engine.register_table(
                 <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor(),
             )?,
@@ -4116,7 +1485,9 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             harness_flags: engine
                 .register_table(StoredMetaHarnessFlagsConfiguration::descriptor())?,
             heartbeat: engine.register_table(StoredMetaHeartbeatConfiguration::descriptor())?,
-            metaflows: engine.upgraded_metaflow_declarations(
+            protected_addresses: engine
+                .register_table(StoredMetaProtectedAddressConfiguration::descriptor())?,
+            metaflows: engine.register_table(
                 <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor(),
             )?,
         })
@@ -4141,7 +1512,6 @@ pub struct FlowStore {
     replacements: TableReference<Replacement>,
     roles: TableReference<StoredRole>,
     meta_configuration_tables: MetaConfigurationTables,
-    quarantined_launch_attempts: TableReference<QuarantinedLaunchAttempt>,
     delivery_tables: DeliveryTables,
     event_tables: events::EventTables,
     context_sizes: TableReference<context::FlowContextSize>,
@@ -4156,10 +1526,9 @@ pub struct FlowStore {
     send_outcomes: SendOutcomeTables,
     logical_deliveries: LogicalDeliveryTables,
     heartbeat_standings: TableReference<StoredHeartbeatStanding>,
+    restarts: TableReference<restart::StoredRestart>,
+    seat_births: TableReference<crate::generated::memory::SeatBirth>,
     pub launch_changes: LaunchChanges,
-    /// What opening did with launch-attempt rows older than 0.34's shape;
-    /// each is also logged.
-    pub opening_settlements: Vec<LaunchAttemptSettlement>,
 }
 
 pub(crate) trait TracksHeartbeat {
@@ -4230,6 +1599,7 @@ pub struct ConfiguredFamilies {
     pub default_minutes: i64,
     pub configured_harness_flags: Vec<ConfigureHarnessFlags>,
     pub heartbeat: Option<HeartbeatConfig>,
+    pub protected_addresses: Vec<Address>,
 }
 
 pub trait CompletesSnapshot {
@@ -4250,6 +1620,7 @@ impl CompletesSnapshot for ConfiguredFamilies {
             default_minutes: self.default_minutes,
             configured_harness_flags: self.configured_harness_flags,
             heartbeat: self.heartbeat,
+            protected_addresses: self.protected_addresses,
             counters,
         }
     }
@@ -4257,8 +1628,7 @@ impl CompletesSnapshot for ConfiguredFamilies {
 
 /// The one-request configuration listener's view of the same Sema store.
 /// It registers only the rows Configure owns and never seeds the rest of
-/// Flow state or settles launches/deliveries; of the stored families it
-/// upgrades only the leave-out defaults it serves.
+/// Flow state or settles launches/deliveries.
 /// Keeping this Engine alive holds redb's exclusive writer lock while that
 /// listener owns the meta socket.
 pub struct ConfigurationOnlyStore {
@@ -4282,16 +1652,9 @@ pub trait ConfiguresOnlyStore: Sized {
 
 impl ConfiguresOnlyStore for ConfigurationOnlyStore {
     /// Opens the same versioned store as normal startup without invoking its
-    /// seeding, settlement or adoption path, upgrading only the families it
-    /// serves; a store that still holds a retired table drops it first. An
-    /// open that changes the store runs on a staged copy that replaces the
-    /// store only once the whole open has succeeded.
+    /// seeding or settlement path. A store this Flow did not write, an
+    /// earlier Flow's among them, is refused before anything is written.
     fn open(path: &Path) -> Result<Self, StoreError> {
-        if FlowStore::recognize_flow_memory(path)? {
-            StagedUpgrade::run(path, UpgradeScope::ConfigurationOnly, |copy| {
-                Self::open_in_place(copy).map(drop)
-            })?;
-        }
         Self::open_in_place(path)
     }
 
@@ -4316,8 +1679,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             delivery::DELIVERY_CONFIGURATION_TABLE_NAME,
             FamilyName::new("flow-nexus-delivery-configuration"),
             DeliveryConfiguration::schema_hash(),
-        )
-        .with_predecessor::<delivery::DeliveryConfigurationV1>();
+        );
         let meta_nexus_descriptor = StoredMetaNexusConfiguration::descriptor();
         let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
         let meta_thresholds_descriptor = StoredMetaThresholdConfiguration::descriptor();
@@ -4325,12 +1687,11 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let meta_default_minutes_descriptor = StoredMetaDefaultMinutesConfiguration::descriptor();
         let meta_harness_flags_descriptor = StoredMetaHarnessFlagsConfiguration::descriptor();
         let meta_heartbeat_descriptor = StoredMetaHeartbeatConfiguration::descriptor();
+        let meta_protected_addresses_descriptor =
+            StoredMetaProtectedAddressConfiguration::descriptor();
         let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         let meta_metaflows_descriptor = <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor();
-        if recognized {
-            FlowStore::drop_retired_tables(path)?;
-        }
         // Family identities are part of the open request, so Engine validates
         // them before its first durable write. Existing paths have already
         // passed the read-only Memory identity check above.
@@ -4349,35 +1710,25 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_default_minutes_descriptor)
                 .with_family(&meta_harness_flags_descriptor)
                 .with_family(&meta_heartbeat_descriptor)
+                .with_family(&meta_protected_addresses_descriptor)
                 .with_family(&meta_metaflows_descriptor),
         )?;
         let state = engine.register_table(state_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
         let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
-        let delivery_configuration = match engine
-            .upgrade_table::<delivery::DeliveryConfigurationV1, DeliveryConfiguration>(
-                delivery_configuration_descriptor,
-            ) {
-            UpgradeOutcome::Upgraded(receipt) => receipt.table(),
-            UpgradeOutcome::AlreadyCurrent(table) => table,
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure) => {
-                return Err(StoreError::DeliveryConfigurationUpgrade(format!(
-                    "{failure:?}"
-                )));
-            }
-        };
+        let delivery_configuration = engine.register_table(delivery_configuration_descriptor)?;
         let meta_configuration_tables = MetaConfigurationTables {
-            nexus: engine.upgraded_nexus_configuration(meta_nexus_descriptor)?,
-            models: engine.upgraded_models(meta_models_descriptor)?,
+            nexus: engine.register_table(meta_nexus_descriptor)?,
+            models: engine.register_table(meta_models_descriptor)?,
             thresholds: engine.register_table(meta_thresholds_descriptor)?,
-            leave_outs: engine.upgraded_leave_out_defaults(meta_leave_outs_descriptor)?,
+            leave_outs: engine.register_table(meta_leave_outs_descriptor)?,
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
             investigation: engine.register_table(meta_investigation_descriptor)?,
             default_minutes: engine.register_table(meta_default_minutes_descriptor)?,
             harness_flags: engine.register_table(meta_harness_flags_descriptor)?,
             heartbeat: engine.register_table(meta_heartbeat_descriptor)?,
-            metaflows: engine.upgraded_metaflow_declarations(meta_metaflows_descriptor)?,
+            protected_addresses: engine.register_table(meta_protected_addresses_descriptor)?,
+            metaflows: engine.register_table(meta_metaflows_descriptor)?,
         };
         if !recognized {
             engine.assert(Assertion::new(
@@ -4517,9 +1868,8 @@ pub trait OpensFlowStore {
         Self: Sized;
 
     /// Opens an already-configured, recognized Flow Memory store without
-    /// seeding defaults, importing an older store, or settling prior work.
-    /// It drops the retired tables and upgrades the flows and launch
-    /// outcomes from their 0.34 predecessor.
+    /// seeding defaults or settling prior work. A store an earlier Flow
+    /// wrote is refused, never upgraded.
     fn open_configured(path: &Path) -> Result<Self, StoreError>
     where
         Self: Sized;
@@ -4670,9 +2020,8 @@ pub trait RecordsReplacement {
 
 pub trait ReadsLaunchAttempt {
     fn launch_attempt(&self, launch_request_id: &str) -> Result<Option<LaunchAttempt>, StoreError>;
-    /// The profile of a launch that named its seat's context by module
-    /// identity, which a later seat can be composed from again; None for a
-    /// launch kept from before 0.35.0, whose context no module names.
+    /// The profile of a launch, which a later seat can be composed from
+    /// again.
     fn composable_launch_profile(
         &self,
         launch_request_id: &str,
@@ -4750,22 +2099,15 @@ trait WritesFlowStore {
 }
 
 impl OpensFlowStore for FlowStore {
-    /// An open that changes the store runs on a staged copy that replaces
-    /// the store only once the whole open has succeeded; what that open
-    /// set aside is reported by the store returned.
+    /// The first running open of a configuration-only store adds the
+    /// running families on a staged copy that replaces the store only once
+    /// the whole open has succeeded.
     fn open_configured(path: &Path) -> Result<Self, StoreError> {
         if !FlowStore::recognize_flow_memory(path)? {
             return Err(StoreError::NotConfigured);
         }
-        let staged = StagedUpgrade::run(path, UpgradeScope::Running, |copy| {
-            Self::open_configured_in_place(copy)
-                .map(|mut store| std::mem::take(&mut store.opening_settlements))
-        })?;
-        let mut store = Self::open_configured_in_place(path)?;
-        if let Some(settlements) = staged {
-            store.opening_settlements = settlements;
-        }
-        Ok(store)
+        StagedOpen::run(path, |copy| Self::open_configured_in_place(copy).map(drop))?;
+        Self::open_configured_in_place(path)
     }
 
     fn open_configured_in_place(path: &Path) -> Result<Self, StoreError> {
@@ -4783,8 +2125,7 @@ impl OpensFlowStore for FlowStore {
             FLOW_TABLE_NAME,
             FamilyName::new("flow-nexus-flow"),
             FlowRecord::schema_hash(),
-        )
-        .with_predecessor::<FlowRecordV5>();
+        );
         let native_owner_proofs_descriptor = NativeOwnerProofRecord::descriptor();
         let state_descriptor = TableDescriptor::<FlowStoreState>::new(
             FLOW_STATE_TABLE_NAME,
@@ -4795,21 +2136,16 @@ impl OpensFlowStore for FlowStore {
             METAFLOW_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow"),
             StoredMetaflow::schema_hash(),
-        )
-        .with_predecessor::<StoredMetaflowV5>()
-        .with_predecessor::<StoredMetaflowV1>()
-        .with_predecessor::<StoredMetaflowV2>()
-        .with_predecessor::<StoredMetaflowV3>()
-        .with_predecessor::<StoredMetaflowV4>();
+        );
         let metaflow_processes_descriptor = TableDescriptor::<StoredMetaflowProcess>::new(
             METAFLOW_PROCESS_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow-process"),
-            SchemaHash::for_label("flow-nexus-metaflow-process-v1"),
+            StoredMetaflowProcess::schema_hash(),
         );
         let metaflow_locks_descriptor = TableDescriptor::<StoredMetaflowLock>::new(
             METAFLOW_LOCK_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow-lock"),
-            SchemaHash::for_label("flow-nexus-metaflow-lock-v1"),
+            StoredMetaflowLock::schema_hash(),
         );
         let configuration_descriptor = TableDescriptor::<FlowStoreConfiguration>::new(
             FLOW_CONFIGURATION_TABLE_NAME,
@@ -4830,10 +2166,7 @@ impl OpensFlowStore for FlowStore {
             FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
             FamilyName::new("flow-nexus-launch-attempt"),
             StoredLaunchAttempt::schema_hash(),
-        )
-        .with_predecessor::<StoredLaunchAttemptV1>()
-        .with_predecessor::<StoredLaunchAttemptV2>()
-        .with_predecessor::<StoredLaunchAttemptV3>();
+        );
         let launch_panes_descriptor = TableDescriptor::<StoredLaunchPane>::new(
             FLOW_LAUNCH_PANE_TABLE_NAME,
             FamilyName::new("flow-nexus-launch-pane"),
@@ -4843,14 +2176,7 @@ impl OpensFlowStore for FlowStore {
             FLOW_LAUNCH_OUTCOME_TABLE_NAME,
             FamilyName::new("flow-nexus-launch-outcome"),
             StoredLaunchOutcome::schema_hash(),
-        )
-        .with_predecessor::<StoredLaunchOutcomeV2>()
-        .with_predecessor::<StoredLaunchOutcomeV3>()
-        .with_predecessor::<StoredLaunchOutcomeV4>()
-        .with_predecessor::<StoredLaunchOutcomeV5>()
-        .with_predecessor::<StoredLaunchOutcomeV6>()
-        .with_predecessor::<StoredLaunchOutcomeV7>()
-        .with_predecessor::<StoredLaunchOutcomeV8>();
+        );
         let replacements_descriptor = TableDescriptor::<Replacement>::new(
             FLOW_REPLACEMENT_TABLE_NAME,
             FamilyName::new("flow-nexus-replacement"),
@@ -4861,12 +2187,6 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-role"),
             SchemaHash::for_label("flow-nexus-role-v1"),
         );
-        let quarantined_launch_attempts_descriptor =
-            TableDescriptor::<QuarantinedLaunchAttempt>::new(
-                FLOW_QUARANTINED_LAUNCH_ATTEMPT_TABLE_NAME,
-                FamilyName::new("flow-nexus-quarantined-launch-attempt"),
-                SchemaHash::for_label("flow-nexus-quarantined-launch-attempt-v1"),
-            );
         let delivery_descriptor = TableDescriptor::<delivery::StoredDelivery>::new(
             delivery::DELIVERY_TABLE_NAME,
             FamilyName::new("flow-nexus-delivery"),
@@ -4881,8 +2201,7 @@ impl OpensFlowStore for FlowStore {
             delivery::DELIVERY_CONFIGURATION_TABLE_NAME,
             FamilyName::new("flow-nexus-delivery-configuration"),
             DeliveryConfiguration::schema_hash(),
-        )
-        .with_predecessor::<delivery::DeliveryConfigurationV1>();
+        );
         let meta_nexus_descriptor = StoredMetaNexusConfiguration::descriptor();
         let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
         let meta_thresholds_descriptor = StoredMetaThresholdConfiguration::descriptor();
@@ -4909,6 +2228,10 @@ impl OpensFlowStore for FlowStore {
         let send_outcome_descriptors = SendOutcomeTables::descriptors();
         let logical_delivery_descriptors = LogicalDeliveryTables::descriptors();
         let heartbeat_standing_descriptor = StoredHeartbeatStanding::descriptor();
+        let restart_descriptor =
+            <FlowStore as restart::DescribesRestartTables>::restart_descriptor();
+        let seat_birth_descriptor =
+            <FlowStore as restart::DescribesRestartTables>::seat_birth_descriptor();
         let mut engine = Engine::open(
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
@@ -4925,7 +2248,6 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&launch_outcomes_descriptor)
                 .with_family(&replacements_descriptor)
                 .with_family(&roles_descriptor)
-                .with_family(&quarantined_launch_attempts_descriptor)
                 .with_family(&delivery_descriptor)
                 .with_family(&pane_lease_descriptor)
                 .with_family(&delivery_configuration_descriptor)
@@ -4938,6 +2260,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&StoredMetaDefaultMinutesConfiguration::descriptor())
                 .with_family(&StoredMetaHarnessFlagsConfiguration::descriptor())
                 .with_family(&StoredMetaHeartbeatConfiguration::descriptor())
+                .with_family(&StoredMetaProtectedAddressConfiguration::descriptor())
                 .with_family(&compactions_descriptor)
                 .with_family(&reminders_descriptor)
                 .with_family(&successor_intents_descriptor)
@@ -4958,23 +2281,22 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&logical_delivery_descriptors.events)
                 .with_family(&logical_delivery_descriptors.simplified_replies)
                 .with_family(&logical_delivery_descriptors.purposes)
-                .with_family(&heartbeat_standing_descriptor),
+                .with_family(&heartbeat_standing_descriptor)
+                .with_family(&restart_descriptor)
+                .with_family(&seat_birth_descriptor),
         )?;
-        let flows = engine.upgraded_flows(flows_descriptor)?;
+        let flows = engine.register_table(flows_descriptor)?;
         let native_owner_proofs = engine.register_table(native_owner_proofs_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
-        let metaflows = engine.upgraded_metaflows(metaflows_descriptor)?;
+        let metaflows = engine.register_table(metaflows_descriptor)?;
         let metaflow_processes = engine.register_table(metaflow_processes_descriptor)?;
         let metaflow_locks = engine.register_table(metaflow_locks_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
         let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
         let herdr_routes = engine.register_table(herdr_routes_descriptor)?;
-        let quarantined_launch_attempts =
-            engine.register_table(quarantined_launch_attempts_descriptor)?;
-        let (launch_attempts, opening_settlements) = engine
-            .upgraded_launch_attempts(launch_attempts_descriptor, quarantined_launch_attempts)?;
+        let launch_attempts = engine.register_table(launch_attempts_descriptor)?;
         let launch_panes = engine.register_table(launch_panes_descriptor)?;
-        let launch_outcomes = engine.upgraded_launch_outcomes(launch_outcomes_descriptor)?;
+        let launch_outcomes = engine.register_table(launch_outcomes_descriptor)?;
         let replacements = engine.register_table(replacements_descriptor)?;
         let roles = engine.register_table(roles_descriptor)?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
@@ -4982,22 +2304,21 @@ impl OpensFlowStore for FlowStore {
         let event_tables =
             <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
         let context_sizes = engine.register_table(context_sizes_descriptor)?;
-        let address_holds = engine.upgraded_address_holds(address_holds_descriptor)?;
+        let address_holds = engine.register_table(address_holds_descriptor)?;
         let opened_threads = engine.register_table(opened_threads_descriptor)?;
-        let send_calls = engine.upgraded_send_calls(send_calls_descriptor)?;
+        let send_calls = engine.register_table(send_calls_descriptor)?;
         let launch_cleanups = engine.register_table(launch_cleanups_descriptor)?;
         let compactions = engine.register_table(compactions_descriptor)?;
         let reminders = engine.register_table(reminders_descriptor)?;
-        let successor_intents = successor::UpgradesSuccessorIntents::upgraded_successor_intents(
-            &mut engine,
-            successor_intents_descriptor,
-        )?;
+        let successor_intents = engine.register_table(successor_intents_descriptor)?;
         let queue_delivery =
             QueueDeliveryTables::register(&mut engine, queue_delivery_descriptors)?;
         let send_outcomes = SendOutcomeTables::register(&mut engine, send_outcome_descriptors)?;
         let logical_deliveries =
             LogicalDeliveryTables::register(&mut engine, logical_delivery_descriptors)?;
         let heartbeat_standings = engine.register_table(heartbeat_standing_descriptor)?;
+        let restarts = engine.register_table(restart_descriptor)?;
+        let seat_births = engine.register_table(seat_birth_descriptor)?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -5016,7 +2337,6 @@ impl OpensFlowStore for FlowStore {
             replacements,
             roles,
             meta_configuration_tables,
-            quarantined_launch_attempts,
             delivery_tables,
             event_tables,
             context_sizes,
@@ -5031,18 +2351,17 @@ impl OpensFlowStore for FlowStore {
             send_outcomes,
             logical_deliveries,
             heartbeat_standings,
+            restarts,
+            seat_births,
             launch_changes: LaunchChanges::default(),
-            opening_settlements,
         };
-        for settlement in &store.opening_settlements {
-            eprintln!("flow-nexus: {settlement}");
-        }
 
         // Recognition already checked the authored Memory identity record;
         // these reads require the complete committed configuration before any
         // runtime adapter is constructed by RunningNexus.
         store.state()?;
         store.archive_legacy_queue()?;
+        store.align_followed_requests()?;
         store.seed_missing_queued_deliveries()?;
         store
             .configuration_snapshot()?
@@ -5051,45 +2370,33 @@ impl OpensFlowStore for FlowStore {
     }
 
     fn open_seeded(path: &Path, defaults: &DefaultConfiguration) -> Result<Self, StoreError> {
-        if path.exists() {
-            FlowStore::drop_retired_tables(path)?;
-        }
         let mut engine = Engine::open(EngineOpen::new(path, SchemaVersion::new(1)))?;
-        let flows = engine.upgraded_flows(
-            TableDescriptor::new(
-                FLOW_TABLE_NAME,
-                FamilyName::new("flow-nexus-flow"),
-                FlowRecord::schema_hash(),
-            )
-            .with_predecessor::<FlowRecordV5>(),
-        )?;
+        let flows = engine.register_table(TableDescriptor::new(
+            FLOW_TABLE_NAME,
+            FamilyName::new("flow-nexus-flow"),
+            FlowRecord::schema_hash(),
+        ))?;
         let native_owner_proofs = engine.register_table(NativeOwnerProofRecord::descriptor())?;
         let state = engine.register_table(TableDescriptor::new(
             FLOW_STATE_TABLE_NAME,
             FamilyName::new("flow-nexus-state"),
             SchemaHash::for_label("flow-nexus-state-v1"),
         ))?;
-        let metaflows = engine.upgraded_metaflows(
-            TableDescriptor::new(
-                METAFLOW_TABLE_NAME,
-                FamilyName::new("flow-nexus-metaflow"),
-                StoredMetaflow::schema_hash(),
-            )
-            .with_predecessor::<StoredMetaflowV5>()
-            .with_predecessor::<StoredMetaflowV1>()
-            .with_predecessor::<StoredMetaflowV2>()
-            .with_predecessor::<StoredMetaflowV3>()
-            .with_predecessor::<StoredMetaflowV4>(),
-        )?;
-        let metaflow_processes = engine.register_table(TableDescriptor::new(
-            METAFLOW_PROCESS_TABLE_NAME,
-            FamilyName::new("flow-nexus-metaflow-process"),
-            SchemaHash::for_label("flow-nexus-metaflow-process-v1"),
+        let metaflows = engine.register_table(TableDescriptor::new(
+            METAFLOW_TABLE_NAME,
+            FamilyName::new("flow-nexus-metaflow"),
+            StoredMetaflow::schema_hash(),
         ))?;
-        let metaflow_locks = engine.register_table(TableDescriptor::new(
+        let metaflow_processes =
+            engine.register_table(TableDescriptor::<StoredMetaflowProcess>::new(
+                METAFLOW_PROCESS_TABLE_NAME,
+                FamilyName::new("flow-nexus-metaflow-process"),
+                StoredMetaflowProcess::schema_hash(),
+            ))?;
+        let metaflow_locks = engine.register_table(TableDescriptor::<StoredMetaflowLock>::new(
             METAFLOW_LOCK_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow-lock"),
-            SchemaHash::for_label("flow-nexus-metaflow-lock-v1"),
+            StoredMetaflowLock::schema_hash(),
         ))?;
         let configuration = engine.register_table(TableDescriptor::new(
             FLOW_CONFIGURATION_TABLE_NAME,
@@ -5111,20 +2418,11 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-launch-pane"),
             SchemaHash::for_label("flow-nexus-launch-pane-v1"),
         ))?;
-        let launch_outcomes = engine.upgraded_launch_outcomes(
-            TableDescriptor::new(
-                FLOW_LAUNCH_OUTCOME_TABLE_NAME,
-                FamilyName::new("flow-nexus-launch-outcome"),
-                StoredLaunchOutcome::schema_hash(),
-            )
-            .with_predecessor::<StoredLaunchOutcomeV2>()
-            .with_predecessor::<StoredLaunchOutcomeV3>()
-            .with_predecessor::<StoredLaunchOutcomeV4>()
-            .with_predecessor::<StoredLaunchOutcomeV5>()
-            .with_predecessor::<StoredLaunchOutcomeV6>()
-            .with_predecessor::<StoredLaunchOutcomeV7>()
-            .with_predecessor::<StoredLaunchOutcomeV8>(),
-        )?;
+        let launch_outcomes = engine.register_table(TableDescriptor::new(
+            FLOW_LAUNCH_OUTCOME_TABLE_NAME,
+            FamilyName::new("flow-nexus-launch-outcome"),
+            StoredLaunchOutcome::schema_hash(),
+        ))?;
         let replacements = engine.register_table(TableDescriptor::new(
             FLOW_REPLACEMENT_TABLE_NAME,
             FamilyName::new("flow-nexus-replacement"),
@@ -5135,22 +2433,11 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-role"),
             SchemaHash::for_label("flow-nexus-role-v1"),
         ))?;
-        let quarantined_launch_attempts = engine.register_table(TableDescriptor::new(
-            FLOW_QUARANTINED_LAUNCH_ATTEMPT_TABLE_NAME,
-            FamilyName::new("flow-nexus-quarantined-launch-attempt"),
-            SchemaHash::for_label("flow-nexus-quarantined-launch-attempt-v1"),
+        let launch_attempts = engine.register_table(TableDescriptor::new(
+            FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
+            FamilyName::new("flow-nexus-launch-attempt"),
+            StoredLaunchAttempt::schema_hash(),
         ))?;
-        let (launch_attempts, opening_settlements) = engine.upgraded_launch_attempts(
-            TableDescriptor::new(
-                FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
-                FamilyName::new("flow-nexus-launch-attempt"),
-                StoredLaunchAttempt::schema_hash(),
-            )
-            .with_predecessor::<StoredLaunchAttemptV1>()
-            .with_predecessor::<StoredLaunchAttemptV2>()
-            .with_predecessor::<StoredLaunchAttemptV3>(),
-            quarantined_launch_attempts,
-        )?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
         let meta_configuration_tables = MetaConfigurationTables::register(&mut engine)?;
         let event_tables =
@@ -5158,14 +2445,14 @@ impl OpensFlowStore for FlowStore {
         let context_sizes = engine.register_table(
             <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor(),
         )?;
-        let address_holds = engine.upgraded_address_holds(
+        let address_holds = engine.register_table(
             <address_hold::AddressHold as address_hold::DescribesAddressHoldTable>::descriptor(),
         )?;
         let opened_threads = engine.register_table(
             <opened_thread::OpenedLaunchThread as opened_thread::DescribesOpenedThreadTable>::descriptor(
             ),
         )?;
-        let send_calls = engine.upgraded_send_calls(
+        let send_calls = engine.register_table(
             <crate::generated::send_tool::SendCall as send_call::DescribesSendCallTable>::descriptor(),
         )?;
         let launch_cleanups = engine.register_table(
@@ -5177,8 +2464,7 @@ impl OpensFlowStore for FlowStore {
         let reminders = engine.register_table(
             <reminder::Reminder as reminder::DescribesReminderTable>::descriptor(),
         )?;
-        let successor_intents = successor::UpgradesSuccessorIntents::upgraded_successor_intents(
-            &mut engine,
+        let successor_intents = engine.register_table(
             <successor::SuccessorIntent as successor::DescribesSuccessorIntentTable>::descriptor(),
         )?;
         let queue_delivery =
@@ -5188,6 +2474,11 @@ impl OpensFlowStore for FlowStore {
         let logical_deliveries =
             LogicalDeliveryTables::register(&mut engine, LogicalDeliveryTables::descriptors())?;
         let heartbeat_standings = engine.register_table(StoredHeartbeatStanding::descriptor())?;
+        let restarts = engine
+            .register_table(<FlowStore as restart::DescribesRestartTables>::restart_descriptor())?;
+        let seat_births = engine.register_table(
+            <FlowStore as restart::DescribesRestartTables>::seat_birth_descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -5206,7 +2497,6 @@ impl OpensFlowStore for FlowStore {
             replacements,
             roles,
             meta_configuration_tables,
-            quarantined_launch_attempts,
             delivery_tables,
             event_tables,
             context_sizes,
@@ -5221,10 +2511,12 @@ impl OpensFlowStore for FlowStore {
             send_outcomes,
             logical_deliveries,
             heartbeat_standings,
+            restarts,
+            seat_births,
             launch_changes: LaunchChanges::default(),
-            opening_settlements,
         };
         store.archive_legacy_queue()?;
+        store.align_followed_requests()?;
         store.seed_missing_queued_deliveries()?;
         if store
             .engine
@@ -5267,10 +2559,6 @@ impl OpensFlowStore for FlowStore {
                 defaults.runtime_configuration(),
             ))?;
         }
-        for settlement in &store.opening_settlements {
-            eprintln!("flow-nexus: {settlement}");
-        }
-        store.adopt_legacy_roles()?;
         store.seed_delivery_configuration(defaults)?;
         // A delivery a crash left under the lease is settled Uncertain here
         // and never retried: what reached its pane is not known.
@@ -5309,6 +2597,8 @@ pub(crate) trait ManagesMetaflowState: Sized {
     /// Replace one configuration family whole with its declaration.
     fn configure_change(&self, change: ConfigurationChange)
     -> Result<ConfigureOutcome, StoreError>;
+    /// Whether ProtectedAddresses names `address`.
+    fn protects(&self, address: &Address) -> Result<bool, StoreError>;
     /// The refresh threshold configured for one model, if any.
     fn configured_threshold(
         &self,
@@ -5369,6 +2659,18 @@ impl ManagesMetaflowState for FlowStore {
                 &self.meta_configuration_tables,
                 change,
             ),
+        }
+    }
+
+    fn protects(&self, address: &Address) -> Result<bool, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.meta_configuration_tables.protected_addresses,
+            RecordKey::new(FlowStore::address_record_key(address)),
+        ))?;
+        match rows.records() {
+            [] => Ok(false),
+            [stored] if &stored.address == address => Ok(true),
+            _ => Err(StoreError::StateInvariant),
         }
     }
 
@@ -5570,6 +2872,10 @@ impl AppliesFlowQuery for FlowStore {
             Query::Refresh(_) => Ok(Response::Refused(signal_flow::Refusal::Store(
                 "the store alone closes no pane".into(),
             ))),
+            // A restart closes and opens panes, which the store alone cannot.
+            Query::Restart(_) => Ok(Response::Refused(signal_flow::Refusal::Store(
+                "the store alone closes no pane".into(),
+            ))),
             Query::ResolveRecipient(flow_id) => self.resolve_recipient(&flow_id),
             Query::Stop(_) => Ok(Response::StopRejected(
                 signal_flow::StopRejection::PersistenceRefused,
@@ -5650,7 +2956,8 @@ impl ReservesPendingStart for FlowStore {
             | Query::DeliverAll(_)
             | Query::Launch(_)
             | Query::BindSeat(_)
-            | Query::Adopt(_) => Ok(None),
+            | Query::Adopt(_)
+            | Query::Restart(_) => Ok(None),
         }
     }
 }
@@ -5824,243 +3131,6 @@ impl RegistersBindings for FlowStore {
     }
 }
 
-trait SettlesLaunchAttempts {
-    /// Reads every row of a 0.34 attempts table by itself. A row that reads
-    /// in 0.34's shape stays, for the family upgrade to carry. Any other row
-    /// is moved aside whole into the quarantine table, in one commit with
-    /// its retraction, naming the earlier shape it reads in, or Unknown.
-    fn settle_launch_attempts(
-        &mut self,
-        quarantine: TableReference<QuarantinedLaunchAttempt>,
-    ) -> Result<Vec<LaunchAttemptSettlement>, StoreError>;
-    /// Every launch-attempt row as its stored key and archive bytes, read
-    /// through the engine's read-only storage reader. Reading the archive
-    /// undecoded is an exception taken only here: it is how a row that no
-    /// shape reads is found and kept whole.
-    fn launch_attempt_archives(&self) -> Result<Vec<(String, Vec<u8>)>, StoreError>;
-    fn quarantined_launch_attempts_of(
-        &self,
-        quarantine: TableReference<QuarantinedLaunchAttempt>,
-        launch_request_id: &str,
-    ) -> Result<Vec<QuarantinedLaunchAttempt>, StoreError>;
-}
-
-impl SettlesLaunchAttempts for Engine {
-    fn settle_launch_attempts(
-        &mut self,
-        quarantine: TableReference<QuarantinedLaunchAttempt>,
-    ) -> Result<Vec<LaunchAttemptSettlement>, StoreError> {
-        let mut settlements = Vec::new();
-        let mut unread = None;
-        for (launch_request_id, archive) in self.launch_attempt_archives()? {
-            let Err(decode_error) =
-                rkyv::from_bytes::<StoredLaunchAttemptV1, rkyv::rancor::Error>(&archive)
-            else {
-                continue;
-            };
-            let shape =
-                if rkyv::from_bytes::<StoredLaunchAttemptBeforeAddress, rkyv::rancor::Error>(
-                    &archive,
-                )
-                .is_ok()
-                {
-                    ArchivedLaunchAttemptShape::BeforeAddress
-                } else if rkyv::from_bytes::<StoredLaunchAttemptBeforeBundle, rkyv::rancor::Error>(
-                    &archive,
-                )
-                .is_ok()
-                {
-                    ArchivedLaunchAttemptShape::BeforeSystemPromptBundle
-                } else {
-                    ArchivedLaunchAttemptShape::Unknown(decode_error.to_string())
-                };
-            // The same table, named for moving aside a row 0.34's shape
-            // does not read.
-            let unread_table = match unread {
-                Some(table) => table,
-                None => {
-                    let table =
-                        self.register_table(TableDescriptor::<UnreadLaunchAttempt>::new(
-                            FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
-                            FamilyName::new("flow-nexus-launch-attempt"),
-                            StoredLaunchAttemptV1::schema_hash(),
-                        ))?;
-                    unread = Some(table);
-                    table
-                }
-            };
-            let quarantine_number = self
-                .quarantined_launch_attempts_of(quarantine, &launch_request_id)?
-                .len() as u64
-                + 1;
-            self.commit_atomic(
-                self.begin_atomic_commit()
-                    .retract(unread_table, RecordKey::new(launch_request_id.clone()))
-                    .assert(
-                        quarantine,
-                        QuarantinedLaunchAttempt {
-                            launch_request_id: launch_request_id.clone(),
-                            quarantine_number,
-                            archive,
-                            shape: shape.clone(),
-                        },
-                    ),
-            )?;
-            settlements.push(match shape {
-                ArchivedLaunchAttemptShape::Unknown(decode_error) => {
-                    LaunchAttemptSettlement::Quarantined {
-                        launch_request_id,
-                        decode_error,
-                    }
-                }
-                from => LaunchAttemptSettlement::SetAside {
-                    launch_request_id,
-                    from,
-                },
-            });
-        }
-        Ok(settlements)
-    }
-
-    fn launch_attempt_archives(&self) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
-        let definition =
-            redb::TableDefinition::<String, &[u8]>::new(FLOW_LAUNCH_ATTEMPT_TABLE_NAME.as_str());
-        Ok(self
-            .storage_reader()
-            .read(|transaction| {
-                let table = match transaction.open_table(definition) {
-                    Ok(table) => table,
-                    Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-                    Err(error) => return Err(error.into()),
-                };
-                let mut rows = Vec::new();
-                for entry in redb::ReadableTable::iter(&table)? {
-                    let (key, archive) = entry?;
-                    rows.push((key.value(), archive.value().to_vec()));
-                }
-                Ok(rows)
-            })
-            .map_err(sema_engine::Error::from)?)
-    }
-
-    fn quarantined_launch_attempts_of(
-        &self,
-        quarantine: TableReference<QuarantinedLaunchAttempt>,
-        launch_request_id: &str,
-    ) -> Result<Vec<QuarantinedLaunchAttempt>, StoreError> {
-        Ok(self
-            .match_records(QueryPlan::all(quarantine))?
-            .records()
-            .iter()
-            .filter(|quarantined| quarantined.launch_request_id == launch_request_id)
-            .cloned()
-            .collect())
-    }
-}
-
-trait AdoptsLegacyRoles {
-    /// A store written before roles were kept has flows and no role rows.
-    /// Each such flow's role is taken from what the store already holds: the
-    /// launch profile of the launch that bound it, else the flow type
-    /// MetaBindExisting wrote as `<aspect>:<power>:<model>`. Parsing that
-    /// text is an exception taken only here, to read rows written before the
-    /// typed record existed; nothing new is written in that form for reading.
-    fn adopt_legacy_roles(&self) -> Result<(), StoreError>;
-}
-
-impl AdoptsLegacyRoles for FlowStore {
-    fn adopt_legacy_roles(&self) -> Result<(), StoreError> {
-        let flows = self
-            .engine
-            .match_records(QueryPlan::all(self.flows))?
-            .records()
-            .to_vec();
-        // Settlement has already moved aside every row that did
-        // not read; should the attempts still not read, adoption says so and
-        // reads the flow types alone rather than refusing to open the store.
-        let attempts = match self
-            .engine
-            .match_records(QueryPlan::all(self.launch_attempts))
-        {
-            Ok(matched) => matched.records().to_vec(),
-            Err(error) => {
-                eprintln!("flow-nexus: RoleAdoptionWithoutLaunchAttempts.«{error}»");
-                Vec::new()
-            }
-        };
-        // A launch archived in an earlier shape is kept aside whole; the
-        // role it names is read from there.
-        let kept_attempts = self
-            .engine
-            .match_records(QueryPlan::all(self.quarantined_launch_attempts))?
-            .records()
-            .to_vec();
-        for flow in flows {
-            if self.role(&flow.flow_id)?.is_some() {
-                continue;
-            }
-            let launched = attempts.iter().find_map(|stored| {
-                let attempt = &stored.attempt;
-                attempt
-                    .native_launch_binding_option
-                    .as_ref()
-                    .filter(|binding| binding.flow_id == flow.flow_id)
-                    .map(|_| Caller {
-                        flow_id: flow.flow_id.clone(),
-                        aspect: attempt.launch_profile.address.aspect.clone(),
-                        power_level: <crate::RunningNexus as crate::waking::WakePolicy>::power_of(
-                            &attempt.launch_profile.address.layer,
-                        ),
-                        model_name: attempt.launch_profile.model_name.clone(),
-                    })
-            });
-            let kept = || {
-                kept_attempts
-                    .iter()
-                    .find_map(|kept| kept.kept_role(&flow.flow_id))
-            };
-            let Some(role) = launched.or_else(kept).or_else(|| flow.legacy_role()) else {
-                continue;
-            };
-            self.engine
-                .assert(Assertion::new(self.roles, StoredRole { caller: role }))?;
-        }
-        Ok(())
-    }
-}
-
-trait ReadsLegacyRole {
-    /// The role MetaBindExisting wrote into the flow type before roles had
-    /// their own record; see `adopt_legacy_roles`.
-    fn legacy_role(&self) -> Option<Caller>;
-}
-
-impl ReadsLegacyRole for FlowRecord {
-    fn legacy_role(&self) -> Option<Caller> {
-        let mut parts = self.flow_type.splitn(3, ':');
-        let aspect = match parts.next()? {
-            "Psyche" => Aspect::Psyche,
-            "Mind" => Aspect::Mind,
-            "Field" => Aspect::Field,
-            _ => return None,
-        };
-        let power_level = match parts.next()? {
-            "High" => PowerLevel::High,
-            "Medium" => PowerLevel::Medium,
-            "Low" => PowerLevel::Low,
-            "UltraLow" => PowerLevel::UltraLow,
-            _ => return None,
-        };
-        let model_name = parts.next().filter(|model| !model.is_empty())?;
-        Some(Caller {
-            flow_id: self.flow_id.clone(),
-            aspect,
-            power_level,
-            model_name: model_name.into(),
-        })
-    }
-}
-
 impl RegistersFlowIdentity for FlowStore {
     fn register_flow(&self, flow_node: FlowNode) -> Result<FlowRegistration, StoreError> {
         let flow_type = match flow_node.harness_kind {
@@ -6095,15 +3165,7 @@ impl RegistersExistingFlow for FlowStore {
         if role.flow_id != flow_node.flow_id || role.aspect != address.aspect {
             return Ok(ExistingSeatAdoption::Refused(Refusal::RoleMismatch));
         }
-        let expected_power = match address.layer {
-            Layer::Primary => PowerLevel::High,
-            Layer::Secondary => PowerLevel::Medium,
-            Layer::Tertiary => PowerLevel::Low,
-            Layer::Quaternary => PowerLevel::UltraLow,
-        };
-        if role.power_level != expected_power
-            || self.configured_model(&address)?.as_deref() != Some(role.model_name.as_str())
-        {
+        if self.configured_model(&address)?.as_deref() != Some(role.model_name.as_str()) {
             return Ok(ExistingSeatAdoption::Refused(Refusal::RoleMismatch));
         }
         let HerdrRouteSelection::Available(route) = flow_node.herdr_route_selection.clone() else {
@@ -6195,10 +3257,7 @@ impl RegistersExistingFlow for FlowStore {
         };
         let flow_record = FlowRecord {
             flow_id: flow_node.flow_id.clone(),
-            flow_type: format!(
-                "{:?}:{:?}:{}",
-                role.aspect, role.power_level, role.model_name
-            ),
+            flow_type: format!("{:?}:{}", role.aspect, role.model_name),
             origin: flow_node.origin.clone(),
             thread_id: Some(flow_node.session_id.clone()),
             harness_kind: flow_node.harness_kind.clone(),
@@ -6341,7 +3400,6 @@ impl ReservesLaunchAttempt for FlowStore {
             self.launch_attempts,
             StoredLaunchAttempt {
                 attempt: attempt.clone(),
-                context: LaunchContext::Modules,
             },
         ))?;
         self.launch_changes.announce();
@@ -6807,10 +3865,7 @@ impl ReadsLaunchAttempt for FlowStore {
     ) -> Result<Option<LaunchProfile>, StoreError> {
         Ok(self
             .stored_launch_attempt(launch_request_id)?
-            .and_then(|stored| match stored.context {
-                LaunchContext::Modules => Some(stored.attempt.launch_profile),
-                LaunchContext::BeforeModules(_) => None,
-            }))
+            .map(|stored| stored.attempt.launch_profile))
     }
 
     fn launch_requests_bound_to(&self, flow_id: &str) -> Result<Vec<String>, StoreError> {
@@ -7165,8 +4220,13 @@ impl RecordsFlowLifecycle for FlowStore {
         }
         flow.lifecycle = FlowLifecycle::Retired;
         // A flow that ends before its launch was confirmed gives back the
-        // Address it held; a confirmed one puts its metaflow to sleep.
-        let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
+        // Address it held; a confirmed one puts its metaflow to sleep. A
+        // restart record it holds goes in the same write.
+        let commit = restart::RecordsRestarts::restart_retracted(
+            self,
+            flow_id,
+            self.engine.begin_atomic_commit().mutate(self.flows, flow),
+        )?;
         self.engine
             .commit_atomic(self.ended_at_address(flow_id, commit)?)?;
         self.launch_changes.announce();
@@ -7390,417 +4450,45 @@ impl WritesFlowStore for FlowStore {
     }
 }
 
-/// Rows as earlier Flow versions left them, for fixtures: one launch attempt
-/// archived before `SystemPromptBundleFile`, whose native launch bound
-/// `bound_flow_id` (registered here without a role, as Start registered it
-/// then), one archived before the profile named an Address, and one row no
-/// known shape reads.
-#[cfg(test)]
-pub(crate) struct EarlierLaunchAttemptRows {
-    pub bound_flow_id: String,
-}
-
-#[cfg(test)]
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct NotALaunchAttempt {
-    launch_request_id: String,
-}
-
-#[cfg(test)]
-impl EngineRecord for NotALaunchAttempt {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.launch_request_id.clone())
-    }
-}
-
-#[cfg(test)]
-impl EngineRecord for StoredLaunchAttemptBeforeBundle {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.attempt.launch_request_id.clone())
-    }
-}
-
-#[cfg(test)]
-impl EngineRecord for StoredLaunchAttemptBeforeAddress {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.attempt.launch_request_id.clone())
-    }
-}
-
-#[cfg(test)]
-impl EarlierLaunchAttemptRows {
-    pub const EARLIER_REQUEST: &str = "flow06-earlier";
-    pub const BEFORE_ADDRESS_REQUEST: &str = "flow15-before-address";
-    pub const UNREADABLE_REQUEST: &str = "unreadable-request";
-    pub const ZERO_THIRTY_FOUR_REQUEST: &str = "flow34-before-modules";
-
-    /// A launch as signal-flow 15.0.0 archived it: its profile named the
-    /// Aspect alone. It bound no flow.
-    fn before_address_attempt(&self) -> LaunchAttemptBeforeAddress {
-        let earlier = self.earlier_attempt();
-        let profile = earlier.launch_profile;
-        LaunchAttemptBeforeAddress {
-            launch_request_id: Self::BEFORE_ADDRESS_REQUEST.into(),
-            launch_profile: LaunchProfileBeforeAddress {
-                launch_request_id: Self::BEFORE_ADDRESS_REQUEST.into(),
-                launch_source_vector: profile.launch_source_vector,
-                skill_name_vector: profile.skill_name_vector,
-                aspect: Aspect::Field,
-                power_level: profile.power_level,
-                harness_kind: profile.harness_kind,
-                model_name: profile.model_name,
-                effort: profile.effort,
-                flow_id_option: None,
-                remembered_flow_vector: profile.remembered_flow_vector,
-                herdr_session_name: profile.herdr_session_name,
-                system_prompt_bundle_file: "/kept/bundle.md".into(),
-                instruction_prompt: profile.instruction_prompt,
-            },
-            prompt_sha256: earlier.prompt_sha256,
-            origin_clue: earlier.origin_clue,
-            launch_attempt_phase: LaunchAttemptPhase::Reserved,
-            native_launch_intent_option: None,
-            native_launch_binding_option: None,
-            registration_acknowledgement_option: None,
-            prompt_delivery_intent_option: None,
-            prompt_delivery_result_option: None,
-        }
-    }
-
-    fn earlier_attempt(&self) -> LaunchAttemptBeforeBundle {
-        let pane = signal_flow::HerdrPaneBinding {
-            launch_request_id: Self::EARLIER_REQUEST.into(),
-            herdr_session_name: "messaging-build".into(),
-            herdr_agent_name: "psyche-opus-earlier".into(),
-            herdr_workspace_id: "w17".into(),
-            herdr_pane_id: "w17:p1".into(),
-            herdr_terminal_id: "term-earlier".into(),
-        };
-        LaunchAttemptBeforeBundle {
-            launch_request_id: Self::EARLIER_REQUEST.into(),
-            launch_profile: LaunchProfileBeforeBundle {
-                launch_request_id: Self::EARLIER_REQUEST.into(),
-                launch_source_vector: vec![LaunchSourceBeforeModules {
-                    source_path: "skills/operation-main-flow.md".into(),
-                    source_sha256: "ab".repeat(32),
-                }],
-                skill_name_vector: vec!["operation-main-flow".into()],
-                aspect: Aspect::Psyche,
-                power_level: PowerLevel::Medium,
-                harness_kind: HarnessKind::Claude,
-                model_name: "claude-opus-5-5".into(),
-                effort: "medium".into(),
-                flow_id_option: None,
-                remembered_flow_vector: vec![RememberedFlow {
-                    flow_id: "e51411".into(),
-                    remembering_depth: 1,
-                }],
-                herdr_session_name: "messaging-build".into(),
-                instruction_prompt: "earlier instruction".into(),
-            },
-            prompt_sha256: "cd".repeat(32),
-            origin_clue: OriginClueBeforeOrigin {
-                flow_id: "e51411".into(),
-                session_id: "e51411-session".into(),
-                turn_id: "handover-successor".into(),
-            },
-            launch_attempt_phase: LaunchAttemptPhase::NativeBound,
-            native_launch_intent_option: Some(NativeLaunchIntentBeforeModules {
-                launch_request_id: Self::EARLIER_REQUEST.into(),
-                prompt_sha256: "cd".repeat(32),
-                harness_kind: HarnessKind::Claude,
-                model_name: "claude-opus-5-5".into(),
-                effort: "medium".into(),
-                skill_name_vector: vec!["operation-main-flow".into()],
-            }),
-            native_launch_binding_option: Some(NativeLaunchBinding {
-                launch_request_id: Self::EARLIER_REQUEST.into(),
-                flow_id: self.bound_flow_id.clone(),
-                native_session_id: format!("{}-session", self.bound_flow_id),
-                harness_kind: HarnessKind::Claude,
-                herdr_pane_binding: pane,
-            }),
-            registration_acknowledgement_option: None,
-            prompt_delivery_intent_option: None,
-            prompt_delivery_result_option: None,
-        }
-    }
-
-    /// A launch as Flow 0.34 archived it: its context named by skill
-    /// sources and a bundle file, its first message observed.
-    fn zero_thirty_four_attempt(&self) -> LaunchAttemptBeforeModules {
-        let request = Self::ZERO_THIRTY_FOUR_REQUEST;
-        let selection = NativeSkillSelectionBeforeModules {
-            skill_name: "operation-main-flow".into(),
-            native_skill_path: "/kept/skills/operation-main-flow/SKILL.md".into(),
-            native_skill_sha256: "ef".repeat(32),
-        };
-        let pane = signal_flow::HerdrPaneBinding {
-            launch_request_id: request.into(),
-            herdr_session_name: "messaging-build".into(),
-            herdr_agent_name: "mind-sol-34".into(),
-            herdr_workspace_id: "w34".into(),
-            herdr_pane_id: "w34:p1".into(),
-            herdr_terminal_id: "term-34".into(),
-        };
-        let boundary = NativeTranscriptBoundary::Absent(signal_flow::NativeTranscriptAbsence {
-            native_session_id: "session-34".into(),
-            harness_kind: HarnessKind::Codex,
-            transcript_root_device: "64768".into(),
-            transcript_root_inode: "1234".into(),
-        });
-        let intent = PromptDeliveryIntentBeforeModules {
-            launch_request_id: request.into(),
-            prompt_sha256: "ab".repeat(32),
-            flow_id: "flow34".into(),
-            native_session_id: "session-34".into(),
-            harness_kind: HarnessKind::Codex,
-            model_name: "gpt-sol".into(),
-            effort: "medium".into(),
-            native_skill_selection_vector: vec![selection.clone()],
-            herdr_pane_binding: pane.clone(),
-            native_transcript_boundary: boundary,
-        };
-        LaunchAttemptBeforeModules {
-            launch_request_id: request.into(),
-            launch_profile: LaunchProfileBeforeModules {
-                launch_request_id: request.into(),
-                launch_source_vector: vec![LaunchSourceBeforeModules {
-                    source_path: "/kept/skills/operation-main-flow.md".into(),
-                    source_sha256: "cd".repeat(32),
-                }],
-                skill_name_vector: vec!["operation-main-flow".into()],
-                address: Address {
-                    aspect: Aspect::Mind,
-                    topic: "flow".into(),
-                    layer: Layer::Secondary,
-                },
-                power_level: PowerLevel::Medium,
-                harness_kind: HarnessKind::Codex,
-                model_name: "gpt-sol".into(),
-                effort: "medium".into(),
-                flow_id_option: Some("predecessor-34".into()),
-                remembered_flow_vector: vec![RememberedFlow {
-                    flow_id: "e51411".into(),
-                    remembering_depth: 2,
-                }],
-                herdr_session_name: "messaging-build".into(),
-                system_prompt_bundle_file: "/kept/bundles/flow34.md".into(),
-                instruction_prompt: "0.34 instruction".into(),
-            },
-            prompt_sha256: "ab".repeat(32),
-            origin_clue: OriginClueBeforeOrigin {
-                flow_id: "e51411".into(),
-                session_id: "e51411-session".into(),
-                turn_id: "turn-34".into(),
-            },
-            launch_attempt_phase: LaunchAttemptPhase::PromptObserved,
-            native_launch_intent_option: Some(NativeLaunchIntentBeforeModules {
-                launch_request_id: request.into(),
-                prompt_sha256: "ab".repeat(32),
-                harness_kind: HarnessKind::Codex,
-                model_name: "gpt-sol".into(),
-                effort: "medium".into(),
-                skill_name_vector: vec!["operation-main-flow".into()],
-            }),
-            native_launch_binding_option: Some(NativeLaunchBinding {
-                launch_request_id: request.into(),
-                flow_id: "flow34".into(),
-                native_session_id: "session-34".into(),
-                harness_kind: HarnessKind::Codex,
-                herdr_pane_binding: pane.clone(),
-            }),
-            registration_acknowledgement_option: Some(RegistrationAcknowledgement {
-                launch_request_id: request.into(),
-                flow_id: "flow34".into(),
-                native_session_id: "session-34".into(),
-                herdr_pane_binding: pane,
-            }),
-            prompt_delivery_intent_option: Some(intent),
-            prompt_delivery_result_option: Some(PromptDeliveryResultBeforeModules::Observed(
-                NativeTargetReceiptBeforeModules {
-                    launch_request_id: request.into(),
-                    prompt_sha256: "ab".repeat(32),
-                    flow_id: "flow34".into(),
-                    native_session_id: "session-34".into(),
-                    native_turn_id: "turn-1".into(),
-                    receipt_sha256: "12".repeat(32),
-                    model_name: "gpt-sol".into(),
-                    effort: "medium".into(),
-                    native_skill_selection_vector: vec![selection],
-                },
-            )),
-        }
-    }
-
-    /// Writes the rows into the store at `path` and closes it: the store
-    /// is made current, then its attempts table is set back to 0.34's
-    /// family identity, as an 0.34 store holds it, and the earlier rows
-    /// are written under it.
-    pub fn seed(&self, path: &Path) {
-        let store = FlowStore::open(path).expect("store to seed opens");
-        let node = signal_flow::FlowNode {
-            flow_id: self.bound_flow_id.clone(),
-            session_id: format!("{}-session", self.bound_flow_id),
-            harness_kind: HarnessKind::Claude,
-            endpoint_selection: EndpointSelection::Unavailable,
-            herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
-                herdr_session_name: "messaging-build".into(),
-                herdr_agent_name: "psyche-opus-earlier".into(),
-                herdr_pane_id: "w17:p1".into(),
-                herdr_terminal_id: "term-earlier".into(),
-            }),
-            origin: self.earlier_attempt().origin_clue.into(),
-            flow_lifecycle: SignalFlowLifecycle::Pending,
-        };
-        assert!(matches!(
-            store.register_flow(node).expect("earlier flow registered"),
-            FlowRegistration::Registered(_)
-        ));
-        drop(store);
-        StoredLaunchAttemptV1::restore_family(path);
-
-        let mut engine = Engine::open(EngineOpen::new(path, SchemaVersion::new(1)))
-            .expect("store opens under the engine");
-        // Every shape names the table under 0.34's identity.
-        let descriptor = || {
-            (
-                FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
-                FamilyName::new("flow-nexus-launch-attempt"),
-                StoredLaunchAttemptV1::schema_hash(),
-            )
-        };
-        let (name, family, schema) = descriptor();
-        let zero_thirty_four = engine
-            .register_table::<StoredLaunchAttemptV1>(TableDescriptor::new(name, family, schema))
-            .expect("0.34 shape names the table");
-        engine
-            .assert(Assertion::new(
-                zero_thirty_four,
-                StoredLaunchAttemptV1 {
-                    attempt: self.zero_thirty_four_attempt(),
-                },
-            ))
-            .expect("0.34 row written");
-        let (name, family, schema) = descriptor();
-        let earlier = engine
-            .register_table::<StoredLaunchAttemptBeforeBundle>(TableDescriptor::new(
-                name, family, schema,
-            ))
-            .expect("earlier shape names the table");
-        engine
-            .assert(Assertion::new(
-                earlier,
-                StoredLaunchAttemptBeforeBundle {
-                    attempt: self.earlier_attempt(),
-                },
-            ))
-            .expect("earlier row written");
-        let (name, family, schema) = descriptor();
-        let before_address = engine
-            .register_table::<StoredLaunchAttemptBeforeAddress>(TableDescriptor::new(
-                name, family, schema,
-            ))
-            .expect("15.0.0 shape names the table");
-        engine
-            .assert(Assertion::new(
-                before_address,
-                StoredLaunchAttemptBeforeAddress {
-                    attempt: self.before_address_attempt(),
-                },
-            ))
-            .expect("15.0.0 row written");
-        let (name, family, schema) = descriptor();
-        let unreadable = engine
-            .register_table::<NotALaunchAttempt>(TableDescriptor::new(name, family, schema))
-            .expect("unreadable shape names the table");
-        engine
-            .assert(Assertion::new(
-                unreadable,
-                NotALaunchAttempt {
-                    launch_request_id: Self::UNREADABLE_REQUEST.into(),
-                },
-            ))
-            .expect("unreadable row written");
-    }
-}
-
-/// Sets a store's attempts table back to the family identity Flow 0.34
-/// registered it under. The table must hold no row.
-#[cfg(test)]
-trait RestoresZeroThirtyFourFamily {
-    fn restore_family(path: &Path);
-}
-
-#[cfg(test)]
-impl RestoresZeroThirtyFourFamily for StoredLaunchAttemptV1 {
-    fn restore_family(path: &Path) {
-        let registration = TableRegistration::new(
-            TableDescriptor::<StoredLaunchAttemptV1>::new(
-                FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
-                FamilyName::new("flow-nexus-launch-attempt"),
-                StoredLaunchAttemptV1::schema_hash(),
-            )
-            .family_identity(),
-        );
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&registration)
-            .expect("registration archives")
-            .to_vec();
-        let database = redb::Database::open(path).expect("store opens directly");
-        let write = database.begin_write().expect("catalog transaction starts");
-        {
-            let mut catalog = write.open_table(SEMA_CATALOG_TABLE).expect("catalog opens");
-            catalog
-                .insert(FLOW_LAUNCH_ATTEMPT_TABLE_NAME.as_str(), bytes.as_slice())
-                .expect("0.34 identity written");
-        }
-        write.commit().expect("catalog commits");
-    }
-}
-
 /// Store identity, catalogue validation and committed-record operations.
 pub(crate) trait ReadsFlowMemory {
-    fn layer_key(layer: &Layer) -> &'static str {
-        match layer {
-            Layer::Primary => "Primary",
-            Layer::Secondary => "Secondary",
-            Layer::Tertiary => "Tertiary",
-            Layer::Quaternary => "Quaternary",
-        }
-    }
-
-    /// A configured model's key: its layer and aspect.
-    fn model_record_key(layer: &Layer, aspect: &Aspect) -> String {
-        let aspect = match aspect {
+    fn aspect_key(aspect: &Aspect) -> &'static str {
+        match aspect {
             Aspect::Psyche => "Psyche",
             Aspect::Mind => "Mind",
             Aspect::Field => "Field",
-        };
-        format!("{}:{aspect}", FlowStore::layer_key(layer))
+        }
+    }
+
+    /// A configured model's key: its Model.
+    fn model_record_key(model: &Model) -> String {
+        model.name().to_owned()
     }
 
     /// A leave-out default's key: its Address's key, then its harness.
     fn leave_out_record_key(address: &Address, harness_kind: &HarnessKind) -> String {
-        let harness = match harness_kind {
+        format!(
+            "{}:{}",
+            FlowStore::address_record_key(address),
+            FlowStore::harness_key(harness_kind)
+        )
+    }
+
+    fn harness_key(harness_kind: &HarnessKind) -> &'static str {
+        match harness_kind {
             HarnessKind::Claude => "Claude",
             HarnessKind::Codex => "Codex",
-        };
-        format!("{}:{harness}", FlowStore::address_record_key(address))
+        }
     }
 
     fn address_record_key(address: &Address) -> String {
-        let aspect = match &address.aspect {
-            Aspect::Psyche => "Psyche",
-            Aspect::Mind => "Mind",
-            Aspect::Field => "Field",
-        };
-        let layer = match &address.layer {
-            Layer::Primary => "Primary",
-            Layer::Secondary => "Secondary",
-            Layer::Tertiary => "Tertiary",
-            Layer::Quaternary => "Quaternary",
-        };
-        format!("{aspect}:{}:{}:{layer}", address.topic.len(), address.topic)
+        format!(
+            "{}:{}:{}:{}",
+            FlowStore::aspect_key(&address.aspect),
+            address.topic.len(),
+            address.topic,
+            address.model.name()
+        )
     }
 
     fn process_start(pid: i64) -> Option<(i64, i64)> {
@@ -7880,17 +4568,13 @@ pub(crate) trait ReadsFlowMemory {
             }
             "flow_nexus_replacements" => ("flow-nexus-replacement", "flow-nexus-replacement-v1"),
             "flow_nexus_roles" => ("flow-nexus-role", "flow-nexus-role-v1"),
-            "flow_nexus_quarantined_launch_attempts" => (
-                "flow-nexus-quarantined-launch-attempt",
-                "flow-nexus-quarantined-launch-attempt-v1",
-            ),
-            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v6"),
+            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v7"),
             "flow_nexus_metaflow_processes" => (
                 "flow-nexus-metaflow-process",
-                "flow-nexus-metaflow-process-v1",
+                "flow-nexus-metaflow-process-v2",
             ),
             "flow_nexus_metaflow_locks" => {
-                ("flow-nexus-metaflow-lock", "flow-nexus-metaflow-lock-v1")
+                ("flow-nexus-metaflow-lock", "flow-nexus-metaflow-lock-v2")
             }
             "flow_nexus_deliveries" => ("flow-nexus-delivery", "flow-nexus-delivery-v1"),
             "flow_nexus_pane_leases" => ("flow-nexus-pane-lease", "flow-nexus-pane-lease-v1"),
@@ -7930,6 +4614,10 @@ pub(crate) trait ReadsFlowMemory {
                 META_HEARTBEAT_CONFIGURATION_FAMILY,
                 META_HEARTBEAT_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_meta_protected_address_configuration" => (
+                META_PROTECTED_ADDRESS_CONFIGURATION_FAMILY,
+                META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA,
+            ),
             "flow_nexus_send_outcome_counter" => {
                 (send_outcome::COUNTER_FAMILY, send_outcome::COUNTER_SCHEMA)
             }
@@ -7950,12 +4638,14 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_simplified_reply_bindings" => (
                 "flow-nexus-simplified-reply-binding",
-                "flow-nexus-simplified-reply-binding-v1",
+                "flow-nexus-simplified-reply-binding-v2",
             ),
             "flow_nexus_logical_delivery_purposes" => (
                 "flow-nexus-logical-delivery-purpose",
-                "flow-nexus-logical-delivery-purpose-v1",
+                "flow-nexus-logical-delivery-purpose-v2",
             ),
+            "flow_nexus_restarts" => (restart::RESTART_FAMILY, restart::RESTART_SCHEMA),
+            "flow_nexus_seat_births" => (restart::SEAT_BIRTH_FAMILY, restart::SEAT_BIRTH_SCHEMA),
             "flow_nexus_heartbeat_standings" => {
                 (HEARTBEAT_STANDING_FAMILY, HEARTBEAT_STANDING_SCHEMA)
             }
@@ -8009,342 +4699,40 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_queue_delivery_requests" => (
                 "flow-nexus-queue-delivery-request",
-                "flow-nexus-queue-delivery-request-v6",
+                "flow-nexus-queue-delivery-request-v7",
             ),
             "flow_nexus_queue_delivery_attempts" => (
                 "flow-nexus-queue-delivery-attempt",
-                "flow-nexus-queue-delivery-attempt-v7",
+                "flow-nexus-queue-delivery-attempt-v8",
             ),
             _ => return None,
         };
         Some((family, SchemaHash::for_label(version)))
     }
 
-    /// A family registration this Flow opens: its current identity, a
-    /// predecessor of a family the open upgrades, or a retired table the
-    /// open drops.
+    /// A family registration this Flow opens: its current identity alone.
     fn is_current_flow_registration(table_key: &str, registration: &TableRegistration) -> bool {
         let identity = registration.identity();
-        let matches = |family: &str, schema_hash: SchemaHash| {
+        FlowStore::current_flow_family_identity(table_key).is_some_and(|(family, schema_hash)| {
             identity.table_name() == table_key
                 && identity.family().as_str() == family
                 && identity.schema_hash() == schema_hash
-        };
-        let predecessors: &[(&str, SchemaHash)] = match table_key {
-            "flow_nexus_send_outcomes" => &[
-                (
-                    send_outcome::OUTCOME_FAMILY,
-                    send_outcome::StoredSendOutcomeV1::schema_hash(),
-                ),
-                (
-                    send_outcome::OUTCOME_FAMILY,
-                    send_outcome::StoredSendOutcomeV2::schema_hash(),
-                ),
-                (
-                    send_outcome::OUTCOME_FAMILY,
-                    send_outcome::StoredSendOutcomeV3::schema_hash(),
-                ),
-                (
-                    send_outcome::OUTCOME_FAMILY,
-                    send_outcome::StoredSendOutcomeV4::schema_hash(),
-                ),
-                (
-                    send_outcome::OUTCOME_FAMILY,
-                    send_outcome::StoredSendOutcomeV5::schema_hash(),
-                ),
-            ],
-            "flow_nexus_flows" => &[("flow-nexus-flow", FlowRecordV5::schema_hash())],
-            "flow_nexus_launch_outcomes" => &[
-                (
-                    "flow-nexus-launch-outcome",
-                    StoredLaunchOutcomeV2::schema_hash(),
-                ),
-                (
-                    "flow-nexus-launch-outcome",
-                    StoredLaunchOutcomeV3::schema_hash(),
-                ),
-                (
-                    "flow-nexus-launch-outcome",
-                    StoredLaunchOutcomeV4::schema_hash(),
-                ),
-                (
-                    "flow-nexus-launch-outcome",
-                    StoredLaunchOutcomeV5::schema_hash(),
-                ),
-                (
-                    "flow-nexus-launch-outcome",
-                    StoredLaunchOutcomeV6::schema_hash(),
-                ),
-                (
-                    "flow-nexus-launch-outcome",
-                    StoredLaunchOutcomeV7::schema_hash(),
-                ),
-                (
-                    "flow-nexus-launch-outcome",
-                    StoredLaunchOutcomeV8::schema_hash(),
-                ),
-            ],
-            "flow_nexus_launch_attempts" => &[
-                (
-                    "flow-nexus-launch-attempt",
-                    StoredLaunchAttemptV1::schema_hash(),
-                ),
-                (
-                    "flow-nexus-launch-attempt",
-                    StoredLaunchAttemptV2::schema_hash(),
-                ),
-                (
-                    "flow-nexus-launch-attempt",
-                    StoredLaunchAttemptV3::schema_hash(),
-                ),
-            ],
-            "flow_nexus_meta_metaflow_configuration" => &[
-                (
-                    metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
-                    SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v1"),
-                ),
-                (
-                    metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
-                    SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v2"),
-                ),
-                (
-                    metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
-                    SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v3"),
-                ),
-                (
-                    metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
-                    SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v4"),
-                ),
-            ],
-            "flow_nexus_metaflows" => &[
-                ("flow-nexus-metaflow", StoredMetaflowV1::schema_hash()),
-                ("flow-nexus-metaflow", StoredMetaflowV2::schema_hash()),
-                ("flow-nexus-metaflow", StoredMetaflowV3::schema_hash()),
-                ("flow-nexus-metaflow", StoredMetaflowV4::schema_hash()),
-                ("flow-nexus-metaflow", StoredMetaflowV5::schema_hash()),
-            ],
-            "flow_nexus_meta_model_configuration" => &[(
-                "flow-nexus-meta-model-configuration",
-                StoredMetaModelConfigurationV1::schema_hash(),
-            )],
-            "flow_nexus_meta_nexus_configuration" => &[
-                (
-                    nexus_configuration::META_NEXUS_CONFIGURATION_FAMILY,
-                    <nexus_configuration::StoredMetaNexusConfigurationV1 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    nexus_configuration::META_NEXUS_CONFIGURATION_FAMILY,
-                    <nexus_configuration::StoredMetaNexusConfigurationV2 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    nexus_configuration::META_NEXUS_CONFIGURATION_FAMILY,
-                    <nexus_configuration::StoredMetaNexusConfigurationV3 as MemoryDefinition>::schema_hash(),
-                ),
-            ],
-            "flow_nexus_logical_delivery_current" => &[
-                (
-                    "flow-nexus-logical-delivery-current",
-                    <logical_delivery::CurrentLogicalDeliveryV1 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    "flow-nexus-logical-delivery-current",
-                    <logical_delivery::CurrentLogicalDeliveryV2 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    "flow-nexus-logical-delivery-current",
-                    <logical_delivery::CurrentLogicalDeliveryV3 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    "flow-nexus-logical-delivery-current",
-                    <logical_delivery::CurrentLogicalDeliveryV4 as MemoryDefinition>::schema_hash(),
-                ),
-            ],
-            "flow_nexus_logical_delivery_events" => &[
-                (
-                    "flow-nexus-logical-delivery-event",
-                    <logical_delivery::LogicalDeliveryEventV1 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    "flow-nexus-logical-delivery-event",
-                    <logical_delivery::LogicalDeliveryEventV2 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    "flow-nexus-logical-delivery-event",
-                    <logical_delivery::LogicalDeliveryEventV3 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    "flow-nexus-logical-delivery-event",
-                    <logical_delivery::LogicalDeliveryEventV4 as MemoryDefinition>::schema_hash(),
-                ),
-            ],
-            "flow_nexus_successor_intents" => &[(
-                successor::SUCCESSOR_INTENT_FAMILY,
-                <successor::SuccessorIntentV1 as MemoryDefinition>::schema_hash(),
-            )],
-            "flow_nexus_meta_leave_out_configuration" => &[(
-                "flow-nexus-meta-leave-out-configuration",
-                StoredMetaLeaveOutConfigurationV1::schema_hash(),
-            )],
-            "flow_nexus_address_holds" => &[
-                (
-                    address_hold::ADDRESS_HOLD_FAMILY,
-                    <address_hold::AddressHoldV1 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    address_hold::ADDRESS_HOLD_FAMILY,
-                    <address_hold::AddressHoldV2 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    address_hold::ADDRESS_HOLD_FAMILY,
-                    <address_hold::AddressHoldV3 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    address_hold::ADDRESS_HOLD_FAMILY,
-                    <address_hold::AddressHoldV4 as MemoryDefinition>::schema_hash(),
-                ),
-            ],
-            "flow_nexus_send_calls" => &[
-                (
-                    send_call::SEND_CALL_FAMILY,
-                    <send_call::SendCallV1 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    send_call::SEND_CALL_FAMILY,
-                    <send_call::SendCallV2 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    send_call::SEND_CALL_FAMILY,
-                    <send_call::SendCallV3 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    send_call::SEND_CALL_FAMILY,
-                    <send_call::SendCallV4 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    send_call::SEND_CALL_FAMILY,
-                    <send_call::SendCallV5 as MemoryDefinition>::schema_hash(),
-                ),
-            ],
-            "flow_nexus_queue_delivery_requests" => &[
-                (
-                    "flow-nexus-queue-delivery-request",
-                    <queue_delivery::StoredDeliveryRequestV2 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    "flow-nexus-queue-delivery-request",
-                    <queue_delivery::StoredDeliveryRequestV3 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    "flow-nexus-queue-delivery-request",
-                    <queue_delivery::StoredDeliveryRequestV4 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    "flow-nexus-queue-delivery-request",
-                    <queue_delivery::StoredDeliveryRequestV5 as MemoryDefinition>::schema_hash(),
-                ),
-            ],
-            "flow_nexus_queue_delivery_attempts" => &[
-                (
-                    "flow-nexus-queue-delivery-attempt",
-                    <queue_delivery::QueueDeliveryAttemptV4 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    "flow-nexus-queue-delivery-attempt",
-                    <queue_delivery::QueueDeliveryAttemptV5 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    "flow-nexus-queue-delivery-attempt",
-                    <queue_delivery::QueueDeliveryAttemptV6 as MemoryDefinition>::schema_hash(),
-                ),
-            ],
-            "flow_nexus_flow_events" => &[
-                (
-                    events::FLOW_EVENT_FAMILY,
-                    <events::FlowEventsV1 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    events::FLOW_EVENT_FAMILY,
-                    <events::FlowEventsV2 as MemoryDefinition>::schema_hash(),
-                ),
-                (
-                    events::FLOW_EVENT_FAMILY,
-                    <events::FlowEventsV3 as MemoryDefinition>::schema_hash(),
-                ),
-            ],
-            _ => &[],
-        };
-        FlowStore::current_flow_family_identity(table_key)
-            .is_some_and(|(family, schema_hash)| matches(family, schema_hash))
-            || predecessors
-                .iter()
-                .any(|(family, schema_hash)| matches(family, *schema_hash))
-            || RETIRED_TABLES.iter().any(|(table, family, schema)| {
-                *table == table_key && matches(family, SchemaHash::for_label(schema))
-            })
+        })
     }
 
-    /// Drops each retired table a store holds, its rows and its catalog
-    /// registration, in one write before the engine opens the store.
-    fn drop_retired_tables(path: &Path) -> Result<(), StoreError> {
-        use redb::ReadableTable as _;
-        let failed = |error: String| StoreError::RetiredTableDrop(error);
-        let database = redb::Database::open(path).map_err(|error| failed(error.to_string()))?;
-        let write = database
-            .begin_write()
-            .map_err(|error| failed(error.to_string()))?;
-        let mut dropped = false;
-        {
-            let mut catalog = write
-                .open_table(SEMA_CATALOG_TABLE)
-                .map_err(|error| failed(error.to_string()))?;
-            for (table, _, _) in RETIRED_TABLES {
-                if catalog
-                    .get(*table)
-                    .map_err(|error| failed(error.to_string()))?
-                    .is_some()
-                {
-                    catalog
-                        .remove(*table)
-                        .map_err(|error| failed(error.to_string()))?;
-                    dropped = true;
-                }
-            }
-        }
-        for (table, _, _) in RETIRED_TABLES {
-            dropped |= write
-                .delete_table(redb::TableDefinition::<&str, &[u8]>::new(table))
-                .map_err(|error| failed(error.to_string()))?;
-        }
-        if dropped {
-            write.commit().map_err(|error| failed(error.to_string()))?;
-        } else {
-            write.abort().map_err(|error| failed(error.to_string()))?;
-        }
-        Ok(())
-    }
-
+    /// The catalog of a configuration-only store or of a running store,
+    /// whole: every table of the one and none other, or, as 0.53.0 wrote
+    /// it, every table but the ones 0.53.1 added.
     fn has_expected_flow_catalog(actual: &std::collections::BTreeSet<String>) -> bool {
-        // A store before 0.35.0 may still hold a table 0.35.0 drops.
-        let retired = |name: &String| RETIRED_TABLES.iter().any(|(table, _, _)| table == name);
-        let running = RUNNING_TABLES.iter().all(|name| actual.contains(*name))
-            && actual.iter().all(|name| {
-                RUNNING_TABLES.contains(&name.as_str())
-                    || RUNNING_ADDED_TABLES.contains(&name.as_str())
-                    || ADDED_LATER_TABLES.contains(&name.as_str())
-                    || retired(name)
-            });
-        let configuration_only = CONFIGURATION_ONLY_TABLES
-            .iter()
-            .all(|name| actual.contains(*name))
-            && actual.iter().all(|name| {
-                CONFIGURATION_ONLY_TABLES.contains(&name.as_str())
-                    || CONFIGURATION_ONLY_ADDED_TABLES.contains(&name.as_str())
-                    || name == "flow_nexus_queue_delivery_counter"
-                    || name == "flow_nexus_queue_delivery_requests"
-                    || name == "flow_nexus_queue_delivery_attempts"
-                    || retired(name)
-            });
-        configuration_only || running
+        let is = |tables: &[&str]| {
+            actual.iter().all(|name| tables.contains(&name.as_str()))
+                && tables
+                    .iter()
+                    .all(|name| actual.contains(*name) || ADDED_IN_0531.contains(name))
+                && (ADDED_IN_0531.iter().all(|name| actual.contains(*name))
+                    || ADDED_IN_0531.iter().all(|name| !actual.contains(*name)))
+        };
+        is(CONFIGURATION_ONLY_TABLES) || is(RUNNING_TABLES)
     }
 
     fn recognize_flow_memory(path: &Path) -> Result<bool, StoreError> {
@@ -8359,18 +4747,22 @@ pub(crate) trait ReadsFlowMemory {
             path: path.display().to_string(),
             reason,
         };
+        let earlier = |version: u64| StoreError::EarlierMemory {
+            path: path.display().to_string(),
+            version,
+        };
         // ReadOnlyDatabase refuses an active writer and never runs redb recovery.
         // In particular, do not use Database::open here: Sema's normal writer open
         // can stamp schema/layout metadata before a caller discovers this is an
         // old or foreign occupant.
         match redb::ReadOnlyDatabase::open(path) {
-            Ok(database) => FlowStore::recognize_open_memory(&database, &reject),
+            Ok(database) => FlowStore::recognize_open_memory(&database, &reject, &earlier),
             // A writer that did not close cleanly leaves redb's recovery flag,
             // and a read-only open refuses to repair. The flagged store is
             // recognized through a repaired copy, so the original is written
             // only by the writer open that follows recognition.
             Err(redb::DatabaseError::RepairAborted) => {
-                FlowStore::recognize_repaired_copy(path, &reject)
+                FlowStore::recognize_repaired_copy(path, &reject, &earlier)
             }
             Err(redb::DatabaseError::DatabaseAlreadyOpen) => Err(StoreError::StoreHeld {
                 path: path.display().to_string(),
@@ -8382,6 +4774,7 @@ pub(crate) trait ReadsFlowMemory {
     fn recognize_repaired_copy(
         path: &Path,
         reject: &dyn Fn(String) -> StoreError,
+        earlier: &dyn Fn(u64) -> StoreError,
     ) -> Result<bool, StoreError> {
         /// The repaired copy is removed however recognition ends.
         struct RecognitionCopy(std::path::PathBuf);
@@ -8412,7 +4805,7 @@ pub(crate) trait ReadsFlowMemory {
             .map_err(|error| reject(format!("flagged store copy cannot be repaired: {error}")))?;
         let database = redb::ReadOnlyDatabase::open(&copy.0)
             .map_err(|error| reject(format!("repaired store copy: {error}")))?;
-        let recognized = FlowStore::recognize_open_memory(&database, reject);
+        let recognized = FlowStore::recognize_open_memory(&database, reject, earlier);
         drop(database);
         recognized
     }
@@ -8420,6 +4813,7 @@ pub(crate) trait ReadsFlowMemory {
     fn recognize_open_memory(
         database: &redb::ReadOnlyDatabase,
         reject: &dyn Fn(String) -> StoreError,
+        earlier: &dyn Fn(u64) -> StoreError,
     ) -> Result<bool, StoreError> {
         use redb::{ReadableDatabase as _, ReadableTable as _};
         let read = database
@@ -8434,10 +4828,18 @@ pub(crate) trait ReadsFlowMemory {
                 .map_err(|error| reject(error.to_string()))?
                 .map(|value| value.value())
         };
-        if version != Some(u64::from(FLOW_SCHEMA_VERSION)) {
-            return Err(reject(format!(
-                "Sema schema version is {version:?}, expected {FLOW_SCHEMA_VERSION}"
-            )));
+        // A store an earlier Flow wrote is refused, never upgraded: Flow
+        // Memory v3 begins with 0.52.0.
+        match version {
+            Some(version) if version == u64::from(FLOW_SCHEMA_VERSION) => {}
+            Some(version) if version < u64::from(FLOW_SCHEMA_VERSION) => {
+                return Err(earlier(version));
+            }
+            version => {
+                return Err(reject(format!(
+                    "Sema schema version is {version:?}, expected {FLOW_SCHEMA_VERSION}"
+                )));
+            }
         }
 
         let storage_layout = {
@@ -8474,7 +4876,7 @@ pub(crate) trait ReadsFlowMemory {
                         })?;
                 if !FlowStore::is_current_flow_registration(table_key, &registration) {
                     return Err(reject(format!(
-                        "family registration {table_key:?} is not an authored Flow Memory v2 identity"
+                        "family registration {table_key:?} is not an authored Flow Memory v3 identity"
                     )));
                 }
                 registered_tables.insert(table_key.to_owned());
@@ -8483,7 +4885,7 @@ pub(crate) trait ReadsFlowMemory {
         };
         if !catalog_is_current {
             return Err(reject(
-                "family catalog is not a complete authored Flow Memory v2 configuration-only or running schema".into(),
+                "family catalog is not a complete authored Flow Memory v3 configuration-only or running schema".into(),
             ));
         }
 
@@ -8526,6 +4928,8 @@ pub(crate) trait ReadsFlowMemory {
         let default_minutes_rows = engine.match_records(QueryPlan::all(tables.default_minutes))?;
         let harness_flags_rows = engine.match_records(QueryPlan::all(tables.harness_flags))?;
         let heartbeat_rows = engine.match_records(QueryPlan::all(tables.heartbeat))?;
+        let protected_address_rows =
+            engine.match_records(QueryPlan::all(tables.protected_addresses))?;
         let metaflow_rows = engine.match_records(QueryPlan::all(tables.metaflows))?;
         if models_rows.database_marker() != marker
             || metaflow_rows.database_marker() != marker
@@ -8536,6 +4940,7 @@ pub(crate) trait ReadsFlowMemory {
             || default_minutes_rows.database_marker() != marker
             || harness_flags_rows.database_marker() != marker
             || heartbeat_rows.database_marker() != marker
+            || protected_address_rows.database_marker() != marker
             || engine.current_database_marker()? != marker
         {
             return Err(StoreError::ConfigurationReadViewChanged);
@@ -8548,7 +4953,7 @@ pub(crate) trait ReadsFlowMemory {
             .iter()
             .map(|stored| stored.model.clone())
             .collect::<Vec<_>>();
-        models.sort_by_key(|model| FlowStore::model_record_key(&model.layer, &model.aspect));
+        models.sort_by_key(|model| FlowStore::model_record_key(&model.model));
         let mut thresholds = thresholds_rows
             .records()
             .iter()
@@ -8601,6 +5006,12 @@ pub(crate) trait ReadsFlowMemory {
             .collect::<Vec<_>>();
         configured_harness_flags
             .sort_by_key(|configured| FlowStore::address_record_key(&configured.address));
+        let mut protected_addresses = protected_address_rows
+            .records()
+            .iter()
+            .map(|stored| stored.address.clone())
+            .collect::<Vec<_>>();
+        protected_addresses.sort_by_key(FlowStore::address_record_key);
         Ok(Some(ConfiguredFamilies {
             nexus,
             models,
@@ -8612,6 +5023,7 @@ pub(crate) trait ReadsFlowMemory {
             default_minutes,
             configured_harness_flags,
             heartbeat,
+            protected_addresses,
         }))
     }
 
@@ -8709,6 +5121,7 @@ pub(crate) trait ReadsFlowMemory {
             ConfigurationChange::Heartbeat(Some(config)) => {
                 config.heartbeat_recipients.iter().collect()
             }
+            ConfigurationChange::ProtectedAddresses(addresses) => addresses.iter().collect(),
             _ => Vec::new(),
         };
         if let Some(refused) = addresses
@@ -8850,6 +5263,16 @@ pub(crate) trait ReadsFlowMemory {
                         .collect(),
                 )
             }
+            ConfigurationChange::ProtectedAddresses(addresses) => {
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.protected_addresses,
+                    addresses
+                        .into_iter()
+                        .map(|address| StoredMetaProtectedAddressConfiguration { address })
+                        .collect(),
+                )
+            }
             // A store opened for configuration only holds no counters; the
             // running store declares them (`counters::ConfiguresCounters`).
             ConfigurationChange::Counters(_) => {
@@ -8886,8 +5309,7 @@ mod tests {
     use super::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
     use crate::store::logical_delivery::{RecordsLogicalDeliveries, SimplifiedReplyBinding};
     use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
-    use crate::store::queue_delivery::AccountsQueueDelivery;
-    use sema_engine::MemoryDefinition;
+
     use std::fs;
     use std::os::unix::fs::MetadataExt;
 
@@ -8895,13 +5317,13 @@ mod tests {
     fn heartbeat_admission_atomically_advances_and_survives_reopen() {
         use super::{StoredHeartbeatStanding, TracksHeartbeat};
         use crate::heartbeat::DeliveryPurpose;
-        use signal_flow::{Address, Aspect, Layer, Message, Metaflow, Request, SentBy};
+        use signal_flow::{Address, Aspect, Message, Metaflow, Model, Request, SentBy};
         let fixture = StoreFixture::new();
         let store = fixture.store();
         let recipient = Address {
             aspect: Aspect::Field,
             topic: "heartbeatTest".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         store.seed_metaflow(Metaflow {
             address: recipient.clone(),
@@ -8974,600 +5396,9 @@ mod tests {
     }
 
     #[test]
-    fn immediately_previous_catalog_upgrades_and_reopens_with_records() {
-        use super::events::{EventV2, FlowEventsV2, NativeStopV2};
-        use super::metaflow_declaration::{
-            ConfigureMetaflowV1, ReadsMetaflowDeclarations, StoredMetaMetaflowConfigurationV1,
-        };
-        use super::{MemoryDefinition, StoredLaunchAttemptV2};
-        let fixture = StoreFixture::new();
-        fixture.configured();
-        drop(fixture.configured_store());
-        let tables = [
-            "flow_nexus_launch_attempts",
-            "flow_nexus_flow_events",
-            "flow_nexus_meta_metaflow_configuration",
-        ];
-        let database = redb::Database::open(fixture.path()).unwrap();
-        let write = database.begin_write().unwrap();
-        {
-            let mut catalog = write.open_table(super::SEMA_CATALOG_TABLE).unwrap();
-            for name in tables {
-                catalog.remove(name).unwrap();
-            }
-        }
-        for name in tables {
-            write
-                .delete_table(redb::TableDefinition::<&str, &[u8]>::new(name))
-                .unwrap();
-        }
-        write.commit().unwrap();
-        drop(database);
-        let mut engine = Engine::open(EngineOpen::new(
-            fixture.path(),
-            SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
-        ))
-        .unwrap();
-        engine
-            .register_table::<StoredLaunchAttemptV2>(TableDescriptor::new(
-                TableName::new(tables[0]),
-                FamilyName::new("flow-nexus-launch-attempt"),
-                StoredLaunchAttemptV2::schema_hash(),
-            ))
-            .unwrap();
-        let events = engine
-            .register_table::<FlowEventsV2>(TableDescriptor::new(
-                TableName::new(tables[1]),
-                FamilyName::new("flow-nexus-flow-events"),
-                FlowEventsV2::schema_hash(),
-            ))
-            .unwrap();
-        engine
-            .assert(Assertion::new(
-                events,
-                FlowEventsV2 {
-                    flow_id: "old-flow".into(),
-                    event_vector: vec![
-                        EventV2::Started,
-                        EventV2::Stopped(NativeStopV2 {
-                            native_session_id_option: Some("old-session".into()),
-                            transcript_path_option: Some("/old/transcript".into()),
-                        }),
-                    ],
-                },
-            ))
-            .unwrap();
-        let declarations = engine
-            .register_table::<StoredMetaMetaflowConfigurationV1>(TableDescriptor::new(
-                TableName::new(tables[2]),
-                FamilyName::new("flow-nexus-meta-metaflow-configuration"),
-                StoredMetaMetaflowConfigurationV1::schema_hash(),
-            ))
-            .unwrap();
-        let address = Address {
-            aspect: Aspect::Psyche,
-            topic: "judgment".into(),
-            layer: Layer::Primary,
-        };
-        engine
-            .assert(Assertion::new(
-                declarations,
-                StoredMetaMetaflowConfigurationV1 {
-                    metaflow: ConfigureMetaflowV1 {
-                        address: address.clone(),
-                        system_modules: vec!["system".into()],
-                        user_modules: vec!["user".into()],
-                    },
-                },
-            ))
-            .unwrap();
-        drop(engine);
-        for _ in 0..2 {
-            let store = fixture.configured_store();
-            let declaration = store.metaflow_declaration(&address).unwrap().unwrap();
-            assert_eq!(declaration.system_modules, ["system"]);
-            assert_eq!(declaration.user_modules, ["user"]);
-            assert_eq!(declaration.flow_kind, signal_flow::FlowKind::Regular);
-            assert_eq!(declaration.tool_set, signal_flow::ToolSet::Default);
-            assert_eq!(declaration.root_option, None);
-            let events = super::events::RecordsHarnessEvents::events(&store, "old-flow")
-                .unwrap()
-                .unwrap();
-            assert_eq!(events.len(), 2);
-            assert!(
-                matches!(&events[1], signal_flow::Event::Stopped(stop) if stop.native_session_id_option.as_deref() == Some("old-session") && stop.last_assistant_message_option.is_none())
-            );
-        }
-    }
-
-    #[test]
-    fn v4_metaflow_declaration_upgrades_to_default_workspace_and_reopens() {
-        use super::metaflow_declaration::{
-            ConfigureMetaflowV4, ReadsMetaflowDeclarations, StoredMetaMetaflowConfigurationV4,
-        };
-        let fixture = StoreFixture::new();
-        fixture.configured();
-        drop(fixture.configured_store());
-        let table = "flow_nexus_meta_metaflow_configuration";
-        let database = redb::Database::open(fixture.path()).unwrap();
-        let write = database.begin_write().unwrap();
-        write
-            .open_table(super::SEMA_CATALOG_TABLE)
-            .unwrap()
-            .remove(table)
-            .unwrap();
-        write
-            .delete_table(redb::TableDefinition::<&str, &[u8]>::new(table))
-            .unwrap();
-        write.commit().unwrap();
-        drop(database);
-        let mut engine = Engine::open(EngineOpen::new(
-            fixture.path(),
-            SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
-        ))
-        .unwrap();
-        let declarations = engine
-            .register_table::<StoredMetaMetaflowConfigurationV4>(TableDescriptor::new(
-                TableName::new(table),
-                FamilyName::new("flow-nexus-meta-metaflow-configuration"),
-                StoredMetaMetaflowConfigurationV4::schema_hash(),
-            ))
-            .unwrap();
-        let address = Address {
-            aspect: Aspect::Mind,
-            topic: "workspaceMigration".into(),
-            layer: Layer::Secondary,
-        };
-        engine
-            .assert(Assertion::new(
-                declarations,
-                StoredMetaMetaflowConfigurationV4 {
-                    metaflow: ConfigureMetaflowV4 {
-                        address: address.clone(),
-                        system_modules: vec!["spirit:core".into()],
-                        user_modules: vec!["vision:flow-nexus".into()],
-                        flow_kind: signal_flow::FlowKind::Regular,
-                        tool_set: signal_flow::ToolSet::Default,
-                        continuity: meta_signal_flow::Continuity::OnDemand,
-                        purpose: "Uses a configurable workspace.".into(),
-                        records: vec!["flows/f35668/vision/flow-nexus.md".into()],
-                    },
-                },
-            ))
-            .unwrap();
-        drop(engine);
-
-        for _ in 0..2 {
-            let store = fixture.configured_store();
-            let declaration = store.metaflow_declaration(&address).unwrap().unwrap();
-            assert_eq!(declaration.root_option, None);
-            assert_eq!(declaration.purpose, "Uses a configurable workspace.");
-            assert_eq!(declaration.records, ["flows/f35668/vision/flow-nexus.md"]);
-        }
-        {
-            let store = fixture.configured_store();
-            let mut declaration = store.metaflow_declaration(&address).unwrap().unwrap();
-            declaration.root_option = Some("/srv/workspace".into());
-            store
-                .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
-                    declaration,
-                ]))
-                .unwrap();
-        }
-        assert_eq!(
-            fixture
-                .configured_store()
-                .metaflow_declaration(&address)
-                .unwrap()
-                .unwrap()
-                .root_option
-                .as_deref(),
-            Some("/srv/workspace")
-        );
-    }
-
-    /// A store written before Continuity, before a session's end was an
-    /// event, before a successor could be owed for an ordered Refresh or a
-    /// Replace, and before a queued request could be withdrawn, opens with
-    /// every one of those families upgraded, and opens again unchanged: its
-    /// declarations Maintained at the core Addresses alone, its events,
-    /// successors, deliveries and send calls as they were kept.
-    #[test]
-    fn a_store_before_continuity_and_withdrawal_upgrades_and_reopens() {
-        use super::MemoryDefinition;
-        use super::events::{EventV3, FlowEventsV3};
-        use super::logical_delivery::{CurrentLogicalDeliveryV1, LogicalDeliveryEventV1};
-        use super::metaflow_declaration::{
-            AvailabilityV3, ConfigureMetaflowV3, ReadsMetaflowDeclarations,
-            StoredMetaMetaflowConfigurationV3,
-        };
-        use super::send_call::{AcceptedV4, SendCallV4, SendOutcomeV4};
-        use super::send_v31::{
-            DeliverySnapshotV31, DeliveryStateV31, RefusalV31, SendAcceptanceV31,
-        };
-        use super::successor::{
-            OwesSuccessors, SuccessionCause, SuccessionCauseV1, SuccessorIntent, SuccessorIntentV1,
-        };
-        use crate::store::logical_delivery::RecordsLogicalDeliveries;
-        let fixture = StoreFixture::new();
-        fixture.configured();
-        drop(fixture.configured_store());
-        let tables = [
-            "flow_nexus_flow_events",
-            "flow_nexus_successor_intents",
-            "flow_nexus_logical_delivery_current",
-            "flow_nexus_logical_delivery_events",
-            "flow_nexus_send_calls",
-            "flow_nexus_meta_metaflow_configuration",
-        ];
-        let database = redb::Database::open(fixture.path()).unwrap();
-        let write = database.begin_write().unwrap();
-        {
-            let mut catalog = write.open_table(super::SEMA_CATALOG_TABLE).unwrap();
-            for name in tables {
-                catalog.remove(name).unwrap();
-            }
-        }
-        for name in tables {
-            write
-                .delete_table(redb::TableDefinition::<&str, &[u8]>::new(name))
-                .unwrap();
-        }
-        write.commit().unwrap();
-        drop(database);
-        let core = Address {
-            aspect: Aspect::Mind,
-            topic: "core".into(),
-            layer: Layer::Secondary,
-        };
-        let elsewhere = Address {
-            aspect: Aspect::Mind,
-            topic: "flow".into(),
-            layer: Layer::Primary,
-        };
-        let snapshot = DeliverySnapshotV31 {
-            delivery_cursor: 7,
-            logical_delivery_id: "logical-old".into(),
-            sent_by: signal_flow::SentBy::Sender(elsewhere.clone()),
-            address: core.clone(),
-            delivery_state: DeliveryStateV31::Failed(RefusalV31::Direct("gone".into())),
-        };
-        let key = crate::generated::send_tool::ToolCallKey {
-            thread_id: "thread-old".into(),
-            turn_id: "turn-old".into(),
-            call_id: "call-old".into(),
-        };
-        let mut engine = Engine::open(EngineOpen::new(
-            fixture.path(),
-            SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
-        ))
-        .unwrap();
-        let events = engine
-            .register_table::<FlowEventsV3>(TableDescriptor::new(
-                TableName::new(tables[0]),
-                FamilyName::new("flow-nexus-flow-events"),
-                FlowEventsV3::schema_hash(),
-            ))
-            .unwrap();
-        engine
-            .assert(Assertion::new(
-                events,
-                FlowEventsV3 {
-                    flow_id: "old-flow".into(),
-                    event_vector: vec![EventV3::Started, EventV3::ToolUsed("Bash".into())],
-                },
-            ))
-            .unwrap();
-        let successors = engine
-            .register_table::<SuccessorIntentV1>(TableDescriptor::new(
-                TableName::new(tables[1]),
-                FamilyName::new("flow-nexus-successor-intent"),
-                SuccessorIntentV1::schema_hash(),
-            ))
-            .unwrap();
-        engine
-            .assert(Assertion::new(
-                successors,
-                SuccessorIntentV1 {
-                    address: core.clone(),
-                    predecessor: "old-flow".into(),
-                    cause: SuccessionCauseV1::Exit,
-                    launch_request_id: String::new(),
-                },
-            ))
-            .unwrap();
-        let current = engine
-            .register_table::<CurrentLogicalDeliveryV1>(TableDescriptor::new(
-                TableName::new(tables[2]),
-                FamilyName::new("flow-nexus-logical-delivery-current"),
-                CurrentLogicalDeliveryV1::schema_hash(),
-            ))
-            .unwrap();
-        engine
-            .assert(Assertion::new(
-                current,
-                CurrentLogicalDeliveryV1 {
-                    snapshot: snapshot.clone(),
-                },
-            ))
-            .unwrap();
-        let delivery_events = engine
-            .register_table::<LogicalDeliveryEventV1>(TableDescriptor::new(
-                TableName::new(tables[3]),
-                FamilyName::new("flow-nexus-logical-delivery-event"),
-                LogicalDeliveryEventV1::schema_hash(),
-            ))
-            .unwrap();
-        engine
-            .assert(Assertion::new(
-                delivery_events,
-                LogicalDeliveryEventV1 {
-                    snapshot: snapshot.clone(),
-                },
-            ))
-            .unwrap();
-        let calls = engine
-            .register_table::<SendCallV4>(TableDescriptor::new(
-                TableName::new(tables[4]),
-                FamilyName::new("flow-nexus-send-call"),
-                SendCallV4::schema_hash(),
-            ))
-            .unwrap();
-        engine
-            .assert(Assertion::new(
-                calls,
-                SendCallV4 {
-                    tool_call_key: key.clone(),
-                    content_sha256: "sha-old".into(),
-                    send_outcome: SendOutcomeV4::Accepted(AcceptedV4 {
-                        sender: elsewhere.clone(),
-                        target: core.clone(),
-                        send_acceptance: SendAcceptanceV31 {
-                            logical_delivery_id: "logical-old".into(),
-                            delivery_cursor: 7,
-                            delivery_state: DeliveryStateV31::Queued,
-                        },
-                    }),
-                },
-            ))
-            .unwrap();
-        let declarations = engine
-            .register_table::<StoredMetaMetaflowConfigurationV3>(TableDescriptor::new(
-                TableName::new(tables[5]),
-                FamilyName::new("flow-nexus-meta-metaflow-configuration"),
-                StoredMetaMetaflowConfigurationV3::schema_hash(),
-            ))
-            .unwrap();
-        for (address, availability) in [
-            (core.clone(), AvailabilityV3::OnDemand),
-            (elsewhere.clone(), AvailabilityV3::Required),
-        ] {
-            engine
-                .assert(Assertion::new(
-                    declarations,
-                    StoredMetaMetaflowConfigurationV3 {
-                        metaflow: ConfigureMetaflowV3 {
-                            address,
-                            system_modules: vec!["spirit:core".into()],
-                            user_modules: vec![],
-                            flow_kind: signal_flow::FlowKind::Regular,
-                            tool_set: signal_flow::ToolSet::Default,
-                            availability,
-                            purpose: "Kept.".into(),
-                            records: vec![],
-                        },
-                    },
-                ))
-                .unwrap();
-        }
-        drop(engine);
-        for _ in 0..2 {
-            let store = fixture.configured_store();
-            assert_eq!(
-                super::events::RecordsHarnessEvents::events(&store, "old-flow")
-                    .unwrap()
-                    .unwrap(),
-                vec![
-                    signal_flow::Event::Started(None),
-                    signal_flow::Event::ToolUsed("Bash".into())
-                ]
-            );
-            assert_eq!(
-                store.successor_intent(&core).unwrap(),
-                Some(SuccessorIntent {
-                    address: core.clone(),
-                    predecessor: "old-flow".into(),
-                    cause: SuccessionCause::Exit,
-                    launch_request_id: String::new(),
-                })
-            );
-            let upgraded: signal_flow::DeliverySnapshot = snapshot.clone().into();
-            assert_eq!(
-                upgraded.delivery_state,
-                signal_flow::DeliveryState::Failed(signal_flow::Refusal::Direct("gone".into()))
-            );
-            assert_eq!(
-                store
-                    .logical_delivery_snapshot(&"logical-old".to_owned())
-                    .unwrap(),
-                Some(upgraded.clone())
-            );
-            assert_eq!(
-                store
-                    .engine
-                    .match_records(QueryPlan::all(store.logical_deliveries.events))
-                    .unwrap()
-                    .records()
-                    .iter()
-                    .map(|event| event.snapshot.clone())
-                    .collect::<Vec<_>>(),
-                vec![upgraded]
-            );
-            let kept = store
-                .engine
-                .match_records(QueryPlan::all(store.send_calls))
-                .unwrap()
-                .records()
-                .to_vec();
-            assert!(
-                matches!(
-                    kept.as_slice(),
-                    [call] if call.tool_call_key == key
-                        && matches!(
-                            &call.send_outcome,
-                            crate::generated::send_tool::SendOutcome::Accepted(accepted)
-                                if accepted.send_acceptance.delivery_state
-                                    == signal_flow::DeliveryState::Queued
-                        )
-                ),
-                "{kept:?}"
-            );
-            assert_eq!(
-                store
-                    .metaflow_declaration(&core)
-                    .unwrap()
-                    .expect("core declared")
-                    .continuity,
-                meta_signal_flow::Continuity::Maintained
-            );
-            let other = store
-                .metaflow_declaration(&elsewhere)
-                .unwrap()
-                .expect("other declared");
-            assert_eq!(other.continuity, meta_signal_flow::Continuity::OnDemand);
-            assert_eq!(other.purpose, "Kept.");
-        }
-    }
-
-    /// A store written by 0.40.4 to 0.40.10 keeps its logical deliveries at
-    /// v3. It opens with every current delivery and every event upgraded,
-    /// and opens again unchanged.
-    #[test]
-    fn a_store_from_0_40_4_upgrades_its_v3_logical_deliveries() {
-        use super::MemoryDefinition;
-        use super::logical_delivery::{CurrentLogicalDeliveryV3, LogicalDeliveryEventV3};
-        use super::send_v34::{DeliverySnapshotV34, DeliveryStateV34, RefusalV34};
-        use crate::store::logical_delivery::RecordsLogicalDeliveries;
-        let fixture = StoreFixture::new();
-        fixture.configured();
-        drop(fixture.configured_store());
-        let tables = [
-            "flow_nexus_logical_delivery_current",
-            "flow_nexus_logical_delivery_events",
-        ];
-        let database = redb::Database::open(fixture.path()).unwrap();
-        let write = database.begin_write().unwrap();
-        {
-            let mut catalog = write.open_table(super::SEMA_CATALOG_TABLE).unwrap();
-            for name in tables {
-                catalog.remove(name).unwrap();
-            }
-        }
-        for name in tables {
-            write
-                .delete_table(redb::TableDefinition::<&str, &[u8]>::new(name))
-                .unwrap();
-        }
-        write.commit().unwrap();
-        drop(database);
-        let core = Address {
-            aspect: Aspect::Mind,
-            topic: "core".into(),
-            layer: Layer::Secondary,
-        };
-        let elsewhere = Address {
-            aspect: Aspect::Mind,
-            topic: "flow".into(),
-            layer: Layer::Primary,
-        };
-        let snapshots = [
-            DeliverySnapshotV34 {
-                delivery_cursor: 7,
-                logical_delivery_id: "logical-queued".into(),
-                sent_by: signal_flow::SentBy::Sender(elsewhere.clone()),
-                address: core.clone(),
-                delivery_state: DeliveryStateV34::Queued,
-            },
-            DeliverySnapshotV34 {
-                delivery_cursor: 8,
-                logical_delivery_id: "logical-failed".into(),
-                sent_by: signal_flow::SentBy::Sender(elsewhere.clone()),
-                address: core.clone(),
-                delivery_state: DeliveryStateV34::Failed(RefusalV34::Direct("gone".into())),
-            },
-        ];
-        let mut engine = Engine::open(EngineOpen::new(
-            fixture.path(),
-            SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
-        ))
-        .unwrap();
-        let current = engine
-            .register_table::<CurrentLogicalDeliveryV3>(TableDescriptor::new(
-                TableName::new(tables[0]),
-                FamilyName::new("flow-nexus-logical-delivery-current"),
-                CurrentLogicalDeliveryV3::schema_hash(),
-            ))
-            .unwrap();
-        let events = engine
-            .register_table::<LogicalDeliveryEventV3>(TableDescriptor::new(
-                TableName::new(tables[1]),
-                FamilyName::new("flow-nexus-logical-delivery-event"),
-                LogicalDeliveryEventV3::schema_hash(),
-            ))
-            .unwrap();
-        for snapshot in &snapshots {
-            engine
-                .assert(Assertion::new(
-                    current,
-                    CurrentLogicalDeliveryV3 {
-                        snapshot: snapshot.clone(),
-                    },
-                ))
-                .unwrap();
-            engine
-                .assert(Assertion::new(
-                    events,
-                    LogicalDeliveryEventV3 {
-                        snapshot: snapshot.clone(),
-                    },
-                ))
-                .unwrap();
-        }
-        drop(engine);
-        let upgraded: Vec<signal_flow::DeliverySnapshot> =
-            snapshots.iter().cloned().map(Into::into).collect();
-        assert_eq!(
-            upgraded[1].delivery_state,
-            signal_flow::DeliveryState::Failed(signal_flow::Refusal::Direct("gone".into()))
-        );
-        for _ in 0..2 {
-            let store = fixture.configured_store();
-            for snapshot in &upgraded {
-                assert_eq!(
-                    store
-                        .logical_delivery_snapshot(&snapshot.logical_delivery_id)
-                        .unwrap(),
-                    Some(snapshot.clone())
-                );
-            }
-            assert_eq!(
-                store
-                    .engine
-                    .match_records(QueryPlan::all(store.logical_deliveries.events))
-                    .unwrap()
-                    .records()
-                    .iter()
-                    .map(|event| event.snapshot.clone())
-                    .collect::<Vec<_>>(),
-                upgraded
-            );
-        }
-    }
-
-    #[test]
     fn simplified_reply_requires_consumed_input_and_queues_once_to_its_sender() {
         use signal_flow::{
-            Address, Aspect, DeliveryState, Layer, Message, Metaflow, NativeReceipt, Request,
+            Address, Aspect, DeliveryState, Message, Metaflow, Model, NativeReceipt, Request,
             SentBy,
         };
         let fixture = StoreFixture::new();
@@ -9575,12 +5406,12 @@ mod tests {
         let source = Address {
             aspect: Aspect::Mind,
             topic: "judgment".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         let recipient = Address {
             aspect: Aspect::Psyche,
             topic: "core".into(),
-            layer: Layer::Secondary,
+            model: Model::Opus,
         };
         for address in [&source, &recipient] {
             store.seed_metaflow(Metaflow {
@@ -9702,7 +5533,7 @@ mod tests {
         let second_sender = Address {
             aspect: Aspect::Field,
             topic: "review".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         store.seed_metaflow(Metaflow {
             address: second_sender.clone(),
@@ -9780,7 +5611,7 @@ mod tests {
     #[test]
     fn core_presentation_is_queued_as_is_once_and_secondary_gets_only_a_notice() {
         use signal_flow::{
-            Address, Aspect, DeliveryState, Layer, Message, Metaflow, NativeReceipt, Request,
+            Address, Aspect, DeliveryState, Message, Metaflow, Model, NativeReceipt, Request,
             SentBy,
         };
         let fixture = StoreFixture::new();
@@ -9788,17 +5619,17 @@ mod tests {
         let source = Address {
             aspect: Aspect::Psyche,
             topic: "core".into(),
-            layer: Layer::Primary,
+            model: Model::Fable,
         };
         let sender = Address {
             aspect: Aspect::Psyche,
             topic: "core".into(),
-            layer: Layer::Secondary,
+            model: Model::Opus,
         };
         let book = Address {
             aspect: Aspect::Psyche,
             topic: "book".into(),
-            layer: Layer::Tertiary,
+            model: Model::Sonnet,
         };
         for address in [&source, &sender, &book] {
             store.seed_metaflow(Metaflow {
@@ -9959,13 +5790,12 @@ mod tests {
 
     use super::{
         AppliesFlowQuery, ConfigurationOnlyStore, ConfiguresFlowStore, ConfirmsStartedFlow,
-        DerivesNativeOwnerProof, FlowStore, LaunchOutcome, LaunchOutcomeV2, ManagesMetaflowState,
-        NativeOwnerEnvironment, NativeOwnerProof, NativeOwnerState, OpensFlowStore, ReadsFlowRoles,
-        ReadsFlowStore, ReadsLaunchAttempt, RecordsLaunchOutcome, RecordsNativeLaunchBinding,
-        RecordsNativeLaunchIntent, RecordsPendingThread, RecordsPromptDeliveryIntent,
-        RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RegistersExistingFlow,
-        RegistersFlowIdentity, ReservesLaunchAttempt, ReservesPendingStart,
-        SetsNativeOwnerEnvironmentForTests, StoredLaunchOutcomeV2,
+        DerivesNativeOwnerProof, FlowStore, ManagesMetaflowState, NativeOwnerEnvironment,
+        NativeOwnerProof, NativeOwnerState, OpensFlowStore, ReadsFlowRoles, ReadsLaunchAttempt,
+        RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPendingThread,
+        RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
+        RecordsRegistrationAcknowledgement, RegistersExistingFlow, RegistersFlowIdentity,
+        ReservesLaunchAttempt, ReservesPendingStart, SetsNativeOwnerEnvironmentForTests,
     };
 
     #[test]
@@ -10041,8 +5871,7 @@ mod tests {
         store
             .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
                 meta_signal_flow::ConfigureModel {
-                    layer: Layer::Secondary,
-                    aspect: Aspect::Mind,
+                    model: Model::Sol,
                     native: "gpt-sol".into(),
                 },
             ]))
@@ -10066,7 +5895,7 @@ mod tests {
         let address = Address {
             aspect: Aspect::Mind,
             topic: "core".into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         };
         let route = |flow_id: &str| signal_flow::FlowNode {
             flow_id: flow_id.into(),
@@ -10088,7 +5917,6 @@ mod tests {
             |flow_id: &str, pid: i64, uid: i64, start: String| meta_signal_flow::FlowBinding {
                 flow_id: flow_id.into(),
                 aspect: Aspect::Mind,
-                power_level: PowerLevel::Medium,
                 model_name: "gpt-sol".into(),
                 harness_kind: HarnessKind::Claude,
                 native_session_id: format!("session-{flow_id}"),
@@ -10113,7 +5941,6 @@ mod tests {
         let role = |flow_id: &str| Caller {
             flow_id: flow_id.into(),
             aspect: Aspect::Mind,
-            power_level: PowerLevel::Medium,
             model_name: "gpt-sol".into(),
         };
         assert!(matches!(
@@ -10168,22 +5995,9 @@ mod tests {
     }
 
     use super::{Configuration, ConfiguresOnlyStore, ReadsFlowMemory};
-    use super::{
-        ContextRefusalV30, LaunchOutcomeV6, ReplaceRejectionV30, StartRejectionV30,
-        StoredLaunchOutcomeV6,
-    };
-    use super::{
-        ContextRefusalV38, LaunchOutcomeV8, ReplaceRejectionV38, StartRejectionV38,
-        StoredLaunchOutcomeV8,
-    };
-    use super::{FlowRecordV5, LaunchedRecordV2, OriginClueBeforeOrigin, ReplacedRecordV2};
-    use super::{LaunchOutcomeV3, ReplaceRejectionV17, StartRejectionV17, StoredLaunchOutcomeV3};
-    use super::{LaunchOutcomeV4, ReplaceRejectionV18, StartRejectionV18, StoredLaunchOutcomeV4};
-    use super::{LaunchOutcomeV5, ReplaceRejectionV22, StartRejectionV22, StoredLaunchOutcomeV5};
-    use super::{LaunchOutcomeV7, ReplaceRejectionV32, StartRejectionV32, StoredLaunchOutcomeV7};
-    use super::{LaunchedRecord, ReplacedRecord};
+
     use super::{LaysOutDefaults, SeedsConfiguration};
-    use crate::store::RegistersBindings;
+
     use crate::store::delivery::RecordsDeliveries;
     use crate::store::delivery::{LeaseStep, PaneLease};
     use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -10192,12 +6006,11 @@ mod tests {
         SchemaVersion, TableDescriptor, TableName,
     };
     use signal_flow::{
-        Address, Aspect, BindingRefusal, Caller, ComposedLaunch, FirstPromptPayload, FlowOrigin,
-        HarnessKind, HerdrPaneBinding, LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile,
-        Layer, NativeLaunchBinding, NativeLaunchIntent, NativeTargetReceipt,
-        NativeTranscriptAbsence, NativeTranscriptBoundary, NativeTranscriptCursor, Origin,
-        PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement,
-        ReplaceRejection, Response, StartRejection, StopRejection, TargetReceiptRequest,
+        Address, Aspect, Caller, ComposedLaunch, FirstPromptPayload, FlowOrigin, HarnessKind,
+        HerdrPaneBinding, LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, Model,
+        NativeLaunchBinding, NativeLaunchIntent, NativeTargetReceipt, NativeTranscriptAbsence,
+        NativeTranscriptBoundary, NativeTranscriptCursor, Origin, PromptDeliveryIntent,
+        PromptDeliveryResult, Query, RegistrationAcknowledgement, Response, TargetReceiptRequest,
     };
 
     struct StoreFixture {
@@ -10217,48 +6030,6 @@ mod tests {
 
         fn path(&self) -> std::path::PathBuf {
             self.directory.path().join("flow.sema")
-        }
-
-        /// Replaces the store's model family with its v1 shape, one model
-        /// per Layer under that Layer alone, as 0.35.11 and earlier kept it.
-        fn seed_v1_models(&self, schema: u32, models: &[(signal_flow::Layer, &str)]) {
-            let database = redb::Database::open(self.path()).expect("store opens directly");
-            let write = database.begin_write().expect("catalog transaction starts");
-            {
-                let mut catalog = write
-                    .open_table(super::SEMA_CATALOG_TABLE)
-                    .expect("catalog opens");
-                catalog
-                    .remove("flow_nexus_meta_model_configuration")
-                    .expect("model family removes");
-            }
-            let _ = write.delete_table(redb::TableDefinition::<&str, &[u8]>::new(
-                "flow_nexus_meta_model_configuration",
-            ));
-            write.commit().expect("catalog commits");
-            drop(database);
-            let mut engine = Engine::open(EngineOpen::new(self.path(), SchemaVersion::new(schema)))
-                .expect("v1 store opens");
-            let table = engine
-                .register_table(TableDescriptor::new(
-                    TableName::new("flow_nexus_meta_model_configuration"),
-                    FamilyName::new("flow-nexus-meta-model-configuration"),
-                    SchemaHash::for_label("flow-nexus-meta-model-configuration-v1"),
-                ))
-                .expect("v1 model family registers");
-            for (layer, native) in models {
-                engine
-                    .assert(Assertion::new(
-                        table,
-                        super::StoredMetaModelConfigurationV1 {
-                            model: super::ModelBeforeAspect {
-                                layer: layer.clone(),
-                                native: (*native).into(),
-                            },
-                        },
-                    ))
-                    .expect("v1 model row persists");
-            }
         }
 
         /// A configured current-version store, as a deployment holds one.
@@ -10288,33 +6059,6 @@ mod tests {
                 .expect("configuration commits");
         }
 
-        /// The tables 0.35.19 adds to a running store.
-        const ADDED_IN_0_35_19: &'static [&'static str] = &[
-            "flow_nexus_meta_send_server_configuration",
-            "flow_nexus_queue_delivery_counter",
-            "flow_nexus_queue_delivery_requests",
-            "flow_nexus_queue_delivery_attempts",
-        ];
-
-        /// Removes the tables 0.35.19 adds, empty in the store, so the
-        /// catalog is the one 0.35.11 wrote.
-        fn as_0_35_11(&self) {
-            let database = redb::Database::open(self.path()).expect("store opens directly");
-            let write = database.begin_write().expect("catalog transaction starts");
-            {
-                let mut catalog = write
-                    .open_table(super::SEMA_CATALOG_TABLE)
-                    .expect("catalog opens");
-                for table in Self::ADDED_IN_0_35_19 {
-                    catalog.remove(*table).expect("added family removes");
-                }
-            }
-            for table in Self::ADDED_IN_0_35_19 {
-                let _ = write.delete_table(redb::TableDefinition::<&str, &[u8]>::new(table));
-            }
-            write.commit().expect("catalog commits");
-        }
-
         /// The staged copies beside the store.
         fn staged_copies(&self) -> Vec<String> {
             std::fs::read_dir(self.directory.path())
@@ -10326,126 +6070,12 @@ mod tests {
                         .to_string_lossy()
                         .into_owned()
                 })
-                .filter(|name| name.starts_with(".flow.sema.upgrade-"))
+                .filter(|name| name.starts_with(".flow.sema.open-"))
                 .collect()
         }
 
         fn configured_store(&self) -> FlowStore {
             FlowStore::open_configured(&self.path()).expect("configured store opens")
-        }
-
-        /// Replaces the store's leave-out family with its v1 shape, holding
-        /// each default given under its Address alone, as 0.35.0 to 0.35.11
-        /// kept it.
-        fn seed_v1_leave_outs(
-            &self,
-            defaults: &[(signal_flow::Address, Vec<signal_flow::LeaveOut>)],
-        ) {
-            let database = redb::Database::open(self.path()).expect("store opens directly");
-            let write = database.begin_write().expect("catalog transaction starts");
-            {
-                let mut catalog = write
-                    .open_table(super::SEMA_CATALOG_TABLE)
-                    .expect("catalog opens");
-                catalog
-                    .remove("flow_nexus_meta_leave_out_configuration")
-                    .expect("leave-out family removes");
-            }
-            let _ = write.delete_table(redb::TableDefinition::<&str, &[u8]>::new(
-                "flow_nexus_meta_leave_out_configuration",
-            ));
-            write.commit().expect("catalog commits");
-            drop(database);
-            let mut engine = Engine::open(EngineOpen::new(
-                self.path(),
-                SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
-            ))
-            .expect("v1 store opens");
-            let table = engine
-                .register_table(TableDescriptor::new(
-                    TableName::new("flow_nexus_meta_leave_out_configuration"),
-                    FamilyName::new("flow-nexus-meta-leave-out-configuration"),
-                    SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1"),
-                ))
-                .expect("v1 leave-out family registers");
-            for (address, leave_outs) in defaults {
-                engine
-                    .assert(Assertion::new(
-                        table,
-                        super::StoredMetaLeaveOutConfigurationV1 {
-                            leave_out: super::LeaveOutDefaultBeforeHarness {
-                                address: address.clone(),
-                                leave_outs: leave_outs.clone(),
-                            },
-                        },
-                    ))
-                    .expect("v1 leave-out row persists");
-            }
-        }
-
-        /// Replaces the store's events family with its v1 shape, each flow's
-        /// events as 0.35.11 and earlier kept them.
-        fn seed_v1_events(&self, flows: &[(&str, Vec<super::events::EventBeforeIdentity>)]) {
-            let database = redb::Database::open(self.path()).expect("store opens directly");
-            let write = database.begin_write().expect("catalog transaction starts");
-            {
-                let mut catalog = write
-                    .open_table(super::SEMA_CATALOG_TABLE)
-                    .expect("catalog opens");
-                catalog
-                    .remove("flow_nexus_flow_events")
-                    .expect("events family removes");
-            }
-            let _ = write.delete_table(redb::TableDefinition::<&str, &[u8]>::new(
-                "flow_nexus_flow_events",
-            ));
-            write.commit().expect("catalog commits");
-            drop(database);
-            let mut engine = Engine::open(EngineOpen::new(
-                self.path(),
-                SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
-            ))
-            .expect("v1 store opens");
-            let table = engine
-                .register_table(TableDescriptor::new(
-                    TableName::new("flow_nexus_flow_events"),
-                    FamilyName::new("flow-nexus-flow-events"),
-                    SchemaHash::for_label("flow-nexus-flow-events-v1"),
-                ))
-                .expect("v1 events family registers");
-            for (flow_id, event_vector) in flows {
-                engine
-                    .assert(Assertion::new(
-                        table,
-                        super::events::FlowEventsV1 {
-                            flow_id: (*flow_id).into(),
-                            event_vector: event_vector.clone(),
-                        },
-                    ))
-                    .expect("v1 event row persists");
-            }
-        }
-
-        /// Outcome rows of the 0.34 shape, under the family label given.
-        fn seed_outcomes(
-            &self,
-            label: &str,
-            rows: impl IntoIterator<Item = StoredLaunchOutcomeV2>,
-        ) {
-            let mut engine = Engine::open(EngineOpen::new(self.path(), SchemaVersion::new(1)))
-                .expect("outcome store opens");
-            let outcomes = engine
-                .register_table(TableDescriptor::new(
-                    TableName::new("flow_nexus_launch_outcomes"),
-                    FamilyName::new("flow-nexus-launch-outcome"),
-                    SchemaHash::for_label(label),
-                ))
-                .expect("outcome family registers");
-            for row in rows {
-                engine
-                    .assert(Assertion::new(outcomes, row))
-                    .expect("outcome persists");
-            }
         }
 
         fn launch_profile(&self, launch_request_id: &str) -> LaunchProfile {
@@ -10456,7 +6086,7 @@ mod tests {
                 address: signal_flow::Address {
                     aspect: Aspect::Field,
                     topic: "flow".into(),
-                    layer: signal_flow::Layer::Secondary,
+                    model: signal_flow::Model::Sol,
                 },
                 model_name: "fixture-model".into(),
                 effort: "medium".into(),
@@ -11191,7 +6821,6 @@ mod tests {
         drop(config);
 
         let store = FlowStore::open_configured(&path).expect("configured Memory opens");
-        assert!(store.opening_settlements.is_empty());
         store
             .record_lease_step(PaneLease {
                 delivery_id: "interrupted-delivery".into(),
@@ -11213,7 +6842,6 @@ mod tests {
         drop(config);
 
         let reopened = FlowStore::open_configured(&path).expect("configured Memory resumes");
-        assert!(reopened.opening_settlements.is_empty());
         let leases = reopened
             .engine
             .match_records(QueryPlan::all(reopened.delivery_tables.pane_leases))
@@ -11222,239 +6850,6 @@ mod tests {
             .to_vec();
         assert_eq!(leases.len(), 1, "either open did not settle the lease");
         assert_eq!(leases[0].delivery_id, "interrupted-delivery");
-    }
-
-    /// A running store written before context sizes were kept (0.27.0)
-    /// is recognized, and its next full open adds the table.
-    #[test]
-    fn a_running_store_from_before_context_sizes_opens_and_gains_the_table() {
-        let fixture = StoreFixture::new();
-        let path = fixture.path();
-        let defaults = super::DefaultConfiguration {
-            home: fixture.directory.path().join("home"),
-            runtime_directory: fixture.directory.path().join("runtime"),
-        };
-        let config = ConfigurationOnlyStore::open(&path).expect("fresh Memory opens");
-        let settings = defaults.configuration();
-        config
-            .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
-                meta_signal_flow::ConfigureNexus {
-                    source_root: settings.source_root,
-                    stable_codex: settings.stable_codex,
-                    next_codex: settings.next_codex,
-                    harness_profiles: settings.harness_profile_vector,
-                    meta_aspects: settings.meta_aspects,
-                    message_nexus_path_option: Some(settings.message_nexus_path.clone()),
-                    message_nexus_binary_option: Some("/fixture/message-nexus".into()),
-
-                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                    lease: 60,
-                    presentation_prompt_option: None,
-                },
-            ))
-            .expect("configuration commits");
-        drop(config);
-        drop(FlowStore::open_configured(&path).expect("configured Memory opens"));
-
-        // The catalog as 0.27.0 wrote it: no context size family.
-        let database = redb::Database::open(&path).expect("store opens directly");
-        let write = database.begin_write().expect("catalog transaction starts");
-        {
-            let mut catalog = write
-                .open_table(super::SEMA_CATALOG_TABLE)
-                .expect("catalog opens");
-            assert!(
-                catalog
-                    .remove("flow_nexus_flow_context_sizes")
-                    .expect("catalog entry removes")
-                    .is_some()
-            );
-        }
-        write.commit().expect("catalog commits");
-        drop(database);
-
-        let store = FlowStore::open_configured(&path).expect("0.27.0 running Memory opens");
-        use super::context::RecordsContextSize;
-        store
-            .record_context_size("5a4d0b", 90_000)
-            .expect("the added table takes a row");
-        drop(store);
-        let reopened = FlowStore::open_configured(&path).expect("upgraded Memory reopens");
-        assert_eq!(reopened.context_size("5a4d0b").unwrap(), Some(90_000));
-    }
-
-    /// A row of a retired table. Its shape is never read; it only fills a
-    /// table.
-    #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-    struct RetiredRow {
-        key: String,
-        bytes: Vec<u8>,
-    }
-
-    impl EngineRecord for RetiredRow {
-        fn record_key(&self) -> sema_engine::RecordKey {
-            sema_engine::RecordKey::new(self.key.clone())
-        }
-    }
-
-    /// An older store holds every retired table with rows in it: the meta
-    /// topic modules and start bundles of 0.34.6, the fresh-wake marks of
-    /// 0.35.21. Its next open drops each table, rows and registration, and
-    /// the store keeps opening without them.
-    #[test]
-    fn a_store_from_0_34_6_drops_its_retired_tables_when_it_opens() {
-        let fixture = StoreFixture::new();
-        let path = fixture.path();
-        let defaults = super::DefaultConfiguration {
-            home: fixture.directory.path().join("home"),
-            runtime_directory: fixture.directory.path().join("runtime"),
-        };
-        let config = ConfigurationOnlyStore::open(&path).expect("fresh Memory opens");
-        let settings = defaults.configuration();
-        config
-            .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
-                meta_signal_flow::ConfigureNexus {
-                    source_root: settings.source_root,
-                    stable_codex: settings.stable_codex,
-                    next_codex: settings.next_codex,
-                    harness_profiles: settings.harness_profile_vector,
-                    meta_aspects: settings.meta_aspects,
-                    message_nexus_path_option: Some(settings.message_nexus_path.clone()),
-                    message_nexus_binary_option: Some("/fixture/message-nexus".into()),
-
-                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                    lease: 60,
-                    presentation_prompt_option: None,
-                },
-            ))
-            .expect("configuration commits");
-        drop(config);
-        drop(FlowStore::open_configured(&path).expect("configured Memory opens"));
-
-        // The retired tables as an older store kept them, each holding a row.
-        {
-            let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(2)))
-                .expect("store opens under the engine");
-            for (table, family, schema) in super::RETIRED_TABLES {
-                let retired = engine
-                    .register_table(TableDescriptor::<RetiredRow>::new(
-                        TableName::new(table),
-                        FamilyName::new(family.to_string()),
-                        SchemaHash::for_label(schema),
-                    ))
-                    .expect("retired family registers");
-                engine
-                    .assert(Assertion::new(
-                        retired,
-                        RetiredRow {
-                            key: "Field:flow:Secondary".into(),
-                            bytes: b"kept bytes".to_vec(),
-                        },
-                    ))
-                    .expect("retired row persists");
-            }
-        }
-        let tables = || {
-            use redb::{ReadableDatabase as _, ReadableTable as _, TableHandle as _};
-            let database = redb::ReadOnlyDatabase::open(&path).expect("store reads directly");
-            let read = database.begin_read().expect("read starts");
-            let registered = read
-                .open_table(super::SEMA_CATALOG_TABLE)
-                .expect("catalog opens")
-                .iter()
-                .expect("catalog iterates")
-                .map(|entry| entry.expect("catalog entry").0.value().to_owned())
-                .collect::<Vec<_>>();
-            let stored = read
-                .list_tables()
-                .expect("tables list")
-                .map(|table| table.name().to_owned())
-                .collect::<Vec<_>>();
-            (registered, stored)
-        };
-        let (registered, stored) = tables();
-        for (table, _, _) in super::RETIRED_TABLES {
-            assert!(
-                registered.iter().any(|name| name == *table),
-                "{table} seeded"
-            );
-            assert!(
-                stored.iter().any(|name| name == *table),
-                "{table} rows seeded"
-            );
-        }
-
-        drop(FlowStore::open_configured(&path).expect("the older store opens"));
-        let (registered, stored) = tables();
-        for (table, _, _) in super::RETIRED_TABLES {
-            assert!(
-                !registered.iter().any(|name| name == *table),
-                "{table} unregistered"
-            );
-            assert!(
-                !stored.iter().any(|name| name == *table),
-                "{table} rows dropped"
-            );
-        }
-        drop(FlowStore::open_configured(&path).expect("the store reopens without them"));
-        drop(ConfigurationOnlyStore::open(&path).expect("configuration reopens without them"));
-    }
-
-    /// A running store written before Address holds were kept (0.31.0)
-    /// is recognized, and its next full open adds the table.
-    #[test]
-    fn a_running_store_from_before_address_holds_opens_and_gains_the_table() {
-        let fixture = StoreFixture::new();
-        let path = fixture.path();
-        let defaults = super::DefaultConfiguration {
-            home: fixture.directory.path().join("home"),
-            runtime_directory: fixture.directory.path().join("runtime"),
-        };
-        let config = ConfigurationOnlyStore::open(&path).expect("fresh Memory opens");
-        let settings = defaults.configuration();
-        config
-            .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
-                meta_signal_flow::ConfigureNexus {
-                    source_root: settings.source_root,
-                    stable_codex: settings.stable_codex,
-                    next_codex: settings.next_codex,
-                    harness_profiles: settings.harness_profile_vector,
-                    meta_aspects: settings.meta_aspects,
-                    message_nexus_path_option: Some(settings.message_nexus_path.clone()),
-                    message_nexus_binary_option: Some("/fixture/message-nexus".into()),
-
-                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                    lease: 60,
-                    presentation_prompt_option: None,
-                },
-            ))
-            .expect("configuration commits");
-        drop(config);
-        drop(FlowStore::open_configured(&path).expect("configured Memory opens"));
-
-        // The catalog as 0.31.0 wrote it: no Address hold family.
-        let database = redb::Database::open(&path).expect("store opens directly");
-        let write = database.begin_write().expect("catalog transaction starts");
-        {
-            let mut catalog = write
-                .open_table(super::SEMA_CATALOG_TABLE)
-                .expect("catalog opens");
-            assert!(
-                catalog
-                    .remove("flow_nexus_address_holds")
-                    .expect("catalog entry removes")
-                    .is_some()
-            );
-        }
-        write.commit().expect("catalog commits");
-        drop(database);
-
-        let store = FlowStore::open_configured(&path).expect("0.31.0 running Memory opens");
-        use super::address_hold::HoldsLaunchAddress;
-        assert_eq!(store.address_hold("908786").unwrap(), None);
-        drop(store);
-        let reopened = FlowStore::open_configured(&path).expect("upgraded Memory reopens");
-        assert_eq!(reopened.address_hold("908786").unwrap(), None);
     }
 
     /// Sets redb's recovery-required flag, as a writer killed before it
@@ -11533,27 +6928,111 @@ mod tests {
         assert_eq!(directory_entries(&path), entries, "the copy is discarded");
     }
 
-    #[test]
-    fn configuration_only_refuses_old_memory_without_changing_any_bytes() {
-        let fixture = StoreFixture::new();
-        let path = fixture.path();
-        // A family label no Flow wrote since 0.20 is not recognized.
-        fixture.seed_outcomes(
-            "flow-nexus-launch-outcome-v1",
-            [StoredLaunchOutcomeV2 {
-                launch_request_id: "old-row".into(),
-                launch_outcome: LaunchOutcomeV2::StartRejected(
-                    StartRejectionV17::CompositionRefused,
-                ),
-            }],
-        );
-        let before = std::fs::read(&path).expect("old store bytes read");
+    /// Rewrites a store's Sema schema version, as an earlier Flow left it.
+    fn stamp_schema_version(path: &std::path::Path, version: u64) {
+        let database = redb::Database::open(path).expect("store opens directly");
+        let write = database.begin_write().expect("meta transaction starts");
+        {
+            let mut meta = write
+                .open_table(super::SEMA_META_TABLE)
+                .expect("meta table opens");
+            meta.insert(super::SEMA_SCHEMA_VERSION_KEY, version)
+                .expect("schema version writes");
+        }
+        write.commit().expect("meta commits");
+    }
 
-        assert!(matches!(
-            ConfigurationOnlyStore::open(&path),
-            Err(super::StoreError::UnrecognizedMemory { .. })
-        ));
-        assert_eq!(std::fs::read(&path).expect("old bytes reread"), before);
+    /// A store an earlier Flow wrote is Flow Memory v2: no open upgrades it.
+    /// Each open refuses it typed, as an earlier Flow's store, and leaves it
+    /// byte for byte as it was.
+    #[test]
+    fn an_earlier_flows_store_is_refused_and_left_byte_for_byte() {
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        drop(fixture.configured_store());
+        stamp_schema_version(&fixture.path(), 2);
+        let path = fixture.path();
+        let before = std::fs::read(&path).expect("earlier store reads");
+        let entries = directory_entries(&path);
+        let earlier = |error: super::StoreError| match error {
+            super::StoreError::EarlierMemory {
+                path: refused,
+                version,
+            } => {
+                assert_eq!(refused, path.display().to_string());
+                assert_eq!(version, 2);
+            }
+            other => panic!("an earlier store is refused as one: {other:?}"),
+        };
+        earlier(ConfigurationOnlyStore::open(&path).err().expect("refused"));
+        earlier(FlowStore::open_configured(&path).err().expect("refused"));
+        assert_eq!(std::fs::read(&path).expect("earlier store rereads"), before);
+        assert_eq!(directory_entries(&path), entries, "no copy is left");
+    }
+
+    /// A Memory v3 store holding a family under the identity an earlier
+    /// Flow registered it with, the 0.51 metaflow family, is refused before
+    /// anything is written: no family is upgraded on open.
+    #[test]
+    fn a_family_under_an_earlier_identity_is_refused_not_upgraded() {
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        drop(fixture.configured_store());
+        let path = fixture.path();
+        {
+            let database = redb::Database::open(&path).expect("store opens directly");
+            let write = database.begin_write().expect("catalog transaction starts");
+            {
+                let mut catalog = write
+                    .open_table(super::SEMA_CATALOG_TABLE)
+                    .expect("catalog opens");
+                catalog
+                    .remove("flow_nexus_metaflows")
+                    .expect("metaflow family removes");
+            }
+            let _ = write.delete_table(redb::TableDefinition::<&str, &[u8]>::new(
+                "flow_nexus_metaflows",
+            ));
+            write.commit().expect("catalog commits");
+        }
+        {
+            #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone)]
+            struct EarlierMetaflow {
+                key: String,
+            }
+            impl EngineRecord for EarlierMetaflow {
+                fn record_key(&self) -> sema_engine::RecordKey {
+                    sema_engine::RecordKey::new(self.key.clone())
+                }
+            }
+            let mut engine = Engine::open(EngineOpen::new(
+                &path,
+                SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
+            ))
+            .expect("store opens");
+            engine
+                .register_table(TableDescriptor::<EarlierMetaflow>::new(
+                    TableName::new("flow_nexus_metaflows"),
+                    FamilyName::new("flow-nexus-metaflow"),
+                    SchemaHash::for_label("flow-nexus-metaflow-v6"),
+                ))
+                .expect("the earlier metaflow family registers");
+        }
+        let before = std::fs::read(&path).expect("store reads");
+        for refused in [
+            ConfigurationOnlyStore::open(&path).err(),
+            FlowStore::open_configured(&path).err(),
+        ] {
+            assert!(
+                matches!(
+                    &refused,
+                    Some(super::StoreError::UnrecognizedMemory { reason, .. })
+                        if reason.contains("flow_nexus_metaflows")
+                ),
+                "{refused:?}"
+            );
+        }
+        assert_eq!(std::fs::read(&path).expect("store rereads"), before);
     }
 
     #[test]
@@ -11711,32 +7190,6 @@ mod tests {
     }
 
     #[test]
-    fn socket_record_keeps_the_archive_of_the_former_two_field_configuration() {
-        #[derive(rkyv::Archive, rkyv::Serialize)]
-        struct FormerConfiguration {
-            ordinary_socket_path: String,
-            meta_socket_path: String,
-        }
-        #[derive(rkyv::Archive, rkyv::Serialize)]
-        struct FormerRecord {
-            configuration: FormerConfiguration,
-        }
-        let former = rkyv::to_bytes::<rkyv::rancor::Error>(&FormerRecord {
-            configuration: FormerConfiguration {
-                ordinary_socket_path: "/run/user/1001/flow/flow.sock".into(),
-                meta_socket_path: "/run/user/1001/flow/flow-meta.sock".into(),
-            },
-        })
-        .expect("former archive");
-        let current = rkyv::to_bytes::<rkyv::rancor::Error>(&super::FlowStoreConfiguration {
-            ordinary_socket_path: "/run/user/1001/flow/flow.sock".into(),
-            meta_socket_path: "/run/user/1001/flow/flow-meta.sock".into(),
-        })
-        .expect("current archive");
-        assert_eq!(former.as_slice(), current.as_slice());
-    }
-
-    #[test]
     fn active_flow_resolves_to_its_daemon_owned_codex_session() {
         let fixture = StoreFixture::new();
         let store = fixture.store();
@@ -11822,733 +7275,12 @@ mod tests {
     }
 
     #[test]
-    fn a_store_written_before_roles_adopts_them_when_it_reopens() {
-        let fixture = StoreFixture::new();
-        let store = fixture.store();
-        // As MetaBindExisting wrote it before the role had its own record.
-        store
-            .register_flow_as(
-                pane_node("bound-old", "w1:p1"),
-                "Mind:Medium:gpt-sol".into(),
-                None,
-            )
-            .expect("legacy bound flow");
-        store
-            .register_flow(pane_node("registered-old", "w1:p2"))
-            .expect("flow registered without a role");
-        assert_eq!(store.role("bound-old").unwrap(), None);
-        drop(store);
-
-        let store = fixture.store();
-        assert_eq!(
-            store.role("bound-old").unwrap(),
-            Some(signal_flow::Caller {
-                flow_id: "bound-old".into(),
-                aspect: Aspect::Mind,
-                power_level: PowerLevel::Medium,
-                model_name: "gpt-sol".into(),
-            })
-        );
-        assert_eq!(store.role("registered-old").unwrap(), None);
-    }
-
-    #[test]
-    fn earlier_launch_attempt_rows_are_set_aside_whole_once_and_logged() {
-        use super::{
-            ArchivedLaunchAttemptShape, EarlierLaunchAttemptRows, LaunchAttemptSettlement,
-            QueryPlan, ReadsFlowRows,
-        };
-        let fixture = StoreFixture::new();
-        let path = fixture.directory.path().join("flow.sema");
-        let rows = EarlierLaunchAttemptRows {
-            bound_flow_id: "launched-earlier".into(),
-        };
-        rows.seed(&path);
-
-        let store = fixture.store();
-        let quarantined = match store.opening_settlements.as_slice() {
-            [
-                LaunchAttemptSettlement::SetAside {
-                    launch_request_id: earlier,
-                    from: ArchivedLaunchAttemptShape::BeforeSystemPromptBundle,
-                },
-                LaunchAttemptSettlement::SetAside {
-                    launch_request_id: before_address,
-                    from: ArchivedLaunchAttemptShape::BeforeAddress,
-                },
-                LaunchAttemptSettlement::Quarantined {
-                    launch_request_id: unreadable,
-                    decode_error,
-                },
-            ] => {
-                assert_eq!(earlier, EarlierLaunchAttemptRows::EARLIER_REQUEST);
-                assert_eq!(
-                    before_address,
-                    EarlierLaunchAttemptRows::BEFORE_ADDRESS_REQUEST
-                );
-                assert_eq!(unreadable, EarlierLaunchAttemptRows::UNREADABLE_REQUEST);
-                decode_error.clone()
-            }
-            other => panic!("unexpected settlements: {other:?}"),
-        };
-        assert_eq!(
-            store.opening_settlements[0].to_string(),
-            "LaunchAttemptSetAside.{ flow06-earlier BeforeSystemPromptBundle }"
-        );
-        assert_eq!(
-            store.opening_settlements[1].to_string(),
-            "LaunchAttemptSetAside.{ flow15-before-address BeforeAddress }"
-        );
-        assert_eq!(
-            store.opening_settlements[2].to_string(),
-            format!("LaunchAttemptQuarantined.{{ unreadable-request «{quarantined}» }}")
-        );
-        // No earlier shape names the launched seat's Address: none is
-        // carried into the attempts table.
-        for request in [
-            EarlierLaunchAttemptRows::EARLIER_REQUEST,
-            EarlierLaunchAttemptRows::BEFORE_ADDRESS_REQUEST,
-            EarlierLaunchAttemptRows::UNREADABLE_REQUEST,
-        ] {
-            assert_eq!(store.launch_attempt(request).unwrap(), None);
-        }
-        // The 0.34 row is carried, not set aside.
-        assert!(
-            store
-                .launch_attempt(EarlierLaunchAttemptRows::ZERO_THIRTY_FOUR_REQUEST)
-                .unwrap()
-                .is_some()
-        );
-        // Every whole-table read answers again.
-        assert!(store.ambiguous_launch_attempts().is_ok());
-        assert_eq!(store.flow_nodes().unwrap().len(), 1);
-        // Every row is kept whole, each with the shape it was found to have.
-        let kept = store
-            .engine
-            .match_records(QueryPlan::all(store.quarantined_launch_attempts))
-            .unwrap()
-            .records()
-            .to_vec();
-        assert_eq!(kept.len(), 3);
-        assert!(kept.iter().any(|row| {
-            row.launch_request_id == EarlierLaunchAttemptRows::EARLIER_REQUEST
-                && row.shape == ArchivedLaunchAttemptShape::BeforeSystemPromptBundle
-                && rkyv::from_bytes::<super::StoredLaunchAttemptBeforeBundle, rkyv::rancor::Error>(
-                    &row.archive,
-                )
-                .is_ok_and(|earlier| earlier.attempt == rows.earlier_attempt())
-        }));
-        assert!(kept.iter().any(|row| {
-            row.launch_request_id == EarlierLaunchAttemptRows::BEFORE_ADDRESS_REQUEST
-                && row.shape == ArchivedLaunchAttemptShape::BeforeAddress
-                && rkyv::from_bytes::<super::StoredLaunchAttemptBeforeAddress, rkyv::rancor::Error>(
-                    &row.archive,
-                )
-                .is_ok_and(|kept| kept.attempt == rows.before_address_attempt())
-        }));
-        assert!(kept.iter().any(|row| row.launch_request_id
-            == EarlierLaunchAttemptRows::UNREADABLE_REQUEST
-            && row.shape == ArchivedLaunchAttemptShape::Unknown(quarantined.clone())));
-        // The flow the earlier launch bound takes its role from the kept row.
-        assert_eq!(
-            store.role("launched-earlier").unwrap(),
-            Some(signal_flow::Caller {
-                flow_id: "launched-earlier".into(),
-                aspect: Aspect::Psyche,
-                power_level: PowerLevel::Medium,
-                model_name: "claude-opus-5-5".into(),
-            })
-        );
-        drop(store);
-
-        let store = fixture.store();
-        assert_eq!(store.opening_settlements, Vec::new());
-        assert_eq!(
-            store
-                .engine
-                .match_records(QueryPlan::all(store.quarantined_launch_attempts))
-                .unwrap()
-                .records()
-                .len(),
-            3
-        );
-    }
-
-    /// How many rows each Flow table holds: read raw off a store file, or
-    /// read whole, every row decoded, through an open store.
-    trait CountsRowsByTable {
-        fn rows_by_table(&self) -> std::collections::BTreeMap<String, u64>;
-    }
-
-    /// Every table the catalog registers, each row counted undecoded.
-    impl CountsRowsByTable for std::path::Path {
-        fn rows_by_table(&self) -> std::collections::BTreeMap<String, u64> {
-            use redb::{ReadableDatabase as _, ReadableTable as _, ReadableTableMetadata as _};
-            let database = redb::ReadOnlyDatabase::open(self).expect("store reads directly");
-            let read = database.begin_read().expect("read starts");
-            let catalog = read
-                .open_table(super::SEMA_CATALOG_TABLE)
-                .expect("catalog opens");
-            let names = catalog
-                .iter()
-                .expect("catalog iterates")
-                .map(|entry| entry.expect("catalog entry").0.value().to_owned())
-                .collect::<Vec<_>>();
-            names
-                .into_iter()
-                .map(|name| {
-                    let rows =
-                        match read.open_table(redb::TableDefinition::<String, &[u8]>::new(&name)) {
-                            Ok(table) => table.len().expect("table length"),
-                            Err(redb::TableError::TableDoesNotExist(_)) => 0,
-                            Err(error) => panic!("table {name} opens: {error}"),
-                        };
-                    (name, rows)
-                })
-                .collect()
-        }
-    }
-
-    /// Every table the store holds, each row read and decoded in its
-    /// current shape.
-    impl CountsRowsByTable for FlowStore {
-        fn rows_by_table(&self) -> std::collections::BTreeMap<String, u64> {
-            let engine = &self.engine;
-            let meta = &self.meta_configuration_tables;
-            let delivery = &self.delivery_tables;
-            let read = |name: &str, rows: usize| (name.to_owned(), rows as u64);
-            [
-                read(
-                    "flow_nexus_flows",
-                    engine
-                        .match_records(QueryPlan::all(self.flows))
-                        .expect("flows read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_state",
-                    engine
-                        .match_records(QueryPlan::all(self.state))
-                        .expect("state reads")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_metaflows",
-                    engine
-                        .match_records(QueryPlan::all(self.metaflows))
-                        .expect("metaflows read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_metaflow_processes",
-                    engine
-                        .match_records(QueryPlan::all(self.metaflow_processes))
-                        .expect("metaflow processes read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_metaflow_locks",
-                    engine
-                        .match_records(QueryPlan::all(self.metaflow_locks))
-                        .expect("metaflow locks read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_configuration",
-                    engine
-                        .match_records(QueryPlan::all(self.configuration))
-                        .expect("configuration reads")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_runtime_configuration",
-                    engine
-                        .match_records(QueryPlan::all(self.runtime_configuration))
-                        .expect("runtime configuration reads")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_herdr_routes",
-                    engine
-                        .match_records(QueryPlan::all(self.herdr_routes))
-                        .expect("herdr routes read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_launch_attempts",
-                    engine
-                        .match_records(QueryPlan::all(self.launch_attempts))
-                        .expect("launch attempts read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_launch_panes",
-                    engine
-                        .match_records(QueryPlan::all(self.launch_panes))
-                        .expect("launch panes read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_launch_outcomes",
-                    engine
-                        .match_records(QueryPlan::all(self.launch_outcomes))
-                        .expect("launch outcomes read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_replacements",
-                    engine
-                        .match_records(QueryPlan::all(self.replacements))
-                        .expect("replacements read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_roles",
-                    engine
-                        .match_records(QueryPlan::all(self.roles))
-                        .expect("roles read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_quarantined_launch_attempts",
-                    engine
-                        .match_records(QueryPlan::all(self.quarantined_launch_attempts))
-                        .expect("quarantined launch attempts read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_deliveries",
-                    engine
-                        .match_records(QueryPlan::all(delivery.deliveries))
-                        .expect("deliveries read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_pane_leases",
-                    engine
-                        .match_records(QueryPlan::all(delivery.pane_leases))
-                        .expect("pane leases read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_delivery_configuration",
-                    engine
-                        .match_records(QueryPlan::all(delivery.configuration))
-                        .expect("delivery configuration reads")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_meta_nexus_configuration",
-                    engine
-                        .match_records(QueryPlan::all(meta.nexus))
-                        .expect("meta nexus configuration reads")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_meta_model_configuration",
-                    engine
-                        .match_records(QueryPlan::all(meta.models))
-                        .expect("meta model configuration reads")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_meta_model_threshold_configuration",
-                    engine
-                        .match_records(QueryPlan::all(meta.thresholds))
-                        .expect("meta threshold configuration reads")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_meta_investigation_configuration",
-                    engine
-                        .match_records(QueryPlan::all(meta.investigation))
-                        .expect("meta investigation configuration reads")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_meta_default_minutes_configuration",
-                    engine
-                        .match_records(QueryPlan::all(meta.default_minutes))
-                        .expect("meta default minutes configuration reads")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_meta_leave_out_configuration",
-                    engine
-                        .match_records(QueryPlan::all(meta.leave_outs))
-                        .expect("meta leave-out configuration reads")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_flow_events",
-                    engine
-                        .match_records(QueryPlan::all(self.event_tables.events))
-                        .expect("flow events read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_flow_context_sizes",
-                    engine
-                        .match_records(QueryPlan::all(self.context_sizes))
-                        .expect("context sizes read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_address_holds",
-                    engine
-                        .match_records(QueryPlan::all(self.address_holds))
-                        .expect("address holds read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_launch_opened_threads",
-                    engine
-                        .match_records(QueryPlan::all(self.opened_threads))
-                        .expect("opened threads read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_send_calls",
-                    engine
-                        .match_records(QueryPlan::all(self.send_calls))
-                        .expect("send calls read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_launch_cleanups",
-                    engine
-                        .match_records(QueryPlan::all(self.launch_cleanups))
-                        .expect("launch cleanups read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_compactions",
-                    engine
-                        .match_records(QueryPlan::all(self.compactions))
-                        .expect("compactions read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_reminders",
-                    engine
-                        .match_records(QueryPlan::all(self.reminders))
-                        .expect("reminders read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_successor_intents",
-                    engine
-                        .match_records(QueryPlan::all(self.successor_intents))
-                        .expect("successor intents read")
-                        .records()
-                        .len(),
-                ),
-            ]
-            .into_iter()
-            .collect()
-        }
-    }
-
-    /// A store Flow 0.34.4 wrote, opened as production opens it: every
-    /// row of every table reads in the current shape, and each table holds
-    /// as many rows as it did. `FLOW_0_34_STORE` names that store; it is
-    /// copied and only the copy is opened. No such store is kept in the
-    /// repository, so the test runs only when asked for by name with
-    /// `--ignored` and the variable set.
-    #[test]
-    #[ignore = "needs FLOW_0_34_STORE naming a store Flow 0.34.4 wrote"]
-    fn a_0_34_4_store_opens_and_every_row_of_every_table_reads() {
-        use super::{LaunchAttemptSettlement, ManagesMetaflowState, ReadsFlowRows};
-        let source = std::env::var_os("FLOW_0_34_STORE")
-            .map(std::path::PathBuf::from)
-            .expect("FLOW_0_34_STORE names the 0.34.4 store to copy");
-        let directory = tempfile::tempdir().expect("copy directory");
-        let path = directory.path().join("flow.sema");
-        std::fs::copy(&source, &path).expect("0.34.4 store copied");
-        let mut permissions = std::fs::metadata(&path)
-            .expect("copy metadata")
-            .permissions();
-        #[allow(clippy::permissions_set_readonly_false)]
-        permissions.set_readonly(false);
-        std::fs::set_permissions(&path, permissions).expect("copy writable");
-
-        let before = path.rows_by_table();
-        eprintln!("rows before: {before:?}");
-        let store = FlowStore::open_configured(&path).expect("the 0.34.4 store opens");
-        let set_aside = store
-            .opening_settlements
-            .iter()
-            .filter(|settlement| !matches!(settlement, LaunchAttemptSettlement::Unsettled { .. }))
-            .count() as u64;
-        assert!(
-            !store
-                .opening_settlements
-                .iter()
-                .any(|settlement| matches!(settlement, LaunchAttemptSettlement::Unsettled { .. })),
-            "{:?}",
-            store.opening_settlements
-        );
-        let after = store.rows_by_table();
-        eprintln!("rows after: {after:?}");
-        eprintln!("launch-attempt rows set aside: {set_aside}");
-        for (table, rows) in &before {
-            if super::RETIRED_TABLES
-                .iter()
-                .any(|(retired, _, _)| retired == table)
-            {
-                eprintln!("retired table {table} held {rows} rows");
-                assert!(!after.contains_key(table), "{table} is retired");
-                continue;
-            }
-            let expected = match table.as_str() {
-                "flow_nexus_launch_attempts" => rows - set_aside,
-                "flow_nexus_quarantined_launch_attempts" => rows + set_aside,
-                _ => *rows,
-            };
-            assert_eq!(after.get(table), Some(&expected), "rows of {table}");
-        }
-        for (table, rows) in &after {
-            if !before.contains_key(table) {
-                assert_eq!(*rows, 0, "{table} is added empty");
-            }
-        }
-
-        // Every whole-table read answers, and every attempt and outcome.
-        assert!(store.ambiguous_launch_attempts().is_ok());
-        assert_eq!(
-            store.flow_nodes().expect("flow nodes read").len() as u64,
-            after["flow_nexus_flows"]
-        );
-        assert_eq!(
-            store.list_metaflows().expect("metaflows list").len() as u64,
-            after["flow_nexus_metaflows"]
-        );
-        assert!(
-            store
-                .configuration_snapshot()
-                .expect("snapshot reads")
-                .is_some()
-        );
-        let attempts = store
-            .engine
-            .match_records(QueryPlan::all(store.launch_attempts))
-            .expect("attempts read")
-            .records()
-            .to_vec();
-        for stored in &attempts {
-            let request = &stored.attempt.launch_request_id;
-            assert!(
-                store
-                    .launch_attempt(request)
-                    .expect("attempt reads")
-                    .is_some()
-            );
-            store.launch_outcome(request).expect("outcome reads");
-        }
-        drop(store);
-
-        // The upgrade is done once: a reopen carries nothing again.
-        let reopened = FlowStore::open_configured(&path).expect("the upgraded store reopens");
-        assert_eq!(reopened.opening_settlements, Vec::new());
-        assert_eq!(reopened.rows_by_table(), after);
-    }
-
-    /// A 0.34 launch-attempt row is carried into the current shape when the
-    /// store opens: what the current shape names, into it, and what it no
-    /// longer names, kept beside it; no later seat is composed from it.
-    #[test]
-    fn a_0_34_launch_attempt_row_is_carried_with_what_it_named_kept() {
-        use super::{
-            Address, ContextBeforeModules, EarlierLaunchAttemptRows, LaunchAttempt, LaunchContext,
-            LaunchSource, Layer, NativeSkill, OriginClue,
-        };
-        let fixture = StoreFixture::new();
-        let path = fixture.directory.path().join("flow.sema");
-        let rows = EarlierLaunchAttemptRows {
-            bound_flow_id: "launched-earlier".into(),
-        };
-        rows.seed(&path);
-        let request = EarlierLaunchAttemptRows::ZERO_THIRTY_FOUR_REQUEST;
-
-        let store = fixture.store();
-        let pane = signal_flow::HerdrPaneBinding {
-            launch_request_id: request.into(),
-            herdr_session_name: "messaging-build".into(),
-            herdr_agent_name: "mind-sol-34".into(),
-            herdr_workspace_id: "w34".into(),
-            herdr_pane_id: "w34:p1".into(),
-            herdr_terminal_id: "term-34".into(),
-        };
-        let intent = signal_flow::PromptDeliveryIntent {
-            launch_request_id: request.into(),
-            prompt_sha256: "ab".repeat(32),
-            flow_id: "flow34".into(),
-            native_session_id: "session-34".into(),
-            harness_kind: HarnessKind::Codex,
-            model_name: "gpt-sol".into(),
-            effort: "medium".into(),
-            prompt_sha256_vector: vec!["ab".repeat(32)],
-            parts_submitted: 1,
-            stops_reported: 0,
-            leave_outs: Vec::new(),
-            herdr_pane_binding: pane.clone(),
-            native_transcript_boundary: signal_flow::NativeTranscriptBoundary::Absent(
-                signal_flow::NativeTranscriptAbsence {
-                    native_session_id: "session-34".into(),
-                    harness_kind: HarnessKind::Codex,
-                    transcript_root_device: "64768".into(),
-                    transcript_root_inode: "1234".into(),
-                },
-            ),
-        };
-        let expected = LaunchAttempt {
-            launch_request_id: request.into(),
-            launch_profile: signal_flow::LaunchProfile {
-                launch_request_id: request.into(),
-                system_modules: Vec::new(),
-                user_modules: Vec::new(),
-                address: Address {
-                    aspect: Aspect::Mind,
-                    topic: "flow".into(),
-                    layer: Layer::Secondary,
-                },
-                model_name: "gpt-sol".into(),
-                effort: "medium".into(),
-                flow_id_option: Some("predecessor-34".into()),
-                remembering: signal_flow::Remembering::Custom(vec!["e51411".into()]),
-                herdr_session_name: "messaging-build".into(),
-                leave_outs_option: Some(Vec::new()),
-                flow_kind: signal_flow::FlowKind::Regular,
-                tool_set: signal_flow::ToolSet::Default,
-                instruction_prompt: "0.34 instruction".into(),
-            },
-            prompt_sha256: "ab".repeat(32),
-            origin: Origin::Flow(signal_flow::FlowOrigin {
-                flow_id: "e51411".into(),
-                session_id: "e51411-session".into(),
-            }),
-            launch_attempt_phase: LaunchAttemptPhase::PromptObserved,
-            native_launch_intent_option: Some(signal_flow::NativeLaunchIntent {
-                launch_request_id: request.into(),
-                prompt_sha256: "ab".repeat(32),
-                system_prompt_sha256: String::new(),
-                harness_kind: HarnessKind::Codex,
-                model_name: "gpt-sol".into(),
-                effort: "medium".into(),
-                prompt_sha256_vector: vec!["ab".repeat(32)],
-            }),
-            native_launch_binding_option: Some(signal_flow::NativeLaunchBinding {
-                launch_request_id: request.into(),
-                flow_id: "flow34".into(),
-                native_session_id: "session-34".into(),
-                harness_kind: HarnessKind::Codex,
-                herdr_pane_binding: pane.clone(),
-            }),
-            registration_acknowledgement_option: Some(signal_flow::RegistrationAcknowledgement {
-                launch_request_id: request.into(),
-                flow_id: "flow34".into(),
-                native_session_id: "session-34".into(),
-                herdr_pane_binding: pane,
-            }),
-            prompt_delivery_intent_option: Some(intent),
-            prompt_delivery_result_option: Some(signal_flow::PromptDeliveryResult::Observed(
-                signal_flow::NativeTargetReceipt {
-                    launch_request_id: request.into(),
-                    prompt_sha256: "ab".repeat(32),
-                    flow_id: "flow34".into(),
-                    native_session_id: "session-34".into(),
-                    native_turn_id: "turn-1".into(),
-                    receipt_sha256: "12".repeat(32),
-                    model_name: "gpt-sol".into(),
-                    effort: "medium".into(),
-                    prompt_sha256_vector: vec!["ab".repeat(32)],
-                },
-            )),
-        };
-        let skill = NativeSkill {
-            skill_name: "operation-main-flow".into(),
-            skill_path: "/kept/skills/operation-main-flow/SKILL.md".into(),
-            skill_sha256: "ef".repeat(32),
-        };
-        let stored = store
-            .stored_launch_attempt(request)
-            .unwrap()
-            .expect("0.34 row carried");
-        assert_eq!(stored.attempt, expected);
-        assert_eq!(
-            stored.context,
-            LaunchContext::BeforeModules(ContextBeforeModules {
-                launch_sources: vec![LaunchSource {
-                    source_path: "/kept/skills/operation-main-flow.md".into(),
-                    source_sha256: "cd".repeat(32),
-                }],
-                skills: vec!["operation-main-flow".into()],
-                power_level: PowerLevel::Medium,
-                harness_kind: HarnessKind::Codex,
-                bundle_file: "/kept/bundles/flow34.md".into(),
-                origin_clue: OriginClue {
-                    flow_id: "e51411".into(),
-                    session_id: "e51411-session".into(),
-                    turn_id: "turn-34".into(),
-                },
-                launch_intent_skills: Some(vec!["operation-main-flow".into()]),
-                intent_skills: Some(vec![skill.clone()]),
-                result_skills: Some(vec![skill]),
-            })
-        );
-        // No module names its context: no later seat is composed from it.
-        assert_eq!(store.composable_launch_profile(request).unwrap(), None);
-        assert_eq!(
-            store.launch_attempt(request).unwrap(),
-            Some(expected.clone())
-        );
-        drop(store);
-
-        // The family is current now: a reopen carries nothing again.
-        let store = fixture.store();
-        assert_eq!(store.opening_settlements, Vec::new());
-        assert_eq!(store.launch_attempt(request).unwrap(), Some(expected));
-    }
-
-    #[test]
     fn a_role_is_kept_with_its_binding_and_a_different_one_conflicts() {
         let fixture = StoreFixture::new();
         let store = fixture.store();
         let role = signal_flow::Caller {
             flow_id: "psyche-high".into(),
             aspect: Aspect::Psyche,
-            power_level: PowerLevel::High,
             model_name: "claude-opus-5-5".into(),
         };
         let node = pane_node("psyche-high", "w1:p3");
@@ -12622,1117 +7354,6 @@ mod tests {
         );
     }
 
-    /// A store before 0.35.19 keeps Stops without their native identity:
-    /// opening carries every flow's events in order, each such Stop as
-    /// `Stopped.{ None None }`, which is never taken for the flow's own.
-    #[test]
-    fn a_v1_stop_upgrades_to_a_stop_of_unknown_identity() {
-        use super::events::{EventBeforeIdentity, FlowEventsV1, RecordsHarnessEvents};
-        use signal_flow::{Event, NativeStop};
-        let fixture = StoreFixture::new();
-        drop(fixture.store());
-        let database = redb::Database::open(fixture.path()).expect("store opens directly");
-        let write = database.begin_write().expect("catalog transaction starts");
-        {
-            let mut catalog = write
-                .open_table(super::SEMA_CATALOG_TABLE)
-                .expect("catalog opens");
-            catalog
-                .remove("flow_nexus_flow_events")
-                .expect("events family removes");
-        }
-        write
-            .delete_table(redb::TableDefinition::<&str, &[u8]>::new(
-                "flow_nexus_flow_events",
-            ))
-            .expect("event rows drop");
-        write.commit().expect("catalog commits");
-        drop(database);
-        {
-            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
-                .expect("v1 store opens");
-            let events = engine
-                .register_table(TableDescriptor::new(
-                    TableName::new("flow_nexus_flow_events"),
-                    FamilyName::new("flow-nexus-flow-events"),
-                    SchemaHash::for_label("flow-nexus-flow-events-v1"),
-                ))
-                .expect("v1 events family registers");
-            engine
-                .assert(Assertion::new(
-                    events,
-                    FlowEventsV1 {
-                        flow_id: "a1a1a1".into(),
-                        event_vector: vec![
-                            EventBeforeIdentity::Started,
-                            EventBeforeIdentity::ToolUsed("Bash".into()),
-                            EventBeforeIdentity::Stopped,
-                        ],
-                    },
-                ))
-                .expect("v1 row persists");
-        }
-
-        let store = fixture.store();
-        assert_eq!(
-            store.events("a1a1a1").unwrap(),
-            Some(vec![
-                Event::Started(None),
-                Event::ToolUsed("Bash".into()),
-                Event::Stopped(NativeStop {
-                    native_session_id_option: None,
-                    transcript_path_option: None,
-                    last_assistant_message_option: None,
-                }),
-            ])
-        );
-    }
-
-    /// A flow row of 0.34 named the clue its caller gave as its origin; the
-    /// open upgrades it to the origin it was: the calling flow, or Unbound
-    /// for the Nexus's own wake. Nothing else of the row changes.
-    /// A store before 0.35.7 keeps queues of bare requests: opening carries
-    /// every metaflow whole, each queued request with its sender Unknown.
-    #[test]
-    fn a_v1_metaflow_queue_upgrades_with_its_senders_unknown() {
-        use super::ManagesMetaflowState;
-        use signal_flow::{Address, Layer, Request};
-        let fixture = StoreFixture::new();
-        drop(fixture.store());
-        let address = Address {
-            aspect: Aspect::Mind,
-            topic: "flow".into(),
-            layer: Layer::Tertiary,
-        };
-        let database = redb::Database::open(fixture.path()).expect("store opens directly");
-        let write = database.begin_write().expect("catalog transaction starts");
-        {
-            let mut catalog = write
-                .open_table(super::SEMA_CATALOG_TABLE)
-                .expect("catalog opens");
-            catalog
-                .remove("flow_nexus_metaflows")
-                .expect("metaflow family removes");
-        }
-        write
-            .delete_table(redb::TableDefinition::<&str, &[u8]>::new(
-                "flow_nexus_metaflows",
-            ))
-            .expect("metaflow rows drop");
-        write.commit().expect("catalog commits");
-        drop(database);
-        {
-            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
-                .expect("v1 store opens");
-            let metaflows = engine
-                .register_table(TableDescriptor::new(
-                    TableName::new("flow_nexus_metaflows"),
-                    FamilyName::new("flow-nexus-metaflow"),
-                    SchemaHash::for_label("flow-nexus-metaflow-v1"),
-                ))
-                .expect("v1 metaflow family registers");
-            engine
-                .assert(Assertion::new(
-                    metaflows,
-                    super::StoredMetaflowV1 {
-                        metaflow: super::MetaflowBeforeSenders {
-                            address: address.clone(),
-                            state: super::StateBeforeIdle::Asleep,
-                            past: vec!["a1a1a1".into()],
-                            queue: vec![
-                                super::message_v41::RequestV41::Order("first".into()),
-                                super::message_v41::RequestV41::Notice("second".into()),
-                            ],
-                        },
-                    },
-                ))
-                .expect("v1 row persists");
-        }
-
-        let store = fixture.store();
-        let metaflow = store
-            .list_metaflows()
-            .unwrap()
-            .into_iter()
-            .find(|metaflow| metaflow.address == address)
-            .expect("the metaflow is carried");
-        assert_eq!(metaflow.state, flow_ethos::State::Asleep);
-        assert_eq!(metaflow.past, vec!["a1a1a1".to_owned()]);
-        assert!(metaflow.queue.is_empty());
-        let expected = vec![
-            flow_ethos::QueueEntry {
-                logical_delivery_id: format!(
-                    "legacy:{}:{:016x}",
-                    FlowStore::address_record_key(&address),
-                    0
-                ),
-                sent_by: flow_ethos::SentBy::Unknown,
-                delivery: flow_ethos::Delivery::Queue,
-                message: flow_ethos::Message::Soft(Request::Order("first".into())),
-            },
-            flow_ethos::QueueEntry {
-                logical_delivery_id: format!(
-                    "legacy:{}:{:016x}",
-                    FlowStore::address_record_key(&address),
-                    1
-                ),
-                sent_by: flow_ethos::SentBy::Unknown,
-                delivery: flow_ethos::Delivery::Queue,
-                message: flow_ethos::Message::Soft(Request::Notice("second".into())),
-            },
-        ];
-        let archive = store.observe_legacy_archive().unwrap();
-        for entry in expected {
-            assert!(archive.iter().any(|record| record.address == address
-                && record.queue_evidence
-                    == meta_signal_flow::QueueEvidence::Logical(entry.clone())));
-        }
-    }
-
-    /// A topic never dies: a 0.35.21 store's ended metaflow opens Asleep,
-    /// its past and its queue kept, and an Awake one as it was.
-    #[test]
-    fn a_v2_ended_metaflow_upgrades_asleep() {
-        use super::ManagesMetaflowState;
-        use signal_flow::{Address, Layer, Request};
-        let fixture = StoreFixture::new();
-        drop(fixture.store());
-        let at = |layer| Address {
-            aspect: Aspect::Mind,
-            topic: "flow".into(),
-            layer,
-        };
-        let database = redb::Database::open(fixture.path()).expect("store opens directly");
-        let write = database.begin_write().expect("catalog transaction starts");
-        {
-            let mut catalog = write
-                .open_table(super::SEMA_CATALOG_TABLE)
-                .expect("catalog opens");
-            catalog
-                .remove("flow_nexus_metaflows")
-                .expect("metaflow family removes");
-        }
-        write
-            .delete_table(redb::TableDefinition::<&str, &[u8]>::new(
-                "flow_nexus_metaflows",
-            ))
-            .expect("metaflow rows drop");
-        write.commit().expect("catalog commits");
-        drop(database);
-        let queued = vec![super::QueuedRequestBeforeFlow {
-            sent_by: super::SentByBeforeFlow::Unknown,
-            request: super::message_v41::RequestV41::Order("kept".into()),
-        }];
-        {
-            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
-                .expect("v2 store opens");
-            let metaflows = engine
-                .register_table(TableDescriptor::new(
-                    TableName::new("flow_nexus_metaflows"),
-                    FamilyName::new("flow-nexus-metaflow"),
-                    SchemaHash::for_label("flow-nexus-metaflow-v2"),
-                ))
-                .expect("v2 metaflow family registers");
-            for (layer, state) in [
-                (Layer::Tertiary, super::StateBeforeIdle::Ended),
-                (
-                    Layer::Secondary,
-                    super::StateBeforeIdle::Awake("b2b2b2".into()),
-                ),
-            ] {
-                engine
-                    .assert(Assertion::new(
-                        metaflows,
-                        super::StoredMetaflowV2 {
-                            metaflow: super::MetaflowBeforeIdle {
-                                address: at(layer),
-                                state,
-                                past: vec!["a1a1a1".into()],
-                                queue: queued.clone(),
-                            },
-                        },
-                    ))
-                    .expect("v2 row persists");
-            }
-        }
-
-        let store = fixture.store();
-        let metaflows = store.list_metaflows().unwrap();
-        let carried = |layer: Layer| {
-            let address = at(layer);
-            metaflows
-                .iter()
-                .find(|metaflow| metaflow.address == address)
-                .cloned()
-                .expect("the metaflow is carried")
-        };
-        let idle = carried(Layer::Tertiary);
-        assert_eq!(idle.state, flow_ethos::State::Asleep);
-        assert_eq!(idle.past, vec!["a1a1a1".to_owned()]);
-        assert!(idle.queue.is_empty());
-        let archive = store.observe_legacy_archive().unwrap();
-        let archived = archive
-            .iter()
-            .find(|record| record.address == at(Layer::Tertiary))
-            .expect("legacy queue is archived");
-        let meta_signal_flow::QueueEvidence::Logical(entry) = &archived.queue_evidence else {
-            panic!("the full migrated queue slot is kept")
-        };
-        assert_eq!(entry.sent_by, flow_ethos::SentBy::Unknown);
-        assert_eq!(
-            entry.message,
-            flow_ethos::Message::Soft(Request::Order("kept".into()))
-        );
-        assert_eq!(
-            carried(Layer::Secondary).state,
-            flow_ethos::State::Awake("b2b2b2".into())
-        );
-    }
-
-    #[test]
-    fn a_v5_flow_row_upgrades_to_its_derived_origin() {
-        let fixture = StoreFixture::new();
-        drop(fixture.store());
-        let clue = |flow_id: &str, session_id: &str| OriginClueBeforeOrigin {
-            flow_id: flow_id.into(),
-            session_id: session_id.into(),
-            turn_id: "turn-1".into(),
-        };
-        let row = |flow_id: &str, origin: OriginClueBeforeOrigin| FlowRecordV5 {
-            flow_id: flow_id.into(),
-            flow_type: "claude-registered".into(),
-            origin,
-            thread_id: Some(format!("{flow_id}-session")),
-            harness_kind: HarnessKind::Claude,
-            endpoint_selection: signal_flow::EndpointSelection::Unavailable,
-            lifecycle: super::FlowLifecycle::Active,
-            generation: 7,
-        };
-        // The store as 0.34 left it: the flows family at v5.
-        let database = redb::Database::open(fixture.path()).expect("store opens directly");
-        let write = database.begin_write().expect("catalog transaction starts");
-        {
-            let mut catalog = write
-                .open_table(super::SEMA_CATALOG_TABLE)
-                .expect("catalog opens");
-            catalog
-                .remove("flow_nexus_flows")
-                .expect("flow family removes");
-        }
-        write
-            .delete_table(redb::TableDefinition::<&str, &[u8]>::new(
-                "flow_nexus_flows",
-            ))
-            .expect("flow rows drop");
-        write.commit().expect("catalog commits");
-        drop(database);
-        {
-            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
-                .expect("v5 store opens");
-            let flows = engine
-                .register_table(TableDescriptor::new(
-                    TableName::new("flow_nexus_flows"),
-                    FamilyName::new("flow-nexus-flow"),
-                    SchemaHash::for_label("flow-nexus-flow-v5"),
-                ))
-                .expect("v5 flow family registers");
-            for kept in [
-                row("old-called", clue("caller-flow", "caller-session")),
-                row("old-woken", clue("e51411", "flow-nexus-wake")),
-            ] {
-                engine
-                    .assert(Assertion::new(flows, kept))
-                    .expect("v5 row persists");
-            }
-        }
-
-        let store = fixture.store();
-        let called = store.flow("old-called").unwrap().expect("upgraded row");
-        assert_eq!(
-            called.origin,
-            Origin::Flow(FlowOrigin {
-                flow_id: "caller-flow".into(),
-                session_id: "caller-session".into(),
-            })
-        );
-        assert_eq!(called.generation, 7);
-        assert_eq!(called.thread_id.as_deref(), Some("old-called-session"));
-        assert_eq!(
-            store
-                .flow("old-woken")
-                .unwrap()
-                .expect("upgraded row")
-                .origin,
-            Origin::Unbound
-        );
-        let Response::RecipientResolved(node) = store
-            .apply(Query::ResolveRecipient("old-called".into()))
-            .unwrap()
-        else {
-            panic!("old active flow resolves")
-        };
-        assert_eq!(
-            node.herdr_route_selection,
-            signal_flow::HerdrRouteSelection::Unavailable
-        );
-        drop(store);
-        // Reopening sees v6 and leaves the row as upgraded.
-        assert_eq!(
-            fixture.store().flow("old-called").unwrap().unwrap().origin,
-            called.origin
-        );
-    }
-
-    /// A 0.35.5 store's outcomes, each rejection in signal-flow 18's shape,
-    /// open as the current outcomes: a refused native step or registration,
-    /// whose stage was not kept, reads Unclassified, every other outcome as
-    /// it was; the store then keeps a refusal with its stage.
-    #[test]
-    fn v4_launch_outcomes_upgrade_to_the_staged_refusal_shape() {
-        let fixture = StoreFixture::new();
-        let started = LaunchedRecord {
-            flow_id: "started-flow".into(),
-            session_id: "started-session".into(),
-            origin: Origin::Unbound,
-        };
-        let spawn = signal_flow::HarnessSpawnRefusal {
-            spawn_refusal_cause: signal_flow::SpawnRefusalCause::CommandTooLong,
-            opened_thread_option: None,
-        };
-        let rows = [
-            StoredLaunchOutcomeV4 {
-                launch_request_id: "v4-started".into(),
-                launch_outcome: LaunchOutcomeV4::Started(started.clone()),
-            },
-            StoredLaunchOutcomeV4 {
-                launch_request_id: "v4-native".into(),
-                launch_outcome: LaunchOutcomeV4::StartRejected(
-                    StartRejectionV18::NativeLaunchRefused,
-                ),
-            },
-            StoredLaunchOutcomeV4 {
-                launch_request_id: "v4-registration".into(),
-                launch_outcome: LaunchOutcomeV4::ReplaceRejected(
-                    ReplaceRejectionV18::LaunchRefused(StartRejectionV18::RegistrationRefused),
-                ),
-            },
-            StoredLaunchOutcomeV4 {
-                launch_request_id: "v4-spawn".into(),
-                launch_outcome: LaunchOutcomeV4::StartRejected(
-                    StartRejectionV18::HarnessSpawnRefused(spawn.clone()),
-                ),
-            },
-        ];
-        {
-            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
-                .expect("outcome store opens");
-            let outcomes = engine
-                .register_table(TableDescriptor::new(
-                    TableName::new("flow_nexus_launch_outcomes"),
-                    FamilyName::new("flow-nexus-launch-outcome"),
-                    SchemaHash::for_label("flow-nexus-launch-outcome-v4"),
-                ))
-                .expect("v4 outcome family registers");
-            for row in rows {
-                engine
-                    .assert(Assertion::new(outcomes, row))
-                    .expect("v4 outcome persists");
-            }
-        }
-        let expected = [
-            ("v4-started", LaunchOutcome::Started(started)),
-            (
-                "v4-native",
-                LaunchOutcome::StartRejected(StartRejection::NativeLaunchRefused(
-                    signal_flow::NativeLaunchRefusal {
-                        native_launch_stage: signal_flow::NativeLaunchStage::Unclassified,
-                        native_launch_failure: signal_flow::NativeLaunchFailure::Unclassified,
-                    },
-                )),
-            ),
-            (
-                "v4-registration",
-                LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(
-                    StartRejection::RegistrationRefused(
-                        signal_flow::RegistrationRefusal::Unclassified,
-                    ),
-                )),
-            ),
-            (
-                "v4-spawn",
-                LaunchOutcome::StartRejected(StartRejection::HarnessSpawnRefused(spawn)),
-            ),
-        ];
-        let store = fixture.store();
-        for (request, outcome) in &expected {
-            assert_eq!(
-                store
-                    .launch_outcome(request)
-                    .expect("upgraded outcome reads"),
-                Some(outcome.clone()),
-                "the v4 outcome for {request} survives the family upgrade"
-            );
-        }
-        let staged = LaunchOutcome::StartRejected(StartRejection::RegistrationRefused(
-            signal_flow::RegistrationRefusal::NativeTarget(
-                signal_flow::NativeTargetRefusal::IdentityInexact,
-            ),
-        ));
-        store
-            .record_launch_outcome("v5-staged", staged.clone())
-            .expect("a staged refusal persists");
-        drop(store);
-        let reopened = fixture.store();
-        for (request, outcome) in expected.iter().chain([("v5-staged", staged)].iter()) {
-            assert_eq!(
-                reopened
-                    .launch_outcome(request)
-                    .expect("outcome reads after reopening"),
-                Some(outcome.clone()),
-                "the outcome for {request} reads unchanged after reopening"
-            );
-        }
-    }
-
-    /// Registers a launch outcome family at its v5 shape, as 0.35.6 to
-    /// 0.35.21 kept it, holding these rows.
-    fn seed_v5_launch_outcomes(fixture: &StoreFixture, rows: Vec<StoredLaunchOutcomeV5>) {
-        let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
-            .expect("outcome store opens");
-        let outcomes = engine
-            .register_table(TableDescriptor::new(
-                TableName::new("flow_nexus_launch_outcomes"),
-                FamilyName::new("flow-nexus-launch-outcome"),
-                SchemaHash::for_label("flow-nexus-launch-outcome-v5"),
-            ))
-            .expect("v5 outcome family registers");
-        for row in rows {
-            engine
-                .assert(Assertion::new(outcomes, row))
-                .expect("v5 outcome persists");
-        }
-    }
-
-    /// A 0.35.21 store's outcomes, each rejection in signal-flow 22's shape
-    /// with AddressEnded among them, open as the current outcomes: every
-    /// rejection after AddressEnded keeps its meaning though its archived
-    /// discriminant moves.
-    #[test]
-    fn v5_launch_outcomes_upgrade_without_the_ended_address() {
-        let fixture = StoreFixture::new();
-        let started = LaunchedRecord {
-            flow_id: "started-flow".into(),
-            session_id: "started-session".into(),
-            origin: Origin::Unbound,
-        };
-        seed_v5_launch_outcomes(
-            &fixture,
-            vec![
-                StoredLaunchOutcomeV5 {
-                    launch_request_id: "v5-started".into(),
-                    launch_outcome: LaunchOutcomeV5::Started(started.clone()),
-                },
-                StoredLaunchOutcomeV5 {
-                    launch_request_id: "v5-awake".into(),
-                    launch_outcome: LaunchOutcomeV5::StartRejected(StartRejectionV22::AddressAwake),
-                },
-                StoredLaunchOutcomeV5 {
-                    launch_request_id: "v5-context".into(),
-                    launch_outcome: LaunchOutcomeV5::StartRejected(
-                        StartRejectionV22::ContextRefused(ContextRefusalV30::ModuleMissing),
-                    ),
-                },
-                StoredLaunchOutcomeV5 {
-                    launch_request_id: "v5-model".into(),
-                    launch_outcome: LaunchOutcomeV5::ReplaceRejected(
-                        ReplaceRejectionV22::LaunchRefused(StartRejectionV22::ModelRefused(
-                            signal_flow::ModelRefusal::Differs("claude-opus-5-5".into()),
-                        )),
-                    ),
-                },
-            ],
-        );
-        let store = fixture.store();
-        for (request, outcome) in [
-            ("v5-started", LaunchOutcome::Started(started)),
-            (
-                "v5-awake",
-                LaunchOutcome::StartRejected(StartRejection::AddressAwake),
-            ),
-            (
-                "v5-context",
-                LaunchOutcome::StartRejected(StartRejection::ContextRefused(
-                    signal_flow::ContextRefusal::ModuleMissing(None),
-                )),
-            ),
-            (
-                "v5-model",
-                LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(
-                    StartRejection::ModelRefused(signal_flow::ModelRefusal::Differs(
-                        "claude-opus-5-5".into(),
-                    )),
-                )),
-            ),
-        ] {
-            assert_eq!(
-                store
-                    .launch_outcome(request)
-                    .expect("upgraded outcome reads"),
-                Some(outcome),
-                "the v5 outcome for {request} survives the family upgrade"
-            );
-        }
-    }
-
-    /// A 0.40 store's outcomes archived before a composition refusal kept
-    /// its reason open as the current outcomes: such a refusal reads
-    /// Unrecorded, every other outcome as it was.
-    #[test]
-    fn v7_launch_outcomes_upgrade_to_the_composition_refusal_shape() {
-        let fixture = StoreFixture::new();
-        let started = LaunchedRecord {
-            flow_id: "started-flow".into(),
-            session_id: "started-session".into(),
-            origin: Origin::Unbound,
-        };
-        let rows = vec![
-            StoredLaunchOutcomeV7 {
-                launch_request_id: "v7-started".into(),
-                launch_outcome: LaunchOutcomeV7::Started(started.clone()),
-            },
-            StoredLaunchOutcomeV7 {
-                launch_request_id: "v7-composition".into(),
-                launch_outcome: LaunchOutcomeV7::StartRejected(
-                    StartRejectionV32::CompositionRefused,
-                ),
-            },
-            StoredLaunchOutcomeV7 {
-                launch_request_id: "v7-topic".into(),
-                launch_outcome: LaunchOutcomeV7::StartRejected(StartRejectionV32::TopicRefused(
-                    "PrimaryCommitting".into(),
-                )),
-            },
-            StoredLaunchOutcomeV7 {
-                launch_request_id: "v7-replace".into(),
-                launch_outcome: LaunchOutcomeV7::ReplaceRejected(
-                    ReplaceRejectionV32::LaunchRefused(StartRejectionV32::CompositionRefused),
-                ),
-            },
-            StoredLaunchOutcomeV7 {
-                launch_request_id: "v7-locked".into(),
-                launch_outcome: LaunchOutcomeV7::ReplaceRejected(ReplaceRejectionV32::Locked),
-            },
-            StoredLaunchOutcomeV7 {
-                launch_request_id: "v7-missing".into(),
-                launch_outcome: LaunchOutcomeV7::StartRejected(StartRejectionV32::ContextRefused(
-                    ContextRefusalV38::ModuleMissing,
-                )),
-            },
-            StoredLaunchOutcomeV7 {
-                launch_request_id: "v7-replace-missing".into(),
-                launch_outcome: LaunchOutcomeV7::ReplaceRejected(
-                    ReplaceRejectionV32::LaunchRefused(StartRejectionV32::ContextRefused(
-                        ContextRefusalV38::ModuleMissing,
-                    )),
-                ),
-            },
-        ];
-        {
-            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
-                .expect("outcome store opens");
-            let outcomes = engine
-                .register_table(TableDescriptor::new(
-                    TableName::new("flow_nexus_launch_outcomes"),
-                    FamilyName::new("flow-nexus-launch-outcome"),
-                    SchemaHash::for_label("flow-nexus-launch-outcome-v7"),
-                ))
-                .expect("v7 outcome family registers");
-            for row in rows {
-                engine
-                    .assert(Assertion::new(outcomes, row))
-                    .expect("v7 outcome persists");
-            }
-        }
-        let store = fixture.store();
-        let unrecorded =
-            StartRejection::CompositionRefused(signal_flow::CompositionRefusal::Unrecorded);
-        for (request, outcome) in [
-            ("v7-started", LaunchOutcome::Started(started)),
-            (
-                "v7-composition",
-                LaunchOutcome::StartRejected(unrecorded.clone()),
-            ),
-            (
-                "v7-topic",
-                LaunchOutcome::StartRejected(StartRejection::TopicRefused(
-                    "PrimaryCommitting".into(),
-                )),
-            ),
-            (
-                "v7-replace",
-                LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(unrecorded)),
-            ),
-            (
-                "v7-locked",
-                LaunchOutcome::ReplaceRejected(ReplaceRejection::Locked),
-            ),
-            (
-                "v7-missing",
-                LaunchOutcome::StartRejected(StartRejection::ContextRefused(
-                    signal_flow::ContextRefusal::ModuleMissing(None),
-                )),
-            ),
-            (
-                "v7-replace-missing",
-                LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(
-                    StartRejection::ContextRefused(signal_flow::ContextRefusal::ModuleMissing(
-                        None,
-                    )),
-                )),
-            ),
-        ] {
-            assert_eq!(
-                store
-                    .launch_outcome(request)
-                    .expect("upgraded outcome reads"),
-                Some(outcome),
-                "the v7 outcome for {request} survives the family upgrade"
-            );
-        }
-        drop(store);
-        assert_eq!(
-            fixture.store().launch_outcome("v7-missing").unwrap(),
-            Some(LaunchOutcome::StartRejected(
-                StartRejection::ContextRefused(signal_flow::ContextRefusal::ModuleMissing(None))
-            ))
-        );
-    }
-
-    #[test]
-    fn v8_missing_module_identity_upgrades_to_historical_unknown_and_reopens() {
-        let fixture = StoreFixture::new();
-        let rows = [
-            StoredLaunchOutcomeV8 {
-                launch_request_id: "v8-start".into(),
-                launch_outcome: LaunchOutcomeV8::StartRejected(StartRejectionV38::ContextRefused(
-                    ContextRefusalV38::ModuleMissing,
-                )),
-            },
-            StoredLaunchOutcomeV8 {
-                launch_request_id: "v8-replace".into(),
-                launch_outcome: LaunchOutcomeV8::ReplaceRejected(
-                    ReplaceRejectionV38::LaunchRefused(StartRejectionV38::ContextRefused(
-                        ContextRefusalV38::ModuleMissing,
-                    )),
-                ),
-            },
-        ];
-        {
-            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
-                .expect("outcome store opens");
-            let outcomes = engine
-                .register_table(TableDescriptor::new(
-                    TableName::new("flow_nexus_launch_outcomes"),
-                    FamilyName::new("flow-nexus-launch-outcome"),
-                    SchemaHash::for_label("flow-nexus-launch-outcome-v8"),
-                ))
-                .expect("v8 outcome family registers");
-            for row in rows {
-                engine
-                    .assert(Assertion::new(outcomes, row))
-                    .expect("v8 outcome persists");
-            }
-        }
-        let expected = [
-            (
-                "v8-start",
-                LaunchOutcome::StartRejected(StartRejection::ContextRefused(
-                    signal_flow::ContextRefusal::ModuleMissing(None),
-                )),
-            ),
-            (
-                "v8-replace",
-                LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(
-                    StartRejection::ContextRefused(signal_flow::ContextRefusal::ModuleMissing(
-                        None,
-                    )),
-                )),
-            ),
-        ];
-        let store = fixture.store();
-        for (request, outcome) in &expected {
-            assert_eq!(
-                store.launch_outcome(request).unwrap(),
-                Some(outcome.clone())
-            );
-        }
-        let current = LaunchOutcome::StartRejected(StartRejection::ContextRefused(
-            signal_flow::ContextRefusal::ModuleMissing(Some("vision:absent".into())),
-        ));
-        store
-            .record_launch_outcome("v9-current", current.clone())
-            .expect("the current identity-bearing outcome persists");
-        drop(store);
-        let reopened = fixture.store();
-        for (request, outcome) in expected {
-            assert_eq!(reopened.launch_outcome(request).unwrap(), Some(outcome));
-        }
-        assert_eq!(
-            reopened.launch_outcome("v9-current").unwrap(),
-            Some(current)
-        );
-    }
-
-    /// A 0.35.22 to 0.39 store's outcomes, each rejection in signal-flow
-    /// 30's shape, open as the current outcomes: a context refusal archived
-    /// before RecordMissing keeps its meaning though its discriminant moves.
-    #[test]
-    fn v6_launch_outcomes_upgrade_to_the_topic_and_record_shape() {
-        let fixture = StoreFixture::new();
-        let started = LaunchedRecord {
-            flow_id: "started-flow".into(),
-            session_id: "started-session".into(),
-            origin: Origin::Unbound,
-        };
-        let rows = vec![
-            StoredLaunchOutcomeV6 {
-                launch_request_id: "v6-started".into(),
-                launch_outcome: LaunchOutcomeV6::Started(started.clone()),
-            },
-            StoredLaunchOutcomeV6 {
-                launch_request_id: "v6-system".into(),
-                launch_outcome: LaunchOutcomeV6::StartRejected(StartRejectionV30::ContextRefused(
-                    ContextRefusalV30::SystemTooLarge,
-                )),
-            },
-            StoredLaunchOutcomeV6 {
-                launch_request_id: "v6-module".into(),
-                launch_outcome: LaunchOutcomeV6::StartRejected(StartRejectionV30::ContextRefused(
-                    ContextRefusalV30::ModuleTooLarge,
-                )),
-            },
-            StoredLaunchOutcomeV6 {
-                launch_request_id: "v6-undeclared".into(),
-                launch_outcome: LaunchOutcomeV6::ReplaceRejected(
-                    ReplaceRejectionV30::LaunchRefused(StartRejectionV30::Undeclared),
-                ),
-            },
-            StoredLaunchOutcomeV6 {
-                launch_request_id: "v6-reap".into(),
-                launch_outcome: LaunchOutcomeV6::ReplaceRejected(ReplaceRejectionV30::ReapRefused(
-                    StopRejection::CloseRefused,
-                )),
-            },
-        ];
-        {
-            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
-                .expect("outcome store opens");
-            let outcomes = engine
-                .register_table(TableDescriptor::new(
-                    TableName::new("flow_nexus_launch_outcomes"),
-                    FamilyName::new("flow-nexus-launch-outcome"),
-                    SchemaHash::for_label("flow-nexus-launch-outcome-v6"),
-                ))
-                .expect("v6 outcome family registers");
-            for row in rows {
-                engine
-                    .assert(Assertion::new(outcomes, row))
-                    .expect("v6 outcome persists");
-            }
-        }
-        let store = fixture.store();
-        for (request, outcome) in [
-            ("v6-started", LaunchOutcome::Started(started)),
-            (
-                "v6-system",
-                LaunchOutcome::StartRejected(StartRejection::ContextRefused(
-                    signal_flow::ContextRefusal::SystemTooLarge,
-                )),
-            ),
-            (
-                "v6-module",
-                LaunchOutcome::StartRejected(StartRejection::ContextRefused(
-                    signal_flow::ContextRefusal::ModuleTooLarge,
-                )),
-            ),
-            (
-                "v6-undeclared",
-                LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(
-                    StartRejection::Undeclared,
-                )),
-            ),
-            (
-                "v6-reap",
-                LaunchOutcome::ReplaceRejected(ReplaceRejection::ReapRefused(
-                    StopRejection::CloseRefused,
-                )),
-            ),
-        ] {
-            assert_eq!(
-                store
-                    .launch_outcome(request)
-                    .expect("upgraded outcome reads"),
-                Some(outcome),
-                "the v6 outcome for {request} survives the family upgrade"
-            );
-        }
-    }
-
-    /// A kept outcome that refused a Start for an ended Address names a
-    /// state no metaflow has any more: the open refuses it rather than give
-    /// it another reason, and a later open finds it kept and refuses again.
-    #[test]
-    fn a_v5_outcome_refused_for_an_ended_address_refuses_the_open() {
-        let fixture = StoreFixture::new();
-        seed_v5_launch_outcomes(
-            &fixture,
-            vec![StoredLaunchOutcomeV5 {
-                launch_request_id: "v5-ended".into(),
-                launch_outcome: LaunchOutcomeV5::StartRejected(StartRejectionV22::AddressEnded),
-            }],
-        );
-        for open in ["first", "second"] {
-            let Err(error) = <FlowStore as OpensFlowStore>::open(&fixture.path()) else {
-                panic!("an ended Address outcome opens at the {open} open")
-            };
-            assert!(
-                error.to_string().contains("v5-ended"),
-                "the {open} refusal names the kept outcome: {error}"
-            );
-        }
-    }
-
-    /// A 0.35.2 store's outcomes, each rejection in signal-flow 17's shape,
-    /// open as the current outcomes, and the store then keeps a refused
-    /// harness start with its cause and its opened thread.
-    #[test]
-    fn v3_launch_outcomes_upgrade_to_the_refused_spawn_shape() {
-        let fixture = StoreFixture::new();
-        let started = LaunchedRecord {
-            flow_id: "started-flow".into(),
-            session_id: "started-session".into(),
-            origin: Origin::Unbound,
-        };
-        let rows = [
-            StoredLaunchOutcomeV3 {
-                launch_request_id: "v3-started".into(),
-                launch_outcome: LaunchOutcomeV3::Started(started.clone()),
-            },
-            StoredLaunchOutcomeV3 {
-                launch_request_id: "v3-leave-out".into(),
-                launch_outcome: LaunchOutcomeV3::StartRejected(StartRejectionV17::LeaveOutRefused(
-                    signal_flow::LeaveOutRefusal::NotForHarness(
-                        signal_flow::LeaveOut::CodexPermissions,
-                    ),
-                )),
-            },
-            StoredLaunchOutcomeV3 {
-                launch_request_id: "v3-native".into(),
-                launch_outcome: LaunchOutcomeV3::StartRejected(
-                    StartRejectionV17::NativeLaunchRefused,
-                ),
-            },
-            StoredLaunchOutcomeV3 {
-                launch_request_id: "v3-replace".into(),
-                launch_outcome: LaunchOutcomeV3::ReplaceRejected(
-                    ReplaceRejectionV17::LaunchRefused(StartRejectionV17::ContextRefused(
-                        ContextRefusalV30::SystemTooLarge,
-                    )),
-                ),
-            },
-        ];
-        {
-            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
-                .expect("outcome store opens");
-            let outcomes = engine
-                .register_table(TableDescriptor::new(
-                    TableName::new("flow_nexus_launch_outcomes"),
-                    FamilyName::new("flow-nexus-launch-outcome"),
-                    SchemaHash::for_label("flow-nexus-launch-outcome-v3"),
-                ))
-                .expect("v3 outcome family registers");
-            for row in rows {
-                engine
-                    .assert(Assertion::new(outcomes, row))
-                    .expect("v3 outcome persists");
-            }
-        }
-        let expected = [
-            ("v3-started", LaunchOutcome::Started(started)),
-            (
-                "v3-leave-out",
-                LaunchOutcome::StartRejected(StartRejection::LeaveOutRefused(
-                    signal_flow::LeaveOutRefusal::NotForHarness(
-                        signal_flow::LeaveOut::CodexPermissions,
-                    ),
-                )),
-            ),
-            (
-                "v3-native",
-                LaunchOutcome::StartRejected(StartRejection::NativeLaunchRefused(
-                    signal_flow::NativeLaunchRefusal {
-                        native_launch_stage: signal_flow::NativeLaunchStage::Unclassified,
-                        native_launch_failure: signal_flow::NativeLaunchFailure::Unclassified,
-                    },
-                )),
-            ),
-            (
-                "v3-replace",
-                LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(
-                    StartRejection::ContextRefused(signal_flow::ContextRefusal::SystemTooLarge),
-                )),
-            ),
-        ];
-        let store = fixture.store();
-        for (request, outcome) in &expected {
-            assert_eq!(
-                store
-                    .launch_outcome(request)
-                    .expect("upgraded outcome reads"),
-                Some(outcome.clone()),
-                "the v3 outcome for {request} survives the family upgrade"
-            );
-        }
-        let refused = LaunchOutcome::StartRejected(StartRejection::HarnessSpawnRefused(
-            signal_flow::HarnessSpawnRefusal {
-                spawn_refusal_cause: signal_flow::SpawnRefusalCause::Herdr(
-                    signal_flow::HerdrRefusal {
-                        herdr_error_code_option: Some("invalid_agent_argument".into()),
-                        herdr_error_message:
-                            "agent arguments cannot be encoded safely for the target shell".into(),
-                    },
-                ),
-                opened_thread_option: Some(signal_flow::OpenedThread {
-                    native_session_id: "01a14773-f58c-7ca1-978b-1ac675d19399".into(),
-                    first_turn: signal_flow::FirstTurn::Answered,
-                    thread_archive: signal_flow::ThreadArchive::Archived,
-                }),
-            },
-        ));
-        store
-            .record_launch_outcome("v4-refused", refused.clone())
-            .expect("a refused spawn outcome persists");
-        drop(store);
-        let reopened = fixture.store();
-        for (request, outcome) in expected.iter().chain([("v4-refused", refused)].iter()) {
-            assert_eq!(
-                reopened
-                    .launch_outcome(request)
-                    .expect("outcome reads after reopening"),
-                Some(outcome.clone()),
-                "the outcome for {request} reads unchanged after reopening"
-            );
-        }
-    }
-
-    #[test]
-    fn v2_launch_outcomes_upgrade_to_their_derived_origin() {
-        let fixture = StoreFixture::new();
-        let clue = OriginClueBeforeOrigin {
-            flow_id: "origin-flow".into(),
-            session_id: "origin-session".into(),
-            turn_id: "origin-turn".into(),
-        };
-        let origin = Origin::Flow(FlowOrigin {
-            flow_id: "origin-flow".into(),
-            session_id: "origin-session".into(),
-        });
-        fixture.seed_outcomes(
-            "flow-nexus-launch-outcome-v2",
-            [
-                StoredLaunchOutcomeV2 {
-                    launch_request_id: "old-started".into(),
-                    launch_outcome: LaunchOutcomeV2::Started(LaunchedRecordV2 {
-                        flow_id: "started-flow".into(),
-                        session_id: "started-session".into(),
-                        origin_clue: clue.clone(),
-                    }),
-                },
-                StoredLaunchOutcomeV2 {
-                    launch_request_id: "old-replaced".into(),
-                    launch_outcome: LaunchOutcomeV2::Replaced(ReplacedRecordV2 {
-                        flow_id: "predecessor-flow".into(),
-                        launched_record: LaunchedRecordV2 {
-                            flow_id: "successor-flow".into(),
-                            session_id: "successor-session".into(),
-                            origin_clue: clue,
-                        },
-                    }),
-                },
-                StoredLaunchOutcomeV2 {
-                    launch_request_id: "old-binding".into(),
-                    launch_outcome: LaunchOutcomeV2::StartRejected(
-                        StartRejectionV17::BindingRefused(BindingRefusal::Unclassified),
-                    ),
-                },
-                StoredLaunchOutcomeV2 {
-                    launch_request_id: "old-reap-rejection".into(),
-                    launch_outcome: LaunchOutcomeV2::ReplaceRejected(
-                        ReplaceRejectionV17::ReapRefused(StopRejection::CloseRefused),
-                    ),
-                },
-            ],
-        );
-
-        let expected = [
-            (
-                "old-started",
-                LaunchOutcome::Started(LaunchedRecord {
-                    flow_id: "started-flow".into(),
-                    session_id: "started-session".into(),
-                    origin: origin.clone(),
-                }),
-            ),
-            (
-                "old-replaced",
-                LaunchOutcome::Replaced(ReplacedRecord {
-                    flow_id: "predecessor-flow".into(),
-                    launched_record: LaunchedRecord {
-                        flow_id: "successor-flow".into(),
-                        session_id: "successor-session".into(),
-                        origin,
-                    },
-                }),
-            ),
-            (
-                "old-binding",
-                LaunchOutcome::StartRejected(StartRejection::BindingRefused(
-                    BindingRefusal::Unclassified,
-                )),
-            ),
-            (
-                "old-reap-rejection",
-                LaunchOutcome::ReplaceRejected(ReplaceRejection::ReapRefused(
-                    StopRejection::CloseRefused,
-                )),
-            ),
-        ];
-
-        let store = fixture.store();
-        for (request, outcome) in &expected {
-            assert_eq!(
-                store
-                    .launch_outcome(request)
-                    .expect("upgraded outcome reads"),
-                Some(outcome.clone()),
-                "the v2 outcome for {request} survives the family upgrade"
-            );
-        }
-        drop(store);
-
-        // Reopening sees v3 and leaves each migrated outcome unchanged.
-        let reopened = fixture.store();
-        for (request, outcome) in &expected {
-            assert_eq!(
-                reopened
-                    .launch_outcome(request)
-                    .expect("reopened outcome reads"),
-                Some(outcome.clone()),
-                "the v2 family migration is idempotent for {request}"
-            );
-        }
-    }
-
     #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
     struct CorruptOutcomeRow {
         launch_request_id: String,
@@ -13745,543 +7366,19 @@ mod tests {
         }
     }
 
-    #[test]
-    fn corrupt_v2_launch_outcome_refuses_upgrade_and_keeps_its_row() {
-        let fixture = StoreFixture::new();
-        let row = CorruptOutcomeRow {
-            launch_request_id: "corrupt-outcome".into(),
-            marker: [u8::MAX; 64],
-        };
-        let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
-            .expect("corrupt fixture store opens");
-        let outcomes = engine
-            .register_table(TableDescriptor::new(
-                TableName::new("flow_nexus_launch_outcomes"),
-                FamilyName::new("flow-nexus-launch-outcome"),
-                SchemaHash::for_label("flow-nexus-launch-outcome-v2"),
-            ))
-            .expect("v1 outcome family registers");
-        engine
-            .assert(Assertion::new(outcomes, row.clone()))
-            .expect("corrupt fixture row is stored under the v1 family");
-        drop(engine);
-
-        assert!(matches!(
-            FlowStore::open(&fixture.path()),
-            Err(super::StoreError::LaunchOutcomeUpgrade(_))
-        ));
-
-        // The failed upgrade leaves its predecessor family and bytes
-        // available to the type that wrote them.
-        let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
-            .expect("predecessor store remains openable");
-        let outcomes = engine
-            .register_table(TableDescriptor::<CorruptOutcomeRow>::new(
-                TableName::new("flow_nexus_launch_outcomes"),
-                FamilyName::new("flow-nexus-launch-outcome"),
-                SchemaHash::for_label("flow-nexus-launch-outcome-v2"),
-            ))
-            .expect("corrupt predecessor family remains registered");
-        assert_eq!(
-            engine
-                .match_records(QueryPlan::all(outcomes))
-                .expect("the original row remains readable in its own shape")
-                .records()
-                .to_vec(),
-            vec![row]
-        );
-    }
-
-    /// The models the production store held at 0.35.11, one per Layer.
-    fn production_models() -> Vec<(signal_flow::Layer, &'static str)> {
-        use signal_flow::Layer;
-        vec![
-            (Layer::Primary, "claude-fable-5-1"),
-            (Layer::Quaternary, "claude-haiku-5-5"),
-            (Layer::Secondary, "claude-opus-5-5"),
-            (Layer::Tertiary, "claude-sonnet-5-5"),
-        ]
-    }
-
-    /// A store before 0.35.19 keeps one model per Layer, every one a
-    /// Claude model. Opening carries each whole as that layer's Psyche
-    /// model, keyed by its Layer and Aspect: declaring the same rows again
-    /// changes nothing, Mind and Field have no model, and a second open
-    /// reads the same rows.
-    #[test]
-    fn production_models_upgrade_each_as_its_layers_psyche_model() {
-        use super::{ManagesMetaflowState, NamesConfiguredModel};
-        use signal_flow::Address;
-        let fixture = StoreFixture::new();
-        drop(fixture.store());
-        let models = production_models();
-        fixture.seed_v1_models(1, &models);
-        let expected = models
-            .iter()
-            .map(|(layer, native)| meta_signal_flow::ConfigureModel {
-                layer: layer.clone(),
-                aspect: Aspect::Psyche,
-                native: (*native).into(),
-            })
-            .collect::<Vec<_>>();
-        for reopening in 0..2 {
-            let store = fixture.store();
-            for (layer, native) in &models {
-                for aspect in [Aspect::Psyche, Aspect::Mind, Aspect::Field] {
-                    let address = Address {
-                        aspect: aspect.clone(),
-                        topic: "flow".into(),
-                        layer: layer.clone(),
-                    };
-                    assert_eq!(
-                        store.configured_model(&address).expect("model reads"),
-                        (aspect == Aspect::Psyche).then(|| (*native).to_owned()),
-                        "{aspect:?} {layer:?} (open {reopening})"
-                    );
-                }
-            }
-            assert_eq!(
-                store
-                    .configure_change(meta_signal_flow::ConfigurationChange::Models(
-                        expected.clone()
-                    ))
-                    .expect("declaration commits"),
-                meta_signal_flow::ConfigureOutcome::Unchanged,
-                "every carried row, and no other, is under its Layer and Aspect (open {reopening})"
-            );
-        }
-    }
-
-    /// A Nexus declared before it named the Curriculum socket opens naming
-    /// the socket Curriculum serves under the opening process's runtime
-    /// directory, every other value as it was; the Nexus then opens on it.
-    #[test]
-    fn a_v1_nexus_declaration_opens_naming_the_default_curriculum_socket() {
-        use super::nexus_configuration::{ConfigureNexusV1, StoredMetaNexusConfigurationV1};
-        let fixture = StoreFixture::new();
-        fixture.configured();
-        drop(fixture.configured_store());
-        let database = redb::Database::open(fixture.path()).expect("store opens directly");
-        let write = database.begin_write().expect("catalog transaction starts");
-        {
-            let mut catalog = write
-                .open_table(super::SEMA_CATALOG_TABLE)
-                .expect("catalog opens");
-            catalog
-                .remove("flow_nexus_meta_nexus_configuration")
-                .expect("nexus family removes");
-        }
-        let _ = write.delete_table(redb::TableDefinition::<&str, &[u8]>::new(
-            "flow_nexus_meta_nexus_configuration",
-        ));
-        write.commit().expect("catalog commits");
-        drop(database);
-        {
-            let mut engine = Engine::open(EngineOpen::new(
-                fixture.path(),
-                SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
-            ))
-            .expect("store opens");
-            let table = engine
-                .register_table(TableDescriptor::new(
-                    super::META_NEXUS_CONFIGURATION_TABLE_NAME,
-                    FamilyName::new("flow-nexus-meta-nexus-configuration"),
-                    SchemaHash::for_label("flow-nexus-meta-nexus-configuration-v1"),
-                ))
-                .expect("v1 nexus family registers");
-            let endpoint = |name: &str| meta_signal_flow::CodexEndpoint {
-                client_path: format!("/fixture/{name}-client"),
-                home: format!("/fixture/{name}"),
-                control_socket_path: format!("/fixture/{name}.sock"),
-                model_name_vector: vec![format!("gpt-{name}")],
-            };
-            engine
-                .assert(Assertion::new(
-                    table,
-                    StoredMetaNexusConfigurationV1 {
-                        nexus: ConfigureNexusV1 {
-                            source_root: "/fixture/source".into(),
-                            stable_codex: endpoint("stable"),
-                            next_codex: endpoint("next"),
-                            harness_profiles: vec![],
-                            meta_aspects: vec![Aspect::Psyche],
-                            message_nexus_path: "/fixture/message.sock".into(),
-
-                            message_nexus_binary: "/fixture/message-nexus".into(),
-
-                            lease: 45,
-                        },
-                    },
-                ))
-                .expect("v1 nexus row persists");
-        }
-        let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("opens");
-        let nexus = configuration
-            .configuration_snapshot()
-            .expect("snapshot reads")
-            .expect("store configured")
-            .nexus;
-        drop(configuration);
-        assert_eq!(nexus.source_root, "/fixture/source");
-        assert_eq!(
-            nexus.message_nexus_path_option.as_deref(),
-            Some("/fixture/message.sock")
-        );
-        assert_eq!(
-            nexus.message_nexus_binary_option.as_deref(),
-            Some("/fixture/message-nexus")
-        );
-        assert_eq!(nexus.lease, 45);
-        assert_eq!(nexus.next_codex.model_name_vector, ["gpt-next"]);
-        assert!(
-            nexus
-                .curriculum_nexus_path
-                .ends_with("/curriculum/curriculum.sock"),
-            "{}",
-            nexus.curriculum_nexus_path
-        );
-        let store = fixture.configured_store();
-        assert_eq!(
-            store
-                .configuration_snapshot()
-                .expect("snapshot reads")
-                .expect("store configured")
-                .nexus,
-            nexus
-        );
-    }
-
-    /// The configuration-only open, which the deployment runs before the
-    /// Nexus, carries a v1 model family the same way.
-    #[test]
-    fn the_configuration_only_open_upgrades_v1_models() {
-        let fixture = StoreFixture::new();
-        let defaults = super::DefaultConfiguration {
-            home: fixture.directory.path().join("home"),
-            runtime_directory: fixture.directory.path().join("runtime"),
-        };
-        let settings = defaults.configuration();
-        let config = ConfigurationOnlyStore::open(&fixture.path()).expect("fresh Memory opens");
-        config
-            .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
-                meta_signal_flow::ConfigureNexus {
-                    source_root: settings.source_root,
-                    stable_codex: settings.stable_codex,
-                    next_codex: settings.next_codex,
-                    harness_profiles: settings.harness_profile_vector,
-                    meta_aspects: settings.meta_aspects,
-                    message_nexus_path_option: Some(settings.message_nexus_path.clone()),
-                    message_nexus_binary_option: Some("/fixture/message-nexus".into()),
-
-                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                    lease: 60,
-                    presentation_prompt_option: None,
-                },
-            ))
-            .expect("Nexus configured");
-        drop(config);
-        let models = production_models();
-        fixture.seed_v1_models(super::FLOW_SCHEMA_VERSION, &models);
-        let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("opens");
-        let carried = configuration
-            .configuration_snapshot()
-            .expect("snapshot reads")
-            .expect("store configured")
-            .models;
-        assert_eq!(
-            carried,
-            models
-                .iter()
-                .map(|(layer, native)| meta_signal_flow::ConfigureModel {
-                    layer: layer.clone(),
-                    aspect: Aspect::Psyche,
-                    native: (*native).into(),
-                })
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            configuration
-                .configure_change(meta_signal_flow::ConfigurationChange::Models(carried))
-                .expect("declaration commits"),
-            meta_signal_flow::ConfigureOutcome::Unchanged
-        );
-    }
-
-    /// The leave-out defaults the production store held at 0.35.11, each
-    /// under its Address alone: every Claude metaflow's twelve, every Codex
-    /// metaflow's six.
-    fn production_leave_out_defaults() -> Vec<(signal_flow::Address, Vec<signal_flow::LeaveOut>)> {
-        use signal_flow::{Address, Layer, LeaveOut};
-        let claude = vec![
-            LeaveOut::ClaudeAiConnectors,
-            LeaveOut::ExplorePlanAgents,
-            LeaveOut::WorkflowTool,
-            LeaveOut::SkillTool,
-            LeaveOut::BundledSkills,
-            LeaveOut::ScheduleWakeupTool,
-            LeaveOut::ReportFindingsTool,
-            LeaveOut::ListAgentsTool,
-            LeaveOut::CronTools,
-            LeaveOut::DeferredTools,
-            LeaveOut::ClaudeMd,
-            LeaveOut::GitInstructions,
-        ];
-        let codex = vec![
-            LeaveOut::CodexAgentsMd,
-            LeaveOut::CodexSkillListing,
-            LeaveOut::CodexCollaborationMode,
-            LeaveOut::CodexEnvironmentContext,
-            LeaveOut::CodexPermissions,
-            LeaveOut::CodexDeveloperInstructions,
-        ];
-        [
-            (Aspect::Field, "illustrator", Layer::Tertiary, &claude),
-            (Aspect::Field, "core", Layer::Primary, &codex),
-            (Aspect::Field, "publisher", Layer::Quaternary, &claude),
-            (Aspect::Mind, "prototyping", Layer::Primary, &codex),
-            (Aspect::Mind, "prototyping", Layer::Secondary, &codex),
-            (Aspect::Mind, "core", Layer::Primary, &codex),
-            (Aspect::Mind, "core", Layer::Secondary, &codex),
-            (Aspect::Psyche, "communication", Layer::Primary, &claude),
-            (Aspect::Psyche, "communication", Layer::Secondary, &claude),
-            (Aspect::Psyche, "core", Layer::Primary, &claude),
-            (Aspect::Psyche, "core", Layer::Secondary, &claude),
-            (Aspect::Psyche, "core", Layer::Tertiary, &claude),
-            (Aspect::Psyche, "flow", Layer::Primary, &claude),
-            (Aspect::Psyche, "flow", Layer::Secondary, &claude),
-            (Aspect::Psyche, "ethos", Layer::Primary, &claude),
-            (Aspect::Psyche, "ethos", Layer::Secondary, &claude),
-            (Aspect::Psyche, "nexus", Layer::Secondary, &claude),
-            (Aspect::Psyche, "spirit", Layer::Primary, &claude),
-            (Aspect::Psyche, "spirit", Layer::Secondary, &claude),
-            (Aspect::Psyche, "chronos", Layer::Primary, &claude),
-            (Aspect::Psyche, "chronos", Layer::Secondary, &claude),
-        ]
-        .into_iter()
-        .map(|(aspect, topic, layer, leave_outs)| {
-            (
-                Address {
-                    aspect,
-                    topic: topic.into(),
-                    layer,
-                },
-                leave_outs.clone(),
-            )
-        })
-        .collect()
-    }
-
-    /// A store before 0.35.19 keeps each metaflow's default leave-outs under
-    /// its Address alone. Opening carries every one of them whole under the
-    /// harness its leave-outs belong to, keyed by its Address and that
-    /// harness; the other harness of that Address has none, and a second
-    /// open changes nothing.
-    #[test]
-    fn production_leave_out_defaults_upgrade_each_under_its_harness() {
-        use super::ManagesMetaflowState;
-        use crate::lean::BelongsToHarness;
-        let fixture = StoreFixture::new();
-        fixture.configured();
-        let defaults = production_leave_out_defaults();
-        fixture.seed_v1_leave_outs(&defaults);
-        let expected = defaults
-            .iter()
-            .map(
-                |(address, leave_outs)| meta_signal_flow::ConfigureLeaveOut {
-                    address: address.clone(),
-                    harness_kind: leave_outs[0].harness(),
-                    leave_outs: leave_outs.clone(),
-                },
-            )
-            .collect::<Vec<_>>();
-        assert_eq!(
-            expected
-                .iter()
-                .filter(|entry| entry.harness_kind == HarnessKind::Codex)
-                .count(),
-            5
-        );
-        for reopening in 0..2 {
-            let store = fixture.configured_store();
-            let snapshot = store
-                .configuration_snapshot()
-                .expect("snapshot reads")
-                .expect("store configured");
-            assert_eq!(snapshot.default_leave_outs.len(), defaults.len());
-            for entry in &expected {
-                assert!(
-                    snapshot.default_leave_outs.contains(entry),
-                    "{entry:?} is carried (open {reopening})"
-                );
-                assert_eq!(
-                    store
-                        .default_leave_outs(&entry.address, &entry.harness_kind)
-                        .expect("default reads"),
-                    entry.leave_outs
-                );
-                let other = match entry.harness_kind {
-                    HarnessKind::Claude => HarnessKind::Codex,
-                    HarnessKind::Codex => HarnessKind::Claude,
-                };
-                assert!(
-                    store
-                        .default_leave_outs(&entry.address, &other)
-                        .expect("default reads")
-                        .is_empty()
-                );
-            }
-        }
-        // The configuration-only open reads the same family.
-        let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("opens");
-        let mut carried = configuration
-            .configuration_snapshot()
-            .expect("snapshot reads")
-            .expect("store configured")
-            .default_leave_outs;
-        let mut expected = expected;
-        let order = |entry: &meta_signal_flow::ConfigureLeaveOut| {
-            format!("{:?}", (&entry.address, &entry.harness_kind))
-        };
-        carried.sort_by_key(order);
-        expected.sort_by_key(order);
-        assert_eq!(carried, expected);
-    }
-
-    /// The configuration-only open, which the deployment runs before the
-    /// Nexus, carries a v1 family the same way.
-    #[test]
-    fn the_configuration_only_open_upgrades_v1_leave_out_defaults() {
-        let fixture = StoreFixture::new();
-        fixture.configured();
-        let defaults = production_leave_out_defaults();
-        fixture.seed_v1_leave_outs(&defaults);
-        let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("opens");
-        let carried = configuration
-            .configuration_snapshot()
-            .expect("snapshot reads")
-            .expect("store configured")
-            .default_leave_outs;
-        assert_eq!(carried.len(), defaults.len());
-        for (address, leave_outs) in &defaults {
-            assert!(
-                carried
-                    .iter()
-                    .any(|entry| entry.address == *address && entry.leave_outs == *leave_outs)
-            );
-        }
-        drop(configuration);
-        use super::ManagesMetaflowState;
-        let store = fixture.configured_store();
-        let (address, leave_outs) = &defaults[1];
-        assert_eq!(
-            store
-                .default_leave_outs(address, &HarnessKind::Codex)
-                .expect("default reads"),
-            *leave_outs
-        );
-    }
-
-    /// A 0.35.11 store whose v1 default has leave-outs of both harnesses,
-    /// or none, has no one harness to carry it under: each open refuses,
-    /// naming that entry, and the store stays the 0.35.11 store it was, byte
-    /// for byte — the models upgraded before the leave-outs are not kept
-    /// either.
-    #[test]
-    fn a_v1_leave_out_default_mixing_harnesses_refuses_the_upgrade_by_its_entry() {
-        use signal_flow::{Address, Layer, LeaveOut};
-        for (leave_outs, reason) in [
-            (
-                vec![LeaveOut::ClaudeMd, LeaveOut::CodexAgentsMd],
-                super::LeaveOutUpgradeRefusal::MixedHarnesses,
-            ),
-            (Vec::new(), super::LeaveOutUpgradeRefusal::NoHarness),
-        ] {
-            let fixture = StoreFixture::new();
-            fixture.configured();
-            drop(fixture.configured_store());
-            let mixed = Address {
-                aspect: Aspect::Psyche,
-                topic: "flow".into(),
-                layer: Layer::Secondary,
-            };
-            let mut defaults = production_leave_out_defaults();
-            defaults.retain(|(address, _)| *address != mixed);
-            defaults.push((mixed.clone(), leave_outs));
-            fixture.seed_v1_models(super::FLOW_SCHEMA_VERSION, &production_models());
-            fixture.seed_v1_leave_outs(&defaults);
-            fixture.seed_v1_events(&[("a1a1a1", Vec::new())]);
-            fixture.as_0_35_11();
-            let bytes = std::fs::read(fixture.path()).expect("0.35.11 store reads");
-            let rows = fixture.path().rows_by_table();
-            let refusal = |error: super::StoreError| match error {
-                super::StoreError::LeaveOutUpgrade { entry, reason } => (entry, reason),
-                other => panic!("not a leave-out refusal: {other}"),
-            };
-            let expected = (FlowStore::address_record_key(&mixed), reason);
-            for configuration_only in [false, true] {
-                let refused = if configuration_only {
-                    ConfigurationOnlyStore::open(&fixture.path()).map(drop)
-                } else {
-                    FlowStore::open_configured(&fixture.path()).map(drop)
-                };
-                match refused {
-                    Ok(()) => {
-                        panic!("the open must refuse (configuration only: {configuration_only})")
-                    }
-                    Err(error) => assert_eq!(refusal(error), expected),
-                }
-                assert!(
-                    std::fs::read(fixture.path()).expect("store reads") == bytes,
-                    "the store is the 0.35.11 store it was (configuration only: {configuration_only})"
-                );
-                assert_eq!(fixture.path().rows_by_table(), rows);
-                assert_eq!(fixture.staged_copies(), Vec::<String>::new());
-            }
-            // Nothing was carried: the v1 rows still read as v1.
-            let mut engine = Engine::open(EngineOpen::new(
-                fixture.path(),
-                SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
-            ))
-            .expect("store still opens as before");
-            let table = engine
-                .register_table(
-                    TableDescriptor::<super::StoredMetaLeaveOutConfigurationV1>::new(
-                        TableName::new("flow_nexus_meta_leave_out_configuration"),
-                        FamilyName::new("flow-nexus-meta-leave-out-configuration"),
-                        SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1"),
-                    ),
-                )
-                .expect("v1 family stands");
-            assert_eq!(
-                engine
-                    .match_records(QueryPlan::all(table))
-                    .expect("v1 rows read")
-                    .records()
-                    .len(),
-                defaults.len()
-            );
-        }
-    }
-
-    /// A crash between two family upgrades of one open leaves the store
-    /// the 0.35.11 store it was; the next open upgrades it whole and clears
+    /// A crash in the first running open of a configuration-only store,
+    /// between two of the families it adds, leaves the configuration-only
+    /// store it was; the next open adds every running family and clears
     /// the copy the crash left.
     #[test]
-    fn a_crash_between_family_upgrades_leaves_the_0_35_11_store() {
-        use super::staged_upgrade::{InterruptsStagedUpgrade, StagedUpgrade, StagesUpgrade};
-        use super::{DescribesModelTable, NamesConfiguredModel, UpgradesFlowFamilies};
+    fn a_crash_between_added_families_leaves_the_configuration_only_store() {
+        use super::staged_open::{InterruptsStagedOpen, StagedOpen, StagesOpen};
         let fixture = StoreFixture::new();
         fixture.configured();
-        drop(fixture.configured_store());
-        let models = production_models();
-        fixture.seed_v1_models(super::FLOW_SCHEMA_VERSION, &models);
-        fixture.seed_v1_leave_outs(&production_leave_out_defaults());
-        fixture.seed_v1_events(&[("a1a1a1", Vec::new())]);
-        fixture.as_0_35_11();
-        let bytes = std::fs::read(fixture.path()).expect("0.35.11 store reads");
-        let staged = StagedUpgrade::begin(&fixture.path(), super::UpgradeScope::Running)
+        let bytes = std::fs::read(fixture.path()).expect("configuration-only store reads");
+        let staged = StagedOpen::begin(&fixture.path())
             .expect("staging starts")
-            .expect("a 0.35.11 store has families to upgrade");
+            .expect("a configuration-only store has running families to add");
         {
             let mut engine = Engine::open(EngineOpen::new(
                 staged.copy(),
@@ -14289,50 +7386,116 @@ mod tests {
             ))
             .expect("the copy opens");
             engine
-                .upgraded_models(super::StoredMetaModelConfiguration::descriptor())
-                .expect("the models upgrade on the copy");
+                .register_table(TableDescriptor::<super::FlowRecord>::new(
+                    super::FLOW_TABLE_NAME,
+                    FamilyName::new("flow-nexus-flow"),
+                    <super::FlowRecord as sema_engine::MemoryDefinition>::schema_hash(),
+                ))
+                .expect("one running family registers on the copy");
         }
         staged.crash();
         assert!(
             std::fs::read(fixture.path()).expect("store reads") == bytes,
-            "the store is the 0.35.11 store it was"
+            "the store is the configuration-only store it was"
         );
         assert_eq!(fixture.staged_copies().len(), 1, "the crash left its copy");
-        let store = fixture.configured_store();
-        let (layer, native) = &models[0];
-        assert_eq!(
-            store
-                .configured_model(&signal_flow::Address {
-                    aspect: Aspect::Psyche,
-                    topic: "flow".into(),
-                    layer: layer.clone(),
-                })
-                .expect("model reads"),
-            Some((*native).to_owned())
-        );
-        drop(store);
+        drop(fixture.configured_store());
         assert_eq!(fixture.staged_copies(), Vec::<String>::new());
+        let tables = {
+            use redb::{ReadableDatabase as _, ReadableTable as _};
+            let database = redb::ReadOnlyDatabase::open(fixture.path()).expect("store reads");
+            let read = database.begin_read().expect("read starts");
+            let catalog = read
+                .open_table(super::SEMA_CATALOG_TABLE)
+                .expect("catalog opens");
+            catalog
+                .iter()
+                .expect("catalog iterates")
+                .map(|entry| entry.expect("catalog entry").0.value().to_owned())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(
+            tables,
+            super::RUNNING_TABLES
+                .iter()
+                .map(|table| (*table).to_owned())
+                .collect::<std::collections::BTreeSet<_>>()
+        );
     }
 
-    /// A crash-left copy goes at the next open, one that upgrades nothing
+    /// A store 0.53.0 wrote holds every running family but the one 0.53.1
+    /// added, ProtectedAddresses: it is opened, that family registered
+    /// empty, and nothing is protected. A store missing any other family is
+    /// still refused, byte for byte as it was.
+    #[test]
+    fn a_store_0530_wrote_opens_with_no_address_protected() {
+        use super::ManagesMetaflowState;
+        let strip = |path: &std::path::Path, table: &str| {
+            let database = redb::Database::open(path).expect("store opens raw");
+            let write = database.begin_write().expect("write starts");
+            {
+                let mut catalog = write
+                    .open_table(super::SEMA_CATALOG_TABLE)
+                    .expect("catalog opens");
+                assert!(
+                    catalog
+                        .remove(table)
+                        .expect("catalog entry removed")
+                        .is_some()
+                );
+            }
+            // A family no row was written to has no table of its own yet;
+            // one that has is dropped with its rows.
+            write
+                .delete_table(redb::TableDefinition::<&str, &[u8]>::new(table))
+                .expect("table dropped");
+            write.commit().expect("strip commits");
+        };
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        drop(fixture.configured_store());
+        strip(
+            &fixture.path(),
+            "flow_nexus_meta_protected_address_configuration",
+        );
+        let store = fixture.configured_store();
+        assert_eq!(
+            store
+                .configuration_snapshot()
+                .expect("snapshot reads")
+                .expect("configured")
+                .protected_addresses,
+            Vec::<signal_flow::Address>::new()
+        );
+        drop(store);
+
+        let other = StoreFixture::new();
+        other.configured();
+        drop(other.configured_store());
+        strip(&other.path(), "flow_nexus_meta_heartbeat_configuration");
+        let before = std::fs::read(other.path()).expect("store reads");
+        assert!(matches!(
+            FlowStore::open_configured(&other.path()),
+            Err(super::StoreError::UnrecognizedMemory { .. })
+        ));
+        assert_eq!(std::fs::read(other.path()).expect("store rereads"), before);
+    }
+
+    /// A crash-left copy goes at the next open, one that adds nothing
     /// included.
     #[test]
-    fn a_crash_left_copy_is_removed_by_an_open_that_upgrades_nothing() {
+    fn a_crash_left_copy_is_removed_by_an_open_that_adds_nothing() {
         use super::ConfiguresOnlyStore;
         let fixture = StoreFixture::new();
         fixture.configured();
         drop(fixture.configured_store());
         let leave = |fixture: &StoreFixture| {
-            std::fs::write(
-                fixture.directory.path().join(".flow.sema.upgrade-1-2"),
-                b"x",
-            )
-            .expect("copy planted");
+            std::fs::write(fixture.directory.path().join(".flow.sema.open-1-2"), b"x")
+                .expect("copy planted");
             assert_eq!(fixture.staged_copies().len(), 1);
         };
         leave(&fixture);
         drop(super::ConfigurationOnlyStore::open(&fixture.path()).expect("configuration open"));
-        assert_eq!(fixture.staged_copies(), Vec::<String>::new());
         leave(&fixture);
         drop(fixture.configured_store());
         assert_eq!(fixture.staged_copies(), Vec::<String>::new());
@@ -14342,16 +7505,14 @@ mod tests {
     /// meets it is refused as the store held.
     #[test]
     fn a_copy_held_by_a_live_staging_open_stays_and_contention_is_a_lock_refusal() {
-        use super::staged_upgrade::{StagedUpgrade, StagesUpgrade};
+        use super::staged_open::{StagedOpen, StagesOpen};
         let fixture = StoreFixture::new();
         fixture.configured();
-        drop(fixture.configured_store());
-        fixture.as_0_35_11();
-        let staged = StagedUpgrade::begin(&fixture.path(), super::UpgradeScope::Running)
+        let staged = StagedOpen::begin(&fixture.path())
             .expect("staging starts")
-            .expect("a 0.35.11 store has families to upgrade");
+            .expect("a configuration-only store has running families to add");
         assert_eq!(fixture.staged_copies().len(), 1);
-        let refused = StagedUpgrade::begin(&fixture.path(), super::UpgradeScope::Running);
+        let refused = StagedOpen::begin(&fixture.path());
         assert!(
             matches!(refused, Err(super::StoreError::StoreHeld { .. })),
             "contention is a lock refusal"
@@ -14359,305 +7520,5 @@ mod tests {
         assert_eq!(fixture.staged_copies().len(), 1, "the held copy stays");
         drop(staged);
         assert_eq!(fixture.staged_copies(), Vec::<String>::new());
-    }
-
-    /// A 0.35.11 store holds the model, leave-out and events families at
-    /// v1. One open carries all three, models first, then leave-outs, then
-    /// events; a second open carries nothing again.
-    #[test]
-    fn a_0_35_11_store_upgrades_models_leave_outs_and_events_in_one_open() {
-        use super::ManagesMetaflowState;
-        use super::NamesConfiguredModel;
-        use super::events::{EventBeforeIdentity, RecordsHarnessEvents};
-        use crate::lean::BelongsToHarness;
-        use signal_flow::{Address, Event, NativeStop};
-        let fixture = StoreFixture::new();
-        fixture.configured();
-        drop(fixture.configured_store());
-        let models = production_models();
-        let defaults = production_leave_out_defaults();
-        let events = vec![(
-            "a1a1a1",
-            vec![
-                EventBeforeIdentity::Started,
-                EventBeforeIdentity::ToolUsed("Bash".into()),
-                EventBeforeIdentity::Stopped,
-            ],
-        )];
-        fixture.seed_v1_models(super::FLOW_SCHEMA_VERSION, &models);
-        fixture.seed_v1_leave_outs(&defaults);
-        fixture.seed_v1_events(&events);
-        fixture.as_0_35_11();
-        let mut before = fixture.path().rows_by_table();
-        for added in StoreFixture::ADDED_IN_0_35_19 {
-            assert_eq!(before.insert((*added).to_owned(), 0), None);
-        }
-        for reopening in 0..2 {
-            let store = fixture.configured_store();
-            for (layer, native) in &models {
-                let address = Address {
-                    aspect: Aspect::Psyche,
-                    topic: "flow".into(),
-                    layer: layer.clone(),
-                };
-                assert_eq!(
-                    store.configured_model(&address).expect("model reads"),
-                    Some((*native).to_owned()),
-                    "{layer:?} (open {reopening})"
-                );
-            }
-            for (address, leave_outs) in &defaults {
-                assert_eq!(
-                    store
-                        .default_leave_outs(address, &leave_outs[0].harness())
-                        .expect("default reads"),
-                    *leave_outs,
-                    "{address:?} (open {reopening})"
-                );
-            }
-            assert_eq!(
-                store.events("a1a1a1").expect("events read"),
-                Some(vec![
-                    Event::Started(None),
-                    Event::ToolUsed("Bash".into()),
-                    Event::Stopped(NativeStop {
-                        native_session_id_option: None,
-                        transcript_path_option: None,
-                        last_assistant_message_option: None,
-                    }),
-                ]),
-                "open {reopening}"
-            );
-            drop(store);
-            assert_eq!(fixture.path().rows_by_table(), before, "open {reopening}");
-            assert_eq!(fixture.staged_copies(), Vec::<String>::new());
-        }
-        let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("opens");
-        let snapshot = configuration
-            .configuration_snapshot()
-            .expect("snapshot reads")
-            .expect("store configured");
-        assert_eq!(snapshot.models.len(), models.len());
-        assert_eq!(snapshot.default_leave_outs.len(), defaults.len());
-    }
-
-    /// The store the deployment holds, copied: one open by this Flow carries
-    /// every family it keeps at an older version, every table keeps its rows
-    /// and every added table is empty, every row reads in its current shape,
-    /// and a second open changes nothing. The store is no fixture this
-    /// repository holds, so the test runs only when asked for by name with
-    /// `--ignored` and the variable set.
-    #[test]
-    #[ignore = "needs FLOW_0_35_11_STORE naming a copy of a store Flow 0.35.11 wrote"]
-    fn the_deployed_0_35_11_store_opens_and_every_family_upgrades_in_one_open() {
-        use super::events::RecordsHarnessEvents;
-        use super::{ManagesMetaflowState, ReadsFlowRows};
-        let source = std::env::var_os("FLOW_0_35_11_STORE")
-            .map(std::path::PathBuf::from)
-            .expect("FLOW_0_35_11_STORE names the 0.35.11 store to copy");
-        for configuration_first in [false, true] {
-            let directory = tempfile::tempdir().expect("copy directory");
-            let path = directory.path().join("flow.sema");
-            std::fs::copy(&source, &path).expect("0.35.11 store copied");
-            let mut permissions = std::fs::metadata(&path)
-                .expect("copy metadata")
-                .permissions();
-            #[allow(clippy::permissions_set_readonly_false)]
-            permissions.set_readonly(false);
-            std::fs::set_permissions(&path, permissions).expect("copy writable");
-            // A copy of a store its Nexus holds open reads as one left
-            // uncleanly; redb repairs it on its first writable open, as the
-            // Nexus's own open would, before anything is counted.
-            drop(redb::Database::open(&path).expect("the copy opens and repairs"));
-            let before = path.rows_by_table();
-            eprintln!("configuration-only open first: {configuration_first}");
-            eprintln!("rows before: {before:?}");
-            if configuration_first {
-                let configuration =
-                    ConfigurationOnlyStore::open(&path).expect("the configuration-only open");
-                let snapshot = configuration
-                    .configuration_snapshot()
-                    .expect("snapshot reads")
-                    .expect("store configured");
-                eprintln!(
-                    "models after the configuration-only open: {:?}",
-                    snapshot.models
-                );
-            }
-            let store = FlowStore::open_configured(&path).expect("the 0.35.11 store opens");
-            let set_aside = store
-                .opening_settlements
-                .iter()
-                .filter(|settlement| {
-                    !matches!(settlement, super::LaunchAttemptSettlement::Unsettled { .. })
-                })
-                .count() as u64;
-            eprintln!("launch-attempt rows set aside: {set_aside}");
-            let snapshot = store
-                .configuration_snapshot()
-                .expect("snapshot reads")
-                .expect("store configured");
-            eprintln!("models: {:?}", snapshot.models);
-            eprintln!("leave-out defaults: {}", snapshot.default_leave_outs.len());
-            for entry in &snapshot.default_leave_outs {
-                eprintln!(
-                    "  {:?} {:?} {}",
-                    entry.address,
-                    entry.harness_kind,
-                    entry.leave_outs.len()
-                );
-            }
-            assert!(
-                snapshot
-                    .models
-                    .iter()
-                    .all(|model| model.aspect == Aspect::Psyche),
-                "every carried model is a Psyche model"
-            );
-            assert!(snapshot.send_servers.is_empty());
-            let flows = store.flow_nodes().expect("flow nodes read");
-            let mut stops = 0usize;
-            for flow in &flows {
-                if let Some(events) = store.events(&flow.flow_id).expect("events read") {
-                    stops += events
-                        .iter()
-                        .filter(|event| matches!(event, signal_flow::Event::Stopped(_)))
-                        .count();
-                }
-            }
-            eprintln!("flows: {}, their Stops read: {stops}", flows.len());
-            assert_eq!(
-                store.list_metaflows().expect("metaflows list").len() as u64,
-                before["flow_nexus_metaflows"]
-            );
-            assert!(store.ambiguous_launch_attempts().is_ok());
-            drop(store);
-            let after = path.rows_by_table();
-            eprintln!("rows after: {after:?}");
-            for (table, rows) in &before {
-                let expected = match table.as_str() {
-                    "flow_nexus_launch_attempts" => rows - set_aside,
-                    "flow_nexus_quarantined_launch_attempts" => rows + set_aside,
-                    _ => *rows,
-                };
-                assert_eq!(after.get(table), Some(&expected), "rows of {table}");
-            }
-            for (table, rows) in &after {
-                if !before.contains_key(table) {
-                    eprintln!("added {table}");
-                    assert_eq!(*rows, 0, "{table} is added empty");
-                }
-            }
-            let reopened = FlowStore::open_configured(&path).expect("the upgraded store reopens");
-            assert_eq!(reopened.opening_settlements, Vec::new());
-            drop(reopened);
-            assert_eq!(path.rows_by_table(), after);
-        }
-    }
-}
-
-/// A v3 launch attempt row, written in its old shape, reads as v4 with its
-/// remembered flows as Custom.
-#[cfg(test)]
-mod v3_attempts {
-    use super::{
-        LaunchAttemptV3, LaunchContext, LaunchProfileV3, MemoryDefinition, OpensFlowStore,
-        ReadsLaunchAttempt, RememberedFlow, StoredLaunchAttemptV3,
-    };
-    use sema_engine::{
-        Assertion, Engine, EngineOpen, FamilyName, SchemaVersion, TableDescriptor, TableName,
-    };
-    use signal_flow::{Address, Aspect, LaunchAttemptPhase, Layer, Origin, Remembering};
-
-    fn v3_attempt(request: &str, remembered: Vec<RememberedFlow>) -> StoredLaunchAttemptV3 {
-        StoredLaunchAttemptV3 {
-            attempt: LaunchAttemptV3 {
-                launch_request_id: request.into(),
-                launch_profile: LaunchProfileV3 {
-                    launch_request_id: request.into(),
-                    system_modules: vec!["spirit-core".into()],
-                    user_modules: vec!["operation-main-flow".into()],
-                    address: Address {
-                        aspect: Aspect::Mind,
-                        topic: "flow".into(),
-                        layer: Layer::Secondary,
-                    },
-                    model_name: "gpt-6-sol".into(),
-                    effort: "medium".into(),
-                    flow_id_option: None,
-                    remembered_flow_vector: remembered,
-                    herdr_session_name: "default".into(),
-                    leave_outs_option: None,
-                    flow_kind: signal_flow::FlowKind::Regular,
-                    tool_set: signal_flow::ToolSet::Default,
-                    instruction_prompt: "Carry on.".into(),
-                },
-                prompt_sha256: "0".repeat(64),
-                origin: Origin::Unbound,
-                launch_attempt_phase: LaunchAttemptPhase::Reserved,
-                native_launch_intent_option: None,
-                native_launch_binding_option: None,
-                registration_acknowledgement_option: None,
-                prompt_delivery_intent_option: None,
-                prompt_delivery_result_option: None,
-            },
-            context: LaunchContext::Modules,
-        }
-    }
-
-    #[test]
-    fn a_v3_launch_attempt_upgrades_to_v4_with_its_remembering() {
-        let directory = tempfile::tempdir().expect("store directory");
-        let path = directory.path().join("flow.sema");
-        {
-            let mut engine =
-                Engine::open(EngineOpen::new(&path, SchemaVersion::new(1))).expect("store opens");
-            let attempts = engine
-                .register_table(TableDescriptor::new(
-                    TableName::new("flow_nexus_launch_attempts"),
-                    FamilyName::new("flow-nexus-launch-attempt"),
-                    StoredLaunchAttemptV3::schema_hash(),
-                ))
-                .expect("v3 attempt family registers");
-            engine
-                .assert(Assertion::new(attempts, v3_attempt("v3-none", vec![])))
-                .expect("v3 attempt persists");
-            engine
-                .assert(Assertion::new(
-                    attempts,
-                    v3_attempt(
-                        "v3-named",
-                        vec![
-                            RememberedFlow {
-                                flow_id: "36b71b".into(),
-                                remembering_depth: 1,
-                            },
-                            RememberedFlow {
-                                flow_id: "e3c8c1".into(),
-                                remembering_depth: 2,
-                            },
-                        ],
-                    ),
-                ))
-                .expect("v3 attempt persists");
-        }
-        let store = <super::FlowStore as OpensFlowStore>::open(&path).expect("store reopens");
-        let none = store
-            .launch_attempt("v3-none")
-            .expect("upgraded attempt reads")
-            .expect("the v3 attempt is kept");
-        assert_eq!(
-            none.launch_profile.remembering,
-            Remembering::Predecessors(0)
-        );
-        let named = store
-            .launch_attempt("v3-named")
-            .expect("upgraded attempt reads")
-            .expect("the v3 attempt is kept");
-        assert_eq!(
-            named.launch_profile.remembering,
-            Remembering::Custom(vec!["36b71b".into(), "e3c8c1".into()])
-        );
-        assert_eq!(named.launch_profile.address.topic, "flow");
     }
 }

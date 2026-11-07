@@ -97,6 +97,50 @@ enum ClaudeSession {
     /// The Codex thread Flow opened through the app-server, which the TUI
     /// attaches to: `resume <thread>`.
     Attached(String),
+    /// The session a restarted Claude flow already holds: `--resume`.
+    Resumed(String),
+}
+
+/// Starts a restarted Claude flow's harness in the restart's new pane as
+/// the native session the flow already holds: `--resume <session>` where a
+/// launch passes `--session-id`, with the flow's FlowId exported into the
+/// pane as at launch, the launch's title, settings and hook, and no
+/// positional prompt. That a resume keeps the session's id is Claude Code's
+/// own claim; Bind checks the pane reports it.
+pub(crate) trait ResumesClaudeHarness {
+    fn resume_configured_claude_harness(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        flow_id: &str,
+        native_session_id: &str,
+        harness_arguments: &[String],
+    ) -> Result<(), SpawnFailure>;
+}
+
+impl ResumesClaudeHarness for HerdrCli {
+    fn resume_configured_claude_harness(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        flow_id: &str,
+        native_session_id: &str,
+        harness_arguments: &[String],
+    ) -> Result<(), SpawnFailure> {
+        if launch.harness_kind != HarnessKind::Claude {
+            return Err("only a Claude harness is resumed in a pane".into());
+        }
+        if flow_id.is_empty() || native_session_id.is_empty() {
+            return Err("a resumed harness needs its FlowId and native session".into());
+        }
+        self.spawn_native_harness(
+            launch,
+            pane,
+            Some(flow_id),
+            ClaudeSession::Resumed(native_session_id.to_owned()),
+            harness_arguments,
+        )
+    }
 }
 
 /// The one Herdr `agent start` every launch runs.
@@ -1918,6 +1962,10 @@ impl ConstructsHarnessCommand for HerdrCli {
                 arguments.push("--session-id".into());
                 arguments.push(session);
             }
+            if let Some(session) = resources.claude_resume {
+                arguments.push("--resume".into());
+                arguments.push(session);
+            }
         }
         arguments.push("--model".into());
         arguments.push(launch.launch_profile.model_name.clone());
@@ -2036,13 +2084,23 @@ impl SpawnsNativeHarness for HerdrCli {
             prompt_fd,
             claude_session: match &session {
                 ClaudeSession::Chosen(session) => Some(session.clone()),
-                ClaudeSession::Unchosen | ClaudeSession::Attached(_) => None,
+                ClaudeSession::Unchosen
+                | ClaudeSession::Attached(_)
+                | ClaudeSession::Resumed(_) => None,
+            },
+            claude_resume: match &session {
+                ClaudeSession::Resumed(session) => Some(session.clone()),
+                ClaudeSession::Unchosen | ClaudeSession::Attached(_) | ClaudeSession::Chosen(_) => {
+                    None
+                }
             },
             codex_title: (launch.harness_kind == HarnessKind::Codex)
                 .then(|| CODEX_TERMINAL_TITLE.into()),
             thread: match &session {
                 ClaudeSession::Attached(thread) => Some(thread.clone()),
-                ClaudeSession::Chosen(_) | ClaudeSession::Unchosen => None,
+                ClaudeSession::Chosen(_) | ClaudeSession::Unchosen | ClaudeSession::Resumed(_) => {
+                    None
+                }
             },
         };
         let command = self
@@ -2946,7 +3004,7 @@ pub(crate) mod tests {
     use std::os::unix::net::UnixListener;
     use std::path::Path;
 
-    const SYSTEM_TEXT: &str = "Metaflow: { Field flow Secondary }\nModel: model-current\nEffort: high\nFlow ID: pending\nNative binding: pending\nfixture system prompt";
+    const SYSTEM_TEXT: &str = "Metaflow: { Field flow Sol }\nModel: model-current\nEffort: high\nFlow ID: pending\nNative binding: pending\nfixture system prompt";
 
     fn digest(text: &str) -> String {
         format!(
@@ -2967,7 +3025,7 @@ pub(crate) mod tests {
                 address: signal_flow::Address {
                     aspect: Aspect::Field,
                     topic: "flow".into(),
-                    layer: signal_flow::Layer::Secondary,
+                    model: signal_flow::Model::Sol,
                 },
                 model_name: ModelName::from("model-current"),
                 effort: Effort::from("high"),
@@ -3682,7 +3740,7 @@ printf '%s\n' "$alias"
             .expect("a title")
             .as_str()
             .to_owned();
-        assert_eq!(title, "{ Field flow Secondary 123456 }");
+        assert_eq!(title, "{ Field flow Sol 123456 }");
         let session = adapter
             .reserved_native_session_id(&launch)
             .expect("a Claude launch chooses its session");
@@ -5116,13 +5174,14 @@ printf '%s\n' "$alias"
     fn claude_is_named_at_launch_and_its_title_read_back() {
         let mut launch = launch(HarnessKind::Claude);
         launch.launch_profile.address.aspect = Aspect::Psyche;
+        launch.launch_profile.address.model = signal_flow::Model::Opus;
         launch.launch_profile.model_name = "claude-fable-5-1".into();
         launch.leave_outs = vec![signal_flow::LeaveOut::SkillTool];
         let (root, adapter, session, pane) = reserved_claude(&launch);
         adapter
             .start_native_harness(&launch, &pane, Some("123456"))
             .expect("started without prompt");
-        let expected = "{ Psyche flow Secondary 123456 }";
+        let expected = "{ Psyche flow Opus 123456 }";
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
         let start = calls
             .lines()
@@ -5213,7 +5272,7 @@ printf '%s\n' "$alias"
         let title = adapter
             .title_native_flow(&launch, &binding)
             .expect("no record yet contradicts the terminal title");
-        assert_eq!(title.as_str(), "{ Field flow Secondary 123456 }");
+        assert_eq!(title.as_str(), "{ Field flow Sol 123456 }");
 
         let (root, adapter, _, pane) = reserved_claude(&launch);
         fs::write(
@@ -5267,7 +5326,7 @@ printf '%s\n' "$alias"
     fn a_model_alias_is_titled_from_the_address() {
         let mut launch = launch(HarnessKind::Claude);
         launch.launch_profile.model_name = "haiku".into();
-        launch.launch_profile.address.layer = signal_flow::Layer::Quaternary;
+        launch.launch_profile.address.model = signal_flow::Model::Haiku;
         let (root, adapter, _, pane) = reserved_claude(&launch);
         adapter
             .start_native_harness(&launch, &pane, Some("123456"))
@@ -5278,7 +5337,7 @@ printf '%s\n' "$alias"
         let title = adapter
             .title_native_flow(&launch, &binding)
             .expect("an alias model is titled");
-        assert_eq!(title.as_str(), "{ Field flow Quaternary 123456 }");
+        assert_eq!(title.as_str(), "{ Field flow Haiku 123456 }");
         assert_eq!(
             fs::read_to_string(root.path().join("pane-label"))
                 .unwrap()
@@ -5487,7 +5546,7 @@ printf '%s\n' "$alias"
             "1234567812344abc8def123456789abc",
             &agent_name,
         );
-        let expected = "{ Field flow Secondary 123456 }";
+        let expected = "{ Field flow Sol 123456 }";
         let frame = |json: &str| {
             let mut bytes = vec![0x81, json.len() as u8];
             bytes.extend_from_slice(json.as_bytes());
@@ -5647,7 +5706,7 @@ printf '%s\n' "$alias"
     fn both_harnesses_label_the_workspace_with_the_title_and_never_the_agent_name() {
         for kind in [HarnessKind::Claude, HarnessKind::Codex] {
             let (root, agent_name, title) = titled_launch(kind.clone(), "aa034f");
-            assert_eq!(title, "{ Field flow Secondary aa034f }", "{kind:?}");
+            assert_eq!(title, "{ Field flow Sol aa034f }", "{kind:?}");
             for label in visible_labels(&root) {
                 assert_eq!(label, title, "{kind:?}");
                 assert!(!label.contains(&agent_name), "{kind:?}");
@@ -5700,8 +5759,8 @@ printf '%s\n' "$alias"
         for kind in [HarnessKind::Claude, HarnessKind::Codex] {
             let (first_root, first_agent, first) = titled_launch(kind.clone(), "123456");
             let (second_root, _, second) = titled_launch(kind.clone(), "abcdef");
-            assert_eq!(first, "{ Field flow Secondary 123456 }");
-            assert_eq!(second, "{ Field flow Secondary abcdef }");
+            assert_eq!(first, "{ Field flow Sol 123456 }");
+            assert_eq!(second, "{ Field flow Sol abcdef }");
             let first_labels = visible_labels(&first_root);
             let second_labels = visible_labels(&second_root);
             for (one, other) in first_labels.iter().zip(second_labels.iter()) {

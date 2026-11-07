@@ -22,7 +22,7 @@ use meta_signal_flow::{
     ConfigurationChange, ConfigureMetaflow, ConfigureModel, ConfigureThreshold, Continuity,
 };
 use signal_flow::{
-    Address, Aspect, Caller, FlowLifecycle, Layer, Message, Metaflow, PowerLevel, Request, SentBy,
+    Address, Aspect, Caller, FlowLifecycle, Message, Metaflow, Model, Request, SentBy,
 };
 use std::fs;
 use std::io::Write;
@@ -34,7 +34,7 @@ fn seat_address() -> Address {
     Address {
         aspect: Aspect::Mind,
         topic: "flow".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     }
 }
 
@@ -44,7 +44,6 @@ pub(super) fn seat_refreshing_at(fixture: &NexusFixture, refresh: i64) {
     fixture.nexus.store.seed_role(Caller {
         flow_id: CLAUDE_SEAT.into(),
         aspect: Aspect::Mind,
-        power_level: PowerLevel::Medium,
         model_name: CLAUDE_MODEL.into(),
     });
     fixture
@@ -103,7 +102,7 @@ fn closed(fixture: &NexusFixture) -> bool {
 pub(super) const SUCCESSOR_REQUEST: &str = "refresh-c1a0de";
 
 /// Declares the seat's metaflow, continuing as `continuity`, and the model
-/// its layer and aspect run.
+/// its model and aspect run.
 pub(super) fn declare_seat(
     fixture: &NexusFixture,
     continuity: Continuity,
@@ -128,8 +127,7 @@ pub(super) fn declare_seat(
         .nexus
         .store
         .configure_change(ConfigurationChange::Models(vec![ConfigureModel {
-            layer: Layer::Secondary,
-            aspect: Aspect::Mind,
+            model: Model::Sol,
             native: "fixture-model".into(),
         }]))
         .expect("successor model configured");
@@ -326,7 +324,7 @@ fn a_seat_past_its_threshold_shown_working_is_refreshed_at_its_stop() {
 
 /// An OnDemand seat resting past its threshold whose successor cannot be
 /// composed is not closed: its Address keeps its flow, which is handed what
-/// is queued for it, and the refusal is told once to the metaflow's Up.
+/// is queued for it, and the refusal is told to no flow.
 #[test]
 fn a_seat_whose_successor_cannot_compose_stays_and_is_handed_its_queue() {
     let fixture = NexusFixture::new();
@@ -339,16 +337,27 @@ fn a_seat_whose_successor_cannot_compose_stays_and_is_handed_its_queue() {
     seat_refreshing_at(&fixture, 200_000);
     // No declaration and no launch of the seat's names a successor.
     seat_metaflow(&fixture, vec![Request::Order("Still yours.".into())]);
-    let up = signal_flow::Address {
-        layer: Layer::Primary,
-        ..seat_address()
-    };
-    fixture.nexus.store.seed_metaflow(Metaflow {
-        address: up.clone(),
-        state: State::Asleep,
-        past: vec![],
-        queue: vec![],
-    });
+    // The Astra of the seat's aspect and topic, and the Psyche core Opus
+    // a refused successor was once told to, are held: neither is told.
+    let held = [
+        signal_flow::Address {
+            model: Model::Astra,
+            ..seat_address()
+        },
+        signal_flow::Address {
+            aspect: Aspect::Psyche,
+            topic: "core".into(),
+            model: Model::Opus,
+        },
+    ];
+    for address in &held {
+        fixture.nexus.store.seed_metaflow(Metaflow {
+            address: address.clone(),
+            state: State::Asleep,
+            past: vec![],
+            queue: vec![],
+        });
+    }
 
     fixture
         .nexus
@@ -365,18 +374,20 @@ fn a_seat_whose_successor_cannot_compose_stays_and_is_handed_its_queue() {
         seat_metaflow_now(&fixture).state,
         State::Awake(CLAUDE_SEAT.into())
     );
-    let told = fixture
-        .nexus
-        .store
-        .metaflow(&up)
-        .unwrap()
-        .expect("the Up metaflow")
-        .queue;
-    assert_eq!(told.len(), 1, "the refusal is told once");
-    assert!(matches!(
-        &told[0].message,
-        Message::Soft(Request::Notice(notice)) if notice.contains(CLAUDE_SEAT)
-    ));
+    // The refusal is told to no flow: no message is queued anywhere, and
+    // only the seat's own metaflow and the two held are Flow's.
+    let metaflows = crate::store::ManagesMetaflowState::list_metaflows(&fixture.nexus.store)
+        .expect("metaflows list");
+    assert_eq!(metaflows.len(), 3, "{metaflows:?}");
+    for address in &held {
+        let metaflow = fixture
+            .nexus
+            .store
+            .metaflow(address)
+            .unwrap()
+            .expect("the held metaflow");
+        assert!(metaflow.queue.is_empty(), "{address:?} is told nothing");
+    }
 }
 
 /// An idle OnDemand seat with nothing queued closes its harness either way:
@@ -664,7 +675,6 @@ fn a_codex_seat_due_a_refresh_waits_for_its_thread_to_rest() {
     fixture.nexus.store.seed_role(Caller {
         flow_id: "908786".into(),
         aspect: Aspect::Mind,
-        power_level: PowerLevel::Medium,
         model_name: "fixture-model".into(),
     });
     fixture
@@ -889,4 +899,150 @@ fn unconfirmed_successor_keeps_predecessor_unreaped() {
             .is_some(),
         "the successor stays owed"
     );
+}
+
+const FABLE_MODEL: &str = "claude-fable-5";
+
+fn fable_address(topic: &str) -> Address {
+    Address {
+        aspect: Aspect::Psyche,
+        topic: topic.into(),
+        model: Model::Fable,
+    }
+}
+
+/// The Claude seat runs `FABLE_MODEL` past its 200 000 token threshold,
+/// Awake at `{ Psyche core Fable }` with one Order queued, its metaflow
+/// declared OnDemand; `protected` is the configured ProtectedAddresses.
+fn fable_seat_past_its_threshold(fixture: &NexusFixture, protected: Vec<Address>) {
+    fixture.accept_pane_operations(
+        vec![claude_agent(fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(fixture, 230_000);
+    append_main_rows(fixture, &[end_turn("last-turn")]);
+    fixture.nexus.store.seed_role(Caller {
+        flow_id: CLAUDE_SEAT.into(),
+        aspect: Aspect::Psyche,
+        model_name: FABLE_MODEL.into(),
+    });
+    for change in [
+        ConfigurationChange::Thresholds(vec![ConfigureThreshold {
+            model_name: FABLE_MODEL.into(),
+            refresh: 200_000,
+        }]),
+        ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+            root_option: None,
+            address: fable_address("core"),
+            system_modules: vec!["spirit-core".into()],
+            user_modules: vec!["operation-main-flow".into()],
+            flow_kind: signal_flow::FlowKind::Regular,
+            tool_set: signal_flow::ToolSet::Default,
+            continuity: Continuity::OnDemand,
+            purpose: String::new(),
+            records: vec![],
+        }]),
+        ConfigurationChange::Models(vec![ConfigureModel {
+            model: Model::Fable,
+            native: FABLE_MODEL.into(),
+        }]),
+        ConfigurationChange::ProtectedAddresses(protected),
+    ] {
+        fixture
+            .nexus
+            .store
+            .configure_change(change)
+            .expect("configured");
+    }
+    let mut metaflow = seat_metaflow_with(vec![Request::Order("Kept for this flow.".into())]);
+    metaflow.address = fable_address("core");
+    fixture.nexus.store.seed_metaflow(metaflow);
+    fixture
+        .nexus
+        .store
+        .record_context_size(CLAUDE_SEAT, 230_000)
+        .unwrap();
+}
+
+/// A protected Address's flow past its model's threshold stands Protected:
+/// it is not past it for delivery, a Compact of it is refused as below it,
+/// and at its Stop it is neither closed nor stopped, its metaflow Awake as
+/// it and its queued work handed to it.
+#[test]
+fn a_protected_seat_past_its_threshold_is_kept_and_handed_its_work() {
+    use crate::store::context::JudgesCompaction;
+    let fixture = NexusFixture::new();
+    fable_seat_past_its_threshold(&fixture, vec![fable_address("core")]);
+    assert_eq!(
+        fixture.nexus.store.threshold_standing(CLAUDE_SEAT).unwrap(),
+        ThresholdStanding::Protected {
+            context: 230_000,
+            refresh: 200_000
+        }
+    );
+    assert!(!fixture.nexus.store.past_threshold(CLAUDE_SEAT).unwrap());
+    assert_eq!(
+        fixture.nexus.store.compaction_refusal(CLAUDE_SEAT).unwrap(),
+        Some(meta_signal_flow::CompactionRefusal::BelowThreshold(
+            meta_signal_flow::ContextBelowThreshold {
+                context_tokens: 230_000,
+                refresh_tokens: 200_000,
+            }
+        ))
+    );
+
+    fixture
+        .nexus
+        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+
+    assert!(!closed(&fixture), "the protected seat's pane stays");
+    assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Active);
+    let metaflow = fixture
+        .nexus
+        .store
+        .metaflow(&fable_address("core"))
+        .unwrap()
+        .expect("metaflow held");
+    assert_eq!(metaflow.state, State::Awake(CLAUDE_SEAT.into()));
+    assert!(metaflow.past.is_empty());
+    assert!(
+        fixture
+            .typed()
+            .is_some_and(|typed| typed.contains("Kept for this flow.")),
+        "the queued work is handed to the protected seat: {:?}",
+        fixture.typed()
+    );
+}
+
+/// A Fable seat whose Address is not protected is refreshed past its
+/// threshold as any seat is, though another Address is protected: its pane
+/// closed, its flow Stopped, its metaflow Asleep with its work kept.
+#[test]
+fn an_unprotected_fable_seat_past_its_threshold_is_refreshed() {
+    let fixture = NexusFixture::new();
+    fable_seat_past_its_threshold(&fixture, vec![fable_address("other")]);
+    assert_eq!(
+        fixture.nexus.store.threshold_standing(CLAUDE_SEAT).unwrap(),
+        ThresholdStanding::Past {
+            context: 230_000,
+            refresh: 200_000
+        }
+    );
+
+    fixture
+        .nexus
+        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+
+    assert!(closed(&fixture), "the seat's pane is closed");
+    assert!(fixture.typed().is_none(), "nothing is typed into it");
+    assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
+    let metaflow = fixture
+        .nexus
+        .store
+        .metaflow(&fable_address("core"))
+        .unwrap()
+        .expect("metaflow held");
+    assert_eq!(metaflow.state, State::Asleep);
+    assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
+    assert_eq!(metaflow.queue.len(), 1, "the work waits for the next flow");
 }

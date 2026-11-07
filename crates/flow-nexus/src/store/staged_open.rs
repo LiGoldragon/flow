@@ -1,80 +1,46 @@
-//! An open that changes a store's families lands whole or not at all.
+//! An open that adds a store's families lands whole or not at all.
 //!
-//! Sema Engine lands each family upgrade, each re-keying and each new
-//! family registration in a write transaction of its own, and offers no
-//! transaction that spans families; one open of an older store is therefore
-//! several commits. Such an open runs first on a copy beside the store, and
-//! only when that open has succeeded does the copy replace the store, by one
-//! rename. A refusal, an error or a crash before the rename leaves the store
-//! byte for byte as it was; after it, the store is wholly upgraded.
+//! The first running open of a configuration-only store adds the running
+//! families. Sema Engine lands each new family registration in a write
+//! transaction of its own, and offers no transaction that spans families;
+//! that open is therefore several commits. It runs first on a copy beside
+//! the store, and only when that open has succeeded does the copy replace
+//! the store, by one rename. A refusal, an error or a crash before the
+//! rename leaves the store byte for byte as it was; after it, the store
+//! holds every running family.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use redb::{ReadableDatabase as _, ReadableTable as _, TableHandle as _};
+use redb::{ReadableDatabase as _, ReadableTable as _};
 use sema_engine::TableRegistration;
 
-use super::{
-    ADDED_LATER_TABLES, CONFIGURATION_ONLY_ADDED_TABLES, CONFIGURATION_ONLY_TABLES, FlowStore,
-    RETIRED_TABLES, RUNNING_TABLES, ReadsFlowMemory, SEMA_CATALOG_TABLE, StoreError,
-};
+use super::{FlowStore, RUNNING_TABLES, ReadsFlowMemory, SEMA_CATALOG_TABLE, StoreError};
 
-/// The tables one entry point registers, and so may add or upgrade.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UpgradeScope {
-    /// The configuration-only open: the configuration tables, the
-    /// leave-out defaults and the send servers.
-    ConfigurationOnly,
-    /// The Nexus's open: every table a running store holds.
-    Running,
-}
-
-trait NamesScopeTables {
-    fn tables(&self) -> Vec<&'static str>;
-}
-
-impl NamesScopeTables for UpgradeScope {
-    fn tables(&self) -> Vec<&'static str> {
-        match self {
-            UpgradeScope::ConfigurationOnly => CONFIGURATION_ONLY_TABLES
-                .iter()
-                .chain(CONFIGURATION_ONLY_ADDED_TABLES)
-                .copied()
-                .collect(),
-            UpgradeScope::Running => RUNNING_TABLES
-                .iter()
-                .chain(ADDED_LATER_TABLES)
-                .copied()
-                .collect(),
-        }
-    }
-}
-
-/// A copy of the store an open upgrades in place of the store itself.
+/// A copy of the store an open adds families to in place of the store itself.
 ///
 /// While it stands it holds the store's whole-file lock, the lock every
 /// redb open of the store also takes, so no other open reads or writes the
 /// store under it. Dropped without landing, it removes its copy.
-pub(crate) struct StagedUpgrade {
+pub(crate) struct StagedOpen {
     store: PathBuf,
     copy: PathBuf,
     exclusion: Option<File>,
     keeps_copy: bool,
 }
 
-pub(crate) trait StagesUpgrade: Sized {
-    /// Runs `open` on a staged copy when opening `store` in `scope` would
-    /// change it, and lands the copy over the store once `open` has
-    /// returned. `None` when the store is absent or already current; the
-    /// store is then opened in place alone.
+pub(crate) trait StagesOpen: Sized {
+    /// Runs `open` on a staged copy when a running open of `store` would
+    /// add families to it, and lands the copy over the store once `open`
+    /// has returned. `None` when the store is absent or already holds every
+    /// running family; the store is then opened in place alone.
     fn run<T>(
         store: &Path,
-        scope: UpgradeScope,
         open: impl FnOnce(&Path) -> Result<T, StoreError>,
     ) -> Result<Option<T>, StoreError>;
 
-    /// Stages a copy when opening `store` in `scope` would change it.
-    fn begin(store: &Path, scope: UpgradeScope) -> Result<Option<Self>, StoreError>;
+    /// Stages a copy when a running open of `store` would add families.
+    fn begin(store: &Path) -> Result<Option<Self>, StoreError>;
 
     fn copy(&self) -> &Path;
 
@@ -87,17 +53,16 @@ pub(crate) trait StagesUpgrade: Sized {
 
     fn copy_prefix(store: &Path) -> Result<String, StoreError>;
 
-    /// Replaces the store with the upgraded copy in one rename.
+    /// Replaces the store with the opened copy in one rename.
     fn land(self) -> Result<(), StoreError>;
 }
 
-impl StagesUpgrade for StagedUpgrade {
+impl StagesOpen for StagedOpen {
     fn run<T>(
         store: &Path,
-        scope: UpgradeScope,
         open: impl FnOnce(&Path) -> Result<T, StoreError>,
     ) -> Result<Option<T>, StoreError> {
-        let Some(staged) = Self::begin(store, scope)? else {
+        let Some(staged) = Self::begin(store)? else {
             return Ok(None);
         };
         // The copy's Engine is dropped when `open` returns, before landing.
@@ -106,9 +71,9 @@ impl StagesUpgrade for StagedUpgrade {
         Ok(Some(opened))
     }
 
-    fn begin(store: &Path, scope: UpgradeScope) -> Result<Option<Self>, StoreError> {
+    fn begin(store: &Path) -> Result<Option<Self>, StoreError> {
         let failed = |action: &str, error: &dyn std::fmt::Display| {
-            StoreError::StagedUpgrade(format!("{action} {}: {error}", store.display()))
+            StoreError::StagedOpen(format!("{action} {}: {error}", store.display()))
         };
         if !store.exists() {
             return Ok(None);
@@ -117,7 +82,7 @@ impl StagesUpgrade for StagedUpgrade {
             path: store.display().to_string(),
         };
         // Every open clears the copies a crash left, whether or not it
-        // upgrades; the lock is released again before the store is read,
+        // adds families; the lock is released again before the store is read,
         // since a read opens the store under the same whole-file lock.
         {
             let exclusion = File::open(store).map_err(|error| failed("cannot open", &error))?;
@@ -135,12 +100,12 @@ impl StagesUpgrade for StagedUpgrade {
         }
         match redb::ReadOnlyDatabase::open(store) {
             Ok(reader) => {
-                if !FlowStore::upgrade_pending(&reader, scope)? {
+                if !FlowStore::families_pending(&reader)? {
                     return Ok(None);
                 }
             }
             // A store left uncleanly cannot be read without repair; its copy
-            // is repaired by the open that upgrades it.
+            // is repaired by the open that adds its families.
             Err(redb::DatabaseError::RepairAborted) => {}
             Err(redb::DatabaseError::DatabaseAlreadyOpen) => return Err(held()),
             Err(error) => return Err(failed("cannot read", &error)),
@@ -191,16 +156,16 @@ impl StagesUpgrade for StagedUpgrade {
 
     fn copy_prefix(store: &Path) -> Result<String, StoreError> {
         let name = store.file_name().ok_or(StoreError::InvalidStorePath)?;
-        Ok(format!(".{}.upgrade-", name.to_string_lossy()))
+        Ok(format!(".{}.open-", name.to_string_lossy()))
     }
 
     fn land(mut self) -> Result<(), StoreError> {
         let failed = |action: &str, error: &dyn std::fmt::Display| {
-            StoreError::StagedUpgrade(format!("{action} {}: {error}", self.store.display()))
+            StoreError::StagedOpen(format!("{action} {}: {error}", self.store.display()))
         };
         File::open(&self.copy)
             .and_then(|copy| copy.sync_all())
-            .map_err(|error| failed("cannot sync the upgraded copy of", &error))?;
+            .map_err(|error| failed("cannot sync the opened copy of", &error))?;
         std::fs::rename(&self.copy, &self.store)
             .map_err(|error| failed("cannot replace", &error))?;
         self.keeps_copy = true;
@@ -214,20 +179,20 @@ impl StagesUpgrade for StagedUpgrade {
 }
 
 #[cfg(test)]
-pub(crate) trait InterruptsStagedUpgrade {
+pub(crate) trait InterruptsStagedOpen {
     /// Ends the staging as a crash would: the locks fall with the process
     /// and the copy stays, never landed.
     fn crash(self);
 }
 
 #[cfg(test)]
-impl InterruptsStagedUpgrade for StagedUpgrade {
+impl InterruptsStagedOpen for StagedOpen {
     fn crash(mut self) {
         self.keeps_copy = true;
     }
 }
 
-impl Drop for StagedUpgrade {
+impl Drop for StagedOpen {
     fn drop(&mut self) {
         if !self.keeps_copy {
             let _ = std::fs::remove_file(&self.copy);
@@ -238,33 +203,18 @@ impl Drop for StagedUpgrade {
     }
 }
 
-trait ReadsPendingUpgrade {
-    fn upgrade_pending(
-        reader: &redb::ReadOnlyDatabase,
-        scope: UpgradeScope,
-    ) -> Result<bool, StoreError>;
+trait ReadsPendingFamilies {
+    fn families_pending(reader: &redb::ReadOnlyDatabase) -> Result<bool, StoreError>;
 }
 
-impl ReadsPendingUpgrade for FlowStore {
-    /// Whether opening in `scope` would write the catalog: a retired table
-    /// to drop, or a table of the scope absent or registered under an
-    /// identity other than its current one.
-    fn upgrade_pending(
-        reader: &redb::ReadOnlyDatabase,
-        scope: UpgradeScope,
-    ) -> Result<bool, StoreError> {
+impl ReadsPendingFamilies for FlowStore {
+    /// Whether a running open would write the catalog: a running table
+    /// absent, or registered under an identity other than its current one.
+    fn families_pending(reader: &redb::ReadOnlyDatabase) -> Result<bool, StoreError> {
         let failed = |error: &dyn std::fmt::Display| {
-            StoreError::StagedUpgrade(format!("cannot read the family catalog: {error}"))
+            StoreError::StagedOpen(format!("cannot read the family catalog: {error}"))
         };
         let read = reader.begin_read().map_err(|error| failed(&error))?;
-        let retired = |name: &str| RETIRED_TABLES.iter().any(|(table, _, _)| *table == name);
-        if read
-            .list_tables()
-            .map_err(|error| failed(&error))?
-            .any(|table| retired(table.name()))
-        {
-            return Ok(true);
-        }
         let catalog = read
             .open_table(SEMA_CATALOG_TABLE)
             .map_err(|error| failed(&error))?;
@@ -272,9 +222,6 @@ impl ReadsPendingUpgrade for FlowStore {
         for entry in catalog.iter().map_err(|error| failed(&error))? {
             let (table_key, bytes) = entry.map_err(|error| failed(&error))?;
             let table_key = table_key.value();
-            if retired(table_key) {
-                return Ok(true);
-            }
             let registration =
                 rkyv::from_bytes::<TableRegistration, rkyv::rancor::Error>(bytes.value())
                     .map_err(|error| failed(&error))?;
@@ -290,6 +237,6 @@ impl ReadsPendingUpgrade for FlowStore {
                 current.insert(table_key.to_owned());
             }
         }
-        Ok(scope.tables().iter().any(|table| !current.contains(*table)))
+        Ok(RUNNING_TABLES.iter().any(|table| !current.contains(*table)))
     }
 }

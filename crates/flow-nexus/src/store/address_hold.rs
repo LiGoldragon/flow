@@ -14,25 +14,21 @@
 //! A confirmed flow that ends (Stopped, Retired or Exited) while its
 //! metaflow is Awake as it puts the metaflow to sleep in the same write,
 //! the flow joining Past: a topic never dies, its flows are turned off.
-//!
-//! The row lives in its own table, so a store written before holds were
-//! kept opens with the table added and holds nothing.
 
-use super::message_v41::MetaflowV41;
 use super::metaflow::{AddressTaking, SleepsMetaflows, TakesLaunchAddress, WritesTakenAddress};
 use super::{
     FlowStore, ManagesMetaflowState, MetaflowState, ReadsFlowMemory, StoreError, StoredMetaflow,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    AtomicCommit, Decision, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan,
-    RecordKey, SchemaHash, TableDescriptor, TableName, UpgradeFrom,
+    AtomicCommit, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey,
+    SchemaHash, TableDescriptor, TableName,
 };
 use signal_flow::{Address, LaunchProfile, Metaflow, StartRejection};
 
 pub(super) const ADDRESS_HOLD_TABLE_NAME: TableName = TableName::new("flow_nexus_address_holds");
 pub(super) const ADDRESS_HOLD_FAMILY: &str = "flow-nexus-address-hold";
-pub(super) const ADDRESS_HOLD_SCHEMA: &str = "flow-nexus-address-hold-v5";
+pub(super) const ADDRESS_HOLD_SCHEMA: &str = "flow-nexus-address-hold-v6";
 
 /// The Address a launched flow holds, and the metaflow it found there.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -50,161 +46,11 @@ impl EngineRecord for AddressHold {
 
 impl MemoryDefinition for AddressHold {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(5)
+        MemoryVersion::new(6)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-address-hold-v5")
-    }
-}
-
-/// The current hold through Flow 0.41, whose found metaflow embeds the old
-/// Result(String) request shape.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AddressHoldV4 {
-    flow_id: String,
-    address: Address,
-    found: Option<MetaflowV41>,
-}
-
-impl EngineRecord for AddressHoldV4 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.flow_id.clone())
-    }
-}
-
-impl MemoryDefinition for AddressHoldV4 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-address-hold-v4")
-    }
-}
-
-impl UpgradeFrom<AddressHoldV4> for AddressHold {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: AddressHoldV4) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            flow_id: previous.flow_id,
-            address: previous.address,
-            found: previous.found.map(Into::into),
-        })
-    }
-}
-
-/// An Address hold as Flow 0.35.22 to 0.37.2 kept it, before `SentBy`
-/// named Flow. The variant is appended, so its bytes read as the current
-/// hold; the v3-to-v4 upgrade moves it unchanged.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AddressHoldV3 {
-    flow_id: String,
-    address: Address,
-    found: Option<MetaflowV41>,
-}
-
-impl EngineRecord for AddressHoldV3 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.flow_id.clone())
-    }
-}
-
-impl MemoryDefinition for AddressHoldV3 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-address-hold-v3")
-    }
-}
-
-impl UpgradeFrom<AddressHoldV3> for AddressHold {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: AddressHoldV3) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            flow_id: previous.flow_id,
-            address: previous.address,
-            found: previous.found.map(Into::into),
-        })
-    }
-}
-
-/// An Address hold as Flow 0.35.7 to 0.35.21 kept it, the metaflow it
-/// found possibly Ended. It is read only by the v2-to-v4 upgrade, which
-/// carries an ended metaflow Asleep.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AddressHoldV2 {
-    flow_id: String,
-    address: Address,
-    found: Option<super::MetaflowBeforeIdle>,
-}
-
-impl EngineRecord for AddressHoldV2 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.flow_id.clone())
-    }
-}
-
-impl MemoryDefinition for AddressHoldV2 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(2)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-address-hold-v2")
-    }
-}
-
-impl UpgradeFrom<AddressHoldV2> for AddressHold {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: AddressHoldV2) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            flow_id: previous.flow_id,
-            address: previous.address,
-            found: previous.found.map(Metaflow::from),
-        })
-    }
-}
-
-/// An Address hold as Flow kept it before 0.35.7, the metaflow it found
-/// holding bare requests. It is read only by the v1-to-v4 upgrade.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AddressHoldV1 {
-    flow_id: String,
-    address: Address,
-    found: Option<super::MetaflowBeforeSenders>,
-}
-
-impl EngineRecord for AddressHoldV1 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.flow_id.clone())
-    }
-}
-
-impl MemoryDefinition for AddressHoldV1 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-address-hold-v1")
-    }
-}
-
-impl UpgradeFrom<AddressHoldV1> for AddressHold {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: AddressHoldV1) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            flow_id: previous.flow_id,
-            address: previous.address,
-            found: previous.found.map(Metaflow::from),
-        })
+        SchemaHash::for_label(ADDRESS_HOLD_SCHEMA)
     }
 }
 
@@ -219,10 +65,6 @@ impl DescribesAddressHoldTable for AddressHold {
             FamilyName::new(ADDRESS_HOLD_FAMILY),
             AddressHold::schema_hash(),
         )
-        .with_predecessor::<AddressHoldV4>()
-        .with_predecessor::<AddressHoldV1>()
-        .with_predecessor::<AddressHoldV2>()
-        .with_predecessor::<AddressHoldV3>()
     }
 }
 

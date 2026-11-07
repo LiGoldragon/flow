@@ -79,9 +79,11 @@ impl RemindsCallers for RunningNexus {
                     continue;
                 };
                 let (sent, next) = reminder.advanced(task_words, now);
-                let mut notices = vec![(sent.address.clone(), sent.notice.clone())];
-                notices.extend(sent.failure.clone());
-                for (address, notice) in notices {
+                // The last reminder's failure goes to the same sender, after
+                // it: a Notice from Flow, which no reminder follows.
+                let notices = std::iter::once(sent.notice.clone()).chain(sent.failure.clone());
+                for notice in notices {
+                    let address = sent.address.clone();
                     match self.store.accept_logical_delivery(
                         &address,
                         SentBy::Flow,

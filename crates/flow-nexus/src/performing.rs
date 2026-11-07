@@ -8,7 +8,7 @@ use crate::RunningNexus;
 use crate::codex::{
     AccountsOpenedThread, OpensCodexThread, SelectsCodexEndpoint, SubmitsBoundCodexPart,
 };
-use crate::composition::{ComposesLaunch, CompositionError, HarnessedProfile};
+use crate::composition::{ComposesInRoot, CompositionError, HandoverRoot, HarnessedProfile};
 use crate::generated::operation::{
     Failed_Data, Open_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Asleep_Data,
     Record_Data_Awoken_Data, Record_Data_Context_Data, Record_Data_Harness_Data,
@@ -248,13 +248,28 @@ impl Performs for RunningNexus {
                         Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
                     }
                 };
-                match self.composer.compose(
+                // A successor's handover is read under the root its flow runs
+                // in. A launch that names no predecessor needs none; one that
+                // names a predecessor and whose root cannot be resolved is
+                // refused if it is given a handover.
+                let launch_root = match profile.flow_id_option {
+                    None => None,
+                    Some(_) => Some(self.launch_root(&profile.address).inspect_err(|rejection| {
+                        eprintln!("flow-nexus: launch {request} root unresolved: {rejection:?}");
+                    })),
+                };
+                match self.composer.compose_in_root(
                     HarnessedProfile {
                         remembered_flows,
                         harness_kind,
                         launch_profile: profile,
                     },
                     default,
+                    match &launch_root {
+                        None => HandoverRoot::Unread,
+                        Some(Ok(root)) => HandoverRoot::At(std::path::Path::new(root)),
+                        Some(Err(_)) => HandoverRoot::Unresolved,
+                    },
                 ) {
                     Ok(launch) => Outcome::Composed(launch),
                     Err(CompositionError::LeaveOut(refusal)) => {
@@ -273,6 +288,19 @@ impl Performs for RunningNexus {
                         eprintln!("flow-nexus: launch {request} not composed: {error}");
                         Outcome::Failed(Failed_Data::CompositionRefused(
                             signal_flow::CompositionRefusal::PresentationUnavailable,
+                        ))
+                    }
+                    Err(CompositionError::HandoverUnreadable { predecessor, fault }) => {
+                        eprintln!(
+                            "flow-nexus: launch {request} not composed: the handover of {predecessor} could not be read: {fault:?}"
+                        );
+                        Outcome::Failed(Failed_Data::CompositionRefused(
+                            signal_flow::CompositionRefusal::HandoverUnreadable(
+                                signal_flow::HandoverUnreadable_Data {
+                                    flow_id: predecessor,
+                                    handover_fault: fault,
+                                },
+                            ),
                         ))
                     }
                 }
@@ -512,6 +540,50 @@ impl Performs for RunningNexus {
                 true => Outcome::Closed,
                 false => Outcome::Failed(Failed_Data::HerdrRefused),
             },
+            // A restart's resume: the session the flow holds, in the new
+            // pane, with its FlowId; no prompt follows.
+            Operation::Resume(PaneLaunch {
+                composed_launch,
+                herdr_pane_binding,
+                flow_id_option,
+                native_session_id_option,
+                harness_arguments,
+                ..
+            }) => {
+                use crate::herdr::launch::ResumesClaudeHarness;
+                let (Some(flow_id), Some(session)) = (flow_id_option, native_session_id_option)
+                else {
+                    return NativeLaunchRefusal::refused(
+                        NativeLaunchStage::Spawn,
+                        "a resume needs its FlowId and native session".into(),
+                    );
+                };
+                match self.herdr.resume_configured_claude_harness(
+                    &composed_launch,
+                    &herdr_pane_binding,
+                    &flow_id,
+                    &session,
+                    &harness_arguments,
+                ) {
+                    Ok(()) => Outcome::Spawned(None),
+                    Err(SpawnFailure::Refused(spawn_refusal_cause)) => Outcome::Failed(
+                        Failed_Data::SpawnRefused(signal_flow::HarnessSpawnRefusal {
+                            spawn_refusal_cause,
+                            opened_thread_option: None,
+                        }),
+                    ),
+                    Err(SpawnFailure::Unattempted(error)) => {
+                        NativeLaunchRefusal::refused(NativeLaunchStage::Spawn, error)
+                    }
+                }
+            }
+            Operation::Discard(pane) => {
+                use crate::restarting::DiscardsCreatedPane;
+                match self.herdr.discard_created(&pane) {
+                    true => Outcome::Closed,
+                    false => Outcome::Failed(Failed_Data::HerdrRefused),
+                }
+            }
             Operation::Wake(address) => self.wake(address),
             Operation::Drain(address) => self.drain(address),
         }
@@ -615,6 +687,17 @@ impl PerformsInParts for RunningNexus {
             // now running another session is never closed. The close takes
             // no pane lease: an exit is recorded where a write may already
             // hold it, and nothing more is typed into an exited flow.
+            // A flow a restart holds has not ended: the pane it left is the
+            // restart's to close, and its seat's own exit is fenced.
+            Record_Data::Exited(flow_id)
+                if !matches!(
+                    crate::store::restart::RecordsRestarts::restart_record(&self.store, &flow_id),
+                    Ok(None)
+                ) =>
+            {
+                eprintln!("flow-nexus: flow {flow_id} is restarting; no exit is recorded for it");
+                Outcome::Failed(Failed_Data::Restarting)
+            }
             Record_Data::Exited(flow_id) => {
                 let node = self.store.flow_node(&flow_id).ok().flatten();
                 let recorded = self.store.record_exited(&flow_id).recorded();
@@ -661,6 +744,14 @@ impl PerformsInParts for RunningNexus {
                         .recorded(),
                     Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
                 }
+            }
+            Record_Data::Restart(record) => {
+                use crate::store::restart::RecordsRestarts;
+                self.store.record_restart(record).recorded()
+            }
+            Record_Data::Rebound(birth) => {
+                use crate::store::restart::RecordsRestarts;
+                self.store.rebind_restarted(birth).recorded()
             }
             Record_Data::Context(Record_Data_Context_Data { flow_id, tokens }) => {
                 use crate::store::context::RecordsContextSize;

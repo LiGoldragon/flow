@@ -116,7 +116,7 @@ impl NamesMetaPeer for RunningNexus {
 }
 
 /// Whether a pane holds a live flow, whatever its role.
-trait FindsFlowInPane {
+pub(crate) trait FindsFlowInPane {
     fn pane_holds_flow(&self, pane: &CallerPane) -> bool;
 }
 

@@ -23,8 +23,8 @@ use crate::{HoldsStopRequest, generated::send_tool::DeclaresSendTool};
 use flow_ethos::State;
 use meta_signal_flow::QueueEvidence;
 use signal_flow::{
-    Address, Aspect, Caller, FlowNode, HerdrRoute, HerdrRouteSelection, Layer, Message, Metaflow,
-    PowerLevel, QueueEntry, Request, SentBy,
+    Address, Aspect, Caller, FlowNode, HerdrRoute, HerdrRouteSelection, Message, Metaflow, Model,
+    QueueEntry, Request, SentBy,
 };
 use std::{
     path::{Path, PathBuf},
@@ -51,24 +51,24 @@ fn queue_entry(id: impl Into<String>, queued: TestRequest) -> QueueEntry {
     }
 }
 
-fn address(topic: &str, layer: Layer) -> Address {
+fn address(topic: &str, model: Model) -> Address {
     Address {
         aspect: Aspect::Mind,
         topic: topic.into(),
-        layer,
+        model,
     }
 }
 
 fn sender_a() -> Address {
-    address("alpha", Layer::Tertiary)
+    address("alpha", Model::Luna)
 }
 
 fn sender_b() -> Address {
-    address("beta", Layer::Tertiary)
+    address("beta", Model::Luna)
 }
 
 fn target() -> Address {
-    address("gamma", Layer::Secondary)
+    address("gamma", Model::Sol)
 }
 
 /// One server-to-client WebSocket text frame, as `printf %b` octal escapes.
@@ -114,7 +114,7 @@ fn send_request(
                 "target": {
                     "aspect": format!("{:?}", to.aspect),
                     "topic": to.topic,
-                    "layer": format!("{:?}", to.layer)
+                    "model": format!("{:?}", to.model)
                 },
             "priority": "Soft",
             "kind": kind,
@@ -133,7 +133,7 @@ fn tool_call(thread: &str, call: &str, body: &str) -> ToolCall {
         },
         tool_name: SendTool::tool_name(),
         arguments: serde_json::json!({
-            "target": { "aspect": "Mind", "topic": "gamma", "layer": "Secondary" },
+            "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
             "priority": "Soft",
             "kind": "Order",
             "body": body
@@ -433,7 +433,6 @@ impl SeatsCodexFlows for NexusFixture {
                 Caller {
                     flow_id: flow_id.into(),
                     aspect: Aspect::Mind,
-                    power_level: PowerLevel::Medium,
                     model_name: model.into(),
                 },
             )
@@ -673,7 +672,7 @@ fn a_call_queued_before_a_crash_is_answered_from_its_record_when_replayed() {
 
 /// The launched Claude seat's metaflow, Asleep with nothing queued.
 fn asleep_target() -> Address {
-    address("flow", Layer::Secondary)
+    address("flow", Model::Sol)
 }
 
 trait SeatsAsleepTargets {
@@ -747,7 +746,7 @@ fn dynamic_send_requires_priority() {
 
     let mut old_shape = explicit;
     old_shape.arguments = serde_json::json!({
-        "target": { "aspect": "Mind", "topic": "gamma", "layer": "Secondary" },
+        "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
         "kind": "Order",
         "body": "old implicit policy"
     })
@@ -762,7 +761,7 @@ fn soft_dynamic_admission_queues_without_waking() {
     fixture.asleep_at(asleep_target());
     let mut call = tool_call(THREAD_A, "queue-only", "retain this");
     call.arguments = serde_json::json!({
-        "target": { "aspect": "Mind", "topic": "flow", "layer": "Secondary" },
+        "target": { "aspect": "Mind", "topic": "flow", "model": "Sol" },
         "priority": "Soft",
         "kind": "Order",
         "body": "retain this"
@@ -838,7 +837,7 @@ fn a_malformed_call_is_refused_and_recorded() {
     fixture.awake_target();
     let mut call = tool_call(THREAD_A, "call-m", "x");
     call.arguments = serde_json::json!({
-        "target": { "aspect": "Mind", "topic": "gamma", "layer": "Secondary" },
+        "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
         "kind": "Psyche",
         "body": "the living's words are not a flow's to send"
     })
@@ -870,7 +869,7 @@ fn a_call_to_a_topic_that_is_not_camel_case_is_refused_as_written() {
     for (call_id, topic) in [("call-capital", "Gamma"), ("call-snake", "gamma_two")] {
         let mut call = tool_call(THREAD_A, call_id, "x");
         call.arguments = serde_json::json!({
-            "target": { "aspect": "Mind", "topic": topic, "layer": "Secondary" },
+            "target": { "aspect": "Mind", "topic": topic, "model": "Sol" },
             "priority": "Soft",
             "kind": "Order",
             "body": "x"
@@ -1024,7 +1023,7 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
             vec![signal_flow::LeaveOut::CodexAgentsMd],
         )
         .expect("launch composes");
-    let instruction = "Call the send tool exactly once with target aspect Mind, topic flow, layer Secondary, kind Order and body witness-order. Then reply with the exact text the tool returned.";
+    let instruction = "Call the send tool exactly once with target aspect Mind, topic flow, model Sol, kind Order and body witness-order. Then reply with the exact text the tool returned.";
     let digest = format!("{:x}", Sha256::digest(instruction.as_bytes()));
     launch.first_prompt_payload.first_prompt_body = instruction.into();
     launch.first_prompt_payload.prompt_sha256 = digest.clone();
@@ -1035,9 +1034,7 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
     launch.target_receipt_request.prompt_sha256 = digest;
 
     let (thread, mut connection) = adapter
-        .open_thread(&launch, &mut |_| {
-            Ok("{ Mind flow Secondary witness }".into())
-        })
+        .open_thread(&launch, &mut |_| Ok("{ Mind flow Sol witness }".into()))
         .expect("the thread opens declaring the send tool");
     start_first_turn(&mut connection, &launch, &thread);
     drop(connection);
@@ -1180,7 +1177,7 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
             vec![signal_flow::LeaveOut::CodexAgentsMd],
         )
         .expect("launch composes");
-    let instruction = "Call the send tool exactly once with target aspect Mind, topic flow, layer Secondary, kind Order and body first-turn-witness. Then reply with the exact text the tool returned, and end your turn.";
+    let instruction = "Call the send tool exactly once with target aspect Mind, topic flow, model Sol, kind Order and body first-turn-witness. Then reply with the exact text the tool returned, and end your turn.";
     let digest = format!("{:x}", Sha256::digest(instruction.as_bytes()));
     launch.first_prompt_payload.first_prompt_body = instruction.into();
     launch.first_prompt_payload.prompt_sha256 = digest.clone();
@@ -1235,7 +1232,7 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
                     .unwrap()
             );
             eprintln!("witness thread {thread} recorded before its first turn");
-            Ok("{ Field flow Secondary witness }".into())
+            Ok("{ Field flow Sol witness }".into())
         })
         .expect("the thread opens and is named");
     start_first_turn(&mut connection, &launch, &thread);
@@ -1328,7 +1325,7 @@ fn witness_interrupted_launch_first_half_exits_with_its_call_pending() {
             vec![signal_flow::LeaveOut::CodexAgentsMd],
         )
         .expect("launch composes");
-    let instruction = "Call the send tool exactly once with target aspect Mind, topic flow, layer Secondary, kind Order and body interrupted-witness. Then reply with the exact text the tool returned, and end your turn.";
+    let instruction = "Call the send tool exactly once with target aspect Mind, topic flow, model Sol, kind Order and body interrupted-witness. Then reply with the exact text the tool returned, and end your turn.";
     let digest = format!("{:x}", Sha256::digest(instruction.as_bytes()));
     launch.first_prompt_payload.first_prompt_body = instruction.into();
     launch.first_prompt_payload.prompt_sha256 = digest.clone();
@@ -1372,7 +1369,7 @@ fn witness_interrupted_launch_first_half_exits_with_its_call_pending() {
                     .record_opened_thread(&profile.launch_request_id, thread)
                     .unwrap()
             );
-            Ok("{ Field flow Secondary witness }".into())
+            Ok("{ Field flow Sol witness }".into())
         })
         .expect("the thread opens and is named");
     start_first_turn(&mut connection, &launch, &thread);
@@ -1498,10 +1495,10 @@ fn a_queued_request_is_rendered_as_its_datom_in_one_vector() {
     let prompt = queue.prompt_text(&seat_at());
     assert_eq!(
         prompt,
-        "[ { Sender.{ Mind alpha Tertiary } Soft.Order.«Carry on.» } { Unknown Soft.Notice.kept } ]"
+        "[ { Sender.{ Mind alpha Luna } Soft.Order.«Carry on.» } { Unknown Soft.Notice.kept } ]"
     );
     assert_eq!(prompt.matches("Sender.").count(), 1);
-    assert!(!prompt.contains("{ Mind flow Secondary }"));
+    assert!(!prompt.contains("{ Mind flow Sol }"));
     assert!(!prompt.contains("logical-delivery-"));
 }
 
@@ -1510,7 +1507,7 @@ fn a_queued_request_is_rendered_as_its_datom_in_one_vector() {
 const SEAT_THREAD: &str = "01a0b22c-e24f-7452-9940-64490878680f";
 
 fn seat_at() -> Address {
-    address("flow", Layer::Secondary)
+    address("flow", Model::Sol)
 }
 
 /// Who sends the seat its work: the core Secondary of Psyche.
@@ -1518,7 +1515,7 @@ fn core() -> Address {
     Address {
         aspect: Aspect::Psyche,
         topic: "core".into(),
-        layer: Layer::Secondary,
+        model: Model::Opus,
     }
 }
 
@@ -1526,7 +1523,7 @@ fn core_primary() -> Address {
     Address {
         aspect: Aspect::Psyche,
         topic: "core".into(),
-        layer: Layer::Primary,
+        model: Model::Fable,
     }
 }
 
@@ -1558,7 +1555,7 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
         .unwrap();
     assert!(matches!(authorized, SendOutcome::Accepted(_)));
 
-    let unauthorized_sender = address("not-core", Layer::Secondary);
+    let unauthorized_sender = address("not-core", Model::Sol);
     let unauthorized = fixture
         .nexus
         .store
@@ -1648,7 +1645,6 @@ impl SeatsAwakeCodexSeat for NexusFixture {
                 Caller {
                     flow_id: "908786".into(),
                     aspect: Aspect::Mind,
-                    power_level: PowerLevel::Medium,
                     model_name: "gpt-sol".into(),
                 },
             ),
@@ -1751,7 +1747,7 @@ fn a_codex_native_event_delivers_the_oldest_cohort_through_its_pane() {
             && typed.find("Your brief.") < typed.find("Then report."),
         "the whole Codex cohort is placed oldest first: {typed}"
     );
-    assert!(typed.contains("Sender.{ Psyche core Secondary }"));
+    assert!(typed.contains("Sender.{ Psyche core Opus }"));
     assert_eq!(fixture.seat_queue(), vec![]);
 }
 
@@ -2148,9 +2144,10 @@ fn a_start_reading_an_unanswering_codex_history_still_serves_metaflows() {
         while fake.runs() == 0 {
             std::thread::yield_now();
         }
-        let listed = fixture
-            .nexus
-            .dispatch_serially(signal_flow::Query::Metaflows, signal_flow::Origin::Unbound);
+        let listed = fixture.nexus.dispatch_serially(
+            signal_flow::Query::Metaflows,
+            signal_flow::Origin::Unbound.into(),
+        );
         assert!(
             matches!(listed, signal_flow::Response::Listed(_)),
             "{listed:?}"

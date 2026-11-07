@@ -9,7 +9,8 @@ Library
   Topic.String
   ; The design type is Blake3.Bytes<32>; 16.0 uses a 64-hex-character string.
   Blake3.String
-  Layer.[ Primary Secondary Tertiary Quaternary ]
+  ; An address names its model; any model stands in any aspect.
+  Model.[ Fable Opus Sonnet Haiku Astra Sol Luna Terra ]
   Subaspect.[ Vision Intent Knowledge Operation Trial Compensation ]
   ; Define the component types once. Source refers to these declarations;
   ; inlining Path.String inside Source would redeclare Path globally.
@@ -46,8 +47,9 @@ Library
   ; The selected request kind and routing policy are common to every
   ; consumer of Flow messages.
   Aspect.[ Psyche Mind Field ]
-  Address.{ Aspect Topic Layer }
-  Recipient.[ Address Up ]
+  Address.{ Aspect Topic Model }
+  ; A recipient is the Address it names.
+  Recipient.Address
   ; Who a queued request is from: the Address Flow resolved for its sender
   ; (the Lock's Sender of a Deliver, the thread's metaflow of a send-tool
   ; call), Unknown for a request queued before Flow kept senders, or Flow

@@ -40,7 +40,7 @@ impl ParsesFlowCommand for FlowClient {
         }
         let mut budget = Budget {
             remaining: 65_536,
-            reader: ReaderBudget { remaining: 65_536 },
+            reader: ReaderBudget::try_from(65_536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1_024,
         };
@@ -160,37 +160,42 @@ mod tests {
                 .map(|Invocation { query, .. }| query)
         }
     }
-    use signal_flow::{Query, Recipient, Response, SendableMessage, SendableRequest};
+    use signal_flow::{Address, Aspect, Model, Query, Response, SendableMessage, SendableRequest};
 
     #[test]
     fn send_priority_and_deliver_all_are_typed() {
         let client = FlowClient;
         let Query::Send(send) = client
-            .parse_query(
-                ["Send.{ Address.{ Mind core Secondary } Soft.Order.«Review.» }".into()]
-                    .into_iter(),
-            )
+            .parse_query(["Send.{ { Mind core Sol } Soft.Order.«Review.» }".into()].into_iter())
             .expect("current Send parses")
         else {
             panic!("fixture must remain a Send")
         };
-        assert!(matches!(send.recipient, Recipient::Address(_)));
+        assert_eq!(
+            send.recipient,
+            Address {
+                aspect: Aspect::Mind,
+                topic: "core".into(),
+                model: Model::Sol,
+            }
+        );
         assert_eq!(
             send.sendable_message,
             SendableMessage::Soft(SendableRequest::Order("Review.".into()))
         );
-        let Query::Send(queued) = client
-            .parse_query(
-                ["Send.{ Up Soft.Result.{ Order.«Review.» «Ready.» } }".into()].into_iter(),
-            )
-            .expect("Send parses")
-        else {
-            panic!("fixture must remain a Send")
-        };
-        assert_eq!(queued.recipient, Recipient::Up);
+        // A recipient is an Address: no route relative to the sender.
+        for relative in [
+            "Send.{ Up Soft.Result.{ Order.«Review.» «Ready.» } }",
+            "Send.{ Address.{ Mind core Sol } Soft.Order.«Review.» }",
+        ] {
+            assert!(
+                client.parse_query([relative.into()].into_iter()).is_err(),
+                "must reject {relative}"
+            );
+        }
         assert!(matches!(
             client
-                .parse_query(["DeliverAll.{ Mind core Secondary }".into()].into_iter())
+                .parse_query(["DeliverAll.{ Mind core Sol }".into()].into_iter())
                 .expect("DeliverAll parses"),
             Query::DeliverAll(_)
         ));
@@ -207,18 +212,17 @@ mod tests {
             "Soft.Psyches.[ { «context» «verbatim» } ]",
         ] {
             let explicit = client
-                .parse_query([format!("Send.{{ Up {message} }}")].into_iter())
+                .parse_query([format!("Send.{{ {{ Psyche core Opus }} {message} }}")].into_iter())
                 .expect("Send parses");
             assert!(matches!(explicit, Query::Send(_)));
         }
         for invalid in [
             "Send.{}",
-            "Send.{ Up }",
-            "Send.{ Up Soft.Order.«Review.» extra }",
-            "Send.{ Up Unknown Soft.Order.«Review.» }",
-            "Send.{ Up Soft.Order.«Review.» extra }",
+            "Send.{ { Psyche core Opus } }",
+            "Send.{ { Psyche core Opus } Soft.Order.«Review.» extra }",
+            "Send.{ { Psyche core Opus } Unknown Soft.Order.«Review.» }",
             "Send.{ Unknown Soft.Order.«Review.» }",
-            "Send.[ Up Soft.Order.«Review.» ]",
+            "Send.[ { Psyche core Opus } Soft.Order.«Review.» ]",
         ] {
             assert!(
                 client.parse_query([invalid.into()].into_iter()).is_err(),
@@ -260,7 +264,7 @@ mod tests {
         let client = FlowClient;
         let Query::Start(request) = client
             .parse_query([
-                "Start.{ request-7 [ spirit-core intent-flow ] [ operation-main-flow compensation-behavior ] Custom.[ 1b8ac0 ] { Field flow Primary } gpt-6-astra medium Some.836818 messaging-build Some.[ SkillTool WorkflowTool ] Regular Default «Carry this bounded launch request.» }".into(),
+                "Start.{ request-7 [ spirit-core intent-flow ] [ operation-main-flow compensation-behavior ] Custom.[ 1b8ac0 ] { Field flow Astra } gpt-6-astra medium Some.836818 messaging-build Some.[ SkillTool WorkflowTool ] Regular Default «Carry this bounded launch request.» }".into(),
             ]
             .into_iter())
             .expect("typed Start parses")
@@ -292,7 +296,7 @@ mod tests {
         assert!(
             client
                 .parse_query([
-                    "Start.{ request-7 [ { Vision/flowNexus.md 54c08e7190360a308e560935c120c69b81c4aacb4975751a4841912b599f4f5a } ] [ operation-main-flow ] Predecessors.0 { Field flow Primary } gpt-6-astra medium None messaging-build None Regular Default «Launch.» }".into(),
+                    "Start.{ request-7 [ { Vision/flowNexus.md 54c08e7190360a308e560935c120c69b81c4aacb4975751a4841912b599f4f5a } ] [ operation-main-flow ] Predecessors.0 { Field flow Astra } gpt-6-astra medium None messaging-build None Regular Default «Launch.» }".into(),
                 ]
                 .into_iter())
                 .is_err()
@@ -327,7 +331,7 @@ mod tests {
             Query::Observe(signal_flow::ObserveSelection::Launch("request-8".into()))
         );
         let Query::Replace(request) = client
-            .parse_query(["Replace.{ request-8 [ spirit-core ] [] Predecessors.1 { Field flow Primary } opus-5-5 high Some.fac697 messaging-build None Regular Default «Carry on from fac697.» }".into()].into_iter())
+            .parse_query(["Replace.{ request-8 [ spirit-core ] [] Predecessors.1 { Field flow Astra } opus-5-5 high Some.fac697 messaging-build None Regular Default «Carry on from fac697.» }".into()].into_iter())
             .expect("typed Replace parses")
         else {
             panic!("Replace fixture must remain a Replace query")
@@ -395,9 +399,8 @@ mod tests {
         );
         let Query::Send(send) = client
             .parse_query(
-                ["Send.{ Address.{ Mind core Secondary } Soft.Task.{ 30 «Check the capsule run.» } }"
-                    .into()]
-                .into_iter(),
+                ["Send.{ { Mind core Sol } Soft.Task.{ 30 «Check the capsule run.» } }".into()]
+                    .into_iter(),
             )
             .expect("a Task reads")
         else {
@@ -409,8 +412,8 @@ mod tests {
         assert_eq!(task.minutes, 30);
         assert_eq!(task.string, "Check the capsule run.");
         for text in [
-            "Send.{ Up Soft.Task.{ soon «Check the capsule run.» } }",
-            "Send.{ Up Soft.Task.{ 9223372036854775808 «Check the capsule run.» } }",
+            "Send.{ { Mind core Sol } Soft.Task.{ soon «Check the capsule run.» } }",
+            "Send.{ { Mind core Sol } Soft.Task.{ 9223372036854775808 «Check the capsule run.» } }",
         ] {
             assert!(
                 client.parse_query([text.into()].into_iter()).is_err(),

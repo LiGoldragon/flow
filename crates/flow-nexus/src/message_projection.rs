@@ -22,9 +22,7 @@ pub(crate) fn visible_refusal(refusal: &signal_flow::Refusal) -> signal_flow::Vi
             Unknown_Data::FlowId(_) => VisibleUnknown::Flow,
             Unknown_Data::Key(value) => VisibleUnknown::Key(value.clone()),
         }),
-        Refusal::NoLayer => VisibleRefusal::NoLayer,
         Refusal::NotConfigured => VisibleRefusal::NotConfigured,
-        Refusal::NoneAbove => VisibleRefusal::NoneAbove,
         Refusal::NotMessage => VisibleRefusal::NotMessage,
         Refusal::Taken(value) => VisibleRefusal::Taken(value.clone()),
         Refusal::Unidentified(value) => VisibleRefusal::Unidentified(value.clone()),
@@ -319,6 +317,7 @@ pub(crate) fn visible_inspection(
                 }
             })
             .collect(),
+        restart_record_option: value.restart_record_option,
     }
 }
 

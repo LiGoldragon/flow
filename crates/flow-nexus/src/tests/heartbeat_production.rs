@@ -3,7 +3,7 @@ use crate::heartbeat::{DeliveryPurpose, RunsHeartbeat};
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::{StoredHeartbeatStanding, TracksHeartbeat};
-use signal_flow::{Address, Aspect, DeliveryState, Layer, Message, Metaflow, Request, SentBy};
+use signal_flow::{Address, Aspect, DeliveryState, Message, Metaflow, Model, Request, SentBy};
 
 trait HeartbeatFixture {
     fn recipient(topic: &str) -> Address;
@@ -17,7 +17,7 @@ impl HeartbeatFixture for NexusFixture {
         Address {
             aspect: Aspect::Field,
             topic: topic.into(),
-            layer: Layer::Secondary,
+            model: Model::Sol,
         }
     }
 

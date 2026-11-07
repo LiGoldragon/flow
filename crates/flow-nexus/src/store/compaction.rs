@@ -4,21 +4,18 @@
 //! investigation Flow raised for it. A compaction already recorded raises
 //! nothing again, so a transcript read twice, or read again after a Nexus
 //! restart, warns once.
-//!
-//! The rows live in their own table, so a store written before compactions
-//! were kept opens with the table added and holding none.
 
 use super::{FlowStore, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey, SchemaHash,
-    TableDescriptor, TableName,
+    Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,
+    RecordKey, SchemaHash, TableDescriptor, TableName,
 };
 use signal_flow::Address;
 
 pub(super) const COMPACTION_TABLE_NAME: TableName = TableName::new("flow_nexus_compactions");
 pub(super) const COMPACTION_FAMILY: &str = "flow-nexus-compaction";
-pub(super) const COMPACTION_SCHEMA: &str = "flow-nexus-compaction-v1";
+pub(super) const COMPACTION_SCHEMA: &str = "flow-nexus-compaction-v2";
 
 /// What Flow did with the warning a compaction raised.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -47,6 +44,16 @@ pub struct Compaction {
 impl EngineRecord for Compaction {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(Compaction::key(&self.flow_id, &self.boundary))
+    }
+}
+
+impl MemoryDefinition for Compaction {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(COMPACTION_SCHEMA)
     }
 }
 

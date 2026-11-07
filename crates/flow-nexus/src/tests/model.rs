@@ -1,22 +1,21 @@
-//! A seat runs the model configured for its Address's layer and aspect,
+//! A seat runs the native model configured for its Address's Model,
 //! named exactly. A Start or a Replace naming any other model is refused
 //! before the Nexus writes, claims, composes or opens anything.
 
 use super::NexusFixture;
 use crate::store::ManagesMetaflowState as _;
-use signal_flow::{Address, Aspect, LaunchProfile, Layer};
+use signal_flow::{Address, Aspect, LaunchProfile, Model};
 
-/// Declares the Models family whole: one model per layer and aspect.
-pub(super) fn configure(fixture: &NexusFixture, models: &[(Layer, Aspect, &str)]) {
+/// Declares the Models family whole: one native model per Model.
+pub(super) fn configure(fixture: &NexusFixture, models: &[(Model, &str)]) {
     fixture
         .nexus
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Models(
             models
                 .iter()
-                .map(|(layer, aspect, native)| meta_signal_flow::ConfigureModel {
-                    layer: layer.clone(),
-                    aspect: aspect.clone(),
+                .map(|(model, native)| meta_signal_flow::ConfigureModel {
+                    model: model.clone(),
                     native: (*native).into(),
                 })
                 .collect(),
@@ -27,8 +26,8 @@ pub(super) fn configure(fixture: &NexusFixture, models: &[(Layer, Aspect, &str)]
 /// A fresh launch of one seat, naming one model.
 pub(super) fn seat(
     aspect: Aspect,
-    layer: Layer,
-    model: &str,
+    model: Model,
+    native: &str,
     launch_request_id: &str,
 ) -> LaunchProfile {
     LaunchProfile {
@@ -37,9 +36,9 @@ pub(super) fn seat(
             aspect,
             // A topic is camelCase: the request id with its hyphens taken out.
             topic: launch_request_id.replace('-', ""),
-            layer,
+            model,
         },
-        model_name: model.into(),
+        model_name: native.into(),
         flow_id_option: None,
         remembering: signal_flow::Remembering::Predecessors(0),
         herdr_session_name: "fixture-session".into(),

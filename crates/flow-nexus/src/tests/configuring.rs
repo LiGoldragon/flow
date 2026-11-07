@@ -19,8 +19,7 @@ use meta_signal_flow::{
 };
 use signal_flow::{
     Address, Aspect, Bind_Data, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin,
-    HarnessKind, HerdrRoute, HerdrRouteSelection, Layer, Lock_Data, Origin, Process, Recipient,
-    Response,
+    HarnessKind, HerdrRoute, HerdrRouteSelection, Lock_Data, Model, Origin, Process, Response,
 };
 use std::collections::BTreeSet;
 
@@ -47,7 +46,7 @@ fn harness_flags_are_per_metaflow_persistent_and_absent_by_default() {
     let address = Address {
         aspect: Aspect::Field,
         topic: "flagsTest".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     };
     assert!(
         nexus
@@ -106,7 +105,7 @@ fn heartbeat_configuration_requires_a_positive_period_and_unique_recipients() {
     let recipient = Address {
         aspect: Aspect::Field,
         topic: "heartbeatTest".into(),
-        layer: Layer::Secondary,
+        model: Model::Sol,
     };
     assert_eq!(
         configure(
@@ -161,8 +160,7 @@ impl ConfiguredStore {
         for change in [
             ConfigurationChange::Nexus(Self::nexus(&defaults, &[TERRA, SOL, LUNA], 30)),
             ConfigurationChange::Models(vec![ConfigureModel {
-                layer: Layer::Primary,
-                aspect: Aspect::Mind,
+                model: Model::Astra,
                 native: "gpt-6-astra".into(),
             }]),
             ConfigurationChange::Thresholds(vec![ConfigureThreshold {
@@ -199,7 +197,7 @@ impl ConfiguredStore {
                 .lock_metaflow(
                     Lock_Data {
                         sender: Self::message(),
-                        recipient: Recipient::Address(Self::message()),
+                        recipient: Self::message(),
                     },
                     100,
                 )
@@ -241,7 +239,7 @@ impl ConfiguredStore {
         Address {
             aspect: Aspect::Field,
             topic: "message".into(),
-            layer: Layer::Primary,
+            model: Model::Astra,
         }
     }
 
@@ -321,7 +319,7 @@ fn quaternary_field() -> Address {
     Address {
         aspect: Aspect::Field,
         topic: "flow".into(),
-        layer: Layer::Quaternary,
+        model: Model::Terra,
     }
 }
 
@@ -379,8 +377,7 @@ fn a_refused_declaration_changes_nothing() {
     );
     // One key named twice is not a family.
     let model = |native: &str| ConfigureModel {
-        layer: Layer::Secondary,
-        aspect: Aspect::Psyche,
+        model: Model::Sol,
         native: native.into(),
     };
     assert_eq!(
@@ -404,23 +401,19 @@ fn each_family_is_its_last_declaration() {
     let nexus = fixture.open();
     let nexus_before = snapshot(&nexus).nexus;
 
-    // In the order the snapshot reads them, by layer then aspect name; one
-    // layer holds a model for each aspect.
+    // In the order the snapshot reads them, by Model name.
     let models = vec![
         ConfigureModel {
-            layer: Layer::Quaternary,
-            aspect: Aspect::Psyche,
+            model: Model::Haiku,
             native: "claude-haiku-5-5".into(),
         },
         ConfigureModel {
-            layer: Layer::Secondary,
-            aspect: Aspect::Mind,
-            native: SOL.into(),
+            model: Model::Opus,
+            native: "claude-opus-5-5".into(),
         },
         ConfigureModel {
-            layer: Layer::Secondary,
-            aspect: Aspect::Psyche,
-            native: "claude-opus-5-5".into(),
+            model: Model::Sol,
+            native: SOL.into(),
         },
     ];
     assert_eq!(
@@ -517,6 +510,7 @@ fn each_family_is_its_last_declaration() {
             investigation: None,
             default_minutes: crate::store::SEEDED_DEFAULT_MINUTES,
             heartbeat: None,
+            protected_addresses: vec![],
             counters: meta_signal_flow::ConfigureCounters {
                 logical_delivery: 1,
                 queue_attempt: 3,
@@ -543,6 +537,9 @@ fn a_launch_after_a_replaced_declaration_takes_the_new_defaults() {
     nexus.composer = crate::composition::tests::fixture_composer();
     let mut profile = crate::composition::tests::fixture_profile();
     profile.address = quaternary_field();
+    // A first launch: it names no predecessor, so no handover is read under
+    // the store's root.
+    profile.flow_id_option = None;
     profile.model_name = "claude-haiku-5-5".into();
     let composed_leave_outs =
         |nexus: &RunningNexus| match nexus.perform(Operation::Compose(profile.clone())) {
@@ -604,6 +601,9 @@ fn a_launch_naming_a_claude_alias_is_not_composed_and_its_full_name_is() {
     nexus.composer = crate::composition::tests::fixture_composer();
     let mut profile = crate::composition::tests::fixture_profile();
     profile.address = quaternary_field();
+    // A first launch: it names no predecessor, so no handover is read under
+    // the store's root.
+    profile.flow_id_option = None;
     for inexact in [
         "haiku",
         "claude-opus-5-5[1m]",
@@ -726,6 +726,9 @@ fn a_codex_start_naming_none_takes_no_claude_default() {
     );
     let mut profile = crate::composition::tests::fixture_profile();
     profile.address = quaternary_field();
+    // A first launch: it names no predecessor, so no handover is read under
+    // the store's root.
+    profile.flow_id_option = None;
     profile.leave_outs_option = None;
     profile.model_name = SOL.into();
     match nexus.perform(Operation::Compose(profile.clone())) {
@@ -806,7 +809,7 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     let ask = |nexus: &RunningNexus, text: &str| -> String {
         let mut budget = Budget {
             remaining: 65536,
-            reader: ReaderBudget { remaining: 65536 },
+            reader: ReaderBudget::try_from(65536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1024,
         };
@@ -823,7 +826,7 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     let nexus = fixture.open();
     let seeded = ask(&nexus, "Configuration");
     assert!(
-        seeded.ends_with(" None 30 None { 1 3 1 } }"),
+        seeded.ends_with(" None 30 None [] { 1 3 1 } }"),
         "seeded at 30: {seeded}"
     );
     assert_eq!(
@@ -846,14 +849,14 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     }
     let declared = ask(&nexus, "Configuration");
     assert!(
-        declared.ends_with(" None 45 None { 1 3 1 } }"),
+        declared.ends_with(" None 45 None [] { 1 3 1 } }"),
         "{declared}"
     );
     drop(nexus);
     let reopened = fixture.open();
     let kept = ask(&reopened, "Configuration");
     assert!(
-        kept.ends_with(" None 45 None { 1 3 1 } }"),
+        kept.ends_with(" None 45 None [] { 1 3 1 } }"),
         "kept across a reopen: {kept}"
     );
 }
@@ -867,7 +870,7 @@ fn configured_counters_are_kept_across_a_reopen() {
     let ask = |nexus: &RunningNexus, text: &str| -> String {
         let mut budget = Budget {
             remaining: 65536,
-            reader: ReaderBudget { remaining: 65536 },
+            reader: ReaderBudget::try_from(65536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1024,
         };
@@ -890,11 +893,78 @@ fn configured_counters_are_kept_across_a_reopen() {
     let reopened = fixture.open();
     let kept = ask(&reopened, "Configuration");
     assert!(
-        kept.ends_with(" None 30 None { 120 45 300 } }"),
+        kept.ends_with(" None 30 None [] { 120 45 300 } }"),
         "kept across a reopen: {kept}"
     );
     assert_eq!(
         ask(&reopened, "Configure.Counters.{ 119 45 300 }"),
         "ConfigureRejected.CountersRefused.Lowered.{ 120 45 300 }"
     );
+}
+
+/// ProtectedAddresses is one family: declared whole, one entry per Address,
+/// read back in Address order, and kept across a reopen. An Address named
+/// twice, or one whose topic is not camelCase, is refused and changes
+/// nothing.
+#[test]
+fn protected_addresses_persist_across_reopen() {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let fable = Address {
+        aspect: Aspect::Psyche,
+        topic: "core".into(),
+        model: Model::Fable,
+    };
+    let other = Address {
+        aspect: Aspect::Mind,
+        topic: "versionZero".into(),
+        model: Model::Astra,
+    };
+    assert_eq!(snapshot(&nexus).protected_addresses, Vec::<Address>::new());
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::ProtectedAddresses(vec![fable.clone(), other.clone()])
+        ),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::ProtectedAddresses(vec![other.clone(), fable.clone()])
+        ),
+        MetaResponse::Configured(ConfigureOutcome::Unchanged)
+    );
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::ProtectedAddresses(vec![fable.clone(), fable.clone()])
+        ),
+        MetaResponse::ConfigureRejected(ConfigureRejection::DuplicateEntry)
+    );
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::ProtectedAddresses(vec![Address {
+                topic: "Not-camel".into(),
+                ..fable.clone()
+            }])
+        ),
+        MetaResponse::ConfigureRejected(ConfigureRejection::TopicRefused("Not-camel".into()))
+    );
+    let declared = snapshot(&nexus).protected_addresses;
+    assert_eq!(declared.len(), 2);
+    assert!(declared.contains(&fable) && declared.contains(&other));
+    drop(nexus);
+    let reopened = fixture.open();
+    assert_eq!(snapshot(&reopened).protected_addresses, declared);
+    assert_eq!(
+        configure(
+            &reopened,
+            ConfigurationChange::ProtectedAddresses(vec![fable.clone()])
+        ),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    drop(reopened);
+    assert_eq!(snapshot(&fixture.open()).protected_addresses, vec![fable]);
 }

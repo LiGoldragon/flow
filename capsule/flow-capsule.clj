@@ -474,6 +474,29 @@
   (let [node (first (heads-named "Some" (second (items (body (read-datom inspected))))))]
     (some-> node body items second str)))
 
+(defn nonempty-identifier? [value]
+  (and (string? value) (not (str/blank? value))))
+
+(defn inspected-binding
+  "The Flow/native binding carried by one typed Inspect reply."
+  [inspected addr]
+  (let [d (read-datom inspected)
+        [visible _binding _locks _attempts _restart :as fields] (items (body d))
+        [address state past queue :as visible-fields] (items visible)
+        flow-id (when (= "Awake" (head state)) (some-> state body str))
+        thread-id (native-session inspected)
+        pane (bound-pane inspected)]
+    (when-not (and (= "Inspected" (head d)) (= 5 (count fields))
+                   (= 4 (count visible-fields))
+                   (= (mapv str (address-items addr)) (mapv str (items address)))
+                   (= \[ (:enclosure past)) (= \[ (:enclosure queue))
+                   (nonempty-identifier? flow-id) (nonempty-identifier? thread-id)
+                   (nonempty-identifier? pane))
+      (throw (ex-info "Inspect did not carry one complete Awake Flow/native binding"
+                      {:address addr :reply inspected})))
+    {:flow flow-id :thread thread-id :pane pane
+     :past (vec (items past)) :queue (vec (items queue))}))
+
 (defn bound-process-id
   "The native process pid exposed by Inspect.Address for its current binding."
   [inspected]
@@ -523,6 +546,53 @@
 (def results (atom []))
 (def seen-flows (atom #{}))
 (def keep-going (atom false))
+(def handover-fixture-outcomes (atom {}))
+
+(defn failed-prerequisite
+  "The first named fixture that has not established its contract."
+  [fixtures]
+  (some (fn [fixture]
+          (let [outcome (get @handover-fixture-outcomes fixture ::missing)]
+            (when (or (= ::missing outcome) (not (:pass outcome)))
+              {:fixture fixture :outcome (when-not (= ::missing outcome) outcome)})))
+        fixtures))
+
+(defn fixture-case
+  "A handover fixture with explicit prerequisites. A failed prerequisite is
+  recorded immediately as NOT ESTABLISHED; it is a failure, never a skip or
+  a pass, and its original outcome remains in handover-fixture-outcomes."
+  [fixture prerequisites body]
+  (with-meta
+    (fn []
+      (if-let [{failed :fixture original :outcome} (failed-prerequisite prerequisites)]
+        {:reply (str "NOT ESTABLISHED: required fixture " (name failed) " failed")
+         :pass false :not-established true :failed-prerequisite failed
+         :prerequisite-outcome original
+         :watched (str "required fixture " (name failed)
+                       " was not established; no dependent action or wait ran")}
+        (body)))
+    {:handover-fixture fixture}))
+
+(defn require-fixture-values!
+  "Refuses a fixture before its first effect when any named required value is
+  absent or false."
+  [fixture values]
+  (let [missing (mapv key (filter (comp not val) values))]
+    (when (seq missing)
+      (throw (ex-info (str (name fixture) " required fixture values were not established")
+                      {:prerequisite fixture :missing missing})))
+    values))
+
+(defn refresh-effects-proof
+  "The two exact typed Refresh effects, distinct successor identities and
+  both native completion proofs required by H6."
+  [own-reply first-successor first-completion meta-reply second-successor second-completion predecessor]
+  (let [own-effect (= own-reply (str "Refreshed." first-successor))
+        meta-effect (= meta-reply (str "Refreshed." second-successor))
+        distinct (= 3 (count (set [predecessor first-successor second-successor])))]
+    {:established (boolean (and own-effect first-completion meta-effect second-completion distinct))
+     :own-effect own-effect :meta-effect meta-effect :distinct distinct
+     :first-completion (boolean first-completion) :second-completion (boolean second-completion)}))
 
 (defn note-flows! []
   (let [listed (:datom (metaflows))]
@@ -548,7 +618,9 @@
                                    (when (seq typed) (str " " (pr-str typed))))
                        :pass false
                        :watched "the scenario threw"})))
-        line (assoc outcome :name name :ms (- (System/currentTimeMillis) start))]
+        line (assoc outcome :name name :ms (- (System/currentTimeMillis) start))
+        fixture (:handover-fixture (meta f))]
+    (when fixture (swap! handover-fixture-outcomes assoc fixture line))
     (swap! results conj line)
     (print-line line)
     (try (note-flows!) (catch Exception _ nil))
@@ -1123,6 +1195,27 @@
               (when (= (map str (items a)) want)
                 [(str kind) (str wake)])))
           (items (loop [d (read-datom metaflows-line)] (if (head d) (recur (body d)) d))))))
+
+(defn seat-profile-declaration
+  "The profile premises that decide this capsule's exact Codex first prompt."
+  [metaflows-line addr]
+  (let [want (map str (address-items addr))
+        descendants (fn descendants [node]
+                      (cons node (mapcat descendants
+                                         (concat (items node)
+                                                 (when-let [b (body node)] [b])))))]
+    (some (fn [entry]
+            (let [[a root system-modules user-modules kind availability wake purpose raw-records]
+                  (items entry)]
+              (when (and (= 9 (count (items entry)))
+                         (= (map str (items a)) want))
+                {:root (str root)
+                 :system-modules (mapv str (items system-modules))
+                 :user-modules (mapv str (items user-modules))
+                 :flow-kind (str kind) :availability (str availability) :wake (str wake)
+                 :purpose (or (:string purpose) (str purpose))
+                 :raw-records (mapv str (items raw-records))})))
+          (descendants (read-datom metaflows-line)))))
 
 ;; ---------------------------------------------------------------- capsule life
 
@@ -1838,6 +1931,7 @@
 (def ho-hook-release (str ho-archive "/.git/hook-release"))
 (def ho-bulk (str source-root "/bulk.txt"))
 (def ho (atom {}))
+(def handover-seat-effects (atom []))
 (def retirement-observation (atom nil))
 
 (declare keep-datom)
@@ -1886,6 +1980,182 @@
          {:turn-id turnId
           :content content
           :text (str/join "\n" (keep #(when (= "text" (:type %)) (:text %)) content))})))
+
+(defn turn-user-content
+  "The one userMessage content array in a full turn. Nil when the turn has
+  none or more than one: either shape cannot prove one exact prompt."
+  [turn]
+  (let [messages (filterv #(= "userMessage" (:type %)) (:items turn))]
+    (when (= 1 (count messages)) (:content (first messages)))))
+
+(defn exact-text-content?
+  "Whether content is exactly one text part whose complete text is prompt.
+  Native descriptive keys on that part are retained in evidence and do not
+  alter its text; any additional content part refuses equality."
+  [content prompt]
+  (and (= 1 (count content))
+       (= "text" (:type (first content)))
+       (= prompt (:text (first content)))))
+
+(defn history-shape-proof
+  "Validates the pinned thread/turns/list shape before IDs are compared or a
+  baseline is used to decide freshness."
+  [thread-id history]
+  (let [returned-thread (get-in history [:thread :id])
+        turns (:turns history)
+        ids (when (vector? turns) (mapv :id turns))
+        turns-valid (and (vector? turns)
+                         (every? #(and (map? %) (nonempty-identifier? (:id %))
+                                       (string? (:status %)) (vector? (:items %))) turns))
+        unique-ids (and turns-valid (= (count ids) (count (set ids))))
+        established (boolean (and (nonempty-identifier? thread-id)
+                                  (= thread-id returned-thread) turns-valid unique-ids))]
+    {:established established :thread-id thread-id :returned-thread-id returned-thread
+     :turns-valid (boolean turns-valid) :unique-turn-ids (boolean unique-ids)
+     :turn-ids (or ids [])}))
+
+(defn observer-baseline!
+  "Returns a validated exact-thread ID set, refusing before a native effect."
+  [label thread-id history]
+  (let [proof (history-shape-proof thread-id history)]
+    (when-not (:established proof)
+      (throw (ex-info "observer baseline was malformed or for another thread"
+                      {:prerequisite label :identifier :observer-baseline :proof proof})))
+    (set (:turn-ids proof))))
+
+(defn completed-turn-proof
+  "Proves one fresh exact-prompt turn completed successfully on the known
+  native thread. Completion is only native turn completion: it says nothing
+  about Nexus settlement, delivery, threshold, green state, or effects."
+  [thread-id prompt before-turn-ids history]
+  (let [shape (history-shape-proof thread-id history)
+        returned-thread (get-in history [:thread :id])
+        turns (:turns history)
+        baseline-valid (and (set? before-turn-ids)
+                            (every? nonempty-identifier? before-turn-ids))
+        fresh (if (and (:established shape) baseline-valid)
+                (filterv #(not (contains? before-turn-ids (:id %))) turns) [])
+        matching (filterv #(exact-text-content? (turn-user-content %) prompt) fresh)
+        turn (when (and (:established shape) baseline-valid
+                        (= 1 (count fresh))
+                        (= 1 (count matching)))
+               (first matching))
+        error-none (and turn (or (not (contains? turn :error)) (nil? (:error turn))))
+        established (boolean (and turn (= "completed" (:status turn)) error-none))]
+    {:established established :shape shape :baseline-valid (boolean baseline-valid)
+     :thread-id thread-id :returned-thread-id returned-thread
+     :before-turn-ids before-turn-ids :fresh-turn-ids (mapv :id fresh)
+     :matching-turn-ids (mapv :id matching) :turn-id (:id turn)
+     :status (:status turn) :error-present (boolean (and turn (contains? turn :error)))
+     :error (:error turn)}))
+
+(defn initial-turn-proof
+  "Proves the first turn already bound to a known launched native thread.
+  Freshness is intentionally not required: launch may have completed before
+  its binding was inspected."
+  [thread-id prompt history]
+  (let [shape (history-shape-proof thread-id history)
+        returned-thread (get-in history [:thread :id])
+        turns (:turns history)
+        turn (first turns)
+        prompt-equal (and turn (exact-text-content? (turn-user-content turn) prompt))
+        error-none (and turn (or (not (contains? turn :error)) (nil? (:error turn))))
+        established (boolean (and (:established shape) (= 1 (count turns))
+                                  prompt-equal (= "completed" (:status turn)) error-none))]
+    {:established established :shape shape :thread-id thread-id :returned-thread-id returned-thread
+     :turn-count (count turns) :turn-id (:id turn) :prompt-equal (boolean prompt-equal)
+     :status (:status turn) :error-present (boolean (and turn (contains? turn :error)))
+     :error (:error turn)}))
+
+(defn binding-proof
+  "The inspected Flow/native pair remains the exact expected successor pair
+  across native-history observation."
+  [expected-flow expected-thread before after]
+  (let [established (boolean (and (= (str expected-flow) (str (:flow before)) (str (:flow after)))
+                                  (= expected-thread (:thread before) (:thread after))))]
+    {:established established :expected-flow (str expected-flow)
+     :expected-thread expected-thread :before before :after after}))
+
+(defn handover-profile-proof
+  "Checks the complete set of profile premises under which composition.rs's
+  brief is the entire first user text before an optional handover."
+  [{:keys [flow-kind user-modules raw-records predecessor-depth
+           purpose profile-brief herdr-session queued-first prelaunch-observed]}]
+  (let [checks {:regular (= "Regular" flow-kind)
+                :no-user-modules (empty? user-modules)
+                :no-raw-records (empty? raw-records)
+                :predecessors-zero (= 0 predecessor-depth)
+                :empty-purpose (= "" purpose)
+                :fixed-brief (= brief profile-brief)
+                :brief-no-trailing-newline (and (string? profile-brief)
+                                                (not (str/ends-with? profile-brief "\n")))
+                :fixed-session (= session herdr-session)
+                :prelaunch-observed (true? prelaunch-observed)
+                :no-queued-first-prompt (nil? queued-first)}]
+    {:established (every? true? (vals checks)) :checks checks}))
+
+(defn launch-profile-request
+  "The prompt premises carried by the exact typed Launch or Rehearse input."
+  [request addr]
+  (let [d (read-datom request)
+        [address predecessors brief-value :as fields] (items (body d))
+        depth (when (= "Predecessors" (head predecessors))
+                (parse-long (str (body predecessors))))]
+    (when-not (and (contains? #{"Launch" "Rehearse"} (head d))
+                   (= 3 (count fields))
+                   (= (mapv str (address-items addr)) (mapv str (items address)))
+                   (some? depth) (string? (:string brief-value)))
+      (throw (ex-info "typed launch request did not carry the expected profile"
+                      {:request request :address addr})))
+    {:predecessor-depth depth :profile-brief (:string brief-value)}))
+
+(defn codex-first-prompt [profile-proof handover]
+  (when-not (:established profile-proof)
+    (throw (ex-info "the exact Codex first-prompt profile was not established"
+                    {:prerequisite :codex-profile :checks (:checks profile-proof)})))
+  (str "# Flow launch\n\nHarness: Codex\nHerdr session: " session
+       "\nRemote control: app-server endpoint\n\n" brief
+       (when (seq handover) (str "\n\n" handover))))
+
+(defn await-initial-turn!
+  [label addr expected-flow expected-prompt]
+  (let [first-inspection (inspect addr)
+        before-binding (inspected-binding first-inspection addr)
+        flow-id (:flow before-binding)
+        _ (when-not (= (str expected-flow) (str flow-id))
+            (throw (ex-info "the expected successor is not the bound flow"
+                            {:prerequisite label :address addr
+                             :expected-flow (str expected-flow) :actual-flow (str flow-id)})))
+        thread-id (:thread before-binding)
+        observed (watch 180 #(let [history (observer-history (str label "-" (System/nanoTime)) thread-id)
+                                   proof (initial-turn-proof thread-id expected-prompt history)]
+                               (when (:established proof) {:flow-id (str flow-id) :history history :proof proof})))
+        after-inspection (inspect addr)
+        after-binding (inspected-binding after-inspection addr)
+        stable-binding (binding-proof expected-flow thread-id before-binding after-binding)
+        established (and observed (:established stable-binding))]
+    (keep-text! (str "handover-" label "-initial-completion.json")
+                (json/generate-string {:observation (or observed {:flow-id (str flow-id)
+                                                                  :thread-id thread-id
+                                                                  :established false})
+                                       :binding stable-binding} {:pretty true}))
+    (if established
+      (assoc observed :binding stable-binding)
+      (throw (ex-info "initial native turn and stable successor binding were not established"
+                      {:prerequisite label :address addr :identifier :native-completion
+                       :binding stable-binding})))))
+
+(defn await-fresh-turn!
+  [label thread-id prompt before-turn-ids]
+  (let [observed (watch 240 #(let [history (observer-history (str label "-" (System/nanoTime)) thread-id)
+                                   proof (completed-turn-proof thread-id prompt before-turn-ids history)]
+                               (when (:established proof) {:history history :proof proof})))]
+    (keep-text! (str "handover-" label "-completion.json")
+                (json/generate-string (or observed {:thread-id thread-id :prompt prompt
+                                                    :before-turn-ids before-turn-ids
+                                                    :established false}) {:pretty true}))
+    (or observed (throw (ex-info "fresh native turn completion was not established"
+                                 {:prerequisite label :identifier :native-completion})))))
 
 (defn user-turns [thread-id]
   (history-user-turns (observer-history (str "history-" thread-id "-" (System/nanoTime)) thread-id)))
@@ -2032,25 +2302,48 @@
 (defn type-into! [pane text] (herdr "pane" "run" pane text))
 
 (defn ho-turn!
-  "A prompt typed into the seat's pane, and the seat's next Stop awaited.
-  Answers whether it rested."
+  "Types one complete prompt into the known Terra thread and proves that one
+  fresh exact-prompt turn on that same thread completed without error."
   [flow-id text]
-  (let [before (stops-of flow-id)]
-    (type-into! (bound-pane (inspect ho-seat)) text)
-    (watch 240 #(> (stops-of flow-id) before))))
+  (let [inspection (inspect ho-seat)
+        binding (inspected-binding inspection ho-seat)
+        current (:flow binding)
+        _ (when-not (= (str current) (str flow-id))
+            (throw (ex-info "the requested flow is not the bound Terra flow"
+                            {:expected (str flow-id) :actual (str current)})))
+        thread-id (:thread binding)
+        before-history (observer-history (str "turn-before-" (System/nanoTime)) thread-id)
+        before (observer-baseline! :ho-turn thread-id before-history)]
+    (type-into! (:pane binding) text)
+    (await-fresh-turn! (str "turn-" (System/nanoTime)) thread-id text before)))
 
 (defn seat-call!
   "The seat at addr runs one ordinary client call itself, from its own
-  pane: a prompt typed there asks it to run the call's script. Answers the
-  reply, or nil when none was written; waits for the seat's Stop."
+  pane. Persists the exact typed CLI reply and proves the correlated operator
+  prompt completed on that seat's known native thread."
   [addr tag datom]
   (let [[script out] (ho-script! tag "flow" datom)
-        flow-id (str (awake-flow addr))
-        before (stops-of flow-id)]
-    (type-into! (bound-pane (inspect addr))
-                (str "OPERATOR-SCRIPT: Run the shell command sh " script " once, then answer with one word and stop. Tag " tag "."))
-    (let [reply (when (watch 150 #(fs/exists? out)) (str/trim (slurp out)))]
-      (watch 90 #(> (stops-of flow-id) before))
+        inspection (inspect addr)
+        binding (inspected-binding inspection addr)
+        flow-id (:flow binding)
+        thread-id (:thread binding)
+        before-history (observer-history (str tag "-seat-before") thread-id)
+        before (observer-baseline! tag thread-id before-history)
+        prompt (str "OPERATOR-SCRIPT: Run the shell command sh " script
+                    " once, then answer with one word and stop. Tag " tag ".")]
+    (type-into! (:pane binding) prompt)
+    (let [reply (when (watch 150 #(fs/exists? out)) (str/trim (slurp out)))
+          completion (await-fresh-turn! (str "seat-call-" tag) thread-id prompt before)]
+      (keep-text! (str "handover-seat-call-" tag ".json")
+                  (json/generate-string {:address addr :flowId flow-id :threadId thread-id
+                                         :prompt prompt :datom datom :reply reply
+                                         :completion (:proof completion)} {:pretty true}))
+      (when-not reply
+        (throw (ex-info "seat client wrote no typed reply"
+                        {:prerequisite tag :address addr :identifier :typed-reply})))
+      (swap! handover-seat-effects conj {:address addr :flow-id flow-id :thread-id thread-id
+                                         :tag tag :datom datom :reply reply
+                                         :turn-id (get-in completion [:proof :turn-id])})
       reply)))
 
 (defn bulk-order [tag]
@@ -2122,6 +2415,58 @@
     {:complete (boolean (and target (= [:archive :removed] kinds) same-key identity-exact))
      :key key :kinds kinds :target (boolean target) :same-key (boolean same-key)
      :immutable-commit (boolean immutable-commit) :identity-exact (boolean identity-exact)}))
+
+(defn archived-untouched-generation-proof
+  "Proves an exact refresh generation was closed with touch=None and then
+  published under the emitted immutable commit:path/blob before removal."
+  [frames predecessor successor expected-path git-evidence]
+  (let [snapshot (first frames)
+        events (vec (rest frames))
+        [closed archive removed] events
+        key (:key closed)
+        identity (:identity archive)
+        content (:content git-evidence)
+        parsed (when (string? content)
+                 (when-let [[_ generation content-predecessor content-successor]
+                            (re-matches #"(?s)^generation=(-?\d+) predecessor=(\S+) successor=(\S+) sections=.* touch=None\n$"
+                                        content)]
+                   {:generation (parse-long generation)
+                    :predecessor content-predecessor :successor content-successor}))
+        exact-key (and (= ho-seat (:address key)) (integer? (:generation key))
+                       (= predecessor (:predecessor key)) (= successor (:successor key)))
+        exact-events (and (= :snapshot (:kind snapshot)) (empty? (:keys snapshot))
+                          (= [:closed :archive :removed] (mapv :kind events))
+                          (= key (:key archive) (:key removed)))
+        immutable-identity
+        (and (boolean (re-matches #"[0-9a-f]{40}" (or (:commit identity) "")))
+             (= expected-path (:path identity))
+             (zero? (or (:commit-exit git-evidence) -1))
+             (= (:commit identity) (:verified-commit git-evidence))
+             (zero? (or (:blob-exit git-evidence) -1))
+             (= (:blob identity) (:blob git-evidence))
+             (zero? (or (:content-exit git-evidence) -1)))]
+    {:established (boolean (and exact-key exact-events immutable-identity
+                                (= (select-keys key [:generation :predecessor :successor]) parsed)))
+     :key key :parsed parsed :kinds (mapv :kind events)
+     :exact-key (boolean exact-key) :exact-events (boolean exact-events)
+     :immutable-identity (boolean immutable-identity)
+     :touch-none (boolean parsed)}))
+
+(defn archive-git-evidence
+  "Reads the exact immutable identity emitted for one retirement transition."
+  [frames predecessor successor]
+  (let [archive (some #(when (and (= :archive (:kind %))
+                                  (= predecessor (get-in % [:key :predecessor]))
+                                  (= successor (get-in % [:key :successor]))) %) frames)
+        identity (:identity archive)
+        commit (:commit identity)
+        spec (when (and commit (:path identity)) (str commit ":" (:path identity)))
+        commit-result (when commit (ho-git "rev-parse" "--verify" (str commit "^{commit}")))
+        blob-result (when spec (ho-git "rev-parse" "--verify" spec))
+        content-result (when spec (ho-git "cat-file" "blob" spec))]
+    {:commit-exit (:exit commit-result) :verified-commit (some-> commit-result :out str/trim)
+     :blob-exit (:exit blob-result) :blob (some-> blob-result :out str/trim)
+     :content-exit (:exit content-result) :content (:out content-result)}))
 
 (defn start-retirement-observation! []
   (let [query (str "Observe.Retirement." ho-seat)
@@ -2235,7 +2580,7 @@
   [["H0 diagnostic: exact Terra request rehearsed, launched once, and preserved before teardown"
     h0-diagnostic-scenario]])
 
-(def handover-scenarios
+(def handover-scenario-bodies
   [["H0 setup: Terra re-declared Maintained; archive repo with a refusing pre-commit hook; policy, archive, count; Luna and Terra launched"
    (fn []
       (let [_ (when (fs/exists? ho-archive) (throw (ex-info "archive must be new" {:path ho-archive})))
@@ -2243,8 +2588,9 @@
             native-models (set (map :model (:models catalog)))
             catalogued (contains? native-models codex-model)
             _ (keep-text! "handover-H0-model-catalog.json" (json/generate-string catalog {:pretty true}))
-            metaflows (flow-meta (str/replace-first (configure-line "Metaflows")
-                                                    "Regular Default OnDemand" "Regular Default Maintained"))
+            metaflows-line (str/replace-first (configure-line "Metaflows")
+                                              "Regular Default OnDemand" "Regular Default Maintained")
+            metaflows (flow-meta metaflows-line)
             _ (fs/create-dirs ho-archive)
             git-init [(ho-git "init" "-q") (ho-git "config" "user.name" "flow-capsule")
                       (ho-git "config" "user.email" "flow-capsule@localhost")
@@ -2262,28 +2608,69 @@
             policy (flow-meta (ho-policy ho-share))
             archive (flow-meta (str "Configure.HandoverArchive." ho-archive))
             handover-count (flow-meta "Configure.HandoverCount.0")
+            snapshot (flow-meta "Configuration")
+            prelaunch-listing (metaflows)
+            prelaunch-seat (when (:datom prelaunch-listing) (metaflow (:datom prelaunch-listing) ho-seat))
+            prelaunch-other (when (:datom prelaunch-listing) (metaflow (:datom prelaunch-listing) ho-other))
+            launch-request (launch-query "Launch" ho-seat)
+            rehearse-request (launch-query "Rehearse" ho-seat)
+            profile-input (merge (seat-profile-declaration snapshot ho-seat)
+                                 (launch-profile-request launch-request ho-seat)
+                                 {:herdr-session session
+                                  :prelaunch-observed (and (some? prelaunch-seat)
+                                                           (some? prelaunch-other))
+                                  :queued-first (when (seq (:queue prelaunch-seat))
+                                                  (:queue prelaunch-seat))})
+            profile-proof (handover-profile-proof profile-input)
+            _profile (require-fixture-values! :h0-profile
+                                              {:profile (:established profile-proof)
+                                               :other-queue-empty (and (some? prelaunch-other)
+                                                                       (empty? (:queue prelaunch-other)))})
+            rehearsal (flow rehearse-request)
+            _rehearsal (require-fixture-values! :h0-rehearsal
+                                                {:rehearsed (str/starts-with? rehearsal "Rehearsed.")})
+            _ (swap! ho assoc :profile-proof profile-proof :profile-input profile-input
+                     :rehearsal rehearsal)
+            _ (keep-text! "handover-H0-profile.json"
+                          (json/generate-string {:configuration snapshot
+                                                 :metaflowsDeclaration metaflows-line
+                                                 :prelaunchMetaflows (:reply prelaunch-listing)
+                                                 :prelaunchSeat prelaunch-seat
+                                                 :prelaunchOther prelaunch-other
+                                                 :profileInput profile-input
+                                                 :profileProof profile-proof
+                                                 :launchRequest launch-request
+                                                 :rehearseRequest rehearse-request
+                                                 :rehearsal rehearsal}
+                                                {:pretty true}))
             other-launch (launch ho-other)
             other-awake (watch 60 #(awake-flow ho-other))
-            other-rested (when other-awake (watch 180 #(pos? (stops-of (str other-awake)))))
+            other-completed (when other-awake
+                              (await-initial-turn! "H0-Luna" ho-other other-awake
+                                                   (codex-first-prompt profile-proof nil)))
             test-launch (launch ho-seat)
             _ (reset! handover-h0-refusals {:luna other-launch :terra test-launch})
             flow-id (watch 60 #(awake-flow ho-seat))
-            rested (when flow-id (watch 180 #(pos? (stops-of (str flow-id)))))
+            completed (when flow-id
+                        (await-initial-turn! "H0-Terra" ho-seat flow-id
+                                             (codex-first-prompt profile-proof nil)))
             declared (seat-declaration (configure-line "Metaflows") ho-seat)
-            snapshot (flow-meta "Configuration")]
-        (keep-text! "handover-H0-configuration.txt" snapshot)
+            postlaunch-snapshot (flow-meta "Configuration")]
+        (keep-text! "handover-H0-configuration.txt" postlaunch-snapshot)
         {:reply (str "Metaflows: " metaflows " / Policy: " policy " / Archive: " archive " / Count: " handover-count
-                     " / Luna: " other-launch " / Terra: " test-launch)
+                     " / Rehearse: " rehearsal " / Luna: " other-launch " / Terra: " test-launch)
          :pass (boolean (and (every? #(str/starts-with? % "Configured.") [metaflows policy archive handover-count])
                              (every? #(zero? (:exit %)) git-init)
                              catalogued
-                             (str/includes? snapshot "Regular Default Maintained")
-                             other-awake other-rested flow-id rested))
+                             (:established profile-proof) (str/starts-with? rehearsal "Rehearsed.")
+                             (str/includes? postlaunch-snapshot "Regular Default Maintained")
+                             other-awake other-completed flow-id completed))
          :watched (str "native model/list names " codex-model " " catalogued
-                       " (catalog membership is not entitlement); actual Terra launch/first Stop " (boolean rested)
+                       " (catalog membership is not entitlement); actual Terra launch/first native completion " (boolean completed)
                        "; git init exits " (mapv :exit git-init) "; Configuration names Terra Maintained "
-                       (str/includes? snapshot "Regular Default Maintained") " (configure.datom declares " declared
-                       "); Luna Awake " other-awake "; Terra Awake " flow-id ", first Stop " (boolean rested))}))]
+                       (str/includes? postlaunch-snapshot "Regular Default Maintained") " (configure.datom declares " declared
+                       "); Luna Awake " other-awake ", first completion " (boolean other-completed)
+                       "; Terra Awake " flow-id ", first completion " (boolean completed))}))]
 
    ["H1 Keep and Drop from the seat's own pane; NotOwner from another pane; UnknownCaller from the driver; Read before and after Drop"
     (fn []
@@ -2324,8 +2711,9 @@
     (fn []
       (let [flow-id (handover-flow ho-seat)
             thread-id (handover-thread ho-seat)
-            rested (pos? (stops-of flow-id))
             latest-touch (:latest-touch @ho)
+            _touch-prerequisite (require-fixture-values! :h1-latest-touch
+                                                          {:known-touch latest-touch})
             baseline (observed-turn! "h2-warning-baseline" thread-id
                                      #(ho-turn! flow-id "Answer with one word and stop. Tag h2-warning-baseline."))
             tb (:tokens baseline)
@@ -2378,7 +2766,7 @@
         (swap! ho assoc :r r :t2 touch)
         (keep-text! "handover-H2-warning.txt" (json/generate-string {:threadId thread-id :turns all :keepAt (str kept-at)} {:pretty true}))
         {:reply (str "Thresholds " r ": " thresholds " / Keep from the seat: " kept)
-         :pass (boolean (and (str/starts-with? thresholds "Configured.") rested baseline-below non-green-before
+         :pass (boolean (and (str/starts-with? thresholds "Configured.") baseline-below non-green-before
                              (= "OBSERVED" (:observation measured)) below-refresh opened non-green first-turn kept
                              (str/includes? (:text first-turn) "flow 'Keep.")
                              (= (:turn-id first-turn) (:turn-id (first keep-turns)))
@@ -2406,10 +2794,15 @@
             read (flow (str "Read." ho-seat))
             sections (sections-of read)
             expected (handover-text sections)
+            cur (:t2 @ho)
+            threshold (:r @ho)
+            green (window-open? cur threshold ho-share)
+            _prerequisite (require-fixture-values! :h2-green-sections
+                                                    {:touch cur :threshold threshold
+                                                     :green green :sections (seq sections)})
             marker (str ho-calls "/h3-closed")
             [waiter old-out] (ho-script! "h3-old-keep" "flow" (keep-datom "after-close" "From the closed generation." "x") marker)
             armed (ho-turn! old (str "OPERATOR-SCRIPT: Run the shell command sh " waiter " once, then answer with one word and stop. Tag h3-arm."))
-            cur (:t2 @ho)
             r3 (+ cur 300)
             thresholds (flow-meta (ho-threshold r3))
             measured (observed-turn! "h3-threshold" old-native #(ho-turn! old (bulk-order "h3-threshold")))
@@ -2423,18 +2816,27 @@
             restored (flow-meta (ho-threshold ho-high))
             native (require-handover-identifier
                     :native-thread (watch 60 #(native-session (inspect ho-seat))) ho-seat)
-            first-history (watch 120 #(let [h (observer-history "h3-successor-first" native)]
-                                        (when (seq (history-user-turns h)) h)))
+            first-completion (await-initial-turn! "H3-successor" ho-seat successor
+                                                  (codex-first-prompt (:profile-proof @ho) expected))
+            _ (when-not (= native (get-in first-completion [:proof :thread-id]))
+                (throw (ex-info "successor native binding changed during first-turn proof"
+                                {:expected native
+                                 :actual (get-in first-completion [:proof :thread-id])})))
+            first-history (:history first-completion)
             handed (first (history-user-turns first-history))
-            last-part (boolean (and handed (str/ends-with? (str/trim (:text handed)) (str/trim expected))))
+            exact-first-prompt (boolean (and handed (= (:text handed)
+                                                       (codex-first-prompt (:profile-proof @ho) expected))))
+            last-part (boolean (and handed (str/ends-with? (:text handed) expected)))
             _ (spit marker "closed")
             old-keep (when (watch 30 #(fs/exists? old-out)) (str/trim (slurp old-out)))
             read-after (flow (str "Read." ho-seat))]
-        (swap! ho assoc :pred old :successor successor)
+        (swap! ho assoc :pred old :successor successor
+               :successor-native native :successor-completion (:proof first-completion))
         (keep-text! "handover-H3-first-prompt.json" (json/generate-string {:threadId native :history first-history :expectedHandover expected} {:pretty true}))
         {:reply (str "Thresholds " r3 ": " thresholds " / bulk turn rested " (boolean sent) " / restored: " restored
                      " / Keep by the old flow's waiter after the close: " old-keep " / Read after: " read-after)
-         :pass (boolean (and (seq sections) crossed (= "OBSERVED" (:observation measured)) successor handed last-part
+         :pass (boolean (and (seq sections) crossed (= "OBSERVED" (:observation measured)) successor handed
+                             exact-first-prompt last-part
                              (= old-keep "KeepRefused.NotOwner")))
          :watched (str "old flow " old " baseline " cur " tokens, R " r3
                        "; pre-subscribed measured turn " (:turn-id measured) " tokenUsage.last.inputTokens " (:tokens measured)
@@ -2517,7 +2919,8 @@
       (let [policy (flow-meta (ho-policy ho-share))
             flow-id (handover-flow ho-seat)
             thread-id (handover-thread ho-seat)
-            first-stop (watch 180 #(pos? (stops-of flow-id)))
+            predecessor-completed (or (:successor-completion @ho)
+                                      (:h6-final-completion @ho))
             baseline (observed-turn! "h5-baseline" thread-id #(ho-turn! flow-id (bulk-order "h5-baseline")))
             push1 (:result baseline)
             tp (:tokens baseline)
@@ -2540,16 +2943,22 @@
             ;; turn's Stop is the next Stop after the Keep.
             kept (str (seat-call! ho-seat "h5-keep" (keep-datom "canary-green" "Kept past the threshold." "Body green.")))
             green (window-open? (touch-tokens kept) r5 ho-share)
+            successor-handover (handover-text (sections-of (flow (str "Read." ho-seat))))
             successor (watch 240 #(let [f (awake-flow ho-seat)] (when (and f (not= (str f) flow-id)) (str f))))
+            successor-completion (when successor
+                                   (await-initial-turn! "H5-successor" ho-seat successor
+                                                        (codex-first-prompt (:profile-proof @ho)
+                                                                            successor-handover)))
             restored [(flow-meta (ho-threshold ho-high)) (flow-meta (ho-policy ho-share))]
             delivered (boolean (and reached (not uncertain)))]
-        (swap! ho assoc :h5-successor successor)
+        (swap! ho assoc :h5-successor successor
+               :h5-successor-completion (:proof successor-completion))
         (keep-text! "handover-H5-queue-deliveries.txt" deliveries)
         {:reply (str "Policy S " ho-share ": " policy " / Thresholds " r5 ": " thresholds " / Send by the Luna seat: " drained
                      " / ReadQueueDeliveries: " deliveries " / Keep: " kept " / restored: " restored)
-         :pass (boolean (and first-stop push1 (= "OBSERVED" (:observation baseline))
+         :pass (boolean (and predecessor-completed push1 (= "OBSERVED" (:observation baseline))
                              rested (= "OBSERVED" (:observation measured)) past kept-awake delivered
-                             (str/starts-with? kept "Kept.") green successor))
+                             (str/starts-with? kept "Kept.") green successor successor-completion))
          :watched (str "flow " flow-id " at " tp " tokens, R " r5 "; after the push " tq " (past " past
                        ", exact measured turn " (:turn-id measured) ")"
                        "; not refreshed at that Stop: still Awake " kept-awake ", log " (pr-str (last kept-lines))
@@ -2563,30 +2972,70 @@
    ["H6 an ordered Refresh bypasses the gate: a non-green seat refreshed from its own pane, then from meta"
     (fn []
       (let [f1 (handover-flow ho-seat)
-            rested (watch 180 #(pos? (stops-of f1)))
+            expected-f1 (:h5-successor @ho)
+            f1-completion (:h5-successor-completion @ho)
+            _fixture (when-not (and f1-completion (= f1 expected-f1))
+                       (throw (ex-info "H6 predecessor identity and completion were not established"
+                                       {:prerequisite :h5-successor
+                                        :flow f1 :expected expected-f1})))
             glance (flow (str "Glance." ho-seat))
+            expected-handover (handover-text (sections-of (flow (str "Read." ho-seat))))
+            first-retirement-snapshot (start-retirement-observation!)
             own (seat-call! ho-seat "h6-refresh" (str "Refresh." ho-seat))
             f2 (require-handover-identifier
                 :successor-flow
                 (watch 180 #(let [f (awake-flow ho-seat)] (when (and f (not= (str f) f1)) (str f))))
                 ho-seat)
-            rested2 (when f2 (watch 180 #(pos? (stops-of f2))))
+            f2-completion (await-initial-turn! "H6-pane-successor" ho-seat f2
+                                               (codex-first-prompt (:profile-proof @ho)
+                                                                   expected-handover))
+            first-retirement-frames (finish-retirement-observation! 45000)
+            first-path (str "Mind/test/Terra/" f1 ".md")
+            first-git (archive-git-evidence first-retirement-frames f1 f2)
+            first-untouched (archived-untouched-generation-proof
+                             first-retirement-frames f1 f2 first-path first-git)
+            second-retirement-snapshot (start-retirement-observation!)
             by-meta (flow-meta (str "Refresh." ho-seat))
             f3 (require-handover-identifier
                 :successor-flow
                 (watch 180 #(let [f (awake-flow ho-seat)] (when (and f f2 (not= (str f) f2)) (str f))))
-                ho-seat)]
+                ho-seat)
+            f3-completion (await-initial-turn! "H6-meta-successor" ho-seat f3
+                                               (codex-first-prompt (:profile-proof @ho)
+                                                                   expected-handover))
+            second-retirement-frames (finish-retirement-observation! 45000)
+            second-path (str "Mind/test/Terra/" f2 ".md")
+            second-git (archive-git-evidence second-retirement-frames f2 f3)
+            second-untouched (archived-untouched-generation-proof
+                              second-retirement-frames f2 f3 second-path second-git)
+            refresh-proof (refresh-effects-proof own f2 f2-completion by-meta f3 f3-completion f1)
+            own-effect (:own-effect refresh-proof)
+            meta-effect (:meta-effect refresh-proof)
+            distinct (:distinct refresh-proof)]
+        (keep-text! "handover-H6-retirement.json"
+                    (json/generate-string
+                     {:firstSnapshot first-retirement-snapshot
+                      :firstFrames first-retirement-frames :firstGit first-git
+                      :firstUntouched first-untouched
+                      :secondSnapshot second-retirement-snapshot
+                      :secondFrames second-retirement-frames :secondGit second-git
+                      :secondUntouched second-untouched} {:pretty true}))
+        (swap! ho assoc :h6-final-successor f3 :h6-final-completion (:proof f3-completion))
         {:reply (str "Glance: " glance " / Refresh from its pane: " own " / Refresh from meta: " by-meta)
-         :pass (boolean (and rested (or (nil? own) (str/starts-with? own "Refreshed.")) f2
-                             (str/starts-with? by-meta "Refreshed.") f3))
-         :watched (str "flow " f1 " (no Keep of its own, so not green) rested " (boolean rested)
-                       "; its own pane's Refresh (reply " (pr-str own) ", nil when the closing pane took the client) started " (or f2 "nothing") ", rested " (boolean rested2)
-                       "; meta Refresh started " (or f3 "nothing"))}))]
+         :pass (boolean (and (:established first-untouched) (:established second-untouched)
+                             (:established refresh-proof)))
+         :watched (str "flow " f1 " closed untouched/non-green under immutable archive identity "
+                       (:established first-untouched) ", and " f2 " likewise " (:established second-untouched)
+                       "; pane Refresh exact typed effect " own-effect " started " f2
+                       " with native completion " (boolean f2-completion)
+                       "; meta Refresh exact typed effect " meta-effect " started " f3
+                       " with native completion " (boolean f3-completion)
+                       "; all three identities distinct " distinct)}))]
 
    ["H7 empty-queue threshold crossing: after a pre-subscribed measured Stop, a Soft message reaches the same native thread before any green"
     (fn []
       (let [flow-id (handover-flow ho-seat)
-            rested (watch 180 #(pos? (stops-of flow-id)))
+            predecessor-completed (:h6-final-completion @ho)
             thread-id (handover-thread ho-seat)
             baseline (observed-turn! "h7-baseline" thread-id #(ho-turn! flow-id (bulk-order "h7-baseline")))
             tp (:tokens baseline)
@@ -2622,7 +3071,7 @@
                                            :reached reached :sameWhenReached same-when-reached
                                            :queueDeliveries deliveries} {:pretty true}))
         {:reply (str "Thresholds " r7 ": " thresholds " / Soft send: " sent " / deliveries: " deliveries)
-         :pass (boolean (and rested (= "OBSERVED" (:observation baseline))
+         :pass (boolean (and predecessor-completed (= "OBSERVED" (:observation baseline))
                              (= "OBSERVED" (:observation measured)) crossed empty-before empty-at-stop
                              same-before-send (str/starts-with? sent "SendAccepted.") reached
                              same-when-reached (not uncertain)))
@@ -2632,6 +3081,21 @@
                        "; no Keep was made in this generation; same flow before send " same-before-send
                        "; fresh Soft user turn " (:turn-id reached) " reached same native thread before refresh " same-when-reached
                        "; Uncertain " uncertain)}))]])
+
+(def handover-scenarios
+  (mapv (fn [[fixture prerequisites] [name body]]
+          [name (fixture-case fixture prerequisites body)])
+        [[:h0 []]
+         [:h1 [:h0]]
+         [:h2 [:h1]]
+         [:h3 [:h2]]
+         [:h4 [:h3]]
+         ;; H5 uses H3's live successor but remains runnable when H4's
+         ;; archive/publication assertion fails.
+         [:h5 [:h3]]
+         [:h6 [:h5]]
+         [:h7 [:h6]]]
+        handover-scenario-bodies))
 
 ;; ---------------------------------------------------------------- takeover
 ;; flow-capsule --takeover <old flow package> <new flow package>: the bie3.6

@@ -125,6 +125,271 @@
                   (= refusals (:h0-refusals failure)))))
     (finally (reset! flow-capsule/handover-h0-refusals saved))))
 
+;; Codex completion is proved from the exact known thread and complete prompt,
+;; never from a Flow Stop count or a tag substring.
+(let [prompt "Answer exactly. Tag same."
+      turn (fn turn
+             ([id text status] (turn id text status ::missing))
+             ([id text status error]
+              (cond-> {:id id :status status
+                       :items [{:type "userMessage"
+                                :content [{:type "text" :text text :text_elements []}]}]}
+                (not= error ::missing) (assoc :error error))))
+      history (fn [thread turns] {:thread {:id thread} :turns turns})
+      proof #(flow-capsule/completed-turn-proof "thread-a" prompt #{"old"} %)
+      valid (history "thread-a" [(turn "old" "old prompt" "completed" nil)
+                                  (turn "new" prompt "completed" nil)])]
+  (check "one fresh exact-prompt turn completed with explicit null error is established"
+         (:established (proof valid)))
+  (check "the pinned optional error field may be missing and still means no error"
+         (:established (proof (history "thread-a" [(turn "old" "old prompt" "completed")
+                                                    (turn "new" prompt "completed")]))))
+  (check "a stale exact turn is not fresh"
+         (not (:established (flow-capsule/completed-turn-proof
+                             "thread-a" prompt #{"old" "new"} valid))))
+  (check "a history returned for the wrong native thread is refused"
+         (not (:established (proof (history "thread-b" [(turn "old" "old" "completed")
+                                                         (turn "new" prompt "completed")])))))
+  (check "the same tag in a different full prompt is refused"
+         (not (:established (proof (history "thread-a" [(turn "old" "old" "completed")
+                                                         (turn "new" (str "prefix " prompt) "completed")])))))
+  (check "two fresh exact matching turns are ambiguous"
+         (not (:established (proof (history "thread-a" [(turn "old" "old" "completed")
+                                                         (turn "new-1" prompt "completed")
+                                                         (turn "new-2" prompt "completed")])))))
+  (check "completion on a different fresh turn does not complete the prompt turn"
+         (not (:established (proof (history "thread-a" [(turn "old" "old" "completed")
+                                                         (turn "prompt" prompt "inProgress" nil)
+                                                         (turn "other" "other" "completed" nil)])))))
+  (check "a non-null error refuses a completed turn"
+         (not (:established (proof (history "thread-a" [(turn "old" "old" "completed")
+                                                         (turn "new" prompt "completed" {:message "failed"})])))))
+  (check "an in-progress exact turn is not completion"
+         (not (:established (proof (history "thread-a" [(turn "old" "old" "completed")
+                                                         (turn "new" prompt "inProgress" nil)])))))
+  (check "an already-completed initial exact turn proves launch identity"
+         (:established (flow-capsule/initial-turn-proof
+                        "thread-a" prompt (history "thread-a" [(turn "initial" prompt "completed" nil)]))))
+  (check "an initial turn on the wrong thread is refused"
+         (not (:established (flow-capsule/initial-turn-proof
+                             "thread-a" prompt (history "thread-b" [(turn "initial" prompt "completed" nil)])))))
+  (doseq [[label malformed]
+          [["a completed turn with a missing identity is refused"
+            (history "thread-a" [(turn "old" "old" "completed")
+                                  (dissoc (turn "new" prompt "completed") :id)])]
+           ["a blank native thread identity is refused"
+            (history "" [(turn "new" prompt "completed")])]
+           ["duplicate turn identities are refused"
+            (history "thread-a" [(turn "old" "old" "completed")
+                                  (turn "old" prompt "completed")])]
+           ["an absent turns vector is refused" {:thread {:id "thread-a"}}]
+           ["a malformed turn items shape is refused"
+            (history "thread-a" [(assoc (turn "new" prompt "completed") :items nil)])]]]
+    (check label (not (:established (proof malformed)))))
+  (check "an initial completed turn with no identity is refused"
+         (not (:established
+               (flow-capsule/initial-turn-proof
+                "thread-a" prompt
+                (history "thread-a" [(dissoc (turn "initial" prompt "completed") :id)])))))
+  (doseq [[label malformed]
+          [["wrong-thread baseline" (history "thread-b" [(turn "old" "old" "completed")])]
+           ["absent-turn baseline" {:thread {:id "thread-a"}}]
+           ["duplicate-id baseline" (history "thread-a" [(turn "old" "a" "completed")
+                                                            (turn "old" "b" "completed")])]]]
+    (let [effects (atom 0)
+          failure (try
+                    (let [_before (flow-capsule/observer-baseline! label "thread-a" malformed)]
+                      (swap! effects inc))
+                    nil
+                    (catch Exception e (ex-data e)))]
+      (check (str label " refuses before a native side effect")
+             (and (zero? @effects) (= :observer-baseline (:identifier failure)))))))
+
+(let [saved @flow-capsule/handover-fixture-outcomes]
+  (try
+    (reset! flow-capsule/handover-fixture-outcomes
+            {:touch {:pass false :reply "original touch failure"}
+             :t2 {:pass false :reply "original t2 failure"}
+             :pred {:pass false :reply "original pred failure"}})
+    (doseq [failed [:touch :t2 :pred]]
+      (let [effects (atom 0)
+            started (System/nanoTime)
+            outcome ((flow-capsule/fixture-case :dependent [failed]
+                                                #(do (swap! effects inc) {:pass true})))
+            elapsed-ms (/ (- (System/nanoTime) started) 1000000.0)]
+        (check (str "missing " (name failed) " is immediately NOT ESTABLISHED with no side effect")
+               (and (not (:pass outcome)) (:not-established outcome)
+                    (= failed (:failed-prerequisite outcome))
+                    (= "original " (subs (get-in outcome [:prerequisite-outcome :reply]) 0 9))
+                    (zero? @effects) (< elapsed-ms 100.0)))))
+    (let [effects (atom 0)
+          outcome ((flow-capsule/fixture-case :independent []
+                                              #(do (swap! effects inc) {:pass true})))]
+      (check "an independent fixture still runs after unrelated failures"
+             (and (:pass outcome) (= 1 @effects))))
+    (check "a NOT ESTABLISHED outcome is never accepted as pass or skip"
+           (let [outcome ((flow-capsule/fixture-case :dependent [:touch] #(identity {:pass true})))]
+             (and (false? (:pass outcome)) (not (:skipped outcome)))))
+    (finally (reset! flow-capsule/handover-fixture-outcomes saved))))
+
+(doseq [[label proof accepted]
+        [["two exact typed refresh effects and both completions"
+          (flow-capsule/refresh-effects-proof "Refreshed.two" "two" {:turn-id "a"}
+                                              "Refreshed.three" "three" {:turn-id "b"} "one") true]
+         ["typed pane reply mismatch"
+          (flow-capsule/refresh-effects-proof "" "two" {:turn-id "a"}
+                                              "Refreshed.three" "three" {:turn-id "b"} "one") false]
+         ["successor completion missing"
+          (flow-capsule/refresh-effects-proof "Refreshed.two" "two" nil
+                                              "Refreshed.three" "three" {:turn-id "b"} "one") false]
+         ["successor identities reused"
+          (flow-capsule/refresh-effects-proof "Refreshed.two" "two" {:turn-id "a"}
+                                              "Refreshed.two" "two" {:turn-id "b"} "one") false]]]
+  (check label (= accepted (:established proof))))
+
+(doseq [missing [:touch :t2 :pred]]
+  (let [started (System/nanoTime)
+        failure (try
+                  (flow-capsule/require-fixture-values! missing {missing nil})
+                  nil
+                  (catch Exception e (ex-data e)))]
+    (check (str "missing required " (name missing) " refuses before a wait")
+           (and (= missing (:prerequisite failure))
+                (= [missing] (:missing failure))
+                (< (/ (- (System/nanoTime) started) 1000000.0) 100.0)))))
+
+(let [base {:flow-kind "Regular" :user-modules [] :raw-records []
+            :predecessor-depth 0 :purpose "" :prelaunch-observed true
+            :profile-brief flow-capsule/brief :herdr-session flow-capsule/session
+            :queued-first nil}]
+  (check "the exact handover profile premises establish the source-derived first prompt"
+         (:established (flow-capsule/handover-profile-proof base)))
+  (doseq [[label drift]
+          [["flow kind drift" {:flow-kind "Simplified"}]
+           ["user module drift" {:user-modules ["vision:extra"]}]
+           ["raw remembered record drift" {:raw-records ["raw"]}]
+           ["unobserved prelaunch state" {:prelaunch-observed false}]
+           ["purpose drift" {:purpose "purpose"}]
+           ["brief drift" {:profile-brief (str flow-capsule/brief "\n")}]
+           ["session drift" {:herdr-session "other"}]
+           ["queued first-prompt content" {:queued-first "Soft.Order"}]]]
+    (check label (not (:established (flow-capsule/handover-profile-proof (merge base drift)))))))
+
+(let [line (first (filter #(str/starts-with? % "Configure.Metaflows.")
+                          (str/split-lines
+                           (slurp (fs/file (fs/parent (first *command-line-args*))
+                                          "configure-handover.datom")))))
+      maintained (str/replace-first line "Regular Default OnDemand"
+                                    "Regular Default Maintained")
+      profile (flow-capsule/seat-profile-declaration maintained flow-capsule/ho-seat)
+      nested-profile (flow-capsule/seat-profile-declaration
+                      (str "Configuration.{ Success [ " maintained " ] }")
+                      flow-capsule/ho-seat)
+      request (flow-capsule/launch-profile-request
+               (flow-capsule/launch-query "Launch" flow-capsule/ho-seat)
+               flow-capsule/ho-seat)]
+  (check "the actual handover declaration parses as Regular with no user modules, raw records or purpose"
+         (and (= "Regular" (:flow-kind profile))
+              (= "Maintained" (:wake profile))
+              (empty? (:user-modules profile))
+              (empty? (:raw-records profile))
+              (= "" (:purpose profile))))
+  (check "the profile is found inside a typed Configuration snapshot"
+         (= profile nested-profile))
+  (check "the typed Launch request supplies exact Predecessors and brief"
+         (= {:predecessor-depth 0 :profile-brief flow-capsule/brief} request)))
+
+(let [reply (str "Inspected.{ { { Mind test Terra } Awake.flow-a [] [] } "
+                 "{ None Some.{ native thread-a } } [] "
+                 "[ Available.{ one two pane-a three } ] None }")
+      binding (flow-capsule/inspected-binding reply flow-capsule/ho-seat)]
+  (check "one Inspect reply binds its own Flow, native thread and pane"
+         (= {:flow "flow-a" :thread "thread-a" :pane "pane-a" :past [] :queue []}
+            binding))
+  (check "an Inspect reply for a different Flow address is refused"
+         (try (flow-capsule/inspected-binding reply flow-capsule/ho-other)
+              false
+              (catch Exception _ true))))
+
+(let [stable (flow-capsule/binding-proof "flow-a" "thread-a"
+                                         {:flow "flow-a" :thread "thread-a"}
+                                         {:flow "flow-a" :thread "thread-a"})]
+  (check "the expected successor Flow/native binding is stable across observation"
+         (:established stable))
+  (check "a successor Flow binding race is refused"
+         (not (:established (flow-capsule/binding-proof
+                             "flow-a" "thread-a"
+                             {:flow "flow-a" :thread "thread-a"}
+                             {:flow "flow-b" :thread "thread-a"}))))
+  (check "a successor native-thread binding race is refused"
+         (not (:established (flow-capsule/binding-proof
+                             "flow-a" "thread-a"
+                             {:flow "flow-a" :thread "thread-a"}
+                             {:flow "flow-a" :thread "thread-b"})))))
+
+(let [commit (apply str (repeat 40 "a"))
+      blob (apply str (repeat 40 "b"))
+      key {:address flow-capsule/ho-seat :generation 7
+           :predecessor "pred" :successor "succ"}
+      identity {:commit commit :path "Mind/test/Terra/pred.md" :blob blob}
+      snapshot {:keys [key]}
+      later [{:kind :archive :key key :identity identity}
+             {:kind :removed :key key}]
+      git {:commit-exit 0 :verified-commit commit :blob-exit 0 :blob blob
+           :content-exit 0 :content "document" :requested-content "document"}
+      verdict #(flow-capsule/retirement-verdict
+                %1 %2 "pred" "succ" "Mind/test/Terra/pred.md" %3)]
+  (check "exact retirement key, archive identity, order and removal complete"
+         (:complete (verdict snapshot later git)))
+  (check "a wrong retirement successor is refused"
+         (not (:complete (verdict {:keys [(assoc key :successor "wrong")]} later git))))
+  (check "a removal for a different generation key is refused"
+         (not (:complete (verdict snapshot
+                                  [(first later) {:kind :removed :key (assoc key :generation 8)}]
+                                  git))))
+  (check "removal before archive is refused"
+         (not (:complete (verdict snapshot (vec (reverse later)) git))))
+  (check "a wrong immutable commit:path/blob identity is refused"
+         (not (:complete (verdict snapshot
+                                  [{:kind :archive :key key
+                                    :identity (assoc identity :path "wrong.md")}
+                                   {:kind :removed :key key}]
+                                  git)))))
+
+(let [commit (apply str (repeat 40 "c"))
+      blob (apply str (repeat 40 "d"))
+      key {:address flow-capsule/ho-seat :generation 9
+           :predecessor "flow-one" :successor "flow-two"}
+      path "Mind/test/Terra/flow-one.md"
+      content (str "generation=9 predecessor=flow-one successor=flow-two "
+                   "sections=[Section] touch=None\n")
+      frames [{:kind :snapshot :address flow-capsule/ho-seat :keys []}
+              {:kind :closed :key key}
+              {:kind :archive :key key
+               :identity {:commit commit :path path :blob blob}}
+              {:kind :removed :key key}]
+      git {:commit-exit 0 :verified-commit commit :blob-exit 0 :blob blob
+           :content-exit 0 :content content}
+      proof #(flow-capsule/archived-untouched-generation-proof
+              %1 "flow-one" "flow-two" path %2)]
+  (check "an exact immutable closed generation explicitly records touch None"
+         (:established (proof frames git)))
+  (doseq [[label changed-frames changed-git]
+          [["touch omission is refused"
+            frames (assoc git :content (str/replace content " touch=None" ""))]
+           ["a touched generation is refused"
+            frames (assoc git :content (str/replace content "None" "Some(Unknown)"))]
+           ["the wrong archived generation is refused"
+            frames (assoc git :content (str/replace content "generation=9" "generation=8"))]
+           ["the wrong successor is refused"
+            frames (assoc git :content (str/replace content "successor=flow-two" "successor=other"))]
+           ["an uncommitted archive identity is refused" frames (assoc git :commit-exit 1)]
+           ["a wrong archive path is refused"
+            (assoc-in frames [2 :identity :path] "Mind/test/Terra/other.md") git]
+           ["a missing generation removal is refused" (pop frames) git]
+           ["an inherited closed key is refused" (assoc-in frames [0 :keys] [key]) git]]]
+    (check label (not (:established (proof changed-frames changed-git))))))
+
 ;; The H0-only diagnostic keeps its bounded evidence before teardown, even
 ;; when the launch body or an evidence probe fails. Credential/configuration
 ;; files are outside the preservation allowlist.

@@ -1782,6 +1782,7 @@ pub(crate) fn evolve_request_id_memory(
                         .ok_or(StoreError::StateInvariant)?,
                 )?,
                 archived: None,
+                admission: super::logical_delivery::DeliveryAdmission::HistoricalUnknown,
             })
         })
         .collect::<Result<Vec<_>, StoreError>>()?;
@@ -2450,6 +2451,15 @@ mod tests {
             .as_deref(),
             Some("same original words")
         );
+        let current_table = engine
+            .register_table(descriptors.current)
+            .expect("current deliveries register");
+        let evolved_current = engine
+            .match_records(QueryPlan::all(current_table))
+            .expect("current deliveries read");
+        assert!(evolved_current.records().iter().all(|row| {
+            row.admission == super::logical_delivery::DeliveryAdmission::HistoricalUnknown
+        }));
     }
 
     #[test]

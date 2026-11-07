@@ -3179,7 +3179,7 @@ impl AppliesFlowQuery for FlowStore {
             | Query::BindSeat(_)
             | Query::Adopt(_)
             | Query::ObserveSends(_)
-            | Query::ObserveSender(_) => Ok(Response::Refused(
+            | Query::ObserveDeliveries(_) => Ok(Response::Refused(
                 <signal_flow::Refusal as crate::sending::RefusesUnidentified>::unidentified(
                     signal_flow::Process { pid: 0, started: 0 },
                 ),
@@ -3235,7 +3235,7 @@ impl ReservesPendingStart for FlowStore {
             | Query::LaunchStatus(_)
             | Query::Observe(_)
             | Query::ObserveSends(_)
-            | Query::ObserveSender(_)
+            | Query::ObserveDeliveries(_)
             | Query::ResolveCaller(_)
             | Query::Report(_)
             | Query::Bind(_)

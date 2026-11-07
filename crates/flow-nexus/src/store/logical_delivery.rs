@@ -26,7 +26,7 @@ const COUNTER_KEY: &str = "counter";
 const COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_counter");
 const CURRENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_current");
 const EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_events");
-pub(super) const CURRENT_SCHEMA: &str = "flow-nexus-logical-delivery-current-v7";
+pub(super) const CURRENT_SCHEMA: &str = "flow-nexus-logical-delivery-current-v8";
 pub(super) const EVENT_SCHEMA: &str = "flow-nexus-logical-delivery-event-v7";
 const SIMPLIFIED_REPLY_TABLE_NAME: TableName =
     TableName::new("flow_nexus_simplified_reply_bindings");
@@ -201,9 +201,17 @@ impl MemoryDefinition for LogicalDeliveryCounter {
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DeliveryAdmission {
+    Message,
+    Ordinary,
+    HistoricalUnknown,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CurrentLogicalDelivery {
     pub snapshot: DeliverySnapshot,
     pub archived: Option<signal_flow::DeliveryCursor>,
+    pub admission: DeliveryAdmission,
 }
 impl EngineRecord for CurrentLogicalDelivery {
     fn record_key(&self) -> RecordKey {
@@ -213,7 +221,7 @@ impl EngineRecord for CurrentLogicalDelivery {
 
 impl MemoryDefinition for CurrentLogicalDelivery {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(7)
+        MemoryVersion::new(8)
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(CURRENT_SCHEMA)
@@ -643,6 +651,10 @@ pub(crate) trait RecordsLogicalDeliveries {
         sender: &Address,
         after_cursor: Option<i64>,
     ) -> Result<SendObservation, StoreError>;
+    fn read_message_delivery_snapshots(
+        &self,
+        after_cursor: Option<i64>,
+    ) -> Result<SendObservation, StoreError>;
     fn debug_snapshot(
         &self,
         address: &Address,
@@ -1063,6 +1075,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     CurrentLogicalDelivery {
                         snapshot: snapshot.clone(),
                         archived: None,
+                        admission: current.admission.clone(),
                     },
                 )
                 .assert(
@@ -1265,6 +1278,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     CurrentLogicalDelivery {
                         snapshot: notice_snapshot.clone(),
                         archived: None,
+                        admission: DeliveryAdmission::Ordinary,
                     },
                 )
                 .assert(
@@ -1299,6 +1313,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     CurrentLogicalDelivery {
                         snapshot: snapshot.clone(),
                         archived: None,
+                        admission: DeliveryAdmission::Ordinary,
                     },
                 )
                 .assert(
@@ -1520,6 +1535,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     CurrentLogicalDelivery {
                         snapshot: snapshot.clone(),
                         archived: None,
+                        admission: DeliveryAdmission::Ordinary,
                     },
                 )
                 .assert(
@@ -1695,6 +1711,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     CurrentLogicalDelivery {
                         snapshot: snapshot.clone(),
                         archived: None,
+                        admission: DeliveryAdmission::Ordinary,
                     },
                 )
                 .assert(
@@ -1786,6 +1803,11 @@ impl RecordsLogicalDeliveries for FlowStore {
             deliver_call,
             upgrade_notice,
         } = transition;
+        let admission = if deliver_call.is_some() {
+            DeliveryAdmission::Message
+        } else {
+            DeliveryAdmission::Ordinary
+        };
         // A retry may present the same pre-commit snapshot after the prior
         // atomic commit succeeded. The durable sent count is the expected
         // state witness; refuse the stale attempt before creating a second
@@ -1935,6 +1957,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 CurrentLogicalDelivery {
                     snapshot: snapshot.clone(),
                     archived: None,
+                    admission,
                 },
             )
             .assert(
@@ -2183,6 +2206,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 CurrentLogicalDelivery {
                     snapshot: snapshot.clone(),
                     archived: None,
+                    admission: current.admission.clone(),
                 },
             )
             .assert(
@@ -2253,6 +2277,61 @@ impl RecordsLogicalDeliveries for FlowStore {
                         && r.snapshot.sent_by == signal_flow::SentBy::Sender(sender.clone())
                 })
                 .map(|r| r.snapshot.clone())
+                .collect()
+        };
+        snapshots.sort_by_key(|snapshot| snapshot.delivery_cursor);
+        Ok(SendObservation {
+            store_identity: self.store_identity()?,
+            delivery_cursor: highwater,
+            delivery_snapshot_vector: snapshots,
+        })
+    }
+    fn read_message_delivery_snapshots(
+        &self,
+        after_cursor: Option<i64>,
+    ) -> Result<SendObservation, StoreError> {
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let current = self
+            .engine
+            .match_records(QueryPlan::all(self.logical_deliveries.current))?;
+        let events = self
+            .engine
+            .match_records(QueryPlan::all(self.logical_deliveries.events))?;
+        let counters = self.engine.match_records(QueryPlan::key(
+            self.logical_deliveries.counter,
+            RecordKey::new(COUNTER_KEY),
+        ))?;
+        let highwater = counters
+            .records()
+            .first()
+            .map(|counter| counter.next_cursor.saturating_sub(1))
+            .unwrap_or(0);
+        let admitted: std::collections::HashSet<_> = current
+            .records()
+            .iter()
+            .filter(|row| row.admission == DeliveryAdmission::Message)
+            .map(|row| row.snapshot.logical_delivery_id.clone())
+            .collect();
+        let mut snapshots: Vec<DeliverySnapshot> = if let Some(cursor) = after_cursor {
+            events
+                .records()
+                .iter()
+                .filter(|row| {
+                    row.snapshot.delivery_cursor > cursor
+                        && admitted.contains(&row.snapshot.logical_delivery_id)
+                })
+                .map(|row| row.snapshot.clone())
+                .collect()
+        } else {
+            current
+                .records()
+                .iter()
+                .filter(|row| row.archived.is_none() && row.admission == DeliveryAdmission::Message)
+                .map(|row| row.snapshot.clone())
                 .collect()
         };
         snapshots.sort_by_key(|snapshot| snapshot.delivery_cursor);

@@ -1500,9 +1500,12 @@ mod tests {
     }
 
     fn queued(body: &str) -> QueueEntry {
+        let value = body.bytes().fold(2166136261_u32, |hash, byte| {
+            hash.wrapping_mul(16777619) ^ u32::from(byte)
+        });
         QueueEntry {
             logical_delivery_id: format!("logical-{body}"),
-            request_id: "test".into(),
+            request_id: format!("{:04x}", value & 0xffff),
             sent_by: SentBy::Sender(Address {
                 aspect: Aspect::Psyche,
                 topic: "core".into(),

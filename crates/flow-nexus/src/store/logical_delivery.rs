@@ -328,10 +328,21 @@ impl MintsRequestIds for FlowStore {
             self.logical_deliveries.store_identity,
             RecordKey::new(STORE_IDENTITY_KEY),
         ))?;
-        rows.records()
-            .first()
-            .map(|row| row.store_identity.clone())
-            .ok_or(StoreError::StateInvariant)
+        match rows.records() {
+            [row] => Ok(row.store_identity.clone()),
+            [] => {
+                self.seed_store_identity()?;
+                let seeded = self.engine.match_records(QueryPlan::key(
+                    self.logical_deliveries.store_identity,
+                    RecordKey::new(STORE_IDENTITY_KEY),
+                ))?;
+                match seeded.records() {
+                    [row] => Ok(row.store_identity.clone()),
+                    _ => Err(StoreError::StateInvariant),
+                }
+            }
+            _ => Err(StoreError::StateInvariant),
+        }
     }
     fn request_binding(
         &self,
@@ -1298,6 +1309,14 @@ impl RecordsLogicalDeliveries for FlowStore {
                     self.logical_deliveries.events,
                     LogicalDeliveryEvent {
                         snapshot: snapshot.clone(),
+                    },
+                )
+                .assert(
+                    self.logical_deliveries.request_ids,
+                    RequestIdBinding {
+                        request_id: snapshot.request_id.clone(),
+                        logical_delivery_id: snapshot.logical_delivery_id.clone(),
+                        closure: RequestClosure::Open,
                     },
                 );
         }

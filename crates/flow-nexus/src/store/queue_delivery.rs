@@ -90,7 +90,7 @@ impl EngineRecord for DeliveryCounter {
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-enum RequestState {
+pub(crate) enum RequestState {
     Queued,
     Settled,
     /// Its attempt was proved never to have reached the seat; the request
@@ -104,10 +104,10 @@ enum RequestState {
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredDeliveryRequest {
-    request_id: String,
-    address: Address,
-    queue_evidence: QueueEvidence,
-    state: RequestState,
+    pub(crate) request_id: String,
+    pub(crate) address: Address,
+    pub(crate) queue_evidence: QueueEvidence,
+    pub(crate) state: RequestState,
 }
 
 impl EngineRecord for StoredDeliveryRequest {

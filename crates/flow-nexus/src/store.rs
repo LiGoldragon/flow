@@ -635,7 +635,7 @@ impl ReadsNativeOwnerEnvironment for FlowStore {
 /// address remains asleep after the process it named is gone.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredMetaflow {
-    metaflow: Metaflow,
+    pub(crate) metaflow: Metaflow,
 }
 
 impl EngineRecord for StoredMetaflow {
@@ -2274,15 +2274,7 @@ impl OpensFlowStore for FlowStore {
     }
 
     fn open_configured_in_place(path: &Path) -> Result<Self, StoreError> {
-        if !FlowStore::recognize_flow_memory(path)? {
-            return Err(StoreError::NotConfigured);
-        }
-
-        let configuration_only = ConfigurationOnlyStore::open_in_place(path)?;
-        if configuration_only.configuration_snapshot()?.is_none() {
-            return Err(StoreError::NotConfigured);
-        }
-        drop(configuration_only);
+        let era = FlowStore::recognize_flow_memory_era(path)?.ok_or(StoreError::NotConfigured)?;
 
         let flows_descriptor = TableDescriptor::<FlowRecord>::new(
             FLOW_TABLE_NAME,
@@ -2398,8 +2390,7 @@ impl OpensFlowStore for FlowStore {
             <FlowStore as restart::DescribesRestartTables>::restart_descriptor();
         let seat_birth_descriptor =
             <FlowStore as restart::DescribesRestartTables>::seat_birth_descriptor();
-        let mut engine = Engine::open(
-            EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
+        let mut engine_open = EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
                 .with_family(&native_owner_proofs_descriptor)
                 .with_family(&state_descriptor)
@@ -2448,17 +2439,26 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&logical_delivery_descriptors.events)
                 .with_family(&logical_delivery_descriptors.simplified_replies)
                 .with_family(&logical_delivery_descriptors.purposes)
+                .with_family(&heartbeat_standing_descriptor)
+                .with_family(&restart_descriptor)
+                .with_family(&seat_birth_descriptor)
+                .with_family(&<handover::HandoverMemory as handover::DescribesHandoverTable>::descriptor());
+        if era == FlowMemoryEra::Current {
+            engine_open = engine_open
                 .with_family(&logical_delivery_descriptors.request_ids)
                 .with_family(&logical_delivery_descriptors.deliver_calls)
                 .with_family(&logical_delivery_descriptors.store_identity)
                 .with_family(&request_id_upgrade_descriptors.prior_deliveries)
                 .with_family(&request_id_upgrade_descriptors.task_announcements)
-                .with_family(&request_id_upgrade_descriptors.upgrade_assignments)
-                .with_family(&heartbeat_standing_descriptor)
-                .with_family(&restart_descriptor)
-                .with_family(&seat_birth_descriptor)
-                .with_family(&<handover::HandoverMemory as handover::DescribesHandoverTable>::descriptor()),
-        )?;
+                .with_family(&request_id_upgrade_descriptors.upgrade_assignments);
+        }
+        let mut engine = Engine::open(engine_open)?;
+        if era == FlowMemoryEra::RequestIdPredecessor {
+            // The atomic evolution is assembled before any current-family registration.
+            // Until that plan is complete, refuse the predecessor without writing it.
+            return Err(StoreError::StateInvariant);
+        }
+
         let flows = engine.register_table(flows_descriptor)?;
         let native_owner_proofs = engine.register_table(native_owner_proofs_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
@@ -2475,6 +2475,9 @@ impl OpensFlowStore for FlowStore {
         let roles = engine.register_table(roles_descriptor)?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
         let meta_configuration_tables = MetaConfigurationTables::register(&mut engine)?;
+        if FlowStore::meta_configuration_snapshot(&engine, &meta_configuration_tables)?.is_none() {
+            return Err(StoreError::NotConfigured);
+        }
         let event_tables =
             <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
         let context_sizes = engine.register_table(context_sizes_descriptor)?;

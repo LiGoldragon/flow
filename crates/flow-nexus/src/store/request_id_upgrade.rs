@@ -441,3 +441,482 @@ impl DeclaresRequestIdUpgradeTables for RequestIdUpgradeTables {
         })
     }
 }
+
+macro_rules! recode_unchanged {
+    ($value:expr, $current:ty) => {{
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>($value)
+            .map_err(|_| StoreError::StateInvariant)?;
+        rkyv::from_bytes::<$current, rkyv::rancor::Error>(&bytes)
+            .map_err(|_| StoreError::StateInvariant)
+    }};
+}
+
+pub(crate) fn current_address(value: &old_flow::Address) -> Result<Address, StoreError> {
+    recode_unchanged!(value, Address)
+}
+
+pub(crate) fn current_sent_by(value: &old_flow::SentBy) -> Result<flow_ethos::SentBy, StoreError> {
+    recode_unchanged!(value, flow_ethos::SentBy)
+}
+
+pub(crate) fn current_message(
+    value: &old_flow::Message,
+) -> Result<flow_ethos::Message, StoreError> {
+    Ok(match value {
+        old_flow::Message::HardAbrupt(request) => {
+            flow_ethos::Message::HardAbrupt(current_request(request)?)
+        }
+        old_flow::Message::MiddleAbrupt(request) => {
+            flow_ethos::Message::MiddleAbrupt(current_request(request)?)
+        }
+        old_flow::Message::Soft(request) => flow_ethos::Message::Soft(current_request(request)?),
+    })
+}
+
+pub(crate) fn current_request(
+    value: &old_flow::Request,
+) -> Result<flow_ethos::Request, StoreError> {
+    Ok(match value {
+        old_flow::Request::Order(words) => flow_ethos::Request::Order(words.clone()),
+        old_flow::Request::Question(words) => flow_ethos::Request::Question(words.clone()),
+        old_flow::Request::Psyche(said) => {
+            flow_ethos::Request::Psyche(recode_unchanged!(said, flow_ethos::Said)?)
+        }
+        old_flow::Request::Psyches(saids) => flow_ethos::Request::Psyches(
+            saids
+                .iter()
+                .map(|said| recode_unchanged!(said, flow_ethos::Said))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        old_flow::Request::Result(result) => flow_ethos::Request::Result(match result {
+            old_flow::ResultPayload::Answered(answered) => {
+                flow_ethos::ResultPayload::Historical(answered.string.clone())
+            }
+            old_flow::ResultPayload::Historical(words) => {
+                flow_ethos::ResultPayload::Historical(words.clone())
+            }
+        }),
+        old_flow::Request::Notice(words) => flow_ethos::Request::Notice(words.clone()),
+        old_flow::Request::Task(task) => {
+            flow_ethos::Request::Task(recode_unchanged!(task, flow_ethos::AnswerableTask)?)
+        }
+        old_flow::Request::Done(done) => flow_ethos::Request::Done(match done {
+            old_flow::DonePayload::Answered(answered) => {
+                flow_ethos::DonePayload::Historical(flow_ethos::Historical_Data {
+                    logical_delivery_id: answered.logical_delivery_id.clone(),
+                    string: answered.string.clone(),
+                })
+            }
+            old_flow::DonePayload::Historical(historical) => flow_ethos::DonePayload::Historical(
+                recode_unchanged!(historical, flow_ethos::Historical_Data)?,
+            ),
+        }),
+    })
+}
+
+pub(crate) fn current_queue_entry(
+    value: &old_flow::QueueEntry,
+    request_id: RequestId,
+) -> Result<flow_ethos::QueueEntry, StoreError> {
+    Ok(flow_ethos::QueueEntry {
+        logical_delivery_id: value.logical_delivery_id.clone(),
+        request_id,
+        sent_by: current_sent_by(&value.sent_by)?,
+        delivery: recode_unchanged!(&value.delivery, flow_ethos::Delivery)?,
+        message: current_message(&value.message)?,
+    })
+}
+
+pub(crate) fn current_metaflow(
+    value: &old_flow::Metaflow,
+    request_ids: &std::collections::BTreeMap<String, RequestId>,
+) -> Result<flow_ethos::Metaflow, StoreError> {
+    Ok(flow_ethos::Metaflow {
+        address: current_address(&value.address)?,
+        state: recode_unchanged!(&value.state, flow_ethos::State)?,
+        past: value.past.clone(),
+        queue: value
+            .queue
+            .iter()
+            .map(|entry| {
+                let request_id = request_ids
+                    .get(&entry.logical_delivery_id)
+                    .cloned()
+                    .ok_or(StoreError::StateInvariant)?;
+                current_queue_entry(entry, request_id)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+pub(crate) fn current_refusal(
+    value: &old_signal::Refusal,
+) -> Result<signal_flow::Refusal, StoreError> {
+    Ok(match value {
+        old_signal::Refusal::Locked => signal_flow::Refusal::Locked,
+        old_signal::Refusal::Held(lock) => {
+            signal_flow::Refusal::Held(recode_unchanged!(lock, flow_ethos::Lock)?)
+        }
+        old_signal::Refusal::Awake(flow_id) => signal_flow::Refusal::Awake(flow_id.clone()),
+        old_signal::Refusal::Asleep => signal_flow::Refusal::Asleep,
+        old_signal::Refusal::Lapsed => signal_flow::Refusal::Lapsed,
+        old_signal::Refusal::Unknown(unknown) => signal_flow::Refusal::Unknown(match unknown {
+            old_signal::Unknown_Data::Address(address) => {
+                signal_flow::Unknown_Data::Address(current_address(address)?)
+            }
+            old_signal::Unknown_Data::Lock(lock) => {
+                signal_flow::Unknown_Data::Lock(recode_unchanged!(lock, flow_ethos::Lock)?)
+            }
+            old_signal::Unknown_Data::FlowId(flow_id) => {
+                signal_flow::Unknown_Data::FlowId(flow_id.clone())
+            }
+            old_signal::Unknown_Data::Key(key) => signal_flow::Unknown_Data::Key(key.clone()),
+        }),
+        old_signal::Refusal::NotConfigured => signal_flow::Refusal::NotConfigured,
+        old_signal::Refusal::NotMessage => signal_flow::Refusal::NotMessage,
+        old_signal::Refusal::Taken(address) => {
+            signal_flow::Refusal::Taken(current_address(address)?)
+        }
+        old_signal::Refusal::Unidentified(evidence) => signal_flow::Refusal::Unidentified(
+            recode_unchanged!(evidence, signal_flow::SeatEvidence)?,
+        ),
+        old_signal::Refusal::Store(words) => signal_flow::Refusal::Store(words.clone()),
+        old_signal::Refusal::NotSendServer(process) => {
+            signal_flow::Refusal::NotSendServer(recode_unchanged!(process, flow_ethos::Process)?)
+        }
+        old_signal::Refusal::Oversized(size) => {
+            signal_flow::Refusal::Oversized(recode_unchanged!(size, signal_flow::SendPayloadSize)?)
+        }
+        old_signal::Refusal::Direct(words) => signal_flow::Refusal::Direct(words.clone()),
+        old_signal::Refusal::TopicRefused(topic) => {
+            signal_flow::Refusal::TopicRefused(topic.clone())
+        }
+        old_signal::Refusal::NoOpenTask(_)
+        | old_signal::Refusal::Unresolved
+        | old_signal::Refusal::Ambiguous => signal_flow::Refusal::Unresolved,
+        old_signal::Refusal::MinutesRefused(minutes) => signal_flow::Refusal::MinutesRefused(
+            recode_unchanged!(minutes, signal_flow::MinutesRefusal)?,
+        ),
+    })
+}
+
+pub(crate) fn current_delivery_state(
+    value: &old_signal::DeliveryState,
+) -> Result<signal_flow::DeliveryState, StoreError> {
+    Ok(match value {
+        old_signal::DeliveryState::Queued => signal_flow::DeliveryState::Queued,
+        old_signal::DeliveryState::Attempting => signal_flow::DeliveryState::Attempting,
+        old_signal::DeliveryState::Retryable(cause) => signal_flow::DeliveryState::Retryable(
+            recode_unchanged!(cause, signal_flow::RetryCause)?,
+        ),
+        old_signal::DeliveryState::Uncertain => signal_flow::DeliveryState::Uncertain,
+        old_signal::DeliveryState::Delivered(receipt) => signal_flow::DeliveryState::Delivered(
+            recode_unchanged!(receipt, signal_flow::NativeReceipt)?,
+        ),
+        old_signal::DeliveryState::Failed(refusal) => {
+            signal_flow::DeliveryState::Failed(current_refusal(refusal)?)
+        }
+        old_signal::DeliveryState::Withdrawn => signal_flow::DeliveryState::Withdrawn,
+    })
+}
+
+pub(crate) fn current_snapshot(
+    value: &old_signal::DeliverySnapshot,
+    request_id: RequestId,
+) -> Result<signal_flow::DeliverySnapshot, StoreError> {
+    Ok(signal_flow::DeliverySnapshot {
+        delivery_cursor: value.delivery_cursor,
+        logical_delivery_id: value.logical_delivery_id.clone(),
+        request_id,
+        sent_by: current_sent_by(&value.sent_by)?,
+        address: current_address(&value.address)?,
+        delivery_state: current_delivery_state(&value.delivery_state)?,
+    })
+}
+
+pub(crate) fn current_queue_evidence(
+    value: &old_meta::QueueEvidence,
+    request_ids: &std::collections::BTreeMap<String, RequestId>,
+) -> Result<meta_signal_flow::QueueEvidence, StoreError> {
+    Ok(match value {
+        old_meta::QueueEvidence::Logical(entry) => {
+            let request_id = request_ids
+                .get(&entry.logical_delivery_id)
+                .cloned()
+                .ok_or(StoreError::StateInvariant)?;
+            meta_signal_flow::QueueEvidence::Logical(current_queue_entry(entry, request_id)?)
+        }
+        old_meta::QueueEvidence::Legacy(legacy) => {
+            meta_signal_flow::QueueEvidence::Legacy(meta_signal_flow::QueueEvidence_Legacy_Data {
+                sent_by: current_sent_by(&legacy.sent_by)?,
+                request: current_request(&legacy.request)?,
+            })
+        }
+    })
+}
+
+pub(crate) fn current_stored_request(
+    value: &PriorStoredDeliveryRequest,
+    request_ids: &std::collections::BTreeMap<String, RequestId>,
+) -> Result<super::queue_delivery::StoredDeliveryRequest, StoreError> {
+    Ok(super::queue_delivery::StoredDeliveryRequest {
+        request_id: value.request_id.clone(),
+        address: current_address(&value.address)?,
+        queue_evidence: current_queue_evidence(&value.queue_evidence, request_ids)?,
+        state: match value.state {
+            PriorRequestState::Queued => super::queue_delivery::RequestState::Queued,
+            PriorRequestState::Settled => super::queue_delivery::RequestState::Settled,
+            PriorRequestState::Unsent => super::queue_delivery::RequestState::Unsent,
+            PriorRequestState::Parked => super::queue_delivery::RequestState::Parked,
+        },
+    })
+}
+
+fn current_native_receipt(
+    value: &PriorNativeDeliveryReceipt,
+) -> super::queue_delivery::NativeDeliveryReceipt {
+    super::queue_delivery::NativeDeliveryReceipt {
+        native_request_id: value.native_request_id,
+        thread_id: value.thread_id.clone(),
+        turn_id: value.turn_id.clone(),
+        native_receipt: value.native_receipt.clone(),
+    }
+}
+
+pub(crate) fn current_attempt(
+    value: &PriorQueueDeliveryAttempt,
+    request_ids: &std::collections::BTreeMap<String, RequestId>,
+) -> Result<super::queue_delivery::QueueDeliveryAttempt, StoreError> {
+    use super::queue_delivery::{
+        AbsenceRecord, NativeHistoryAnchor, NativeTranscriptCursor, QueueDeliveryAttempt,
+        QueueDeliveryPhase,
+    };
+    let history_anchor = match &value.history_anchor {
+        PriorNativeHistoryAnchor::ClaudeTranscript(cursor) => {
+            NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
+                device: cursor.device,
+                inode: cursor.inode,
+                offset: cursor.offset,
+            })
+        }
+        PriorNativeHistoryAnchor::CodexTurns(turn) => NativeHistoryAnchor::CodexTurns(turn.clone()),
+    };
+    let phase = match &value.phase {
+        PriorQueueDeliveryPhase::Prepared => QueueDeliveryPhase::Prepared,
+        PriorQueueDeliveryPhase::Uncertain(undecided) => QueueDeliveryPhase::Uncertain(
+            undecided
+                .as_ref()
+                .map(|value| recode_unchanged!(value, meta_signal_flow::Undecided))
+                .transpose()?,
+        ),
+        PriorQueueDeliveryPhase::ReceiptRecorded(receipt) => {
+            QueueDeliveryPhase::ReceiptRecorded(current_native_receipt(receipt))
+        }
+        PriorQueueDeliveryPhase::Settled(receipt) => {
+            QueueDeliveryPhase::Settled(current_native_receipt(receipt))
+        }
+        PriorQueueDeliveryPhase::Absent(absence) => QueueDeliveryPhase::Absent(AbsenceRecord {
+            proof: recode_unchanged!(&absence.proof, meta_signal_flow::AbsenceProof)?,
+            observation: absence.observation.clone(),
+        }),
+        PriorQueueDeliveryPhase::Resolved(record) => QueueDeliveryPhase::Resolved(
+            recode_unchanged!(record, meta_signal_flow::QueueResolutionRecord)?,
+        ),
+    };
+    Ok(QueueDeliveryAttempt {
+        request_id: value.request_id.clone(),
+        attempt_id: value.attempt_id.clone(),
+        native_request_id: value.native_request_id,
+        flow_id: value.flow_id.clone(),
+        thread_id: value.thread_id.clone(),
+        harness_kind: recode_unchanged!(&value.harness_kind, flow_ethos::HarnessKind)?,
+        history_anchor,
+        address: current_address(&value.address)?,
+        queue_evidence: current_queue_evidence(&value.queue_evidence, request_ids)?,
+        phase,
+    })
+}
+
+fn current_send_failure_reason(
+    value: &old_signal::SendFailureReason,
+) -> Result<signal_flow::SendFailureReason, StoreError> {
+    Ok(match value {
+        old_signal::SendFailureReason::RecipientUnavailable(address) => {
+            signal_flow::SendFailureReason::RecipientUnavailable(current_address(address)?)
+        }
+        old_signal::SendFailureReason::QueueNotPermitted => {
+            signal_flow::SendFailureReason::QueueNotPermitted
+        }
+        old_signal::SendFailureReason::Refused(refusal) => {
+            signal_flow::SendFailureReason::Refused(current_refusal(refusal)?)
+        }
+        old_signal::SendFailureReason::ReceiptUncertain => {
+            signal_flow::SendFailureReason::ReceiptUncertain
+        }
+        old_signal::SendFailureReason::NotSent(words) => {
+            signal_flow::SendFailureReason::NotSent(words.clone())
+        }
+    })
+}
+
+fn current_acceptance(
+    value: &old_signal::SendAcceptance,
+    request_id: RequestId,
+) -> Result<signal_flow::SendAcceptance, StoreError> {
+    Ok(signal_flow::SendAcceptance {
+        logical_delivery_id: value.logical_delivery_id.clone(),
+        request_id,
+        delivery_cursor: value.delivery_cursor,
+        delivery_state: current_delivery_state(&value.delivery_state)?,
+    })
+}
+
+pub(crate) fn current_send_outcome(
+    value: &PriorStoredSendOutcome,
+    request_ids: &std::collections::BTreeMap<String, RequestId>,
+) -> Result<super::send_outcome::StoredSendOutcome, StoreError> {
+    use meta_signal_flow::{OrdinarySendOutcome, PriorSendOutcome, SendOutcomeRecord};
+    let old = &value.record;
+    let ordinary_send_outcome = match &old.ordinary_send_outcome {
+        old_meta::OrdinarySendOutcome::Accepted(acceptance) => {
+            let id = request_ids
+                .get(&acceptance.logical_delivery_id)
+                .cloned()
+                .ok_or(StoreError::StateInvariant)?;
+            OrdinarySendOutcome::Accepted(current_acceptance(acceptance, id)?)
+        }
+        old_meta::OrdinarySendOutcome::Refused(refusal) => {
+            OrdinarySendOutcome::Refused(current_refusal(refusal)?)
+        }
+        old_meta::OrdinarySendOutcome::PriorAdmission(prior) => {
+            OrdinarySendOutcome::PriorAdmission(match prior {
+                old_meta::PriorSendOutcome::Queued => PriorSendOutcome::Queued,
+                old_meta::PriorSendOutcome::Delivered => PriorSendOutcome::Delivered,
+            })
+        }
+        old_meta::OrdinarySendOutcome::Sent(receipt) => {
+            let id = request_ids
+                .get(&receipt.logical_delivery_id)
+                .cloned()
+                .ok_or(StoreError::StateInvariant)?;
+            OrdinarySendOutcome::Sent(signal_flow::SendReceipt {
+                logical_delivery_id: receipt.logical_delivery_id.clone(),
+                request_id: id,
+            })
+        }
+        old_meta::OrdinarySendOutcome::Failed(failure) => {
+            let reason = current_send_failure_reason(&failure.send_failure_reason)?;
+            OrdinarySendOutcome::Failed(match &failure.logical_delivery_id_option {
+                Some(logical_delivery_id) => {
+                    let id = request_ids
+                        .get(logical_delivery_id)
+                        .cloned()
+                        .ok_or(StoreError::StateInvariant)?;
+                    signal_flow::SendFailure::Admitted(signal_flow::SendFailure_Admitted_Data {
+                        logical_delivery_id: logical_delivery_id.clone(),
+                        request_id: id,
+                        send_failure_reason: reason,
+                    })
+                }
+                None => signal_flow::SendFailure::Unadmitted(reason),
+            })
+        }
+    };
+    Ok(super::send_outcome::StoredSendOutcome {
+        record: SendOutcomeRecord {
+            send_outcome_id: old.send_outcome_id.clone(),
+            process_option: old
+                .process_option
+                .as_ref()
+                .map(|value| recode_unchanged!(value, signal_flow::Process))
+                .transpose()?,
+            first_address_option: old
+                .first_address_option
+                .as_ref()
+                .map(current_address)
+                .transpose()?,
+            second_address_option: old
+                .second_address_option
+                .as_ref()
+                .map(current_address)
+                .transpose()?,
+            request_digest: old.request_digest.clone(),
+            ordinary_send_outcome,
+        },
+    })
+}
+
+fn current_tool_call_key(
+    value: &crate::generated::send_tool_before_request_ids::ToolCallKey,
+) -> crate::generated::send_tool::ToolCallKey {
+    crate::generated::send_tool::ToolCallKey {
+        thread_id: value.thread_id.clone(),
+        turn_id: value.turn_id.clone(),
+        call_id: value.call_id.clone(),
+    }
+}
+
+fn current_send_refusal(
+    value: &crate::generated::send_tool_before_request_ids::SendRefusal,
+) -> Result<crate::generated::send_tool::SendRefusal, StoreError> {
+    use crate::generated::{send_tool as current, send_tool_before_request_ids as old};
+    Ok(match value {
+        old::SendRefusal::UnknownTool => current::SendRefusal::UnknownTool,
+        old::SendRefusal::Malformed => current::SendRefusal::Malformed,
+        old::SendRefusal::ThreadUnowned => current::SendRefusal::ThreadUnowned,
+        old::SendRefusal::FlowEnded => current::SendRefusal::FlowEnded,
+        old::SendRefusal::NotAwake => current::SendRefusal::NotAwake,
+        old::SendRefusal::KeyReused => current::SendRefusal::KeyReused,
+        old::SendRefusal::UnknownRecipient(target) => {
+            current::SendRefusal::UnknownRecipient(current_address(target)?)
+        }
+        old::SendRefusal::Held => current::SendRefusal::Held,
+        old::SendRefusal::Oversized(size) => {
+            current::SendRefusal::Oversized(recode_unchanged!(size, signal_flow::SendPayloadSize)?)
+        }
+        old::SendRefusal::Store => current::SendRefusal::Store,
+        old::SendRefusal::TopicRefused(topic) => current::SendRefusal::TopicRefused(topic.clone()),
+    })
+}
+
+pub(crate) fn current_send_call(
+    value: &PriorSendCall,
+    request_ids: &std::collections::BTreeMap<String, RequestId>,
+    archived: bool,
+) -> Result<crate::generated::send_tool::SendCall, StoreError> {
+    use crate::generated::{send_tool as current, send_tool_before_request_ids as old};
+    let send_outcome = match &value.send_outcome {
+        old::SendOutcome::Accepted(accepted) if archived => {
+            current::SendOutcome::Archived(current::Archived_Data {
+                sender: current_address(&accepted.sender)?,
+                target: current_address(&accepted.target)?,
+            })
+        }
+        old::SendOutcome::Accepted(accepted) => {
+            let logical_delivery_id = &accepted.send_acceptance.logical_delivery_id;
+            let request_id = request_ids
+                .get(logical_delivery_id)
+                .cloned()
+                .ok_or(StoreError::StateInvariant)?;
+            current::SendOutcome::Accepted(current::Accepted_Data {
+                sender: current_address(&accepted.sender)?,
+                target: current_address(&accepted.target)?,
+                send_acceptance: current_acceptance(&accepted.send_acceptance, request_id)?,
+            })
+        }
+        old::SendOutcome::LegacyUnknown(unknown) => {
+            current::SendOutcome::LegacyUnknown(current::LegacyUnknown_Data {
+                sender: current_address(&unknown.sender)?,
+                target: current_address(&unknown.target)?,
+            })
+        }
+        old::SendOutcome::Refused(refusal) => {
+            current::SendOutcome::Refused(current_send_refusal(refusal)?)
+        }
+    };
+    Ok(current::SendCall {
+        tool_call_key: current_tool_call_key(&value.tool_call_key),
+        content_sha256: value.content_sha256.clone(),
+        send_outcome,
+    })
+}

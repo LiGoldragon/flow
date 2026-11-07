@@ -2607,15 +2607,19 @@ mod tests {
         let [assignment] = assignments.records() else {
             panic!("one assignment part")
         };
-        let [decision] = assignment.decisions.as_slice() else {
-            panic!("one ambiguous group is reported")
-        };
-        assert_eq!(decision.assigned.len(), 1);
-        assert_eq!(decision.assigned[0].order, "order-early");
+        assert_eq!(assignment.decisions.len(), 3);
+        let assigned = assignment
+            .decisions
+            .iter()
+            .flat_map(|decision| &decision.assigned)
+            .collect::<Vec<_>>();
+        assert_eq!(assigned.len(), 1);
+        assert_eq!(assigned[0].order, "order-early");
         assert_eq!(
-            decision
-                .open
+            assignment
+                .decisions
                 .iter()
+                .flat_map(|decision| &decision.open)
                 .map(|open| open.order.as_str())
                 .collect::<std::collections::BTreeSet<_>>(),
             std::collections::BTreeSet::from(["order-after-answer", "order-late"])

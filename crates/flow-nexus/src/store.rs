@@ -6060,6 +6060,9 @@ mod tests {
         );
 
         store
+            .acknowledge_deliver_calls(&[key(0), key(1)])
+            .expect("Message calls acknowledge");
+        store
             .transition_logical_delivery(
                 &notice,
                 signal_flow::DeliveryState::Failed(signal_flow::Refusal::Direct(
@@ -9067,9 +9070,6 @@ mod tests {
                 .expect("first Message delivery archives"),
             Ok(())
         );
-        store
-            .acknowledge_deliver_calls(&[key(0), key(1)])
-            .expect("Message calls acknowledge");
         drop(store);
 
         let reopened = fixture.store();

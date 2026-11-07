@@ -2817,7 +2817,12 @@ impl WakesInParts for RunningNexus {
             let text = handover
                 .current
                 .iter()
-                .map(|section| format!("## {}\n{}\n{}", section.title, section.description, section.body))
+                .map(|section| {
+                    format!(
+                        "## {}\n{}\n{}",
+                        section.title, section.description, section.body
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n\n");
             profile.instruction_prompt = match profile.instruction_prompt.is_empty() {

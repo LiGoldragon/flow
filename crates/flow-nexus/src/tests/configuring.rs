@@ -133,16 +133,19 @@ const TERRA: &str = "gpt-5.6-terra";
 const SOL: &str = "gpt-5.6-sol";
 const LUNA: &str = "gpt-5.6-luna";
 
-struct ConfiguredStore {
+pub(crate) struct ConfiguredStore {
     _directory: tempfile::TempDir,
     defaults: DefaultConfiguration,
     start: flow_ethos::Start,
 }
 
 impl ConfiguredStore {
+    pub(crate) fn path(&self) -> &std::path::Path {
+        std::path::Path::new(&self.start.store_path)
+    }
     /// A configured store: Nexus, Models and Thresholds declared through
     /// Configure, a registered flow, Message bound and a lock held.
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let directory = tempfile::tempdir().expect("temporary state");
         let defaults = DefaultConfiguration {
             home: directory.path().join("home"),

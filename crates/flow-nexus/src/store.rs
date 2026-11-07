@@ -128,10 +128,9 @@ const META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA: &str =
     "flow-nexus-meta-protected-address-configuration-v1";
 /// The families 0.53.1 added. A store 0.53.0 wrote holds every other
 /// family and none of these; it is opened, and each is registered empty.
-const ADDED_IN_0531: &[&str] = &[
-    "flow_nexus_meta_protected_address_configuration",
-];
+const ADDED_IN_0531: &[&str] = &["flow_nexus_meta_protected_address_configuration"];
 const OPTIONAL_HANDOVER_TABLE: &str = "flow_nexus_meta_handover_configuration";
+const OPTIONAL_HANDOVER_RUNTIME_TABLE: &str = "flow_nexus_handovers";
 const HEARTBEAT_STANDING_TABLE_NAME: TableName = TableName::new("flow_nexus_heartbeat_standings");
 const HEARTBEAT_STANDING_FAMILY: &str = "flow-nexus-heartbeat-standing";
 const HEARTBEAT_STANDING_SCHEMA: &str = "flow-nexus-heartbeat-standing-v2";
@@ -212,6 +211,7 @@ const RUNNING_TABLES: &[&str] = &[
     "flow_nexus_seat_births",
     "flow_nexus_meta_protected_address_configuration",
     "flow_nexus_meta_handover_configuration",
+    "flow_nexus_handovers",
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -1412,6 +1412,14 @@ impl AnnouncesLaunchChanges for LaunchChanges {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum HandoverConfigurationRefusal {
+    #[error("a handover policy has an invalid share or interval, or duplicates a model")]
+    InvalidPolicy,
+    #[error("the handover count must be non-negative")]
+    InvalidCount,
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("sema-engine operation failed: {0}")]
     Engine(#[from] sema_engine::Error),
@@ -1427,6 +1435,8 @@ pub enum StoreError {
     ConfigurationReadViewChanged,
     #[error("a configuration declaration names one key twice")]
     DuplicateConfigurationEntry,
+    #[error("handover configuration refused: {0}")]
+    HandoverConfigurationRefused(#[from] HandoverConfigurationRefusal),
     #[error("heartbeat period must be positive")]
     InvalidHeartbeatPeriod,
     #[error("store path must be an absolute file path")]
@@ -1458,6 +1468,7 @@ pub enum StoreError {
 }
 
 pub(crate) struct MetaConfigurationTables {
+    handover: TableReference<handover_configuration::StoredHandoverConfiguration>,
     nexus: TableReference<StoredMetaNexusConfiguration>,
     models: TableReference<StoredMetaModelConfiguration>,
     thresholds: TableReference<StoredMetaThresholdConfiguration>,
@@ -1478,6 +1489,7 @@ trait RegistersMetaConfigurationTables: Sized {
 impl RegistersMetaConfigurationTables for MetaConfigurationTables {
     fn register(engine: &mut Engine) -> Result<Self, StoreError> {
         Ok(Self {
+            handover: engine.register_table(<handover_configuration::StoredHandoverConfiguration as handover_configuration::DescribesHandoverConfiguration>::descriptor())?,
             nexus: engine.register_table(StoredMetaNexusConfiguration::descriptor())?,
             models: engine.register_table(StoredMetaModelConfiguration::descriptor())?,
             thresholds: engine.register_table(StoredMetaThresholdConfiguration::descriptor())?,
@@ -1698,6 +1710,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
         let meta_thresholds_descriptor = StoredMetaThresholdConfiguration::descriptor();
         let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
+        let meta_handover_descriptor = <handover_configuration::StoredHandoverConfiguration as handover_configuration::DescribesHandoverConfiguration>::descriptor();
         let meta_default_minutes_descriptor = StoredMetaDefaultMinutesConfiguration::descriptor();
         let meta_harness_flags_descriptor = StoredMetaHarnessFlagsConfiguration::descriptor();
         let meta_heartbeat_descriptor = StoredMetaHeartbeatConfiguration::descriptor();
@@ -1725,7 +1738,8 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_harness_flags_descriptor)
                 .with_family(&meta_heartbeat_descriptor)
                 .with_family(&meta_protected_addresses_descriptor)
-                .with_family(&meta_metaflows_descriptor),
+                .with_family(&meta_metaflows_descriptor)
+                .with_family(&meta_handover_descriptor),
         )?;
         let state = engine.register_table(state_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
@@ -2221,6 +2235,7 @@ impl OpensFlowStore for FlowStore {
         let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
         let meta_thresholds_descriptor = StoredMetaThresholdConfiguration::descriptor();
         let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
+        let meta_handover_descriptor = <handover_configuration::StoredHandoverConfiguration as handover_configuration::DescribesHandoverConfiguration>::descriptor();
         let compactions_descriptor =
             <compaction::Compaction as compaction::DescribesCompactionTable>::descriptor();
         let reminders_descriptor =
@@ -2276,6 +2291,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&StoredMetaHarnessFlagsConfiguration::descriptor())
                 .with_family(&StoredMetaHeartbeatConfiguration::descriptor())
                 .with_family(&StoredMetaProtectedAddressConfiguration::descriptor())
+                .with_family(&meta_handover_descriptor)
                 .with_family(&compactions_descriptor)
                 .with_family(&reminders_descriptor)
                 .with_family(&successor_intents_descriptor)
@@ -2335,7 +2351,8 @@ impl OpensFlowStore for FlowStore {
         let heartbeat_standings = engine.register_table(heartbeat_standing_descriptor)?;
         let restarts = engine.register_table(restart_descriptor)?;
         let seat_births = engine.register_table(seat_birth_descriptor)?;
-        let handovers = <FlowStore as handover::RegistersHandoverTable>::register_handover_table(&mut engine)?;
+        let handovers =
+            <FlowStore as handover::RegistersHandoverTable>::register_handover_table(&mut engine)?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2497,7 +2514,8 @@ impl OpensFlowStore for FlowStore {
         let seat_births = engine.register_table(
             <FlowStore as restart::DescribesRestartTables>::seat_birth_descriptor(),
         )?;
-        let handovers = <FlowStore as handover::RegistersHandoverTable>::register_handover_table(&mut engine)?;
+        let handovers =
+            <FlowStore as handover::RegistersHandoverTable>::register_handover_table(&mut engine)?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2920,9 +2938,11 @@ impl AppliesFlowQuery for FlowStore {
             Query::Launch(_) => Ok(Response::StartRejected(
                 StartRejection::LaunchPersistenceRefused,
             )),
-            Query::Keep(_) | Query::Drop(_) | Query::Glance(_) | Query::Read(_) => Ok(Response::Refused(
-                signal_flow::Refusal::Store("handover requires running Nexus caller".into()),
-            )),
+            Query::Keep(_) | Query::Drop(_) | Query::Glance(_) | Query::Read(_) => {
+                Ok(Response::Refused(signal_flow::Refusal::Store(
+                    "handover requires running Nexus caller".into(),
+                )))
+            }
             Query::Current(address) => self.current_metaflow(&address),
             Query::Metaflows => self.list_metaflows().map(Response::Listed),
             Query::Replace(_) => Ok(Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
@@ -4698,6 +4718,11 @@ pub(crate) trait ReadsFlowMemory {
                 metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
                 metaflow_declaration::META_METAFLOW_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_meta_handover_configuration" => (
+                "flow-nexus-handover-configuration",
+                "flow-nexus-handover-configuration-v1",
+            ),
+            "flow_nexus_handovers" => (handover::HANDOVER_FAMILY, handover::HANDOVER_SCHEMA),
             "flow_nexus_flow_events" => (events::FLOW_EVENT_FAMILY, events::FLOW_EVENT_SCHEMA),
             "flow_nexus_flow_context_sizes" => (
                 context::FLOW_CONTEXT_SIZE_FAMILY,
@@ -4752,12 +4777,17 @@ pub(crate) trait ReadsFlowMemory {
     /// it, every table but the ones 0.53.1 added.
     fn has_expected_flow_catalog(actual: &std::collections::BTreeSet<String>) -> bool {
         let is = |tables: &[&str]| {
-            actual.iter().all(|name| tables.contains(&name.as_str()))
-                && tables
-                    .iter()
-                    .all(|name| actual.contains(*name) || ADDED_IN_0531.contains(name) || *name == OPTIONAL_HANDOVER_TABLE)
-                && (ADDED_IN_0531.iter().all(|name| actual.contains(*name))
-                    || ADDED_IN_0531.iter().all(|name| !actual.contains(*name)))
+            actual.iter().all(|name| {
+                tables.contains(&name.as_str())
+                    || *name == OPTIONAL_HANDOVER_TABLE
+                    || *name == OPTIONAL_HANDOVER_RUNTIME_TABLE
+            }) && tables.iter().all(|name| {
+                actual.contains(*name)
+                    || ADDED_IN_0531.contains(name)
+                    || *name == OPTIONAL_HANDOVER_TABLE
+                    || *name == OPTIONAL_HANDOVER_RUNTIME_TABLE
+            }) && (ADDED_IN_0531.iter().all(|name| actual.contains(*name))
+                || ADDED_IN_0531.iter().all(|name| !actual.contains(*name)))
         };
         is(CONFIGURATION_ONLY_TABLES) || is(RUNNING_TABLES)
     }
@@ -4939,6 +4969,7 @@ pub(crate) trait ReadsFlowMemory {
         tables: &MetaConfigurationTables,
     ) -> Result<Option<ConfiguredFamilies>, StoreError> {
         let nexus_rows = engine.match_records(QueryPlan::all(tables.nexus))?;
+        let handover_rows = engine.match_records(QueryPlan::all(tables.handover))?;
         let marker = nexus_rows.database_marker();
         let nexus = match nexus_rows.records() {
             [] => None,
@@ -4957,6 +4988,11 @@ pub(crate) trait ReadsFlowMemory {
         let heartbeat_rows = engine.match_records(QueryPlan::all(tables.heartbeat))?;
         let protected_address_rows =
             engine.match_records(QueryPlan::all(tables.protected_addresses))?;
+        let handover = handover_rows
+            .records()
+            .first()
+            .cloned()
+            .unwrap_or_else(handover_configuration::unconfigured);
         let metaflow_rows = engine.match_records(QueryPlan::all(tables.metaflows))?;
         if models_rows.database_marker() != marker
             || metaflow_rows.database_marker() != marker
@@ -5051,9 +5087,9 @@ pub(crate) trait ReadsFlowMemory {
             configured_harness_flags,
             heartbeat,
             protected_addresses,
-            handover_policies: meta_signal_flow::HandoverPoliciesConfiguration::Unconfigured,
-            handover_archive: meta_signal_flow::HandoverArchiveConfiguration::Unconfigured,
-            handover_count: meta_signal_flow::HandoverCountConfiguration::Unconfigured,
+            handover_policies: handover.policies,
+            handover_archive: handover.archive,
+            handover_count: handover.count,
         }))
     }
 
@@ -5161,6 +5197,69 @@ pub(crate) trait ReadsFlowMemory {
             return Err(StoreError::TopicRefused(refused.topic.clone()));
         }
         match change {
+            ConfigurationChange::HandoverPolicies(policies) => {
+                if policies.iter().enumerate().any(|(i, p)| {
+                    p.warning_share_left > 100
+                        || p.every_minutes <= 0
+                        || policies[..i].iter().any(|q| q.model_name == p.model_name)
+                }) {
+                    return Err(HandoverConfigurationRefusal::InvalidPolicy.into());
+                }
+                let old = engine
+                    .match_records(QueryPlan::all(tables.handover))?
+                    .records()
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(handover_configuration::unconfigured);
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.handover,
+                    vec![handover_configuration::StoredHandoverConfiguration {
+                        policies: meta_signal_flow::HandoverPoliciesConfiguration::Configured(
+                            policies,
+                        ),
+                        archive: old.archive,
+                        count: old.count,
+                    }],
+                )
+            }
+            ConfigurationChange::HandoverArchive(path) => {
+                let old = engine
+                    .match_records(QueryPlan::all(tables.handover))?
+                    .records()
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(handover_configuration::unconfigured);
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.handover,
+                    vec![handover_configuration::StoredHandoverConfiguration {
+                        policies: old.policies,
+                        archive: meta_signal_flow::HandoverArchiveConfiguration::Configured(path),
+                        count: old.count,
+                    }],
+                )
+            }
+            ConfigurationChange::HandoverCount(count) => {
+                if count < 0 {
+                    return Err(HandoverConfigurationRefusal::InvalidCount.into());
+                }
+                let old = engine
+                    .match_records(QueryPlan::all(tables.handover))?
+                    .records()
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(handover_configuration::unconfigured);
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.handover,
+                    vec![handover_configuration::StoredHandoverConfiguration {
+                        policies: old.policies,
+                        archive: old.archive,
+                        count: meta_signal_flow::HandoverCountConfiguration::Configured(count),
+                    }],
+                )
+            }
             ConfigurationChange::Nexus(nexus) => {
                 if nexus
                     .stable_codex

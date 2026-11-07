@@ -1,6 +1,6 @@
 //! Durable current and closed handover generations.
 
-use super::{FlowStore, StoreError, ReadsFlowMemory};
+use super::{FlowStore, ReadsFlowMemory, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,
@@ -87,7 +87,7 @@ pub trait HoldsHandovers {
         predecessor: &str,
     ) -> Result<(), StoreError>;
     fn handover_headings(&self, address: &Address)
-        -> Result<Vec<signal_flow::Heading>, StoreError>;
+    -> Result<Vec<signal_flow::Heading>, StoreError>;
 }
 
 pub(crate) trait RegistersHandoverTable {
@@ -201,7 +201,7 @@ impl HoldsHandovers for FlowStore {
         // predecessor snapshot remains immutable for archival.  Clone here
         // rather than sharing any mutable representation across generations.
         let sections = row.current.clone();
-        let touch = std::mem::replace(&mut row.touch, None);
+        let touch = row.touch.take();
         if !sections.is_empty() {
             row.closed.push(ClosedHandover {
                 generation: row.generation,

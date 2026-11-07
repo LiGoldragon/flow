@@ -1623,13 +1623,25 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
             "archive-content",
             core(),
             &core_primary(),
-            Message::Soft(Request::Notice("historical".into())),
+            Message::Soft(Request::Task(flow_ethos::AnswerableTask {
+                minutes: 1,
+                string: "historical task".into(),
+            })),
             0,
         )
         .expect("tool Send admits");
     let SendOutcome::Accepted(accepted) = first else {
         panic!("tool Send accepted")
     };
+    assert!(
+        crate::store::reminder::RecordsReminders::reminder(
+            &fixture.nexus.store,
+            &accepted.send_acceptance.logical_delivery_id,
+        )
+        .expect("Task reminder reads")
+        .is_some(),
+        "an open Task keeps its reminder until archive"
+    );
     fixture
         .nexus
         .store
@@ -1650,6 +1662,15 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
             .expect("archive reads"),
         Ok(())
     );
+    assert!(
+        crate::store::reminder::RecordsReminders::reminder(
+            &fixture.nexus.store,
+            &accepted.send_acceptance.logical_delivery_id,
+        )
+        .expect("archived Task reminder reads")
+        .is_none(),
+        "archive retracts the Task reminder in its commit"
+    );
 
     let replay = fixture
         .nexus
@@ -1659,7 +1680,10 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
             "archive-content",
             core(),
             &core_primary(),
-            Message::Soft(Request::Notice("historical".into())),
+            Message::Soft(Request::Task(flow_ethos::AnswerableTask {
+                minutes: 1,
+                string: "historical task".into(),
+            })),
             0,
         )
         .expect("tool replay reads");

@@ -921,6 +921,25 @@ impl RecordsLogicalDeliveries for FlowStore {
         }
         let allocation = self.allocate_logical_cursor()?;
         let cursor = allocation.cursor;
+        let is_task = matches!(
+            &retained.entry.message,
+            Message::HardAbrupt(Request::Task(_))
+                | Message::MiddleAbrupt(Request::Task(_))
+                | Message::Soft(Request::Task(_))
+        );
+        let task_reminder = if is_task {
+            let reminders = self.engine.match_records(QueryPlan::key(
+                self.reminders,
+                RecordKey::new(binding.logical_delivery_id.clone()),
+            ))?;
+            match reminders.records() {
+                [] => false,
+                [_] => true,
+                _ => return Err(StoreError::StateInvariant),
+            }
+        } else {
+            false
+        };
         let mut archived = current.clone();
         archived.archived = Some(cursor);
         let mut event = current.snapshot.clone();
@@ -945,6 +964,14 @@ impl RecordsLogicalDeliveries for FlowStore {
             commit.mutate(self.logical_deliveries.counter, next_counter)
         } else {
             commit.assert(self.logical_deliveries.counter, next_counter)
+        };
+        let commit = if task_reminder {
+            commit.retract(
+                self.reminders,
+                RecordKey::new(binding.logical_delivery_id.clone()),
+            )
+        } else {
+            commit
         };
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();

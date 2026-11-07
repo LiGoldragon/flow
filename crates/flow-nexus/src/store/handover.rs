@@ -89,6 +89,12 @@ pub trait HoldsHandovers {
         address: &Address,
         flow_id: &str,
     ) -> Result<Option<Vec<Section>>, StoreError>;
+    fn closed_handovers(
+        &self,
+        address: &Address,
+        count: usize,
+    ) -> Result<Vec<ClosedHandover>, StoreError>;
+    fn remove_closed_handover(&self, address: &Address, generation: i64) -> Result<(), StoreError>;
     fn keep_handover(
         &self,
         address: &Address,
@@ -198,6 +204,28 @@ impl HoldsHandovers for FlowStore {
             .rev()
             .find(|closed| closed.predecessor == flow_id)
             .map(|closed| closed.sections.clone()))
+    }
+
+    fn closed_handovers(
+        &self,
+        address: &Address,
+        count: usize,
+    ) -> Result<Vec<ClosedHandover>, StoreError> {
+        let Some(row) = self.handover_row(address)? else {
+            return Ok(Vec::new());
+        };
+        if count == 0 {
+            return Ok(row.closed);
+        }
+        Ok(row.closed.into_iter().take(count).collect())
+    }
+
+    fn remove_closed_handover(&self, address: &Address, generation: i64) -> Result<(), StoreError> {
+        let Some(mut row) = self.handover_row(address)? else {
+            return Ok(());
+        };
+        row.closed.retain(|closed| closed.generation != generation);
+        self.write_handover(row)
     }
 
     fn handover_green(

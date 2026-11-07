@@ -7,9 +7,7 @@
 //! refused Protected, before anything is written.
 
 use crate::RunningNexus;
-use crate::caller::{
-    AuthenticatesProcessAuthority, CallerProcess, LocatesCallerPane, ProcessAuthority,
-};
+use crate::caller::{AuthenticatesProcessAuthority, ProcessAuthority};
 use crate::store::{FlowStore, ManagesMetaflowState, StoreError};
 use signal_flow::{Address, Metaflow, Origin, Process};
 
@@ -135,17 +133,10 @@ impl GuardsProtectedAddresses for RunningNexus {
         };
         match self.process_authority(peer) {
             Ok(ProcessAuthority::Bound(origin)) => Asker::Ordinary(Origin::Flow(origin)),
-            Ok(ProcessAuthority::Launching(_)) | Err(_) => Asker::Ordinary(Origin::Unbound),
-            Ok(ProcessAuthority::Unbound)
-                if u32::try_from(peer.pid)
-                    .ok()
-                    .map(|process_id| CallerProcess { process_id })
-                    .and_then(|process| process.caller_pane(&self.herdr))
-                    .is_none_or(|pane| !self.pane_holds_flow(&pane)) =>
-            {
-                Asker::Owner
+            Ok(ProcessAuthority::Owner) => Asker::Owner,
+            Ok(ProcessAuthority::Sending(_) | ProcessAuthority::Rejected) | Err(_) => {
+                Asker::Ordinary(Origin::Unbound)
             }
-            Ok(ProcessAuthority::Unbound) => Asker::Ordinary(Origin::Unbound),
         }
     }
 }

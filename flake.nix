@@ -350,6 +350,10 @@
             "tests::seat_binding::a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for";
           flow-codex-ordinary-process-authority = context.exactWorkspaceTest
             "tests::seat_binding::ordinary_codex_cli_send_keep_and_drop_share_process_authority";
+          flow-address-process-never-inherits-successor = context.exactTest "flow-nexus"
+            "tests::seat_binding::a_registered_address_process_never_inherits_its_successor_flow";
+          flow-failed-process-authority-never-owner = context.exactTest "flow-nexus"
+            "tests::seat_binding::failed_process_authority_evidence_never_becomes_owner";
           flow-claude-seat-binds-on-an-empty-store = context.exactTest "flow-nexus"
             "tests::seat_binding::a_claude_seat_binds_on_an_empty_store_under_its_sessions_flow_id";
           flow-pane-without-agent-refuses-with-evidence = context.exactTest "flow-nexus"

@@ -119,8 +119,8 @@ impl IdentifiesSender for RunningNexus {
                 .map_err(|error| Box::new(Response::Refused(Refusal::Store(error.to_string()))))?
                 .map(|metaflow| metaflow.address)
                 .ok_or_else(unidentified),
-            ProcessAuthority::Launching(address) => Ok(address),
-            ProcessAuthority::Unbound => Err(unidentified()),
+            ProcessAuthority::Sending(address) => Ok(address),
+            ProcessAuthority::Owner | ProcessAuthority::Rejected => Err(unidentified()),
         }
     }
 }

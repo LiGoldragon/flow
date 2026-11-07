@@ -681,6 +681,171 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
     );
 }
 
+/// Address-only process registration remains Send authority across a later
+/// native owner, but it never becomes that owner's FlowOrigin or protected
+/// Stop/Retire authority.
+#[test]
+fn a_registered_address_process_never_inherits_its_successor_flow() {
+    use crate::Dispatches;
+    use crate::caller::{AuthenticatesProcessAuthority, ProcessAuthority};
+    use crate::protecting::{ChecksAsker, GuardedAct, GuardsProtectedAddresses};
+    use crate::store::handover::HoldsHandovers;
+    use crate::store::metaflow::SeedsMetaflow;
+    use crate::store::{ReadsFlowRows, RegistersFlowIdentity};
+    use flow_ethos::State;
+    use signal_flow::{FlowLifecycle, HarnessKind, Metaflow, Origin, Query, Section};
+
+    let fixture = NexusFixture::new();
+    let address = super::waking::address(Model::Terra);
+    let child = SpawnedProcess(Command::new("sleep").arg("30").spawn().unwrap());
+    let peer = FlowStore::process_identity_for_pid(child.0.id()).unwrap();
+    assert!(matches!(
+        fixture.nexus.store.bind_metaflow(
+            signal_flow::Bind_Data {
+                address: address.clone(),
+                process: peer.clone(),
+            },
+            &peer,
+            None,
+        ),
+        Ok(Response::Bound(_))
+    ));
+    assert_eq!(
+        fixture.nexus.process_authority(&peer).unwrap(),
+        ProcessAuthority::Sending(address.clone())
+    );
+    assert_eq!(fixture.nexus.sending_address(&peer).unwrap(), address);
+
+    let mut successor = fixture.node();
+    successor.flow_id = "successor".into();
+    successor.session_id = "successor-native-session".into();
+    successor.harness_kind = HarnessKind::Codex;
+    successor.origin = Origin::Unbound;
+    successor.flow_lifecycle = FlowLifecycle::Active;
+    fixture.nexus.store.register_flow(successor).unwrap();
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: address.clone(),
+        state: State::Awake("successor".into()),
+        past: vec![],
+        queue: vec![],
+    });
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::ProtectedAddresses(
+            vec![address.clone()],
+        ))
+        .unwrap();
+
+    assert_eq!(
+        fixture.nexus.process_authority(&peer).unwrap(),
+        ProcessAuthority::Sending(address.clone()),
+        "the old Address binder is never promoted to the successor"
+    );
+    assert_eq!(fixture.nexus.sending_address(&peer).unwrap(), address);
+    let asker = fixture.nexus.asker_of(Some(&peer));
+    assert_eq!(asker.origin(), Origin::Unbound);
+    assert!(!asker.may(GuardedAct::Stop, "successor"));
+    assert!(!asker.may(GuardedAct::Retire, "successor"));
+    assert_eq!(
+        fixture.nexus.dispatch_asked(
+            Query::Keep(signal_flow::Keep_Data {
+                address: address.clone(),
+                section: Section {
+                    title: "forbidden".into(),
+                    description: "old binder".into(),
+                    body: "must not land".into(),
+                },
+            }),
+            asker.clone(),
+        ),
+        Response::KeepRefused(signal_flow::HandoverRefusal::UnknownCaller)
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_asked(Query::Stop("successor".into()), asker),
+        Response::StopRejected(signal_flow::StopRejection::Protected)
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .handover_headings(&address)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .flow_node("successor")
+            .unwrap()
+            .unwrap()
+            .flow_lifecycle,
+        FlowLifecycle::Active
+    );
+}
+
+/// Native/tool markers and stale kernel identities can only deny owner.
+#[test]
+fn failed_process_authority_evidence_never_becomes_owner() {
+    use crate::caller::{AuthenticatesProcessAuthority, ProcessAuthority};
+    use crate::protecting::{Asker, GuardsProtectedAddresses};
+
+    let unconfigured = NexusFixture::new();
+    let (_marked_child, marked) = command_of("unknown-native-session");
+    assert_eq!(
+        unconfigured.nexus.process_authority(&marked).unwrap(),
+        ProcessAuthority::Rejected,
+        "a CODEX_THREAD_ID is deny-owner evidence even with empty SendServers"
+    );
+    assert_eq!(
+        unconfigured.nexus.asker_of(Some(&marked)),
+        Asker::Ordinary(signal_flow::Origin::Unbound)
+    );
+
+    let configured = NexusFixture::new();
+    configured.serves_codex_commands();
+    let (_unknown_child, unknown) = command_of("unknown-native-session");
+    assert_eq!(
+        configured.nexus.process_authority(&unknown).unwrap(),
+        ProcessAuthority::Rejected,
+        "configured ancestry with no live root is known failed evidence"
+    );
+    assert_eq!(
+        configured.nexus.asker_of(Some(&unknown)),
+        Asker::Ordinary(signal_flow::Origin::Unbound)
+    );
+
+    let mut stale = unknown;
+    stale.started += 1;
+    assert_eq!(
+        configured.nexus.process_authority(&stale).unwrap(),
+        ProcessAuthority::Rejected
+    );
+    assert_eq!(
+        configured.nexus.asker_of(Some(&stale)),
+        Asker::Ordinary(signal_flow::Origin::Unbound)
+    );
+
+    let operator = SpawnedProcess(
+        Command::new("sleep")
+            .arg("30")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("HERDR_SESSION")
+            .env_remove("HERDR_PANE_ID")
+            .spawn()
+            .unwrap(),
+    );
+    let operator = FlowStore::process_identity_for_pid(operator.0.id()).unwrap();
+    assert_eq!(
+        configured.nexus.process_authority(&operator).unwrap(),
+        ProcessAuthority::Owner
+    );
+    assert_eq!(configured.nexus.asker_of(Some(&operator)), Asker::Owner);
+}
+
 #[test]
 fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
     use super::waking::{CLAUDE_SEAT, claude_agent, claude_seat, metaflow};

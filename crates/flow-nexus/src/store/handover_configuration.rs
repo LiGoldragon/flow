@@ -185,9 +185,7 @@ mod tests {
             archive: HandoverArchiveConfiguration::Configured("/archive".into()),
             count: HandoverCountConfiguration::Configured(3),
         };
-        let Decision::Ready(current) = StoredHandoverConfiguration::upgrade_from(old) else {
-            panic!("legacy handover configuration must upgrade");
-        };
+        let Decision::Ready(current) = StoredHandoverConfiguration::upgrade_from(old);
         assert_eq!(
             current.archive,
             HandoverArchiveConfiguration::Configured("/archive".into())

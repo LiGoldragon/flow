@@ -1754,7 +1754,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
         let delivery_configuration = engine.register_table(delivery_configuration_descriptor)?;
         let meta_configuration_tables = MetaConfigurationTables {
-            handover: handover_configuration::upgrade_or_register(engine)
+            handover: handover_configuration::upgrade_or_register(&mut engine)
                 .map_err(StoreError::HandoverConfigurationUpgrade)?,
             nexus: engine.register_table(meta_nexus_descriptor)?,
             models: engine.register_table(meta_models_descriptor)?,

@@ -7,6 +7,7 @@ use crate::{
 use signal_flow::{Address, Aspect, HandoverArchiveIdentity, Model};
 use std::{
     fs, io,
+    io::Read,
     path::{Path, PathBuf},
     process::Command,
     thread,

@@ -97,6 +97,21 @@ fn spawn_flow(binary: &Path, home: &Path, runtime: &Path, store: &Path) -> FlowC
     FlowChild { child }
 }
 
+fn spawn_configuration_only(binary: &Path, home: &Path, runtime: &Path, store: &Path) -> FlowChild {
+    let child = Command::new(binary)
+        .env_clear()
+        .env("HOME", home)
+        .env("XDG_RUNTIME_DIR", runtime)
+        .arg("--configure-only")
+        .arg(start_argument(runtime, store))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("configuration-only Flow starts");
+    FlowChild { child }
+}
+
 fn wait_for_socket(path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -204,7 +219,8 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     assert_eq!(request_policy_rows(&store_path), malformed);
     let refused_runtime = tempfile::tempdir().expect("refused runtime");
     let status =
-        spawn_flow(&current, home.path(), refused_runtime.path(), &store_path).wait_for_failure();
+        spawn_configuration_only(&current, home.path(), refused_runtime.path(), &store_path)
+            .wait_for_failure();
     assert_eq!(
         request_policy_rows(&store_path),
         malformed,

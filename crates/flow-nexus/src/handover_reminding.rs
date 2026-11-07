@@ -42,14 +42,23 @@ impl RendersHandoverCommands for HandoverReminderNotice {
             address: self.address.clone(),
             section,
         });
-        format!("flow '{}'", query.datomize(vec![]).protosize().compact().replace('\'', "'\"'\"'"))
+        format!(
+            "flow '{}'",
+            query
+                .datomize(vec![])
+                .protosize()
+                .compact()
+                .replace('\'', "'\"'\"'")
+        )
     }
     fn notice_text(&self, sections: &[Section]) -> String {
         let mut commands = vec![self.keep_commands(sections)];
         if sections.is_empty() {
             commands.push(self.drop_command(signal_flow::Title::from("")));
         } else {
-            for section in sections { commands.push(self.drop_command(section.title.clone())); }
+            for section in sections {
+                commands.push(self.drop_command(section.title.clone()));
+            }
         }
         commands.push(self.text.clone());
         commands.join("\n")
@@ -61,7 +70,14 @@ impl RendersHandoverCommands for HandoverReminderNotice {
             address: self.address.clone(),
             title,
         });
-        format!("flow '{}'", query.datomize(vec![]).protosize().compact().replace('\'', "'\"'\"'"))
+        format!(
+            "flow '{}'",
+            query
+                .datomize(vec![])
+                .protosize()
+                .compact()
+                .replace('\'', "'\"'\"'")
+        )
     }
 }
 
@@ -107,8 +123,11 @@ pub trait DiscoversHandoverWindow {
 }
 impl DiscoversHandoverWindow for HandoverWindowObservation {
     fn warning_window_opens(&self) -> bool {
-        HandoverReminder::warning_open(self.refresh_threshold, self.warning_share_left, self.context_tokens)
-            && self.context_tokens >= 0
+        HandoverReminder::warning_open(
+            self.refresh_threshold,
+            self.warning_share_left,
+            self.context_tokens,
+        ) && self.context_tokens >= 0
     }
     fn warning_window_is_current(&self) -> bool {
         self.warning_window_opens() && !self.green
@@ -123,43 +142,104 @@ pub trait RemindsHandoverCallers {
 
 impl RemindsHandoverCallers for crate::RunningNexus {
     fn send_due_handover_reminders(&self, now: i64) {
-        use crate::store::handover_reminders::{HandoverReminderRules, SchedulesHandoverReminders, OpensHandoverReminder};
-        use crate::store::{ManagesMetaflowState, ReadsFlowMemory};
         use crate::store::context::{NamesFlowModel, RecordsContextSize};
         use crate::store::handover::HoldsHandovers;
-        use crate::waking::SleepsAndWakesSeats;
         use crate::store::handover_configuration::ReadsHandoverConfiguration;
-        use meta_signal_flow::HandoverPoliciesConfiguration;
+        use crate::store::handover_reminders::{
+            HandoverReminderRules, OpensHandoverReminder, SchedulesHandoverReminders,
+        };
         use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        use crate::store::{ManagesMetaflowState, ReadsFlowMemory};
+        use crate::waking::SleepsAndWakesSeats;
         use flow_ethos::Delivery;
+        use meta_signal_flow::HandoverPoliciesConfiguration;
         use signal_flow::{Message, Request, SentBy};
         // Discover warning windows from every awake metaflow before reading
         // due rows. All inputs are durable Memory observations.
-        let Ok(metaflows) = self.store.list_metaflows() else { return };
-        let Ok(configuration) = self.store.handover_policies() else { return };
-        let HandoverPoliciesConfiguration::Configured(policies) = configuration else { return };
+        let Ok(metaflows) = self.store.list_metaflows() else {
+            return;
+        };
+        let Ok(configuration) = self.store.handover_policies() else {
+            return;
+        };
+        let HandoverPoliciesConfiguration::Configured(policies) = configuration else {
+            return;
+        };
         for metaflow in metaflows {
-            let flow_ethos::State::Awake(flow_id) = metaflow.state else { continue };
-            let Ok(Some(model_name)) = self.store.flow_model(&flow_id) else { continue };
-            let Some(policy) = policies.iter().find(|p| p.model_name == model_name) else { continue };
-            let Ok(Some(refresh)) = self.store.configured_threshold(&model_name) else { continue };
-            let Ok(Some(tokens)) = self.store.context_size(&flow_id) else { continue };
-            let Ok(live) = self.store.ensure_live_handover(&metaflow.address, &flow_id) else { continue };
+            let flow_ethos::State::Awake(flow_id) = metaflow.state else {
+                continue;
+            };
+            let Ok(Some(model_name)) = self.store.flow_model(&flow_id) else {
+                continue;
+            };
+            let Some(policy) = policies.iter().find(|p| p.model_name == model_name) else {
+                continue;
+            };
+            let Ok(Some(refresh)) = self.store.configured_threshold(&model_name) else {
+                continue;
+            };
+            let Ok(Some(tokens)) = self.store.context_size(&flow_id) else {
+                continue;
+            };
+            let Ok(live) = self.store.ensure_live_handover(&metaflow.address, &flow_id) else {
+                continue;
+            };
             let generation = live.generation;
-            let Ok(green) = self.store.handover_green(&metaflow.address, &flow_id, refresh.refresh) else { continue };
-            let existing = self.store.handover_reminder(&metaflow.address, generation).ok().flatten();
-            if green { if existing.is_some() { let _ = self.store.close_handover_reminder(&metaflow.address, generation); } continue; }
-            if !HandoverReminder::warning_open(refresh.refresh, policy.warning_share_left, tokens) { if existing.is_some() { let _ = self.store.close_handover_reminder(&metaflow.address, generation); } continue; }
+            let Ok(green) = self
+                .store
+                .handover_green(&metaflow.address, &flow_id, refresh.refresh)
+            else {
+                continue;
+            };
+            let existing = self
+                .store
+                .handover_reminder(&metaflow.address, generation)
+                .ok()
+                .flatten();
+            if green {
+                if existing.is_some() {
+                    let _ = self
+                        .store
+                        .close_handover_reminder(&metaflow.address, generation);
+                }
+                continue;
+            }
+            if !HandoverReminder::warning_open(refresh.refresh, policy.warning_share_left, tokens) {
+                if existing.is_some() {
+                    let _ = self
+                        .store
+                        .close_handover_reminder(&metaflow.address, generation);
+                }
+                continue;
+            }
             if existing.is_none() {
-                let Ok(reminder) = HandoverReminder::open_handover_reminder(metaflow.address.clone(), generation, model_name, now, policy.every_minutes, policy.reminder_text.clone()) else { continue };
+                let Ok(reminder) = HandoverReminder::open_handover_reminder(
+                    metaflow.address.clone(),
+                    generation,
+                    model_name,
+                    now,
+                    policy.every_minutes,
+                    policy.reminder_text.clone(),
+                ) else {
+                    continue;
+                };
                 let _ = self.store.hold_handover_reminder(reminder);
             }
         }
-        let Ok(due) = self.store.due_handover_reminders(now) else { return; };
+        let Ok(due) = self.store.due_handover_reminders(now) else {
+            return;
+        };
         for reminder in due {
-            let Ok(live) = self.store.handover_memory(&reminder.address) else { continue };
+            let Ok(live) = self.store.handover_memory(&reminder.address) else {
+                continue;
+            };
             let Some(live) = live else { continue };
-            if live.generation != reminder.generation || live.current_flow_id.is_none() { let _ = self.store.close_handover_reminder(&reminder.address, reminder.generation); continue; }
+            if live.generation != reminder.generation || live.current_flow_id.is_none() {
+                let _ = self
+                    .store
+                    .close_handover_reminder(&reminder.address, reminder.generation);
+                continue;
+            }
             // Admission is deliberately ordinary. In particular this does
             // not use DeliveryPurpose::Heartbeat or any refresh hold bypass.
             let sections = match self.store.handover(&reminder.address) {

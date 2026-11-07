@@ -18,8 +18,8 @@ use crate::handover::{Handover, HandoverFile, YieldsHandover};
 use crate::performing::Performs;
 use crate::store::ManagesMetaflowState as _;
 use crate::store::RecordsLaunchOutcome as _;
-use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows as _};
 use crate::store::handover::HoldsHandovers as _;
+use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows as _};
 use crate::waking::HoldsWakingMetaflows;
 use flow_ethos::State;
 use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, Continuity};
@@ -561,14 +561,20 @@ fn the_file_source_reads_a_predecessors_file_under_the_launch_root_only() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     let source = HandoverFile;
-    assert_eq!(source.handover(&address(Model::Sol), "abc123", root), Handover::Absent);
+    assert_eq!(
+        source.handover(&address(Model::Sol), "abc123", root),
+        Handover::Absent
+    );
     leave(root, "abc123", Left::Text(TEXT.as_bytes()));
     assert_eq!(
         source.handover(&address(Model::Sol), "abc123", root),
         Handover::Text(TEXT.to_owned())
     );
     // Another flow's file, and another root's, are not this one's.
-    assert_eq!(source.handover(&address(Model::Sol), "def456", root), Handover::Absent);
+    assert_eq!(
+        source.handover(&address(Model::Sol), "def456", root),
+        Handover::Absent
+    );
     let elsewhere = tempfile::tempdir().unwrap();
     assert_eq!(
         source.handover(&address(Model::Sol), "abc123", elsewhere.path()),
@@ -576,7 +582,10 @@ fn the_file_source_reads_a_predecessors_file_under_the_launch_root_only() {
     );
     // An empty file is none.
     leave(root, "def456", Left::Text(b""));
-    assert_eq!(source.handover(&address(Model::Sol), "def456", root), Handover::Absent);
+    assert_eq!(
+        source.handover(&address(Model::Sol), "def456", root),
+        Handover::Absent
+    );
     // A file that is not UTF-8, or is not a file, is unreadable.
     leave(root, "aaa111", Left::Text(b"\xff"));
     assert_eq!(
@@ -629,13 +638,14 @@ fn an_installed_memory_source_reads_the_live_store_and_ignores_the_file() {
     let mut fixture = NexusFixture::new();
     leave(fixture.directory.path(), "abc123", Left::Text(b"file text"));
     let at = address(Model::Sol);
-    fixture.nexus.composer = fixture
-        .nexus
-        .composer
-        .clone()
-        .with_handover_source(std::sync::Arc::new(crate::MemoryHandoverSource(
-            fixture.nexus.store.clone(),
-        )));
+    fixture.nexus.composer =
+        fixture
+            .nexus
+            .composer
+            .clone()
+            .with_handover_source(std::sync::Arc::new(crate::MemoryHandoverSource(
+                fixture.nexus.store.clone(),
+            )));
     fixture
         .nexus
         .store
@@ -669,25 +679,63 @@ fn an_installed_memory_source_reads_the_live_store_and_ignores_the_file() {
 fn memory_source_reads_only_the_last_closed_generation_and_ignores_root() {
     let fixture = NexusFixture::new();
     let at = address(Model::Sol);
-    fixture.nexus.store.ensure_live_handover(&at, "abc123").unwrap();
-    fixture.nexus.store.keep_handover(
-        &at, &at,
-        signal_flow::Section { title: "old".into(), description: "d".into(), body: "one".into() },
-        signal_flow::Touch::Unknown,
-    ).unwrap();
-    fixture.nexus.store.close_handover_for_successor(&at, "abc123", "def456").unwrap();
-    fixture.nexus.store.keep_handover(
-        &at, &at,
-        signal_flow::Section { title: "new".into(), description: "d".into(), body: "two".into() },
-        signal_flow::Touch::Unknown,
-    ).unwrap();
+    fixture
+        .nexus
+        .store
+        .ensure_live_handover(&at, "abc123")
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .keep_handover(
+            &at,
+            &at,
+            signal_flow::Section {
+                title: "old".into(),
+                description: "d".into(),
+                body: "one".into(),
+            },
+            signal_flow::Touch::Unknown,
+        )
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .close_handover_for_successor(&at, "abc123", "def456")
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .keep_handover(
+            &at,
+            &at,
+            signal_flow::Section {
+                title: "new".into(),
+                description: "d".into(),
+                body: "two".into(),
+            },
+            signal_flow::Touch::Unknown,
+        )
+        .unwrap();
     let source = crate::MemoryHandoverSource(fixture.nexus.store.clone());
     let root_a = tempfile::tempdir().unwrap();
     let root_b = tempfile::tempdir().unwrap();
-    assert_eq!(source.handover(&at, "abc123", root_a.path()), Handover::Text("## old\nd\none".into()));
-    assert_eq!(source.handover(&at, "abc123", root_b.path()), Handover::Text("## old\nd\none".into()));
-    assert_eq!(source.handover(&at, "def456", root_a.path()), Handover::Text("## old\nd\none\n\n## new\nd\ntwo".into()));
-    assert_eq!(source.handover(&at, "missing", root_a.path()), Handover::Absent);
+    assert_eq!(
+        source.handover(&at, "abc123", root_a.path()),
+        Handover::Text("## old\nd\none".into())
+    );
+    assert_eq!(
+        source.handover(&at, "abc123", root_b.path()),
+        Handover::Text("## old\nd\none".into())
+    );
+    assert_eq!(
+        source.handover(&at, "def456", root_a.path()),
+        Handover::Text("## old\nd\none\n\n## new\nd\ntwo".into())
+    );
+    assert_eq!(
+        source.handover(&at, "missing", root_a.path()),
+        Handover::Absent
+    );
 }
 
 /// An OnDemand seat resting with nothing queued is closed only once its

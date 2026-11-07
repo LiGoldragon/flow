@@ -3,11 +3,11 @@
 //!
 //! The composition asks one source, [`YieldsHandover`], for the text of a
 //! predecessor and places whatever it yields; where the text lives is the
-//! source's alone. [`HandoverFile`] is the source of today: the predecessor's
-//! `flows/<FlowId>/handover.md`, resolved against the launch root the
-//! successor runs in. A source that reads another store replaces it in
-//! [`crate::composition::OpensLaunchComposer::with_handover_source`]; the order of
-//! the prompt does not change.
+//! source's alone. Runtime launches use the live Memory source, while
+//! [`HandoverFile`] remains the file-backed capability for callers that choose
+//! it. A source is selected through
+//! [`crate::composition::OpensLaunchComposer::with_handover_source`]; the order
+//! of the prompt does not change.
 
 use signal_flow::{Address, HandoverFault};
 use std::path::Path;
@@ -30,7 +30,9 @@ pub enum Handover {
 /// kept under a root ignores it.
 pub trait YieldsHandover: std::fmt::Debug + Send + Sync {
     fn handover(&self, address: &Address, predecessor: &str, launch_root: &Path) -> Handover;
-    fn requires_launch_root(&self) -> bool { true }
+    fn requires_launch_root(&self) -> bool {
+        true
+    }
 }
 
 /// The file-backed source: `flows/<predecessor FlowId>/handover.md` under

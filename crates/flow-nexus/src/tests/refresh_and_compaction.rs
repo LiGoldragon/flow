@@ -497,18 +497,54 @@ fn a_maintained_seat_refreshed_with_nothing_queued_starts_its_successor_first() 
     seat_metaflow(&fixture, vec![]);
     owe_staged_successor(&fixture);
     fixture.herdr_for_replacement_showing(0, vec![claude_agent(&fixture)]);
-    fixture.nexus.store.keep_handover(
-        &seat_address(), &seat_address(),
-        Section { title: "before".into(), description: "d".into(), body: "body".into() },
-        signal_flow::Touch::Unknown,
-    ).unwrap();
+    fixture
+        .nexus
+        .store
+        .keep_handover(
+            &seat_address(),
+            &seat_address(),
+            Section {
+                title: "before".into(),
+                description: "d".into(),
+                body: "body".into(),
+            },
+            signal_flow::Touch::Unknown,
+        )
+        .unwrap();
 
     let before = seat_metaflow_now(&fixture);
     let standing = fixture.nexus.store.threshold_standing(CLAUDE_SEAT).unwrap();
-    let green = fixture.nexus.store.handover_green(&seat_address(), CLAUDE_SEAT, 200_000).unwrap();
-    assert!(matches!(before.state, State::Awake(ref id) if id == CLAUDE_SEAT), "state={:?} row={:?}", before.state, fixture.nexus.store.handover_memory(&seat_address()).unwrap());
-    assert!(matches!(standing, ThresholdStanding::Past { .. }), "standing={standing:?} model={:?}", fixture.nexus.store.flow_model(CLAUDE_SEAT).unwrap());
-    assert!(green, "green={green} row={:?} policies={:?} model={:?}", fixture.nexus.store.handover_memory(&seat_address()).unwrap(), fixture.nexus.store.handover_policies().unwrap(), fixture.nexus.store.flow_model(CLAUDE_SEAT).unwrap());
+    let green = fixture
+        .nexus
+        .store
+        .handover_green(&seat_address(), CLAUDE_SEAT, 200_000)
+        .unwrap();
+    assert!(
+        matches!(before.state, State::Awake(ref id) if id == CLAUDE_SEAT),
+        "state={:?} row={:?}",
+        before.state,
+        fixture
+            .nexus
+            .store
+            .handover_memory(&seat_address())
+            .unwrap()
+    );
+    assert!(
+        matches!(standing, ThresholdStanding::Past { .. }),
+        "standing={standing:?} model={:?}",
+        fixture.nexus.store.flow_model(CLAUDE_SEAT).unwrap()
+    );
+    assert!(
+        green,
+        "green={green} row={:?} policies={:?} model={:?}",
+        fixture
+            .nexus
+            .store
+            .handover_memory(&seat_address())
+            .unwrap(),
+        fixture.nexus.store.handover_policies().unwrap(),
+        fixture.nexus.store.flow_model(CLAUDE_SEAT).unwrap()
+    );
 
     assert_eq!(
         fixture.nexus.settle_stopped(CLAUDE_SEAT),
@@ -528,12 +564,24 @@ fn a_maintained_seat_refreshed_with_nothing_queued_starts_its_successor_first() 
         None,
         "the successor owed is given"
     );
-    let handover = fixture.nexus.store.handover_memory(&seat_address()).unwrap().unwrap();
+    let handover = fixture
+        .nexus
+        .store
+        .handover_memory(&seat_address())
+        .unwrap()
+        .unwrap();
     assert_eq!(handover.current_flow_id.as_deref(), Some("908786"));
     assert_eq!(handover.touch, None);
     assert_eq!(handover.closed.len(), 1);
     assert_eq!(handover.closed[0].predecessor, CLAUDE_SEAT);
-    assert_eq!(handover.closed[0].sections, vec![Section { title: "before".into(), description: "d".into(), body: "body".into() }]);
+    assert_eq!(
+        handover.closed[0].sections,
+        vec![Section {
+            title: "before".into(),
+            description: "d".into(),
+            body: "body".into()
+        }]
+    );
 }
 
 /// An OnDemand metaflow holding a request that wakes it is refreshed
@@ -559,18 +607,54 @@ fn an_on_demand_seat_refreshed_with_a_waking_request_starts_its_successor_first(
     fixture.nexus.store.seed_metaflow(waking);
     owe_staged_successor(&fixture);
     fixture.herdr_for_replacement_showing(0, vec![claude_agent(&fixture)]);
-    fixture.nexus.store.keep_handover(
-        &seat_address(), &seat_address(),
-        Section { title: "before".into(), description: "d".into(), body: "body".into() },
-        signal_flow::Touch::Unknown,
-    ).unwrap();
+    fixture
+        .nexus
+        .store
+        .keep_handover(
+            &seat_address(),
+            &seat_address(),
+            Section {
+                title: "before".into(),
+                description: "d".into(),
+                body: "body".into(),
+            },
+            signal_flow::Touch::Unknown,
+        )
+        .unwrap();
 
     let before = seat_metaflow_now(&fixture);
     let standing = fixture.nexus.store.threshold_standing(CLAUDE_SEAT).unwrap();
-    let green = fixture.nexus.store.handover_green(&seat_address(), CLAUDE_SEAT, 200_000).unwrap();
-    assert!(matches!(before.state, State::Awake(ref id) if id == CLAUDE_SEAT), "state={:?} row={:?}", before.state, fixture.nexus.store.handover_memory(&seat_address()).unwrap());
-    assert!(matches!(standing, ThresholdStanding::Past { .. }), "standing={standing:?} model={:?}", fixture.nexus.store.flow_model(CLAUDE_SEAT).unwrap());
-    assert!(green, "green={green} row={:?} policies={:?} model={:?}", fixture.nexus.store.handover_memory(&seat_address()).unwrap(), fixture.nexus.store.handover_policies().unwrap(), fixture.nexus.store.flow_model(CLAUDE_SEAT).unwrap());
+    let green = fixture
+        .nexus
+        .store
+        .handover_green(&seat_address(), CLAUDE_SEAT, 200_000)
+        .unwrap();
+    assert!(
+        matches!(before.state, State::Awake(ref id) if id == CLAUDE_SEAT),
+        "state={:?} row={:?}",
+        before.state,
+        fixture
+            .nexus
+            .store
+            .handover_memory(&seat_address())
+            .unwrap()
+    );
+    assert!(
+        matches!(standing, ThresholdStanding::Past { .. }),
+        "standing={standing:?} model={:?}",
+        fixture.nexus.store.flow_model(CLAUDE_SEAT).unwrap()
+    );
+    assert!(
+        green,
+        "green={green} row={:?} policies={:?} model={:?}",
+        fixture
+            .nexus
+            .store
+            .handover_memory(&seat_address())
+            .unwrap(),
+        fixture.nexus.store.handover_policies().unwrap(),
+        fixture.nexus.store.flow_model(CLAUDE_SEAT).unwrap()
+    );
 
     assert_eq!(
         fixture.nexus.settle_stopped(CLAUDE_SEAT),
@@ -584,7 +668,12 @@ fn an_on_demand_seat_refreshed_with_a_waking_request_starts_its_successor_first(
         fixture.typed().is_none(),
         "nothing is typed into the predecessor"
     );
-    let handover = fixture.nexus.store.handover_memory(&seat_address()).unwrap().unwrap();
+    let handover = fixture
+        .nexus
+        .store
+        .handover_memory(&seat_address())
+        .unwrap()
+        .unwrap();
     assert_eq!(handover.current_flow_id.as_deref(), Some("908786"));
     assert_eq!(handover.touch, None);
     assert_eq!(handover.closed.len(), 1);

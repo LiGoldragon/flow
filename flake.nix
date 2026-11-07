@@ -348,8 +348,8 @@
             "store_check::tests::a_store_a_later_flow_wrote_is_refused";
           flow-codex-subagent-binds-its-seat = context.exactTest "flow-nexus"
             "tests::seat_binding::a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for";
-          flow-codex-ordinary-handover-caller-diagnostic = context.exactWorkspaceTest
-            "tests::seat_binding::ordinary_codex_cli_keep_and_drop_remain_unknown_after_real_sender_attribution";
+          flow-codex-ordinary-process-authority = context.exactWorkspaceTest
+            "tests::seat_binding::ordinary_codex_cli_send_keep_and_drop_share_process_authority";
           flow-claude-seat-binds-on-an-empty-store = context.exactTest "flow-nexus"
             "tests::seat_binding::a_claude_seat_binds_on_an_empty_store_under_its_sessions_flow_id";
           flow-pane-without-agent-refuses-with-evidence = context.exactTest "flow-nexus"

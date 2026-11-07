@@ -7,9 +7,11 @@
 //! refused Protected, before anything is written.
 
 use crate::RunningNexus;
-use crate::caller::{CallerProcess, LocatesCallerPane};
+use crate::caller::{
+    AuthenticatesProcessAuthority, CallerProcess, LocatesCallerPane, ProcessAuthority,
+};
 use crate::store::{FlowStore, ManagesMetaflowState, StoreError};
-use signal_flow::{Address, Metaflow, Origin};
+use signal_flow::{Address, Metaflow, Origin, Process};
 
 /// Who asks for an act on a flow, as the Nexus read the asking process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,7 +109,7 @@ pub trait GuardsProtectedAddresses {
     fn admits_refresh(&self, address: &Address, asker: &Asker) -> Result<bool, StoreError>;
     /// Who the process on an ordinary connection is: the flow it runs in,
     /// the owner, or neither.
-    fn asker_of(&self, peer: Option<CallerProcess>) -> Asker;
+    fn asker_of(&self, peer: Option<&Process>) -> Asker;
 }
 
 impl GuardsProtectedAddresses for RunningNexus {
@@ -126,18 +128,24 @@ impl GuardsProtectedAddresses for RunningNexus {
         }
     }
 
-    fn asker_of(&self, peer: Option<CallerProcess>) -> Asker {
-        use crate::generated::starter::DerivesOrigin;
+    fn asker_of(&self, peer: Option<&Process>) -> Asker {
         use crate::peer::FindsFlowInPane;
-        match self.origin_of(peer) {
-            Origin::Unbound
-                if peer
+        let Some(peer) = peer else {
+            return Asker::Ordinary(Origin::Unbound);
+        };
+        match self.process_authority(peer) {
+            Ok(ProcessAuthority::Bound(origin)) => Asker::Ordinary(Origin::Flow(origin)),
+            Ok(ProcessAuthority::Launching(_)) | Err(_) => Asker::Ordinary(Origin::Unbound),
+            Ok(ProcessAuthority::Unbound)
+                if u32::try_from(peer.pid)
+                    .ok()
+                    .map(|process_id| CallerProcess { process_id })
                     .and_then(|process| process.caller_pane(&self.herdr))
                     .is_none_or(|pane| !self.pane_holds_flow(&pane)) =>
             {
                 Asker::Owner
             }
-            origin => Asker::Ordinary(origin),
+            Ok(ProcessAuthority::Unbound) => Asker::Ordinary(Origin::Unbound),
         }
     }
 }

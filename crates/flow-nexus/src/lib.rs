@@ -1351,7 +1351,7 @@ impl ServesConnection for Connection {
             // process, or, for a metaflow Awake as a live flow, the Replace
             // of that flow under the metaflow's lock.
             Query::Launch(launch) => {
-                let asker = nexus.asker_of(self.peer.peer_process());
+                let asker = nexus.asker_of(self.process.as_ref());
                 let declared = {
                     let _turn = nexus
                         .dispatch_gate
@@ -1374,7 +1374,11 @@ impl ServesConnection for Connection {
             | Query::Restart(_)
             | Query::Refresh(_)
             | Query::Stop(_)) => {
-                let asker = nexus.asker_of(self.peer.peer_process());
+                let asker = nexus.asker_of(self.process.as_ref());
+                nexus.dispatch_serially(query, asker)
+            }
+            query @ (Query::Keep(_) | Query::Drop(_)) => {
+                let asker = nexus.asker_of(self.process.as_ref());
                 nexus.dispatch_serially(query, asker)
             }
             query => nexus.dispatch_serially(query, protecting::Asker::Ordinary(Origin::Unbound)),

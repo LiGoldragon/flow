@@ -16,8 +16,8 @@
 use crate::RunningNexus;
 use crate::binding::{ReadsProcessIdentity, VerifiesAdoptedSeat};
 use crate::caller::{
-    CallerProcess, KnowsHerdrServers, LocatesCallerPane, LocatesCodexThread, NamesRootThread,
-    ReadsProcess,
+    AuthenticatesProcessAuthority, CallerProcess, KnowsHerdrServers, LocatesCallerPane,
+    LocatesCodexThread, NamesRootThread, ProcessAuthority, ReadsProcess,
 };
 use crate::composition::JoinsPurpose;
 use crate::delivery::body::RendersNativeContent;
@@ -110,32 +110,18 @@ pub trait IdentifiesSender {
 impl IdentifiesSender for RunningNexus {
     fn sending_address(&self, peer: &Process) -> Result<Address, Box<Response>> {
         let unidentified = || Box::new(Response::Refused(Refusal::unidentified(peer.clone())));
-        match self.identify_peer_process(peer.clone()) {
-            Ok(Response::Identified(address)) => return Ok(address),
-            Ok(_) => {}
-            Err(error) => {
-                return Err(Box::new(Response::Refused(Refusal::Store(
-                    error.to_string(),
-                ))));
-            }
-        }
-        let Ok(process_id) = u32::try_from(peer.pid) else {
-            return Err(unidentified());
-        };
-        let app_servers = self
-            .store
-            .codex_app_servers()
-            .map_err(|error| Box::new(Response::Refused(Refusal::Store(error.to_string()))))?;
-        let Some(thread) = (CallerProcess { process_id }).codex_thread(&app_servers) else {
-            return Err(unidentified());
-        };
-        let root_thread = self.codex_endpoints.root_thread(&thread);
-        match self.store.thread_sender(&root_thread) {
-            Ok(Ok(address)) => Ok(address),
-            Ok(Err(_)) => Err(unidentified()),
-            Err(error) => Err(Box::new(Response::Refused(Refusal::Store(
-                error.to_string(),
-            )))),
+        match self
+            .process_authority(peer)
+            .map_err(|error| Box::new(Response::Refused(Refusal::Store(error.to_string()))))?
+        {
+            ProcessAuthority::Bound(origin) => self
+                .store
+                .metaflow_awake_as(&origin.flow_id)
+                .map_err(|error| Box::new(Response::Refused(Refusal::Store(error.to_string()))))?
+                .map(|metaflow| metaflow.address)
+                .ok_or_else(unidentified),
+            ProcessAuthority::Launching(address) => Ok(address),
+            ProcessAuthority::Unbound => Err(unidentified()),
         }
     }
 }

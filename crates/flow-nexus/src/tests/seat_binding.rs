@@ -410,11 +410,10 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
     assert_eq!(awake.map(|metaflow| metaflow.address), Some(address));
 }
 
-/// Diagnostic of the current handover caller split. The same real CLI peer
-/// that Send attributes through its configured Codex app-server ancestry is
-/// still passed to Keep and Drop as Unbound on the ordinary connection.
+/// The same real CLI peer is authenticated once for Send, Keep and Drop
+/// through its configured Codex app-server ancestry.
 #[test]
-fn ordinary_codex_cli_keep_and_drop_remain_unknown_after_real_sender_attribution() {
+fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
     use crate::sending::SendsRequests;
     use crate::store::ReadsFlowRows;
     use crate::store::handover::HoldsHandovers;
@@ -490,9 +489,29 @@ fn ordinary_codex_cli_keep_and_drop_remain_unknown_after_real_sender_attribution
             },
         })
     };
+    let prior_call = configured.call(
+        Query::Keep(signal_flow::Keep_Data {
+            address: terra.clone(),
+            section: Section {
+                title: "prior".into(),
+                description: "must remain".into(),
+                body: "existing handover".into(),
+            },
+        }),
+        Some(ROOT),
+    );
+    assert!(
+        prior_call.answer.starts_with("Kept."),
+        "{}",
+        prior_call.answer
+    );
     let keep_call = configured.call(keep(terra.clone()), Some(ROOT));
     assert_eq!(keep_call.sending_address, Some(terra.clone()));
-    assert_eq!(keep_call.answer, "KeepRefused.UnknownCaller");
+    assert!(
+        keep_call.answer.starts_with("Kept."),
+        "{}",
+        keep_call.answer
+    );
     let drop_call = configured.call(
         Query::Drop(signal_flow::Drop_Data {
             address: terra.clone(),
@@ -501,15 +520,22 @@ fn ordinary_codex_cli_keep_and_drop_remain_unknown_after_real_sender_attribution
         Some(ROOT),
     );
     assert_eq!(drop_call.sending_address, Some(terra.clone()));
-    assert_eq!(drop_call.answer, "DropRefused.UnknownCaller");
     assert!(
+        drop_call.answer.starts_with("Dropped."),
+        "{}",
+        drop_call.answer
+    );
+    assert_eq!(
         configured
             .fixture
             .nexus
             .store
             .handover_headings(&terra)
             .unwrap()
-            .is_empty()
+            .into_iter()
+            .map(|heading| heading.title)
+            .collect::<Vec<_>>(),
+        vec!["prior"]
     );
 
     // No SendServers authority: the identical real ancestry has no Codex
@@ -602,14 +628,22 @@ fn ordinary_codex_cli_keep_and_drop_remain_unknown_after_real_sender_attribution
     );
 
     // A real Luna seat asking to Keep Terra is isolated from the positive
-    // Terra case. Its exact peer authenticates as Luna, while current Keep
-    // still loses that caller before the ownership check.
+    // Terra case. Its exact peer authenticates as Luna and reaches the
+    // unchanged ownership check.
     let wrong_seat = CodexCliWorld::new(true, Model::Luna);
     let luna_bind = wrong_seat.call(Query::BindSeat(luna.clone()), Some(ROOT));
     assert_eq!(luna_bind.answer, "Bound.877549");
     let luna_keep = wrong_seat.call(keep(terra.clone()), Some(ROOT));
     assert_eq!(luna_keep.sending_address, Some(luna.clone()));
-    assert_eq!(luna_keep.answer, "KeepRefused.UnknownCaller");
+    assert_eq!(luna_keep.answer, "KeepRefused.NotOwner");
+    let luna_drop = wrong_seat.call(
+        Query::Drop(signal_flow::Drop_Data {
+            address: terra.clone(),
+            title: "diagnostic".into(),
+        }),
+        Some(ROOT),
+    );
+    assert_eq!(luna_drop.answer, "DropRefused.NotOwner");
     assert!(
         wrong_seat
             .fixture
@@ -627,6 +661,14 @@ fn ordinary_codex_cli_keep_and_drop_remain_unknown_after_real_sender_attribution
     assert_eq!(unbound_keep.sending_address, None);
     assert_eq!(unbound_keep.codex_thread, None);
     assert_eq!(unbound_keep.answer, "KeepRefused.UnknownCaller");
+    let unbound_drop = unbound.call(
+        Query::Drop(signal_flow::Drop_Data {
+            address: terra.clone(),
+            title: "diagnostic".into(),
+        }),
+        None,
+    );
+    assert_eq!(unbound_drop.answer, "DropRefused.UnknownCaller");
     assert_eq!(unbound.fixture.nexus.live_awake_flow(&terra), None);
     assert!(
         unbound

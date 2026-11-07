@@ -26,8 +26,13 @@ use crate::RunningNexus;
 use crate::generated::starter::{CallerProcessing, DerivesOrigin};
 use crate::herdr::PanePresence;
 use crate::herdr::ReadsHerdrPanes;
-use crate::store::{ReadsFlowRoles, ReadsFlowRows, StoreError};
-use signal_flow::{Caller, CallerResolutionRejection, FlowId, FlowNode, Response};
+use crate::store::metaflow::SleepsMetaflows;
+use crate::store::send_call::KeepsSendCalls;
+use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowRoles, ReadsFlowRows, StoreError};
+use signal_flow::{
+    Address, Caller, CallerResolutionRejection, FlowId, FlowNode, FlowOrigin, HarnessKind, Process,
+    Response,
+};
 use std::collections::BTreeSet;
 use std::{fs, os::unix::net::UnixStream, path::PathBuf};
 
@@ -367,6 +372,125 @@ impl NamesRootThread for crate::codex::CodexEndpoints {
             .filter(|session| !session.is_empty())
             .unwrap_or(thread)
             .to_owned()
+    }
+}
+
+/// Authority proven from one live kernel peer and Flow's current records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcessAuthority {
+    /// The peer belongs to the one live flow currently owning its Address.
+    Bound(FlowOrigin),
+    /// The peer belongs to a Codex thread whose launch still owns this Address.
+    Launching(Address),
+    /// The peer has no single coherent authority.
+    Unbound,
+}
+
+/// Authenticates an ordinary peer once for every process-authorized operation.
+pub trait AuthenticatesProcessAuthority {
+    fn process_authority(&self, peer: &Process) -> Result<ProcessAuthority, StoreError>;
+}
+
+impl RunningNexus {
+    fn authority_for_address(&self, address: &Address) -> Result<ProcessAuthority, StoreError> {
+        let Some(metaflow) = self.store.metaflow(address)? else {
+            return Ok(ProcessAuthority::Unbound);
+        };
+        let flow_id = match metaflow.state {
+            flow_ethos::State::Awake(flow_id) => flow_id,
+            flow_ethos::State::Asleep => return Ok(ProcessAuthority::Unbound),
+        };
+        let Some(node) = self.store.flow_node(&flow_id)? else {
+            return Ok(ProcessAuthority::Unbound);
+        };
+        if !node.flow_lifecycle.is_live()
+            || self
+                .store
+                .metaflow_awake_as(&flow_id)?
+                .as_ref()
+                .map(|row| &row.address)
+                != Some(address)
+        {
+            return Ok(ProcessAuthority::Unbound);
+        }
+        Ok(ProcessAuthority::Bound(FlowOrigin {
+            flow_id: node.flow_id,
+            session_id: node.session_id,
+        }))
+    }
+
+    fn authority_for_flow(&self, flow_id: &str) -> Result<ProcessAuthority, StoreError> {
+        let Some(node) = self.store.flow_node(flow_id)? else {
+            return Ok(ProcessAuthority::Unbound);
+        };
+        if !node.flow_lifecycle.is_live() || self.store.metaflow_awake_as(flow_id)?.is_none() {
+            return Ok(ProcessAuthority::Unbound);
+        }
+        Ok(ProcessAuthority::Bound(FlowOrigin {
+            flow_id: node.flow_id,
+            session_id: node.session_id,
+        }))
+    }
+}
+
+impl AuthenticatesProcessAuthority for RunningNexus {
+    fn process_authority(&self, peer: &Process) -> Result<ProcessAuthority, StoreError> {
+        if !FlowStore::process_is_live(peer) {
+            return Ok(ProcessAuthority::Unbound);
+        }
+        let Some(process_id) = u32::try_from(peer.pid).ok() else {
+            return Ok(ProcessAuthority::Unbound);
+        };
+        let process = CallerProcess { process_id };
+        let mut evidence = Vec::new();
+
+        if let Response::Identified(address) = self.store.identify_process(peer.clone())? {
+            evidence.push(self.authority_for_address(&address)?);
+        }
+        if let Some(pane) = process.caller_pane(&self.herdr) {
+            evidence.push(match self.bound_caller(&pane) {
+                Ok(caller) => self.authority_for_flow(&caller.flow_id)?,
+                Err(_) => ProcessAuthority::Unbound,
+            });
+        }
+
+        let app_servers = self.store.codex_app_servers()?;
+        if let Some(thread) = process.codex_thread(&app_servers) {
+            let root_thread = self.codex_endpoints.root_thread(&thread);
+            let live = self
+                .store
+                .flow_nodes()?
+                .into_iter()
+                .filter(|node| {
+                    node.harness_kind == HarnessKind::Codex
+                        && node.session_id == root_thread
+                        && node.flow_lifecycle.is_live()
+                })
+                .collect::<Vec<_>>();
+            match live.as_slice() {
+                [node] => evidence.push(self.authority_for_flow(&node.flow_id)?),
+                [] => {
+                    if let Some(address) = self.store.launching_address(&root_thread)? {
+                        evidence.push(ProcessAuthority::Launching(address));
+                    } else {
+                        evidence.push(ProcessAuthority::Unbound);
+                    }
+                }
+                _ => evidence.push(ProcessAuthority::Unbound),
+            }
+        }
+        if !FlowStore::process_is_live(peer) {
+            return Ok(ProcessAuthority::Unbound);
+        }
+
+        let Some(first) = evidence.first().cloned() else {
+            return Ok(ProcessAuthority::Unbound);
+        };
+        Ok(if evidence.iter().all(|authority| authority == &first) {
+            first
+        } else {
+            ProcessAuthority::Unbound
+        })
     }
 }
 

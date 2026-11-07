@@ -1088,6 +1088,13 @@ impl RecordsLogicalDeliveries for FlowStore {
             .write_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        // Reminder admission follows the global order logical -> handover.
+        // Keep/Drop takes only the handover gate, so its mutation cannot race
+        // the green check and the atomic Notice/state commit below.
+        let _handover_guard = self
+            .handover_write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // A retry may present the same pre-commit snapshot after the prior
         // atomic commit succeeded. The durable sent count is the expected
         // state witness; refuse the stale attempt before creating a second

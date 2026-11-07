@@ -14,6 +14,7 @@ pub mod delivery;
 pub mod events;
 pub(crate) mod handover;
 pub(crate) mod handover_configuration;
+pub(crate) mod handover_reminders;
 pub(crate) mod launch_cleanup;
 pub(crate) mod logical_delivery;
 pub(crate) mod metaflow;
@@ -1540,6 +1541,7 @@ pub struct FlowStore {
     restarts: TableReference<restart::StoredRestart>,
     seat_births: TableReference<crate::generated::memory::SeatBirth>,
     handovers: TableReference<handover::HandoverMemory>,
+    pub(crate) handover_reminders: TableReference<handover_reminders::HandoverReminder>,
     pub launch_changes: LaunchChanges,
 }
 
@@ -2345,6 +2347,9 @@ impl OpensFlowStore for FlowStore {
         let seat_births = engine.register_table(seat_birth_descriptor)?;
         let handovers =
             <FlowStore as handover::RegistersHandoverTable>::register_handover_table(&mut engine)?;
+        let handover_reminders = engine.register_table(
+            <handover_reminders::HandoverReminder as handover_reminders::DescribesHandoverReminderTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2380,6 +2385,7 @@ impl OpensFlowStore for FlowStore {
             restarts,
             seat_births,
             handovers,
+            handover_reminders,
             launch_changes: LaunchChanges::default(),
         };
 
@@ -2508,6 +2514,9 @@ impl OpensFlowStore for FlowStore {
         )?;
         let handovers =
             <FlowStore as handover::RegistersHandoverTable>::register_handover_table(&mut engine)?;
+        let handover_reminders = engine.register_table(
+            <handover_reminders::HandoverReminder as handover_reminders::DescribesHandoverReminderTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2543,6 +2552,7 @@ impl OpensFlowStore for FlowStore {
             restarts,
             seat_births,
             handovers,
+            handover_reminders,
             launch_changes: LaunchChanges::default(),
         };
         store.archive_legacy_queue()?;

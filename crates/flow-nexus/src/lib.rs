@@ -1729,7 +1729,9 @@ mod tests {
     mod curriculum;
     mod delivery;
     mod ending;
+    mod handover_archive;
     mod handover_configuration;
+    mod handover_reminding;
     mod heartbeat_production;
     mod launching_nexus;
     mod model;

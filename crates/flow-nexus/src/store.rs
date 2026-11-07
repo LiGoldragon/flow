@@ -7969,6 +7969,9 @@ mod tests {
                         super::OPTIONAL_STORE_IDENTITY_TABLE,
                         super::OPTIONAL_DELIVER_CALL_TABLE,
                         super::OPTIONAL_REQUEST_POLICY_TABLE,
+                        super::OPTIONAL_PRIOR_DELIVERY_TABLE,
+                        super::OPTIONAL_TASK_ANNOUNCEMENT_TABLE,
+                        super::OPTIONAL_UPGRADE_ASSIGNMENT_TABLE,
                     ]
                     .iter(),
                 )

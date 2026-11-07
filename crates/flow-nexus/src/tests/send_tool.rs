@@ -520,7 +520,7 @@ fn responding<T>(
 
 #[test]
 fn two_threads_are_each_attributed_to_their_own_metaflow() {
-    let fixture = NexusFixture::new();
+    let mut fixture = NexusFixture::new();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.codex_seat("b2b2b2", THREAD_B, "w1:p6", "gpt-6-sol", sender_b());
     fixture.awake_target();
@@ -1672,7 +1672,7 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
 
 #[test]
 fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically() {
-    let mut fixture = NexusFixture::new();
+    let fixture = NexusFixture::new();
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: core_primary(),
         state: State::Asleep,
@@ -1764,6 +1764,18 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
             .expect("binding reads")
             .is_none(),
         "archive releases the id in its commit"
+    );
+    let opening = fixture
+        .nexus
+        .store
+        .read_logical_delivery_snapshots(&core(), None)
+        .expect("cursorless opening reads");
+    assert!(
+        opening
+            .delivery_snapshot_vector
+            .iter()
+            .all(|snapshot| snapshot.logical_delivery_id != logical_id),
+        "cursorless opening lists held requests only"
     );
     let history = fixture
         .nexus

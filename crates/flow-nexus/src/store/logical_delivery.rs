@@ -2236,7 +2236,10 @@ impl RecordsLogicalDeliveries for FlowStore {
             current
                 .records()
                 .iter()
-                .filter(|r| r.snapshot.sent_by == signal_flow::SentBy::Sender(sender.clone()))
+                .filter(|r| {
+                    r.archived.is_none()
+                        && r.snapshot.sent_by == signal_flow::SentBy::Sender(sender.clone())
+                })
                 .map(|r| r.snapshot.clone())
                 .collect()
         };

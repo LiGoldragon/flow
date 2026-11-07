@@ -99,7 +99,7 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
     use super::NexusFixture;
     use crate::handover_reminding::RemindsHandoverCallers;
     use crate::store::handover_reminders::{HandoverReminder, OpensHandoverReminder, SchedulesHandoverReminders};
-    use crate::store::metaflow::SeedsMetaflow;
+    use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow};
     use flow_ethos::{Metaflow, State};
     let fixture = NexusFixture::new();
     let address = address();
@@ -122,7 +122,7 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
     use crate::store::{ManagesMetaflowState, SeedsRole};
     use crate::store::context::RecordsContextSize;
     use crate::store::handover::HoldsHandovers;
-    use crate::store::metaflow::SeedsMetaflow;
+    use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow};
     use meta_signal_flow::{ConfigurationChange, ConfigureThreshold, HandoverPolicy};
     use signal_flow::{Address, Aspect, Caller, Metaflow, Model};
     let fixture = NexusFixture::new();
@@ -139,6 +139,8 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
     fixture.nexus.send_due_handover_reminders(20);
     let row = fixture.nexus.store.handover_reminder(&address, 0).unwrap().unwrap();
     assert_eq!(row.sent, 1);
+    let public = fixture.nexus.store.metaflow(&address).unwrap().unwrap();
+    assert!(public.queue.iter().any(|entry| matches!(&entry.message, flow_ethos::Message::HardAbrupt(flow_ethos::Request::Notice(_)))));
     fixture.nexus.send_due_handover_reminders(319);
     assert_eq!(fixture.nexus.store.handover_reminder(&address, 0).unwrap().unwrap().sent, 1);
     fixture.nexus.send_due_handover_reminders(320);
@@ -154,7 +156,7 @@ fn green_keep_cancels_open_warning_timer() {
     use crate::store::{ManagesMetaflowState, SeedsRole};
     use crate::store::context::RecordsContextSize;
     use crate::store::handover::{HandoverWriter, HoldsHandovers};
-    use crate::store::metaflow::SeedsMetaflow;
+    use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow};
     use meta_signal_flow::{ConfigurationChange, ConfigureThreshold, HandoverPolicy};
     use signal_flow::{Address, Aspect, Caller, Metaflow, Model, Touch, Known_Data};
     let fixture = NexusFixture::new();
@@ -177,7 +179,7 @@ fn atomic_same_expected_reminder_state_rejects_duplicate_admission() {
     use super::NexusFixture;
     use crate::store::logical_delivery::RecordsLogicalDeliveries;
     use crate::store::handover_reminders::{HandoverReminder, OpensHandoverReminder};
-    use crate::store::metaflow::SeedsMetaflow;
+    use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow};
     use flow_ethos::{Metaflow, Message, Request, State};
     use signal_flow::{PrivateSendResponse, SentBy};
     let fixture = NexusFixture::new();
@@ -203,7 +205,7 @@ fn reminder_state_reopens_with_anchored_due_without_duplicate_initial() {
     let path = configured.path();
     let store = crate::store::FlowStore::open_configured(path).unwrap();
     let address = address();
-    use crate::store::metaflow::SeedsMetaflow;
+    use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow};
     use crate::store::logical_delivery::RecordsLogicalDeliveries;
     store.seed_metaflow(flow_ethos::Metaflow { address: address.clone(), state: flow_ethos::State::Asleep, past: vec![], queue: vec![] });
     let reminder = HandoverReminder::open_handover_reminder(address.clone(), 4, "m".into(), 100, 5, "x".into()).unwrap();

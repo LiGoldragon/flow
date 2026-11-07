@@ -133,6 +133,8 @@ const ADDED_IN_0531: &[&str] = &["flow_nexus_meta_protected_address_configuratio
 const OPTIONAL_HANDOVER_TABLE: &str = "flow_nexus_meta_handover_configuration";
 const OPTIONAL_HANDOVER_RUNTIME_TABLE: &str = "flow_nexus_handovers";
 const OPTIONAL_HANDOVER_REMINDER_TABLE: &str = "flow_nexus_handover_reminders";
+const OPTIONAL_REQUEST_ID_TABLE: &str = "flow_nexus_request_ids";
+const OPTIONAL_STORE_IDENTITY_TABLE: &str = "flow_nexus_store_identity";
 const HEARTBEAT_STANDING_TABLE_NAME: TableName = TableName::new("flow_nexus_heartbeat_standings");
 const HEARTBEAT_STANDING_FAMILY: &str = "flow-nexus-heartbeat-standing";
 const HEARTBEAT_STANDING_SCHEMA: &str = "flow-nexus-heartbeat-standing-v2";
@@ -4707,6 +4709,10 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-logical-delivery-purpose",
                 "flow-nexus-logical-delivery-purpose-v2",
             ),
+            "flow_nexus_request_ids" => ("flow-nexus-request-id", "flow-nexus-request-id-v1"),
+            "flow_nexus_store_identity" => {
+                ("flow-nexus-store-identity", "flow-nexus-store-identity-v1")
+            }
             "flow_nexus_restarts" => (restart::RESTART_FAMILY, restart::RESTART_SCHEMA),
             "flow_nexus_seat_births" => (restart::SEAT_BIRTH_FAMILY, restart::SEAT_BIRTH_SCHEMA),
             "flow_nexus_heartbeat_standings" => {
@@ -4801,14 +4807,20 @@ pub(crate) trait ReadsFlowMemory {
                 tables.contains(&name.as_str())
                     || *name == OPTIONAL_HANDOVER_TABLE
                     || *name == OPTIONAL_HANDOVER_RUNTIME_TABLE
+                    || *name == OPTIONAL_REQUEST_ID_TABLE
+                    || *name == OPTIONAL_STORE_IDENTITY_TABLE
             }) && tables.iter().all(|name| {
                 actual.contains(*name)
                     || ADDED_IN_0531.contains(name)
                     || *name == OPTIONAL_HANDOVER_TABLE
                     || *name == OPTIONAL_HANDOVER_RUNTIME_TABLE
                     || *name == OPTIONAL_HANDOVER_REMINDER_TABLE
-            }) && (ADDED_IN_0531.iter().all(|name| actual.contains(*name))
-                || ADDED_IN_0531.iter().all(|name| !actual.contains(*name)))
+                    || *name == OPTIONAL_REQUEST_ID_TABLE
+                    || *name == OPTIONAL_STORE_IDENTITY_TABLE
+            }) && (actual.contains(OPTIONAL_REQUEST_ID_TABLE)
+                == actual.contains(OPTIONAL_STORE_IDENTITY_TABLE))
+                && (ADDED_IN_0531.iter().all(|name| actual.contains(*name))
+                    || ADDED_IN_0531.iter().all(|name| !actual.contains(*name)))
         };
         is(CONFIGURATION_ONLY_TABLES) || is(RUNNING_TABLES)
     }

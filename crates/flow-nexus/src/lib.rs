@@ -1690,8 +1690,8 @@ mod tests {
     mod curriculum;
     mod delivery;
     mod ending;
-    mod heartbeat_production;
     mod handover_configuration;
+    mod heartbeat_production;
     mod launching_nexus;
     mod model;
     mod queue_drain;

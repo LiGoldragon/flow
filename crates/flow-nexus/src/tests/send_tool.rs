@@ -1889,15 +1889,11 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
             }),
         )
         .expect("request ends");
-    let failing = fixture.nexus.store.engine.begin_atomic_commit().retract(
-        fixture.nexus.store.logical_deliveries.current,
-        sema_engine::RecordKey::new("missing-archive-row"),
-    );
     assert!(
         fixture
             .nexus
             .store
-            .commit_archive_request(&request_id, &core(), failing)
+            .archive_request_with_injected_commit_failure(&request_id, &core())
             .is_err(),
         "a fault in the archive commit is returned"
     );

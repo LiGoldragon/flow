@@ -611,6 +611,12 @@ pub(crate) trait RecordsLogicalDeliveries {
         sender: &Address,
         commit: AtomicCommit,
     ) -> Result<Result<(), signal_flow::ArchiveRejection>, StoreError>;
+    #[cfg(test)]
+    fn archive_request_with_injected_commit_failure(
+        &self,
+        request_id: &str,
+        sender: &Address,
+    ) -> Result<Result<(), signal_flow::ArchiveRejection>, StoreError>;
     fn seed_missing_queued_deliveries(&self) -> Result<(), StoreError>;
     fn force_queue_wake(&self, address: &Address) -> Result<(), StoreError>;
     /// Resolves a public message against durable private evidence. The
@@ -1056,6 +1062,19 @@ impl RecordsLogicalDeliveries for FlowStore {
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
         Ok(Ok(()))
+    }
+
+    #[cfg(test)]
+    fn archive_request_with_injected_commit_failure(
+        &self,
+        request_id: &str,
+        sender: &Address,
+    ) -> Result<Result<(), signal_flow::ArchiveRejection>, StoreError> {
+        let failing = self.engine.begin_atomic_commit().retract(
+            self.logical_deliveries.current,
+            RecordKey::new("missing-archive-row"),
+        );
+        self.commit_archive_request(request_id, sender, failing)
     }
 
     fn seed_store_identity(&self) -> Result<(), StoreError> {

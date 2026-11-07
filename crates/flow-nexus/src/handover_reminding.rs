@@ -33,7 +33,7 @@ impl DecidesHandoverReminder for HandoverReminder {
     fn advanced(&self) -> Option<HandoverReminder> {
         let mut next = self.clone();
         next.sent = next.sent.checked_add(1)?;
-        next.next_due = next.next_due()?;
+        next.next_due = next.next_due().ok()?;
         Some(next)
     }
 }

@@ -655,6 +655,10 @@ impl RecordsLogicalDeliveries for FlowStore {
                 QueueDeliveryPhase::ReceiptRecorded(value) | QueueDeliveryPhase::Settled(value) => {
                     value
                 }
+                QueueDeliveryPhase::Read {
+                    late_receipt: Some(value),
+                    ..
+                } => value,
                 _ => return None,
             };
             Some(NativeReceipt {
@@ -1330,7 +1334,12 @@ impl RecordsLogicalDeliveries for FlowStore {
             ),
             _ => None,
         };
-        let answers_request = answered_binding.is_some();
+        let answered_uncertain = match &answered_binding {
+            Some(binding) => self
+                .logical_delivery_snapshot(&binding.logical_delivery_id)?
+                .is_some_and(|snapshot| snapshot.delivery_state == DeliveryState::Uncertain),
+            None => false,
+        };
         let allocation = self.allocate_logical_cursor()?;
         let cursor = allocation.cursor;
         let create_counter = !allocation.existing;
@@ -1370,7 +1379,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         });
         let next_counter = LogicalDeliveryCounter {
             next_cursor: cursor
-                .checked_add(if answers_request { 2 } else { 1 })
+                .checked_add(if answered_uncertain { 2 } else { 1 })
                 .ok_or(StoreError::StateInvariant)?,
         };
         let commit = self
@@ -1394,19 +1403,24 @@ impl RecordsLogicalDeliveries for FlowStore {
             if current.archived.is_some() {
                 return Err(StoreError::StateInvariant);
             }
-            let mut read = current.clone();
-            read.snapshot.delivery_cursor = cursor + 1;
-            read.snapshot.delivery_state = DeliveryState::Read;
+            let answered_logical_id = binding.logical_delivery_id.clone();
             binding.closure = RequestClosure::Answered(accepted_logical_id.clone());
-            commit
-                .mutate(self.logical_deliveries.request_ids, binding)
-                .mutate(self.logical_deliveries.current, read.clone())
-                .assert(
-                    self.logical_deliveries.events,
-                    LogicalDeliveryEvent {
-                        snapshot: read.snapshot,
-                    },
-                )
+            let commit = commit.mutate(self.logical_deliveries.request_ids, binding);
+            if answered_uncertain {
+                let mut read = current.clone();
+                read.snapshot.delivery_cursor = cursor + 1;
+                read.snapshot.delivery_state = DeliveryState::Read;
+                self.read_uncertain_delivery(&answered_logical_id, &accepted_logical_id, commit)?
+                    .mutate(self.logical_deliveries.current, read.clone())
+                    .assert(
+                        self.logical_deliveries.events,
+                        LogicalDeliveryEvent {
+                            snapshot: read.snapshot,
+                        },
+                    )
+            } else {
+                commit
+            }
         } else {
             commit
         };
@@ -1783,7 +1797,12 @@ impl RecordsLogicalDeliveries for FlowStore {
             ),
             _ => None,
         };
-        let answers_request = answered_binding.is_some();
+        let answered_uncertain = match &answered_binding {
+            Some(binding) => self
+                .logical_delivery_snapshot(&binding.logical_delivery_id)?
+                .is_some_and(|snapshot| snapshot.delivery_state == DeliveryState::Uncertain),
+            None => false,
+        };
         let allocation = self.allocate_logical_cursor()?;
         let next = allocation.cursor;
         let create = !allocation.existing;
@@ -1806,7 +1825,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         };
         let next_counter = LogicalDeliveryCounter {
             next_cursor: next
-                .checked_add(if answers_request { 2 } else { 1 })
+                .checked_add(if answered_uncertain { 2 } else { 1 })
                 .ok_or(StoreError::StateInvariant)?,
         };
         let commit = self
@@ -1878,19 +1897,24 @@ impl RecordsLogicalDeliveries for FlowStore {
             if current.archived.is_some() {
                 return Err(StoreError::StateInvariant);
             }
-            let mut read = current.clone();
-            read.snapshot.delivery_cursor = next + 1;
-            read.snapshot.delivery_state = DeliveryState::Read;
+            let answered_logical_id = binding.logical_delivery_id.clone();
             binding.closure = RequestClosure::Answered(id.clone());
-            commit
-                .mutate(self.logical_deliveries.request_ids, binding)
-                .mutate(self.logical_deliveries.current, read.clone())
-                .assert(
-                    self.logical_deliveries.events,
-                    LogicalDeliveryEvent {
-                        snapshot: read.snapshot,
-                    },
-                )
+            let commit = commit.mutate(self.logical_deliveries.request_ids, binding);
+            if answered_uncertain {
+                let mut read = current.clone();
+                read.snapshot.delivery_cursor = next + 1;
+                read.snapshot.delivery_state = DeliveryState::Read;
+                self.read_uncertain_delivery(&answered_logical_id, &id, commit)?
+                    .mutate(self.logical_deliveries.current, read.clone())
+                    .assert(
+                        self.logical_deliveries.events,
+                        LogicalDeliveryEvent {
+                            snapshot: read.snapshot,
+                        },
+                    )
+            } else {
+                commit
+            }
         } else {
             commit
         };

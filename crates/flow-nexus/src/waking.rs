@@ -1070,6 +1070,7 @@ impl ReconcilesQueueDelivery for RunningNexus {
             QueueDeliveryPhase::Settled(_) => {
                 return attempt.as_settled(SeatAfter::InItsTurn);
             }
+            QueueDeliveryPhase::Read { .. } => return Reconciled::Refused,
             QueueDeliveryPhase::Absent(_) => return Reconciled::Absent,
             QueueDeliveryPhase::Resolved(record) => {
                 return match record.queue_resolution_outcome {

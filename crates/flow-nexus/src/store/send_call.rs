@@ -19,7 +19,7 @@ use signal_flow::{Address, HarnessKind};
 
 pub(super) const SEND_CALL_TABLE_NAME: TableName = TableName::new("flow_nexus_send_calls");
 pub(super) const SEND_CALL_FAMILY: &str = "flow-nexus-send-call";
-pub(super) const SEND_CALL_SCHEMA: &str = "flow-nexus-send-call-v7";
+pub(super) const SEND_CALL_SCHEMA: &str = "flow-nexus-send-call-v8";
 
 /// The record key of a call: each part prefixed by its length, so no two
 /// keys of different parts read alike.
@@ -49,7 +49,7 @@ impl EngineRecord for SendCall {
 
 impl MemoryDefinition for SendCall {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(7)
+        MemoryVersion::new(8)
     }
 
     fn schema_hash() -> SchemaHash {

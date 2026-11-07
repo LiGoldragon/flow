@@ -118,11 +118,11 @@ impl EngineRecord for StoredDeliveryRequest {
 
 impl MemoryDefinition for StoredDeliveryRequest {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(7)
+        MemoryVersion::new(8)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-queue-delivery-request-v7")
+        SchemaHash::for_label("flow-nexus-queue-delivery-request-v8")
     }
 }
 
@@ -171,6 +171,13 @@ pub enum QueueDeliveryPhase {
     Uncertain(Option<Undecided>),
     ReceiptRecorded(NativeDeliveryReceipt),
     Settled(NativeDeliveryReceipt),
+    /// An authenticated answer proves the request was read even though the
+    /// native submission never produced an exact receipt.  Answer evidence
+    /// and a receipt observed later remain separate.
+    Read {
+        answer: String,
+        late_receipt: Option<NativeDeliveryReceipt>,
+    },
     /// Native history proved the request never reached the seat.
     Absent(AbsenceRecord),
     /// The owner resolved an Uncertain attempt: who, why and when are
@@ -193,7 +200,7 @@ impl ShowsQueueDelivery for QueueDeliveryAttempt {
             QueueDeliveryPhase::ReceiptRecorded(_) => QueueDeliveryStanding::ReceiptRecorded,
             QueueDeliveryPhase::Absent(absence) => QueueDeliveryStanding::Absent(absence.proof),
             QueueDeliveryPhase::Resolved(record) => QueueDeliveryStanding::Resolved(record),
-            QueueDeliveryPhase::Settled(_) => return None,
+            QueueDeliveryPhase::Settled(_) | QueueDeliveryPhase::Read { .. } => return None,
         };
         Some(QueueDelivery {
             queue_attempt_id: self.attempt_id,
@@ -207,13 +214,16 @@ impl ShowsQueueDelivery for QueueDeliveryAttempt {
 }
 
 pub trait EndsQueueDeliveryPhase {
-    /// Settled, Absent and Resolved attempts hold no request back.
+    /// Settled, Read, Absent and Resolved attempts hold no request back.
     fn is_finished(&self) -> bool;
 }
 
 impl EndsQueueDeliveryPhase for QueueDeliveryPhase {
     fn is_finished(&self) -> bool {
-        matches!(self, Self::Settled(_) | Self::Absent(_) | Self::Resolved(_))
+        matches!(
+            self,
+            Self::Settled(_) | Self::Read { .. } | Self::Absent(_) | Self::Resolved(_)
+        )
     }
 }
 
@@ -239,11 +249,11 @@ impl EngineRecord for QueueDeliveryAttempt {
 
 impl MemoryDefinition for QueueDeliveryAttempt {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(8)
+        MemoryVersion::new(9)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v8")
+        SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v9")
     }
 }
 
@@ -387,6 +397,16 @@ pub trait AccountsQueueDelivery {
     /// Atomically removes the request if it remains oldest and retains the
     /// settled attempt, so a duplicate completion is idempotent.
     fn settle_recorded_delivery(&self, attempt_id: &str) -> Result<bool, StoreError>;
+
+    /// Adds an authenticated answer's settlement of one Uncertain attempt to
+    /// the caller's admission commit.  There must be exactly one unfinished
+    /// attempt for the logical delivery.
+    fn read_uncertain_delivery(
+        &self,
+        logical_delivery_id: &str,
+        answer_logical_delivery_id: &str,
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError>;
 
     /// Removes an unresolved request from active queue processing without
     /// changing its Uncertain delivery record or permitting automatic retry.
@@ -924,17 +944,102 @@ impl AccountsQueueDelivery for FlowStore {
             }
             QueueDeliveryPhase::ReceiptRecorded(recorded)
             | QueueDeliveryPhase::Settled(recorded) => Ok(recorded == &receipt),
+            QueueDeliveryPhase::Read {
+                answer,
+                late_receipt,
+            } => {
+                let _ = answer;
+                match late_receipt {
+                    Some(recorded) => Ok(recorded == &receipt),
+                    None => {
+                        attempt.phase = QueueDeliveryPhase::Read {
+                            answer: answer.clone(),
+                            late_receipt: Some(receipt),
+                        };
+                        self.engine.mutate_keyed(KeyedMutation::new(
+                            self.queue_delivery.attempts,
+                            RecordKey::new(attempt_id),
+                            attempt,
+                        ))?;
+                        Ok(true)
+                    }
+                }
+            }
             QueueDeliveryPhase::Absent(_) | QueueDeliveryPhase::Resolved(_) => {
                 Err(StoreError::StateInvariant)
             }
         }
     }
 
+    fn read_uncertain_delivery(
+        &self,
+        logical_delivery_id: &str,
+        answer_logical_delivery_id: &str,
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError> {
+        let mut unfinished = self
+            .delivery_attempts_for(logical_delivery_id)?
+            .into_iter()
+            .filter(|attempt| !attempt.phase.is_finished());
+        let Some(mut attempt) = unfinished.next() else {
+            return Err(StoreError::StateInvariant);
+        };
+        if unfinished.next().is_some() || !matches!(attempt.phase, QueueDeliveryPhase::Uncertain(_))
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        let requests = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.queue_delivery.requests,
+                RecordKey::new(attempt.request_id.clone()),
+            ))?
+            .records()
+            .to_vec();
+        let [request] = requests.as_slice() else {
+            return Err(StoreError::StateInvariant);
+        };
+        if request.address != attempt.address || request.queue_evidence != attempt.queue_evidence {
+            return Err(StoreError::StateInvariant);
+        }
+        let mut request = request.clone();
+        let mut metaflow = self
+            .stored_metaflow(&attempt.address)?
+            .ok_or(StoreError::StateInvariant)?;
+        match request.state {
+            RequestState::Queued => {
+                let QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
+                    return Err(StoreError::StateInvariant);
+                };
+                if metaflow.metaflow.queue.first() != Some(entry) {
+                    return Err(StoreError::StateInvariant);
+                }
+                metaflow.metaflow.queue.remove(0);
+            }
+            RequestState::Parked => {}
+            RequestState::Settled | RequestState::Unsent => {
+                return Err(StoreError::StateInvariant);
+            }
+        }
+        request.state = RequestState::Settled;
+        attempt.phase = QueueDeliveryPhase::Read {
+            answer: answer_logical_delivery_id.to_owned(),
+            late_receipt: None,
+        };
+        Ok(commit
+            .mutate(self.metaflows, metaflow)
+            .mutate(self.queue_delivery.requests, request)
+            .mutate(self.queue_delivery.attempts, attempt))
+    }
+
     fn settle_recorded_delivery(&self, attempt_id: &str) -> Result<bool, StoreError> {
         let Some(mut attempt) = self.queue_delivery_attempt(attempt_id)? else {
             return Ok(false);
         };
-        if matches!(&attempt.phase, QueueDeliveryPhase::Settled(_)) {
+        if matches!(
+            &attempt.phase,
+            QueueDeliveryPhase::Settled(_) | QueueDeliveryPhase::Read { .. }
+        ) {
             return Ok(true);
         }
         let QueueDeliveryPhase::ReceiptRecorded(receipt) = &attempt.phase else {
@@ -1010,7 +1115,10 @@ impl AccountsQueueDelivery for FlowStore {
         let snapshot = self
             .logical_delivery_snapshot(&logical_id)?
             .ok_or(StoreError::StateInvariant)?;
-        if matches!(snapshot.delivery_state, DeliveryState::Delivered(_)) {
+        if matches!(
+            snapshot.delivery_state,
+            DeliveryState::Delivered(_) | DeliveryState::Read
+        ) {
             return Ok(snapshot.delivery_state);
         }
         if let Some(attempt) = self.outstanding_delivery(address)? {
@@ -1138,6 +1246,7 @@ impl AccountsQueueDelivery for FlowStore {
             QueueDeliveryPhase::Uncertain(_) => Ok(true),
             QueueDeliveryPhase::ReceiptRecorded(_)
             | QueueDeliveryPhase::Settled(_)
+            | QueueDeliveryPhase::Read { .. }
             | QueueDeliveryPhase::Absent(_)
             | QueueDeliveryPhase::Resolved(_) => Ok(false),
         }
@@ -1184,6 +1293,7 @@ impl AccountsQueueDelivery for FlowStore {
             QueueDeliveryPhase::Absent(recorded) => return Ok(recorded == &absence),
             QueueDeliveryPhase::ReceiptRecorded(_)
             | QueueDeliveryPhase::Settled(_)
+            | QueueDeliveryPhase::Read { .. }
             | QueueDeliveryPhase::Resolved(_) => {
                 return Ok(false);
             }
@@ -1231,6 +1341,9 @@ impl AccountsQueueDelivery for FlowStore {
         if let QueueDeliveryPhase::Settled(receipt) = &attempt.phase {
             let _ = receipt;
             return Ok(Err(Rejected::AlreadyDelivered));
+        }
+        if matches!(attempt.phase, QueueDeliveryPhase::Read { .. }) {
+            return Ok(Err(Rejected::AlreadyRead));
         }
         if let QueueDeliveryPhase::Resolved(prior) = &attempt.phase {
             if prior.queue_resolution_outcome == QueueResolutionOutcome::Absent
@@ -1310,7 +1423,10 @@ impl AccountsQueueDelivery for FlowStore {
             .into_iter()
             .filter(|attempt| {
                 &attempt.address == address
-                    && !matches!(attempt.phase, QueueDeliveryPhase::Settled(_))
+                    && !matches!(
+                        attempt.phase,
+                        QueueDeliveryPhase::Settled(_) | QueueDeliveryPhase::Read { .. }
+                    )
             })
             .collect::<Vec<_>>();
         // Attempt ids are fixed-width hex of one counter: their order is
@@ -1343,6 +1459,7 @@ impl AccountsQueueDelivery for FlowStore {
                     outstanding.push(attempt);
                 }
                 QueueDeliveryPhase::Settled(_)
+                | QueueDeliveryPhase::Read { .. }
                 | QueueDeliveryPhase::Absent(_)
                 | QueueDeliveryPhase::Resolved(_) => {}
             }

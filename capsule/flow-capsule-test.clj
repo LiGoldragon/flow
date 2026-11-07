@@ -166,6 +166,51 @@
       (reset! flow-capsule/run-log saved-log)
       (fs/delete-tree scratch))))
 
+;; Full handover preservation is the one owner of its Codex evidence. The
+;; later generic teardown copier keeps its other witnesses without colliding
+;; with live or archived JSONL and their session index.
+(let [scratch (str (fs/create-temp-dir))
+      private (str scratch "/private")
+      codex (str private "/codex")
+      witness (str scratch "/witness")
+      log (str private "/nexus.log")
+      saved-witness @flow-capsule/witness-dir
+      saved-log @flow-capsule/run-log]
+  (try
+    (doseq [dir [(str codex "/sessions/2026/11") (str codex "/archived_sessions")]]
+      (fs/create-dirs dir))
+    (spit (str codex "/sessions/2026/11/live.jsonl") "live\n")
+    (spit (str codex "/archived_sessions/archived.jsonl") "archived\n")
+    (spit (str codex "/session_index.jsonl") "index\n")
+    (spit log "native log\n")
+    (reset! flow-capsule/witness-dir witness)
+    (reset! flow-capsule/run-log log)
+    (with-redefs [flow-capsule/codex-home codex
+                  flow-capsule/h0-herdr-stdout (str private "/absent-herdr-stdout.log")
+                  flow-capsule/h0-herdr-stderr (str private "/absent-herdr-stderr.log")]
+      (flow-capsule/preserve-full-handover!))
+    (flow-capsule/keep-witnesses!
+     witness (flow-capsule/teardown-witnesses true log
+                                                (str private "/absent-claude")
+                                                (str codex "/sessions")))
+    (fs/delete-tree private)
+    (check "full handover preservation keeps live, archived, and index evidence through teardown"
+           (and (fs/exists? (str witness "/codex-sessions/2026/11/live.jsonl"))
+                (fs/exists? (str witness "/codex-archived-sessions/archived.jsonl"))
+                (fs/exists? (str witness "/codex-session-index/session_index.jsonl"))
+                (fs/exists? (str witness "/nexus.log"))
+                (not (fs/exists? private))))
+    (check "ordinary handover teardown has no second Codex-session copier"
+           (not (contains? (flow-capsule/teardown-witnesses true log "claude" "codex")
+                           "codex-sessions")))
+    (check "non-handover teardown retains its Codex-session copier"
+           (= "codex" (get (flow-capsule/teardown-witnesses false log "claude" "codex")
+                            "codex-sessions")))
+    (finally
+      (reset! flow-capsule/witness-dir saved-witness)
+      (reset! flow-capsule/run-log saved-log)
+      (fs/delete-tree scratch))))
+
 (let [finished (atom false)
       threw (try
               (with-redefs [flow-capsule/finish-h0-diagnostic! #(reset! finished true)]
@@ -175,6 +220,20 @@
               (catch Exception _ true))]
   (check "an H0 launch exception still runs preservation before it escapes"
          (and threw @finished)))
+
+(doseq [[label body throws?]
+        [["success" #(identity :done) false]
+         ["exception" #(throw (ex-info "full handover failure" {})) true]]]
+  (let [events (atom [])
+        threw (try
+                (with-redefs [flow-capsule/preserve-full-handover!
+                              #(swap! events conj :preserved)]
+                  (flow-capsule/with-full-handover-finish
+                   #(do (swap! events conj :body) (body))))
+                false
+                (catch Exception _ true))]
+    (check (str "full handover preserves native evidence before teardown after " label)
+           (and (= throws? threw) (= [:body :preserved] @events)))))
 
 (let [header (str "#!/bin/sh\nexport CODEX_HOME=" flow-capsule/codex-home "\n")
       exec (str "exec " flow-capsule/codex-binary " \"$@\"\n")

@@ -861,6 +861,13 @@
       (fs/copy source (str dir "/" name))))
   dir)
 
+(defn teardown-witnesses
+  "The teardown copy set. Handover preservation already owns every Codex
+  session tree before teardown; other modes copy that tree here."
+  [handover? log transcripts sessions]
+  (cond-> {"nexus.log" log "claude-transcripts" transcripts}
+    (not handover?) (assoc "codex-sessions" sessions)))
+
 (def witness-dir (atom nil))
 (def run-log (atom nil))
 
@@ -910,11 +917,11 @@
           {:source path :destination path :present true :sha256 (sha256-file path)})
       {:source path :destination path :present false :reason "evidence absent"})))
 
-(defn preserve-h0-diagnostic!
-  "Keeps only the ruled native session/index and diagnostic log evidence.
+(defn preserve-handover-evidence!
+  "Keeps only the ruled native session/index and handover log evidence.
   Every absence and preservation error becomes evidence; none escapes to
   prevent the outer teardown."
-  []
+  [receipt-name evidence-names]
   (let [receipt (atom [])
         keep #(try (swap! receipt conj (preserve-h0-file! %1 %2))
                    (catch Exception e
@@ -932,19 +939,29 @@
       (keep @run-log "nexus-and-native.log")
       (keep h0-herdr-stdout "herdr-server.stdout.log")
       (keep h0-herdr-stderr "herdr-server.stderr.log")
-      (doseq [name [h0-wrapper-record-name h0-sampler-record-name
-                    "handover-H0-model-catalog.json"
-                    "handover-H0-diagnostic-prelaunch.json"
-                    "handover-H0-diagnostic-launch.txt"]]
+      (doseq [name evidence-names]
         (swap! receipt conj (inventory-h0-evidence name)))
       (catch Exception e
         (swap! receipt conj {:present false :error (.getMessage e) :stage "preservation"})))
     (try
-      (keep-text! "handover-H0-preservation.json"
+      (keep-text! receipt-name
                   (json/generate-string {:time (str (java.time.Instant/now)) :files @receipt} {:pretty true}))
-      (fs/set-posix-file-permissions (str @witness-dir "/handover-H0-preservation.json") "rw-------")
+      (fs/set-posix-file-permissions (str @witness-dir "/" receipt-name) "rw-------")
       (catch Exception _ nil))
     @receipt))
+
+(defn preserve-h0-diagnostic! []
+  (preserve-handover-evidence!
+   "handover-H0-preservation.json"
+   [h0-wrapper-record-name h0-sampler-record-name
+    "handover-H0-model-catalog.json"
+    "handover-H0-diagnostic-prelaunch.json"
+    "handover-H0-diagnostic-launch.txt"]))
+
+(defn preserve-full-handover! []
+  (preserve-handover-evidence!
+   "handover-full-preservation.json"
+   [h0-wrapper-record-name "handover-H0-model-catalog.json"]))
 
 (defn finish-h0-diagnostic! []
   (try (stop-h0-sampler!)
@@ -953,6 +970,9 @@
                           {:time (str (java.time.Instant/now)) :kind "sampler-stop-error"
                            :error (.getMessage e)})))
   (preserve-h0-diagnostic!))
+
+(defn with-full-handover-finish [body]
+  (try (body) (finally (preserve-full-handover!))))
 
 ;; ---------------------------------------------------------------- readings
 
@@ -1181,7 +1201,7 @@
     (prepare-private-home-and-flow-wrapper!))
   (reset! herdr-server
           (p/process ["herdr" "--session" session "server"]
-                     (if h0-diagnostic-mode
+                     (if handover-mode
                        {:env (clean-env) :out :append :out-file (fs/file h0-herdr-stdout)
                         :err :append :err-file (fs/file h0-herdr-stderr) :in ""}
                        {:env (clean-env) :out :discard :err :discard :in ""})))
@@ -1291,8 +1311,8 @@
   (fs/set-posix-file-permissions (str codex-home "/auth.json") "rw-------")
   (spit (str codex-home "/config.toml")
         (str "approval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"\nmodel = \"" codex-model "\"\n"))
-  (let [{:keys [script record]} (when h0-diagnostic-mode (prepare-h0-exec-wrapper-telemetry!))]
-    (spit codex-client (codex-client-script h0-diagnostic-mode script record)))
+  (let [{:keys [script record]} (when handover-mode (prepare-h0-exec-wrapper-telemetry!))]
+    (spit codex-client (codex-client-script handover-mode script record)))
   (fs/set-posix-file-permissions codex-client "rwx------")
   (reset! codex-server (p/process [codex-binary "app-server" "--remote-control" "--listen" (str "unix://" codex-socket)]
                                   {:env (clean-env {"CODEX_HOME" codex-home}) :dir source-root
@@ -1461,9 +1481,9 @@
     ;; flow transcript are kept before the state root and traces go.
     (when-let [dir @witness-dir]
       (swap! steps conj
-             (try (keep-witnesses! dir {"nexus.log" @run-log
-                                        "claude-transcripts" capsule-transcripts
-                                        "codex-sessions" (str codex-home "/sessions")})
+             (try (keep-witnesses! dir (teardown-witnesses handover-mode @run-log
+                                                           capsule-transcripts
+                                                           (str codex-home "/sessions")))
                   (str "witnesses kept in " dir)
                   (catch Exception e (str "witnesses not kept in " dir ": " (.getMessage e))))))
     ;; The capsule's Herdr keeps its sessions in the capsule's own config
@@ -3385,9 +3405,9 @@
                 (catch Exception e
                   (reset! passed false)
                   (println (str "stopped: " (.getMessage e) " " (pr-str (ex-data e)))))))]
-        (if h0-diagnostic-only
-          (with-h0-diagnostic-finish run-capsule)
-          (run-capsule)))
+        (cond h0-diagnostic-only (with-h0-diagnostic-finish run-capsule)
+              handover-only (with-full-handover-finish run-capsule)
+              :else (run-capsule)))
       (let [clean (teardown!)
             contract-complete (seven-line-contract-complete? handover-only h0-diagnostic-only @results)
             diagnostic-capture (and h0-diagnostic-only (h0-diagnostic-capture-complete?))]

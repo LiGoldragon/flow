@@ -4753,7 +4753,7 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_meta_handover_configuration" => (
                 "flow-nexus-handover-configuration",
-                "flow-nexus-handover-configuration-v1",
+                "flow-nexus-handover-configuration-v2",
             ),
             "flow_nexus_handovers" => (handover::HANDOVER_FAMILY, handover::HANDOVER_SCHEMA),
             "flow_nexus_handover_reminders" => (
@@ -4805,7 +4805,7 @@ pub(crate) trait ReadsFlowMemory {
         FlowStore::current_flow_family_identity(table_key).is_some_and(|(family, schema_hash)| {
             let legacy_handover = table_key == OPTIONAL_HANDOVER_TABLE
                 && identity.schema_hash()
-                    == SchemaHash::for_label("flow-nexus-handover-configuration-v1");
+                    == SchemaHash::for_label("flow-nexus-handover-configuration-v2");
             identity.table_name() == table_key
                 && identity.family().as_str() == family
                 && (identity.schema_hash() == schema_hash || legacy_handover)

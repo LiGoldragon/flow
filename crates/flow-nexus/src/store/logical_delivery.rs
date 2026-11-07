@@ -1091,6 +1091,20 @@ impl RecordsLogicalDeliveries for FlowStore {
         // state witness; refuse the stale attempt before creating a second
         // logical Notice.
         if let Some(expected) = handover_reminder.as_ref() {
+            // Revalidate green while holding the same logical write gate as
+            // admission. A Keep/Drop that won the gate before this call
+            // therefore suppresses the stale warning rather than queueing it.
+            if let Some(live) = self.handover_memory(&expected.address)? {
+                if live.generation == expected.generation {
+                    if let Some(flow_id) = live.current_flow_id.as_deref() {
+                        if let Some(threshold) = self.configured_threshold(&expected.model_name)? {
+                            if self.handover_green(&expected.address, flow_id, threshold.refresh)? {
+                                return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(Unknown_Data::Address(address.clone()))));
+                            }
+                        }
+                    }
+                }
+            }
             if let Some(held) = self.handover_reminder(&expected.address, expected.generation)? {
                 if held.sent >= expected.sent {
                     return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(

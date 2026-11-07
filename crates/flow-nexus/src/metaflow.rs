@@ -220,23 +220,30 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     };
                     drop(_turn);
                     if let Some(lease) = direct_lease {
-                        let private = match response.private_response {
+                        match &response.private_response {
                             signal_flow::PrivateSendResponse::SendAccepted(accepted) => {
-                                self.complete_direct_send(&recipient, accepted, &lease)
-                                    .private_response
+                                // Deliver answers the admission which Message can
+                                // recover by its key. Native delivery advances the
+                                // observed state; it never replaces that answer.
+                                let _ =
+                                    self.complete_direct_send(&recipient, accepted.clone(), &lease);
                             }
                             signal_flow::PrivateSendResponse::Refused(refusal) => {
-                                signal_flow::PrivateSendResponse::Failed(
-                                    signal_flow::SendFailure::Unadmitted(
-                                        signal_flow::SendFailureReason::Refused(refusal),
-                                    ),
-                                )
+                                response.private_response =
+                                    signal_flow::PrivateSendResponse::Failed(
+                                        signal_flow::SendFailure::Unadmitted(
+                                            signal_flow::SendFailureReason::Refused(
+                                                refusal.clone(),
+                                            ),
+                                        ),
+                                    );
+                                response.response =
+                                    crate::message_projection::visible_send_response(
+                                        &response.private_response,
+                                    );
                             }
-                            other => other,
-                        };
-                        response.response =
-                            crate::message_projection::visible_send_response(&private);
-                        response.private_response = private;
+                            _ => {}
+                        }
                     }
                     return match self.store.record_send_outcome(
                         Some(peer.clone()),

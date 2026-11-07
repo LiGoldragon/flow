@@ -98,6 +98,33 @@ pub trait HoldsHandovers {
         flow_id: &str,
         refresh: i64,
     ) -> Result<bool, StoreError>;
+}
+
+pub(crate) trait RegistersHandoverTable {
+    fn register_handover_table(
+        engine: &mut sema_engine::Engine,
+    ) -> Result<TableReference<HandoverMemory>, StoreError>;
+}
+
+impl RegistersHandoverTable for FlowStore {
+    fn register_handover_table(
+        engine: &mut sema_engine::Engine,
+    ) -> Result<TableReference<HandoverMemory>, StoreError> {
+        Ok(engine.register_table(HandoverMemory::descriptor())?)
+    }
+}
+
+impl HoldsHandovers for FlowStore {
+    fn handover_memory(&self, address: &Address) -> Result<Option<HandoverMemory>, StoreError> {
+        self.handover_row(address)
+    }
+
+    fn handover(&self, address: &Address) -> Result<Vec<Section>, StoreError> {
+        Ok(self
+            .handover_row(address)?
+            .map_or_else(Vec::new, |row| row.current))
+    }
+
     fn handover_green(
         &self,
         address: &Address,
@@ -128,6 +155,12 @@ pub trait HoldsHandovers {
             return Ok(false);
         };
         if touch.flow_id != flow_id {
+            return Ok(false);
+        }
+        let Some(latest_tokens) = self.context_size(flow_id)? else {
+            return Ok(false);
+        };
+        if latest_tokens != touch.tokens {
             return Ok(false);
         }
         let left = i128::from(100 - policy.warning_share_left);

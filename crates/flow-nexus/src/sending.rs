@@ -290,7 +290,6 @@ impl SendsRequests for RunningNexus {
             } else {
                 None
             };
-            let direct = direct_lease.is_some();
             let admitted_at = std::time::SystemTime::now();
             let admitted = self.store.accept_logical_delivery(
                 &recipient,
@@ -323,11 +322,11 @@ impl SendsRequests for RunningNexus {
                 );
             }
             drop(_turn);
-            match admitted {
-                Ok(PrivateSendResponse::SendAccepted(acceptance)) if direct => {
-                    self.complete_direct_send(&recipient, acceptance)
+            match (admitted, direct_lease) {
+                (Ok(PrivateSendResponse::SendAccepted(acceptance)), Some(lease)) => {
+                    self.complete_direct_send(&recipient, acceptance, &lease)
                 }
-                Ok(private_response) => {
+                (Ok(private_response), _) => {
                     let pending = matches!(private_response, PrivateSendResponse::SendAccepted(_))
                         .then(|| PendingSend { address: recipient });
                     let response =
@@ -338,7 +337,7 @@ impl SendsRequests for RunningNexus {
                         pending,
                     }
                 }
-                Err(error) => {
+                (Err(error), _) => {
                     PrivateSendResponse::Refused(Refusal::Store(error.to_string())).into()
                 }
             }
@@ -1148,6 +1147,7 @@ pub(crate) trait CompletesDirectSends {
         &self,
         address: &Address,
         acceptance: signal_flow::SendAcceptance,
+        lease: &crate::waking::WakingLease<'_>,
     ) -> SendAnswer;
     /// The attempt still to settle that carried `logical_id`: the one
     /// outstanding, else the latest parked once its payload was typed.
@@ -1286,6 +1286,7 @@ impl CompletesDirectSends for RunningNexus {
         &self,
         address: &Address,
         acceptance: signal_flow::SendAcceptance,
+        lease: &crate::waking::WakingLease<'_>,
     ) -> SendAnswer {
         use crate::store::AnnouncesLaunchChanges;
         use signal_flow::{DeliveryState, SendFailure, SendFailureReason, SendReceipt};
@@ -1301,7 +1302,7 @@ impl CompletesDirectSends for RunningNexus {
         let _receipt_watch = self.direct_receipt_watch(address);
         let outcome = {
             let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
-            self.drain_all(address.clone())
+            crate::waking::DrainsHeldSeats::drain_all_held(self, address.clone(), lease)
         };
         let logical_id = acceptance.logical_delivery_id.clone();
         // Waiting is a disposition, not a failed attempt: admission already

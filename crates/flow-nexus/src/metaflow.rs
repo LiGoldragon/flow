@@ -188,7 +188,6 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     } else {
                         None
                     };
-                    let direct = direct_lease.is_some();
                     let mut response: MetaflowAnswer = match self.store.queue_metaflow(request, now)
                     {
                         Ok(response) => response.into(),
@@ -198,10 +197,10 @@ impl DispatchesMetaflowPeer for RunningNexus {
                         .into(),
                     };
                     drop(_turn);
-                    if direct {
+                    if let Some(lease) = direct_lease {
                         let private = match response.private_response {
                             signal_flow::PrivateSendResponse::SendAccepted(accepted) => {
-                                self.complete_direct_send(&recipient, accepted)
+                                self.complete_direct_send(&recipient, accepted, &lease)
                                     .private_response
                             }
                             signal_flow::PrivateSendResponse::Refused(refusal) => {

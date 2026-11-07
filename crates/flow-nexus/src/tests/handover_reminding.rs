@@ -401,6 +401,82 @@ fn reminder_admission_waits_for_handover_gate_before_commit() {
 }
 
 #[test]
+fn reminder_snapshot_closed_before_admission_creates_no_notice() {
+    use super::NexusFixture;
+    use crate::store::handover::HoldsHandovers;
+    use crate::store::logical_delivery::{
+        HoldsLogicalDeliveryGateForTest, RecordsLogicalDeliveries,
+    };
+    use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+    use signal_flow::{Message, Request};
+    let fixture = NexusFixture::new();
+    let address = address();
+    fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+        address: address.clone(),
+        state: flow_ethos::State::Awake("predecessor".into()),
+        past: vec![],
+        queue: vec![],
+    });
+    fixture
+        .nexus
+        .store
+        .ensure_live_handover(&address, "predecessor")
+        .unwrap();
+    let reminder = HandoverReminder::open_handover_reminder(
+        address.clone(),
+        0,
+        "m".into(),
+        10,
+        5,
+        "configured".into(),
+    )
+    .unwrap();
+    let store = fixture.nexus.store.clone();
+    let address_for_thread = address.clone();
+    let result = fixture.nexus.store.with_logical_delivery_gate(|| {
+        let (started, started_receiver) = std::sync::mpsc::channel();
+        let join = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            store.accept_handover_reminder(
+                &address_for_thread,
+                Message::HardAbrupt(Request::Notice("stale".into())),
+                reminder,
+            )
+        });
+        started_receiver.recv().unwrap();
+        fixture
+            .nexus
+            .store
+            .close_handover_for_successor(&address, "predecessor", "successor")
+            .unwrap();
+        join
+    });
+    let admitted = result.join().unwrap().unwrap();
+    assert!(matches!(
+        admitted,
+        signal_flow::PrivateSendResponse::Refused(_)
+    ));
+    assert!(
+        fixture
+            .nexus
+            .store
+            .metaflow(&address)
+            .unwrap()
+            .unwrap()
+            .queue
+            .is_empty()
+    );
+    let memory = fixture
+        .nexus
+        .store
+        .handover_memory(&address)
+        .unwrap()
+        .unwrap();
+    assert_eq!(memory.generation, 1);
+    assert_eq!(memory.current_flow_id.as_deref(), Some("successor"));
+}
+
+#[test]
 fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
     use super::refresh_and_compaction::{declare_seat, seat_metaflow};
     use super::waking::{
@@ -696,6 +772,7 @@ fn green_keep_cancels_open_warning_timer() {
 #[test]
 fn atomic_same_expected_reminder_state_rejects_duplicate_admission() {
     use super::NexusFixture;
+    use crate::store::handover::HoldsHandovers;
     use crate::store::handover_reminders::{HandoverReminder, OpensHandoverReminder};
     use crate::store::logical_delivery::RecordsLogicalDeliveries;
     use crate::store::metaflow::SeedsMetaflow;
@@ -705,10 +782,15 @@ fn atomic_same_expected_reminder_state_rejects_duplicate_admission() {
     let address = address();
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address.clone(),
-        state: State::Asleep,
+        state: State::Awake("fixture-seat".into()),
         past: vec![],
         queue: vec![],
     });
+    fixture
+        .nexus
+        .store
+        .ensure_live_handover(&address, "fixture-seat")
+        .unwrap();
     let reminder =
         HandoverReminder::open_handover_reminder(address.clone(), 0, "m".into(), 0, 5, "x".into())
             .unwrap();
@@ -734,6 +816,7 @@ fn atomic_same_expected_reminder_state_rejects_duplicate_admission() {
 fn reminder_state_reopens_with_anchored_due_without_duplicate_initial() {
     use super::configuring::ConfiguredStore;
     use crate::store::OpensFlowStore;
+    use crate::store::handover::HoldsHandovers;
     use crate::store::handover_reminders::{
         HandoverReminder, OpensHandoverReminder, SchedulesHandoverReminders,
     };
@@ -745,13 +828,16 @@ fn reminder_state_reopens_with_anchored_due_without_duplicate_initial() {
     use crate::store::metaflow::SeedsMetaflow;
     store.seed_metaflow(flow_ethos::Metaflow {
         address: address.clone(),
-        state: flow_ethos::State::Asleep,
+        state: flow_ethos::State::Awake("fixture-seat".into()),
         past: vec![],
         queue: vec![],
     });
+    store
+        .ensure_live_handover(&address, "fixture-seat")
+        .unwrap();
     let reminder = HandoverReminder::open_handover_reminder(
         address.clone(),
-        4,
+        0,
         "m".into(),
         100,
         5,
@@ -776,7 +862,7 @@ fn reminder_state_reopens_with_anchored_due_without_duplicate_initial() {
     drop(store);
     let reopened = crate::store::FlowStore::open_configured(path).unwrap();
     assert_eq!(
-        reopened.handover_reminder(&address, 4).unwrap(),
+        reopened.handover_reminder(&address, 0).unwrap(),
         Some(advanced.clone())
     );
     let retry = reopened
@@ -794,7 +880,7 @@ fn reminder_state_reopens_with_anchored_due_without_duplicate_initial() {
     let reopened = crate::store::FlowStore::open_configured(path).unwrap();
     assert_eq!(
         reopened
-            .handover_reminder(&address, 4)
+            .handover_reminder(&address, 0)
             .unwrap()
             .unwrap()
             .next_due,

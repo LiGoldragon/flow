@@ -22,7 +22,7 @@ use crate::performing::Performs;
 use crate::store::context::JudgesCompaction;
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
 use crate::store::{ReadsFlowRows, RecordsReplacement};
-use crate::waking::{HoldsWakingMetaflows, WakingLease};
+use crate::waking::{HoldsWakingMetaflows, IdentifiesWakingLease, WakingLease};
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
 use lease::LeasesPanes;
 use meta_signal_flow::{

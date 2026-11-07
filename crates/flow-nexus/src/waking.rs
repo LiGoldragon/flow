@@ -138,12 +138,17 @@ pub struct WakingLease<'held> {
     address: Address,
 }
 
-impl WakingLease<'_> {
-    pub(crate) fn address(&self) -> &Address {
+pub(crate) trait IdentifiesWakingLease {
+    fn address(&self) -> &Address;
+    fn owned_by(&self, holder: &WakingMetaflows) -> bool;
+}
+
+impl IdentifiesWakingLease for WakingLease<'_> {
+    fn address(&self) -> &Address {
         &self.address
     }
 
-    pub(crate) fn owned_by(&self, holder: &WakingMetaflows) -> bool {
+    fn owned_by(&self, holder: &WakingMetaflows) -> bool {
         std::ptr::eq(self.held, holder)
     }
 }
@@ -1790,7 +1795,12 @@ impl PerformsWakeAndDrain for RunningNexus {
     }
 }
 
-impl RunningNexus {
+pub(crate) trait DrainsHeldSeats {
+    fn drain_held(&self, address: Address, lease: &WakingLease<'_>) -> Outcome;
+    fn drain_all_held(&self, address: Address, lease: &WakingLease<'_>) -> Outcome;
+}
+
+impl DrainsHeldSeats for RunningNexus {
     fn drain_held(&self, address: Address, lease: &WakingLease<'_>) -> Outcome {
         let flow_id = match self.store.metaflow(&address) {
             Ok(Some(Metaflow {

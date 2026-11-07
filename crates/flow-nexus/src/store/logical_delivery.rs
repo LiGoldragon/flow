@@ -1117,25 +1117,30 @@ impl RecordsLogicalDeliveries for FlowStore {
         // state witness; refuse the stale attempt before creating a second
         // logical Notice.
         if let Some(expected) = handover_reminder.as_ref() {
+            let stale = || {
+                signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(Unknown_Data::Address(
+                    address.clone(),
+                )))
+            };
+            let Some(live) = self.handover_memory(&expected.address)? else {
+                return Ok(stale());
+            };
+            if live.generation != expected.generation || live.current_flow_id.is_none() {
+                return Ok(stale());
+            }
             // Revalidate green while holding the same logical write gate as
             // admission. A Keep/Drop that won the gate before this call
             // therefore suppresses the stale warning rather than queueing it.
-            if let Some(live) = self.handover_memory(&expected.address)?
-                && live.generation == expected.generation
-                && let Some(flow_id) = live.current_flow_id.as_deref()
+            if let Some(flow_id) = live.current_flow_id.as_deref()
                 && let Some(threshold) = self.configured_threshold(&expected.model_name)?
                 && self.handover_green(&expected.address, flow_id, threshold.refresh)?
             {
-                return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
-                    Unknown_Data::Address(address.clone()),
-                )));
+                return Ok(stale());
             }
             if let Some(held) = self.handover_reminder(&expected.address, expected.generation)?
                 && held.sent >= expected.sent
             {
-                return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
-                    Unknown_Data::Address(address.clone()),
-                )));
+                return Ok(stale());
             }
         }
         let Some(mut stored) = self.stored_metaflow(address)? else {
@@ -1517,6 +1522,23 @@ impl AllocatesLogicalCursor for FlowStore {
 
 /// The logical delivery ids: a store that has allocated none begins at 1.
 pub(crate) struct LogicalDeliveryIds<'store>(pub(crate) &'store FlowStore);
+
+#[cfg(test)]
+pub(crate) trait HoldsLogicalDeliveryGateForTest {
+    fn with_logical_delivery_gate<T>(&self, body: impl FnOnce() -> T) -> T;
+}
+
+#[cfg(test)]
+impl HoldsLogicalDeliveryGateForTest for FlowStore {
+    fn with_logical_delivery_gate<T>(&self, body: impl FnOnce() -> T) -> T {
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        body()
+    }
+}
 
 impl super::counters::CountsIds for LogicalDeliveryIds<'_> {
     fn hold_writes(&self) -> Option<std::sync::MutexGuard<'_, ()>> {

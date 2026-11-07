@@ -729,6 +729,7 @@ fn an_abrupt_send_to_a_held_metaflow_is_queued_never_refused_busy() {
 fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
     use crate::store::context::JudgesThreshold as _;
     use crate::store::context::RecordsContextSize as _;
+    use crate::store::logical_delivery::RecordsLogicalDeliveries as _;
     use crate::store::queue_delivery::{
         AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery,
     };
@@ -760,8 +761,9 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
             awake_seat(
                 &fixture,
                 match busy {
-                    Busy::PastThreshold => vec![],
-                    _ => vec![Request::Order("Already waiting.".into())],
+                    Busy::QueueNotEmpty | Busy::DeliveryOutstanding | Busy::PastThreshold => {
+                        vec![Request::Order("Already waiting.".into())]
+                    }
                 },
             );
             declare(&fixture, seat_address());
@@ -837,11 +839,32 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
                     assert_eq!(stored(&fixture).queue.len(), queued_before + 1, "{busy:?}");
                 }
                 Busy::PastThreshold => {
-                    assert!(
-                        matches!(sent.response, Response::SendAccepted(_)),
-                        "{busy:?}: {:?}",
-                        sent.response
-                    );
+                    let Response::Sent(_) = &sent.response else {
+                        panic!("{busy:?}: {:?}", sent.response)
+                    };
+                    let signal_flow::PrivateSendResponse::Sent(receipt) = &sent.private_response
+                    else {
+                        panic!("{busy:?}: {:?}", sent.private_response)
+                    };
+                    assert!(stored(&fixture).queue.is_empty(), "{busy:?}");
+                    let typed = fixture.typed().expect("post-threshold cohort reached pane");
+                    assert!(typed.contains("Already waiting."), "{typed}");
+                    assert!(typed.contains("Arrived while busy."), "{typed}");
+                    for logical_id in [
+                        "refreshing-test-0".to_owned(),
+                        receipt.logical_delivery_id.clone(),
+                    ] {
+                        let snapshot = fixture
+                            .nexus
+                            .store
+                            .logical_delivery_snapshot(&logical_id)
+                            .unwrap()
+                            .unwrap();
+                        assert!(matches!(
+                            snapshot.delivery_state,
+                            signal_flow::DeliveryState::Delivered(_)
+                        ));
+                    }
                 }
             }
         }

@@ -25,8 +25,8 @@ use crate::store::{
     RecordsNativeLaunchIntent, RegistersFlowIdentity, ReservesLaunchAttempt,
 };
 use crate::waking::{
-    AnswersWakeRefusal, AtStop, FreshContext, HoldsWakingMetaflows, KeptAtStop,
-    PerformsWakeAndDrain, SleepsAndWakesSeats, WakePlan, WakePolicy, WakeRefusal,
+    AnswersWakeRefusal, AtStop, FreshContext, HoldsWakingMetaflows, IdentifiesWakingLease,
+    KeptAtStop, PerformsWakeAndDrain, SleepsAndWakesSeats, WakePlan, WakePolicy, WakeRefusal,
 };
 use flow_ethos::{Delivery, State};
 use signal_flow::{

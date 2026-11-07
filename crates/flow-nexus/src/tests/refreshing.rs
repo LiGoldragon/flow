@@ -818,7 +818,7 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
                         "the exact receipt settles all"
                     );
                 }
-                Busy::DeliveryOutstanding | Busy::PastThreshold => {
+                Busy::DeliveryOutstanding => {
                     let Response::SendAccepted(acceptance) = &sent.response else {
                         panic!("{busy:?}: {:?}", sent.response)
                     };
@@ -828,6 +828,13 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
                         "{busy:?}"
                     );
                     assert_eq!(stored(&fixture).queue.len(), queued_before + 1, "{busy:?}");
+                }
+                Busy::PastThreshold => {
+                    assert!(
+                        matches!(sent.response, Response::SendAccepted(_)),
+                        "{busy:?}: {:?}",
+                        sent.response
+                    );
                 }
             }
         }

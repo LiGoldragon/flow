@@ -834,6 +834,12 @@ fn fable_seat_past_its_threshold(fixture: &NexusFixture, protected: Vec<Address>
             native: FABLE_MODEL.into(),
         }]),
         ConfigurationChange::ProtectedAddresses(protected),
+        ConfigurationChange::HandoverPolicies(vec![meta_signal_flow::HandoverPolicy {
+            model_name: FABLE_MODEL.into(),
+            warning_share_left: 15,
+            reminder_text: "fixture".into(),
+            every_minutes: 5,
+        }]),
     ] {
         fixture
             .nexus
@@ -849,6 +855,24 @@ fn fable_seat_past_its_threshold(fixture: &NexusFixture, protected: Vec<Address>
         .store
         .record_context_size(CLAUDE_SEAT, 230_000)
         .unwrap();
+    fixture
+        .nexus
+        .store
+        .keep_handover(
+            &fable_address("core"),
+            &fable_address("core"),
+            signal_flow::Section {
+                title: "fixture".into(),
+                description: "fixture".into(),
+                body: "fixture".into(),
+            },
+            signal_flow::Touch::Known(signal_flow::Known_Data {
+                flow_id: CLAUDE_SEAT.into(),
+                tokens: 230_000,
+                timestamp: 1,
+            }),
+        )
+        .expect("handover touch configured");
 }
 
 /// A protected Address's flow past its model's threshold stands Protected:

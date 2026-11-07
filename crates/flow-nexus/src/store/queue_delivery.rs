@@ -2077,7 +2077,7 @@ mod tests {
 
     #[test]
     fn an_authenticated_answer_atomically_marks_uncertain_delivery_read_and_recovery_excludes_it() {
-        use super::super::logical_delivery::RecordsLogicalDeliveries;
+        use super::super::logical_delivery::{RecordsLogicalDeliveries, RequestClosure};
 
         let (fixture, store) = Fixture::new();
         let PrepareQueueDelivery::Prepared(prepared) = store
@@ -2098,7 +2098,15 @@ mod tests {
         let recovered = reopened.recover_outstanding_deliveries().unwrap();
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].phase, QueueDeliveryPhase::Uncertain(None));
-        let commit = reopened.engine.begin_atomic_commit();
+        let mut binding = reopened
+            .request_binding(&queued("first").request_id)
+            .expect("request binding reads")
+            .expect("queued request stays bound");
+        binding.closure = RequestClosure::Answered("logical-answer".into());
+        let commit = reopened
+            .engine
+            .begin_atomic_commit()
+            .mutate(reopened.logical_deliveries.request_ids, binding);
         let commit = reopened
             .read_uncertain_delivery("logical-first", "logical-answer", commit)
             .expect("answer settlement composes into its admission commit");

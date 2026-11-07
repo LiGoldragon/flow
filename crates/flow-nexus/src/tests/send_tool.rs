@@ -688,7 +688,7 @@ fn a_call_queued_before_a_crash_is_answered_from_its_record_when_replayed() {
 fn an_admitted_send_tool_call_holds_archive_until_its_answer_object_is_released() {
     use crate::store::queue_delivery::AccountsQueueDelivery;
 
-    let mut fixture = NexusFixture::new();
+    let fixture = NexusFixture::new();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.awake_target();
     let answer = fixture.nexus.handle_send_call_answer(tool_call(
@@ -1727,6 +1727,88 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
     };
     assert_eq!(archived.sender, core());
     assert_eq!(archived.target, core_primary());
+}
+
+#[test]
+fn archive_serializes_with_logical_delivery_admission_and_commits_after_the_gate_opens() {
+    use crate::store::logical_delivery::{
+        HoldsLogicalDeliveryGateForTest, RecordsLogicalDeliveries,
+    };
+    use crate::store::metaflow::SeedsMetaflow;
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Duration;
+
+    let fixture = NexusFixture::new();
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: core_primary(),
+        state: State::Asleep,
+        past: vec![],
+        queue: vec![],
+    });
+    let SendOutcome::Accepted(accepted) = fixture
+        .nexus
+        .store
+        .accept_tool_send(
+            &ToolCallKey {
+                thread_id: THREAD_A.into(),
+                turn_id: TURN.into(),
+                call_id: "archive-gate".into(),
+            },
+            "archive-gate-content",
+            core(),
+            &core_primary(),
+            Message::Soft(Request::Notice("archive through the gate".into())),
+            0,
+        )
+        .expect("tool Send admits")
+    else {
+        panic!("tool Send accepted")
+    };
+    fixture
+        .nexus
+        .store
+        .transition_logical_delivery(
+            &accepted.send_acceptance.logical_delivery_id,
+            signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                harness_kind: flow_ethos::HarnessKind::Codex,
+                native_session_id: "archive-gate-session".into(),
+                native_prompt_id: "archive-gate-prompt".into(),
+            }),
+        )
+        .expect("request ends");
+
+    let store = fixture.nexus.store.clone();
+    let request_id = accepted.send_acceptance.request_id;
+    let (contended, contended_receiver) = std::sync::mpsc::channel();
+    let (finished, finished_receiver) = std::sync::mpsc::channel();
+    let join = store.with_logical_delivery_gate(|| {
+        let store = store.clone();
+        let join = std::thread::spawn(move || {
+            assert!(
+                store.logical_delivery_gate_would_block(),
+                "the archive observes the held admission gate"
+            );
+            contended.send(()).expect("archive observes contention");
+            let result = store
+                .archive_request(&request_id, &core())
+                .expect("archive reads");
+            finished.send(()).expect("archive thread finishes");
+            result
+        });
+        contended_receiver
+            .recv()
+            .expect("archive observes the held gate");
+        assert_eq!(
+            finished_receiver.recv_timeout(Duration::from_millis(50)),
+            Err(RecvTimeoutError::Timeout),
+            "archive cannot read and commit across an admission holding the gate"
+        );
+        join
+    });
+    assert_eq!(join.join().expect("archive thread joins"), Ok(()));
+    finished_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("archive finishes after the gate opens");
 }
 
 #[test]

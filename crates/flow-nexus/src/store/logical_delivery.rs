@@ -2466,6 +2466,7 @@ pub(crate) struct LogicalDeliveryIds<'store>(pub(crate) &'store FlowStore);
 #[cfg(test)]
 pub(crate) trait HoldsLogicalDeliveryGateForTest {
     fn with_logical_delivery_gate<T>(&self, body: impl FnOnce() -> T) -> T;
+    fn logical_delivery_gate_would_block(&self) -> bool;
 }
 
 #[cfg(test)]
@@ -2477,6 +2478,13 @@ impl HoldsLogicalDeliveryGateForTest for FlowStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         body()
+    }
+
+    fn logical_delivery_gate_would_block(&self) -> bool {
+        matches!(
+            self.logical_deliveries.write_gate.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
     }
 }
 

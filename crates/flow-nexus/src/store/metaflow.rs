@@ -5,7 +5,7 @@ use super::*;
 use crate::sending::AdmitsSendPayload;
 use crate::sending::RefusesUnidentified;
 use signal_flow::{
-    Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, Refusal, SentBy, StartRejection,
+    Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, Refusal, StartRejection,
     Unknown_Data,
 };
 
@@ -251,7 +251,8 @@ impl MutatesMetaflows for FlowStore {
         request: Deliver_Data,
         now: i64,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError> {
-        use datom_codec::{Datomizable, Protosizing};
+        use datom_codec::Datomizable;
+        use protos::{Compactable, Protosizable};
         use sha2::Digest;
         let digest_text = request.datomize(Vec::new()).protosize().compact();
         let digest = format!("{:x}", sha2::Sha256::digest(digest_text.as_bytes()));
@@ -901,7 +902,7 @@ mod tests {
         // Queued with the Sender its Lock named.
         assert_eq!(
             fixture.store.metaflow(&target).unwrap().unwrap().queue[0].sent_by,
-            SentBy::Sender(lock.sender.clone())
+            signal_flow::SentBy::Sender(lock.sender.clone())
         );
         assert_eq!(
             fixture.store.metaflow(&target).unwrap().unwrap().queue[0].message,

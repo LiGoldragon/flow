@@ -496,6 +496,10 @@ pub(crate) trait RecordsLogicalDeliveries {
     ) -> Result<Option<DeliverCall>, StoreError>;
     fn acknowledge_deliver_calls(&self, keys: &[signal_flow::DeliverKey])
     -> Result<(), StoreError>;
+    fn debug_delivery(
+        &self,
+        request_id: &flow_ethos::RequestId,
+    ) -> Result<Option<meta_signal_flow::DeliveryDebugged_Data>, StoreError>;
     fn seed_store_identity(&self) -> Result<(), StoreError>;
     fn archive_request(
         &self,
@@ -634,6 +638,50 @@ pub(crate) trait RecordsLogicalDeliveries {
     ) -> Result<Option<Address>, StoreError>;
 }
 impl RecordsLogicalDeliveries for FlowStore {
+    fn debug_delivery(
+        &self,
+        request_id: &flow_ethos::RequestId,
+    ) -> Result<Option<meta_signal_flow::DeliveryDebugged_Data>, StoreError> {
+        use super::queue_delivery::{NativeDeliveryReceipt, QueueDeliveryPhase, QueueEvidence};
+        let Some(binding) = self.request_binding(request_id)? else {
+            return Ok(None);
+        };
+        let Some(snapshot) = self.logical_delivery_snapshot(&binding.logical_delivery_id)? else {
+            return Err(StoreError::StateInvariant);
+        };
+        let attempts = self
+            .engine
+            .match_records(QueryPlan::all(self.queue_delivery.attempts))?;
+        let receipt = attempts.records().iter().find_map(|attempt| {
+            let QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
+                return None;
+            };
+            if entry.logical_delivery_id != binding.logical_delivery_id {
+                return None;
+            }
+            let recorded: &NativeDeliveryReceipt = match &attempt.phase {
+                QueueDeliveryPhase::ReceiptRecorded(value) | QueueDeliveryPhase::Settled(value) => {
+                    value
+                }
+                _ => return None,
+            };
+            Some(NativeReceipt {
+                harness_kind: attempt.harness_kind.clone(),
+                native_session_id: attempt.thread_id.clone(),
+                native_prompt_id: recorded.turn_id.clone(),
+            })
+        });
+        let read_by = match binding.closure {
+            RequestClosure::Open => None,
+            RequestClosure::Answered(answer) => Some(answer),
+        };
+        Ok(Some(meta_signal_flow::DeliveryDebugged_Data {
+            delivery_snapshot: snapshot,
+            receipt,
+            read_by,
+        }))
+    }
+
     fn deliver_call(
         &self,
         key: &signal_flow::DeliverKey,
@@ -716,6 +764,67 @@ impl RecordsLogicalDeliveries for FlowStore {
         };
         if !matches!(&retained.entry.sent_by, SentBy::Sender(owner) if owner == sender) {
             return Ok(Err(ArchiveRejection::UnknownRequest));
+        }
+        use super::queue_delivery::{EndsQueueDeliveryPhase, QueueEvidence};
+        let attempts = self
+            .engine
+            .match_records(QueryPlan::all(self.queue_delivery.attempts))?;
+        if attempts.records().iter().any(|attempt| {
+            matches!(
+                &attempt.queue_evidence,
+                QueueEvidence::Logical(entry)
+                    if entry.logical_delivery_id == binding.logical_delivery_id
+                        && !attempt.phase.is_finished()
+            )
+        }) {
+            return Ok(Err(ArchiveRejection::NotYet));
+        }
+        let replies = self
+            .engine
+            .match_records(QueryPlan::all(self.logical_deliveries.simplified_replies))?;
+        if replies
+            .records()
+            .iter()
+            .any(|reply| !reply.completed && reply.input_delivery_id == binding.logical_delivery_id)
+        {
+            return Ok(Err(ArchiveRejection::NotYet));
+        }
+        let request_named = self.retained_logical_requests()?.into_iter().any(|held| {
+            if held.entry.logical_delivery_id == binding.logical_delivery_id {
+                return false;
+            }
+            let names = match &held.entry.message {
+                Message::HardAbrupt(request)
+                | Message::MiddleAbrupt(request)
+                | Message::Soft(request) => match request {
+                    Request::Result(flow_ethos::ResultPayload::Answered(answer)) => {
+                        answer.request_id == request_id
+                    }
+                    Request::Done(flow_ethos::DonePayload::Answered(answer)) => {
+                        answer.request_id == request_id
+                    }
+                    Request::Reminder(reminder) => reminder.request_id == request_id,
+                    _ => false,
+                },
+            };
+            names
+                && self
+                    .logical_delivery_snapshot(&held.entry.logical_delivery_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|snapshot| {
+                        !matches!(
+                            snapshot.delivery_state,
+                            DeliveryState::Delivered(_)
+                                | DeliveryState::Read
+                                | DeliveryState::Failed(_)
+                                | DeliveryState::Withdrawn
+                                | DeliveryState::Archived
+                        )
+                    })
+        });
+        if request_named {
+            return Ok(Err(ArchiveRejection::NotYet));
         }
         let deliver_calls = self
             .engine
@@ -1221,6 +1330,18 @@ impl RecordsLogicalDeliveries for FlowStore {
                 return Ok(outcome);
             }
         };
+        let answered_binding = match &request {
+            Request::Result(flow_ethos::ResultPayload::Answered(answered)) => Some(
+                self.request_binding(&answered.request_id)?
+                    .ok_or(StoreError::StateInvariant)?,
+            ),
+            Request::Done(flow_ethos::DonePayload::Answered(answered)) => Some(
+                self.request_binding(&answered.request_id)?
+                    .ok_or(StoreError::StateInvariant)?,
+            ),
+            _ => None,
+        };
+        let answers_request = answered_binding.is_some();
         let allocation = self.allocate_logical_cursor()?;
         let cursor = allocation.cursor;
         let create_counter = !allocation.existing;
@@ -1654,7 +1775,9 @@ impl RecordsLogicalDeliveries for FlowStore {
             delivery_state: DeliveryState::Queued,
         };
         let next_counter = LogicalDeliveryCounter {
-            next_cursor: next.checked_add(1).ok_or(StoreError::StateInvariant)?,
+            next_cursor: next
+                .checked_add(if answers_request { 2 } else { 1 })
+                .ok_or(StoreError::StateInvariant)?,
         };
         let commit = self
             .engine
@@ -1714,22 +1837,32 @@ impl RecordsLogicalDeliveries for FlowStore {
             commit
         };
         let commit = self.assert_logical_request(address, entry, commit);
-        let commit = match &request {
-            Request::Result(flow_ethos::ResultPayload::Answered(answered)) => {
-                let mut binding = self
-                    .request_binding(&answered.request_id)?
-                    .ok_or(StoreError::StateInvariant)?;
-                binding.closure = RequestClosure::Answered(id.clone());
-                commit.mutate(self.logical_deliveries.request_ids, binding)
+        let commit = if let Some(mut binding) = answered_binding {
+            let rows = self.engine.match_records(QueryPlan::key(
+                self.logical_deliveries.current,
+                RecordKey::new(binding.logical_delivery_id.clone()),
+            ))?;
+            let [current] = rows.records() else {
+                return Err(StoreError::StateInvariant);
+            };
+            if current.archived.is_some() {
+                return Err(StoreError::StateInvariant);
             }
-            Request::Done(flow_ethos::DonePayload::Answered(answered)) => {
-                let mut binding = self
-                    .request_binding(&answered.request_id)?
-                    .ok_or(StoreError::StateInvariant)?;
-                binding.closure = RequestClosure::Answered(id.clone());
-                commit.mutate(self.logical_deliveries.request_ids, binding)
-            }
-            _ => commit,
+            let mut read = current.clone();
+            read.snapshot.delivery_cursor = next + 1;
+            read.snapshot.delivery_state = DeliveryState::Read;
+            binding.closure = RequestClosure::Answered(id.clone());
+            commit
+                .mutate(self.logical_deliveries.request_ids, binding)
+                .mutate(self.logical_deliveries.current, read.clone())
+                .assert(
+                    self.logical_deliveries.events,
+                    LogicalDeliveryEvent {
+                        snapshot: read.snapshot,
+                    },
+                )
+        } else {
+            commit
         };
         let commit = match &request {
             Request::Task(task) => {

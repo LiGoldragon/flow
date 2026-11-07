@@ -10,6 +10,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
@@ -18,14 +19,14 @@ use thiserror::Error;
 const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 
 /// The immutable handover document and its archive coordinates.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct HandoverArchiveRequest {
     pub address: Address,
     pub flow_id: String,
     pub document: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct HandoverArchivePublication {
     pub path: PathBuf,
     pub commit: String,
@@ -144,10 +145,34 @@ fn render_closed(closed: &ClosedHandover) -> String {
 }
 
 /// A publisher bound to one pre-existing Git work tree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ExistingGitHandoverArchive {
     repository: PathBuf,
     deadline: Duration,
+    runner: Arc<dyn RunsGitCommand>,
+}
+
+trait RunsGitCommand: Send + Sync {
+    fn run(
+        &self,
+        repository: &Path,
+        args: &[&str],
+        deadline: Instant,
+    ) -> Result<std::process::Output, HandoverArchiveRefusal>;
+}
+
+struct RealGitCommand;
+impl RunsGitCommand for RealGitCommand {
+    fn run(
+        &self,
+        repository: &Path,
+        args: &[&str],
+        deadline: Instant,
+    ) -> Result<std::process::Output, HandoverArchiveRefusal> {
+        let mut command = Command::new("git");
+        command.arg("-C").arg(repository).args(args);
+        command.output_with_deadline(deadline)
+    }
 }
 
 pub trait AccessesExistingGitHandoverArchive: Sized {
@@ -160,6 +185,7 @@ impl AccessesExistingGitHandoverArchive for ExistingGitHandoverArchive {
         Self {
             repository: repository.into(),
             deadline: Duration::from_millis(60_000),
+            runner: Arc::new(RealGitCommand),
         }
     }
     fn repository(&self) -> &Path {

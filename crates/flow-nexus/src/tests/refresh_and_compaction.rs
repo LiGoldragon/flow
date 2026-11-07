@@ -13,9 +13,10 @@ use crate::reporting::RecordsReports;
 use crate::store::compaction::{Investigation, RecordsCompactions};
 use crate::store::context::{JudgesThreshold, RecordsContextSize, ThresholdStanding};
 use crate::store::handover::HoldsHandovers;
+use crate::store::handover_configuration::ReadsHandoverConfiguration;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
-use crate::store::{ManagesMetaflowState, ReadsFlowRows, SeedsRole};
+use crate::store::{ManagesMetaflowState, ReadsFlowMemory, ReadsFlowRows, SeedsRole};
 use crate::waking::{AtStop, SleepsAndWakesSeats};
 use flow_ethos::State;
 use meta_signal_flow::{
@@ -502,6 +503,13 @@ fn a_maintained_seat_refreshed_with_nothing_queued_starts_its_successor_first() 
         signal_flow::Touch::Unknown,
     ).unwrap();
 
+    let before = seat_metaflow_now(&fixture);
+    let standing = fixture.nexus.store.threshold_standing(CLAUDE_SEAT).unwrap();
+    let green = fixture.nexus.store.handover_green(&seat_address(), CLAUDE_SEAT, 200_000).unwrap();
+    assert!(matches!(before.state, State::Awake(ref id) if id == CLAUDE_SEAT), "state={:?} row={:?}", before.state, fixture.nexus.store.handover_memory(&seat_address()).unwrap());
+    assert!(matches!(standing, ThresholdStanding::Past { .. }), "standing={standing:?} model={:?}", fixture.nexus.store.flow_model(CLAUDE_SEAT).unwrap());
+    assert!(green, "green={green} row={:?} policies={:?} model={:?}", fixture.nexus.store.handover_memory(&seat_address()).unwrap(), fixture.nexus.store.handover_policies().unwrap(), fixture.nexus.store.flow_model(CLAUDE_SEAT).unwrap());
+
     assert_eq!(
         fixture.nexus.settle_stopped(CLAUDE_SEAT),
         AtStop::Refreshed(seat_address())
@@ -556,6 +564,13 @@ fn an_on_demand_seat_refreshed_with_a_waking_request_starts_its_successor_first(
         Section { title: "before".into(), description: "d".into(), body: "body".into() },
         signal_flow::Touch::Unknown,
     ).unwrap();
+
+    let before = seat_metaflow_now(&fixture);
+    let standing = fixture.nexus.store.threshold_standing(CLAUDE_SEAT).unwrap();
+    let green = fixture.nexus.store.handover_green(&seat_address(), CLAUDE_SEAT, 200_000).unwrap();
+    assert!(matches!(before.state, State::Awake(ref id) if id == CLAUDE_SEAT), "state={:?} row={:?}", before.state, fixture.nexus.store.handover_memory(&seat_address()).unwrap());
+    assert!(matches!(standing, ThresholdStanding::Past { .. }), "standing={standing:?} model={:?}", fixture.nexus.store.flow_model(CLAUDE_SEAT).unwrap());
+    assert!(green, "green={green} row={:?} policies={:?} model={:?}", fixture.nexus.store.handover_memory(&seat_address()).unwrap(), fixture.nexus.store.handover_policies().unwrap(), fixture.nexus.store.flow_model(CLAUDE_SEAT).unwrap());
 
     assert_eq!(
         fixture.nexus.settle_stopped(CLAUDE_SEAT),

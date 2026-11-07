@@ -187,6 +187,36 @@
               (str/includes? diagnostic "FLOW_CAPSULE_EXEC_PID=$$ python3")
               (str/ends-with? diagnostic exec))))
 
+;; A fresh private HOME is complete before start-capsule! invokes Herdr: the
+;; preparation call immediately precedes Herdr's server process in that
+;; function. The file is private and no operator HOME is touched.
+(let [scratch (str (fs/create-temp-dir))
+      private (str scratch "/private")
+      private-home (str private "/home")
+      state (str private "/state")
+      operator-marker (str scratch "/operator-home-marker")
+      saved-package @flow-capsule/package]
+  (try
+    (spit operator-marker "unchanged\n")
+    (reset! flow-capsule/package flow-package)
+    (fs/create-dirs state)
+    (with-redefs [flow-capsule/private-root private
+                  flow-capsule/home private-home
+                  flow-capsule/state-root state
+                  flow-capsule/ordinary-socket (str private "/runtime/ordinary.sock")]
+      (flow-capsule/prepare-private-home-and-flow-wrapper!))
+    (let [zshrc (fs/file private-home ".zshrc")]
+      (check "private shell preparation writes the minimal zsh startup file"
+             (= "# Flow capsule private shell.\n" (slurp zshrc)))
+      (check "the private zsh startup file is owner-only"
+             (= #{"OWNER_READ" "OWNER_WRITE"}
+                (set (map str (fs/posix-file-permissions zshrc)))))
+      (check "private shell preparation leaves the operator home marker unchanged"
+             (= "unchanged\n" (slurp operator-marker))))
+    (finally
+      (reset! flow-capsule/package saved-package)
+      (fs/delete-tree scratch))))
+
 (let [request (str "Launch.{ { Mind test Terra } Predecessors.0 «" flow-capsule/brief "» }")]
   (check "the H0 diagnostic freezes the original exact Terra Launch request"
          (= request (flow-capsule/launch-query "Launch" flow-capsule/ho-seat)))

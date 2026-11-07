@@ -1118,18 +1118,24 @@
 
 (defn refuse [why] (binding [*out* *err*] (println "flow-capsule:" why)) (System/exit 2))
 
-(defn prepare-private-flow-wrapper! []
+(defn prepare-private-home-and-flow-wrapper! []
   (let [bin (str private-root "/bin")
         config (str state-root "/flow-client-socket")
-        wrapper (str bin "/flow")]
+        wrapper (str bin "/flow")
+        zshrc (str home "/.zshrc")]
     (fs/create-dirs bin)
     (fs/create-dirs home)
+    ;; Herdr opens an interactive shell before it starts a native client. A
+    ;; fresh private HOME therefore carries the smallest ordinary zsh setup,
+    ;; so zsh starts that client instead of opening its first-run questionnaire.
+    (spit zshrc "# Flow capsule private shell.\n")
     (spit config (str ordinary-socket "\n"))
     (spit wrapper
       (str "#!/bin/sh\nset -eu\n[ \"$#\" -eq 1 ] || exit 64\n"
            "socket=$(cat '" config "')\n"
            "invocation=$(" @package "/bin/flow-compose-invocation \"$socket\" \"$1\")\n"
            "exec " @package "/bin/flow \"$invocation\"\n"))
+    (fs/set-posix-file-permissions zshrc "rw-------")
     (fs/set-posix-file-permissions wrapper "rwx------")
     (fs/set-posix-file-permissions config "rw-------")))
 
@@ -1172,7 +1178,7 @@
   (fs/create-dirs workspace-b)
   (when handover-mode
     (fs/set-posix-file-permissions private-root "rwx------")
-    (prepare-private-flow-wrapper!))
+    (prepare-private-home-and-flow-wrapper!))
   (reset! herdr-server
           (p/process ["herdr" "--session" session "server"]
                      (if h0-diagnostic-mode

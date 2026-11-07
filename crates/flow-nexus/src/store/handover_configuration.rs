@@ -178,7 +178,7 @@ pub(crate) fn upgrade_or_register(
 mod tests {
     use super::*;
     use crate::store::handover::{ClosedHandover, DescribesHandoverTable, HandoverMemory};
-    use sema_engine::{EngineOpen, KeyedMutation, QueryPlan, SchemaVersion};
+    use sema_engine::{Assertion, EngineOpen, QueryPlan, SchemaVersion};
     use signal_flow::{Address, Aspect, Model, Section, Touch};
 
     #[test]
@@ -254,18 +254,10 @@ mod tests {
             let configuration = engine.register_table(predecessor_descriptor).unwrap();
             let handovers = engine.register_table(handover_descriptor.clone()).unwrap();
             engine
-                .mutate_keyed(KeyedMutation::new(
-                    configuration,
-                    predecessor.record_key(),
-                    predecessor.clone(),
-                ))
+                .assert(Assertion::new(configuration, predecessor.clone()))
                 .unwrap();
             engine
-                .mutate_keyed(KeyedMutation::new(
-                    handovers,
-                    sibling.record_key(),
-                    sibling.clone(),
-                ))
+                .assert(Assertion::new(handovers, sibling.clone()))
                 .unwrap();
         }
 

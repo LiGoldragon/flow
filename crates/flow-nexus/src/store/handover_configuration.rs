@@ -252,7 +252,7 @@ mod tests {
         {
             let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(1))).unwrap();
             let configuration = engine.register_table(predecessor_descriptor).unwrap();
-            let handovers = engine.register_table(handover_descriptor).unwrap();
+            let handovers = engine.register_table(handover_descriptor.clone()).unwrap();
             engine
                 .mutate_keyed(KeyedMutation::new(
                     configuration,
@@ -303,7 +303,7 @@ mod tests {
             )
             .unwrap();
             let configuration = upgrade_or_register(&mut engine).unwrap();
-            let handovers = engine.register_table(handover_descriptor).unwrap();
+            let handovers = engine.register_table(handover_descriptor.clone()).unwrap();
             assert_current(&engine, configuration, handovers);
         }
         {
@@ -314,7 +314,7 @@ mod tests {
             )
             .unwrap();
             let configuration = upgrade_or_register(&mut engine).unwrap();
-            let handovers = engine.register_table(handover_descriptor).unwrap();
+            let handovers = engine.register_table(handover_descriptor.clone()).unwrap();
             assert_current(&engine, configuration, handovers);
         }
     }

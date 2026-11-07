@@ -26,7 +26,7 @@ pub struct HandoverArchiveRequest {
     pub document: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HandoverArchivePublication {
     pub path: PathBuf,
     pub commit: String,

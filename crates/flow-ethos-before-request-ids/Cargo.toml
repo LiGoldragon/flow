@@ -1,0 +1,13 @@
+[package]
+name = "flow-ethos-before-request-ids"
+version = "0.53.2"
+edition = "2024"
+publish = false
+
+[features]
+default = []
+datom = ["dep:datom-codec"]
+
+[dependencies]
+rkyv.workspace = true
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "eabead4", optional = true }

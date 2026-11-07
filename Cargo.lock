@@ -245,12 +245,12 @@ version = "0.53.3"
 dependencies = [
  "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
- "flow-ethos 0.53.3",
+ "flow-ethos",
  "flow-native",
  "protos 0.33.0",
  "rkyv",
  "serde_json",
- "signal-flow 54.0.0",
+ "signal-flow",
  "tempfile",
 ]
 
@@ -260,33 +260,19 @@ version = "0.53.3"
 
 [[package]]
 name = "flow-ethos"
-version = "0.53.1"
-source = "git+https://github.com/LiGoldragon/flow?rev=5ea2aa474a27bc2f233d189f1295d311c69c6ec8#5ea2aa474a27bc2f233d189f1295d311c69c6ec8"
-dependencies = [
- "datom-codec 0.33.0",
- "ethos-zero 17.0.0",
- "protos 0.33.0",
- "rkyv",
-]
-
-[[package]]
-name = "flow-ethos"
-version = "0.53.2"
-source = "git+https://github.com/LiGoldragon/flow?rev=85bf0f1be9997ed2b1c46a8814750a77704ea40f#85bf0f1be9997ed2b1c46a8814750a77704ea40f"
-dependencies = [
- "datom-codec 0.33.0",
- "ethos-zero 17.0.0",
- "protos 0.33.0",
- "rkyv",
-]
-
-[[package]]
-name = "flow-ethos"
 version = "0.53.3"
 dependencies = [
  "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
  "protos 0.33.0",
+ "rkyv",
+]
+
+[[package]]
+name = "flow-ethos-before-request-ids"
+version = "0.53.2"
+dependencies = [
+ "datom-codec 0.33.0",
  "rkyv",
 ]
 
@@ -296,11 +282,11 @@ version = "0.53.3"
 dependencies = [
  "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
- "flow-ethos 0.53.3",
- "meta-signal-flow 67.0.0",
+ "flow-ethos",
+ "meta-signal-flow",
  "protos 0.33.0",
  "rkyv",
- "signal-flow 54.0.0",
+ "signal-flow",
  "tempfile",
 ]
 
@@ -321,12 +307,12 @@ dependencies = [
  "ethos-zero 17.0.0",
  "flow",
  "flow-defaults",
- "flow-ethos 0.53.2",
- "flow-ethos 0.53.3",
+ "flow-ethos",
+ "flow-ethos-before-request-ids",
  "flow-native",
  "libc",
- "meta-signal-flow 66.0.0",
- "meta-signal-flow 67.0.0",
+ "meta-signal-flow",
+ "meta-signal-flow-before-request-ids",
  "notify",
  "protos 0.33.0",
  "redb",
@@ -337,8 +323,8 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
- "signal-flow 53.0.0",
- "signal-flow 54.0.0",
+ "signal-flow",
+ "signal-flow-before-request-ids",
  "tempfile",
  "thiserror",
  "tungstenite",
@@ -525,30 +511,27 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "meta-signal-flow"
-version = "66.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=b36597a8b18b97b9f97f7702535399b57e3108aa#b36597a8b18b97b9f97f7702535399b57e3108aa"
-dependencies = [
- "datom-codec 0.33.0",
- "ethos-zero 17.0.0",
- "flow-ethos 0.53.1",
- "protos 0.33.0",
- "rkyv",
- "signal",
- "signal-flow 53.0.0",
-]
-
-[[package]]
-name = "meta-signal-flow"
 version = "67.0.0"
 source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=ed3f18d8f03b7b6f17fcffc1efddfb640b185b6a#ed3f18d8f03b7b6f17fcffc1efddfb640b185b6a"
 dependencies = [
  "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
- "flow-ethos 0.53.3",
+ "flow-ethos",
  "protos 0.33.0",
  "rkyv",
  "signal",
- "signal-flow 54.0.0",
+ "signal-flow",
+]
+
+[[package]]
+name = "meta-signal-flow-before-request-ids"
+version = "66.0.0"
+dependencies = [
+ "datom-codec 0.33.0",
+ "flow-ethos-before-request-ids",
+ "rkyv",
+ "signal",
+ "signal-flow-before-request-ids",
 ]
 
 [[package]]
@@ -927,26 +910,23 @@ dependencies = [
 
 [[package]]
 name = "signal-flow"
-version = "53.0.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=3596923778f452b141a6af57f0aebf470ff9d926#3596923778f452b141a6af57f0aebf470ff9d926"
+version = "54.0.0"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=dbad6c9536076132ceedb3c4a9bb0431b848b39f#dbad6c9536076132ceedb3c4a9bb0431b848b39f"
 dependencies = [
  "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
- "flow-ethos 0.53.1",
+ "flow-ethos",
  "protos 0.33.0",
  "rkyv",
  "signal",
 ]
 
 [[package]]
-name = "signal-flow"
-version = "54.0.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=dbad6c9536076132ceedb3c4a9bb0431b848b39f#dbad6c9536076132ceedb3c4a9bb0431b848b39f"
+name = "signal-flow-before-request-ids"
+version = "53.0.0"
 dependencies = [
  "datom-codec 0.33.0",
- "ethos-zero 17.0.0",
- "flow-ethos 0.53.3",
- "protos 0.33.0",
+ "flow-ethos-before-request-ids",
  "rkyv",
  "signal",
 ]

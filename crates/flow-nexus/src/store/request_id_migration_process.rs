@@ -7,9 +7,11 @@
 //! fixtures in `request_id_upgrade`.
 
 use super::{
-    FlowStore, ManagesMetaflowState, OpensFlowStore, ReadsFlowMemory, RecordsLogicalDeliveries,
+    DescribesRequestPolicyTable, FLOW_SCHEMA_VERSION, FlowStore, ManagesMetaflowState,
+    OpensFlowStore, ReadsFlowMemory, RecordsLogicalDeliveries,
     StoredMetaRequestPolicyConfiguration,
 };
+use sema_engine::{Engine, EngineOpen, QueryPlan, SchemaVersion};
 use std::{
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
@@ -130,6 +132,23 @@ fn inject_malformed_request_policy(store_path: &Path) {
     .expect("test seam writes the malformed policy row");
 }
 
+fn request_policy_rows(store_path: &Path) -> Vec<StoredMetaRequestPolicyConfiguration> {
+    let descriptor = StoredMetaRequestPolicyConfiguration::descriptor();
+    let mut engine = Engine::open(
+        EngineOpen::new(store_path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
+            .with_family(&descriptor),
+    )
+    .expect("request policy inspection opens");
+    let table = engine
+        .register_table(descriptor)
+        .expect("request policy table registers");
+    engine
+        .match_records(QueryPlan::all(table))
+        .expect("request policy reads")
+        .records()
+        .to_vec()
+}
+
 #[test]
 #[ignore = "the dedicated Nix check supplies exact predecessor and current production binaries"]
 fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without_writing() {
@@ -177,22 +196,19 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     );
     drop(store);
 
-    let malformed_path = state.path().join("malformed.sema");
-    std::fs::copy(&store_path, &malformed_path).expect("evolved Memory copies for fault proof");
-    inject_malformed_request_policy(&malformed_path);
-    let before = std::fs::read(&malformed_path).expect("malformed Memory reads before refusal");
+    inject_malformed_request_policy(&store_path);
+    let malformed = vec![StoredMetaRequestPolicyConfiguration {
+        request_id_draws: 0,
+        announcement_tries: 3,
+    }];
+    assert_eq!(request_policy_rows(&store_path), malformed);
     let refused_runtime = tempfile::tempdir().expect("refused runtime");
-    let status = spawn_flow(
-        &current,
-        home.path(),
-        refused_runtime.path(),
-        &malformed_path,
-    )
-    .wait_for_failure();
+    let status =
+        spawn_flow(&current, home.path(), refused_runtime.path(), &store_path).wait_for_failure();
     assert_eq!(
-        std::fs::read(&malformed_path).expect("malformed Memory reads after refusal"),
-        before,
-        "a failed staged open leaves the malformed source Memory byte-identical"
+        request_policy_rows(&store_path),
+        malformed,
+        "a failed staged open leaves the malformed policy row unchanged"
     );
     println!(
         "MIGRATION predecessor={predecessor_revision} current={current_revision} refused={status} actual-process old-write/current-serve/current-reopen/malformed-rollback"

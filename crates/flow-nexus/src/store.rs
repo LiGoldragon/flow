@@ -9321,6 +9321,9 @@ mod tests {
 
         let fixture = StoreFixture::new();
         let mut store = fixture.store();
+        store
+            .seed_store_identity()
+            .expect("the observation identity is seeded before scripted id draws");
         super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
             &mut store,
             std::sync::Arc::new(ScriptedRequestIdDrawer::new(["ord1", "ans1"])),

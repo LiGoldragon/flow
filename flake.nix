@@ -831,10 +831,10 @@
             "flow-request-id-immutable-contract-pins"
             { nativeBuildInputs = [ context.pkgs.gnugrep ]; }
             ''
-              grep -F 'rev = "be732756da4413bd5be85b1ee4f2fcb29a73216a"' ${./Cargo.toml}
-              grep -F 'rev = "56c0443a9d43d90345b64ed1bbb34b9b541e7a85"' ${./Cargo.toml}
-              grep -F 'signal-flow?rev=be732756da4413bd5be85b1ee4f2fcb29a73216a#be732756da4413bd5be85b1ee4f2fcb29a73216a' ${./Cargo.lock}
-              grep -F 'meta-signal-flow?rev=56c0443a9d43d90345b64ed1bbb34b9b541e7a85#56c0443a9d43d90345b64ed1bbb34b9b541e7a85' ${./Cargo.lock}
+              grep -F 'rev = "13c2eb9f5c6e358f22415c96e03862e78a5f8091"' ${./Cargo.toml}
+              grep -F 'rev = "bc090753a24ee56bd689da954815f7115afa2c4d"' ${./Cargo.toml}
+              grep -F 'signal-flow?rev=13c2eb9f5c6e358f22415c96e03862e78a5f8091#13c2eb9f5c6e358f22415c96e03862e78a5f8091' ${./Cargo.lock}
+              grep -F 'meta-signal-flow?rev=bc090753a24ee56bd689da954815f7115afa2c4d#bc090753a24ee56bd689da954815f7115afa2c4d' ${./Cargo.lock}
               touch "$out"
             '';
           flow-handover-permission-denied-unreadable = context.exactTest "flow-nexus"

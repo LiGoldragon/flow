@@ -2513,6 +2513,88 @@ mod tests {
     }
 
     #[test]
+    fn predecessor_request_id_collision_exhaustion_leaves_memory_byte_identical() {
+        let directory = tempfile::tempdir().expect("temporary Memory");
+        let path = directory.path().join("flow.sema");
+        let descriptors = evolution_descriptors();
+        let heartbeat = StoredHeartbeatStanding::descriptor();
+        let (predecessor, tables) = old_engine(&path, &descriptors, &heartbeat);
+        let sender = old_address(old_flow::Aspect::Mind, "sender");
+        let recipient = old_address(old_flow::Aspect::Field, "recipient");
+        for (cursor, logical_id) in [(1, "first"), (2, "second")] {
+            let snapshot = old_snapshot(
+                cursor,
+                logical_id,
+                &sender,
+                &recipient,
+                old_signal::DeliveryState::Queued,
+            );
+            predecessor
+                .assert(Assertion::new(
+                    tables.current,
+                    PriorCurrentLogicalDelivery {
+                        snapshot: snapshot.clone(),
+                    },
+                ))
+                .expect("old current stores");
+            predecessor
+                .assert(Assertion::new(
+                    tables.events,
+                    PriorLogicalDeliveryEvent { snapshot },
+                ))
+                .expect("old event stores");
+            predecessor
+                .assert(Assertion::new(
+                    tables.requests,
+                    old_request(
+                        logical_id,
+                        &sender,
+                        &recipient,
+                        old_flow::Request::Notice(logical_id.into()),
+                        PriorRequestState::Queued,
+                    ),
+                ))
+                .expect("old request stores");
+        }
+        drop(predecessor);
+
+        let mut engine = Engine::open(
+            EngineOpen::new(&path, SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION))
+                .with_family(&descriptors.current)
+                .with_family(&descriptors.events)
+                .with_family(&descriptors.metaflows)
+                .with_family(&descriptors.address_holds)
+                .with_family(&descriptors.requests)
+                .with_family(&descriptors.attempts)
+                .with_family(&descriptors.outcomes)
+                .with_family(&descriptors.send_calls)
+                .with_family(&heartbeat),
+        )
+        .expect("predecessor catalog opens for validation");
+        let heartbeat_table = engine.register_table(heartbeat).expect("heartbeat opens");
+        let before = std::fs::read(&path).expect("Memory bytes read before evolution");
+        let draws = vec!["same"; super::super::SEEDED_REQUEST_ID_DRAWS + 1];
+        assert!(matches!(
+            evolve_request_id_memory(
+                &mut engine,
+                descriptors,
+                &[],
+                &[],
+                &[],
+                heartbeat_table,
+                &[],
+                &ScriptedDrawer::new(&draws),
+            ),
+            Err(StoreError::StateInvariant)
+        ));
+        let after = std::fs::read(&path).expect("Memory bytes read after refused evolution");
+        assert_eq!(
+            after, before,
+            "request-id exhaustion commits no catalog or row change"
+        );
+    }
+
+    #[test]
     fn an_empty_exact_predecessor_evolves_once_and_reopens_wholly_current() {
         let directory = tempfile::tempdir().expect("temporary Memory");
         let path = directory.path().join("flow.sema");

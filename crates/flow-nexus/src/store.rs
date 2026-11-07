@@ -8015,6 +8015,15 @@ mod tests {
             tables,
             super::RUNNING_TABLES
                 .iter()
+                .chain(
+                    [
+                        super::OPTIONAL_REQUEST_ID_TABLE,
+                        super::OPTIONAL_STORE_IDENTITY_TABLE,
+                        super::OPTIONAL_DELIVER_CALL_TABLE,
+                        super::OPTIONAL_REQUEST_POLICY_TABLE,
+                    ]
+                    .iter(),
+                )
                 .map(|table| (*table).to_owned())
                 .collect::<std::collections::BTreeSet<_>>()
         );

@@ -835,7 +835,7 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     let nexus = fixture.open();
     let seeded = ask(&nexus, "Configuration");
     assert!(
-        seeded.ends_with(" None 30 None [] { 1 3 1 } }"),
+        seeded.ends_with(" None 30 None [] { 1 3 1 } 64 3 }"),
         "seeded at 30: {seeded}"
     );
     assert_eq!(
@@ -858,14 +858,14 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     }
     let declared = ask(&nexus, "Configuration");
     assert!(
-        declared.ends_with(" None 45 None [] { 1 3 1 } }"),
+        declared.ends_with(" None 45 None [] { 1 3 1 } 64 3 }"),
         "{declared}"
     );
     drop(nexus);
     let reopened = fixture.open();
     let kept = ask(&reopened, "Configuration");
     assert!(
-        kept.ends_with(" None 45 None [] { 1 3 1 } }"),
+        kept.ends_with(" None 45 None [] { 1 3 1 } 64 3 }"),
         "kept across a reopen: {kept}"
     );
 }
@@ -902,7 +902,7 @@ fn configured_counters_are_kept_across_a_reopen() {
     let reopened = fixture.open();
     let kept = ask(&reopened, "Configuration");
     assert!(
-        kept.ends_with(" None 30 None [] { 120 45 300 } }"),
+        kept.ends_with(" None 30 None [] { 120 45 300 } 64 3 }"),
         "kept across a reopen: {kept}"
     );
     assert_eq!(

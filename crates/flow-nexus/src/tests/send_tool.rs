@@ -1508,7 +1508,7 @@ fn a_queued_request_is_rendered_as_its_datom_in_one_vector() {
     let prompt = queue.prompt_text(&seat_at());
     assert_eq!(
         prompt,
-        "[ { Sender.{ Mind alpha Luna } Soft.Order.«Carry on.» } { Unknown Soft.Notice.kept } ]"
+        "[ { Sender.{ Mind alpha Luna } Soft.Order.{ test «Carry on.» } } { Unknown Soft.Notice.{ test kept } } ]"
     );
     assert_eq!(prompt.matches("Sender.").count(), 1);
     assert!(!prompt.contains("{ Mind flow Sol }"));

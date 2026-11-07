@@ -698,9 +698,9 @@ fn a_send_with_nested_and_escaped_guillemets_round_trips_through_the_cli_and_the
         "the Nexus holds each string as written"
     );
     let inspected = world.flow_meta("Inspect.{ Mind flow Sol }");
-    for (message, _) in sent {
+    for (message, words) in sent {
         assert!(
-            inspected.contains(message),
+            inspected.contains(words),
             "{message} is printed back as sent: {inspected}"
         );
     }

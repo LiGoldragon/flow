@@ -682,6 +682,7 @@ impl AccountsQueueDelivery for FlowStore {
                     continue;
                 }
                 let id = entry.logical_delivery_id.clone();
+                let request_id = entry.request_id.clone();
                 let evidence = QueueEvidence::Logical(entry);
                 match requests.iter().find(|request| request.request_id == id) {
                     Some(request)
@@ -703,6 +704,23 @@ impl AccountsQueueDelivery for FlowStore {
                                 state: RequestState::Parked,
                             },
                         );
+                    }
+                }
+                if self.logical_delivery_snapshot(&id)?.is_some() {
+                    commit = commit
+                        .retract(self.logical_deliveries.current, RecordKey::new(id.clone()))
+                        .retract(
+                            self.logical_deliveries.request_ids,
+                            RecordKey::new(request_id),
+                        );
+                    for event in self
+                        .engine
+                        .match_records(QueryPlan::all(self.logical_deliveries.events))?
+                        .records()
+                        .iter()
+                        .filter(|event| event.snapshot.logical_delivery_id == id)
+                    {
+                        commit = commit.retract(self.logical_deliveries.events, event.record_key());
                     }
                 }
                 removed = true;

@@ -67,7 +67,7 @@ fn queue_payload(requests: &[TestRequest]) -> String {
 fn queue_entry(request: &TestRequest) -> QueueEntry {
     QueueEntry {
         logical_delivery_id: request.logical_delivery_id.clone(),
-        request_id: "test".into(),
+        request_id: request.logical_delivery_id[5..9].into(),
         sent_by: request.sent_by.clone(),
         delivery: request.delivery.clone(),
         message: Message::Soft(request.request.clone()),
@@ -84,8 +84,8 @@ fn seat(fixture: &NexusFixture, queue: Vec<TestRequest>) {
         queue: queue
             .into_iter()
             .map(|request| QueueEntry {
+                request_id: request.logical_delivery_id[5..9].into(),
                 logical_delivery_id: request.logical_delivery_id,
-                request_id: "test".into(),
                 sent_by: request.sent_by,
                 delivery: request.delivery,
                 message: Message::Soft(request.request),

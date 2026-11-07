@@ -628,16 +628,30 @@ impl SeedsMetaflow for FlowStore {
         // Hand-authored fixtures historically used `test` for every queued
         // request.  Request ids are store-wide now, so retain the first value
         // and give later colliding fixture rows stable four-character ids.
-        let mut seen = self
+        let bindings = self
             .engine
             .match_records(QueryPlan::all(self.logical_deliveries.request_ids))
-            .expect("request ids readable")
+            .expect("request ids readable");
+        let existing = bindings
             .records()
             .iter()
-            .map(|binding| binding.request_id.clone())
+            .map(|binding| {
+                (
+                    binding.request_id.clone(),
+                    binding.logical_delivery_id.clone(),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut seen = existing
+            .keys()
+            .cloned()
             .collect::<std::collections::HashSet<_>>();
         for entry in &mut metaflow.queue {
-            if seen.insert(entry.request_id.clone()) {
+            if existing
+                .get(&entry.request_id)
+                .is_some_and(|logical_id| logical_id == &entry.logical_delivery_id)
+                || seen.insert(entry.request_id.clone())
+            {
                 continue;
             }
             use sha2::Digest;

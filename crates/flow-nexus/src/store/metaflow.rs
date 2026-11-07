@@ -251,6 +251,10 @@ impl MutatesMetaflows for FlowStore {
         request: Deliver_Data,
         now: i64,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError> {
+        use datom_codec::{Datomizable, Protosizing};
+        use sha2::Digest;
+        let digest_text = request.datomize(Vec::new()).protosize().compact();
+        let digest = format!("{:x}", sha2::Sha256::digest(digest_text.as_bytes()));
         let message = match self.resolve_sendable_message(
             &request.lock.sender,
             &request.lock.address,
@@ -291,15 +295,20 @@ impl MutatesMetaflows for FlowStore {
         } else {
             flow_ethos::Delivery::Wake
         };
-        self.accept_logical_delivery(
+        self.accept_deliver_call(
             &request.lock.address,
-            SentBy::Sender(request.lock.sender.clone()),
+            request.lock.sender.clone(),
             delivery,
             message,
-            Some(VerifiedDeliveryLock {
+            VerifiedDeliveryLock {
                 lock: request.lock.clone(),
                 now,
-            }),
+            },
+            super::logical_delivery::DeliverCallSpec {
+                key: request.deliver_key,
+                sender: request.lock.sender,
+                digest,
+            },
         )
     }
 }
@@ -614,7 +623,42 @@ pub(crate) trait SeedsMetaflow {
 
 #[cfg(test)]
 impl SeedsMetaflow for FlowStore {
-    fn seed_metaflow(&self, metaflow: Metaflow) {
+    fn seed_metaflow(&self, mut metaflow: Metaflow) {
+        // Hand-authored fixtures historically used `test` for every queued
+        // request.  Request ids are store-wide now, so retain the first value
+        // and give later colliding fixture rows stable four-character ids.
+        let mut seen = self
+            .engine
+            .match_records(QueryPlan::all(self.logical_deliveries.request_ids))
+            .expect("request ids readable")
+            .records()
+            .iter()
+            .map(|binding| binding.request_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        for entry in &mut metaflow.queue {
+            if seen.insert(entry.request_id.clone()) {
+                continue;
+            }
+            use sha2::Digest;
+            let digest = sha2::Sha256::digest(entry.logical_delivery_id.as_bytes());
+            let mut candidate = String::with_capacity(4);
+            for byte in digest {
+                candidate
+                    .push(b"0123456789abcdefghijklmnopqrstuvwxyz"[(byte as usize) % 36] as char);
+                if candidate.len() == 4 {
+                    break;
+                }
+            }
+            while !seen.insert(candidate.clone()) {
+                let last = candidate.pop().expect("four-character fixture id");
+                let at = b"0123456789abcdefghijklmnopqrstuvwxyz"
+                    .iter()
+                    .position(|byte| *byte as char == last)
+                    .expect("base36 fixture id");
+                candidate.push(b"0123456789abcdefghijklmnopqrstuvwxyz"[(at + 1) % 36] as char);
+            }
+            entry.request_id = candidate;
+        }
         let exists = self
             .stored_metaflow(&metaflow.address)
             .expect("metaflow readable")

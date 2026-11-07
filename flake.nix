@@ -310,7 +310,7 @@
               export FLOW_PREDECESSOR_FIXTURE_OUT="$out/share/request-id-predecessor"
               cargoWithProfile test -p flow-nexus --lib \
                 request_id_predecessor_fixture::writes_nonempty_request_id_predecessor_memory \
-                -- --exact
+                -- --exact --ignored
               test -s "$FLOW_PREDECESSOR_FIXTURE_OUT/flow.sema"
               test -s "$FLOW_PREDECESSOR_FIXTURE_OUT/fixture.ids"
             '';

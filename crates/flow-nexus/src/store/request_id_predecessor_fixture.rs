@@ -12,6 +12,7 @@ use signal_flow::{
 };
 
 #[test]
+#[ignore = "the exact predecessor derivation supplies the private output path"]
 fn writes_nonempty_request_id_predecessor_memory() {
     let output = std::path::PathBuf::from(
         std::env::var_os("FLOW_PREDECESSOR_FIXTURE_OUT")

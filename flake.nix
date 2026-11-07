@@ -264,7 +264,7 @@
           context = mkContext system;
           migrationPredecessor = builtins.getFlake "git+file:///git/github.com/LiGoldragon/flow?rev=f7d2336a7380206728cbd5aef2ebb3656d0cfd87";
           migrationRoot = "/tmp/flow-request-id-migration-intermediate";
-          migrationPredecessorPackage = migrationPredecessor.lib.${system}.mkFlowPackage {
+          migrationPredecessorPackage = (migrationPredecessor.lib.${system}.mkFlowPackage {
             defaultConfiguration = {
               sourceRoot = "${migrationRoot}/source";
               runtimeDirectory = "${migrationRoot}/runtime";
@@ -291,7 +291,9 @@
               metaAspects = [ "Mind" ];
               presentationPrompt = null;
             };
-          };
+          }).overrideAttrs (old: {
+            nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [ pkgs.util-linux ];
+          });
         in
         {
           default = context.craneLib.cargoTest (

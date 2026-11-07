@@ -163,6 +163,7 @@ pub struct SendAnswer {
     pub response: Response,
     pub private_response: PrivateSendResponse,
     pub pending: Option<PendingSend>,
+    pub(crate) _pending_answer: Option<crate::store::logical_delivery::PendingAnswerHold>,
 }
 
 impl From<PrivateSendResponse> for SendAnswer {
@@ -171,6 +172,7 @@ impl From<PrivateSendResponse> for SendAnswer {
             response: crate::message_projection::visible_send_response(&private_response),
             private_response,
             pending: None,
+            _pending_answer: None,
         }
     }
 }
@@ -201,6 +203,7 @@ impl SendsRequests for RunningNexus {
             .and_then(|result| result.as_ref().ok())
             .cloned();
         let recipient = Some(send.recipient.clone());
+        let mut pending_answer = None;
         let mut answer = (|| -> SendAnswer {
             let _turn = self
                 .dispatch_gate
@@ -294,6 +297,8 @@ impl SendsRequests for RunningNexus {
             // Each admission is logged with its kind, and a Task's
             // Minutes with the deadline its first reminder is due at.
             if let Ok(PrivateSendResponse::SendAccepted(acceptance)) = &admitted {
+                use crate::store::logical_delivery::HoldsAdmissionAnswers;
+                pending_answer = Some(self.store.hold_admission_answer(&acceptance.request_id));
                 use crate::admission::{Admission, LogsAdmission};
                 use crate::store::reminder::RecordsReminders;
                 let (Message::HardAbrupt(request)
@@ -328,6 +333,7 @@ impl SendsRequests for RunningNexus {
                         response,
                         private_response,
                         pending,
+                        _pending_answer: None,
                     }
                 }
                 (Err(error), _) => {
@@ -335,6 +341,7 @@ impl SendsRequests for RunningNexus {
                 }
             }
         })();
+        answer._pending_answer = pending_answer;
         if abrupt && let PrivateSendResponse::Refused(refusal) = &answer.private_response {
             answer.private_response =
                 PrivateSendResponse::Failed(signal_flow::SendFailure::Unadmitted(
@@ -1316,6 +1323,7 @@ impl CompletesDirectSends for RunningNexus {
                 pending: Some(PendingSend {
                     address: address.clone(),
                 }),
+                _pending_answer: None,
             };
         }
         // This budget bounds waiting, not evidence. Expiry is uncertainty,

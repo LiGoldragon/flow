@@ -17,6 +17,7 @@ use signal_flow::{IdentifyThread_Data, Process, Query, Refusal, Response};
 pub(crate) struct MetaflowAnswer {
     pub response: Response,
     pub private_response: signal_flow::PrivateSendResponse,
+    pub(crate) _pending_answer: Option<crate::store::logical_delivery::PendingAnswerHold>,
 }
 
 impl From<signal_flow::PrivateSendResponse> for MetaflowAnswer {
@@ -24,6 +25,7 @@ impl From<signal_flow::PrivateSendResponse> for MetaflowAnswer {
         Self {
             response: crate::message_projection::visible_send_response(&private_response),
             private_response,
+            _pending_answer: None,
         }
     }
 }
@@ -33,6 +35,7 @@ impl From<Response> for MetaflowAnswer {
         Self {
             response,
             private_response: signal_flow::PrivateSendResponse::Refused(Refusal::NotMessage),
+            _pending_answer: None,
         }
     }
 }
@@ -218,6 +221,13 @@ impl DispatchesMetaflowPeer for RunningNexus {
                         ))
                         .into(),
                     };
+                    if let signal_flow::PrivateSendResponse::SendAccepted(acceptance) =
+                        &response.private_response
+                    {
+                        use crate::store::logical_delivery::HoldsAdmissionAnswers;
+                        response._pending_answer =
+                            Some(self.store.hold_admission_answer(&acceptance.request_id));
+                    }
                     drop(_turn);
                     if let Some(lease) = direct_lease {
                         match &response.private_response {

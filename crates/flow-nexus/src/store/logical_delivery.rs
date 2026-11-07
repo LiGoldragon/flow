@@ -294,6 +294,38 @@ pub(crate) struct LogicalDeliveryTables {
     pub(crate) deliver_calls: TableReference<DeliverCall>,
     pub(crate) store_identity: TableReference<StoredStoreIdentity>,
     pub(crate) write_gate: Mutex<()>,
+    pending_answers: std::sync::Arc<PendingAdmissionAnswers>,
+}
+
+#[derive(Default)]
+struct PendingAdmissionAnswers {
+    request_ids: Mutex<std::collections::HashMap<flow_ethos::RequestId, usize>>,
+}
+
+/// One admitted call whose answer has not finished writing to its caller.
+/// The hold is process-local by design: after a restart no call is still
+/// being answered by the old process.
+pub(crate) struct PendingAnswerHold {
+    pending: std::sync::Arc<PendingAdmissionAnswers>,
+    request_id: flow_ethos::RequestId,
+}
+
+impl Drop for PendingAnswerHold {
+    fn drop(&mut self) {
+        let mut held = self
+            .pending
+            .request_ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(count) = held.get_mut(&self.request_id) else {
+            return;
+        };
+        if *count == 1 {
+            held.remove(&self.request_id);
+        } else {
+            *count -= 1;
+        }
+    }
 }
 pub(crate) struct LogicalDeliveryDescriptors {
     pub(crate) counter: TableDescriptor<LogicalDeliveryCounter>,
@@ -373,7 +405,38 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
             deliver_calls: engine.register_table(descriptors.deliver_calls)?,
             store_identity: engine.register_table(descriptors.store_identity)?,
             write_gate: Mutex::new(()),
+            pending_answers: Default::default(),
         })
+    }
+}
+
+pub(crate) trait HoldsAdmissionAnswers {
+    fn hold_admission_answer(&self, request_id: &flow_ethos::RequestId) -> PendingAnswerHold;
+    fn admission_answer_is_pending(&self, request_id: &flow_ethos::RequestId) -> bool;
+}
+
+impl HoldsAdmissionAnswers for FlowStore {
+    fn hold_admission_answer(&self, request_id: &flow_ethos::RequestId) -> PendingAnswerHold {
+        let pending = self.logical_deliveries.pending_answers.clone();
+        *pending
+            .request_ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(request_id.clone())
+            .or_default() += 1;
+        PendingAnswerHold {
+            pending,
+            request_id: request_id.clone(),
+        }
+    }
+
+    fn admission_answer_is_pending(&self, request_id: &flow_ethos::RequestId) -> bool {
+        self.logical_deliveries
+            .pending_answers
+            .request_ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(request_id)
     }
 }
 
@@ -801,6 +864,9 @@ impl RecordsLogicalDeliveries for FlowStore {
         };
         if !matches!(&retained.entry.sent_by, SentBy::Sender(owner) if owner == sender) {
             return Ok(Err(ArchiveRejection::UnknownRequest));
+        }
+        if self.admission_answer_is_pending(&binding.request_id) {
+            return Ok(Err(ArchiveRejection::NotYet));
         }
         use super::queue_delivery::EndsQueueDeliveryPhase;
         if self

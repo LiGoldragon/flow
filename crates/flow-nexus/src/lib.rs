@@ -1852,7 +1852,19 @@ trait DispatchesSerially {
 impl DispatchesSerially for RunningNexus {
     fn dispatch_serially(&self, query: Query, asker: protecting::Asker) -> Response {
         if let Query::Refresh(_) | Query::Replace(_) | Query::Restart(_) = &query {
-            return self.dispatch_asked(query, asker);
+            let response = self.dispatch_asked(query, asker);
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Err(error) =
+                store::request_id_upgrade::RunsRequestIdAnnouncements::run_request_id_announcements(
+                    &*self.store,
+                )
+            {
+                eprintln!("flow-nexus: request-id announcement pass failed: {error}");
+            }
+            return response;
         }
         let response = {
             let _turn = self
@@ -1880,6 +1892,15 @@ impl DispatchesSerially for RunningNexus {
     ) -> meta_signal_flow::Response {
         if let meta_signal_flow::Query::Restart(_) | meta_signal_flow::Query::Refresh(_) = &query {
             let response = self.dispatch_meta_from(query, resolver);
+            {
+                let _turn = self
+                    .dispatch_gate
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Err(error) = store::request_id_upgrade::RunsRequestIdAnnouncements::run_request_id_announcements(&*self.store) {
+                    eprintln!("flow-nexus: request-id announcement pass failed: {error}");
+                }
+            }
             self.wake_deferred();
             return response;
         }

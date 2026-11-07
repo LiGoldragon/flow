@@ -2154,9 +2154,14 @@ mod tests {
     }
 
     struct OldTables {
+        metaflows: TableReference<PriorStoredMetaflow>,
+        address_holds: TableReference<PriorAddressHold>,
         current: TableReference<PriorCurrentLogicalDelivery>,
         events: TableReference<PriorLogicalDeliveryEvent>,
         requests: TableReference<PriorStoredDeliveryRequest>,
+        attempts: TableReference<PriorQueueDeliveryAttempt>,
+        outcomes: TableReference<PriorStoredSendOutcome>,
+        send_calls: TableReference<PriorSendCall>,
     }
 
     fn old_engine(
@@ -2179,12 +2184,12 @@ mod tests {
                 &descriptors.events,
             ))
             .expect("old events register");
-        engine
+        let metaflows = engine
             .register_table(predecessor_descriptor::<PriorStoredMetaflow, _>(
                 &descriptors.metaflows,
             ))
             .expect("old metaflows register");
-        engine
+        let address_holds = engine
             .register_table(predecessor_descriptor::<PriorAddressHold, _>(
                 &descriptors.address_holds,
             ))
@@ -2194,17 +2199,17 @@ mod tests {
                 &descriptors.requests,
             ))
             .expect("old requests register");
-        engine
+        let attempts = engine
             .register_table(predecessor_descriptor::<PriorQueueDeliveryAttempt, _>(
                 &descriptors.attempts,
             ))
             .expect("old attempts register");
-        engine
+        let outcomes = engine
             .register_table(predecessor_descriptor::<PriorStoredSendOutcome, _>(
                 &descriptors.outcomes,
             ))
             .expect("old outcomes register");
-        engine
+        let send_calls = engine
             .register_table(predecessor_descriptor::<PriorSendCall, _>(
                 &descriptors.send_calls,
             ))
@@ -2215,9 +2220,14 @@ mod tests {
         (
             engine,
             OldTables {
+                metaflows,
+                address_holds,
                 current,
                 events,
                 requests,
+                attempts,
+                outcomes,
+                send_calls,
             },
         )
     }
@@ -2816,6 +2826,222 @@ mod tests {
             .match_records(QueryPlan::all(heartbeat_table))
             .expect("heartbeat reads");
         assert_eq!(heartbeat_rows.records()[0].outstanding, None);
+    }
+
+    #[test]
+    fn evolution_rewrites_every_nonempty_held_delivery_family_with_one_request_id() {
+        let directory = tempfile::tempdir().expect("temporary Memory");
+        let path = directory.path().join("flow.sema");
+        let descriptors = evolution_descriptors();
+        let heartbeat = StoredHeartbeatStanding::descriptor();
+        let (predecessor, tables) = old_engine(&path, &descriptors, &heartbeat);
+        let sender = old_address(old_flow::Aspect::Mind, "sender");
+        let recipient = old_address(old_flow::Aspect::Field, "recipient");
+        let logical_id = "held-with-references";
+        let snapshot = old_snapshot(
+            1,
+            logical_id,
+            &sender,
+            &recipient,
+            old_signal::DeliveryState::Uncertain,
+        );
+        let request = old_request(
+            logical_id,
+            &sender,
+            &recipient,
+            old_flow::Request::Notice("held words".into()),
+            PriorRequestState::Queued,
+        );
+        let old_meta::QueueEvidence::Logical(queue_entry) = &request.queue_evidence else {
+            panic!("helper creates logical evidence")
+        };
+        let queue_entry = queue_entry.clone();
+        predecessor
+            .assert(Assertion::new(
+                tables.current,
+                PriorCurrentLogicalDelivery {
+                    snapshot: snapshot.clone(),
+                },
+            ))
+            .expect("old current stores");
+        predecessor
+            .assert(Assertion::new(
+                tables.events,
+                PriorLogicalDeliveryEvent { snapshot },
+            ))
+            .expect("old event stores");
+        predecessor
+            .assert(Assertion::new(tables.requests, request.clone()))
+            .expect("old request stores");
+        predecessor
+            .assert(Assertion::new(
+                tables.attempts,
+                PriorQueueDeliveryAttempt {
+                    request_id: logical_id.into(),
+                    attempt_id: "attempt".into(),
+                    native_request_id: 7,
+                    flow_id: "flow".into(),
+                    thread_id: "thread".into(),
+                    harness_kind: old_flow::HarnessKind::Codex,
+                    history_anchor: PriorNativeHistoryAnchor::CodexTurns(None),
+                    address: recipient.clone(),
+                    queue_evidence: request.queue_evidence.clone(),
+                    phase: PriorQueueDeliveryPhase::Uncertain(None),
+                },
+            ))
+            .expect("old attempt stores");
+        predecessor
+            .assert(Assertion::new(
+                tables.outcomes,
+                PriorStoredSendOutcome {
+                    record: old_meta::SendOutcomeRecord {
+                        send_outcome_id: "outcome".into(),
+                        process_option: None,
+                        first_address_option: Some(sender.clone()),
+                        second_address_option: Some(recipient.clone()),
+                        request_digest: "digest".into(),
+                        ordinary_send_outcome: old_meta::OrdinarySendOutcome::Accepted(
+                            old_signal::SendAcceptance {
+                                logical_delivery_id: logical_id.into(),
+                                delivery_cursor: 1,
+                                delivery_state: old_signal::DeliveryState::Uncertain,
+                            },
+                        ),
+                    },
+                },
+            ))
+            .expect("old outcome stores");
+        let tool_key = crate::generated::send_tool_before_request_ids::ToolCallKey {
+            thread_id: "thread".into(),
+            turn_id: "turn".into(),
+            call_id: "call".into(),
+        };
+        predecessor
+            .assert(Assertion::new(
+                tables.send_calls,
+                PriorSendCall {
+                    tool_call_key: tool_key,
+                    content_sha256: "sha".into(),
+                    send_outcome:
+                        crate::generated::send_tool_before_request_ids::SendOutcome::Accepted(
+                            crate::generated::send_tool_before_request_ids::Accepted_Data {
+                                sender: sender.clone(),
+                                target: recipient.clone(),
+                                send_acceptance: old_signal::SendAcceptance {
+                                    logical_delivery_id: logical_id.into(),
+                                    delivery_cursor: 1,
+                                    delivery_state: old_signal::DeliveryState::Uncertain,
+                                },
+                            },
+                        ),
+                },
+            ))
+            .expect("old send call stores");
+        let metaflow = old_flow::Metaflow {
+            address: recipient.clone(),
+            state: old_flow::State::Asleep,
+            past: Vec::new(),
+            queue: vec![queue_entry],
+        };
+        predecessor
+            .assert(Assertion::new(
+                tables.metaflows,
+                PriorStoredMetaflow {
+                    metaflow: metaflow.clone(),
+                },
+            ))
+            .expect("old metaflow stores");
+        predecessor
+            .assert(Assertion::new(
+                tables.address_holds,
+                PriorAddressHold {
+                    flow_id: "flow".into(),
+                    address: recipient,
+                    found: Some(metaflow),
+                },
+            ))
+            .expect("old address hold stores");
+        drop(predecessor);
+
+        let mut engine = Engine::open(
+            EngineOpen::new(&path, SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION))
+                .with_family(&descriptors.current)
+                .with_family(&descriptors.events)
+                .with_family(&descriptors.metaflows)
+                .with_family(&descriptors.address_holds)
+                .with_family(&descriptors.requests)
+                .with_family(&descriptors.attempts)
+                .with_family(&descriptors.outcomes)
+                .with_family(&descriptors.send_calls)
+                .with_family(&heartbeat),
+        )
+        .expect("predecessor catalog opens for evolution");
+        let heartbeat_table = engine.register_table(heartbeat).expect("heartbeat opens");
+        evolve_request_id_memory(
+            &mut engine,
+            descriptors,
+            &[],
+            &[],
+            &[],
+            heartbeat_table,
+            &[],
+            &ScriptedDrawer::new(&["held", "0000", "0001", "0002", "0003"]),
+        )
+        .expect("nonempty-family evolution commits");
+
+        let descriptors = evolution_descriptors();
+        let metaflows = engine
+            .register_table(descriptors.metaflows)
+            .expect("metaflows register");
+        let metaflows = engine
+            .match_records(QueryPlan::all(metaflows))
+            .expect("metaflows read");
+        assert_eq!(metaflows.records()[0].metaflow.queue[0].request_id, "held");
+        let holds = engine
+            .register_table(descriptors.address_holds)
+            .expect("holds register");
+        let holds = engine
+            .match_records(QueryPlan::all(holds))
+            .expect("holds read");
+        assert_eq!(
+            holds.records()[0].found.as_ref().expect("found kept").queue[0].request_id,
+            "held"
+        );
+        let attempts = engine
+            .register_table(descriptors.attempts)
+            .expect("attempts register");
+        let attempts = engine
+            .match_records(QueryPlan::all(attempts))
+            .expect("attempts read");
+        let meta_signal_flow::QueueEvidence::Logical(entry) = &attempts.records()[0].queue_evidence
+        else {
+            panic!("logical evidence stays logical")
+        };
+        assert_eq!(entry.request_id, "held");
+        let outcomes = engine
+            .register_table(descriptors.outcomes)
+            .expect("outcomes register");
+        let outcomes = engine
+            .match_records(QueryPlan::all(outcomes))
+            .expect("outcomes read");
+        let meta_signal_flow::OrdinarySendOutcome::Accepted(acceptance) =
+            &outcomes.records()[0].record.ordinary_send_outcome
+        else {
+            panic!("accepted outcome stays accepted")
+        };
+        assert_eq!(acceptance.request_id, "held");
+        let calls = engine
+            .register_table(descriptors.send_calls)
+            .expect("send calls register");
+        let calls = engine
+            .match_records(QueryPlan::all(calls))
+            .expect("send calls read");
+        let crate::generated::send_tool::SendOutcome::Accepted(accepted) =
+            &calls.records()[0].send_outcome
+        else {
+            panic!("accepted call stays accepted")
+        };
+        assert_eq!(accepted.send_acceptance.request_id, "held");
     }
 
     #[test]

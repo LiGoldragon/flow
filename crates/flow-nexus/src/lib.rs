@@ -4679,6 +4679,15 @@ mod tests {
     }
 
     #[test]
+    fn archive_from_an_unidentified_process_is_refused_as_a_caller() {
+        let fixture = NexusFixture::new();
+        assert!(matches!(
+            fixture.nexus.dispatch(Query::ArchiveRequest("none".into())),
+            Response::ArchiveRejected(signal_flow::ArchiveRejection::Caller(_))
+        ));
+    }
+
+    #[test]
     fn a_report_is_recorded_for_a_held_flow_and_refused_for_an_unknown_one() {
         use signal_flow::{Event, Report_Data};
         let fixture = NexusFixture::new();

@@ -5,11 +5,11 @@
 
 use super::NexusFixture;
 use crate::reminding::RemindsCallers;
+use crate::store::ManagesMetaflowState;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::reminder::{RecordsReminders, TASK_REMINDERS};
-use crate::store::ManagesMetaflowState;
 use flow_ethos::{Address, Aspect, Model, Request};
 use signal_flow::{Message, Metaflow, PrivateSendResponse, QueueEntry, SentBy};
 

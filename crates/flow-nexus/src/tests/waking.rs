@@ -3391,6 +3391,10 @@ case "$*" in
       printf '%s' "$!" > "$S/pid"
       printf '%s\n' "$!" >> "$S/resumed-pids"
     fi
+    # REFUSED_AFTER_START refuses every resume once its harness runs in the
+    # pane; REFUSED_AFTER_START_ONCE the next one only.
+    if [ -n "$resumed" ] && [ -f "$S/refused-after-start" ]; then printf '%s\n' '{{"id":"cli:agent:start","error":{{"code":"timeout","message":"refused after the harness started"}}}}'; exit 1; fi
+    if [ -n "$resumed" ] && [ -f "$S/refused-after-start-once" ]; then rm -f "$S/refused-after-start-once"; printf '%s\n' '{{"id":"cli:agent:start","error":{{"code":"timeout","message":"refused once after the harness started"}}}}'; exit 1; fi
     # The Codex TUI runs `resume <thread>` in the pane's foreground.
     if [ "$harness" = codex ]; then
       sh -c 'sleep 120; :' resume "$(cat "$S/session")" < /dev/null > /dev/null 2>&1 &
@@ -3429,10 +3433,11 @@ case "$*" in
     fi ;;
   *"pane close"*)
     # CLOSE_REFUSED refuses every close. A restart world's close takes the
-    # pane and its harness down.
+    # pane and its harness down; with ORPHAN_ON_CLOSE the pane goes and the
+    # harness of a restart's pane outlives it.
     if [ -f "$S/close-refused" ]; then printf '%s\n' '{{"error":{{"code":"pane_close_failed","message":"refused"}}}}' >&2; exit 1; fi
     if [ -f "$S/old-pane" ] && [ "$5" = "$(cat "$S/old-pane")" ]; then rm -f "$S/old-agent"; p=$(cat "$S/old-pid" 2>/dev/null); [ -n "$p" ] && kill "$p" 2>/dev/null && gone "$p"; fi
-    if [ -f "$S/restart-world" ] && [ "$5" = "$pane" ]; then rm -f "$S/harness"; : > "$S/closed-$ws"; p=$(cat "$S/pid" 2>/dev/null); [ -n "$p" ] && kill "$p" 2>/dev/null && gone "$p"; rm -f "$S/pid"; fi
+    if [ -f "$S/restart-world" ] && [ "$5" = "$pane" ]; then rm -f "$S/harness"; : > "$S/closed-$ws"; p=$(cat "$S/pid" 2>/dev/null); [ -n "$p" ] && [ ! -f "$S/orphan-on-close" ] && kill "$p" 2>/dev/null && gone "$p"; rm -f "$S/pid"; fi
     printf '%s\n' '{{"result":{{}}}}' ;;
   *"agent read"*) printf '%s\n' '❯ ' ;;
   *"agent prompt"*)

@@ -31,11 +31,12 @@ record written Failed, the restart reopens the same session by itself,
 `claude --resume <session>` with the launch it already composed.
 
 - It reopens only once the seat is proven quiescent, under the gate: the
-  record still the Failed one written, the old pane gone, no pane of the old
-  route's or the resume's Herdr session holding the session, the old
-  harness exited, and the harness the failed pane showed, if Flow saw one,
-  exited (given 3 seconds after the discard). Closed is written with the run
-  counted, then Opening, Spawning and the bind as in any restart.
+  record still the Failed one written, the harness the failed pane showed
+  recorded and proven exited by its birth (given 3 seconds after the
+  discard), the failed pane gone, and no pane of the old seat's, the flow's
+  or the resume's Herdr session holding the session. Closed is written with
+  the run counted, then Opening, Spawning and the bind as in any restart.
+  See "A reopen needs the failed harness proven exited" below.
 - A pane Herdr does not show closed is Interrupted, as before: a start may
   be in flight there, and nothing is respawned from an observed absence.
 - The bound is a constant, `AUTOMATIC_REOPENS` = 1, in
@@ -50,12 +51,43 @@ record written Failed, the restart reopens the same session by itself,
   while a reopen's spawn runs answers `Restarting`, as during any restart
   step.
 - At its start a Nexus takes up a Failed record under the same bound and
-  proof, composing its launch again: a Nexus that died after a failure past
-  the close reopens the flow by itself. A Failed record from before the
+  proof, read from the record, composing its launch again: a Nexus that
+  died after a failure past the close reopens the flow by itself once the
+  harness its record names is proven exited. A Failed record from before the
   close (0.53.0's `CloseRefused` or `CloseUnproven`) is taken up only once
   Herdr shows its old pane gone and its harness exited; until then it is
   left as it is, only reads reaching Herdr.
 - A Working seat is still refused `RestartRefused.Unsupported`, unchanged.
+
+## A reopen needs the failed harness proven exited
+
+A harness can outlive its pane, so a pane's absence, or a pid, proves no
+exit. Before a run's pane is abandoned, the record's `OldSeat` is rewritten
+to that pane's route and the harness Flow saw running the session there,
+`Process.{ pid started }`, or none when it saw none; the old harness was
+proven exited before Closed was written, so the failed pane is now the seat
+to reconcile. The Stop of an Interrupted restart rewrites it alike, to the
+pane it quiesces and the harness it sees there, else the one recorded for
+that pane. No Memory schema changes.
+
+- A reopen by itself, after a failure in this Nexus or at a Nexus start,
+  needs that harness recorded and proven exited by its birth, exactly as the
+  old seat's exit is proven: gone from `/proc`, another process at its pid
+  (same pid, another start), or a zombie. The failed pane gone and no pane
+  holding the session are needed as well, and never enough alone.
+- A harness never seen is `ExitUnwitnessed`; one seen and still running is
+  `ExitUnproven`. Either way the record stays Failed, logged with that word,
+  the session, the queue and the Address held. A resume refused before any
+  harness ran (`SpawnRefused` with nothing in the pane) is
+  `ExitUnwitnessed` and is no longer reopened by itself.
+- The owner's retry of a Failed record applies the same proof before it
+  writes anything: refused `RestartRefused.ResumeRefused` with
+  `ExitUnwitnessed`, or with `ExitUnproven` when the old seat's pane is gone,
+  the record left as it was. A retry whose old seat's pane still stands
+  closes it and proves the exit, as before. The owner's Stop stands, and
+  Retire takes a Failed record as before. A record with no harness seen is
+  never retried, after a Stop either; what frees it besides Retire is
+  undecided.
 
 ## Curriculum 478c's schema
 

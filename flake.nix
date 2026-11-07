@@ -676,6 +676,20 @@
             "tests::restarting::restart_owner_stop_during_bound";
           flow-restart-failed-before-close-taken-up-once-old-harness-gone = context.exactTest "flow-nexus"
             "tests::restarting::restart_failed_before_close_taken_up_once_old_harness_gone";
+          # 0.53.1: a reopen, by itself or the owner's, needs the failed
+          # seat's harness recorded and proven exited by its birth.
+          flow-restart-live-orphan-not-reopened-in-turn = context.exactTest "flow-nexus"
+            "tests::restarting::restart_live_orphan_not_reopened_in_turn";
+          flow-restart-live-orphan-not-reopened-at-start = context.exactTest "flow-nexus"
+            "tests::restarting::restart_live_orphan_not_reopened_at_start";
+          flow-restart-missing-witness-not-reopened = context.exactTest "flow-nexus"
+            "tests::restarting::restart_missing_witness_not_reopened_retry_refused";
+          flow-restart-recorded-harness-exited-reopens-same-session = context.exactTest "flow-nexus"
+            "tests::restarting::restart_recorded_harness_exited_reopens_same_session";
+          flow-restart-pid-reused-exited-by-birth = context.exactTest "flow-nexus"
+            "tests::restarting::restart_pid_reused_exited_by_birth_only";
+          flow-restart-startup-recovery-uses-recorded-identity = context.exactTest "flow-nexus"
+            "tests::restarting::restart_startup_recovery_uses_recorded_identity";
           # The cutover with both Nexuses live: the old side cannot take or end
           # the custody a new Nexus Adopted and Restarted.
           flow-restart-cutover-two-nexus = context.exactTest "flow-nexus"

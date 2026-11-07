@@ -28,17 +28,29 @@
 //! absence, and cleared only by a Stop that proves every pane holding the
 //! session, and the restart's own pane, gone.
 //!
+//! The record's old seat is the seat a reopen reconciles. Before a run's
+//! pane is abandoned, Failed or Interrupted, the old seat is rewritten to
+//! that pane's route and the harness Flow saw running the session there,
+//! `Process.{ pid started }`, or none when Flow saw none; the Stop of an
+//! Interrupted restart rewrites it to the pane it quiesces, as it saw it.
+//!
 //! A Failed restart reopens the same session by itself while its runs number
 //! no more than `AUTOMATIC_REOPENS`, every run counted in its Attempts, the
 //! owner's retries included. It reopens only once the seat is proven
-//! quiescent, under the gate: the record still the Failed one, the old pane
-//! gone, no pane of the old route's or the resume's Herdr session holding
-//! the session, the old harness exited, and the harness the failed pane
-//! showed, if any, exited. Closed is then written with the run counted, and
-//! the resume runs again from Opening, with the launch already composed when
-//! the failure was this Nexus's own, composed again when an earlier Nexus
-//! left it. A Failed record is never written while a spawn may be in
-//! flight, and Stopped, the owner's, is never reopened.
+//! quiescent, under the gate: the record still the Failed one, the old
+//! seat's harness recorded and proven exited by its birth, the old seat's
+//! pane gone, and no pane of the old seat's, the flow's or the resume's
+//! Herdr session holding the session. A pid, or a pane's absence, proves no
+//! exit: a harness can outlive its pane. A record whose harness was never
+//! seen (`ExitUnwitnessed`) or is not proven exited (`ExitUnproven`) stays
+//! Failed, logged so, its session, queue and Address held; the owner's
+//! retry is refused `ResumeRefused` with that word, unless the old seat's
+//! pane stands for the retry to close; the owner's Stop and Retire stand.
+//! Closed is then written with the run counted, and the resume runs again
+//! from Opening, with the launch already composed when the failure was this
+//! Nexus's own, composed again when an earlier Nexus left it. A Failed
+//! record is never written while a spawn may be in flight, and Stopped, the
+//! owner's, is never reopened.
 //!
 //! The fence: once a restart has bound a seat, a harness event acts only
 //! when its caller descends from that seat's harness process, by birth
@@ -78,6 +90,32 @@ const AUTOMATIC_REOPENS: i64 = 1;
 /// is discarded, before the session is opened again.
 const SPAWNED_EXIT_WAIT: Duration = Duration::from_secs(3);
 
+/// Why a Failed restart's old seat does not prove its harness exited; its
+/// name is the category a refused retry answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MissingExit {
+    /// No harness of the seat was ever seen running the session.
+    ExitUnwitnessed,
+    /// The harness seen there is not proven exited by its birth.
+    ExitUnproven,
+}
+
+/// The route of a pane a restart created.
+trait RoutesCreatedPane {
+    fn route(&self) -> HerdrRoute;
+}
+
+impl RoutesCreatedPane for HerdrPaneBinding {
+    fn route(&self) -> HerdrRoute {
+        HerdrRoute {
+            herdr_session_name: self.herdr_session_name.clone(),
+            herdr_agent_name: self.herdr_agent_name.clone(),
+            herdr_pane_id: self.herdr_pane_id.clone(),
+            herdr_terminal_id: self.herdr_terminal_id.clone(),
+        }
+    }
+}
+
 /// What an Observe was opened on: the route the flow ran in, and the birth
 /// of the seat a restart bound there, when one did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,14 +134,17 @@ pub trait RestartsFlows {
     /// composed again first, then Closing is reconciled against the old
     /// pane and Closed resumes; Opening is Interrupted, and
     /// Spawning binds the seat its pane shows or is Interrupted. Failed
-    /// reopens by itself under the bound once its seat is proven quiescent,
-    /// and otherwise stays, as Interrupted does.
+    /// reopens by itself under the bound once its old seat's recorded
+    /// harness is proven exited by its birth and its seat quiescent, and
+    /// otherwise stays, as Interrupted does.
     fn recover_restarts(&self);
     /// The owner's Stop of a flow under a restart record, under the gate:
     /// every pane Herdr shows holding the session is closed, and the
     /// restart's own pane, then the record is Failed.Stopped, the FlowId,
-    /// session and queue kept. A restart step running is Restarting; an
-    /// Interrupted spawn not proven quiesced is SpawnUnproven.
+    /// session and queue kept, and an Interrupted spawn's pane, with the
+    /// harness Flow saw there, its old seat. A restart step running is
+    /// Restarting; an Interrupted spawn not proven quiesced is
+    /// SpawnUnproven.
     fn stop_restarting(&self, record: RestartRecord) -> Response;
 }
 
@@ -294,13 +335,12 @@ struct PreparedRestart {
     resume_launch: ResumeLaunch,
 }
 
-/// A run not bound, its pane shown gone, and the record written Failed:
-/// the launch it ran, the harness its pane showed before the discard, if
-/// any, and the failure's answer.
+/// A run not bound, its pane shown gone, and the record written Failed, its
+/// old seat that pane and the harness it showed: the launch it ran and the
+/// failure's answer.
 struct FailedRun {
     failed: RestartRecord,
     resume_launch: ResumeLaunch,
-    spawned: Option<Process>,
     response: Response,
 }
 
@@ -344,21 +384,28 @@ trait RestartsInSteps {
     /// Spawning, the harness resumed with the prepared launch and bound off
     /// the gate, then bound or abandoned under it.
     fn resumed_once(&self, prepared: PreparedRestart) -> Resumption;
-    /// A Failed restart opened again by itself: under the bound, the record
+    /// A Failed restart opened again by itself: under the bound, its old
+    /// seat's harness recorded and exited within `patience`, the record
     /// unchanged and the seat proven quiescent, Closed written with the run
     /// counted. `resume_launch` is the launch the failed run held; None, it
-    /// is composed again. `spawned` is the harness the failed pane showed.
+    /// is composed again.
     fn reopened(
         &self,
         failed: RestartRecord,
         resume_launch: Option<ResumeLaunch>,
-        spawned: Option<Process>,
+        patience: Duration,
     ) -> Reopening;
+    /// Whether the old seat's harness is recorded and, by its birth, exited
+    /// now or within `patience`. Reads only.
+    fn exit_witness(&self, record: &RestartRecord, patience: Duration) -> Result<(), MissingExit>;
     /// Whether, as Herdr and the kernel show it now, nothing holds the
-    /// session: the old pane gone, no pane of the old route's Herdr session
-    /// or of `herdr_session_name` holding the session, and the old harness
-    /// exited. Reads only.
+    /// session: the old seat's harness recorded and exited, its pane gone,
+    /// and no pane of the old seat's, the flow's or `herdr_session_name`
+    /// Herdr session holding the session. Reads only.
     fn proven_quiescent(&self, record: &RestartRecord, herdr_session_name: &str) -> bool;
+    /// The Herdr sessions a pane holding the session is looked for in: the
+    /// old seat's, and the flow's own route's.
+    fn seat_sessions(&self, record: &RestartRecord) -> BTreeSet<String>;
     /// The Herdr session a resume opens its pane in: the flow's latest
     /// launch's, else its old route's.
     fn resume_session_name(&self, record: &RestartRecord) -> String;
@@ -387,8 +434,9 @@ trait RestartsInSteps {
     /// The resumed seat bound in one write; then its queue is handed to it,
     /// off the gate.
     fn bound(&self, record: &RestartRecord, birth: SeatBirth) -> Response;
-    /// A resume that did not bind: its pane discarded and the record Failed,
-    /// or, the pane not shown gone, Interrupted.
+    /// A resume that did not bind: its old seat rewritten to its pane and
+    /// `spawned`, the harness that pane showed, then the pane discarded and
+    /// the record Failed, or, the pane not shown gone, Interrupted.
     fn abandoned(
         &self,
         record: RestartRecord,
@@ -484,6 +532,26 @@ impl RestartsInSteps for RunningNexus {
             Ok(Some(record)) => {
                 return match record.restart_phase {
                     RestartPhase::Failed(_) => {
+                        // The old seat's harness proven exited by its birth,
+                        // or its pane standing for the retry to close and
+                        // prove; refused, the Failed record stays as it was.
+                        if let Err(missing) = self.exit_witness(&record, Duration::ZERO) {
+                            let pane_stands = missing == MissingExit::ExitUnproven
+                                && self
+                                    .seat_node(&record, record.old_seat.herdr_route.clone())
+                                    .is_some_and(|old| {
+                                        self.herdr.pane_presence(&old) != PanePresence::Absent
+                                    });
+                            if !pane_stands {
+                                eprintln!(
+                                    "flow-nexus: retry of flow {flow_id}'s restart refused: {missing:?}"
+                                );
+                                return Err(Box::new(
+                                    RestartFailure::ResumeRefused(format!("{missing:?}"))
+                                        .answer(flow_id),
+                                ));
+                            }
+                        }
                         let retried = RestartRecord {
                             restart_phase: RestartPhase::Closing,
                             attempts: record.attempts + 1,
@@ -633,9 +701,11 @@ impl RestartsInSteps for RunningNexus {
         // the session, and the harness process it showed exited.
         let gone = self.herdr.pane_presence(&old) == PanePresence::Absent
             && self
-                .herdr
-                .holds_native_session(&record.old_seat.herdr_route.herdr_session_name, &old)
-                == Some(false)
+                .seat_sessions(&record)
+                .iter()
+                .all(|herdr_session_name| {
+                    self.herdr.holds_native_session(herdr_session_name, &old) == Some(false)
+                })
             && record
                 .old_seat
                 .process_option
@@ -664,7 +734,7 @@ impl RestartsInSteps for RunningNexus {
                 Resumption::Answered(response) => return *response,
                 Resumption::Failed(run) => *run,
             };
-            match self.reopened(run.failed, Some(run.resume_launch), run.spawned) {
+            match self.reopened(run.failed, Some(run.resume_launch), SPAWNED_EXIT_WAIT) {
                 Reopening::Reopened(reopened) => prepared = *reopened,
                 Reopening::Kept => return run.response,
                 Reopening::Refused(refused) => return *refused,
@@ -734,15 +804,9 @@ impl RestartsInSteps for RunningNexus {
         // pane is discarded, so its exit is proven before any reopen.
         let spawned = match verified {
             Ok(_) => None,
-            Err(_) => self.herdr.harness_process(
-                &HerdrRoute {
-                    herdr_session_name: pane.herdr_session_name.clone(),
-                    herdr_agent_name: pane.herdr_agent_name.clone(),
-                    herdr_pane_id: pane.herdr_pane_id.clone(),
-                    herdr_terminal_id: pane.herdr_terminal_id.clone(),
-                },
-                &spawning.native_session_id,
-            ),
+            Err(_) => self
+                .herdr
+                .harness_process(&pane.route(), &spawning.native_session_id),
         };
         self.herdr.release_system_prompt(&request);
         let _turn = self
@@ -767,7 +831,7 @@ impl RestartsInSteps for RunningNexus {
         &self,
         failed: RestartRecord,
         resume_launch: Option<ResumeLaunch>,
-        spawned: Option<Process>,
+        patience: Duration,
     ) -> Reopening {
         let flow_id = failed.flow_id.clone();
         let reopens = matches!(
@@ -777,14 +841,19 @@ impl RestartsInSteps for RunningNexus {
         if !reopens {
             return Reopening::Kept;
         }
-        // Off the gate: the failed pane's harness given its moment to exit.
-        if let Some(process) = &spawned
-            && !process.exited_within(SPAWNED_EXIT_WAIT)
-        {
-            eprintln!(
-                "flow-nexus: restart of flow {flow_id} stays Failed: its resumed harness {} has not exited",
-                process.pid
-            );
+        // Off the gate: the old seat's harness, as recorded, given its
+        // moment to exit; never seen, nothing proves it gone.
+        if let Err(missing) = self.exit_witness(&failed, patience) {
+            let pane = &failed.old_seat.herdr_route.herdr_pane_id;
+            match &failed.old_seat.process_option {
+                Some(process) => eprintln!(
+                    "flow-nexus: restart of flow {flow_id} stays Failed: {missing:?}: the harness of pane {pane}, pid {} started {}, has not exited",
+                    process.pid, process.started
+                ),
+                None => eprintln!(
+                    "flow-nexus: restart of flow {flow_id} stays Failed: {missing:?}: no harness of pane {pane} was seen running the session"
+                ),
+            }
             return Reopening::Kept;
         }
         let _turn = self
@@ -836,25 +905,40 @@ impl RestartsInSteps for RunningNexus {
         }))
     }
 
+    fn exit_witness(&self, record: &RestartRecord, patience: Duration) -> Result<(), MissingExit> {
+        match &record.old_seat.process_option {
+            None => Err(MissingExit::ExitUnwitnessed),
+            Some(process) if process.exited_within(patience) => Ok(()),
+            Some(_) => Err(MissingExit::ExitUnproven),
+        }
+    }
+
     fn proven_quiescent(&self, record: &RestartRecord, herdr_session_name: &str) -> bool {
         let Some(old) = self.seat_node(record, record.old_seat.herdr_route.clone()) else {
             return false;
         };
-        let sessions: BTreeSet<&str> = [
-            record.old_seat.herdr_route.herdr_session_name.as_str(),
-            herdr_session_name,
-        ]
-        .into_iter()
-        .collect();
-        self.herdr.pane_presence(&old) == PanePresence::Absent
+        let mut sessions = self.seat_sessions(record);
+        sessions.insert(herdr_session_name.to_owned());
+        self.exit_witness(record, Duration::ZERO).is_ok()
+            && self.herdr.pane_presence(&old) == PanePresence::Absent
             && sessions.iter().all(|herdr_session_name| {
                 self.herdr.holds_native_session(herdr_session_name, &old) == Some(false)
             })
-            && record
-                .old_seat
-                .process_option
-                .as_ref()
-                .is_none_or(ProvesExit::has_exited)
+    }
+
+    fn seat_sessions(&self, record: &RestartRecord) -> BTreeSet<String> {
+        let flows = self
+            .store
+            .flow_node(&record.flow_id)
+            .ok()
+            .flatten()
+            .and_then(|node| match node.herdr_route_selection {
+                HerdrRouteSelection::Available(route) => Some(route.herdr_session_name),
+                HerdrRouteSelection::Unavailable => None,
+            });
+        std::iter::once(record.old_seat.herdr_route.herdr_session_name.clone())
+            .chain(flows)
+            .collect()
     }
 
     fn resume_session_name(&self, record: &RestartRecord) -> String {
@@ -1088,6 +1172,15 @@ impl RestartsInSteps for RunningNexus {
     ) -> Resumption {
         let flow_id = record.flow_id.clone();
         eprintln!("flow-nexus: restart of flow {flow_id} did not bind: {failure:?}");
+        // The seat to reconcile is now this pane and the harness it showed:
+        // the old one was proven exited before Closed was written.
+        let record = RestartRecord {
+            old_seat: OldSeat {
+                herdr_route: pane.route(),
+                process_option: spawned,
+            },
+            ..record
+        };
         if self.perform(Operation::Discard(pane.clone())) != Outcome::Closed {
             return Resumption::Answered(Box::new(self.interrupted(record, Some(pane))));
         }
@@ -1101,7 +1194,6 @@ impl RestartsInSteps for RunningNexus {
         Resumption::Failed(Box::new(FailedRun {
             failed,
             resume_launch,
-            spawned,
             response: failure.answer(&flow_id),
         }))
     }
@@ -1158,10 +1250,8 @@ impl RestartsInSteps for RunningNexus {
         let Some(node) = self.seat_node(record, record.old_seat.herdr_route.clone()) else {
             return false;
         };
-        let sessions: BTreeSet<String> =
-            std::iter::once(record.old_seat.herdr_route.herdr_session_name.clone())
-                .chain(pane.map(|pane| pane.herdr_session_name.clone()))
-                .collect();
+        let mut sessions = self.seat_sessions(record);
+        sessions.extend(pane.map(|pane| pane.herdr_session_name.clone()));
         for herdr_session_name in &sessions {
             let Some(holding) = self
                 .herdr
@@ -1289,9 +1379,10 @@ impl RestartsFlows for RunningNexus {
                         Err(_) => self.interrupted(record, Some(pane)),
                     }
                 }
-                // Reopened only under the bound, and only once nothing
-                // holds the session.
-                RestartPhase::Failed(_) => match self.reopened(record, None, None) {
+                // Reopened only under the bound, and only once the old
+                // seat's recorded harness is exited and nothing holds the
+                // session.
+                RestartPhase::Failed(_) => match self.reopened(record, None, Duration::ZERO) {
                     Reopening::Reopened(prepared) => self.resumed(*prepared),
                     Reopening::Kept => continue,
                     Reopening::Refused(response) => *response,
@@ -1315,6 +1406,28 @@ impl RestartsFlows for RunningNexus {
             | RestartPhase::Spawning(_) => {
                 return Response::StopRejected(StopRejection::Restarting);
             }
+        };
+        // An interrupted spawn's pane is the seat a later retry reconciles:
+        // the harness it shows now, else the one recorded for it.
+        let record = match &pane {
+            Some(pane) => {
+                let route = pane.route();
+                let recorded = Some(&record.old_seat)
+                    .filter(|old_seat| old_seat.herdr_route == route)
+                    .and_then(|old_seat| old_seat.process_option.clone());
+                let process_option = self
+                    .herdr
+                    .harness_process(&route, &record.native_session_id)
+                    .or(recorded);
+                RestartRecord {
+                    old_seat: OldSeat {
+                        herdr_route: route,
+                        process_option,
+                    },
+                    ..record
+                }
+            }
+            None => record,
         };
         if !self.quiesced(&record, pane.as_ref()) {
             return Response::StopRejected(match pane {

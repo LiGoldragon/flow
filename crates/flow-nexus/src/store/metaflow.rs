@@ -738,6 +738,13 @@ impl ResolvesRemembering for FlowStore {
 mod tests {
     use super::*;
 
+    fn deliver_key(counter: i64) -> signal_flow::DeliverKey {
+        signal_flow::DeliverKey {
+            namespace: "testMessageMemory".into(),
+            counter,
+        }
+    }
+
     struct Fixture {
         _directory: tempfile::TempDir,
         store: FlowStore,
@@ -872,7 +879,7 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock: forged,
-                        deliver_key: "forged".into(),
+                        deliver_key: deliver_key(0),
                         sendable_message: signal_flow::SendableMessage::Soft(
                             signal_flow::SendableRequest::Psyche(match body.clone() {
                                 Request::Psyche(value) => value,
@@ -900,7 +907,7 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock: lock.clone(),
-                        deliver_key: "accepted".into(),
+                        deliver_key: deliver_key(1),
                         sendable_message: signal_flow::SendableMessage::Soft(
                             signal_flow::SendableRequest::Psyche(match body.clone() {
                                 Request::Psyche(value) => value,
@@ -935,7 +942,7 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock,
-                        deliver_key: "duplicate".into(),
+                        deliver_key: deliver_key(2),
                         sendable_message: signal_flow::SendableMessage::Soft(
                             signal_flow::SendableRequest::Notice("duplicate".into())
                         )
@@ -983,7 +990,7 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock,
-                        deliver_key: "expired".into(),
+                        deliver_key: deliver_key(3),
                         sendable_message: signal_flow::SendableMessage::Soft(
                             signal_flow::SendableRequest::Notice("expired".into())
                         )

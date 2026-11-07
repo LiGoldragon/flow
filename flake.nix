@@ -717,8 +717,16 @@
             "tests::handover::a_refresh_successor_is_given_its_predecessors_handover_last_whole";
           flow-handover-absent-first-prompt-unchanged = context.exactTest "flow-nexus"
             "tests::handover::a_successor_whose_predecessor_left_no_file_has_its_first_prompt_unchanged";
-          flow-handover-unreadable-launch-goes-on = context.exactTest "flow-nexus"
-            "tests::handover::a_handover_that_cannot_be_read_does_not_stop_the_successor";
+          flow-handover-unreadable-waking-refused-asleep = context.exactTest "flow-nexus"
+            "tests::handover::a_waking_whose_handover_cannot_be_read_is_refused_asleep_with_its_queue";
+          flow-handover-unreadable-refresh-refused-predecessor-kept = context.exactTest "flow-nexus"
+            "tests::handover::a_refresh_whose_handover_cannot_be_read_keeps_its_predecessor";
+          flow-handover-invalid-predecessor-refused = context.exactTest "flow-nexus"
+            "tests::handover::a_waking_after_a_predecessor_naming_no_flow_is_refused_asleep_with_its_queue";
+          flow-handover-root-unresolved-refused = context.exactTest "flow-nexus"
+            "tests::handover::a_launch_whose_root_cannot_be_resolved_is_refused_naming_its_predecessor";
+          flow-handover-on-demand-seat-kept = context.exactTest "flow-nexus"
+            "tests::handover::an_on_demand_seat_whose_successor_is_refused_its_handover_is_not_closed";
           flow-handover-last-bytes-either-harness = context.exactTest "flow-nexus"
             "tests::handover::the_handover_is_the_last_bytes_of_the_first_prompt_on_either_harness";
           flow-handover-restart-none = context.exactTest "flow-nexus"

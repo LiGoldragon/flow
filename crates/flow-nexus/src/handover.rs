@@ -9,6 +9,7 @@
 //! [`crate::composition::OpensLaunchComposer::with_handover_source`]; the order of
 //! the prompt does not change.
 
+use signal_flow::HandoverFault;
 use std::path::Path;
 
 /// What a source holds of a predecessor's handover.
@@ -18,9 +19,9 @@ pub enum Handover {
     Absent,
     /// The handover text, to be placed whole.
     Text(String),
-    /// The source holds one it could not read, with the reason. The launch
-    /// goes on without it and the Nexus logs the reason.
-    Unreadable(String),
+    /// The source holds one it could not read whole, for this fault. The
+    /// launch is refused `HandoverUnreadable` with it.
+    Unreadable(HandoverFault),
 }
 
 /// Yields the handover of a predecessor flow.
@@ -33,7 +34,8 @@ pub trait YieldsHandover: std::fmt::Debug + Send + Sync {
 
 /// The file-backed source: `flows/<predecessor FlowId>/handover.md` under
 /// the launch root. A missing file, or an empty one, is [`Handover::Absent`];
-/// a file that cannot be read, or is not UTF-8, is [`Handover::Unreadable`].
+/// a predecessor that names no flow, a file that cannot be read, or one that
+/// is not UTF-8, is [`Handover::Unreadable`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HandoverFile;
 
@@ -45,7 +47,7 @@ impl YieldsHandover for HandoverFile {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
         if !names_a_flow {
-            return Handover::Unreadable(format!("{predecessor:?} does not name a flow"));
+            return Handover::Unreadable(HandoverFault::InvalidPredecessor);
         }
         let path = launch_root
             .join("flows")
@@ -55,10 +57,13 @@ impl YieldsHandover for HandoverFile {
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(text) if text.is_empty() => Handover::Absent,
                 Ok(text) => Handover::Text(text),
-                Err(_) => Handover::Unreadable(format!("{} is not UTF-8", path.display())),
+                Err(_) => Handover::Unreadable(HandoverFault::NotUtf8),
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Handover::Absent,
-            Err(error) => Handover::Unreadable(format!("{}: {error}", path.display())),
+            Err(error) => Handover::Unreadable(HandoverFault::Unreadable(format!(
+                "{}: {error}",
+                path.display()
+            ))),
         }
     }
 }

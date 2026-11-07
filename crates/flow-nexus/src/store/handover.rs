@@ -476,10 +476,10 @@ impl HoldsHandovers for FlowStore {
         if row.current_flow_id.as_deref() == Some(successor) {
             return Ok(());
         }
-        if let Some(owner) = row.current_flow_id.as_deref() {
-            if owner != predecessor {
-                return Err(StoreError::StateInvariant);
-            }
+        if let Some(owner) = row.current_flow_id.as_deref()
+            && owner != predecessor
+        {
+            return Err(StoreError::StateInvariant);
         }
         let sections = row.current.clone();
         let touch = row.touch.take();

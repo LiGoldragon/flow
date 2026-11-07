@@ -7,6 +7,7 @@ use super::NexusFixture;
 use crate::reminding::RemindsCallers;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::reminder::{RecordsReminders, TASK_REMINDERS};
 use crate::store::ManagesMetaflowState;
 use flow_ethos::{Address, Aspect, Model, Request};
@@ -196,18 +197,14 @@ fn archiving_an_ended_task_retracts_its_reminder_atomically() {
             .is_some(),
         "an open Task holds its reminder"
     );
-    fixture
-        .nexus
-        .store
-        .transition_logical_delivery(
-            &acceptance.logical_delivery_id,
-            signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
-                harness_kind: flow_ethos::HarnessKind::Codex,
-                native_session_id: "archived-task-session".into(),
-                native_prompt_id: "archived-task-prompt".into(),
-            }),
-        )
-        .unwrap();
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .withdraw_queued(&recipient, &acceptance.logical_delivery_id)
+            .unwrap(),
+        Ok(())
+    );
     assert_eq!(
         fixture
             .nexus

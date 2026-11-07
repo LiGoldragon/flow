@@ -5,7 +5,7 @@
 pub enum SendKind {
     Order,
     Question,
-    Result,
+    Result(signal_flow::RequestId),
     Notice,
 }
 #[rustfmt::skip]
@@ -72,6 +72,9 @@ pub enum SendRefusal {
     Oversized(signal_flow::SendPayloadSize),
     Store,
     TopicRefused(signal_flow::Topic),
+    Unresolved,
+    RequestIdSpaceFull,
+    RequestIdDrawsCollided,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -91,9 +94,17 @@ pub struct LegacyUnknown_Data {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Archived_Data {
+    pub sender: signal_flow::Sender,
+    pub target: Target,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum SendOutcome {
     Accepted(Accepted_Data),
     LegacyUnknown(LegacyUnknown_Data),
+    Archived(Archived_Data),
     Refused(SendRefusal),
 }
 #[rustfmt::skip]

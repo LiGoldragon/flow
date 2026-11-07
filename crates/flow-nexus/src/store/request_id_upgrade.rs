@@ -224,7 +224,7 @@ pub(crate) struct PriorDelivery {
     pub(crate) logical_delivery_id: String,
     pub(crate) current: PriorCurrentLogicalDelivery,
     pub(crate) events: Vec<PriorLogicalDeliveryEvent>,
-    pub(crate) request: Option<PriorStoredDeliveryRequest>,
+    pub(crate) request: PriorStoredDeliveryRequest,
     pub(crate) attempts: Vec<PriorQueueDeliveryAttempt>,
     pub(crate) outcomes: Vec<PriorStoredSendOutcome>,
 }
@@ -281,4 +281,106 @@ fn model_key(model: &old_flow::Model) -> &'static str {
         old_flow::Model::Luna => "Luna",
         old_flow::Model::Terra => "Terra",
     }
+}
+
+/// A bounded part of the post-upgrade notice for tasks that were already open.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TaskAnnouncement {
+    pub(crate) recipient: old_flow::Address,
+    pub(crate) part: u64,
+    pub(crate) tasks: Vec<String>,
+    pub(crate) tries: u64,
+    pub(crate) status: TaskAnnouncementStatus,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TaskAnnouncementStatus {
+    Pending(Option<old_signal::Refusal>),
+    Admitted(String),
+    Delivered(String),
+    Failed(String),
+    Closed,
+}
+
+impl EngineRecord for TaskAnnouncement {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(part_key(&self.recipient, self.part))
+    }
+}
+impl MemoryDefinition for TaskAnnouncement {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-task-announcement-v1")
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AssignedAnswer {
+    pub(crate) answer: String,
+    pub(crate) order: String,
+    pub(crate) order_id: Option<String>,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OpenOrder {
+    pub(crate) order: String,
+    pub(crate) order_id: String,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AssignmentDecision {
+    pub(crate) recipient: old_flow::Address,
+    pub(crate) assigned: Vec<AssignedAnswer>,
+    pub(crate) open: Vec<OpenOrder>,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UpgradeAssignment {
+    pub(crate) sender: old_flow::Address,
+    pub(crate) part: u64,
+    pub(crate) decisions: Vec<AssignmentDecision>,
+    pub(crate) tries: u64,
+    pub(crate) status: TaskAnnouncementStatus,
+}
+
+impl EngineRecord for UpgradeAssignment {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(part_key(&self.sender, self.part))
+    }
+}
+impl MemoryDefinition for UpgradeAssignment {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-upgrade-assignment-v1")
+    }
+}
+
+pub(crate) const TASK_ANNOUNCEMENT_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_task_announcements");
+pub(crate) const UPGRADE_ASSIGNMENT_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_upgrade_assignments");
+
+pub(crate) fn task_announcement_descriptor() -> TableDescriptor<TaskAnnouncement> {
+    TableDescriptor::new(
+        TASK_ANNOUNCEMENT_TABLE_NAME,
+        FamilyName::new("flow-nexus-task-announcement"),
+        TaskAnnouncement::schema_hash(),
+    )
+}
+
+pub(crate) fn upgrade_assignment_descriptor() -> TableDescriptor<UpgradeAssignment> {
+    TableDescriptor::new(
+        UPGRADE_ASSIGNMENT_TABLE_NAME,
+        FamilyName::new("flow-nexus-upgrade-assignment"),
+        UpgradeAssignment::schema_hash(),
+    )
+}
+
+fn part_key(address: &old_flow::Address, part: u64) -> String {
+    let address = address_key(address);
+    format!("{}:{address}:{part:020}", address.len())
 }

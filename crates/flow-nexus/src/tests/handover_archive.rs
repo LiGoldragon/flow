@@ -16,7 +16,7 @@ fn run(path: &Path, args: &[&str]) {
         .unwrap()
         .success());
 }
-fn request(path: &Path) -> HandoverArchiveRequest {
+fn request(_path: &Path) -> HandoverArchiveRequest {
     HandoverArchiveRequest {
         address: Address {
             aspect: Aspect::Mind,

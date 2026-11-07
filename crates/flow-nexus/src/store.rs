@@ -636,11 +636,11 @@ impl EngineRecord for StoredMetaflow {
 
 impl MemoryDefinition for StoredMetaflow {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(7)
+        MemoryVersion::new(8)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-metaflow-v7")
+        SchemaHash::for_label("flow-nexus-metaflow-v8")
     }
 }
 
@@ -2761,6 +2761,7 @@ impl OpensFlowStore for FlowStore {
                 ),
                 QueueDeliveryPhase::Prepared
                 | QueueDeliveryPhase::Settled(_)
+                | QueueDeliveryPhase::Read { .. }
                 | QueueDeliveryPhase::Absent(_)
                 | QueueDeliveryPhase::Resolved(_) => {
                     return Err(StoreError::StateInvariant);
@@ -4760,7 +4761,7 @@ pub(crate) trait ReadsFlowMemory {
             }
             "flow_nexus_replacements" => ("flow-nexus-replacement", "flow-nexus-replacement-v1"),
             "flow_nexus_roles" => ("flow-nexus-role", "flow-nexus-role-v1"),
-            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v7"),
+            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v8"),
             "flow_nexus_metaflow_processes" => (
                 "flow-nexus-metaflow-process",
                 "flow-nexus-metaflow-process-v2",
@@ -4909,11 +4910,11 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_queue_delivery_requests" => (
                 "flow-nexus-queue-delivery-request",
-                "flow-nexus-queue-delivery-request-v7",
+                "flow-nexus-queue-delivery-request-v8",
             ),
             "flow_nexus_queue_delivery_attempts" => (
                 "flow-nexus-queue-delivery-attempt",
-                "flow-nexus-queue-delivery-attempt-v8",
+                "flow-nexus-queue-delivery-attempt-v9",
             ),
             _ => return None,
         };

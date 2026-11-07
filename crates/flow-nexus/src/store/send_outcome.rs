@@ -7,7 +7,7 @@ use signal_flow::{Address, PrivateSendResponse, Process};
 pub(super) const COUNTER_FAMILY: &str = "flow-nexus-send-outcome-counter";
 pub(super) const COUNTER_SCHEMA: &str = "flow-nexus-send-outcome-counter-v1";
 pub(super) const OUTCOME_FAMILY: &str = "flow-nexus-send-outcome";
-pub(super) const OUTCOME_SCHEMA: &str = "flow-nexus-send-outcome-v7";
+pub(super) const OUTCOME_SCHEMA: &str = "flow-nexus-send-outcome-v8";
 
 const COUNTER_KEY: &str = "counter";
 const SEND_OUTCOME_COUNTER_TABLE_NAME: TableName =
@@ -48,7 +48,7 @@ impl EngineRecord for StoredSendOutcome {
 
 impl MemoryDefinition for StoredSendOutcome {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(7)
+        MemoryVersion::new(8)
     }
 
     fn schema_hash() -> SchemaHash {

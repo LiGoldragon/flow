@@ -11,7 +11,7 @@ use super::waking::SpawnedProcess;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::sending::{BindsSeats, IdentifiesSender};
 use crate::store::AnnouncesLaunchChanges;
-use crate::store::metaflow::SleepsMetaflows;
+use crate::store::metaflow::{MutatesMetaflows, SleepsMetaflows};
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory};
 use signal_flow::{Address, Aspect, Model, Refusal, Response};
 use std::fs;
@@ -417,7 +417,7 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
     use crate::sending::SendsRequests;
     use crate::store::ReadsFlowRows;
     use crate::store::handover::HoldsHandovers;
-    use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow};
+    use crate::store::metaflow::SeedsMetaflow;
     use crate::store::send_outcome::RecordsSendOutcomes;
     use crate::store::sent::NamesCodexAppServers;
     use flow_ethos::State;

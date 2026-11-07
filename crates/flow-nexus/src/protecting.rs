@@ -127,7 +127,6 @@ impl GuardsProtectedAddresses for RunningNexus {
     }
 
     fn asker_of(&self, peer: Option<&Process>) -> Asker {
-        use crate::peer::FindsFlowInPane;
         let Some(peer) = peer else {
             return Asker::Ordinary(Origin::Unbound);
         };

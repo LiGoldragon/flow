@@ -21,8 +21,9 @@ ArchiveDocumentPath.String
 HandoverArchiveIdentity.{ GitCommit ArchiveDocumentPath GitBlob }
 
 RetirementSnapshot.{ Address Vector<HandoverGenerationKey> }
+ArchiveCommitted.{ HandoverGenerationKey HandoverArchiveIdentity }
 RetirementChange.[ GenerationClosed.HandoverGenerationKey
-                    ArchiveCommitted.{ HandoverGenerationKey HandoverArchiveIdentity }
+                    ArchiveCommitted
                     GenerationRemoved.HandoverGenerationKey ]
 RetirementObservationFailure.[ Overflow MissingEvidence.String ]
 ```

@@ -10,7 +10,7 @@ use crate::store::ManagesMetaflowState;
 use crate::store::handover::HoldsHandovers;
 use crate::{Connection, ServesConnection};
 use meta_signal_flow::ConfigurationChange;
-use signal_flow::{Address, Aspect, Model};
+use signal_flow::{Address, Aspect, Model, Response, RetirementObservationFailure};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::{
@@ -242,6 +242,53 @@ fn retirement_publishes_before_removal_and_retries_failures() {
         0
     );
     assert_eq!(fixture.nexus.store.handover(&address).unwrap(), Vec::new());
+}
+
+#[test]
+fn retirement_scan_read_failure_is_explicitly_incomplete() {
+    let fixture = NexusFixture::new();
+    let address = Address {
+        aspect: Aspect::Mind,
+        topic: "retirementScanReadFailure".into(),
+        model: Model::Sol,
+    };
+    fixture
+        .nexus
+        .store
+        .close_handover_for_successor(&address, "one", "two")
+        .unwrap();
+    let subscription = fixture
+        .nexus
+        .store
+        .observe_handover_retirement(&address)
+        .unwrap();
+    fixture.nexus.store.fail_next_closed_handover_read();
+    assert!(
+        fixture
+            .nexus
+            .retire_handover_generations(
+                &address,
+                0,
+                &RecordingPublisher {
+                    calls: AtomicUsize::new(0),
+                    fail: false,
+                },
+            )
+            .is_err()
+    );
+    assert!(matches!(
+        subscription.next_response().unwrap(),
+        Response::RetirementObservationFailed(RetirementObservationFailure::MissingEvidence(_))
+    ));
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .closed_handovers(&address, 0)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]

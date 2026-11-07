@@ -813,6 +813,10 @@
             "tests::handover_memory::already_absent_is_explicitly_incomplete_and_never_emits_removed";
           flow-retirement-memory-failure-incomplete = context.exactTest "flow-nexus"
             "tests::handover_memory::verified_archive_then_memory_failure_reports_archive_and_incomplete_without_removed";
+          flow-retirement-scan-read-failure-incomplete = context.exactTest "flow-nexus"
+            "tests::handover_archive::retirement_scan_read_failure_is_explicitly_incomplete";
+          flow-retirement-completion-read-failure-incomplete = context.exactTest "flow-nexus"
+            "tests::handover_memory::retirement_completion_read_failure_is_explicitly_incomplete_and_retains_the_generation";
           flow-retirement-cli-incomplete-eof = context.exactTest "flow"
             "tests::retirement_eof_and_truncated_frames_are_incomplete";
           flow-retirement-cli-terminal-failure = context.exactTest "flow"
@@ -823,10 +827,10 @@
             "flow-retirement-immutable-contract-pins"
             { nativeBuildInputs = [ context.pkgs.gnugrep ]; }
             ''
-              grep -F 'rev = "5960b8cd5e7b1a1679c72457964584638c9f4b6f"' ${./Cargo.toml}
-              grep -F 'rev = "b0145e67c0a8d3c683fa34f71644c6e8b595584e"' ${./Cargo.toml}
-              grep -F 'signal-flow?rev=5960b8cd5e7b1a1679c72457964584638c9f4b6f#5960b8cd5e7b1a1679c72457964584638c9f4b6f' ${./Cargo.lock}
-              grep -F 'meta-signal-flow?rev=b0145e67c0a8d3c683fa34f71644c6e8b595584e#b0145e67c0a8d3c683fa34f71644c6e8b595584e' ${./Cargo.lock}
+              grep -F 'rev = "e050c8fbf334d859391cb64f6a47663a2c689c11"' ${./Cargo.toml}
+              grep -F 'rev = "91e1f45adced679a006638f1cec1b6456e5a4dc0"' ${./Cargo.toml}
+              grep -F 'signal-flow?rev=e050c8fbf334d859391cb64f6a47663a2c689c11#e050c8fbf334d859391cb64f6a47663a2c689c11' ${./Cargo.lock}
+              grep -F 'meta-signal-flow?rev=91e1f45adced679a006638f1cec1b6456e5a4dc0#91e1f45adced679a006638f1cec1b6456e5a4dc0' ${./Cargo.lock}
               touch "$out"
             '';
           flow-handover-permission-denied-unreadable = context.exactTest "flow-nexus"

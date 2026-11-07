@@ -90,10 +90,16 @@ impl RetiresHandoverGenerations for RunningNexus {
         retain: usize,
         publisher: &dyn PublishesHandoverArchive,
     ) -> Result<usize, HandoverRetirementRefusal> {
-        let rows = self
-            .store
-            .closed_handovers(address, retain)
-            .map_err(|e| HandoverRetirementRefusal::Memory(e.to_string()))?;
+        let rows = match self.store.closed_handovers(address, retain) {
+            Ok(rows) => rows,
+            Err(error) => {
+                self.store.fail_handover_retirement(
+                    address,
+                    format!("closed generations could not be read from Memory: {error}"),
+                );
+                return Err(HandoverRetirementRefusal::Memory(error.to_string()));
+            }
+        };
         let mut retired = 0;
         for closed in rows {
             let publication = match publisher.publish(HandoverArchiveRequest {

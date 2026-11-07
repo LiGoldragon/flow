@@ -134,6 +134,10 @@ pub trait HoldsHandovers {
     #[cfg(test)]
     fn fail_next_handover_removal(&self);
     #[cfg(test)]
+    fn fail_next_closed_handover_read(&self);
+    #[cfg(test)]
+    fn fail_next_retirement_completion_read(&self);
+    #[cfg(test)]
     fn keep_handover(
         &self,
         address: &Address,
@@ -266,6 +270,15 @@ impl HoldsHandovers for FlowStore {
         address: &Address,
         count: usize,
     ) -> Result<Vec<ClosedHandover>, StoreError> {
+        #[cfg(test)]
+        if std::mem::take(
+            &mut *self
+                .fail_next_closed_handover_read
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        ) {
+            return Err(StoreError::StateInvariant);
+        }
         let Some(row) = self.handover_row(address)? else {
             return Ok(Vec::new());
         };
@@ -303,7 +316,35 @@ impl HoldsHandovers for FlowStore {
             .handover_write_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(mut row) = self.handover_row(address)? else {
+        #[cfg(test)]
+        if std::mem::take(
+            &mut *self
+                .fail_next_retirement_completion_read
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        ) {
+            let error = StoreError::StateInvariant;
+            self.handover_observations.fail(
+                address,
+                RetirementObservationFailure::MissingEvidence(format!(
+                    "the archived generation could not be read from Memory: {error}"
+                )),
+            );
+            return Err(error);
+        }
+        let row = match self.handover_row(address) {
+            Ok(row) => row,
+            Err(error) => {
+                self.handover_observations.fail(
+                    address,
+                    RetirementObservationFailure::MissingEvidence(format!(
+                        "the archived generation could not be read from Memory: {error}"
+                    )),
+                );
+                return Err(error);
+            }
+        };
+        let Some(mut row) = row else {
             self.handover_observations.fail(
                 address,
                 RetirementObservationFailure::MissingEvidence(
@@ -389,6 +430,22 @@ impl HoldsHandovers for FlowStore {
     fn fail_next_handover_removal(&self) {
         *self
             .fail_next_handover_removal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+    }
+
+    #[cfg(test)]
+    fn fail_next_closed_handover_read(&self) {
+        *self
+            .fail_next_closed_handover_read
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+    }
+
+    #[cfg(test)]
+    fn fail_next_retirement_completion_read(&self) {
+        *self
+            .fail_next_retirement_completion_read
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
     }

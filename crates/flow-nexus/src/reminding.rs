@@ -141,7 +141,6 @@ impl ArchivesHandoverOnTick for RunningNexus {
         use crate::store::handover_configuration::ReadsHandoverConfiguration;
         use crate::store::metaflow::SleepsMetaflows;
         use crate::store::ManagesMetaflowState;
-        use std::collections::BTreeSet;
         let Ok(archive) = self.store.handover_archive() else { eprintln!("flow-nexus: handover archive configuration unreadable"); return };
         let meta_signal_flow::HandoverArchiveConfiguration::Configured(path) = archive else {
             eprintln!("flow-nexus: handover archive is ArchiveUnconfigured; closed generations retained");
@@ -154,8 +153,12 @@ impl ArchivesHandoverOnTick for RunningNexus {
         };
         let Ok(metaflows) = self.store.list_metaflows() else { return };
         let publisher = ExistingGitHandoverArchive::new(path);
-        let mut addresses = BTreeSet::new();
-        for metaflow in metaflows { addresses.insert(metaflow.address); }
+        let mut addresses = Vec::new();
+        for metaflow in metaflows {
+            if !addresses.contains(&metaflow.address) {
+                addresses.push(metaflow.address);
+            }
+        }
         for address in addresses {
             if let Err(error) = self.retire_handover_generations(&address, count as usize, &publisher) {
                 eprintln!("flow-nexus: handover archive retry refused for {address:?}: {error}");

@@ -138,6 +138,37 @@ fn successor_restart_is_idempotent_and_empty_generation_is_archived() {
 }
 
 #[test]
+fn closed_generation_reopens_and_retry_keeps_one_snapshot() {
+    use super::configuring::ConfiguredStore;
+    use crate::store::OpensFlowStore;
+    let fixture = ConfiguredStore::new();
+    let address = address("handoverCrashBoundary");
+    let store = crate::store::FlowStore::open_configured(fixture.path()).unwrap();
+    store.ensure_live_handover(&address, "pred").unwrap();
+    store
+        .keep_handover(
+            &address,
+            &address,
+            section("old", "d", "body"),
+            Touch::Unknown,
+        )
+        .unwrap();
+    store
+        .close_handover_for_successor(&address, "pred", "succ")
+        .unwrap();
+    drop(store);
+    let reopened = crate::store::FlowStore::open_configured(fixture.path()).unwrap();
+    reopened
+        .close_handover_for_successor(&address, "pred", "succ")
+        .unwrap();
+    let row = reopened.handover_memory(&address).unwrap().unwrap();
+    assert_eq!(row.closed.len(), 1);
+    assert_eq!(row.current_flow_id.as_deref(), Some("succ"));
+    assert_eq!(row.touch, None);
+    assert_eq!(row.current, vec![section("old", "d", "body")]);
+}
+
+#[test]
 fn only_owner_edits_but_read_apis_cross_addresses() {
     let fixture = NexusFixture::new();
     let owner = address("handoverOwner");

@@ -126,7 +126,7 @@ impl CodexCliWorld {
                 },
                 meta_signal_flow::ConfigureModel {
                     model: Model::Luna,
-                    native: "gpt-6.1-luna".into(),
+                    native: "gpt-6-luna".into(),
                 },
             ]))
             .unwrap();

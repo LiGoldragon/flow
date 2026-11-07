@@ -16,6 +16,11 @@ use flow_ethos_before_request_ids as old_flow;
 use meta_signal_flow_before_request_ids as old_meta;
 use signal_flow_before_request_ids as old_signal;
 
+const TASK_ANNOUNCEMENT_HEADER: &str = "Your open tasks; close each with Done by its id:";
+const ASSIGNMENT_HEADER: &str = "Identical Orders answered before ids; each answer was given to the earliest delivered. If one is wrong, archive the open one or send it again:";
+const LONGEST_TASK_ID: &str = "0000";
+const LONGEST_ASSIGNMENT_ID: &str = "archived";
+
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PriorCurrentLogicalDelivery {
     pub(crate) snapshot: old_signal::DeliverySnapshot,
@@ -438,7 +443,7 @@ pub(crate) trait RunsRequestIdAnnouncements {
 
 impl RunsRequestIdAnnouncements for super::FlowStore {
     fn run_request_id_announcements(&self) -> Result<(), StoreError> {
-        use super::logical_delivery::{RecordsLogicalDeliveries, RequestClosure};
+        use super::logical_delivery::RequestClosure;
         use super::queue_delivery::AccountsQueueDelivery;
         use sema_engine::{KeyedMutation, QueryPlan};
 
@@ -449,6 +454,9 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
             return Err(StoreError::StateInvariant);
         };
         let retained = self.retained_logical_requests()?;
+        let prior = self
+            .engine
+            .match_records(QueryPlan::all(self.request_id_upgrade.prior_deliveries))?;
         let bindings = self
             .engine
             .match_records(QueryPlan::all(self.logical_deliveries.request_ids))?;
@@ -484,6 +492,30 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
                 }
             })
         };
+        let order_words = |logical_id: &str| {
+            retained
+                .iter()
+                .find_map(|value| {
+                    if value.entry.logical_delivery_id != logical_id {
+                        return None;
+                    }
+                    match &value.entry.message {
+                        flow_ethos::Message::HardAbrupt(flow_ethos::Request::Order(words))
+                        | flow_ethos::Message::MiddleAbrupt(flow_ethos::Request::Order(words))
+                        | flow_ethos::Message::Soft(flow_ethos::Request::Order(words)) => {
+                            Some(words.clone())
+                        }
+                        _ => None,
+                    }
+                })
+                .or_else(|| {
+                    prior.records().iter().find_map(|value| {
+                        (value.logical_delivery_id == logical_id)
+                            .then(|| prior_order_words(&value.request))
+                            .flatten()
+                    })
+                })
+        };
 
         let task_rows = self
             .engine
@@ -505,7 +537,11 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
                 if open(logical_id) {
                     let id = request_id(logical_id).ok_or(StoreError::StateInvariant)?;
                     let words = task_words(logical_id).ok_or(StoreError::StateInvariant)?;
-                    lines.push(format!("{id} {words}"));
+                    lines.push(render_bounded_line(
+                        TASK_ANNOUNCEMENT_HEADER,
+                        &format!("{id} "),
+                        &words,
+                    ));
                 }
             }
             if lines.is_empty() {
@@ -517,10 +553,7 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
                 ))?;
                 continue;
             }
-            let text = format!(
-                "Your open tasks; close each with Done by its id:\n{}",
-                lines.join("\n")
-            );
+            let text = format!("{TASK_ANNOUNCEMENT_HEADER}\n{}", lines.join("\n"));
             admit_upgrade_notice(
                 self,
                 row.recipient.clone(),
@@ -566,19 +599,26 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
                     let id = request_id(&assigned.order)
                         .map(|id| id.to_string())
                         .unwrap_or_else(|| "archived".into());
-                    lines.push(format!("{id} answered {}", assigned.order));
+                    let words = order_words(&assigned.order).ok_or(StoreError::StateInvariant)?;
+                    lines.push(render_bounded_line(
+                        ASSIGNMENT_HEADER,
+                        &format!("{id} answered "),
+                        &words,
+                    ));
                 }
                 for order in &decision.open {
                     let id = request_id(&order.order)
                         .map(|id| id.to_string())
                         .unwrap_or_else(|| "archived".into());
-                    lines.push(format!("{id} open {}", order.order));
+                    let words = order_words(&order.order).ok_or(StoreError::StateInvariant)?;
+                    lines.push(render_bounded_line(
+                        ASSIGNMENT_HEADER,
+                        &format!("{id} open "),
+                        &words,
+                    ));
                 }
             }
-            let text = format!(
-                "Identical Orders answered before ids; each answer was given to the earliest delivered. If one is wrong, archive the open one or send it again:\n{}",
-                lines.join("\n")
-            );
+            let text = format!("{ASSIGNMENT_HEADER}\n{}", lines.join("\n"));
             admit_upgrade_notice(
                 self,
                 row.sender.clone(),
@@ -1237,6 +1277,60 @@ fn prior_request<'a>(request: &'a PriorStoredDeliveryRequest) -> Option<&'a old_
     }
 }
 
+fn prior_order_words(request: &PriorStoredDeliveryRequest) -> Option<String> {
+    match prior_request(request) {
+        Some(old_flow::Request::Order(words)) => Some(words.clone()),
+        _ => None,
+    }
+}
+
+fn prior_task_words(request: &PriorStoredDeliveryRequest) -> Option<String> {
+    match prior_request(request) {
+        Some(old_flow::Request::Task(task)) => Some(task.string.clone()),
+        _ => None,
+    }
+}
+
+fn render_bounded_line(header: &str, prefix: &str, words: &str) -> String {
+    let maximum = crate::sending::MAX_SEND_PAYLOAD_BYTES;
+    let fixed = header.len().saturating_add(1).saturating_add(prefix.len());
+    let available = maximum.saturating_sub(fixed);
+    if words.len() <= available {
+        return format!("{prefix}{words}");
+    }
+    const ELLIPSIS: &str = "…";
+    let keep = available.saturating_sub(ELLIPSIS.len());
+    let mut boundary = keep.min(words.len());
+    while boundary > 0 && !words.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    format!("{prefix}{}{ELLIPSIS}", &words[..boundary])
+}
+
+fn partition_rows<T: Clone>(
+    header: &str,
+    rows: impl IntoIterator<Item = (T, String)>,
+) -> Vec<Vec<T>> {
+    let mut parts = Vec::new();
+    let mut current = Vec::new();
+    let mut bytes = header.len();
+    for (item, line) in rows {
+        let addition = 1usize.saturating_add(line.len());
+        if !current.is_empty()
+            && bytes.saturating_add(addition) > crate::sending::MAX_SEND_PAYLOAD_BYTES
+        {
+            parts.push(std::mem::take(&mut current));
+            bytes = header.len();
+        }
+        bytes = bytes.saturating_add(addition);
+        current.push(item);
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
 fn prior_sender(request: &PriorStoredDeliveryRequest) -> Option<&old_flow::Address> {
     match &request.queue_evidence {
         old_meta::QueueEvidence::Logical(entry) => match &entry.sent_by {
@@ -1828,35 +1922,100 @@ pub(crate) fn evolve_request_id_memory(
                 .push(reminder.key.clone());
         }
     }
-    let task_announcements = announcement_groups
-        .into_iter()
-        .map(|(_, (recipient, mut tasks))| {
-            tasks.sort();
-            TaskAnnouncement {
-                recipient,
-                part: 0,
+    let mut task_announcements = Vec::new();
+    for (_, (recipient, mut tasks)) in announcement_groups {
+        tasks.sort();
+        let rows = tasks
+            .into_iter()
+            .map(|logical_id| {
+                let words = prior_task_words(
+                    requests
+                        .get(&logical_id)
+                        .ok_or(StoreError::StateInvariant)?,
+                )
+                .ok_or(StoreError::StateInvariant)?;
+                let line = render_bounded_line(
+                    TASK_ANNOUNCEMENT_HEADER,
+                    &format!("{LONGEST_TASK_ID} "),
+                    &words,
+                );
+                Ok((logical_id, line))
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        for (part, tasks) in partition_rows(TASK_ANNOUNCEMENT_HEADER, rows)
+            .into_iter()
+            .enumerate()
+        {
+            task_announcements.push(TaskAnnouncement {
+                recipient: recipient.clone(),
+                part: u64::try_from(part).map_err(|_| StoreError::StateInvariant)?,
                 tasks,
                 tries: 0,
                 status: TaskAnnouncementStatus::Pending(None),
+            });
+        }
+    }
+    let mut upgrade_assignments = Vec::new();
+    for (_, (sender, mut decisions)) in assignment_decisions {
+        decisions.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut rows = Vec::new();
+        for (_, decision) in decisions {
+            for assigned in decision.assigned {
+                let words = prior_order_words(
+                    requests
+                        .get(&assigned.order)
+                        .ok_or(StoreError::StateInvariant)?,
+                )
+                .ok_or(StoreError::StateInvariant)?;
+                let line = render_bounded_line(
+                    ASSIGNMENT_HEADER,
+                    &format!("{LONGEST_ASSIGNMENT_ID} answered "),
+                    &words,
+                );
+                rows.push((
+                    AssignmentDecision {
+                        recipient: decision.recipient.clone(),
+                        assigned: vec![assigned],
+                        open: Vec::new(),
+                    },
+                    line,
+                ));
             }
-        })
-        .collect::<Vec<_>>();
-    let upgrade_assignments = assignment_decisions
-        .into_iter()
-        .map(|(_, (sender, mut decisions))| {
-            decisions.sort_by(|left, right| left.0.cmp(&right.0));
-            UpgradeAssignment {
-                sender,
-                part: 0,
-                decisions: decisions
-                    .into_iter()
-                    .map(|(_, decision)| decision)
-                    .collect(),
+            for open in decision.open {
+                let words = prior_order_words(
+                    requests
+                        .get(&open.order)
+                        .ok_or(StoreError::StateInvariant)?,
+                )
+                .ok_or(StoreError::StateInvariant)?;
+                let line = render_bounded_line(
+                    ASSIGNMENT_HEADER,
+                    &format!("{LONGEST_ASSIGNMENT_ID} open "),
+                    &words,
+                );
+                rows.push((
+                    AssignmentDecision {
+                        recipient: decision.recipient.clone(),
+                        assigned: Vec::new(),
+                        open: vec![open],
+                    },
+                    line,
+                ));
+            }
+        }
+        for (part, decisions) in partition_rows(ASSIGNMENT_HEADER, rows)
+            .into_iter()
+            .enumerate()
+        {
+            upgrade_assignments.push(UpgradeAssignment {
+                sender: sender.clone(),
+                part: u64::try_from(part).map_err(|_| StoreError::StateInvariant)?,
+                decisions,
                 tries: 0,
                 status: TaskAnnouncementStatus::Pending(None),
-            }
-        })
-        .collect::<Vec<_>>();
+            });
+        }
+    }
 
     let mut identity = String::with_capacity(16);
     for _ in 0..4 {

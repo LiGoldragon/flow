@@ -923,3 +923,78 @@ fn direct_delivery_is_refused_while_refresh_owns_address() {
     ));
     assert_eq!(prompts(&log).len(), 1);
 }
+
+/// Direct Deliver owns the address before it enters Herdr.  A concurrent
+/// refresh therefore observes Locked while the pane operation is blocked,
+/// rather than closing the predecessor beneath an in-flight delivery.
+#[test]
+fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
+    use crate::delivery::DeliversMessages;
+    use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+    use crate::DispatchesSerially;
+    use signal_flow::{Origin, Query, RefreshRejection};
+    use std::time::{Duration, Instant};
+
+    let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
+    fixture.accept_pane_operations(
+        vec![fixture.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.register_with(FlowLifecycle::Active);
+    fixture.at_secondary_refreshing_at(200_000);
+    let reached = fixture.directory.path().join("direct-prompt-reached");
+    let release = fixture.directory.path().join("direct-prompt-release");
+    let body = fs::read_to_string(&fixture.snapshot_program).expect("Herdr fixture");
+    let pattern = "\"agent prompt\") ";
+    assert!(body.contains(pattern), "{body}");
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&body.replacen(
+        pattern,
+        &format!(
+            "\"agent prompt\") : > '{}'; while [ ! -e '{}' ]; do sleep 0.02; done; ",
+            reached.display(),
+            release.display(),
+        ),
+        1,
+    ));
+
+    let address = signal_flow::Address {
+        aspect: signal_flow::Aspect::Psyche,
+        topic: "flow".into(),
+        model: signal_flow::Model::Opus,
+    };
+    let (delivery, refresh) = std::thread::scope(|scope| {
+        let delivery = scope.spawn(|| {
+            fixture.deliver(
+                meta_signal_flow::DeliveryRequest {
+                    delivery_id: "custody-race".into(),
+                    flow_id: "908786".into(),
+                    message: middle_abrupt("custody race"),
+                },
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !reached.exists() {
+            assert!(Instant::now() < deadline, "direct input never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let refresh = fixture
+            .nexus
+            .dispatch_serially(Query::Refresh(address.clone()), Origin::Unbound.into());
+        assert_eq!(
+            refresh,
+            signal_flow::Response::RefreshRejected(RefreshRejection::Locked)
+        );
+        fs::write(&release, "").expect("release direct pane input");
+        (delivery.join().expect("direct delivery"), refresh)
+    });
+    assert!(matches!(delivery, meta_signal_flow::Response::Delivered(_)));
+    assert_eq!(refresh, signal_flow::Response::RefreshRejected(RefreshRejection::Locked));
+    assert_eq!(fixture.typed(), Some("MiddleAbrupt.{ Notification Text.«custody race» }".into()));
+    let after = fixture
+        .nexus
+        .dispatch_serially(Query::Refresh(address), Origin::Unbound.into());
+    assert!(!matches!(after, signal_flow::Response::RefreshRejected(RefreshRejection::Locked)));
+}

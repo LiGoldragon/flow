@@ -8964,6 +8964,52 @@ mod tests {
     }
 
     #[test]
+    fn archived_request_id_is_drawn_again_only_after_its_binding_is_retracted() {
+        use super::logical_delivery::{MintsRequestIds, RequestClosure, RequestIdBinding};
+        use sema_engine::{Assertion, RecordKey, Retraction};
+
+        let fixture = StoreFixture::new();
+        let mut store = fixture.store();
+        store
+            .engine
+            .assert(Assertion::new(
+                store.logical_deliveries.request_ids,
+                RequestIdBinding {
+                    request_id: "same".into(),
+                    logical_delivery_id: "old-delivery".into(),
+                    closure: RequestClosure::Open,
+                },
+            ))
+            .expect("old request holds the id");
+        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+            &mut store,
+            std::sync::Arc::new(ScriptedRequestIdDrawer::new(["same", "next"])),
+        );
+        assert_eq!(
+            MintsRequestIds::mint_request_id(&store).expect("held mint reads"),
+            Ok("next".into()),
+            "a held id is skipped"
+        );
+
+        store
+            .engine
+            .retract(Retraction::new(
+                store.logical_deliveries.request_ids,
+                RecordKey::new("same"),
+            ))
+            .expect("archive's binding retraction is represented");
+        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
+            &mut store,
+            std::sync::Arc::new(ScriptedRequestIdDrawer::new(["same"])),
+        );
+        assert_eq!(
+            MintsRequestIds::mint_request_id(&store).expect("released mint reads"),
+            Ok("same".into()),
+            "only the archive commit frees an id for reuse"
+        );
+    }
+
+    #[test]
     fn request_id_entropy_is_an_injected_capability() {
         let fixture = StoreFixture::new();
         let mut store = fixture.store();

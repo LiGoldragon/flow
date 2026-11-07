@@ -127,16 +127,49 @@ impl RendersNativeContent for signal_flow::VisibleRequest {
                 )
                 .collect::<Vec<_>>()
                 .join("\n"),
+            signal_flow::VisibleRequest::Reminder(value) => value.string.clone(),
         }
     }
 }
 
-impl RendersNativeContent for signal_flow::VisibleMessage {
+impl RendersNativeContent for signal_flow::DeliveredMessage {
     fn native_content(&self) -> String {
         match self {
-            signal_flow::VisibleMessage::HardAbrupt(request)
-            | signal_flow::VisibleMessage::MiddleAbrupt(request)
-            | signal_flow::VisibleMessage::Soft(request) => request.native_content(),
+            signal_flow::DeliveredMessage::HardAbrupt(request)
+            | signal_flow::DeliveredMessage::MiddleAbrupt(request)
+            | signal_flow::DeliveredMessage::Soft(request) => match request {
+                signal_flow::DeliveredRequest::Order(value) => value.string.clone(),
+                signal_flow::DeliveredRequest::Question(value) => value.string.clone(),
+                signal_flow::DeliveredRequest::Notice(value) => value.string.clone(),
+                signal_flow::DeliveredRequest::Result(value) => value.string.clone(),
+                signal_flow::DeliveredRequest::Done(value) => value.string.clone(),
+                signal_flow::DeliveredRequest::Reminder(value) => value.string.clone(),
+                signal_flow::DeliveredRequest::Task(value) => {
+                    format!("Task, {} minutes:\n{}", value.minutes, value.string)
+                }
+                signal_flow::DeliveredRequest::Psyche(value) => match (
+                    value.said.context.is_empty(),
+                    value.said.verbatim.is_empty(),
+                ) {
+                    (true, _) => value.said.verbatim.clone(),
+                    (_, true) => value.said.context.clone(),
+                    _ => format!("{}\n{}", value.said.context, value.said.verbatim),
+                },
+                signal_flow::DeliveredRequest::Psyches(value) => value
+                    .said_vector
+                    .iter()
+                    .map(
+                        |said| match (said.context.is_empty(), said.verbatim.is_empty()) {
+                            (true, _) => said.verbatim.clone(),
+                            (_, true) => said.context.clone(),
+                            _ => format!("{}\n{}", said.context, said.verbatim),
+                        },
+                    )
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                signal_flow::DeliveredRequest::PriorResult(value)
+                | signal_flow::DeliveredRequest::PriorDone(value) => value.clone(),
+            },
         }
     }
 }
@@ -225,7 +258,7 @@ impl ReadsContent for Content {
         match self {
             Content::Waking(inputs) => inputs
                 .iter()
-                .all(|input| input.visible_message.native_content().trim().is_empty()),
+                .all(|input| input.delivered_message.native_content().trim().is_empty()),
             Content::Text(text) => text.trim().is_empty(),
             Content::Psyche(psyche) => psyche.psyche_verbatim.trim().is_empty(),
         }
@@ -235,7 +268,7 @@ impl ReadsContent for Content {
         match self {
             Content::Waking(inputs) => inputs
                 .iter()
-                .map(|input| input.visible_message.native_content())
+                .map(|input| input.delivered_message.native_content())
                 .collect(),
             Content::Text(text) => vec![text.clone()],
             Content::Psyche(psyche) => {

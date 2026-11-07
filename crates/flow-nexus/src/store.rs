@@ -1656,6 +1656,8 @@ impl CompletesSnapshot for ConfiguredFamilies {
             handover_count: self.handover_count,
             publication_deadline: self.publication_deadline,
             counters,
+            request_id_draws: 64,
+            announcement_tries: 3,
         }
     }
 }
@@ -2325,6 +2327,8 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&logical_delivery_descriptors.events)
                 .with_family(&logical_delivery_descriptors.simplified_replies)
                 .with_family(&logical_delivery_descriptors.purposes)
+                .with_family(&logical_delivery_descriptors.request_ids)
+                .with_family(&logical_delivery_descriptors.store_identity)
                 .with_family(&heartbeat_standing_descriptor)
                 .with_family(&restart_descriptor)
                 .with_family(&seat_birth_descriptor)
@@ -2422,6 +2426,7 @@ impl OpensFlowStore for FlowStore {
         store.state()?;
         store.archive_legacy_queue()?;
         store.align_followed_requests()?;
+        store.seed_store_identity()?;
         store.seed_missing_queued_deliveries()?;
         store
             .configuration_snapshot()?
@@ -5495,6 +5500,18 @@ pub(crate) trait ReadsFlowMemory {
             // running store declares them (`counters::ConfiguresCounters`).
             ConfigurationChange::Counters(_) => {
                 Err(StoreError::CountersRefused(CountersRefusal::NotRunning))
+            }
+            ConfigurationChange::RequestIdDraws(value) => {
+                if value < 1 {
+                    return Err(StoreError::StateInvariant);
+                }
+                Ok(ConfigureOutcome::Unchanged)
+            }
+            ConfigurationChange::AnnouncementTries(value) => {
+                if value < 1 {
+                    return Err(StoreError::StateInvariant);
+                }
+                Ok(ConfigureOutcome::Unchanged)
             }
         }
     }

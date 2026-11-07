@@ -4,8 +4,9 @@
 
 use flow_ethos::{DonePayload, Message, Request, ResultPayload, SentBy};
 use signal_flow::{
-    VisibleDonePayload, VisibleDonePayload_Answered_Data, VisibleMessage, VisibleNativeInput,
-    VisibleRequest, VisibleResultPayload, VisibleResultPayload_Answered_Data, VisibleSender,
+    DeliveredMessage, DeliveredRequest, VisibleDonePayload, VisibleDonePayload_Answered_Data,
+    VisibleNativeInput, VisibleRequest, VisibleResultPayload, VisibleResultPayload_Answered_Data,
+    VisibleSender,
 };
 
 pub(crate) fn visible_refusal(refusal: &signal_flow::Refusal) -> signal_flow::VisibleRefusal {
@@ -31,9 +32,9 @@ pub(crate) fn visible_refusal(refusal: &signal_flow::Refusal) -> signal_flow::Vi
         Refusal::Oversized(value) => VisibleRefusal::Oversized(value.clone()),
         Refusal::Direct(value) => VisibleRefusal::Direct(value.clone()),
         Refusal::TopicRefused(value) => VisibleRefusal::TopicRefused(value.clone()),
-        Refusal::NoOpenTask(_) => VisibleRefusal::Unresolved,
         Refusal::Unresolved => VisibleRefusal::Unresolved,
-        Refusal::Ambiguous => VisibleRefusal::Ambiguous,
+        Refusal::RequestIdSpaceFull => VisibleRefusal::RequestIdSpaceFull,
+        Refusal::RequestIdDrawsCollided => VisibleRefusal::RequestIdDrawsCollided,
         Refusal::MinutesRefused(value) => VisibleRefusal::MinutesRefused(value.clone()),
     }
 }
@@ -47,29 +48,41 @@ pub(crate) fn visible_delivery_state(
         DeliveryState::Attempting => VisibleDeliveryState::Attempting,
         DeliveryState::Retryable(value) => VisibleDeliveryState::Retryable(value.clone()),
         DeliveryState::Uncertain => VisibleDeliveryState::Uncertain,
-        DeliveryState::Delivered(value) => VisibleDeliveryState::Delivered(value.clone()),
+        DeliveryState::Delivered(_) => VisibleDeliveryState::Delivered,
+        DeliveryState::Read => VisibleDeliveryState::Read,
         DeliveryState::Failed(value) => VisibleDeliveryState::Failed(visible_refusal(value)),
         DeliveryState::Withdrawn => VisibleDeliveryState::Withdrawn,
+        DeliveryState::Archived => VisibleDeliveryState::Archived,
     }
 }
 
 pub(crate) fn visible_send_failure(
     failure: &signal_flow::SendFailure,
 ) -> signal_flow::VisibleSendFailure {
-    use signal_flow::{SendFailureReason, VisibleSendFailureReason};
-    let visible_send_failure_reason = match &failure.send_failure_reason {
-        SendFailureReason::RecipientUnavailable(value) => {
-            VisibleSendFailureReason::RecipientUnavailable(value.clone())
-        }
-        SendFailureReason::QueueNotPermitted => VisibleSendFailureReason::QueueNotPermitted,
-        SendFailureReason::Refused(value) => {
-            VisibleSendFailureReason::Refused(visible_refusal(value))
-        }
-        SendFailureReason::ReceiptUncertain => VisibleSendFailureReason::ReceiptUncertain,
-        SendFailureReason::NotSent(value) => VisibleSendFailureReason::NotSent(value.clone()),
+    use signal_flow::{
+        SendFailure, SendFailureReason, VisibleSendFailure, VisibleSendFailureReason,
     };
-    signal_flow::VisibleSendFailure {
-        visible_send_failure_reason,
+    fn reason(value: &SendFailureReason) -> VisibleSendFailureReason {
+        match value {
+            SendFailureReason::RecipientUnavailable(value) => {
+                VisibleSendFailureReason::RecipientUnavailable(value.clone())
+            }
+            SendFailureReason::QueueNotPermitted => VisibleSendFailureReason::QueueNotPermitted,
+            SendFailureReason::Refused(value) => {
+                VisibleSendFailureReason::Refused(visible_refusal(value))
+            }
+            SendFailureReason::ReceiptUncertain => VisibleSendFailureReason::ReceiptUncertain,
+            SendFailureReason::NotSent(value) => VisibleSendFailureReason::NotSent(value.clone()),
+        }
+    }
+    match failure {
+        SendFailure::Unadmitted(value) => VisibleSendFailure::Unadmitted(reason(value)),
+        SendFailure::Admitted(value) => {
+            VisibleSendFailure::Admitted(signal_flow::VisibleSendFailure_Admitted_Data {
+                request_id: value.request_id.clone(),
+                visible_send_failure_reason: reason(&value.send_failure_reason),
+            })
+        }
     }
 }
 
@@ -80,18 +93,15 @@ pub(crate) fn visible_send_response(
     match response {
         PrivateSendResponse::SendAccepted(value) => {
             Response::SendAccepted(signal_flow::VisibleSendAcceptance {
+                request_id: value.request_id.clone(),
                 delivery_cursor: value.delivery_cursor,
                 visible_delivery_state: visible_delivery_state(&value.delivery_state),
             })
         }
         PrivateSendResponse::Refused(value) => Response::SendRefused(visible_refusal(value)),
-        PrivateSendResponse::Sent(value) => Response::Sent(value.native_receipt.clone()),
+        PrivateSendResponse::Sent(value) => Response::Sent(value.request_id.clone()),
         PrivateSendResponse::Failed(value) => Response::Failed(visible_send_failure(value)),
     }
-}
-
-pub(crate) trait ProjectsMessage {
-    fn visible_message(&self) -> VisibleMessage;
 }
 
 fn visible_request(request: &Request) -> VisibleRequest {
@@ -102,7 +112,7 @@ fn visible_request(request: &Request) -> VisibleRequest {
         Request::Psyches(value) => VisibleRequest::Psyches(value.clone()),
         Request::Result(ResultPayload::Answered(value)) => VisibleRequest::Result(
             VisibleResultPayload::Answered(VisibleResultPayload_Answered_Data {
-                answerable: value.answerable.clone(),
+                request_id: value.request_id.clone(),
                 string: value.string.clone(),
             }),
         ),
@@ -113,24 +123,72 @@ fn visible_request(request: &Request) -> VisibleRequest {
         Request::Task(value) => VisibleRequest::Task(value.clone()),
         Request::Done(DonePayload::Answered(value)) => VisibleRequest::Done(
             VisibleDonePayload::Answered(VisibleDonePayload_Answered_Data {
-                answerable: value.answerable.clone(),
+                request_id: value.request_id.clone(),
                 string: value.string.clone(),
             }),
         ),
         Request::Done(DonePayload::Historical(value)) => {
             VisibleRequest::Done(VisibleDonePayload::Historical(value.string.clone()))
         }
+        Request::Reminder(value) => {
+            VisibleRequest::Reminder(signal_flow::VisibleRequest_Reminder_Data {
+                request_id: value.request_id.clone(),
+                string: value.string.clone(),
+            })
+        }
     }
 }
 
-impl ProjectsMessage for Message {
-    fn visible_message(&self) -> VisibleMessage {
-        match self {
-            Message::HardAbrupt(request) => VisibleMessage::HardAbrupt(visible_request(request)),
-            Message::MiddleAbrupt(request) => {
-                VisibleMessage::MiddleAbrupt(visible_request(request))
-            }
-            Message::Soft(request) => VisibleMessage::Soft(visible_request(request)),
+fn delivered_request(request_id: &flow_ethos::RequestId, request: &Request) -> DeliveredRequest {
+    match request {
+        Request::Order(value) => DeliveredRequest::Order(signal_flow::Order_Data {
+            request_id: request_id.clone(),
+            string: value.clone(),
+        }),
+        Request::Question(value) => DeliveredRequest::Question(signal_flow::Question_Data {
+            request_id: request_id.clone(),
+            string: value.clone(),
+        }),
+        Request::Psyche(value) => DeliveredRequest::Psyche(signal_flow::Psyche_Data {
+            request_id: request_id.clone(),
+            said: value.clone(),
+        }),
+        Request::Psyches(value) => DeliveredRequest::Psyches(signal_flow::Psyches_Data {
+            request_id: request_id.clone(),
+            said_vector: value.clone(),
+        }),
+        Request::Result(ResultPayload::Answered(value)) => {
+            DeliveredRequest::Result(signal_flow::DeliveredRequest_Result_Data {
+                request_id: value.request_id.clone(),
+                string: value.string.clone(),
+            })
+        }
+        Request::Result(ResultPayload::Historical(value)) => {
+            DeliveredRequest::PriorResult(value.clone())
+        }
+        Request::Notice(value) => DeliveredRequest::Notice(signal_flow::Notice_Data {
+            request_id: request_id.clone(),
+            string: value.clone(),
+        }),
+        Request::Task(value) => DeliveredRequest::Task(signal_flow::Task_Data {
+            request_id: request_id.clone(),
+            minutes: value.minutes,
+            string: value.string.clone(),
+        }),
+        Request::Done(DonePayload::Answered(value)) => {
+            DeliveredRequest::Done(signal_flow::DeliveredRequest_Done_Data {
+                request_id: value.request_id.clone(),
+                string: value.string.clone(),
+            })
+        }
+        Request::Done(DonePayload::Historical(value)) => {
+            DeliveredRequest::PriorDone(value.string.clone())
+        }
+        Request::Reminder(value) => {
+            DeliveredRequest::Reminder(signal_flow::DeliveredRequest_Reminder_Data {
+                request_id: value.request_id.clone(),
+                string: value.string.clone(),
+            })
         }
     }
 }
@@ -148,7 +206,17 @@ impl ProjectsQueueEntry for flow_ethos::QueueEntry {
         };
         VisibleNativeInput {
             visible_sender,
-            visible_message: self.message.visible_message(),
+            delivered_message: match &self.message {
+                Message::HardAbrupt(request) => {
+                    DeliveredMessage::HardAbrupt(delivered_request(&self.request_id, request))
+                }
+                Message::MiddleAbrupt(request) => {
+                    DeliveredMessage::MiddleAbrupt(delivered_request(&self.request_id, request))
+                }
+                Message::Soft(request) => {
+                    DeliveredMessage::Soft(delivered_request(&self.request_id, request))
+                }
+            },
         }
     }
 }
@@ -157,6 +225,7 @@ pub(crate) fn visible_delivery_snapshot(
     value: &signal_flow::DeliverySnapshot,
 ) -> signal_flow::VisibleDeliverySnapshot {
     signal_flow::VisibleDeliverySnapshot {
+        request_id: value.request_id.clone(),
         delivery_cursor: value.delivery_cursor,
         visible_sender: match &value.sent_by {
             SentBy::Sender(address) => VisibleSender::Sender(address.clone()),
@@ -172,6 +241,7 @@ pub(crate) fn visible_send_observation(
     value: &signal_flow::SendObservation,
 ) -> signal_flow::VisibleSendObservation {
     signal_flow::VisibleSendObservation {
+        store_identity: value.store_identity.clone(),
         delivery_cursor: value.delivery_cursor,
         visible_delivery_snapshot_vector: value
             .delivery_snapshot_vector
@@ -227,7 +297,7 @@ pub(crate) fn visible_queue_rejection(
         Private::AlreadyResolved(value) => {
             Visible::AlreadyResolved(visible_queue_resolution_record(&value))
         }
-        Private::AlreadyDelivered(value) => Visible::AlreadyDelivered(value),
+        Private::AlreadyDelivered => Visible::AlreadyDelivered,
     }
 }
 
@@ -336,12 +406,13 @@ pub(crate) fn visible_send_outcome_record(
     use meta_signal_flow::{OrdinarySendOutcome as Private, VisibleOrdinarySendOutcome as Visible};
     let visible_ordinary_send_outcome = match &value.ordinary_send_outcome {
         Private::Accepted(value) => Visible::Accepted(signal_flow::VisibleSendAcceptance {
+            request_id: value.request_id.clone(),
             delivery_cursor: value.delivery_cursor,
             visible_delivery_state: visible_delivery_state(&value.delivery_state),
         }),
         Private::Refused(value) => Visible::Refused(visible_refusal(value)),
         Private::PriorAdmission(value) => Visible::PriorAdmission(value.clone()),
-        Private::Sent(value) => Visible::Sent(value.native_receipt.clone()),
+        Private::Sent(value) => Visible::Sent(value.request_id.clone()),
         Private::Failed(value) => Visible::Failed(visible_send_failure(value)),
     };
     meta_signal_flow::VisibleSendOutcomeRecord {

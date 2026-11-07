@@ -1432,6 +1432,8 @@ pub enum StoreError {
     DuplicateConfigurationEntry,
     #[error("handover configuration refused: {0:?}")]
     HandoverConfigurationRefused(meta_signal_flow::HandoverConfigurationRefusal),
+    #[error("handover configuration upgrade failed: {0}")]
+    HandoverConfigurationUpgrade(String),
     #[error("heartbeat period must be positive")]
     InvalidHeartbeatPeriod,
     #[error("store path must be an absolute file path")]
@@ -1484,7 +1486,7 @@ trait RegistersMetaConfigurationTables: Sized {
 impl RegistersMetaConfigurationTables for MetaConfigurationTables {
     fn register(engine: &mut Engine) -> Result<Self, StoreError> {
         Ok(Self {
-            handover: engine.register_table(<handover_configuration::StoredHandoverConfiguration as handover_configuration::DescribesHandoverConfiguration>::descriptor())?,
+            handover: handover_configuration::upgrade_or_register(engine).map_err(StoreError::HandoverConfigurationUpgrade)?,
             nexus: engine.register_table(StoredMetaNexusConfiguration::descriptor())?,
             models: engine.register_table(StoredMetaModelConfiguration::descriptor())?,
             thresholds: engine.register_table(StoredMetaThresholdConfiguration::descriptor())?,
@@ -1752,7 +1754,8 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
         let delivery_configuration = engine.register_table(delivery_configuration_descriptor)?;
         let meta_configuration_tables = MetaConfigurationTables {
-            handover: engine.register_table(<handover_configuration::StoredHandoverConfiguration as handover_configuration::DescribesHandoverConfiguration>::descriptor())?,
+            handover: handover_configuration::upgrade_or_register(engine)
+                .map_err(StoreError::HandoverConfigurationUpgrade)?,
             nexus: engine.register_table(meta_nexus_descriptor)?,
             models: engine.register_table(meta_models_descriptor)?,
             thresholds: engine.register_table(meta_thresholds_descriptor)?,

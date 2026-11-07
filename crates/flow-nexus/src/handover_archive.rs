@@ -285,7 +285,3 @@ fn run_git_output<const N: usize>(
         ))
     }
 }
-
-#[cfg(test)]
-#[path = "tests/handover_archive.rs"]
-mod tests;

@@ -395,7 +395,12 @@ pub trait AuthenticatesProcessAuthority {
     fn process_authority(&self, peer: &Process) -> Result<ProcessAuthority, StoreError>;
 }
 
-impl RunningNexus {
+trait ResolvesProcessAuthorityEvidence {
+    fn authority_for_address(&self, address: &Address) -> Result<ProcessAuthority, StoreError>;
+    fn authority_for_flow(&self, flow_id: &str) -> Result<ProcessAuthority, StoreError>;
+}
+
+impl ResolvesProcessAuthorityEvidence for RunningNexus {
     fn authority_for_address(&self, address: &Address) -> Result<ProcessAuthority, StoreError> {
         let Some(metaflow) = self.store.metaflow(address)? else {
             return Ok(ProcessAuthority::Unbound);

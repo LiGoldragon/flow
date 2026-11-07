@@ -7563,6 +7563,7 @@ mod tests {
 
     #[test]
     fn a_legacy_configuration_catalog_without_handover_families_upgrades_idempotently() {
+        use redb::ReadableDatabase;
         let fixture = StoreFixture::new();
         fixture.configured();
         let database = redb::Database::open(fixture.path()).expect("legacy catalog opens");
@@ -7572,10 +7573,10 @@ mod tests {
                 .open_table(super::SEMA_CATALOG_TABLE)
                 .expect("catalog opens");
             catalog
-                .delete(super::OPTIONAL_HANDOVER_TABLE)
+                .remove(super::OPTIONAL_HANDOVER_TABLE)
                 .expect("configuration family removes");
             catalog
-                .delete(super::OPTIONAL_HANDOVER_RUNTIME_TABLE)
+                .remove(super::OPTIONAL_HANDOVER_RUNTIME_TABLE)
                 .expect("runtime family removes");
             write.commit().expect("legacy catalog commits");
         }

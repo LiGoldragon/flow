@@ -67,6 +67,13 @@ fn invalid_handover_policy_and_count_are_typed_and_atomic() {
             meta_signal_flow::HandoverConfigurationRefusal::NegativeHandoverCount
         ))
     ));
+    invalid.warning_share_left = -1;
+    assert!(matches!(
+        configuration.configure_change(ConfigurationChange::HandoverPolicies(vec![invalid])),
+        Err(crate::store::StoreError::HandoverConfigurationRefused(
+            meta_signal_flow::HandoverConfigurationRefusal::InvalidWarningShareLeft
+        ))
+    ));
     assert_eq!(configuration.configuration_snapshot().unwrap(), before);
 }
 

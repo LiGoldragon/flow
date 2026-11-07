@@ -5190,7 +5190,10 @@ pub(crate) trait ReadsFlowMemory {
         }
         match change {
             ConfigurationChange::HandoverPolicies(policies) => {
-                if policies.iter().any(|p| p.warning_share_left > 100) {
+                if policies
+                    .iter()
+                    .any(|p| !(0..=100).contains(&p.warning_share_left))
+                {
                     return Err(StoreError::HandoverConfigurationRefused(
                         meta_signal_flow::HandoverConfigurationRefusal::InvalidWarningShareLeft,
                     ));

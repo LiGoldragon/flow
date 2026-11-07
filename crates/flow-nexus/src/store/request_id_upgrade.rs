@@ -3079,11 +3079,11 @@ mod tests {
             else {
                 panic!("helper creates logical evidence")
             };
-            match family {
-                "request" => predecessor
+            let _ = match family {
+                "request" => Some(predecessor
                     .assert(Assertion::new(tables.requests, missing_request.clone()))
-                    .expect("orphan request stores"),
-                "attempt" => predecessor
+                    .expect("orphan request stores")),
+                "attempt" => Some(predecessor
                     .assert(Assertion::new(
                         tables.attempts,
                         PriorQueueDeliveryAttempt {
@@ -3099,8 +3099,8 @@ mod tests {
                             phase: PriorQueueDeliveryPhase::Prepared,
                         },
                     ))
-                    .expect("orphan attempt stores"),
-                "outcome" => predecessor
+                    .expect("orphan attempt stores")),
+                "outcome" => Some(predecessor
                     .assert(Assertion::new(
                         tables.outcomes,
                         PriorStoredSendOutcome {
@@ -3120,8 +3120,8 @@ mod tests {
                             },
                         },
                     ))
-                    .expect("orphan outcome stores"),
-                "send-call" => predecessor
+                    .expect("orphan outcome stores")),
+                "send-call" => Some(predecessor
                     .assert(Assertion::new(
                         tables.send_calls,
                         PriorSendCall {
@@ -3145,8 +3145,8 @@ mod tests {
                             ),
                         },
                     ))
-                    .expect("orphan send call stores"),
-                "metaflow" => predecessor
+                    .expect("orphan send call stores")),
+                "metaflow" => Some(predecessor
                     .assert(Assertion::new(
                         tables.metaflows,
                         PriorStoredMetaflow {
@@ -3158,8 +3158,8 @@ mod tests {
                             },
                         },
                     ))
-                    .expect("orphan metaflow queue stores"),
-                "address-hold" => predecessor
+                    .expect("orphan metaflow queue stores")),
+                "address-hold" => Some(predecessor
                     .assert(Assertion::new(
                         tables.address_holds,
                         PriorAddressHold {
@@ -3173,8 +3173,8 @@ mod tests {
                             }),
                         },
                     ))
-                    .expect("orphan address hold stores"),
-                "heartbeat" => predecessor
+                    .expect("orphan address hold stores")),
+                "heartbeat" => Some(predecessor
                     .assert(Assertion::new(
                         heartbeat_table,
                         StoredHeartbeatStanding {
@@ -3192,10 +3192,10 @@ mod tests {
                             outstanding: Some("missing".into()),
                         },
                     ))
-                    .expect("orphan heartbeat stores"),
-                "reminder" | "simplified-reply" | "purpose" => {}
+                    .expect("orphan heartbeat stores")),
+                "reminder" | "simplified-reply" | "purpose" => None,
                 _ => unreachable!(),
-            }
+            };
             drop(predecessor);
 
             let reminder = super::super::reminder::Reminder {

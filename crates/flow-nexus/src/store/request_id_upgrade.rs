@@ -2473,7 +2473,8 @@ mod tests {
     }
 
     #[test]
-    fn evolution_orders_undelivered_orders_by_admission_and_never_assigns_a_later_order() {
+    fn evolution_orders_undelivered_orders_assigns_each_answer_once_and_never_assigns_a_later_order()
+     {
         let directory = tempfile::tempdir().expect("temporary Memory");
         let path = directory.path().join("flow.sema");
         let descriptors = evolution_descriptors();
@@ -2514,8 +2515,26 @@ mod tests {
             &sender,
             old_signal::DeliveryState::Delivered(native),
         );
-        let after_answer = old_snapshot(
+        let second_answer_queued = old_snapshot(
             5,
+            "answer-second",
+            &recipient,
+            &sender,
+            old_signal::DeliveryState::Queued,
+        );
+        let second_answer_delivered = old_snapshot(
+            6,
+            "answer-second",
+            &recipient,
+            &sender,
+            old_signal::DeliveryState::Delivered(old_signal::NativeReceipt {
+                harness_kind: old_flow::HarnessKind::Codex,
+                native_session_id: "second-session".into(),
+                native_prompt_id: "second-prompt".into(),
+            }),
+        );
+        let after_answer = old_snapshot(
+            7,
             "order-after-answer",
             &sender,
             &recipient,
@@ -2525,6 +2544,7 @@ mod tests {
             early.clone(),
             late.clone(),
             answer_delivered.clone(),
+            second_answer_delivered.clone(),
             after_answer.clone(),
         ] {
             predecessor
@@ -2534,7 +2554,15 @@ mod tests {
                 ))
                 .expect("old current stores");
         }
-        for snapshot in [early, late, answer_queued, answer_delivered, after_answer] {
+        for snapshot in [
+            early,
+            late,
+            answer_queued,
+            answer_delivered,
+            second_answer_queued,
+            second_answer_delivered,
+            after_answer,
+        ] {
             predecessor
                 .assert(Assertion::new(
                     tables.events,
@@ -2568,8 +2596,18 @@ mod tests {
                     },
                 )),
             ),
+            (
+                "answer-second",
+                PriorRequestState::Settled,
+                old_flow::Request::Result(old_flow::ResultPayload::Answered(
+                    old_flow::ResultPayload_Answered_Data {
+                        answerable: old_flow::Answerable::Order("same words".into()),
+                        string: "second answer words".into(),
+                    },
+                )),
+            ),
         ] {
-            let (from, to) = if logical_id == "answer" {
+            let (from, to) = if logical_id.starts_with("answer") {
                 (&recipient, &sender)
             } else {
                 (&sender, &recipient)
@@ -2623,8 +2661,9 @@ mod tests {
             .iter()
             .flat_map(|decision| &decision.assigned)
             .collect::<Vec<_>>();
-        assert_eq!(assigned.len(), 1);
+        assert_eq!(assigned.len(), 2);
         assert_eq!(assigned[0].order, "order-early");
+        assert_eq!(assigned[1].order, "order-late");
         assert_eq!(
             assignment
                 .decisions
@@ -2632,7 +2671,7 @@ mod tests {
                 .flat_map(|decision| &decision.open)
                 .map(|open| open.order.as_str())
                 .collect::<std::collections::BTreeSet<_>>(),
-            std::collections::BTreeSet::from(["order-after-answer", "order-late"])
+            std::collections::BTreeSet::from(["order-after-answer"])
         );
     }
 

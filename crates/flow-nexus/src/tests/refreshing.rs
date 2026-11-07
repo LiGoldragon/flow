@@ -1037,6 +1037,9 @@ fn a_launch_ordered_replace_holds_the_metaflow_and_types_nothing_into_its_predec
 /// predecessor.
 #[test]
 fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
+    use crate::message_projection::ProjectsQueueEntry;
+    use datom_codec::{Actualizing, Potential};
+
     let (mut fixture, profile) =
         refreshable_with_successor(Continuity::OnDemand, flow_ethos::Delivery::Queue);
     let fixture_only_startup = stored(&fixture)
@@ -1227,56 +1230,68 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
             .filter(|call| call.contains(&successor_prompt))
             .count()
     };
+    let queued_cohort = stored(&fixture).queue;
+    assert_eq!(
+        queued_cohort
+            .iter()
+            .map(|entry| entry.logical_delivery_id.clone())
+            .collect::<Vec<_>>(),
+        vec![first_warning_id.clone(), warning_id.clone()],
+        "the scheduler's two distinct warnings remain oldest first"
+    );
+    let expected_inputs = queued_cohort
+        .iter()
+        .map(|entry| entry.visible_input(&seat_address()))
+        .collect::<Vec<_>>();
     assert_eq!(successor_input_count(), 0);
     assert_eq!(fixture.typed(), None);
     let drained = fixture.nexus.perform(Operation::Drain(seat_address()));
-    assert!(matches!(drained, Outcome::Drained(_)), "{drained:?}");
-    let first_input = fixture.typed().expect("first warning typed to successor");
+    let Outcome::Drained(drained_cohort) = drained else {
+        panic!("warning cohort did not drain: {drained:?}")
+    };
     assert_eq!(
-        first_input
-            .matches("flow Keep.{ WhatIAmStillTryingToDo")
-            .count(),
-        1,
-        "the first native input carries one warning: {first_input}"
+        drained_cohort, queued_cohort,
+        "the one drain parks both distinct logical IDs in queue order"
+    );
+    let cohort_input = fixture.typed().expect("warning cohort typed to successor");
+    let mut budget = datom_codec::Budget {
+        remaining: 65536,
+        reader: protos::ReaderBudget::try_from(65536).expect("a constant reader budget"),
+        depth: 0,
+        maximum_depth: 1024,
+    };
+    let observed_inputs =
+        Potential::<Vec<signal_flow::VisibleNativeInput>>::from(cohort_input.clone())
+            .actualize(&mut budget)
+            .unwrap_or_else(|error| panic!("{cohort_input}: {error:?}"));
+    assert_eq!(
+        observed_inputs, expected_inputs,
+        "one native cohort carries both warning IDs' exact visible inputs, oldest first"
     );
     assert_eq!(successor_input_count(), 1);
-    let drained = fixture.nexus.perform(Operation::Drain(seat_address()));
-    assert!(matches!(drained, Outcome::Drained(_)), "{drained:?}");
-    let second_input = fixture.typed().expect("second warning typed to successor");
-    assert_eq!(
-        second_input,
-        format!("{first_input}{first_input}"),
-        "the second drain types the same warning payload exactly once"
-    );
-    assert_eq!(successor_input_count(), 2);
-    let delivered = fixture
-        .nexus
-        .store
-        .logical_delivery_snapshot(&warning_id)
-        .unwrap()
-        .unwrap();
-    assert!(
-        matches!(
-            delivered.delivery_state,
-            signal_flow::DeliveryState::Uncertain
-        ),
-        "the native input is durably placed under the same logical id: {delivered:?}"
-    );
+    for warning in [&first_warning_id, &warning_id] {
+        let placed = fixture
+            .nexus
+            .store
+            .logical_delivery_snapshot(warning)
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(placed.delivery_state, signal_flow::DeliveryState::Uncertain),
+            "the cohort is durably placed, not fabricated as delivered: {placed:?}"
+        );
+    }
     let _ = fixture.nexus.perform(Operation::Drain(seat_address()));
-    assert_eq!(fixture.typed(), Some(second_input));
+    assert_eq!(fixture.typed(), Some(cohort_input));
     assert_eq!(
         successor_input_count(),
-        2,
+        1,
         "an extra drain produces no additional native input"
     );
     drop(codex);
-    assert_eq!(
-        stored(&fixture)
-            .queue
-            .iter()
-            .filter(|entry| entry.logical_delivery_id == warning_id)
-            .count(),
-        0
+    assert!(
+        stored(&fixture).queue.is_empty(),
+        "both correlated warning IDs leave the queue together"
     );
 }
 

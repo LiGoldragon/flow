@@ -250,6 +250,8 @@
 
 (def h0-diagnostic-record-lock (Object.))
 (def h0-diagnostic-sampler (atom nil))
+(def h0-baseline-pane-ids (atom #{}))
+(def h0-discovered-pane-ids (atom #{}))
 (declare witness-dir)
 
 (defn append-h0-json! [name value]
@@ -261,7 +263,7 @@
         (fs/set-posix-file-permissions path "rw-------")))))
 
 (defn h0-herdr-command! [label & args]
-  (let [result (apply run {:timeout 5000} "herdr" "--session" session args)]
+  (let [result (apply run {:timeout 2000} "herdr" "--session" session args)]
     (append-h0-json! h0-sampler-record-name
                      (merge {:time (str (java.time.Instant/now)) :kind "herdr"
                              :label label :arguments (vec args)} result))
@@ -282,6 +284,19 @@
                             (some #(str/includes? (str %) "Mind test Terra") (vals agent)))
                    (some-> (or (:pane_id agent) (:pane agent)) str)))
                (when (sequential? agents) agents)))))
+
+(defn h0-pane-ids [text]
+  (let [parsed (try (json/parse-string (or text "") true) (catch Exception _ nil))]
+    (set (keep #(some-> (:pane_id %) str) (get-in parsed [:result :panes])))))
+
+(defn h0-agent-pane-ids [text]
+  (let [parsed (try (json/parse-string (or text "") true) (catch Exception _ nil))
+        agents (or (get-in parsed [:result :agents]) (:result parsed))]
+    (set (keep #(when (map? %) (some-> (or (:pane_id %) (:pane %)) str))
+               (when (sequential? agents) agents)))))
+
+(defn h0-discovered-ids [baseline retained current labelled]
+  (into (set retained) (concat (remove (set baseline) current) labelled)))
 
 (defn h0-process-stat! [pid]
   (let [path (str "/proc/" pid "/stat")]
@@ -304,37 +319,55 @@
                       (catch Exception _ nil)))
                (when (fs/exists? path) (str/split-lines (slurp path)))))))
 
-(defn h0-sample! []
+(defn h0-sample!
+  ([] (h0-sample! (constantly true)))
+  ([continue?]
   (try
     (let [panes (h0-herdr-command! "pane-list" "pane" "list")
           agents (h0-herdr-command! "agent-list" "agent" "list")
-          ids (into (h0-matching-pane-ids (:out panes)) (h0-matching-agent-pane-ids (:out agents)))]
+          current (into (h0-pane-ids (:out panes)) (h0-agent-pane-ids (:out agents)))
+          labelled (into (h0-matching-pane-ids (:out panes))
+                         (h0-matching-agent-pane-ids (:out agents)))
+          ids (swap! h0-discovered-pane-ids
+                     #(h0-discovered-ids @h0-baseline-pane-ids % current labelled))]
       (doseq [pane ids]
-        (h0-herdr-command! "pane-get" "pane" "get" pane)
-        (h0-herdr-command! "pane-process-info" "pane" "process-info" "--pane" pane)
-        (h0-herdr-command! "pane-read" "pane" "read" pane "--source" "recent-unwrapped"
-                           "--lines" "200" "--format" "text")
-        (h0-herdr-command! "agent-get" "agent" "get" pane)
-        (h0-herdr-command! "agent-explain" "agent" "explain" pane "--json" "--verbose"))
-      (doseq [pid (h0-recorded-pids)] (h0-process-stat! pid)))
+        (when (continue?) (h0-herdr-command! "pane-get" "pane" "get" pane))
+        (when (continue?) (h0-herdr-command! "pane-process-info" "pane" "process-info" "--pane" pane))
+        (when (continue?)
+          (h0-herdr-command! "pane-read" "pane" "read" pane "--source" "recent-unwrapped"
+                             "--lines" "200" "--format" "text"))
+        (when (continue?) (h0-herdr-command! "agent-get" "agent" "get" pane))
+        (when (continue?)
+          (h0-herdr-command! "agent-explain" "agent" "explain" pane "--json" "--verbose")))
+      (doseq [pid (h0-recorded-pids) :while (continue?)] (h0-process-stat! pid)))
     (catch Exception e
       (append-h0-json! h0-sampler-record-name
                        {:time (str (java.time.Instant/now)) :kind "sampler-error"
-                        :error (.getMessage e)}))))
+                        :error (.getMessage e)})))))
 
 (defn start-h0-sampler! []
-  (h0-sample!)
-  (let [running (atom true)
+  (let [panes (h0-herdr-command! "baseline-pane-list" "pane" "list")
+        agents (h0-herdr-command! "baseline-agent-list" "agent" "list")
+        baseline (into (h0-pane-ids (:out panes)) (h0-agent-pane-ids (:out agents)))
+        _ (reset! h0-baseline-pane-ids baseline)
+        _ (reset! h0-discovered-pane-ids #{})
+        _ (append-h0-json! h0-sampler-record-name
+                           {:time (str (java.time.Instant/now)) :kind "baseline-pane-ids"
+                            :paneIds (vec (sort baseline))})
+        running (atom true)
         worker (future
                  (while @running
                    (Thread/sleep 500)
-                   (when @running (h0-sample!))))]
+                   (when @running (h0-sample! #(deref running)))))]
     (reset! h0-diagnostic-sampler {:running running :worker worker})))
 
 (defn stop-h0-sampler! []
   (when-let [{:keys [running worker]} @h0-diagnostic-sampler]
     (reset! running false)
-    (deref worker 10000 nil))
+    ;; Each command is bounded and the running predicate is checked between
+    ;; probes. Join without overlap: preservation begins only after the worker
+    ;; has actually ended.
+    (deref worker))
   (h0-sample!)
   (reset! h0-diagnostic-sampler nil))
 
@@ -2070,6 +2103,16 @@
 (defn with-h0-diagnostic-finish [body]
   (try (body) (finally (finish-h0-diagnostic!))))
 
+(defn seven-line-contract-complete? [handover-only h0-diagnostic-only outcomes]
+  (cond h0-diagnostic-only false
+        handover-only (not-any? #(false? (:contract-pass %)) outcomes)
+        :else true))
+
+(defn h0-diagnostic-capture-complete? []
+  (and @witness-dir
+       (fs/regular-file? (str @witness-dir "/handover-H0-preservation.json"))
+       (fs/regular-file? (str @witness-dir "/" h0-sampler-record-name))))
+
 (defn h0-diagnostic-scenario []
   (when (fs/exists? ho-archive)
     (throw (ex-info "archive must be new" {:path ho-archive})))
@@ -3340,11 +3383,12 @@
           (with-h0-diagnostic-finish run-capsule)
           (run-capsule)))
       (let [clean (teardown!)
-            contract-complete (or (not handover-only)
-                                  (not-any? #(false? (:contract-pass %)) @results))]
+            contract-complete (seven-line-contract-complete? handover-only h0-diagnostic-only @results)
+            diagnostic-capture (and h0-diagnostic-only (h0-diagnostic-capture-complete?))]
         (println (str "wall " (- (System/currentTimeMillis) wall) " ms | "
                       (count (filter :pass @results)) " of " (count @results) " scenarios passed, "
                       (count (filter :skipped @results)) " skipped | seven-line contract complete " contract-complete
+                      " | diagnostic capture complete " diagnostic-capture
                       " | witnesses " @witness-dir))
         (System/exit (if (and @passed clean contract-complete) 0 1))))))
 

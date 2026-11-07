@@ -193,6 +193,28 @@
   (check "the H0 diagnostic selects exactly one scenario"
          (= 1 (count flow-capsule/h0-diagnostic-scenarios))))
 
+(let [baseline #{"driver"}
+      pending (flow-capsule/h0-discovered-ids baseline #{} #{"driver" "unlabelled-pending"} #{})
+      retained (flow-capsule/h0-discovered-ids baseline pending #{"driver"} #{})]
+  (check "an unlabelled pane appearing after the baseline is probed"
+         (= #{"unlabelled-pending"} pending))
+  (check "a disappeared or renamed agent keeps the same discovered pane for final probes"
+         (= pending retained)))
+
+(let [events (atom [])
+      running (atom true)
+      worker (future (Thread/sleep 100) (swap! events conj :inflight-finished))]
+  (reset! flow-capsule/h0-diagnostic-sampler {:running running :worker worker})
+  (with-redefs [flow-capsule/h0-sample! (fn [& _] (swap! events conj :final-snapshot))]
+    (flow-capsule/stop-h0-sampler!))
+  (swap! events conj :preservation-inventory-began)
+  (Thread/sleep 150)
+  (check "the sampler joins an in-flight probe before final snapshot and preservation"
+         (= [:inflight-finished :final-snapshot :preservation-inventory-began] @events)))
+
+(check "H0 diagnostic output never establishes the seven-line contract"
+       (not (flow-capsule/seven-line-contract-complete? false true [{:pass true}])))
+
 (let [scratch (str (fs/create-temp-dir))
       saved @flow-capsule/witness-dir]
   (try

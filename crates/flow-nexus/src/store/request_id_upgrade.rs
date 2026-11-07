@@ -2453,6 +2453,66 @@ mod tests {
     }
 
     #[test]
+    fn orphaned_predecessor_event_refuses_evolution_without_changing_memory() {
+        let directory = tempfile::tempdir().expect("temporary Memory");
+        let path = directory.path().join("flow.sema");
+        let descriptors = evolution_descriptors();
+        let heartbeat = StoredHeartbeatStanding::descriptor();
+        let (predecessor, tables) = old_engine(&path, &descriptors, &heartbeat);
+        let sender = old_address(old_flow::Aspect::Mind, "sender");
+        let recipient = old_address(old_flow::Aspect::Field, "recipient");
+        predecessor
+            .assert(Assertion::new(
+                tables.events,
+                PriorLogicalDeliveryEvent {
+                    snapshot: old_snapshot(
+                        1,
+                        "orphan",
+                        &sender,
+                        &recipient,
+                        old_signal::DeliveryState::Queued,
+                    ),
+                },
+            ))
+            .expect("orphaned predecessor event stores");
+        drop(predecessor);
+
+        let mut engine = Engine::open(
+            EngineOpen::new(&path, SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION))
+                .with_family(&descriptors.current)
+                .with_family(&descriptors.events)
+                .with_family(&descriptors.metaflows)
+                .with_family(&descriptors.address_holds)
+                .with_family(&descriptors.requests)
+                .with_family(&descriptors.attempts)
+                .with_family(&descriptors.outcomes)
+                .with_family(&descriptors.send_calls)
+                .with_family(&heartbeat),
+        )
+        .expect("predecessor catalog opens for validation");
+        let heartbeat_table = engine.register_table(heartbeat).expect("heartbeat opens");
+        let before = std::fs::read(&path).expect("Memory bytes read before evolution");
+        assert!(matches!(
+            evolve_request_id_memory(
+                &mut engine,
+                descriptors,
+                &[],
+                &[],
+                &[],
+                heartbeat_table,
+                &[],
+                &ScriptedDrawer::new(&["0000", "0001", "0002", "0003"]),
+            ),
+            Err(StoreError::StateInvariant)
+        ));
+        let after = std::fs::read(&path).expect("Memory bytes read after refused evolution");
+        assert_eq!(
+            after, before,
+            "prevalidation refusal commits no catalog or row change"
+        );
+    }
+
+    #[test]
     fn an_empty_exact_predecessor_evolves_once_and_reopens_wholly_current() {
         let directory = tempfile::tempdir().expect("temporary Memory");
         let path = directory.path().join("flow.sema");

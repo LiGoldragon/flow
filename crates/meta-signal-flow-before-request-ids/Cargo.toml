@@ -1,0 +1,16 @@
+[package]
+name = "meta-signal-flow-before-request-ids"
+version = "66.0.0"
+edition = "2024"
+publish = false
+
+[features]
+default = []
+datom = ["dep:datom-codec", "flow-ethos/datom", "signal-flow/datom", "signal/datom"]
+
+[dependencies]
+rkyv.workspace = true
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "eabead4", optional = true }
+signal = { git = "https://github.com/LiGoldragon/signal", rev = "7afb68bcd19ce774f47d11c5e69f6e10054f78de", default-features = false }
+flow-ethos = { package = "flow-ethos-before-request-ids", path = "../flow-ethos-before-request-ids" }
+signal-flow = { package = "signal-flow-before-request-ids", path = "../signal-flow-before-request-ids" }

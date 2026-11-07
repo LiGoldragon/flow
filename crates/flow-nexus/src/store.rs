@@ -1411,7 +1411,7 @@ impl AnnouncesLaunchChanges for LaunchChanges {
     }
 }
 
-#[derive(Debug, thiserror::Error, Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("sema-engine operation failed: {0}")]
     Engine(#[from] sema_engine::Error),

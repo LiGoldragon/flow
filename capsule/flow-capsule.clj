@@ -1773,13 +1773,17 @@
         [archive removed] before-boundary
         same-key (and archive removed (= key (:key archive) (:key removed)))
         identity (:identity archive)
-        identity-exact (and (= expected-path (:path identity))
-                            (= (:commit identity) (:commit git-evidence))
+        immutable-commit (and (boolean (re-matches #"[0-9a-f]{40}" (or (:commit identity) "")))
+                              (zero? (or (:commit-exit git-evidence) -1))
+                              (= (:commit identity) (:verified-commit git-evidence)))
+        identity-exact (and immutable-commit (= expected-path (:path identity))
+                            (zero? (or (:blob-exit git-evidence) -1))
+                            (zero? (or (:content-exit git-evidence) -1))
                             (= (:blob identity) (:blob git-evidence))
                             (= (:content git-evidence) (:requested-content git-evidence)))]
     {:complete (boolean (and target (= [:archive :removed] kinds) same-key identity-exact))
      :key key :kinds kinds :target (boolean target) :same-key (boolean same-key)
-     :identity-exact (boolean identity-exact)}))
+     :immutable-commit (boolean immutable-commit) :identity-exact (boolean identity-exact)}))
 
 (defn start-retirement-observation! []
   (let [query (str "Observe.Retirement." ho-seat)
@@ -2056,12 +2060,18 @@
             retirement-frames (finish-retirement-observation! 45000)
             later (subvec (vec retirement-frames) 1)
             emitted (some #(when (= :archive (:kind %)) (:identity %)) later)
-            emitted-spec (when emitted (str (:commit emitted) ":" (:path emitted)))
-            emitted-blob (when emitted-spec (str/trim (:out (ho-git "rev-parse" emitted-spec))))
-            emitted-content (when emitted-spec (:out (ho-git "cat-file" "blob" emitted-spec)))
+            full-commit (and emitted (re-matches #"[0-9a-f]{40}" (:commit emitted)))
+            commit-result (when full-commit (ho-git "rev-parse" "--verify" (str (:commit emitted) "^{commit}")))
+            emitted-spec (when full-commit (str (:commit emitted) ":" (:path emitted)))
+            blob-result (when emitted-spec (ho-git "rev-parse" "--verify" emitted-spec))
+            content-result (when emitted-spec (ho-git "cat-file" "blob" emitted-spec))
             verdict (retirement-verdict retirement-snapshot later pred (:successor @ho) rel
-                                        {:commit (:commit emitted) :blob emitted-blob
-                                         :content emitted-content :requested-content content})
+                                        {:commit-exit (:exit commit-result)
+                                         :verified-commit (some-> commit-result :out str/trim)
+                                         :blob-exit (:exit blob-result)
+                                         :blob (some-> blob-result :out str/trim)
+                                         :content-exit (:exit content-result)
+                                         :content (:out content-result) :requested-content content})
             live-after {:current (str (awake-flow ho-seat)) :handover (flow (str "Read." ho-seat))
                         :sibling (str (awake-flow ho-other)) :sibling-handover (flow (str "Read." ho-other))}
             live-preserved (= live-before live-after)
@@ -2089,7 +2099,8 @@
                        "; refusal observed " (boolean refused) ", next publisher held at the hook " (boolean publisher-waiting)
                        "; fresh ordinary retirement subscription exact sole closed key " (boolean (:target verdict))
                        ", changes through completion " (:kinds verdict) ", same key " (:same-key verdict)
-                       ", emitted immutable commit:path blob and bytes exact " (:identity-exact verdict)
+                       ", emitted canonical immutable commit " (:immutable-commit verdict)
+                       ", commit:path blob and bytes exact " (:identity-exact verdict)
                        ", live current handover and sibling fixture preserved " live-preserved
                        "; kept as handover-H4-archive.txt and handover-H4-retirement.txt")}))]
 

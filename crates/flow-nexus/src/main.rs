@@ -283,6 +283,12 @@ trait RunsConfigurationStartup {
                 Err(StoreError::CountersRefused(refusal)) => {
                     MetaResponse::ConfigureRejected(ConfigureRejection::CountersRefused(refusal))
                 }
+                Err(StoreError::RequestIdDrawsRefused) => {
+                    MetaResponse::ConfigureRejected(ConfigureRejection::RequestIdDrawsRefused)
+                }
+                Err(StoreError::AnnouncementTriesRefused) => {
+                    MetaResponse::ConfigureRejected(ConfigureRejection::AnnouncementTriesRefused)
+                }
                 Err(StoreError::InvalidHeartbeatPeriod) => {
                     MetaResponse::ConfigureRejected(ConfigureRejection::StoreRefused)
                 }

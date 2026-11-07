@@ -679,6 +679,16 @@ impl Dispatches for RunningNexus {
                             meta_signal_flow::ConfigureRejection::CountersRefused(refusal),
                         )
                     }
+                    Err(store::StoreError::RequestIdDrawsRefused) => {
+                        meta_signal_flow::Response::ConfigureRejected(
+                            meta_signal_flow::ConfigureRejection::RequestIdDrawsRefused,
+                        )
+                    }
+                    Err(store::StoreError::AnnouncementTriesRefused) => {
+                        meta_signal_flow::Response::ConfigureRejected(
+                            meta_signal_flow::ConfigureRejection::AnnouncementTriesRefused,
+                        )
+                    }
                     Err(store::StoreError::InvalidHeartbeatPeriod) => {
                         meta_signal_flow::Response::ConfigureRejected(
                             meta_signal_flow::ConfigureRejection::StoreRefused,

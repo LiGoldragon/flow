@@ -131,6 +131,11 @@
             (exactTest package testName).overrideAttrs (old: {
               nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [ pkgs.git ];
             });
+          exactGitSessionTest =
+            package: testName:
+            (exactTest package testName).overrideAttrs (old: {
+              nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [ pkgs.git pkgs.util-linux ];
+            });
           # One named test across the workspace, run exactly once, for a
           # test that drives the workspace's own CLIs, which a test of one
           # package does not build.
@@ -825,7 +830,7 @@
             "store::tests::actual_configuration_and_flow_openers_admit_and_upgrade_the_exact_v1_handover_family";
           flow-publication-deadline-new-memory = context.exactTest "flow-nexus"
             "store::tests::new_memory_persists_the_publication_deadline_default_before_configuration";
-          flow-publication-deadline-descendant-pipes = context.exactGitTest "flow-nexus"
+          flow-publication-deadline-descendant-pipes = context.exactGitSessionTest "flow-nexus"
             "tests::handover_archive::separate_session_pipe_holder_cannot_extend_the_budget_or_remove_the_generation";
           flow-publication-deadline-expired-spawn = context.exactGitTest "flow-nexus"
             "handover_archive::tests::expired_deadline_never_spawns_the_command";

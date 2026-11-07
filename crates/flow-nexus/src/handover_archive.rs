@@ -14,6 +14,8 @@ use std::{
 };
 use thiserror::Error;
 
+const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
+
 /// The immutable handover document and its archive coordinates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandoverArchiveRequest {
@@ -424,7 +426,17 @@ impl RunsWithDeadline for Command {
             let sender = output_sender.clone();
             move || {
                 let mut bytes = Vec::new();
-                let result = io::Read::read_to_end(&mut io::BufReader::new(stdout), &mut bytes);
+                let result = io::Read::read_to_end(
+                    &mut io::BufReader::new(stdout).take((MAX_CAPTURE_BYTES + 1) as u64),
+                    &mut bytes,
+                )
+                .and_then(|_| {
+                    if bytes.len() > MAX_CAPTURE_BYTES {
+                        Err(io::Error::other("git output exceeded capture bound"))
+                    } else {
+                        Ok(())
+                    }
+                });
                 let _ = sender.send((true, result.map(|_| bytes)));
             }
         });
@@ -432,7 +444,17 @@ impl RunsWithDeadline for Command {
             let sender = output_sender;
             move || {
                 let mut bytes = Vec::new();
-                let result = io::Read::read_to_end(&mut io::BufReader::new(stderr), &mut bytes);
+                let result = io::Read::read_to_end(
+                    &mut io::BufReader::new(stderr).take((MAX_CAPTURE_BYTES + 1) as u64),
+                    &mut bytes,
+                )
+                .and_then(|_| {
+                    if bytes.len() > MAX_CAPTURE_BYTES {
+                        Err(io::Error::other("git output exceeded capture bound"))
+                    } else {
+                        Ok(())
+                    }
+                });
                 let _ = sender.send((false, result.map(|_| bytes)));
             }
         });
@@ -463,7 +485,14 @@ impl RunsWithDeadline for Command {
                 kill_process_group(process_id);
                 HandoverArchiveRefusal::PublicationTimedOut
             })?;
-            let bytes = bytes.map_err(|error| HandoverArchiveRefusal::Git(error.to_string()))?;
+            let bytes = match bytes {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    kill_process_group(process_id);
+                    let _ = child.wait();
+                    return Err(HandoverArchiveRefusal::Git(error.to_string()));
+                }
+            };
             if is_stdout {
                 stdout = Some(bytes);
             } else {

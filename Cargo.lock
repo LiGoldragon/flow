@@ -499,7 +499,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "meta-signal-flow"
-version = "68.0.0"
+version = "70.0.0"
 source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=b7533a27d72bd2204212edb074dd10ddc7a2ff3f#b7533a27d72bd2204212edb074dd10ddc7a2ff3f"
 dependencies = [
  "datom-codec 0.33.0",

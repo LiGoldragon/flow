@@ -154,12 +154,6 @@ impl HoldsHandovers for FlowStore {
         if touch.flow_id != flow_id {
             return Ok(false);
         }
-        let Some(latest_tokens) = self.context_size(flow_id)? else {
-            return Ok(false);
-        };
-        if latest_tokens != touch.tokens {
-            return Ok(false);
-        }
         let left = i128::from(100 - policy.warning_share_left);
         Ok(i128::from(touch.tokens) * 100 >= i128::from(refresh) * left)
     }

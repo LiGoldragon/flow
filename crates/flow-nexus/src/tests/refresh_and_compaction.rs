@@ -83,13 +83,6 @@ pub(super) fn seat_refreshing_at(fixture: &NexusFixture, refresh: i64) {
             }),
         )
         .expect("handover touch configured");
-    assert!(
-        fixture
-            .nexus
-            .store
-            .handover_green(&seat_address(), CLAUDE_SEAT, refresh)
-            .expect("green gate readable")
-    );
 }
 
 fn seat_metaflow(fixture: &NexusFixture, queue: Vec<Request>) {

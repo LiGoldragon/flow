@@ -115,7 +115,7 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
     use super::{CLAUDE_MODEL, CLAUDE_SEAT};
     use super::NexusFixture;
     use crate::handover_reminding::RemindsHandoverCallers;
-    use crate::store::{ConfiguresOnlyStore, ManagesMetaflowState};
+    use crate::store::{ConfiguresFlowStore, ManagesMetaflowState};
     use crate::store::context::RecordsContextSize;
     use crate::store::handover::HoldsHandovers;
     use crate::store::metaflow::SeedsMetaflow;

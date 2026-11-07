@@ -4797,6 +4797,7 @@ pub(crate) trait ReadsFlowMemory {
                     || ADDED_IN_0531.contains(name)
                     || *name == OPTIONAL_HANDOVER_TABLE
                     || *name == OPTIONAL_HANDOVER_RUNTIME_TABLE
+                    || *name == OPTIONAL_HANDOVER_REMINDER_TABLE
             }) && (ADDED_IN_0531.iter().all(|name| actual.contains(*name))
                 || ADDED_IN_0531.iter().all(|name| !actual.contains(*name)))
         };
@@ -7676,6 +7677,140 @@ mod tests {
             let snapshot = reopened.configuration_snapshot().unwrap().unwrap();
             assert_eq!(snapshot, configured);
             drop(reopened);
+        }
+    }
+
+    /// The last running catalog before handover held every authored running
+    /// family except the three handover families. A configuration-only open
+    /// and then a running open register those new families through their
+    /// production descriptors. The old mandatory set remains exact.
+    #[test]
+    fn a_running_catalog_before_handover_opens_and_registers_only_the_new_families() {
+        let strip = |path: &std::path::Path, table: &str| {
+            let database = redb::Database::open(path).expect("store opens raw");
+            let write = database.begin_write().expect("write starts");
+            {
+                let mut catalog = write
+                    .open_table(super::SEMA_CATALOG_TABLE)
+                    .expect("catalog opens");
+                assert!(
+                    catalog
+                        .remove(table)
+                        .expect("catalog entry removes")
+                        .is_some()
+                );
+            }
+            write
+                .delete_table(redb::TableDefinition::<&str, &[u8]>::new(table))
+                .expect("empty family table drops");
+            write.commit().expect("strip commits");
+        };
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        drop(fixture.configured_store());
+        for table in [
+            super::OPTIONAL_HANDOVER_TABLE,
+            super::OPTIONAL_HANDOVER_RUNTIME_TABLE,
+            super::OPTIONAL_HANDOVER_REMINDER_TABLE,
+        ] {
+            strip(&fixture.path(), table);
+        }
+
+        let old_running = super::RUNNING_TABLES
+            .iter()
+            .filter(|table| {
+                ![
+                    super::OPTIONAL_HANDOVER_TABLE,
+                    super::OPTIONAL_HANDOVER_RUNTIME_TABLE,
+                    super::OPTIONAL_HANDOVER_REMINDER_TABLE,
+                ]
+                .contains(table)
+            })
+            .map(|table| (*table).to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(super::FlowStore::has_expected_flow_catalog(&old_running));
+        let mut missing_old = old_running.clone();
+        assert!(missing_old.remove("flow_nexus_meta_heartbeat_configuration"));
+        assert!(!super::FlowStore::has_expected_flow_catalog(&missing_old));
+        let mut foreign = old_running;
+        assert!(foreign.insert("foreign_runtime_family".into()));
+        assert!(!super::FlowStore::has_expected_flow_catalog(&foreign));
+
+        drop(
+            super::ConfigurationOnlyStore::open(&fixture.path())
+                .expect("old running catalog opens through configuration"),
+        );
+        drop(
+            super::FlowStore::open_configured(&fixture.path())
+                .expect("running open registers handover runtime families"),
+        );
+        drop(
+            super::ConfigurationOnlyStore::open(&fixture.path())
+                .expect("completed catalog reopens through configuration"),
+        );
+        drop(
+            super::FlowStore::open_configured(&fixture.path())
+                .expect("completed running catalog reopens"),
+        );
+    }
+
+    /// An optional family is optional only while absent. If present, its
+    /// exact current family and schema identity remain mandatory.
+    #[test]
+    fn a_present_handover_reminder_under_a_wrong_identity_is_refused() {
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        drop(fixture.configured_store());
+        let path = fixture.path();
+        {
+            let database = redb::Database::open(&path).expect("store opens directly");
+            let write = database.begin_write().expect("catalog transaction starts");
+            {
+                let mut catalog = write
+                    .open_table(super::SEMA_CATALOG_TABLE)
+                    .expect("catalog opens");
+                catalog
+                    .remove(super::OPTIONAL_HANDOVER_REMINDER_TABLE)
+                    .expect("reminder family removes");
+            }
+            write
+                .delete_table(redb::TableDefinition::<&str, &[u8]>::new(
+                    super::OPTIONAL_HANDOVER_REMINDER_TABLE,
+                ))
+                .expect("reminder table drops");
+            write.commit().expect("catalog commits");
+        }
+        {
+            #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone)]
+            struct WrongReminder {
+                key: String,
+            }
+            impl EngineRecord for WrongReminder {
+                fn record_key(&self) -> sema_engine::RecordKey {
+                    sema_engine::RecordKey::new(self.key.clone())
+                }
+            }
+            let mut engine = Engine::open(EngineOpen::new(
+                &path,
+                SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
+            ))
+            .expect("store opens");
+            engine
+                .register_table(TableDescriptor::<WrongReminder>::new(
+                    TableName::new(super::OPTIONAL_HANDOVER_REMINDER_TABLE),
+                    FamilyName::new("flow-nexus-handover-reminder-wrong"),
+                    SchemaHash::for_label("flow-nexus-handover-reminder-wrong"),
+                ))
+                .expect("wrong reminder identity registers in fixture");
+        }
+        for refused in [
+            super::ConfigurationOnlyStore::open(&path).err(),
+            super::FlowStore::open_configured(&path).err(),
+        ] {
+            assert!(
+                matches!(refused, Some(super::StoreError::UnrecognizedMemory { .. })),
+                "{refused:?}"
+            );
         }
     }
 

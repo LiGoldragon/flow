@@ -3,6 +3,7 @@ use crate::metaflow::IdentifiesThread;
 use crate::sending::IdentifiesSender;
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
+use crate::store::metaflow::MutatesMetaflows;
 use crate::{HoldsStopRequest, RunningNexus};
 use signal_flow::{Address, ObserveSender_Data, Process, Refusal, Response};
 use std::sync::atomic::{AtomicBool, Ordering};

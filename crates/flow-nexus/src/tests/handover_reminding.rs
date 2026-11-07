@@ -117,29 +117,39 @@ fn typed_keep_and_drop_commands_are_shell_single_argument_forms() {
         generation: 1,
     };
     let section = Section {
-        title: "title".into(),
-        description: "description".into(),
-        body: "body".into(),
+        title: "title with ' apostrophe".into(),
+        description: "description with ' apostrophe".into(),
+        body: "body with ' apostrophe".into(),
     };
-    let text = notice.keep_commands(std::slice::from_ref(&section));
-    assert!(text.starts_with("flow '") && text.ends_with("'"));
-    let payload = text
-        .strip_prefix("flow '")
-        .unwrap()
-        .strip_suffix('\'')
-        .unwrap()
-        .replace("'\"'\"'", "'");
-    let mut budget = Budget {
-        remaining: 4096,
-        reader: ReaderBudget::try_from(4096).unwrap(),
-        depth: 0,
-        maximum_depth: 1024,
+    let parse = |text: String| {
+        assert!(text.starts_with("flow '") && text.ends_with("'"));
+        let payload = text
+            .strip_prefix("flow '")
+            .unwrap()
+            .strip_suffix('\'')
+            .unwrap()
+            .replace("'\"'\"'", "'");
+        let mut budget = Budget {
+            remaining: 4096,
+            reader: ReaderBudget::try_from(4096).unwrap(),
+            depth: 0,
+            maximum_depth: 1024,
+        };
+        Potential::<Query>::from(payload.as_str())
+            .actualize(&mut budget)
+            .unwrap()
     };
-    let query = Potential::<Query>::from(payload.as_str())
-        .actualize(&mut budget)
-        .unwrap();
-    assert_eq!(query.datomize(vec![]).protosize().compact(), payload);
-    assert!(notice.drop_command("title".into()).starts_with("flow '"));
+    let keep = parse(notice.keep_commands(std::slice::from_ref(&section)));
+    let Query::Keep(keep) = keep else {
+        panic!("expected Keep query")
+    };
+    assert_eq!(keep.section, section);
+    let drop = parse(notice.drop_command(section.title.clone()));
+    let Query::Drop(drop) = drop else {
+        panic!("expected Drop query")
+    };
+    assert_eq!(drop.title, section.title);
+    assert_eq!(drop.address, address());
 }
 
 #[test]
@@ -359,7 +369,8 @@ fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
         } else {
             let row = reminder.expect("Stop measurement opens the warning");
             assert_eq!(row.sent, 1);
-            fixture.nexus.send_due_handover_reminders(10);
+            let opened_at = row.opened_at;
+            fixture.nexus.send_due_handover_reminders(opened_at + 1);
             assert_eq!(
                 fixture
                     .nexus

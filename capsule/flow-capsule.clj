@@ -1,7 +1,10 @@
 ;; flow-capsule: the real-world test of a Flow package in a capsule of its own.
 ;;
-;; Usage: flow-capsule <flow-package> [--workspace-only] [--keep-going] [--log <path>]
+;; Usage: flow-capsule <flow-package> [--workspace-only | --handover] [--keep-going] [--log <path>]
 ;;        flow-capsule --takeover <old flow package> <new flow package> [--log <path>]
+;;
+;; --handover runs only the handover canary (the handover section) after the
+;; capsule comes up, then tears it down.
 ;;
 ;; --takeover runs the bie3.6 takeover and rollback instead of the
 ;; scenarios (see the takeover section); FLOW_CAPSULE_SKIP_CODEX=1 skips its
@@ -133,7 +136,11 @@
   [run toks]
   (if-let [[_ head rest-run] (re-matches #"([A-Z][A-Za-z0-9]*)\.(.*)" run)]
     (if (str/blank? rest-run)
-      (let [[body toks] (parse-one toks)] [{:head head :body body} toks])
+      ;; A period before a closer, or at the end, ends a word (a seat's
+      ;; last message, `Acknowledged.`): it carries nothing.
+      (if (let [[kind v] (first toks)] (or (nil? kind) (and (= kind :delim) (#{\} \] \>} v))))
+        [run toks]
+        (let [[body toks] (parse-one toks)] [{:head head :body body} toks]))
       (let [[body toks] (parse-run rest-run toks)] [{:head head :body body} toks]))
     [run toks]))
 
@@ -142,7 +149,7 @@
     (case kind
       :delim (let [close ({\{ \} \[ \] \< \>} v)]
                (loop [toks more items []]
-                 (if (= (first toks) [:delim close])
+                 (if (or (empty? toks) (= (first toks) [:delim close]))
                    [{:enclosure v :items items} (rest toks)]
                    (let [[item toks] (parse-one toks)] (recur toks (conj items item))))))
       :str [{:string v} more]
@@ -1370,6 +1377,377 @@
                             (if skip-codex skipped-codex-scenarios codex-scenarios)
                             (subvec base-scenarios 11))))
 
+;; ---------------------------------------------------------------- handover
+;; flow-capsule <flow package> --handover: the handover canary. The Sonnet
+;; seat, re-declared Maintained, keeps and drops sections of its handover,
+;; is warned when its warning window opens, is refreshed into a successor
+;; that is handed the Kept sections, and has its closed generation archived
+;; to a git repository of the capsule's. Every reading is the real seat's:
+;; its transcript, a CLI reply, the Nexus log, the archive's git log.
+;; Context is measured only at a Stop; the window opens when
+;; tokens*100 >= Refresh*(100-WarningShareLeft).
+
+(def ho-seat tertiary-address)
+(def ho-model "claude-haiku-5-5")
+(def ho-needle "canary-needle-b060be")
+(def ho-every-minutes 1)
+(def ho-share 40)
+(def ho-high 200000)
+(def ho-archive (str source-parent "/handover-archive"))
+(def ho-hook (str ho-archive "/.git/hooks/pre-commit"))
+(def ho-bulk (str source-root "/bulk.txt"))
+(def ho (atom {}))
+
+(defn ho-reminder []
+  (str "Handover reminder " ho-needle ". Run no command; answer with one word and stop."))
+
+(defn ho-policy [share]
+  (str "Configure.HandoverPolicies.[ { " ho-model " " share " «" (ho-reminder) "» " ho-every-minutes " } ]"))
+
+(defn ho-threshold [r]
+  (str "Configure.Thresholds.[ { " ho-model " " r " } { " codex-model " " ho-high " } ]"))
+
+(defn keep-datom [title description body]
+  (str "Keep.{ " ho-seat " { «" title "» «" description "» «" body "» } }"))
+
+(defn ho-pane [] (bound-pane (inspect ho-seat)))
+
+(defn ho-transcript-lines [native]
+  (when-let [file (when native (first (fs/glob (str home "/.claude/projects") (str "*/" native ".jsonl"))))]
+    (str/split-lines (slurp (str file)))))
+
+(defn transcript-tokens
+  "The context the Nexus measures at a Stop, read the way it reads it: the
+  last main-thread usage, input plus cache read plus cache creation."
+  [native]
+  (some (fn [line]
+          (let [e (try (json/parse-string line true) (catch Exception _ nil))
+                u (get-in e [:message :usage])]
+            (when (and u (not (:isSidechain e)) (:input_tokens u))
+              (+ (or (:input_tokens u) 0) (or (:cache_read_input_tokens u) 0)
+                 (or (:cache_creation_input_tokens u) 0)))))
+        (reverse (ho-transcript-lines native))))
+
+(defn user-turns
+  "The user turns of a Claude transcript that are prompts, not tool results:
+  each {:ts :text}."
+  [native]
+  (vec (keep (fn [line]
+               (let [e (try (json/parse-string line true) (catch Exception _ nil))
+                     c (get-in e [:message :content])]
+                 (when (and (= "user" (:type e)) (not (:isSidechain e)))
+                   (let [text (cond (string? c) c
+                                    (and (sequential? c) (not-any? #(= "tool_result" (:type %)) c))
+                                    (str/join "\n" (keep :text c)))]
+                     (when text {:ts (:timestamp e) :text text})))))
+             (ho-transcript-lines native))))
+
+(defn turns-holding [native needle] (filterv #(str/includes? (:text %) needle) (user-turns native)))
+
+(defn epoch [stamp] (.getEpochSecond (java.time.Instant/parse stamp)))
+
+(defn touch-tokens
+  "The tokens a Kept or Dropped reply's Known touch carries; nil for Unknown."
+  [reply]
+  (some-> (first (heads-named "Known" (read-datom reply))) body items second str parse-long))
+
+(defn window-open? [tokens r share] (and tokens r (>= (* tokens 100) (* r (- 100 share)))))
+
+(defn sections-of
+  "The sections a Handover reply carries: [title description body]."
+  [reply]
+  (let [d (read-datom reply)]
+    (when (= "Handover" (head d))
+      (vec (for [s (items (body d))] (mapv #(if (map? %) (:string %) (str %)) (items s)))))))
+
+(defn handover-text [sections]
+  (str/join "\n\n" (for [[t d b] sections] (str "## " t "\n" d "\n" b))))
+
+(def ho-calls (str source-root "/calls"))
+
+(defn ho-script!
+  "A script that calls the package's client on the capsule's socket with
+  one datom and writes its reply to a file; a seat runs it, so the call
+  comes from that seat's pane. With wait-for, it first waits in the
+  background, deaf to hangups, until that file exists."
+  [tag client datom & [wait-for]]
+  (let [sock (if (= client "flow") ordinary-socket meta-socket)
+        dfile (str ho-calls "/" tag ".datom") out (str ho-calls "/" tag ".out") script (str ho-calls "/" tag ".sh")
+        call (str "\"$P/bin/" client "\" \"$(\"$P/bin/" client "-compose-invocation\" " sock " \"$d\")\" > " out ".tmp 2>&1; mv " out ".tmp " out)]
+    (fs/create-dirs ho-calls)
+    (spit dfile datom)
+    (spit script (str "#!/bin/sh\nP=" @package "\nd=$(cat " dfile ")\n"
+                      (if wait-for
+                        (str "( trap '' HUP TERM; while [ ! -e " wait-for " ]; do sleep 1; done; " call " ) </dev/null >/dev/null 2>&1 &\n")
+                        (str "trap '' HUP\n" call "\n"))))
+    [script out]))
+
+(defn type-into! [pane text] (herdr "pane" "run" pane text))
+
+(defn ho-turn!
+  "A prompt typed into the seat's pane, and the seat's next Stop awaited.
+  Answers whether it rested."
+  [flow-id text]
+  (let [before (stops-of flow-id)]
+    (type-into! (bound-pane (inspect ho-seat)) text)
+    (watch 240 #(> (stops-of flow-id) before))))
+
+(defn seat-call!
+  "The seat at addr runs one ordinary client call itself, from its own
+  pane: a prompt typed there asks it to run the call's script. Answers the
+  reply, or nil when none was written; waits for the seat's Stop."
+  [addr tag datom]
+  (let [[script out] (ho-script! tag "flow" datom)
+        flow-id (str (awake-flow addr))
+        before (stops-of flow-id)]
+    (type-into! (bound-pane (inspect addr))
+                (str "Run the shell command sh " script " once, then answer with one word and stop. Tag " tag "."))
+    (let [reply (when (watch 150 #(fs/exists? out)) (str/trim (slurp out)))]
+      (watch 90 #(> (stops-of flow-id) before))
+      reply)))
+
+(defn bulk-order [tag]
+  (str "Run the shell command cat " ho-bulk " once, then answer with one word and stop. Tag " tag "."))
+
+(defn ho-git [& args] (apply run {} "git" "-C" ho-archive args))
+
+(defn log-lines-with [& needles]
+  (filterv (fn [l] (every? #(str/includes? l %) needles)) (str/split-lines (log-text))))
+
+(def handover-scenarios
+  [["H0 setup: Sonnet re-declared Maintained; archive repo with a refusing pre-commit hook; policy, archive, count; Opus and Sonnet launched"
+    (fn []
+      (let [metaflows (flow-meta (str/replace-first (configure-line "Metaflows")
+                                                    "Regular Default OnDemand" "Regular Default Maintained"))
+            _ (fs/create-dirs ho-archive)
+            git-init [(ho-git "init" "-q") (ho-git "config" "user.name" "flow-capsule")
+                      (ho-git "config" "user.email" "flow-capsule@localhost")
+                      (ho-git "commit" "-q" "--allow-empty" "-m" "Initial empty commit")]
+            _ (spit ho-hook "#!/bin/sh\necho flow-capsule canary hook refuses >&2\nexit 1\n")
+            _ (fs/set-posix-file-permissions ho-hook "rwxr-xr-x")
+            _ (spit ho-bulk (str/join "\n" (for [i (range 600)] (str "line " i " of the canary bulk: alpha bravo charlie delta echo foxtrot"))))
+            policy (flow-meta (ho-policy ho-share))
+            archive (flow-meta (str "Configure.HandoverArchive." ho-archive))
+            handover-count (flow-meta "Configure.HandoverCount.0")
+            opus (launch secondary)
+            opus-awake (watch 60 #(awake-flow secondary))
+            opus-rested (when opus-awake (watch 180 #(pos? (stops-of (str opus-awake)))))
+            sonnet (launch ho-seat)
+            flow-id (watch 60 #(awake-flow ho-seat))
+            rested (when flow-id (watch 180 #(pos? (stops-of (str flow-id)))))
+            declared (seat-declaration (configure-line "Metaflows") ho-seat)
+            snapshot (flow-meta "Configuration")]
+        (keep-text! "handover-H0-configuration.txt" snapshot)
+        {:reply (str "Metaflows: " metaflows " / Policy: " policy " / Archive: " archive " / Count: " handover-count
+                     " / Opus: " opus " / Sonnet: " sonnet)
+         :pass (boolean (and (every? #(str/starts-with? % "Configured.") [metaflows policy archive handover-count])
+                             (every? #(zero? (:exit %)) git-init)
+                             (str/includes? snapshot "Regular Default Maintained")
+                             opus-awake opus-rested flow-id rested))
+         :watched (str "git init exits " (mapv :exit git-init) "; Configuration names Sonnet Maintained "
+                       (str/includes? snapshot "Regular Default Maintained") " (configure.datom declares " declared
+                       "); Opus Awake " opus-awake "; Sonnet Awake " flow-id ", first Stop " (boolean rested))}))]
+
+   ["H1 Keep and Drop from the seat's own pane; NotOwner from another pane; UnknownCaller from the driver; Read before and after Drop"
+    (fn []
+      (let [pane (ho-pane)
+            other (sender-pane)
+            k1 (seat-call! ho-seat "h1-keep-one" (keep-datom "canary-one" "The first canary section." "Body one."))
+            k2 (seat-call! ho-seat "h1-keep-two" (keep-datom "canary-two" "The section to drop." "Body two."))
+            read1 (flow (str "Read." ho-seat))
+            dropped (seat-call! ho-seat "h1-drop" (str "Drop.{ " ho-seat " «canary-two» }"))
+            read2 (flow (str "Read." ho-seat))
+            not-owner (seat-call! secondary "h1-intruder" (keep-datom "intruder" "From the Opus pane." "x"))
+            unknown (flow (keep-datom "intruder" "From the driver shell." "x") @driver-pane)
+            read3 (flow (str "Read." ho-seat))
+            t0 (touch-tokens k1)
+            titles #(set (map first (sections-of %)))]
+        (swap! ho assoc :t0 t0)
+        {:reply (str "Keep one: " k1 " / Keep two: " k2 " / Read: " read1 " / Drop: " dropped " / Read: " read2
+                     " / Keep from Opus pane: " not-owner " / Keep from driver: " unknown " / Read: " read3)
+         :pass (boolean (and (str/starts-with? k1 "Kept.") (str/starts-with? k2 "Kept.") t0
+                             (= #{"canary-one" "canary-two"} (titles read1))
+                             (str/starts-with? dropped "Dropped.")
+                             (= #{"canary-one"} (titles read2))
+                             (= not-owner "KeepRefused.NotOwner")
+                             (= unknown "KeepRefused.UnknownCaller")
+                             (= #{"canary-one"} (titles read3))))
+         :watched (str "seat pane " pane ", Opus pane " other ", driver pane " @driver-pane
+                       "; T0 from the Keep touch " t0 " (transcript usage " (transcript-tokens (native-session (inspect ho-seat)))
+                       "); Read titles before Drop " (titles read1) ", after " (titles read2) ", after the refusals " (titles read3))}))]
+
+   ["H2 warning when the window opens: Keep command and needle, first reminder is the warning, next one interval later, none for two intervals after a Keep inside the window"
+    (fn []
+      (let [flow-id (str (awake-flow ho-seat))
+            native (native-session (inspect ho-seat))
+            ;; The context measured at the seat's last Stop. A turn's growth
+            ;; is not foreseeable (Claude caps a command's output), so the
+            ;; threshold is chosen from the measurement: the window's bound
+            ;; 200 tokens below it opens the window at the Nexus's next tick,
+            ;; and the threshold lies 40% above, out of the reminders' reach.
+            rested (pos? (stops-of flow-id))
+            t0 (transcript-tokens native)
+            r (long (Math/ceil (/ (* (- t0 200) 100.0) (- 100 ho-share))))
+            thresholds (flow-meta (ho-threshold r))
+            t1 t0
+            opened (window-open? t1 r ho-share)
+            first-turn (watch 120 #(first (turns-holding native ho-needle)))
+            second-turn (watch 150 #(second (turns-holding native ho-needle)))
+            _ (Thread/sleep 10000)
+            kept (seat-call! ho-seat "h2-keep" (keep-datom "canary-window" "Kept inside the window." "Body window."))
+            kept-at (java.time.Instant/now)
+            touch (touch-tokens kept)
+            green (window-open? touch r ho-share)
+            _ (Thread/sleep (* 2 (+ 60 10) 1000))
+            all (turns-holding native ho-needle)
+            after (filterv #(> (epoch (:ts %)) (.getEpochSecond kept-at)) all)
+            keep-turns (turns-holding native "flow 'Keep.")
+            gap (when (and first-turn second-turn) (- (epoch (:ts second-turn)) (epoch (:ts first-turn))))
+            t-end (transcript-tokens native)]
+        (swap! ho assoc :r r)
+        (keep-text! "handover-H2-warning.txt" (str/join "\n----\n" (map #(str (:ts %) "\n" (:text %)) all)))
+        {:reply (str "Thresholds " r ": " thresholds " / Keep from the seat: " kept)
+         :pass (boolean (and (str/starts-with? thresholds "Configured.") rested opened first-turn kept
+                             (str/includes? (:text first-turn) "flow 'Keep.")
+                             (= (:ts first-turn) (:ts (first keep-turns)))
+                             second-turn gap (<= 55 gap 90)
+                             (str/starts-with? (str kept) "Kept.") green (empty? after)
+                             (< t-end r)))
+         :watched (str "T0 " t0 ", R " r ", S " ho-share ", window from " (quot (* r (- 100 ho-share)) 100)
+                       "; measured at the last Stop " t1 " tokens, window open " opened
+                       "; first needle turn " (:ts first-turn) " holds flow 'Keep. "
+                       (boolean (some-> first-turn :text (str/includes? "flow 'Keep.")))
+                       ", first turn with a Keep command is it " (= (:ts first-turn) (:ts (first keep-turns)))
+                       "; second " (:ts second-turn) ", " gap " s later; Keep at " kept-at " touch " touch
+                       " green " green "; needle turns after the Keep in 140 s: " (count after)
+                       "; tokens at the end " t-end " (below R " (< (or t-end 0) r) "); turns kept as handover-H2-warning.txt")}))]
+
+   ["H3 refresh at the Stop of a green seat past its threshold: successor handed the Kept sections last in its first prompt; the closed generation refuses the old flow"
+    (fn []
+      (let [old (str (awake-flow ho-seat))
+            old-pane (ho-pane)
+            old-native (native-session (inspect ho-seat))
+            read (flow (str "Read." ho-seat))
+            sections (sections-of read)
+            expected (handover-text sections)
+            marker (str ho-calls "/h3-closed")
+            [waiter old-out] (ho-script! "h3-old-keep" "flow" (keep-datom "after-close" "From the closed generation." "x") marker)
+            armed (ho-turn! old (str "Run the shell command sh " waiter " once, then answer with one word and stop. Tag h3-arm."))
+            cur (transcript-tokens old-native)
+            r3 (+ cur 300)
+            thresholds (flow-meta (ho-threshold r3))
+            sent (ho-turn! old (bulk-order "h3"))
+            successor (watch 240 #(let [f (awake-flow ho-seat)] (when (and f (not= (str f) old)) (str f))))
+            ;; The successor runs under the ordinary threshold again.
+            restored (flow-meta (ho-threshold ho-high))
+            native (when successor (watch 60 #(native-session (inspect ho-seat))))
+            handed (when native (watch 120 #(first (turns-holding native "## canary-one"))))
+            last-part (boolean (and handed (str/ends-with? (str/trim (:text handed)) (str/trim expected))))
+            _ (spit marker "closed")
+            old-keep (when (watch 30 #(fs/exists? old-out)) (str/trim (slurp old-out)))
+            read-after (flow (str "Read." ho-seat))]
+        (swap! ho assoc :pred old :successor successor)
+        (keep-text! "handover-H3-first-prompt.txt" (:text handed))
+        {:reply (str "Thresholds " r3 ": " thresholds " / bulk turn rested " (boolean sent) " / restored: " restored
+                     " / Keep by the old flow's waiter after the close: " old-keep " / Read after: " read-after)
+         :pass (boolean (and (seq sections) successor handed last-part
+                             (= old-keep "KeepRefused.NotOwner")))
+         :watched (str "old flow " old " at " cur " tokens, R " r3 "; successor " successor " session " native
+                       "; expected handover " (pr-str expected) "; its first prompt holds it " (boolean handed)
+                       ", as its last part " last-part " (kept as handover-H3-first-prompt.txt)"
+                       "; the old flow (pane " old-pane ") armed a waiting Keep " (boolean armed)
+                       ", run after the successor started, answered " (pr-str old-keep))}))]
+
+   ["H4 closed generation archived at Psyche/test/Sonnet/<predecessor>.md: refused by a failing pre-commit hook and retried, committed the tick after the hook goes"
+    (fn []
+      (let [pred (:pred @ho)
+            rel (str "Psyche/test/Sonnet/" pred ".md")
+            retried (watch 30 #(<= 2 (count (log-lines-with "handover archive"))))
+            retry-lines (log-lines-with "handover archive")
+            log-before (:out (ho-git "log" "--format=%h %s"))
+            tracked-before (str/trim (:out (ho-git "ls-files" "--" rel)))
+            status-before (str/trim (:out (ho-git "status" "--porcelain")))
+            exists-before (fs/exists? (str ho-archive "/" rel))
+            removed-at (System/currentTimeMillis)
+            _ (fs/delete ho-hook)
+            committed (watch 30 #(str/includes? (:out (ho-git "log" "--format=%s")) "Archive handover"))
+            secs (/ (- (System/currentTimeMillis) removed-at) 1000.0)
+            log-after (:out (ho-git "log" "--stat" "--format=%h %s"))
+            tracked-after (str/trim (:out (ho-git "ls-files" "--" rel)))
+            content (try (slurp (str ho-archive "/" rel)) (catch Exception _ nil))]
+        (keep-text! "handover-H4-archive.txt" (str "before:\n" log-before "\nstatus: " status-before
+                                                    "\n\nafter:\n" log-after "\n" rel ":\n" content
+                                                    "\n\nNexus log:\n" (str/join "\n" retry-lines)))
+        {:reply (str "git log before: " (str/trim log-before) " / after: " (str/replace (str/trim log-after) "\n" " | "))
+         :pass (boolean (and pred retried (str/blank? tracked-before)
+                             (not (str/includes? log-before "Archive handover"))
+                             committed (= tracked-after rel) (< secs 15)))
+         :watched (str "predecessor " pred "; Nexus log lines naming the handover archive " (count retry-lines)
+                       ", first " (pr-str (first retry-lines)) "; before the hook went: file present " exists-before
+                       ", tracked " (pr-str tracked-before) ", status " (pr-str status-before)
+                       "; hook removed, \"Archive handover\" committed " (boolean committed) " " secs " s later, "
+                       rel " tracked " (= tracked-after rel) "; kept as handover-H4-archive.txt")}))]
+
+   ["H5 ordinary delivery past threshold until green: no refresh at Stop, an Order drained by Wake reaches the transcript, no Uncertain mark; a Keep inside the window, then the next Stop refreshes"
+    (fn []
+      (let [policy (flow-meta (ho-policy 1))
+            flow-id (str (awake-flow ho-seat))
+            native (native-session (inspect ho-seat))
+            first-stop (watch 180 #(pos? (stops-of flow-id)))
+            push1 (ho-turn! flow-id (bulk-order "h5a"))
+            tp (transcript-tokens native)
+            r5 (+ tp 300)
+            thresholds (flow-meta (ho-threshold r5))
+            rested (ho-turn! flow-id (bulk-order "h5b"))
+            tq (transcript-tokens native)
+            past (boolean (and tq (>= tq r5)))
+            _ (Thread/sleep 15000)
+            kept-awake (= (str (awake-flow ho-seat)) flow-id)
+            kept-lines (log-lines-with flow-id "kept at its Stop")
+            tag "canary-drain-h5"
+            drained (seat-call! secondary "h5-send" (str "Send.{ " ho-seat " Soft.Order.«Answer with one word and stop. Tag " tag ".» }"))
+            reached (watch 90 #(first (turns-holding native tag)))
+            deliveries (flow-meta (str "ReadQueueDeliveries." ho-seat))
+            uncertain (str/includes? deliveries "Uncertain")
+            refused-lines (log-lines-with "PastThreshold")
+            ;; The seat keeps from its own pane in a turn of its own: that
+            ;; turn's Stop is the next Stop after the Keep.
+            kept (str (seat-call! ho-seat "h5-keep" (keep-datom "canary-green" "Kept past the threshold." "Body green.")))
+            green (window-open? (touch-tokens kept) r5 1)
+            successor (watch 240 #(let [f (awake-flow ho-seat)] (when (and f (not= (str f) flow-id)) (str f))))
+            restored [(flow-meta (ho-threshold ho-high)) (flow-meta (ho-policy ho-share))]
+            delivered (boolean (and reached (not uncertain)))]
+        (swap! ho assoc :h5-successor successor)
+        (keep-text! "handover-H5-queue-deliveries.txt" deliveries)
+        {:reply (str "Policy S 1: " policy " / Thresholds " r5 ": " thresholds " / Send by the Opus seat: " drained
+                     " / ReadQueueDeliveries: " deliveries " / Keep: " kept " / restored: " restored)
+         :pass (boolean (and first-stop push1 rested past kept-awake delivered (str/starts-with? kept "Kept.") green successor))
+         :watched (str "flow " flow-id " at " tp " tokens, R " r5 "; after the push " tq " (past " past
+                       "); not refreshed at that Stop: still Awake " kept-awake ", log " (pr-str (last kept-lines))
+                       "; ordinary Order by Wake " (if reached "seen" "not seen") " in the transcript"
+                       ", Uncertain mark " (if uncertain "seen" "not seen") ", PastThreshold log lines " (count refused-lines)
+                       (when (seq refused-lines) (str " " (pr-str (last refused-lines))))
+                       " => delivery past threshold " (if delivered "seen" "not seen")
+                       "; the seat's own Keep touch green " green
+                       ", refreshed at that turn's Stop as " (or successor "not seen"))}))]
+
+   ["H6 an ordered Refresh bypasses the gate: a non-green seat refreshed from its own pane, then from meta"
+    (fn []
+      (let [f1 (str (awake-flow ho-seat))
+            rested (watch 180 #(pos? (stops-of f1)))
+            glance (flow (str "Glance." ho-seat))
+            own (seat-call! ho-seat "h6-refresh" (str "Refresh." ho-seat))
+            f2 (watch 180 #(let [f (awake-flow ho-seat)] (when (and f (not= (str f) f1)) (str f))))
+            rested2 (when f2 (watch 180 #(pos? (stops-of f2))))
+            by-meta (flow-meta (str "Refresh." ho-seat))
+            f3 (watch 180 #(let [f (awake-flow ho-seat)] (when (and f f2 (not= (str f) f2)) (str f))))]
+        {:reply (str "Glance: " glance " / Refresh from its pane: " own " / Refresh from meta: " by-meta)
+         :pass (boolean (and rested (or (nil? own) (str/starts-with? own "Refreshed.")) f2
+                             (str/starts-with? by-meta "Refreshed.") f3))
+         :watched (str "flow " f1 " (no Keep of its own, so not green) rested " (boolean rested)
+                       "; its own pane's Refresh (reply " (pr-str own) ", nil when the closing pane took the client) started " (or f2 "nothing") ", rested " (boolean rested2)
+                       "; meta Refresh started " (or f3 "nothing"))}))]])
+
 ;; ---------------------------------------------------------------- takeover
 ;; flow-capsule --takeover <old flow package> <new flow package>: the bie3.6
 ;; transition (procedure §6) inside the capsule's own Herdr session, sockets
@@ -2140,12 +2518,15 @@
     (apply takeover-main (rest args)))
   (let [[pkg & options] args]
     (when-not (and pkg (not (str/starts-with? pkg "--")))
-      (refuse "usage: flow-capsule <flow-package> [--keep-going] [--log <path>]"))
+      (refuse "usage: flow-capsule <flow-package> [--workspace-only | --handover] [--keep-going] [--log <path>]"))
     (reset! package (str (fs/canonicalize pkg)))
     (reset! package-interface {@package :invocation})
     (reset! keep-going (boolean (some #{"--keep-going"} options)))
     (let [workspace-only (boolean (some #{"--workspace-only"} options))
-          selected-scenarios (if workspace-only (subvec base-scenarios 0 2) scenarios)
+          handover-only (boolean (some #{"--handover"} options))
+          selected-scenarios (cond workspace-only (subvec base-scenarios 0 2)
+                                   handover-only handover-scenarios
+                                   :else scenarios)
           log (or (second (drop-while #(not= % "--log") options)) (str state-root "/nexus.log"))
           wall (System/currentTimeMillis)
           passed (atom true)

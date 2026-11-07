@@ -5,7 +5,7 @@
 ; The stable Codex endpoint is the capsule's own app-server, serving
 ; @CODEX_MODEL@ for { Mind test Terra }; the next endpoint names no
 ; models. Message names no running executable.
-Configure.Nexus.{ @SOURCE_ROOT@ { @CODEX_CLIENT@ @CODEX_HOME@ @CODEX_SOCKET@ [ @CODEX_MODEL@ ] } { @CAPSULE_RUNTIME@/no-codex-client @CAPSULE_RUNTIME@/codex-next @CAPSULE_RUNTIME@/codex-next.sock [] } [ { Claude [ / «!» # ] [ esc esc ] [ enter ] } { Codex [ / «!» ] [ esc ] [] } ] [ Psyche ] @CAPSULE_RUNTIME@/message.sock @CAPSULE_RUNTIME@/no-message-nexus @CURRICULUM_SOCKET@ 60 }
+Configure.Nexus.{ @SOURCE_ROOT@ { @CODEX_CLIENT@ @CODEX_HOME@ @CODEX_SOCKET@ [ @CODEX_MODEL@ ] } { @CAPSULE_RUNTIME@/no-codex-client @CAPSULE_RUNTIME@/codex-next @CAPSULE_RUNTIME@/codex-next.sock [] } [ { Claude [ / «!» # ] [ esc esc ] [ enter ] } { Codex [ / «!» ] [ esc ] [] } ] [ Psyche ] Some.@CAPSULE_RUNTIME@/message.sock Some.@CAPSULE_RUNTIME@/no-message-nexus @CURRICULUM_SOCKET@ 60 None }
 Configure.Models.[ { Fable claude-haiku-5-5 } { Opus claude-haiku-5-5 } { Sonnet claude-haiku-5-5 } { Haiku claude-haiku-5-5 } { Terra @CODEX_MODEL@ } ]
 Configure.Thresholds.[ { claude-haiku-5-5 200000 } { @CODEX_MODEL@ 200000 } ]
 Configure.DefaultMinutes.30

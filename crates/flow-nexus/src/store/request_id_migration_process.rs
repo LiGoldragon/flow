@@ -433,6 +433,35 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     else {
         panic!("current Done accepted")
     };
+    assert!(
+        store
+            .awaken_metaflow(&sender, "current-delivery-flow", 0)
+            .expect("migrated sender awakens for current serving")
+    );
+    deliver_oldest_migrated(
+        &store,
+        &sender,
+        &ids["open_reply"],
+        "current-open-reply-input",
+    );
+    deliver_oldest_migrated(
+        &store,
+        &sender,
+        &ids["completed_reply"],
+        "current-completed-reply-input",
+    );
+    deliver_oldest_migrated(
+        &store,
+        &sender,
+        &result.logical_delivery_id,
+        "current-result",
+    );
+    deliver_oldest_migrated(
+        &store,
+        &sender,
+        &done.logical_delivery_id,
+        "current-done",
+    );
     let signal_flow::PrivateSendResponse::SendAccepted(notice) = store
         .accept_logical_delivery(
             &recipient,

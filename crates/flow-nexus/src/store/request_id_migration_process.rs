@@ -322,6 +322,16 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     ));
 
     let open_order = request_binding_for(&store, &ids["open_order"]);
+    store
+        .transition_logical_delivery(
+            &ids["open_order"],
+            signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                harness_kind: signal_flow::HarnessKind::Codex,
+                native_session_id: "current-order-session".into(),
+                native_prompt_id: "current-order-turn".into(),
+            }),
+        )
+        .expect("open migrated Order becomes delivered before its Result");
     let resolved_result = store
         .resolve_sendable_message(
             &recipient,
@@ -348,6 +358,16 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         panic!("current Result accepted")
     };
     let open_task = request_binding_for(&store, &ids["open_task"]);
+    store
+        .transition_logical_delivery(
+            &ids["open_task"],
+            signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                harness_kind: signal_flow::HarnessKind::Codex,
+                native_session_id: "current-task-session".into(),
+                native_prompt_id: "current-task-turn".into(),
+            }),
+        )
+        .expect("open migrated Task becomes delivered before its Done");
     let resolved_done = store
         .resolve_sendable_message(
             &recipient,
@@ -389,16 +409,6 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         .read_logical_delivery_snapshots(&sender, Some(notice.delivery_cursor))
         .expect("cursor resume reads");
     assert!(after_acceptance.delivery_cursor >= notice.delivery_cursor);
-    store
-        .transition_logical_delivery(
-            &ids["open_order"],
-            signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
-                harness_kind: signal_flow::HarnessKind::Codex,
-                native_session_id: "current-order-session".into(),
-                native_prompt_id: "current-order-turn".into(),
-            }),
-        )
-        .expect("answered Order becomes delivered");
     assert_eq!(
         store
             .withdraw_queued(&recipient, &ids["open_order"])

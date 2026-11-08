@@ -152,27 +152,28 @@ fn current_socket_client_serves_request_operations() {
                     ),
                 }),
             );
-            assert!(
-                matches!(result, signal_flow::Response::SendAccepted(_)),
-                "socket Result is admitted: {result:?}"
-            );
-            assert!(matches!(
-                socket_query(
-                    &socket,
-                    signal_flow::Query::Send(signal_flow::SendRequest {
-                        recipient: migration_sender(),
-                        sendable_message: signal_flow::SendableMessage::Soft(
-                            signal_flow::SendableRequest::Done(
-                                signal_flow::SendableRequest_Done_Data {
-                                    request_id: task,
-                                    string: "socket done".into(),
-                                },
-                            ),
+            let signal_flow::Response::SendAccepted(result) = result else {
+                panic!("socket Result is admitted: {result:?}")
+            };
+            let done = socket_query(
+                &socket,
+                signal_flow::Query::Send(signal_flow::SendRequest {
+                    recipient: migration_sender(),
+                    sendable_message: signal_flow::SendableMessage::Soft(
+                        signal_flow::SendableRequest::Done(
+                            signal_flow::SendableRequest_Done_Data {
+                                request_id: task,
+                                string: "socket done".into(),
+                            },
                         ),
-                    }),
-                ),
-                signal_flow::Response::SendAccepted(_)
-            ));
+                    ),
+                }),
+            );
+            let signal_flow::Response::SendAccepted(done) = done else {
+                panic!("socket Done is admitted: {done:?}")
+            };
+            println!("SOCKET_RESULT={}", result.logical_delivery_id);
+            println!("SOCKET_DONE={}", done.logical_delivery_id);
         }
         mode => panic!("unknown migration client mode {mode}"),
     }
@@ -629,58 +630,8 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     );
     let open_order = request_binding_for(&store, &ids["open_order"]);
     deliver_oldest_migrated(&store, &recipient, &ids["open_order"], "current-order");
-    let resolved_result = store
-        .resolve_sendable_message(
-            &recipient,
-            &sender,
-            signal_flow::SendableMessage::Soft(signal_flow::SendableRequest::Result(
-                signal_flow::SendableRequest_Result_Data {
-                    request_id: open_order.request_id.clone(),
-                    string: "current result".into(),
-                },
-            )),
-        )
-        .expect("current Result resolution reads")
-        .expect("current Result resolves");
-    let signal_flow::PrivateSendResponse::SendAccepted(result) = store
-        .accept_logical_delivery(
-            &sender,
-            flow_ethos::SentBy::Sender(recipient.clone()),
-            flow_ethos::Delivery::Queue,
-            resolved_result,
-            None,
-        )
-        .expect("current Result admits")
-    else {
-        panic!("current Result accepted")
-    };
     let open_task = request_binding_for(&store, &ids["open_task"]);
     deliver_oldest_migrated(&store, &recipient, &ids["open_task"], "current-task");
-    let resolved_done = store
-        .resolve_sendable_message(
-            &recipient,
-            &sender,
-            signal_flow::SendableMessage::Soft(signal_flow::SendableRequest::Done(
-                signal_flow::SendableRequest_Done_Data {
-                    request_id: open_task.request_id.clone(),
-                    string: "current done".into(),
-                },
-            )),
-        )
-        .expect("current Done resolution reads")
-        .expect("current Done resolves");
-    let signal_flow::PrivateSendResponse::SendAccepted(done) = store
-        .accept_logical_delivery(
-            &sender,
-            flow_ethos::SentBy::Sender(recipient.clone()),
-            flow_ethos::Delivery::Queue,
-            resolved_done,
-            None,
-        )
-        .expect("current Done admits")
-    else {
-        panic!("current Done accepted")
-    };
     assert!(
         store
             .awaken_metaflow(&sender, "current-delivery-flow", 0)
@@ -698,13 +649,6 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         &ids["completed_reply"],
         "current-completed-reply-input",
     );
-    deliver_through_migrated(
-        &store,
-        &sender,
-        &result.logical_delivery_id,
-        "current-result",
-    );
-    deliver_through_migrated(&store, &sender, &done.logical_delivery_id, "current-done");
     let signal_flow::PrivateSendResponse::SendAccepted(notice) = store
         .accept_logical_delivery(
             &recipient,
@@ -732,7 +676,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     );
     let current_socket = post_operation_runtime.path().join("flow.sock");
     wait_for_socket(&current_socket);
-    let served = run_socket_client(
+    let _served = run_socket_client(
         &current_socket,
         "sender",
         &[(
@@ -740,12 +684,12 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
             open_order.request_id.as_str(),
         )],
     );
-    run_socket_client(
+    let answered = run_socket_client(
         &current_socket,
         "recipient",
         &[
-            ("FLOW_MIGRATION_ORDER", served["SOCKET_ORDER"].as_str()),
-            ("FLOW_MIGRATION_TASK", served["SOCKET_TASK"].as_str()),
+            ("FLOW_MIGRATION_ORDER", open_order.request_id.as_str()),
+            ("FLOW_MIGRATION_TASK", open_task.request_id.as_str()),
         ],
     );
     std::thread::sleep(Duration::from_millis(1_750));
@@ -759,13 +703,13 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     );
     assert!(
         reopened
-            .logical_delivery_snapshot(&result.logical_delivery_id)
+            .logical_delivery_snapshot(&answered["SOCKET_RESULT"])
             .unwrap()
             .is_some()
     );
     assert!(
         reopened
-            .logical_delivery_snapshot(&done.logical_delivery_id)
+            .logical_delivery_snapshot(&answered["SOCKET_DONE"])
             .unwrap()
             .is_some()
     );

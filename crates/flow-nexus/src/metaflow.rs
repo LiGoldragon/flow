@@ -160,6 +160,23 @@ impl DispatchesMetaflowPeer for RunningNexus {
                 Ok(response) => response.into(),
                 Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
             };
+        } else if let Query::ArchiveRequest(request_id) = query {
+            // A flow bound for sending archives only its own request.  This
+            // uses the same kernel peer and persisted sending binding as
+            // Send; a Message credential is neither required nor accepted
+            // as a substitute for that address.
+            let caller = match self.sending_address(peer) {
+                Ok(caller) => caller,
+                Err(response) => return (*response).into(),
+            };
+            use crate::store::logical_delivery::RecordsLogicalDeliveries;
+            return match self.store.archive_request(&request_id, &caller) {
+                Ok(Ok(())) => Response::RequestArchived(request_id).into(),
+                Ok(Err(rejection)) => Response::ArchiveRejected(rejection).into(),
+                Err(_) => {
+                    Response::ArchiveRejected(signal_flow::ArchiveRejection::StoreRefused).into()
+                }
+            };
         } else {
             match self.store.message_peer(peer) {
                 Ok(true) => {}

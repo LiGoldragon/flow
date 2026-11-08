@@ -1396,6 +1396,7 @@ impl ServesConnection for Connection {
             | Query::IdentifyThread(_)
             | Query::Lock(_)
             | Query::Release(_)
+            | Query::ArchiveRequest(_)
             | Query::Acknowledge(_)) => {
                 // These are peer-routed operations. Acknowledge in
                 // particular reaches the authenticated Message path so an
@@ -1482,7 +1483,7 @@ impl ServesConnection for Connection {
                 let asker = nexus.asker_of(self.process.as_ref());
                 nexus.dispatch_serially(query, asker)
             }
-            query @ (Query::ArchiveRequest(_) | Query::Keep(_) | Query::Drop(_)) => {
+            query @ (Query::Keep(_) | Query::Drop(_)) => {
                 let asker = nexus.asker_of(self.process.as_ref());
                 nexus.dispatch_serially(query, asker)
             }

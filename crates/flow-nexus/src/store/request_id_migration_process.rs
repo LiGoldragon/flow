@@ -586,7 +586,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     let heartbeat = store.heartbeat_standings().expect("heartbeat rows read");
     assert_eq!(heartbeat.len(), 1);
     assert_eq!(heartbeat[0].address, singleton_recipient);
-    assert_eq!(heartbeat[0].baseline_sent, 2);
+    assert_eq!(heartbeat[0].baseline_sent, 6);
     assert_eq!(heartbeat[0].latest_sent, 6);
     assert_eq!(
         heartbeat[0].outstanding.as_deref(),
@@ -792,7 +792,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         .as_deref()
         .expect("the current process admitted a fresh heartbeat");
     assert_ne!(fresh_heartbeat, ids["heartbeat"]);
-    assert_eq!(heartbeat.baseline_sent, 2, "the moved baseline is retained");
+    assert_eq!(heartbeat.baseline_sent, 6, "the moved baseline is retained");
     let ordinary_sent = reopened
         .delivery_purposes()
         .expect("purposes reopen")

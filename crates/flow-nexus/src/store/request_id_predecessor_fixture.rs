@@ -6,7 +6,9 @@ use super::*;
 use crate::heartbeat::DeliveryPurpose;
 use crate::store::logical_delivery::{RecordsLogicalDeliveries, SimplifiedReplyBinding};
 use crate::store::metaflow::SeedsMetaflow;
-use crate::store::queue_delivery::AccountsQueueDelivery;
+use crate::store::queue_delivery::{
+    AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery,
+};
 use signal_flow::{
     Address, Aspect, DeliveryState, Message, Metaflow, Model, NativeReceipt, Request, SentBy,
 };
@@ -54,12 +56,28 @@ fn writes_nonempty_request_id_predecessor_memory() {
         SentBy::Sender(sender.clone()),
         Message::Soft(Request::Order("singleton answered order".into())),
     );
-    store
-        .transition_logical_delivery(
-            &uncertain_order.logical_delivery_id,
-            DeliveryState::Uncertain,
+    let PrepareQueueDelivery::Prepared(uncertain_attempt) = store
+        .prepare_oldest_delivery(
+            &recipient,
+            "predecessor-flow",
+            "predecessor-thread",
+            flow_ethos::HarnessKind::Codex,
+            NativeHistoryAnchor::CodexTurns(None),
         )
-        .expect("uncertain Order persists");
+        .expect("singleton Order delivery prepares")
+    else {
+        panic!("the singleton Order is the oldest prepared delivery")
+    };
+    assert!(
+        store
+            .mark_delivery_uncertain(&uncertain_attempt.attempt_id)
+            .expect("singleton Order uncertainty persists")
+    );
+    assert!(
+        store
+            .park_uncertain_delivery(&uncertain_attempt.attempt_id)
+            .expect("singleton uncertain Order leaves active queue processing")
+    );
     let historical_result = admit(
         &sender,
         SentBy::Sender(recipient.clone()),

@@ -12,7 +12,9 @@ use super::{
     StoredMetaRequestPolicyConfiguration, TracksHeartbeat,
 };
 use crate::store::logical_delivery::{MintsRequestIds, RequestClosure, RequestIdBinding};
-use crate::store::queue_delivery::AccountsQueueDelivery;
+use crate::store::queue_delivery::{
+    AccountsQueueDelivery, NativeDeliveryReceipt, NativeHistoryAnchor, PrepareQueueDelivery,
+};
 use sema_engine::{Engine, EngineOpen, QueryPlan, SchemaVersion};
 use std::{
     path::{Path, PathBuf},
@@ -104,6 +106,51 @@ fn request_binding_for(store: &FlowStore, logical_id: &str) -> RequestIdBinding 
         .find(|binding| binding.logical_delivery_id == logical_id)
         .cloned()
         .unwrap_or_else(|| panic!("request binding for {logical_id}"))
+}
+
+fn deliver_oldest_migrated(
+    store: &FlowStore,
+    address: &signal_flow::Address,
+    expected_logical_id: &str,
+    label: &str,
+) {
+    let PrepareQueueDelivery::Prepared(attempt) = store
+        .prepare_oldest_delivery(
+            address,
+            &format!("{label}-flow"),
+            &format!("{label}-thread"),
+            signal_flow::HarnessKind::Codex,
+            NativeHistoryAnchor::CodexTurns(None),
+        )
+        .expect("migrated delivery prepares")
+    else {
+        panic!("the expected migrated request is the oldest prepared delivery")
+    };
+    let meta_signal_flow::QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
+        panic!("the migrated request retains its logical queue evidence")
+    };
+    assert_eq!(entry.logical_delivery_id, expected_logical_id);
+    assert!(
+        store
+            .record_delivery_receipt(
+                &attempt.attempt_id,
+                NativeDeliveryReceipt {
+                    native_request_id: attempt.native_request_id,
+                    thread_id: attempt.thread_id.clone(),
+                    turn_id: format!("{label}-turn"),
+                    native_receipt: format!(
+                        r#"{{"id":{},"result":{{}}}}"#,
+                        attempt.native_request_id
+                    ),
+                },
+            )
+            .expect("migrated delivery receipt records")
+    );
+    assert!(
+        store
+            .settle_recorded_delivery(&attempt.attempt_id)
+            .expect("migrated delivered request leaves its queue")
+    );
 }
 
 fn start_argument(runtime: &Path, store: &Path) -> String {
@@ -322,22 +369,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     ));
 
     let open_order = request_binding_for(&store, &ids["open_order"]);
-    assert_eq!(
-        store
-            .withdraw_queued(&recipient, &ids["open_order"])
-            .expect("open migrated Order queue reads"),
-        Ok(())
-    );
-    store
-        .transition_logical_delivery(
-            &ids["open_order"],
-            signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
-                harness_kind: signal_flow::HarnessKind::Codex,
-                native_session_id: "current-order-session".into(),
-                native_prompt_id: "current-order-turn".into(),
-            }),
-        )
-        .expect("open migrated Order becomes delivered before its Result");
+    deliver_oldest_migrated(&store, &recipient, &ids["open_order"], "current-order");
     let resolved_result = store
         .resolve_sendable_message(
             &recipient,
@@ -364,22 +396,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         panic!("current Result accepted")
     };
     let open_task = request_binding_for(&store, &ids["open_task"]);
-    assert_eq!(
-        store
-            .withdraw_queued(&recipient, &ids["open_task"])
-            .expect("open migrated Task queue reads"),
-        Ok(())
-    );
-    store
-        .transition_logical_delivery(
-            &ids["open_task"],
-            signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
-                harness_kind: signal_flow::HarnessKind::Codex,
-                native_session_id: "current-task-session".into(),
-                native_prompt_id: "current-task-turn".into(),
-            }),
-        )
-        .expect("open migrated Task becomes delivered before its Done");
+    deliver_oldest_migrated(&store, &recipient, &ids["open_task"], "current-task");
     let resolved_done = store
         .resolve_sendable_message(
             &recipient,

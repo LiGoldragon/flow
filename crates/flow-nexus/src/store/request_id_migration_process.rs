@@ -11,6 +11,7 @@ use super::{
     OpensFlowStore, ReadsFlowMemory, RecordsLogicalDeliveries,
     StoredMetaRequestPolicyConfiguration, TracksHeartbeat,
 };
+use crate::CarriesSignalFrames;
 use crate::store::logical_delivery::{MintsRequestIds, RequestClosure, RequestIdBinding};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::queue_delivery::{
@@ -18,10 +19,163 @@ use crate::store::queue_delivery::{
 };
 use sema_engine::{Engine, EngineOpen, QueryPlan, SchemaVersion};
 use std::{
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     time::{Duration, Instant},
 };
+
+fn migration_sender() -> signal_flow::Address {
+    signal_flow::Address {
+        aspect: signal_flow::Aspect::Mind,
+        topic: "migrationSender".into(),
+        model: signal_flow::Model::Sol,
+    }
+}
+
+fn migration_recipient() -> signal_flow::Address {
+    signal_flow::Address {
+        aspect: signal_flow::Aspect::Field,
+        topic: "migrationRecipient".into(),
+        model: signal_flow::Model::Sol,
+    }
+}
+
+fn own_process() -> signal_flow::Process {
+    let stat = std::fs::read_to_string("/proc/self/stat").expect("own process stat reads");
+    let (_, fields) = stat.rsplit_once(") ").expect("own process stat fields");
+    signal_flow::Process {
+        pid: i64::from(std::process::id()),
+        started: fields
+            .split_whitespace()
+            .nth(19)
+            .and_then(|field| field.parse().ok())
+            .expect("own process start time reads"),
+    }
+}
+
+fn socket_query(peer: &mut UnixStream, query: signal_flow::Query) -> signal_flow::Response {
+    peer.write_query(&query).expect("socket query writes");
+    peer.read_response().expect("socket response reads")
+}
+
+fn bind_socket(peer: &mut UnixStream, address: signal_flow::Address) {
+    assert!(matches!(
+        socket_query(
+            peer,
+            signal_flow::Query::Bind(signal_flow::Bind_Data {
+                address,
+                process: own_process(),
+            }),
+        ),
+        signal_flow::Response::Bound(_)
+    ));
+}
+
+#[test]
+#[ignore = "the migration process test starts this authenticated socket client"]
+fn current_socket_client_serves_request_operations() {
+    let socket = PathBuf::from(std::env::var_os("FLOW_MIGRATION_SOCKET").unwrap());
+    let mut peer = UnixStream::connect(socket).expect("current Flow socket connects");
+    match std::env::var("FLOW_MIGRATION_CLIENT_MODE")
+        .unwrap()
+        .as_str()
+    {
+        "sender" => {
+            bind_socket(&mut peer, migration_sender());
+            let order = socket_query(
+                &mut peer,
+                signal_flow::Query::Send(signal_flow::SendRequest {
+                    recipient: migration_recipient(),
+                    sendable_message: signal_flow::SendableMessage::Soft(
+                        signal_flow::SendableRequest::Order("socket order".into()),
+                    ),
+                }),
+            );
+            let signal_flow::Response::SendAccepted(order) = order else {
+                panic!("socket Order is admitted: {order:?}")
+            };
+            let task = socket_query(
+                &mut peer,
+                signal_flow::Query::Send(signal_flow::SendRequest {
+                    recipient: migration_recipient(),
+                    sendable_message: signal_flow::SendableMessage::Soft(
+                        signal_flow::SendableRequest::Task(signal_flow::AnswerableTask {
+                            minutes: 5,
+                            string: "socket task".into(),
+                        }),
+                    ),
+                }),
+            );
+            let signal_flow::Response::SendAccepted(task) = task else {
+                panic!("socket Task is admitted: {task:?}")
+            };
+            assert!(matches!(
+                socket_query(
+                    &mut peer,
+                    signal_flow::Query::Send(signal_flow::SendRequest {
+                        recipient: migration_recipient(),
+                        sendable_message: signal_flow::SendableMessage::Soft(
+                            signal_flow::SendableRequest::Notice("socket notice".into()),
+                        ),
+                    }),
+                ),
+                signal_flow::Response::SendAccepted(_)
+            ));
+            let archived: flow_ethos::RequestId =
+                std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap();
+            assert_eq!(
+                socket_query(
+                    &mut peer,
+                    signal_flow::Query::ArchiveRequest(archived.clone()),
+                ),
+                signal_flow::Response::RequestArchived(archived)
+            );
+            println!("SOCKET_ORDER={}", order.request_id);
+            println!("SOCKET_TASK={}", task.request_id);
+        }
+        "recipient" => {
+            bind_socket(&mut peer, migration_recipient());
+            let order: flow_ethos::RequestId = std::env::var("FLOW_MIGRATION_ORDER").unwrap();
+            let task: flow_ethos::RequestId = std::env::var("FLOW_MIGRATION_TASK").unwrap();
+            assert!(matches!(
+                socket_query(
+                    &mut peer,
+                    signal_flow::Query::Send(signal_flow::SendRequest {
+                        recipient: migration_sender(),
+                        sendable_message: signal_flow::SendableMessage::Soft(
+                            signal_flow::SendableRequest::Result(
+                                signal_flow::SendableRequest_Result_Data {
+                                    request_id: order,
+                                    string: "socket result".into(),
+                                },
+                            ),
+                        ),
+                    }),
+                ),
+                signal_flow::Response::SendAccepted(_)
+            ));
+            assert!(matches!(
+                socket_query(
+                    &mut peer,
+                    signal_flow::Query::Send(signal_flow::SendRequest {
+                        recipient: migration_sender(),
+                        sendable_message: signal_flow::SendableMessage::Soft(
+                            signal_flow::SendableRequest::Done(
+                                signal_flow::SendableRequest_Done_Data {
+                                    request_id: task,
+                                    string: "socket done".into(),
+                                },
+                            ),
+                        ),
+                    }),
+                ),
+                signal_flow::Response::SendAccepted(_)
+            ));
+        }
+        mode => panic!("unknown migration client mode {mode}"),
+    }
+}
 
 struct FlowChild {
     child: Child,
@@ -265,6 +419,37 @@ fn serve_once(binary: &Path, home: &Path, runtime: &Path, store: &Path) {
     child.stop();
 }
 
+fn run_socket_client(
+    socket: &Path,
+    mode: &str,
+    environment: &[(&str, &str)],
+) -> std::collections::BTreeMap<String, String> {
+    let mut command = Command::new(std::env::current_exe().expect("test executable resolves"));
+    command
+        .arg("--exact")
+        .arg("store::request_id_migration_process::current_socket_client_serves_request_operations")
+        .arg("--ignored")
+        .arg("--nocapture")
+        .env("FLOW_MIGRATION_SOCKET", socket)
+        .env("FLOW_MIGRATION_CLIENT_MODE", mode);
+    for (name, value) in environment {
+        command.env(name, value);
+    }
+    let output = command.output().expect("socket client runs");
+    assert!(
+        output.status.success(),
+        "socket client {mode} failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8(output.stdout)
+        .expect("socket client output is text")
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect()
+}
+
 fn inject_malformed_request_policy(store_path: &Path) {
     let store = FlowStore::open_configured(store_path).expect("current Memory opens before fault");
     FlowStore::replace_configuration_family(
@@ -400,6 +585,9 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     );
     let heartbeat = store.heartbeat_standings().expect("heartbeat rows read");
     assert_eq!(heartbeat.len(), 1);
+    assert_eq!(heartbeat[0].address, singleton_recipient);
+    assert_eq!(heartbeat[0].baseline_sent, 2);
+    assert_eq!(heartbeat[0].latest_sent, 6);
     assert_eq!(
         heartbeat[0].outstanding.as_deref(),
         Some(ids["heartbeat"].as_str())
@@ -412,6 +600,14 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
             .any(|row| row.logical_delivery_id == ids["heartbeat"]
                 && row.purpose == crate::heartbeat::DeliveryPurpose::Heartbeat)
     );
+    store
+        .transition_logical_delivery(
+            &ids["heartbeat"],
+            signal_flow::DeliveryState::Failed(signal_flow::Refusal::Direct(
+                "migration fixture completes the moved heartbeat".into(),
+            )),
+        )
+        .expect("moved heartbeat becomes terminal before the current tick");
     assert!(matches!(
         store
             .simplified_reply_receipt("open-simplified")
@@ -431,6 +627,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
             .expect("migrated recipient awakens for current serving")
     );
     let open_order = request_binding_for(&store, &ids["open_order"]);
+    let delivered_order = request_binding_for(&store, &ids["delivered_order"]);
     deliver_oldest_migrated(&store, &recipient, &ids["open_order"], "current-order");
     let resolved_result = store
         .resolve_sendable_message(
@@ -533,12 +730,32 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     drop(store);
 
     let post_operation_runtime = tempfile::tempdir().expect("post-operation runtime");
-    serve_once(
+    let current_process = spawn_flow(
         &current,
         home.path(),
         post_operation_runtime.path(),
         &store_path,
     );
+    let current_socket = post_operation_runtime.path().join("flow.sock");
+    wait_for_socket(&current_socket);
+    let served = run_socket_client(
+        &current_socket,
+        "sender",
+        &[(
+            "FLOW_MIGRATION_ARCHIVE_REQUEST",
+            delivered_order.request_id.as_str(),
+        )],
+    );
+    run_socket_client(
+        &current_socket,
+        "recipient",
+        &[
+            ("FLOW_MIGRATION_ORDER", served["SOCKET_ORDER"].as_str()),
+            ("FLOW_MIGRATION_TASK", served["SOCKET_TASK"].as_str()),
+        ],
+    );
+    std::thread::sleep(Duration::from_millis(1_750));
+    current_process.stop();
     let reopened = FlowStore::open_configured(&store_path).expect("operated Memory reopens");
     assert!(
         reopened
@@ -564,6 +781,28 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
             .unwrap()
             .is_some()
     );
+    let heartbeat = reopened
+        .heartbeat_standings()
+        .expect("ticked heartbeat reopens")
+        .into_iter()
+        .find(|standing| standing.address == singleton_recipient)
+        .expect("moved heartbeat standing remains");
+    let fresh_heartbeat = heartbeat
+        .outstanding
+        .as_deref()
+        .expect("the current process admitted a fresh heartbeat");
+    assert_ne!(fresh_heartbeat, ids["heartbeat"]);
+    assert_eq!(heartbeat.baseline_sent, 2, "the moved baseline is retained");
+    let ordinary_sent = reopened
+        .delivery_purposes()
+        .expect("purposes reopen")
+        .into_iter()
+        .filter(|row| {
+            row.address == singleton_recipient
+                && row.purpose == crate::heartbeat::DeliveryPurpose::Ordinary
+        })
+        .count() as i64;
+    assert_eq!(heartbeat.latest_sent, ordinary_sent);
     drop(reopened);
 
     inject_malformed_request_policy(&store_path);

@@ -39,6 +39,17 @@ fn writes_nonempty_request_id_predecessor_memory() {
         topic: "migrationSingletonRecipient".into(),
         model: Model::Sol,
     };
+    assert_eq!(
+        store
+            .configure_change(meta_signal_flow::ConfigurationChange::Heartbeat(Some(
+                meta_signal_flow::HeartbeatConfig {
+                    heartbeat_period_seconds: 1,
+                    heartbeat_recipients: vec![singleton_recipient.clone()],
+                },
+            )))
+            .expect("predecessor heartbeat configuration commits"),
+        meta_signal_flow::ConfigureOutcome::Replaced
+    );
     for address in [&sender, &recipient, &singleton_recipient] {
         store.seed_metaflow(Metaflow {
             address: address.clone(),
@@ -174,7 +185,7 @@ fn writes_nonempty_request_id_predecessor_memory() {
         .expect("completed reply binding persists");
     store
         .replace_heartbeat_standings(vec![StoredHeartbeatStanding {
-            address: recipient.clone(),
+            address: singleton_recipient.clone(),
             baseline_awake: 1,
             baseline_working: None,
             baseline_working_complete: true,
@@ -190,7 +201,7 @@ fn writes_nonempty_request_id_predecessor_memory() {
         .expect("heartbeat standing persists");
     let signal_flow::PrivateSendResponse::SendAccepted(heartbeat) = store
         .accept_logical_delivery_for(
-            &recipient,
+            &singleton_recipient,
             SentBy::Flow,
             flow_ethos::Delivery::Wake,
             Message::Soft(Request::Notice("heartbeat predecessor".into())),

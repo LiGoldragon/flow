@@ -507,12 +507,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         &result.logical_delivery_id,
         "current-result",
     );
-    deliver_through_migrated(
-        &store,
-        &sender,
-        &done.logical_delivery_id,
-        "current-done",
-    );
+    deliver_through_migrated(&store, &sender, &done.logical_delivery_id, "current-done");
     let signal_flow::PrivateSendResponse::SendAccepted(notice) = store
         .accept_logical_delivery(
             &recipient,

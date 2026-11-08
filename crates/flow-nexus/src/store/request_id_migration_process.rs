@@ -762,7 +762,6 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         .as_deref()
         .expect("the current process admitted a fresh heartbeat");
     assert_ne!(fresh_heartbeat, ids["heartbeat"]);
-    assert_eq!(heartbeat.baseline_sent, 6, "the moved baseline is retained");
     let ordinary_sent = reopened
         .delivery_purposes()
         .expect("purposes reopen")
@@ -772,6 +771,27 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
                 && row.purpose == crate::heartbeat::DeliveryPurpose::Ordinary
         })
         .count() as i64;
+    let fresh_request = reopened
+        .retained_logical_requests()
+        .expect("fresh heartbeat request reopens")
+        .into_iter()
+        .find(|retained| retained.entry.logical_delivery_id == fresh_heartbeat)
+        .expect("fresh heartbeat request is retained");
+    let flow_ethos::Message::Soft(flow_ethos::Request::Notice(reminder)) =
+        fresh_request.entry.message
+    else {
+        panic!("the fresh heartbeat is a soft Notice")
+    };
+    assert!(
+        reminder.contains(&format!(
+            "messages sent (accepted, since purpose-family deployment/start) 6→{ordinary_sent}"
+        )),
+        "the fresh tick compares the moved count to current evidence: {reminder}"
+    );
+    assert_eq!(
+        heartbeat.baseline_sent, ordinary_sent,
+        "admitting the fresh heartbeat advances the sample baseline"
+    );
     assert_eq!(heartbeat.latest_sent, ordinary_sent);
     drop(reopened);
 

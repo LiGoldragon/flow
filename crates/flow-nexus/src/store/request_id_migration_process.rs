@@ -12,6 +12,7 @@ use super::{
     StoredMetaRequestPolicyConfiguration, TracksHeartbeat,
 };
 use crate::store::logical_delivery::{MintsRequestIds, RequestClosure, RequestIdBinding};
+use crate::store::metaflow::SleepsMetaflows;
 use crate::store::queue_delivery::{
     AccountsQueueDelivery, NativeDeliveryReceipt, NativeHistoryAnchor, PrepareQueueDelivery,
 };

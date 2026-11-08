@@ -34,7 +34,12 @@ fn writes_nonempty_request_id_predecessor_memory() {
         topic: "migrationRecipient".into(),
         model: Model::Sol,
     };
-    for address in [&sender, &recipient] {
+    let singleton_recipient = Address {
+        aspect: Aspect::Field,
+        topic: "migrationSingletonRecipient".into(),
+        model: Model::Sol,
+    };
+    for address in [&sender, &recipient, &singleton_recipient] {
         store.seed_metaflow(Metaflow {
             address: address.clone(),
             state: flow_ethos::State::Asleep,
@@ -52,13 +57,18 @@ fn writes_nonempty_request_id_predecessor_memory() {
         value
     };
     let uncertain_order = admit(
-        &recipient,
+        &singleton_recipient,
         SentBy::Sender(sender.clone()),
         Message::Soft(Request::Order("singleton answered order".into())),
     );
+    assert!(
+        store
+            .awaken_metaflow(&singleton_recipient, "predecessor-flow", 0)
+            .expect("predecessor recipient awakens for its delivery attempt")
+    );
     let PrepareQueueDelivery::Prepared(uncertain_attempt) = store
         .prepare_oldest_delivery(
-            &recipient,
+            &singleton_recipient,
             "predecessor-flow",
             "predecessor-thread",
             flow_ethos::HarnessKind::Codex,
@@ -80,7 +90,7 @@ fn writes_nonempty_request_id_predecessor_memory() {
     );
     let historical_result = admit(
         &sender,
-        SentBy::Sender(recipient.clone()),
+        SentBy::Sender(singleton_recipient.clone()),
         Message::Soft(Request::Result(flow_ethos::ResultPayload::Answered(
             flow_ethos::ResultPayload_Answered_Data {
                 answerable: flow_ethos::Answerable::Order("singleton answered order".into()),
@@ -196,7 +206,7 @@ fn writes_nonempty_request_id_predecessor_memory() {
     std::fs::write(
         output.join("fixture.ids"),
         format!(
-            "sender=Mind:migrationSender:Sol\nrecipient=Field:migrationRecipient:Sol\nuncertain_order={}\nhistorical_result={}\nopen_order={}\ndelivered_order={}\nopen_task={}\nopen_reply={}\ncompleted_reply={}\nheartbeat={}\n",
+            "sender=Mind:migrationSender:Sol\nrecipient=Field:migrationRecipient:Sol\nsingleton_recipient=Field:migrationSingletonRecipient:Sol\nuncertain_order={}\nhistorical_result={}\nopen_order={}\ndelivered_order={}\nopen_task={}\nopen_reply={}\ncompleted_reply={}\nheartbeat={}\n",
             uncertain_order.logical_delivery_id,
             historical_result.logical_delivery_id,
             open_order.logical_delivery_id,

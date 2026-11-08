@@ -117,7 +117,7 @@ fn deliver_oldest_migrated(
     let PrepareQueueDelivery::Prepared(attempt) = store
         .prepare_oldest_delivery(
             address,
-            &format!("{label}-flow"),
+            "current-delivery-flow",
             &format!("{label}-thread"),
             signal_flow::HarnessKind::Codex,
             NativeHistoryAnchor::CodexTurns(None),
@@ -314,6 +314,11 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         topic: "migrationRecipient".into(),
         model: signal_flow::Model::Sol,
     };
+    let singleton_recipient = signal_flow::Address {
+        aspect: signal_flow::Aspect::Field,
+        topic: "migrationSingletonRecipient".into(),
+        model: signal_flow::Model::Sol,
+    };
     let singleton = request_binding_for(&store, &ids["uncertain_order"]);
     assert_eq!(
         singleton.closure,
@@ -324,7 +329,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     assert_eq!(
         store
             .resolve_sendable_message(
-                &recipient,
+                &singleton_recipient,
                 &sender,
                 signal_flow::SendableMessage::Soft(signal_flow::SendableRequest::Result(
                     signal_flow::SendableRequest_Result_Data {
@@ -368,6 +373,11 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         super::logical_delivery::SimplifiedReplyStanding::NoneOwed
     ));
 
+    assert!(
+        store
+            .awaken_metaflow(&recipient, "current-delivery-flow", 0)
+            .expect("migrated recipient awakens for current serving")
+    );
     let open_order = request_binding_for(&store, &ids["open_order"]);
     deliver_oldest_migrated(&store, &recipient, &ids["open_order"], "current-order");
     let resolved_result = store

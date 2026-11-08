@@ -5,7 +5,7 @@
 use super::*;
 use crate::heartbeat::DeliveryPurpose;
 use crate::store::logical_delivery::{RecordsLogicalDeliveries, SimplifiedReplyBinding};
-use crate::store::metaflow::SeedsMetaflow;
+use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::queue_delivery::{
     AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery,
 };

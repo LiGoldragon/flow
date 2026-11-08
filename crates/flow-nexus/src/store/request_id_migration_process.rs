@@ -236,6 +236,12 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     );
     std::fs::copy(predecessor_fixture.join("flow.sema"), &store_path)
         .expect("the exact-source nonempty predecessor Memory copies");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&store_path, std::fs::Permissions::from_mode(0o600))
+            .expect("the private copied Memory is writable by the migration process");
+    }
     let ids = fixture_ids(&predecessor_fixture.join("fixture.ids"));
     assert!(store_path.is_file(), "the predecessor fixture wrote Memory");
 

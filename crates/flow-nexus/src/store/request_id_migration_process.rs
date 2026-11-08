@@ -713,7 +713,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     );
     let signal_flow::PrivateSendResponse::SendAccepted(notice) = store
         .accept_logical_delivery(
-            &recipient,
+            &sender,
             flow_ethos::SentBy::Sender(sender.clone()),
             flow_ethos::Delivery::Queue,
             flow_ethos::Message::Soft(flow_ethos::Request::Notice("current send".into())),

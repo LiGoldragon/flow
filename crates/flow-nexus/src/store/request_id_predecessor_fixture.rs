@@ -20,8 +20,8 @@ fn writes_nonempty_request_id_predecessor_memory() {
     );
     std::fs::create_dir_all(&output).expect("fixture output directory creates");
     let store_path = output.join("flow.sema");
-    let store = <FlowStore as OpensFlowStore>::open(&store_path)
-        .expect("exact predecessor production store opens");
+    let store = <FlowStore as OpensFlowStore>::open_configured(&store_path)
+        .expect("the exact predecessor process configured Memory before fixture writes");
     let sender = Address {
         aspect: Aspect::Mind,
         topic: "migrationSender".into(),

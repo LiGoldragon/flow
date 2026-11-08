@@ -309,6 +309,27 @@
             checkPhase = ''
               runHook preCheck
               export FLOW_PREDECESSOR_FIXTURE_OUT="$out/share/request-id-predecessor"
+              fixture_home="$TMPDIR/predecessor-home"
+              fixture_runtime="$TMPDIR/predecessor-runtime"
+              mkdir -m 700 -p "$fixture_home" "$fixture_runtime" "$FLOW_PREDECESSOR_FIXTURE_OUT"
+              HOME="$fixture_home" XDG_RUNTIME_DIR="$fixture_runtime" \
+                target/release/flow-nexus \
+                "{ «$fixture_runtime/flow.sock» «$fixture_runtime/flow-meta.sock» «$FLOW_PREDECESSOR_FIXTURE_OUT/flow.sema» None }" &
+              predecessor_pid=$!
+              for attempt in $(seq 1 3000); do
+                if [ -S "$fixture_runtime/flow.sock" ]; then
+                  break
+                fi
+                if ! kill -0 "$predecessor_pid" 2>/dev/null; then
+                  wait "$predecessor_pid"
+                  echo "the exact predecessor exited before its socket opened" >&2
+                  exit 1
+                fi
+                sleep 0.01
+              done
+              test -S "$fixture_runtime/flow.sock"
+              kill -TERM "$predecessor_pid"
+              wait "$predecessor_pid"
               cargoWithProfile test -p flow-nexus --lib \
                 store::request_id_predecessor_fixture::writes_nonempty_request_id_predecessor_memory \
                 -- --exact --ignored

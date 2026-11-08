@@ -122,15 +122,6 @@ fn current_socket_client_serves_request_operations() {
                 ),
                 signal_flow::Response::SendAccepted(_)
             ));
-            let archived: flow_ethos::RequestId =
-                std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap();
-            assert_eq!(
-                socket_query(
-                    &socket,
-                    signal_flow::Query::ArchiveRequest(archived.clone()),
-                ),
-                signal_flow::Response::RequestArchived(archived)
-            );
             println!("SOCKET_ORDER={}", order.request_id);
             println!("SOCKET_TASK={}", task.request_id);
         }
@@ -174,6 +165,18 @@ fn current_socket_client_serves_request_operations() {
             };
             println!("SOCKET_RESULT={}", result.request_id);
             println!("SOCKET_DONE={}", done.request_id);
+        }
+        "archive" => {
+            bind_socket(&socket, migration_sender());
+            let archived: flow_ethos::RequestId =
+                std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap();
+            assert_eq!(
+                socket_query(
+                    &socket,
+                    signal_flow::Query::ArchiveRequest(archived.clone()),
+                ),
+                signal_flow::Response::RequestArchived(archived)
+            );
         }
         mode => panic!("unknown migration client mode {mode}"),
     }
@@ -676,14 +679,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     );
     let current_socket = post_operation_runtime.path().join("flow.sock");
     wait_for_socket(&current_socket);
-    let _served = run_socket_client(
-        &current_socket,
-        "sender",
-        &[(
-            "FLOW_MIGRATION_ARCHIVE_REQUEST",
-            open_order.request_id.as_str(),
-        )],
-    );
+    let _served = run_socket_client(&current_socket, "sender", &[]);
     let answered = run_socket_client(
         &current_socket,
         "recipient",
@@ -691,6 +687,14 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
             ("FLOW_MIGRATION_ORDER", open_order.request_id.as_str()),
             ("FLOW_MIGRATION_TASK", open_task.request_id.as_str()),
         ],
+    );
+    run_socket_client(
+        &current_socket,
+        "archive",
+        &[(
+            "FLOW_MIGRATION_ARCHIVE_REQUEST",
+            open_order.request_id.as_str(),
+        )],
     );
     std::thread::sleep(Duration::from_millis(1_750));
     current_process.stop();

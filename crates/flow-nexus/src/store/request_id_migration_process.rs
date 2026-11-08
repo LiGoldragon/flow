@@ -154,6 +154,57 @@ fn deliver_oldest_migrated(
     );
 }
 
+fn deliver_through_migrated(
+    store: &FlowStore,
+    address: &signal_flow::Address,
+    expected_logical_id: &str,
+    label: &str,
+) {
+    for ordinal in 0..32 {
+        let PrepareQueueDelivery::Prepared(attempt) = store
+            .prepare_oldest_delivery(
+                address,
+                "current-delivery-flow",
+                &format!("{label}-{ordinal}-thread"),
+                signal_flow::HarnessKind::Codex,
+                NativeHistoryAnchor::CodexTurns(None),
+            )
+            .expect("migrated delivery prefix prepares")
+        else {
+            panic!("the expected migrated request remains in the delivery prefix")
+        };
+        let meta_signal_flow::QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
+            panic!("the migrated request retains its logical queue evidence")
+        };
+        let delivered_logical_id = entry.logical_delivery_id.clone();
+        assert!(
+            store
+                .record_delivery_receipt(
+                    &attempt.attempt_id,
+                    NativeDeliveryReceipt {
+                        native_request_id: attempt.native_request_id,
+                        thread_id: attempt.thread_id.clone(),
+                        turn_id: format!("{label}-{ordinal}-turn"),
+                        native_receipt: format!(
+                            r#"{{"id":{},"result":{{}}}}"#,
+                            attempt.native_request_id
+                        ),
+                    },
+                )
+                .expect("migrated delivery prefix receipt records")
+        );
+        assert!(
+            store
+                .settle_recorded_delivery(&attempt.attempt_id)
+                .expect("migrated delivered prefix leaves its queue")
+        );
+        if delivered_logical_id == expected_logical_id {
+            return;
+        }
+    }
+    panic!("the expected migrated request is within the bounded delivery prefix")
+}
+
 fn start_argument(runtime: &Path, store: &Path) -> String {
     format!(
         "{{ «{}» «{}» «{}» None }}",
@@ -438,25 +489,25 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
             .awaken_metaflow(&sender, "current-delivery-flow", 0)
             .expect("migrated sender awakens for current serving")
     );
-    deliver_oldest_migrated(
+    deliver_through_migrated(
         &store,
         &sender,
         &ids["open_reply"],
         "current-open-reply-input",
     );
-    deliver_oldest_migrated(
+    deliver_through_migrated(
         &store,
         &sender,
         &ids["completed_reply"],
         "current-completed-reply-input",
     );
-    deliver_oldest_migrated(
+    deliver_through_migrated(
         &store,
         &sender,
         &result.logical_delivery_id,
         "current-result",
     );
-    deliver_oldest_migrated(
+    deliver_through_migrated(
         &store,
         &sender,
         &done.logical_delivery_id,

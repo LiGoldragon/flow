@@ -10,7 +10,7 @@ base64 = "0.22"
 meta-signal-flow.workspace = true
 notify = "8"
 rkyv.workspace = true
-sema-engine = { git = "https://github.com/LiGoldragon/sema-engine", rev = "516f01fe0b03157efc6cc3d38b588f0ca123ac94" }
+sema-engine = { git = "https://github.com/LiGoldragon/memory-engine", rev = "cf43091508310966087f311ae400c34b9b2b9350" }
 serde_json.workspace = true
 sha1 = "0.10"
 sha2 = "0.10"

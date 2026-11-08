@@ -657,7 +657,7 @@ dependencies = [
 [[package]]
 name = "sema"
 version = "0.1.1"
-source = "git+https://github.com/LiGoldragon/sema.git?rev=51d7927c872f0df12791bad8d39a4db6433b01a1#51d7927c872f0df12791bad8d39a4db6433b01a1"
+source = "git+https://github.com/LiGoldragon/memory.git?rev=51d7927c872f0df12791bad8d39a4db6433b01a1#51d7927c872f0df12791bad8d39a4db6433b01a1"
 dependencies = [
  "redb",
  "rkyv",
@@ -667,7 +667,7 @@ dependencies = [
 [[package]]
 name = "sema-engine"
 version = "0.16.0"
-source = "git+https://github.com/LiGoldragon/sema-engine?rev=516f01fe0b03157efc6cc3d38b588f0ca123ac94#516f01fe0b03157efc6cc3d38b588f0ca123ac94"
+source = "git+https://github.com/LiGoldragon/memory-engine?rev=cf43091508310966087f311ae400c34b9b2b9350#cf43091508310966087f311ae400c34b9b2b9350"
 dependencies = [
  "blake3",
  "rkyv",

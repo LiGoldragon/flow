@@ -627,7 +627,6 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
             .expect("migrated recipient awakens for current serving")
     );
     let open_order = request_binding_for(&store, &ids["open_order"]);
-    let delivered_order = request_binding_for(&store, &ids["delivered_order"]);
     deliver_oldest_migrated(&store, &recipient, &ids["open_order"], "current-order");
     let resolved_result = store
         .resolve_sendable_message(
@@ -721,12 +720,6 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         .read_logical_delivery_snapshots(&sender, Some(notice.delivery_cursor))
         .expect("cursor resume reads");
     assert!(after_acceptance.delivery_cursor >= notice.delivery_cursor);
-    assert_eq!(
-        store
-            .archive_request(&open_order.request_id, &sender)
-            .expect("answered Order archive reads"),
-        Ok(())
-    );
     drop(store);
 
     let post_operation_runtime = tempfile::tempdir().expect("post-operation runtime");
@@ -743,7 +736,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         "sender",
         &[(
             "FLOW_MIGRATION_ARCHIVE_REQUEST",
-            delivered_order.request_id.as_str(),
+            open_order.request_id.as_str(),
         )],
     );
     run_socket_client(

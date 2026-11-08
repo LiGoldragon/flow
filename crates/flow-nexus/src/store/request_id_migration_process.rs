@@ -688,6 +688,34 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
             ("FLOW_MIGRATION_TASK", open_task.request_id.as_str()),
         ],
     );
+    current_process.stop();
+    let between_processes = FlowStore::open_configured(&store_path)
+        .expect("socket answers reopen before archive serving");
+    assert!(
+        between_processes
+            .awaken_metaflow(&sender, "current-delivery-flow", 0)
+            .expect("socket answer target awakens for settlement")
+    );
+    for (name, label) in [
+        ("SOCKET_RESULT", "socket-result"),
+        ("SOCKET_DONE", "socket-done"),
+    ] {
+        let binding = between_processes
+            .request_binding(&answered[name])
+            .unwrap()
+            .expect("socket answer retains its request binding");
+        deliver_through_migrated(
+            &between_processes,
+            &sender,
+            &binding.logical_delivery_id,
+            label,
+        );
+    }
+    drop(between_processes);
+    let archive_runtime = tempfile::tempdir().expect("archive runtime");
+    let current_process = spawn_flow(&current, home.path(), archive_runtime.path(), &store_path);
+    let current_socket = archive_runtime.path().join("flow.sock");
+    wait_for_socket(&current_socket);
     run_socket_client(
         &current_socket,
         "archive",

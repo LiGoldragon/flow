@@ -172,8 +172,8 @@ fn current_socket_client_serves_request_operations() {
             let signal_flow::Response::SendAccepted(done) = done else {
                 panic!("socket Done is admitted: {done:?}")
             };
-            println!("SOCKET_RESULT={}", result.logical_delivery_id);
-            println!("SOCKET_DONE={}", done.logical_delivery_id);
+            println!("SOCKET_RESULT={}", result.request_id);
+            println!("SOCKET_DONE={}", done.request_id);
         }
         mode => panic!("unknown migration client mode {mode}"),
     }
@@ -701,18 +701,18 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
             .unwrap()
             .is_none()
     );
-    assert!(
-        reopened
-            .logical_delivery_snapshot(&answered["SOCKET_RESULT"])
+    for answered_request in [&answered["SOCKET_RESULT"], &answered["SOCKET_DONE"]] {
+        let binding = reopened
+            .request_binding(answered_request)
             .unwrap()
-            .is_some()
-    );
-    assert!(
-        reopened
-            .logical_delivery_snapshot(&answered["SOCKET_DONE"])
-            .unwrap()
-            .is_some()
-    );
+            .expect("socket answer retains its request binding");
+        assert!(
+            reopened
+                .logical_delivery_snapshot(&binding.logical_delivery_id)
+                .unwrap()
+                .is_some()
+        );
+    }
     assert!(
         reopened
             .logical_delivery_snapshot(&notice.logical_delivery_id)

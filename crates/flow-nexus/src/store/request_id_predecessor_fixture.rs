@@ -212,6 +212,20 @@ fn writes_nonempty_request_id_predecessor_memory() {
     else {
         panic!("heartbeat admission accepted")
     };
+    store
+        .transition_logical_delivery(
+            &heartbeat.logical_delivery_id,
+            DeliveryState::Delivered(NativeReceipt {
+                harness_kind: flow_ethos::HarnessKind::Codex,
+                native_session_id: "predecessor-heartbeat-session".into(),
+                native_prompt_id: "predecessor-heartbeat-turn".into(),
+            }),
+        )
+        .expect("predecessor heartbeat becomes terminal before upgrade");
+    store
+        .withdraw_queued(&singleton_recipient, &heartbeat.logical_delivery_id)
+        .expect("terminal predecessor heartbeat queue reads")
+        .expect("terminal predecessor heartbeat leaves its queue");
     drop(store);
 
     std::fs::write(

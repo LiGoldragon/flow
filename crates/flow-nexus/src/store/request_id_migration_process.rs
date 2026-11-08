@@ -41,6 +41,14 @@ fn migration_recipient() -> signal_flow::Address {
     }
 }
 
+fn migration_message() -> signal_flow::Address {
+    signal_flow::Address {
+        aspect: signal_flow::Aspect::Field,
+        topic: "message".into(),
+        model: signal_flow::Model::Astra,
+    }
+}
+
 fn own_process() -> signal_flow::Process {
     let stat = std::fs::read_to_string("/proc/self/stat").expect("own process stat reads");
     let (_, fields) = stat.rsplit_once(") ").expect("own process stat fields");
@@ -176,6 +184,55 @@ fn current_socket_client_serves_request_operations() {
                     signal_flow::Query::ArchiveRequest(archived.clone()),
                 ),
                 signal_flow::Response::RequestArchived(archived)
+            );
+        }
+        "archive-foreign" => {
+            bind_socket(&socket, migration_recipient());
+            let archived = std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap();
+            assert_eq!(
+                socket_query(&socket, signal_flow::Query::ArchiveRequest(archived)),
+                signal_flow::Response::ArchiveRejected(
+                    signal_flow::ArchiveRejection::UnknownRequest
+                )
+            );
+        }
+        "archive-unbound" => {
+            let archived = std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap();
+            assert!(matches!(
+                socket_query(&socket, signal_flow::Query::ArchiveRequest(archived)),
+                signal_flow::Response::Refused(signal_flow::Refusal::Unidentified(_))
+            ));
+        }
+        "archive-message" => {
+            bind_socket(&socket, migration_message());
+            let archived = std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap();
+            assert_eq!(
+                socket_query(&socket, signal_flow::Query::ArchiveRequest(archived)),
+                signal_flow::Response::ArchiveRejected(
+                    signal_flow::ArchiveRejection::UnknownRequest
+                )
+            );
+        }
+        "archive-unknown" => {
+            bind_socket(&socket, migration_sender());
+            assert_eq!(
+                socket_query(
+                    &socket,
+                    signal_flow::Query::ArchiveRequest("unknown-request-id".into()),
+                ),
+                signal_flow::Response::ArchiveRejected(
+                    signal_flow::ArchiveRejection::UnknownRequest
+                )
+            );
+        }
+        "archive-flow-owned" => {
+            bind_socket(&socket, migration_sender());
+            let archived = std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap();
+            assert_eq!(
+                socket_query(&socket, signal_flow::Query::ArchiveRequest(archived)),
+                signal_flow::Response::ArchiveRejected(
+                    signal_flow::ArchiveRejection::UnknownRequest
+                )
             );
         }
         mode => panic!("unknown migration client mode {mode}"),
@@ -594,25 +651,27 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     assert_eq!(heartbeat[0].baseline_sent, 6);
     assert_eq!(heartbeat[0].latest_sent, 6);
     assert_eq!(
-        heartbeat[0].outstanding.as_deref(),
-        Some(ids["heartbeat"].as_str())
+        heartbeat[0].outstanding, None,
+        "upgrade atomically clears a terminal predecessor heartbeat"
     );
     assert!(
         store
-            .delivery_purposes()
-            .expect("purposes read")
-            .iter()
-            .any(|row| row.logical_delivery_id == ids["heartbeat"]
-                && row.purpose == crate::heartbeat::DeliveryPurpose::Heartbeat)
+            .logical_delivery_snapshot(&ids["heartbeat"])
+            .expect("current heartbeat index reads")
+            .is_none(),
+        "the terminal predecessor heartbeat is absent from current delivery indexes"
     );
-    store
-        .transition_logical_delivery(
-            &ids["heartbeat"],
-            signal_flow::DeliveryState::Failed(signal_flow::Refusal::Direct(
-                "migration fixture completes the moved heartbeat".into(),
-            )),
-        )
-        .expect("moved heartbeat becomes terminal before the current tick");
+    let prior = store
+        .engine
+        .match_records(QueryPlan::all(store.request_id_upgrade.prior_deliveries))
+        .expect("prior deliveries read");
+    assert!(
+        prior
+            .records()
+            .iter()
+            .any(|row| row.logical_delivery_id == ids["heartbeat"]),
+        "the terminal predecessor heartbeat moves only to PriorDelivery"
+    );
     assert!(matches!(
         store
             .simplified_reply_receipt("open-simplified")
@@ -711,11 +770,42 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
             label,
         );
     }
+    let mut nexus_configuration = between_processes
+        .configuration_snapshot()
+        .expect("configuration reads for Message peer negative")
+        .expect("configuration remains complete")
+        .nexus;
+    nexus_configuration.message_nexus_binary_option = Some(
+        std::fs::canonicalize(std::env::current_exe().expect("test executable resolves"))
+            .expect("test executable canonicalizes")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    between_processes
+        .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
+            nexus_configuration,
+        ))
+        .expect("test Message peer executable configures");
     drop(between_processes);
     let archive_runtime = tempfile::tempdir().expect("archive runtime");
     let current_process = spawn_flow(&current, home.path(), archive_runtime.path(), &store_path);
     let current_socket = archive_runtime.path().join("flow.sock");
     wait_for_socket(&current_socket);
+    for mode in [
+        "archive-foreign",
+        "archive-unbound",
+        "archive-message",
+        "archive-unknown",
+    ] {
+        run_socket_client(
+            &current_socket,
+            mode,
+            &[(
+                "FLOW_MIGRATION_ARCHIVE_REQUEST",
+                open_order.request_id.as_str(),
+            )],
+        );
+    }
     run_socket_client(
         &current_socket,
         "archive",
@@ -793,7 +883,43 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         "admitting the fresh heartbeat advances the sample baseline"
     );
     assert_eq!(heartbeat.latest_sent, ordinary_sent);
+    let fresh_heartbeat = fresh_heartbeat.to_owned();
+    let fresh_heartbeat_request_id = request_binding_for(&reopened, &fresh_heartbeat).request_id;
     drop(reopened);
+
+    let flow_owned_runtime = tempfile::tempdir().expect("Flow-owned archive runtime");
+    let flow_owned_process = spawn_flow(
+        &current,
+        home.path(),
+        flow_owned_runtime.path(),
+        &store_path,
+    );
+    let flow_owned_socket = flow_owned_runtime.path().join("flow.sock");
+    wait_for_socket(&flow_owned_socket);
+    run_socket_client(
+        &flow_owned_socket,
+        "archive-flow-owned",
+        &[(
+            "FLOW_MIGRATION_ARCHIVE_REQUEST",
+            fresh_heartbeat_request_id.as_str(),
+        )],
+    );
+    flow_owned_process.stop();
+    let after_flow_owned =
+        FlowStore::open_configured(&store_path).expect("Flow-owned archive refusal reopens");
+    assert!(
+        after_flow_owned
+            .logical_delivery_snapshot(&fresh_heartbeat)
+            .expect("Flow-owned heartbeat snapshot reads")
+            .is_some()
+    );
+    assert!(
+        after_flow_owned
+            .request_binding(&fresh_heartbeat_request_id)
+            .expect("Flow-owned heartbeat binding reads")
+            .is_some()
+    );
+    drop(after_flow_owned);
 
     inject_malformed_request_policy(&store_path);
     let malformed = vec![StoredMetaRequestPolicyConfiguration {

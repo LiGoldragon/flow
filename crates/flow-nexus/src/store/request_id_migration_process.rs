@@ -721,7 +721,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         "archive",
         &[(
             "FLOW_MIGRATION_ARCHIVE_REQUEST",
-            singleton.request_id.as_str(),
+            open_order.request_id.as_str(),
         )],
     );
     std::thread::sleep(Duration::from_millis(1_750));
@@ -729,7 +729,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     let reopened = FlowStore::open_configured(&store_path).expect("operated Memory reopens");
     assert!(
         reopened
-            .request_binding(&singleton.request_id)
+            .request_binding(&open_order.request_id)
             .unwrap()
             .is_none()
     );

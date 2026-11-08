@@ -322,6 +322,12 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     ));
 
     let open_order = request_binding_for(&store, &ids["open_order"]);
+    assert_eq!(
+        store
+            .withdraw_queued(&recipient, &ids["open_order"])
+            .expect("open migrated Order queue reads"),
+        Ok(())
+    );
     store
         .transition_logical_delivery(
             &ids["open_order"],
@@ -358,6 +364,12 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         panic!("current Result accepted")
     };
     let open_task = request_binding_for(&store, &ids["open_task"]);
+    assert_eq!(
+        store
+            .withdraw_queued(&recipient, &ids["open_task"])
+            .expect("open migrated Task queue reads"),
+        Ok(())
+    );
     store
         .transition_logical_delivery(
             &ids["open_task"],
@@ -409,12 +421,6 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         .read_logical_delivery_snapshots(&sender, Some(notice.delivery_cursor))
         .expect("cursor resume reads");
     assert!(after_acceptance.delivery_cursor >= notice.delivery_cursor);
-    assert_eq!(
-        store
-            .withdraw_queued(&recipient, &ids["open_order"])
-            .expect("answered Order queue reads"),
-        Ok(())
-    );
     assert_eq!(
         store
             .archive_request(&open_order.request_id, &sender)

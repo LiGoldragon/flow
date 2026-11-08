@@ -138,23 +138,24 @@ fn current_socket_client_serves_request_operations() {
             bind_socket(&socket, migration_recipient());
             let order: flow_ethos::RequestId = std::env::var("FLOW_MIGRATION_ORDER").unwrap();
             let task: flow_ethos::RequestId = std::env::var("FLOW_MIGRATION_TASK").unwrap();
-            assert!(matches!(
-                socket_query(
-                    &socket,
-                    signal_flow::Query::Send(signal_flow::SendRequest {
-                        recipient: migration_sender(),
-                        sendable_message: signal_flow::SendableMessage::Soft(
-                            signal_flow::SendableRequest::Result(
-                                signal_flow::SendableRequest_Result_Data {
-                                    request_id: order,
-                                    string: "socket result".into(),
-                                },
-                            ),
+            let result = socket_query(
+                &socket,
+                signal_flow::Query::Send(signal_flow::SendRequest {
+                    recipient: migration_sender(),
+                    sendable_message: signal_flow::SendableMessage::Soft(
+                        signal_flow::SendableRequest::Result(
+                            signal_flow::SendableRequest_Result_Data {
+                                request_id: order,
+                                string: "socket result".into(),
+                            },
                         ),
-                    }),
-                ),
-                signal_flow::Response::SendAccepted(_)
-            ));
+                    ),
+                }),
+            );
+            assert!(
+                matches!(result, signal_flow::Response::SendAccepted(_)),
+                "socket Result is admitted: {result:?}"
+            );
             assert!(matches!(
                 socket_query(
                     &socket,

@@ -54,15 +54,16 @@ fn own_process() -> signal_flow::Process {
     }
 }
 
-fn socket_query(peer: &mut UnixStream, query: signal_flow::Query) -> signal_flow::Response {
+fn socket_query(socket: &Path, query: signal_flow::Query) -> signal_flow::Response {
+    let mut peer = UnixStream::connect(socket).expect("current Flow socket connects");
     peer.write_query(&query).expect("socket query writes");
     peer.read_response().expect("socket response reads")
 }
 
-fn bind_socket(peer: &mut UnixStream, address: signal_flow::Address) {
+fn bind_socket(socket: &Path, address: signal_flow::Address) {
     assert!(matches!(
         socket_query(
-            peer,
+            socket,
             signal_flow::Query::Bind(signal_flow::Bind_Data {
                 address,
                 process: own_process(),
@@ -76,15 +77,14 @@ fn bind_socket(peer: &mut UnixStream, address: signal_flow::Address) {
 #[ignore = "the migration process test starts this authenticated socket client"]
 fn current_socket_client_serves_request_operations() {
     let socket = PathBuf::from(std::env::var_os("FLOW_MIGRATION_SOCKET").unwrap());
-    let mut peer = UnixStream::connect(socket).expect("current Flow socket connects");
     match std::env::var("FLOW_MIGRATION_CLIENT_MODE")
         .unwrap()
         .as_str()
     {
         "sender" => {
-            bind_socket(&mut peer, migration_sender());
+            bind_socket(&socket, migration_sender());
             let order = socket_query(
-                &mut peer,
+                &socket,
                 signal_flow::Query::Send(signal_flow::SendRequest {
                     recipient: migration_recipient(),
                     sendable_message: signal_flow::SendableMessage::Soft(
@@ -96,7 +96,7 @@ fn current_socket_client_serves_request_operations() {
                 panic!("socket Order is admitted: {order:?}")
             };
             let task = socket_query(
-                &mut peer,
+                &socket,
                 signal_flow::Query::Send(signal_flow::SendRequest {
                     recipient: migration_recipient(),
                     sendable_message: signal_flow::SendableMessage::Soft(
@@ -112,7 +112,7 @@ fn current_socket_client_serves_request_operations() {
             };
             assert!(matches!(
                 socket_query(
-                    &mut peer,
+                    &socket,
                     signal_flow::Query::Send(signal_flow::SendRequest {
                         recipient: migration_recipient(),
                         sendable_message: signal_flow::SendableMessage::Soft(
@@ -126,7 +126,7 @@ fn current_socket_client_serves_request_operations() {
                 std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap();
             assert_eq!(
                 socket_query(
-                    &mut peer,
+                    &socket,
                     signal_flow::Query::ArchiveRequest(archived.clone()),
                 ),
                 signal_flow::Response::RequestArchived(archived)
@@ -135,12 +135,12 @@ fn current_socket_client_serves_request_operations() {
             println!("SOCKET_TASK={}", task.request_id);
         }
         "recipient" => {
-            bind_socket(&mut peer, migration_recipient());
+            bind_socket(&socket, migration_recipient());
             let order: flow_ethos::RequestId = std::env::var("FLOW_MIGRATION_ORDER").unwrap();
             let task: flow_ethos::RequestId = std::env::var("FLOW_MIGRATION_TASK").unwrap();
             assert!(matches!(
                 socket_query(
-                    &mut peer,
+                    &socket,
                     signal_flow::Query::Send(signal_flow::SendRequest {
                         recipient: migration_sender(),
                         sendable_message: signal_flow::SendableMessage::Soft(
@@ -157,7 +157,7 @@ fn current_socket_client_serves_request_operations() {
             ));
             assert!(matches!(
                 socket_query(
-                    &mut peer,
+                    &socket,
                     signal_flow::Query::Send(signal_flow::SendRequest {
                         recipient: migration_sender(),
                         sendable_message: signal_flow::SendableMessage::Soft(

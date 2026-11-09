@@ -552,14 +552,7 @@ impl MintsRequestIds for FlowStore {
         } else {
             matches!(request, Request::Order(_) | Request::Question(_))
         };
-        let delivered = self
-            .logical_delivery_snapshot(&binding.logical_delivery_id)?
-            .is_some_and(|value| {
-                matches!(
-                    value.delivery_state,
-                    DeliveryState::Delivered(_) | DeliveryState::Uncertain
-                )
-            });
+        let delivered = self.delivered_to_be_answered(&binding.logical_delivery_id)?;
         Ok(correct_kind
             && retained.address == *answerer
             && original_sender == requester
@@ -601,6 +594,65 @@ impl MintsRequestIds for FlowStore {
             }
         }
         Ok(Err(Refusal::RequestIdDrawsCollided))
+    }
+}
+
+/// The requests a permaflow owes an answer. A request is open from its
+/// delivery until the Result or Done that answers it, and it is the
+/// permaflow's, not the flow's: an Order, Question or Task a sender's
+/// delivery reached any flow of the Address, its id still bound to it and
+/// open. Every fact read is Memory's (the retained request, its delivery's
+/// current state, its id's binding), so a refresh, a restart and an upgrade
+/// keep it.
+pub(crate) trait HoldsOpenRequests {
+    /// Whether the delivery has reached its recipient as far as an answer
+    /// may close it: delivered, or uncertain, whose answer proves it read.
+    fn delivered_to_be_answered(&self, id: &LogicalDeliveryId) -> Result<bool, StoreError>;
+    /// The Address's open requests, oldest first, each as it was delivered,
+    /// under the id it was delivered with.
+    fn open_requests(&self, address: &Address) -> Result<Vec<QueueEntry>, StoreError>;
+}
+
+impl HoldsOpenRequests for FlowStore {
+    fn delivered_to_be_answered(&self, id: &LogicalDeliveryId) -> Result<bool, StoreError> {
+        Ok(self.logical_delivery_snapshot(id)?.is_some_and(|value| {
+            matches!(
+                value.delivery_state,
+                DeliveryState::Delivered(_) | DeliveryState::Uncertain
+            )
+        }))
+    }
+
+    fn open_requests(&self, address: &Address) -> Result<Vec<QueueEntry>, StoreError> {
+        let mut open = Vec::new();
+        for retained in self.retained_logical_requests()? {
+            if retained.address != *address || !matches!(retained.entry.sent_by, SentBy::Sender(_))
+            {
+                continue;
+            }
+            let (Message::HardAbrupt(request)
+            | Message::MiddleAbrupt(request)
+            | Message::Soft(request)) = &retained.entry.message;
+            if !matches!(
+                request,
+                Request::Order(_) | Request::Question(_) | Request::Task(_)
+            ) {
+                continue;
+            }
+            let bound_open = self
+                .request_binding(&retained.entry.request_id)?
+                .is_some_and(|binding| {
+                    binding.logical_delivery_id == retained.entry.logical_delivery_id
+                        && binding.closure == RequestClosure::Open
+                });
+            if bound_open && self.delivered_to_be_answered(&retained.entry.logical_delivery_id)? {
+                open.push(retained.entry);
+            }
+        }
+        // A logical delivery id carries its admission cursor, zero-padded:
+        // its order is the order the requests were sent in.
+        open.sort_by(|left, right| left.logical_delivery_id.cmp(&right.logical_delivery_id));
+        Ok(open)
     }
 }
 
@@ -1628,10 +1680,10 @@ impl RecordsLogicalDeliveries for FlowStore {
                 .checked_add(if answered_uncertain { 2 } else { 1 })
                 .ok_or(StoreError::StateInvariant)?,
         };
-        let commit = self
-            .engine
-            .begin_atomic_commit()
-            .mutate(self.metaflows, stored);
+        // The target's metaflow row is written once, last: an answer to an
+        // Uncertain request of the same Address takes that request out of
+        // this row's queue before it is written.
+        let commit = self.engine.begin_atomic_commit();
         let commit = if create_counter {
             commit.assert(self.logical_deliveries.counter, next_counter)
         } else {
@@ -1656,14 +1708,19 @@ impl RecordsLogicalDeliveries for FlowStore {
                 let mut read = current.clone();
                 read.snapshot.delivery_cursor = cursor + 1;
                 read.snapshot.delivery_state = DeliveryState::Read;
-                self.read_uncertain_delivery(&answered_logical_id, &accepted_logical_id, commit)?
-                    .mutate(self.logical_deliveries.current, read.clone())
-                    .assert(
-                        self.logical_deliveries.events,
-                        LogicalDeliveryEvent {
-                            snapshot: read.snapshot,
-                        },
-                    )
+                self.read_uncertain_delivery(
+                    &answered_logical_id,
+                    &accepted_logical_id,
+                    &mut stored,
+                    commit,
+                )?
+                .mutate(self.logical_deliveries.current, read.clone())
+                .assert(
+                    self.logical_deliveries.events,
+                    LogicalDeliveryEvent {
+                        snapshot: read.snapshot,
+                    },
+                )
             } else {
                 commit
             }
@@ -1672,6 +1729,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         };
         self.engine.commit_atomic(
             commit
+                .mutate(self.metaflows, stored)
                 .assert(
                     self.logical_deliveries.current,
                     CurrentLogicalDelivery {
@@ -2088,10 +2146,10 @@ impl RecordsLogicalDeliveries for FlowStore {
                 .checked_add(if answered_uncertain { 2 } else { 1 })
                 .ok_or(StoreError::StateInvariant)?,
         };
-        let commit = self
-            .engine
-            .begin_atomic_commit()
-            .mutate(self.metaflows, stored);
+        // The recipient's metaflow row is written once, after the answered
+        // request is settled: an answer to an Uncertain request of the same
+        // Address takes that request out of this row's queue first.
+        let commit = self.engine.begin_atomic_commit();
         let commit = if create {
             commit.assert(self.logical_deliveries.counter, next_counter)
         } else {
@@ -2165,7 +2223,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 let mut read = current.clone();
                 read.snapshot.delivery_cursor = next + 1;
                 read.snapshot.delivery_state = DeliveryState::Read;
-                self.read_uncertain_delivery(&answered_logical_id, &id, commit)?
+                self.read_uncertain_delivery(&answered_logical_id, &id, &mut stored, commit)?
                     .mutate(self.logical_deliveries.current, read.clone())
                     .assert(
                         self.logical_deliveries.events,
@@ -2179,6 +2237,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         } else {
             commit
         };
+        let commit = commit.mutate(self.metaflows, stored);
         let commit = match &request {
             Request::Task(task) => {
                 let (reminded, due) = match &task_sender {

@@ -266,6 +266,19 @@ impl Performs for RunningNexus {
                         eprintln!("flow-nexus: launch {request} root unresolved: {rejection:?}");
                     })),
                 };
+                // A successor is given every request delivered to its
+                // permaflow's flows and still open, under the id it was
+                // delivered with.
+                let open_requests = match profile.flow_id_option {
+                    None => Vec::new(),
+                    Some(_) => {
+                        use crate::store::logical_delivery::HoldsOpenRequests;
+                        match self.store.open_requests(&profile.address) {
+                            Ok(open) => open,
+                            Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+                        }
+                    }
+                };
                 match self.composer.current().compose_in_root(
                     HarnessedProfile {
                         remembered_flows,
@@ -278,6 +291,7 @@ impl Performs for RunningNexus {
                         Some(Ok(root)) => HandoverRoot::At(std::path::Path::new(root)),
                         Some(Err(_)) => HandoverRoot::Unresolved,
                     },
+                    &open_requests,
                 ) {
                     Ok(launch) => Outcome::Composed(launch),
                     Err(CompositionError::LeaveOut(refusal)) => {

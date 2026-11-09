@@ -2429,6 +2429,7 @@ mod tests {
     mod launching_nexus;
     mod model;
     mod observe_metaflows;
+    mod open_requests;
     mod queue_drain;
     mod refresh_and_compaction;
     mod refreshing;

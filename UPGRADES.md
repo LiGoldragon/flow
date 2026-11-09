@@ -1,3 +1,37 @@
+# Flow 0.53.4: a successor is given its permaflow's open requests
+
+A request is open from its delivery until the Result or Done that answers
+it, and it is the permaflow's, not the flow's.
+
+- A successor (a refresh's, a Replace's, a waking's: any launch naming a
+  predecessor) is given, after its predecessor's handover and last in its
+  first prompt, every request delivered to the Address's flows and still
+  open, oldest first, as one vector datom in the form a flow receives
+  queued work, each under the id it was delivered with:
+  `[ { Sender.{ Psyche core Opus } Soft.Task.{ k7ph 240 «…» } } … ]`.
+  Open is an Order, Question or Task from a sender, delivered or
+  Uncertain, its id still bound to it and not closed by a Result or Done
+  (an archived request is not open). Requests still queued reach the
+  successor through its queue as before.
+- The same Result or Done answers it: admission already checks the
+  Address the request was delivered to, not the flow, so the successor's
+  answer is admitted as its predecessor's would have been, and only a flow
+  of that Address answers.
+- A Task's minutes are its own: its reminder is kept under the request in
+  `flow_nexus_reminders`, due as admission set it, and a refresh neither
+  restarts nor extends it.
+- No stored format changes. Open requests are read from what Memory
+  already holds (`flow_nexus_queue_delivery_requests`,
+  `flow_nexus_logical_delivery_current`, `flow_nexus_request_ids`), so a
+  0.53.3 store opens as it is, and the requests its flows hold open are
+  carried to their successors.
+- A flow's Result or Done to its own request whose hand-over is Uncertain
+  is admitted: its admission takes the request out of the Address's queue
+  and queues the answer in one write of the metaflow row. 0.53.3 wrote the
+  row twice in one commit and answered
+  `SendRefused.Store.«… duplicate key: flow_nexus_metaflows/…»`. A Result to
+  a request still queued, never handed over, stays `SendRefused.Unresolved`.
+
 # Flow 0.53.3: replacement waits for rest; a Stop carries its background work
 
 Pins signal-flow 57.0.0 (`3d0a4cd`), meta-signal-flow 72.0.0 (`27d06b7`),

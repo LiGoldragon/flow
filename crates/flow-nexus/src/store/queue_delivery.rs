@@ -397,11 +397,15 @@ pub trait AccountsQueueDelivery {
 
     /// Adds an authenticated answer's settlement of one Uncertain attempt to
     /// the caller's admission commit.  There must be exactly one unfinished
-    /// attempt for the logical delivery.
+    /// attempt for the logical delivery. `held` is the metaflow row the
+    /// caller's commit writes: when the attempt's Address is held's, the
+    /// request leaves held's queue there, so one commit writes that row
+    /// once; another Address's row is written here.
     fn read_uncertain_delivery(
         &self,
         logical_delivery_id: &str,
         answer_logical_delivery_id: &str,
+        held: &mut StoredMetaflow,
         commit: AtomicCommit,
     ) -> Result<AtomicCommit, StoreError>;
 
@@ -954,6 +958,7 @@ impl AccountsQueueDelivery for FlowStore {
         &self,
         logical_delivery_id: &str,
         answer_logical_delivery_id: &str,
+        held: &mut StoredMetaflow,
         commit: AtomicCommit,
     ) -> Result<AtomicCommit, StoreError> {
         let mut unfinished = self
@@ -982,9 +987,20 @@ impl AccountsQueueDelivery for FlowStore {
             return Err(StoreError::StateInvariant);
         }
         let mut request = request.clone();
-        let mut metaflow = self
-            .stored_metaflow(&attempt.address)?
-            .ok_or(StoreError::StateInvariant)?;
+        // The answered request's own metaflow: the held row when the answer
+        // is queued to the same Address, else that Address's row.
+        let mut elsewhere = if held.metaflow.address == attempt.address {
+            None
+        } else {
+            Some(
+                self.stored_metaflow(&attempt.address)?
+                    .ok_or(StoreError::StateInvariant)?,
+            )
+        };
+        let metaflow = match elsewhere.as_mut() {
+            Some(row) => row,
+            None => held,
+        };
         match request.state {
             RequestState::Queued => {
                 let QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
@@ -1005,8 +1021,11 @@ impl AccountsQueueDelivery for FlowStore {
             answer: answer_logical_delivery_id.to_owned(),
             late_receipt: None,
         };
+        let commit = match elsewhere {
+            Some(row) => commit.mutate(self.metaflows, row),
+            None => commit,
+        };
         Ok(commit
-            .mutate(self.metaflows, metaflow)
             .mutate(self.queue_delivery.requests, request)
             .mutate(self.queue_delivery.attempts, attempt))
     }
@@ -2086,8 +2105,21 @@ mod tests {
             .engine
             .begin_atomic_commit()
             .mutate(reopened.logical_deliveries.request_ids, binding);
+        // The answer is queued at another Address: its row is the caller's,
+        // and the answered request's own row is written by the settlement.
+        let mut answer_row = super::super::StoredMetaflow {
+            metaflow: Metaflow {
+                address: Address {
+                    topic: "answerElsewhere".into(),
+                    ..address()
+                },
+                state: State::Asleep,
+                past: vec![],
+                queue: vec![],
+            },
+        };
         let commit = reopened
-            .read_uncertain_delivery("logical-first", "logical-answer", commit)
+            .read_uncertain_delivery("logical-first", "logical-answer", &mut answer_row, commit)
             .expect("answer settlement composes into its admission commit");
         reopened
             .commit_logical_transition(&"logical-first".into(), DeliveryState::Read, commit)

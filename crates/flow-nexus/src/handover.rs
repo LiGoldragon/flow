@@ -1,5 +1,6 @@
 //! The handover a successor flow is given: its predecessor's handover text,
-//! placed whole and last in the successor's first prompt.
+//! placed whole in the successor's first prompt after the brief, followed
+//! only by the requests its permaflow still owes an answer.
 //!
 //! The composition asks one source, [`YieldsHandover`], for the text of a
 //! predecessor and places whatever it yields; where the text lives is the

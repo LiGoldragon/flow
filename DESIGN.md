@@ -272,9 +272,15 @@ The first prompt is the brief, and the seat's first answer performs it. The
 brief ends asking for a presentation, as does queued work that carries the
 living's words; a message from another flow carries no such line. A
 successor of a refresh or a waking is given its predecessor's
-`flows/<FlowId>/handover.md`, under the launch root, whole and last: the
-final bytes of its first message, read through one source
-(`handover::YieldsHandover`) the composer holds. A Restart has no first
+`flows/<FlowId>/handover.md`, under the launch root, whole, after the
+brief, read through one source (`handover::YieldsHandover`) the composer
+holds. After the handover, last, it is given the requests its permaflow
+still owes an answer: each Order, Question or Task a sender's delivery
+reached any flow of the Address, its id not yet closed by a Result or Done,
+oldest first, as one vector datom in the form it was delivered in, under
+the id it was delivered with (`HoldsOpenRequests` in Memory). A Result or
+Done is admitted from any flow of the Address the request was delivered
+to, so the successor answers by the same id. A Restart has no first
 prompt and is given none. The
 receipt is what the native transcript of the bound
 session shows: the first turn authenticated by its body digest, every selected

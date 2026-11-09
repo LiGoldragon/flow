@@ -8,10 +8,11 @@
 //! (spirit and intent), followed after a blank line by the launch's identity
 //! section (its Address, Flow ID state, native-binding state, predecessor
 //! and remembering). The first USER message is the verified USER text, the
-//! remembered flows' records, then the brief; when it does not fit one
-//! message it is sent in as many numbered parts as it takes, one right
-//! after another. A simplified flow keeps its USER modules in its own
-//! system prompt.
+//! remembered flows' records, then the brief; a successor's message then
+//! holds its predecessor's handover and, after it, the requests its
+//! permaflow still owes an answer. When it does not fit one message it is
+//! sent in as many numbered parts as it takes, one right after another. A
+//! simplified flow keeps its USER modules in its own system prompt.
 
 use crate::context::{ComposesFlowContext, ContextComposer, VerifiedContext, VerifiesContext};
 pub use crate::generated::starter::{
@@ -187,12 +188,12 @@ trait ReadsHandover {
 }
 
 impl ReadsHandover for LaunchComposer {
-    /// The text of a successor's handover, placed last in its first prompt:
-    /// what the source yields for the launch's predecessor. None for a
-    /// launch with no predecessor, for one composed with no root, and when
-    /// the source holds none. A handover the source could not read whole,
-    /// or a root that could not be resolved, refuses the launch
-    /// `HandoverUnreadable`, naming the predecessor and the fault.
+    /// The text of a successor's handover, placed after the brief in its
+    /// first prompt: what the source yields for the launch's predecessor.
+    /// None for a launch with no predecessor, for one composed with no
+    /// root, and when the source holds none. A handover the source could
+    /// not read whole, or a root that could not be resolved, refuses the
+    /// launch `HandoverUnreadable`, naming the predecessor and the fault.
     fn handover_text(
         &self,
         profile: &LaunchProfile,
@@ -613,7 +614,7 @@ impl ComposesLaunch for LaunchComposer {
         input_0: N,
         input_1: O,
     ) -> Result<ComposedLaunch, CompositionError> {
-        self.compose_in_root(input_0, input_1, HandoverRoot::Unread)
+        self.compose_in_root(input_0, input_1, HandoverRoot::Unread, &[])
     }
 }
 
@@ -642,19 +643,25 @@ impl PlacesLast for Vec<String> {
 pub trait ComposesInRoot {
     /// As [`ComposesLaunch::compose`], for a launch that runs in
     /// `launch_root`. A launch that names a predecessor (a refresh's or a
-    /// waking's successor) is given the predecessor's handover, whole and
-    /// last in its first prompt: after the brief, the final bytes of the
-    /// message, or is refused `HandoverUnreadable` when it cannot be read
-    /// whole. A launch composed with [`HandoverRoot::Unread`] reads none; a
-    /// Restart names no predecessor, has no first prompt and is given none.
-    /// A simplified flow with no first message is given no handover either,
-    /// and reads none, since the handover alone would create a context-only
-    /// startup turn.
+    /// waking's successor) is given the predecessor's handover, whole, in
+    /// its first prompt after the brief, or is refused `HandoverUnreadable`
+    /// when it cannot be read whole. A launch composed with
+    /// [`HandoverRoot::Unread`] reads none; a Restart names no predecessor,
+    /// has no first prompt and is given none. A simplified flow with no
+    /// first message is given no handover either, and reads none, since the
+    /// handover alone would create a context-only startup turn.
+    ///
+    /// `open_requests` are the requests delivered to the permaflow's flows
+    /// and still open, oldest first. They follow the handover as the last
+    /// piece of the message, one vector datom in the form each was
+    /// delivered in, under the id it was delivered with, so the same Result
+    /// or Done answers it; none places nothing.
     fn compose_in_root<N: Profiled, O: LeaveOutListing>(
         &self,
         input_0: N,
         input_1: O,
         launch_root: HandoverRoot<'_>,
+        open_requests: &[QueueEntry],
     ) -> Result<ComposedLaunch, CompositionError>;
 }
 
@@ -664,6 +671,7 @@ impl ComposesInRoot for LaunchComposer {
         input_0: N,
         input_1: O,
         launch_root: HandoverRoot<'_>,
+        open_requests: &[QueueEntry],
     ) -> Result<ComposedLaunch, CompositionError> {
         let harnessed = HarnessedProfile {
             remembered_flows: input_0.remembered_flows(),
@@ -701,6 +709,13 @@ impl ComposesInRoot for LaunchComposer {
                 Some(handover) => vec![brief].placed_last(handover).concat(),
                 None => brief,
             };
+            let brief = if brief.is_empty() || open_requests.is_empty() {
+                brief
+            } else {
+                vec![brief]
+                    .placed_last(&open_requests.prompt_text(&harnessed.launch_profile.address))
+                    .concat()
+            };
             let parts = if brief.is_empty() {
                 Vec::new()
             } else {
@@ -722,10 +737,15 @@ impl ComposesInRoot for LaunchComposer {
         // another, so the start is one model call.
         let system_prompt =
             self.launch_system_prompt(&harnessed, &verified, Vec::<String>::new())?;
-        // The handover is the last piece of the message, after the brief.
+        // The handover follows the brief, and the open requests follow the
+        // handover, the last piece of the message.
         let mut pieces = segments.joined_with(&brief);
         if let Some(handover) = &self.handover_text(&harnessed.launch_profile, launch_root)? {
             pieces = pieces.placed_last(handover);
+        }
+        if !open_requests.is_empty() {
+            pieces =
+                pieces.placed_last(&open_requests.prompt_text(&harnessed.launch_profile.address));
         }
         let body = pieces.concat();
         let parts = harnessed.harness_kind.parts_of(pieces)?;

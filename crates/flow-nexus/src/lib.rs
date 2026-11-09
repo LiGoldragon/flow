@@ -1908,7 +1908,9 @@ impl StopsNexus for RunningNexus {
 
 /// A socket path this process binds, after making sure no live listener is
 /// there: a socket file nobody accepts on is stale and removed, a socket
-/// that accepts belongs to a live process and is refused.
+/// that accepts belongs to a live process and is refused. The directory it
+/// is bound in is found, never made: a place's Runtime is shared with every
+/// other Nexus at it and declared by the environment.
 pub struct ClaimedSocket;
 
 /// Binds a socket path this process claims.
@@ -1919,13 +1921,6 @@ pub trait ClaimsSocket {
 impl ClaimsSocket for ClaimedSocket {
     fn bind(socket: &Path) -> Result<UnixListener, String> {
         use std::os::unix::fs::FileTypeExt;
-        if let Some(directory) = socket
-            .parent()
-            .filter(|directory| !directory.as_os_str().is_empty())
-        {
-            fs::create_dir_all(directory)
-                .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
-        }
         match fs::symlink_metadata(socket) {
             Ok(metadata) if metadata.file_type().is_socket() => match UnixStream::connect(socket) {
                 Ok(_peer) => {

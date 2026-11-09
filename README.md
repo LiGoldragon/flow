@@ -74,9 +74,12 @@ main by being started at `main` once the version there has stopped. The
 socket every flow's hook reports to is its launching place's, so a flow
 launched at main keeps reporting to whichever version is main.
 
-The Nexus makes its place's directories if absent (mode 0700), binds both
-sockets before it serves, then sends `READY=1` to `$NOTIFY_SOCKET` when it is
-set, so a systemd unit of `Type=notify` is started only once both listen. A
+A place's two directories are shared with every other Nexus at it and are
+declared by the environment (CriomOS-home declares them as user tmpfiles
+rules): the Nexus finds them, does not start when either is absent, and
+makes and removes only its own two sockets there. It binds both sockets
+before it serves, then sends `READY=1` to `$NOTIFY_SOCKET` when it is set,
+so a systemd unit of `Type=notify` is started only once both listen. A
 fresh memory starts with the configuration built into the executable, so
 the Nexus binds and announces readiness before it is configured. Every
 meta `Configure` is applied to the running Nexus at once, without a

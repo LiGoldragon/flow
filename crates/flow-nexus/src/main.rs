@@ -9,7 +9,6 @@ use flow_nexus::{
 use protos::{Compactable, Protosizable, ReaderBudget};
 use std::{
     fs,
-    os::unix::fs::DirBuilderExt,
     path::Path,
     process::ExitCode,
     sync::atomic::{AtomicBool, Ordering},
@@ -58,18 +57,24 @@ impl ParsesPlace for [String] {
     }
 }
 
-/// Makes a place's directory when it is absent, private to its owner; an
-/// existing one, or a link to one, is used as it stands.
-trait MakesPlaceDirectory {
-    fn make(&self) -> std::io::Result<()>;
+/// A place's two directories are declared by the environment and shared
+/// with every other Nexus at the place: the Nexus finds them and never makes
+/// or removes them.
+trait FindsPlaceDirectory {
+    /// The directory exists; otherwise the Nexus does not start.
+    fn find(&self, place_name: &str) -> Result<(), String>;
 }
 
-impl MakesPlaceDirectory for Path {
-    fn make(&self) -> std::io::Result<()> {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(self)
+impl FindsPlaceDirectory for Path {
+    fn find(&self, place_name: &str) -> Result<(), String> {
+        if self.is_dir() {
+            Ok(())
+        } else {
+            Err(format!(
+                "place {place_name}: {} is not a directory; the place is declared by the environment",
+                self.display()
+            ))
+        }
     }
 }
 
@@ -89,8 +94,8 @@ fn main() -> ExitCode {
         }
     };
     for directory in [place.runtime_directory(), place.state_directory()] {
-        if let Err(error) = directory.make() {
-            eprintln!("flow-nexus: cannot create {}: {error}", directory.display());
+        if let Err(error) = directory.find(&place.place_name) {
+            eprintln!("flow-nexus: {error}");
             return ExitCode::FAILURE;
         }
     }

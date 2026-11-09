@@ -161,7 +161,10 @@ fn endpoint(name: &str, home: &Path) -> meta_signal_flow::CodexEndpoint {
 fn configure_flow(message_binary: &Path, home: &Path, runtime: &Path, place: &crate::place::Place) {
     use crate::place::LaysOutPlace;
     use crate::store::{ConfigurationOnlyStore, ConfiguresOnlyStore};
+    // The place's directories, declared as the environment declares them:
+    // Flow finds them and makes neither.
     std::fs::create_dir_all(place.state_directory()).expect("Flow state");
+    std::fs::create_dir_all(place.runtime_directory()).expect("Flow runtime");
     let change = meta_signal_flow::ConfigurationChange::Nexus(meta_signal_flow::ConfigureNexus {
         source_root: home.join("source").to_string_lossy().into_owned(),
         stable_codex: endpoint("stable", home),

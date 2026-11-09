@@ -2,7 +2,7 @@
 //! its memory in State. Configuration reaches the running Nexus through its
 //! meta socket and takes effect at once; nothing is read from the
 //! environment for either. Every wait here is on an event: the Nexus's
-//! READY=1, an answer, or the child's exit.
+//! READY=1, an answer, or the child's exit, each bounded by EVENT_WAIT.
 use datom_codec::Datomizable;
 use flow_nexus::CarriesSignalFrames;
 use flow_nexus::place::{LaysOutPlace, Place};
@@ -11,7 +11,7 @@ use protos::{Compactable, Protosizable};
 use std::{
     io::Read,
     os::unix::net::{UnixDatagram, UnixStream},
-    path::{Path, PathBuf},
+    path::Path,
     process::{Child, Command, ExitStatus, Stdio},
     sync::mpsc,
     time::Duration,
@@ -39,16 +39,24 @@ impl StartedNexus {
         self.child.as_mut().expect("the child is held")
     }
 
-    /// The child's exit, waited on by a thread that hands it over.
+    /// The child's exit, waited on by a thread that hands it over. A child
+    /// that has not exited within EVENT_WAIT is killed and fails the test.
     fn exit(mut self) -> ExitStatus {
         let mut child = self.child.take().expect("the child is held");
+        let pid = child.id() as libc::pid_t;
         let (exited, exit) = mpsc::channel();
         std::thread::spawn(move || {
             let _ = exited.send(child.wait());
         });
-        exit.recv_timeout(EVENT_WAIT)
-            .expect("flow-nexus exits")
-            .expect("child status")
+        match exit.recv_timeout(EVENT_WAIT) {
+            Ok(status) => status.expect("child status"),
+            Err(error) => {
+                // SAFETY: kill only sends a signal to the child this test
+                // started, which has not been reaped.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                panic!("flow-nexus did not exit within {EVENT_WAIT:?}: {error}")
+            }
+        }
     }
 
     /// Stops the Nexus as systemd does, and waits for its exit.
@@ -68,6 +76,16 @@ fn place(runtime: &Path, state: &Path) -> Place {
         runtime: runtime.join("nexus/main").to_string_lossy().into_owned(),
         state: state.to_string_lossy().into_owned(),
     }
+}
+
+/// The place `main`, its two directories made as the environment declares
+/// them: the Nexus finds them and makes neither.
+fn declared(runtime: &Path, state: &Path) -> Place {
+    let place = place(runtime, state);
+    for directory in [place.runtime_directory(), place.state_directory()] {
+        std::fs::create_dir_all(directory).expect("the declared place directory");
+    }
+    place
 }
 
 /// The literal argv the shell writes, independent of Place's serializer.
@@ -211,8 +229,8 @@ fn two_places_serve_disjoint_sockets_and_memory() {
     let runtime_b = tempfile::tempdir().expect("runtime B");
     let state_a = tempfile::tempdir().expect("state A");
     let state_b = tempfile::tempdir().expect("state B");
-    let place_a = place(runtime_a.path(), state_a.path());
-    let place_b = place(runtime_b.path(), state_b.path());
+    let place_a = declared(runtime_a.path(), state_a.path());
+    let place_b = declared(runtime_b.path(), state_b.path());
     configured(&place_a, home_a.path());
     configured(&place_b, home_b.path());
 
@@ -252,7 +270,7 @@ fn the_nexus_notifies_readiness_only_after_its_socket_is_bound() {
     let home = tempfile::tempdir().expect("temporary home");
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
     let state = tempfile::tempdir().expect("dedicated state directory");
-    let place = place(runtime.path(), state.path());
+    let place = declared(runtime.path(), state.path());
     configured(&place, home.path());
     let _nexus = start_ready(home.path(), &place, &[]);
     UnixStream::connect(place.meta_socket()).expect("the meta socket listens at readiness");
@@ -267,7 +285,7 @@ fn a_configure_applied_to_a_running_nexus_takes_effect_without_a_restart() {
     let home = tempfile::tempdir().expect("temporary home");
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
     let state = tempfile::tempdir().expect("dedicated state directory");
-    let place = place(runtime.path(), state.path());
+    let place = declared(runtime.path(), state.path());
     configured(&place, home.path());
     let nexus = start_ready(home.path(), &place, &[]);
 
@@ -319,7 +337,7 @@ fn environment_overrides_do_not_replace_the_explicit_configuration() {
     let home = tempfile::tempdir().expect("temporary home");
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
     let state = tempfile::tempdir().expect("dedicated state directory");
-    let place = place(runtime.path(), state.path());
+    let place = declared(runtime.path(), state.path());
     configured(&place, home.path());
     let nexus = start_ready(
         home.path(),
@@ -374,7 +392,7 @@ fn sigterm_stops_the_daemon_and_closes_its_store_cleanly() {
     let home = tempfile::tempdir().expect("temporary home");
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
     let state = tempfile::tempdir().expect("dedicated state directory");
-    let place = place(runtime.path(), state.path());
+    let place = declared(runtime.path(), state.path());
     let store = place.store();
     configured(&place, home.path());
     plant_stale_socket(&place.ordinary_socket());
@@ -398,7 +416,7 @@ fn a_live_nexus_socket_is_never_taken_over() {
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
     let state = tempfile::tempdir().expect("dedicated state directory");
     let other_state = tempfile::tempdir().expect("second state directory");
-    let place = place(runtime.path(), state.path());
+    let place = declared(runtime.path(), state.path());
     configured(&place, home.path());
     let _nexus = start_ready(home.path(), &place, &[]);
 
@@ -416,26 +434,72 @@ fn a_live_nexus_socket_is_never_taken_over() {
     assert!(metaflows_listed(&place), "the live Nexus still answers");
 }
 
-/// A place whose directories are absent is made: the Runtime and the State
-/// are created, private to their owner.
+/// A place whose Runtime or State is absent is refused: the Nexus exits
+/// without serving and makes neither directory. The wait for the exit is
+/// bounded by EVENT_WAIT; a Nexus that made its place and served instead
+/// fails the test there.
 #[test]
-fn a_nexus_makes_its_place_directories() {
-    use std::os::unix::fs::PermissionsExt;
+fn a_nexus_whose_place_is_absent_is_refused_and_makes_nothing() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let runtime = tempfile::tempdir().expect("temporary runtime root");
+    let state = tempfile::tempdir().expect("dedicated state directory");
+    let place = place(runtime.path(), state.path());
+    configured(&place, home.path());
+    let (nexus, _notify) = start(home.path(), &place, &[]);
+    assert!(!nexus.exit().success(), "an absent Runtime is refused");
+    assert!(!runtime.path().join("nexus").exists(), "no Runtime is made");
+
+    let state_root = tempfile::tempdir().expect("state root");
+    let absent_state = state_root.path().join("nexus/main");
+    let place = declared(runtime.path(), state.path());
+    let place = Place {
+        state: absent_state.to_string_lossy().into_owned(),
+        ..place
+    };
+    let (nexus, _notify) = start(home.path(), &place, &[]);
+    assert!(!nexus.exit().success(), "an absent State is refused");
+    assert!(
+        !state_root.path().join("nexus").exists(),
+        "no State is made"
+    );
+    assert!(
+        std::fs::read_dir(place.runtime_directory())
+            .expect("the Runtime stands")
+            .next()
+            .is_none(),
+        "the refused Nexus bound nothing in the Runtime"
+    );
+}
+
+/// The place is shared with every other Nexus at it: a stopped Nexus
+/// removes its own two sockets and nothing else, and both directories stay.
+#[test]
+fn a_stopped_nexus_removes_only_its_own_sockets() {
     let home = tempfile::tempdir().expect("temporary home");
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
-    let state_root = tempfile::tempdir().expect("state root");
-    let state: PathBuf = state_root.path().join("nexus/main");
-    let place = place(runtime.path(), &state);
-    std::fs::create_dir_all(&state).expect("state directory for the fixture memory");
+    let state = tempfile::tempdir().expect("dedicated state directory");
+    let place = declared(runtime.path(), state.path());
     configured(&place, home.path());
-    std::fs::remove_dir_all(runtime.path().join("nexus")).ok();
+    let others = [
+        place.runtime_directory().join("energy.sock"),
+        place.runtime_directory().join("energy-translator.sock"),
+        place.state_directory().join("energy.rkyv"),
+    ];
+    for other in &others {
+        std::fs::write(other, "another Nexus's").expect("another's file");
+    }
     let nexus = start_ready(home.path(), &place, &[]);
-    let mode = std::fs::metadata(place.runtime_directory())
-        .expect("runtime directory made")
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o700);
+    assert!(place.ordinary_socket().exists() && place.meta_socket().exists());
     assert!(nexus.terminate().success());
+    assert!(!place.ordinary_socket().exists());
+    assert!(!place.meta_socket().exists());
+    for other in &others {
+        assert_eq!(
+            std::fs::read(other).expect("another's file stays"),
+            b"another Nexus's"
+        );
+    }
+    assert!(place.runtime_directory().is_dir() && place.state_directory().is_dir());
 }
 
 #[cfg(feature = "executable-default-configuration")]
@@ -444,7 +508,7 @@ fn configured_executable_seeds_only_its_fresh_typed_nexus_row() {
     let home = tempfile::tempdir().expect("temporary home");
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
     let state = tempfile::tempdir().expect("dedicated state directory");
-    let place = place(runtime.path(), state.path());
+    let place = declared(runtime.path(), state.path());
 
     // A fresh memory: the Nexus starts with the configuration built into it,
     // and binds and announces readiness before anything is configured.

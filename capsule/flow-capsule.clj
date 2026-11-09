@@ -979,6 +979,10 @@
      (str "{ «" ordinary "» «" meta "» «" store "» None }"))))
 
 (defn start-nexus! [log]
+  ;; A place's Runtime is declared by the environment, as Home's tmpfiles
+  ;; rules declare it (mode 0700); the Nexus finds it and never makes it.
+  (fs/create-dirs (fs/parent ordinary-socket))
+  (fs/set-posix-file-permissions (fs/parent ordinary-socket) "rwx------")
   (reset! nexus (p/process [(str @package "/bin/flow-nexus") (start-text @package)]
                            {:env (clean-env) :out :append :out-file (fs/file log) :err :append :err-file (fs/file log) :in ""}))
   (when-not (watch 20 #(and (fs/exists? ordinary-socket) (fs/exists? meta-socket)))

@@ -278,7 +278,9 @@ holds. After the handover, last, it is given the requests its permaflow
 still owes an answer: each Order, Question or Task a sender's delivery
 reached any flow of the Address, its id not yet closed by a Result or Done,
 oldest first, as one vector datom in the form it was delivered in, under
-the id it was delivered with (`HoldsOpenRequests` in Memory). A Result or
+the id it was delivered with (`HoldsOpenRequests` in Memory), directly after
+one line naming the predecessor that left them open
+(`handover::FramesOpenRequests`); nothing open places neither. A Result or
 Done is admitted from any flow of the Address the request was delivered
 to, so the successor answers by the same id. A Restart has no first
 prompt and is given none. The

@@ -41,7 +41,7 @@
     }:
     let
       lib = base.inputs.nixpkgs.lib;
-      version = "0.53.4";
+      version = "0.53.5";
       forSystems = function: lib.genAttrs base.lib.systems function;
       # The revision the process checks bind their test build and binaries
       # to: the committed revision, or the dirty one a working tree has.

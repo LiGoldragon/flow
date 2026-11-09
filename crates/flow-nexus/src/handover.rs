@@ -71,3 +71,18 @@ impl YieldsHandover for HandoverFile {
         }
     }
 }
+
+/// The line placed directly before the requests a successor's predecessor
+/// left open, naming that predecessor by its FlowId.
+pub trait FramesOpenRequests {
+    fn open_requests_line(&self) -> String;
+}
+
+impl FramesOpenRequests for str {
+    /// `self` is the predecessor's FlowId.
+    fn open_requests_line(&self) -> String {
+        format!(
+            "Flow {self}, which this flow succeeds, left these requests open; answer each by its id."
+        )
+    }
+}

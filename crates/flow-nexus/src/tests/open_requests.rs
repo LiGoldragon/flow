@@ -1,9 +1,9 @@
 //! A request is open from its delivery until the Result or Done that
 //! answers it, and it is the permaflow's, not the flow's: a successor's
 //! first prompt carries, after the handover, every request delivered to its
-//! predecessors and still open, under the id it was delivered with, and the
-//! same Result or Done answers it. A Task's minutes keep running across the
-//! refresh.
+//! predecessors and still open, under the id it was delivered with, directly
+//! after one line naming the predecessor, and the same Result or Done
+//! answers it. A Task's minutes keep running across the refresh.
 
 use super::NexusFixture;
 use super::waking::{
@@ -12,6 +12,7 @@ use super::waking::{
 };
 use crate::Dispatches;
 use crate::composition::RendersQueuedWork;
+use crate::handover::FramesOpenRequests;
 use crate::store::FlowStore;
 use crate::store::RecordsLaunchOutcome as _;
 use crate::store::logical_delivery::{HoldsOpenRequests, RecordsLogicalDeliveries};
@@ -304,10 +305,15 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
             && delivered[order_at..task_at].contains(&open_order.request_id),
         "{delivered}"
     );
+    // One line, naming the predecessor, directly precedes the block.
+    let line = "Flow abc123, which this flow succeeds, left these requests open; \
+                answer each by its id.";
+    assert_eq!(line, "abc123".open_requests_line());
     assert!(
-        first.ends_with(&format!("{HANDOVER}\n\n{delivered}")),
-        "the open requests follow the handover, last: {first}"
+        first.ends_with(&format!("{HANDOVER}\n\n{line}\n{delivered}")),
+        "the line and the open requests follow the handover, last: {first}"
     );
+    assert_eq!(first.matches(line).count(), 1, "{first}");
 
     // The deadline is the Task's: the refresh neither restarted nor
     // extended it.
@@ -334,6 +340,40 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
         "the Done closed the Task's reminders"
     );
     assert_eq!(store.open_requests(&at).unwrap(), open[..1].to_vec());
+}
+
+/// A successor whose predecessor left nothing open is given its handover
+/// last, and no line about open requests.
+#[test]
+fn a_successor_with_nothing_open_is_given_no_open_requests_line() {
+    let (fixture, world) = resting_seat();
+    let store = &fixture.nexus.store;
+    let at = address(Model::Sol);
+    assert_eq!(store.open_requests(&at).unwrap(), Vec::new());
+
+    assert_eq!(
+        fixture.nexus.dispatch(Query::Refresh(at.clone())),
+        Response::Refreshed(Refreshed {
+            address: at.clone(),
+            flow_id: "abc123".into(),
+        }),
+        "Herdr calls: {}",
+        world.calls()
+    );
+    let first = world
+        .user_turns(&fixture)
+        .into_iter()
+        .next()
+        .expect("the successor's first turn");
+    assert!(
+        first.trim_end().ends_with(HANDOVER),
+        "the handover is last: {first}"
+    );
+    assert!(
+        !first.contains(&"abc123".open_requests_line())
+            && !first.contains("left these requests open"),
+        "no open-requests line: {first}"
+    );
 }
 
 /// A flow that sends itself an Order and answers it: while the Order is

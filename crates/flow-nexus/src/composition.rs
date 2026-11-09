@@ -653,9 +653,10 @@ pub trait ComposesInRoot {
     ///
     /// `open_requests` are the requests delivered to the permaflow's flows
     /// and still open, oldest first. They follow the handover as the last
-    /// piece of the message, one vector datom in the form each was
-    /// delivered in, under the id it was delivered with, so the same Result
-    /// or Done answers it; none places nothing.
+    /// piece of the message: one line naming the predecessor that left them
+    /// open, then one vector datom in the form each was delivered in, under
+    /// the id it was delivered with, so the same Result or Done answers it;
+    /// none places nothing, the line included.
     fn compose_in_root<N: Profiled, O: LeaveOutListing>(
         &self,
         input_0: N,
@@ -709,12 +710,9 @@ impl ComposesInRoot for LaunchComposer {
                 Some(handover) => vec![brief].placed_last(handover).concat(),
                 None => brief,
             };
-            let brief = if brief.is_empty() || open_requests.is_empty() {
-                brief
-            } else {
-                vec![brief]
-                    .placed_last(&open_requests.prompt_text(&harnessed.launch_profile.address))
-                    .concat()
+            let brief = match open_requests.successor_text(&harnessed.launch_profile) {
+                Some(open) if !brief.is_empty() => vec![brief].placed_last(&open).concat(),
+                _ => brief,
             };
             let parts = if brief.is_empty() {
                 Vec::new()
@@ -743,9 +741,8 @@ impl ComposesInRoot for LaunchComposer {
         if let Some(handover) = &self.handover_text(&harnessed.launch_profile, launch_root)? {
             pieces = pieces.placed_last(handover);
         }
-        if !open_requests.is_empty() {
-            pieces =
-                pieces.placed_last(&open_requests.prompt_text(&harnessed.launch_profile.address));
+        if let Some(open) = open_requests.successor_text(&harnessed.launch_profile) {
+            pieces = pieces.placed_last(&open);
         }
         let body = pieces.concat();
         let parts = harnessed.harness_kind.parts_of(pieces)?;
@@ -755,6 +752,29 @@ impl ComposesInRoot for LaunchComposer {
             &body,
             &parts,
             &leave_outs,
+        ))
+    }
+}
+
+/// What a successor's open requests become in its first prompt: the line
+/// naming the predecessor that left them open, directly followed by their
+/// vector datom. None when nothing is open or the launch names no
+/// predecessor.
+pub trait RendersOpenRequests {
+    fn successor_text(&self, profile: &LaunchProfile) -> Option<String>;
+}
+
+impl RendersOpenRequests for [QueueEntry] {
+    fn successor_text(&self, profile: &LaunchProfile) -> Option<String> {
+        use crate::handover::FramesOpenRequests;
+        let predecessor = profile.flow_id_option.as_deref()?;
+        if self.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{}\n{}",
+            predecessor.open_requests_line(),
+            self.prompt_text(&profile.address)
         ))
     }
 }

@@ -1,3 +1,13 @@
+# Flow 0.53.5: a successor is told what its open requests are
+
+- A successor's open requests are preceded, directly, by one line naming
+  the predecessor that left them open, the same with or without a
+  handover: «Flow abc123, which this flow succeeds, left these requests
+  open; answer each by its id.» A successor with nothing open is given no
+  line. The line lives in `handover::FramesOpenRequests`; the predecessor
+  is the launch's own `flow_id_option`.
+- No stored format or wire changes.
+
 # Flow 0.53.4: a successor is given its permaflow's open requests
 
 A request is open from its delivery until the Result or Done that answers

@@ -1,7 +1,8 @@
 //! The CLI is `flow-nexus '<Query>'`: it takes the datom and nothing else.
 //! The place is its configuration's,
-//! `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, resolved under `$XDG_RUNTIME_DIR/nexus/` to that place's ordinary socket
-//! and to no other, whatever else the environment names.
+//! `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, resolved under
+//! `$XDG_RUNTIME_DIR/nexus/` to that place's ordinary socket and to no other,
+//! whatever else the environment names.
 use std::{
     io::{Read, Write},
     os::unix::net::UnixListener,
@@ -25,8 +26,11 @@ fn the_client_reaches_only_the_socket_of_the_place_its_configuration_names() {
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
     let configuration = tempfile::tempdir().expect("temporary configuration home");
     std::fs::create_dir_all(configuration.path().join("nexus")).expect("nexus configuration");
-    std::fs::write(configuration.path().join("nexus/flow-nexus.datom"), "{ next }\n")
-        .expect("the configuration names next");
+    std::fs::write(
+        configuration.path().join("nexus/flow-nexus.datom"),
+        "{ next }\n",
+    )
+    .expect("the configuration names next");
     let next = runtime.path().join("nexus/next");
     let main = runtime.path().join("nexus/main");
     std::fs::create_dir_all(&next).expect("the place's runtime directory");

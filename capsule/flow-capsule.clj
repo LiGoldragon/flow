@@ -242,23 +242,6 @@
       {"XDG_CONFIG_HOME" home})
     {}))
 
-(defn client-arguments
-  "The arguments pkg's client takes to send query to socket: the query alone
-  (a client with a default socket, or one whose configuration names the
-  socket's place: place-configuration-env), or the composed invocation
-  naming the socket."
-  [pkg role socket query]
-  (case (get @package-interface pkg)
-    :query [query]
-    :invocation (let [composer (str pkg "/bin/" (get-in binary-names [:invocation role]) "-compose-invocation")
-                      {:keys [exit out err]} (run {} composer socket query)]
-                  (if (zero? exit)
-                    [(str/trim out)]
-                    (throw (ex-info "typed client invocation composition failed"
-                                    {:package pkg :client client :error (str/trim err)}))))
-    :place [query]
-    (throw (ex-info "package client interface is undeclared" {:package pkg}))))
-
 (def binary-names
   "Each package interface's binaries: a package whose clients read their
   place from their configuration names its clients after the Nexus and its
@@ -274,6 +257,23 @@
   (let [names (or (get binary-names (get @package-interface pkg))
                   (throw (ex-info "package client interface is undeclared" {:package pkg})))]
     (str pkg "/bin/" (get names role))))
+
+(defn client-arguments
+  "The arguments pkg's client takes to send query to socket: the query alone
+  (a client with a default socket, or one whose configuration names the
+  socket's place: place-configuration-env), or the composed invocation
+  naming the socket."
+  [pkg role socket query]
+  (case (get @package-interface pkg)
+    :query [query]
+    :invocation (let [composer (str pkg "/bin/" (get-in binary-names [:invocation role]) "-compose-invocation")
+                      {:keys [exit out err]} (run {} composer socket query)]
+                  (if (zero? exit)
+                    [(str/trim out)]
+                    (throw (ex-info "typed client invocation composition failed"
+                                    {:package pkg :role role :error (str/trim err)}))))
+    :place [query]
+    (throw (ex-info "package client interface is undeclared" {:package pkg}))))
 
 (defn herdr [& args]
   (apply run {} "herdr" "--session" session args))

@@ -1,7 +1,7 @@
 //! The CLI is `flow-nexus-meta '<Query>'`: it takes the datom and nothing
 //! else. The place is the Flow configuration's,
-//! `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, resolved under `$XDG_RUNTIME_DIR/nexus/` to that place's meta socket
-//! alone.
+//! `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, resolved under
+//! `$XDG_RUNTIME_DIR/nexus/` to that place's meta socket alone.
 use std::{
     io::{Read, Write},
     os::unix::net::UnixListener,
@@ -25,8 +25,11 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
     let configuration = tempfile::tempdir().expect("temporary configuration home");
     std::fs::create_dir_all(configuration.path().join("nexus")).expect("nexus configuration");
-    std::fs::write(configuration.path().join("nexus/flow-nexus.datom"), "{ main }\n")
-        .expect("the configuration names main");
+    std::fs::write(
+        configuration.path().join("nexus/flow-nexus.datom"),
+        "{ main }\n",
+    )
+    .expect("the configuration names main");
     let main = runtime.path().join("nexus/main");
     std::fs::create_dir_all(&main).expect("the place's runtime directory");
     let selected = main.join("flow-meta.sock");
@@ -83,7 +86,12 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
         stderr.starts_with("Missing.")
-            && stderr.contains(&*empty.path().join("nexus/flow-nexus.datom").to_string_lossy()),
+            && stderr.contains(
+                &*empty
+                    .path()
+                    .join("nexus/flow-nexus.datom")
+                    .to_string_lossy()
+            ),
         "{stderr}"
     );
     assert_eq!(

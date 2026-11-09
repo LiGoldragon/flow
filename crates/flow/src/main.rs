@@ -61,7 +61,9 @@ trait AnswersVersion {
 impl AnswersVersion for [String] {
     fn version_answer(&self) -> Option<String> {
         match self {
-            [only] if only == "--version" => Some(format!("flow {}", env!("CARGO_PKG_VERSION"))),
+            [only] if only == "--version" => {
+                Some(format!("flow-nexus {}", env!("CARGO_PKG_VERSION")))
+            }
             _ => None,
         }
     }
@@ -237,7 +239,7 @@ mod tests {
     fn version_is_the_one_non_datom_invocation() {
         assert_eq!(
             (&["--version".to_owned()] as &[String]).version_answer(),
-            Some(format!("flow {}", env!("CARGO_PKG_VERSION")))
+            Some(format!("flow-nexus {}", env!("CARGO_PKG_VERSION")))
         );
         assert_eq!(
             (&["--version".to_owned(), "extra".to_owned()] as &[String]).version_answer(),

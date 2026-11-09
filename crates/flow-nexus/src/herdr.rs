@@ -259,7 +259,10 @@ impl ChoosesHarnessHook for HookChoice {
             _ => self
                 .executable
                 .as_ref()
-                .and_then(|path| path.parent().map(|directory| directory.join("flow-nexus-hook")))
+                .and_then(|path| {
+                    path.parent()
+                        .map(|directory| directory.join("flow-nexus-hook"))
+                })
                 .unwrap_or_else(|| PathBuf::from("flow-nexus-hook")),
         }
     }

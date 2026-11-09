@@ -23,3 +23,9 @@ meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", re
 # type has one Cargo package identity during the Flow workspace build.
 [patch."https://github.com/LiGoldragon/flow"]
 flow-ethos = { path = "crates/flow-ethos" }
+
+# sema-engine names the Sema kernel by its old repository URL, which no
+# longer holds commit 51d7927. Resolve that edge to the same commit in the
+# renamed repository, so sema-engine and flow-nexus share one sema package.
+[patch."https://github.com/LiGoldragon/sema.git"]
+sema = { git = "https://github.com/LiGoldragon/memory", rev = "51d7927c872f0df12791bad8d39a4db6433b01a1" }

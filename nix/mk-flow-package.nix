@@ -1,16 +1,31 @@
 # Build a Flow package whose executable carries the configuration used only
 # when it opens a new, unconfigured Memory.  The generated Rust is compiled
 # with Flow; a malformed value therefore fails before a package exists.
+#
+# Only flow-nexus is compiled again, per crate, with the
+# executable-default-configuration feature and the generated module; every
+# other member is its ordinary build.  The package exists only once the
+# configured flow-nexus's tests and every other member's check have passed.
 {
   lib,
   pkgs,
-  craneLib,
-  commonArgs,
-  cargoArtifacts,
+  # The flow-nexus member build and test build, as the build base makes them.
+  flowNexus,
+  flowNexusTests,
+  # The other members' builds, whose binaries the package carries.
+  members,
+  # The other members' checks, which the package waits on.
+  memberChecks,
+  # Runs one member's test build: name, test build, environment.
+  crateCheck,
+  # The check environment flow-nexus's tests need.
+  flowNexusEnvironment,
+  # Copies the binaries of builds into one bin directory.
+  binaries,
+  version,
 }:
 {
   defaultConfiguration,
-  extraBuildArgs ? { },
 }:
 let
   exactAttrs =
@@ -186,18 +201,37 @@ let
       true;
 in
 assert validated;
-craneLib.buildPackage (
-  commonArgs
-  // extraBuildArgs
-  // {
-    inherit cargoArtifacts;
-    pname = "flow-configured";
-    cargoExtraArgs = "--workspace --features flow-nexus/executable-default-configuration";
-    FLOW_NEXUS_DEFAULT_CONFIGURATION_RS = generatedModule;
-    nativeCheckInputs = [ pkgs.git ];
-    passthru = {
-      inherit generatedModule;
-      configured = true;
+let
+  configured = "executable-default-configuration";
+  # The generated module reaches flow-nexus's rustc as the variable its
+  # include! names.
+  withModule =
+    overrides:
+    overrides
+    // {
+      flow-nexus =
+        attributes:
+        (overrides.flow-nexus or (_: { })) attributes
+        // {
+          FLOW_NEXUS_DEFAULT_CONFIGURATION_RS = generatedModule;
+        };
     };
-  }
-)
+  # The feature enables no dependency, so the dependency graph is the
+  # unconfigured one and only flow-nexus is compiled again.
+  configuredNexus = flowNexus.override (old: {
+    features = old.features ++ [ configured ];
+    crateOverrides = withModule old.crateOverrides;
+  });
+  configuredNexusTests = flowNexusTests.override (old: {
+    features = old.features ++ [ configured ];
+    crateOverrides = withModule old.crateOverrides;
+  });
+  configuredNexusCheck = crateCheck "flow-nexus-configured" configuredNexusTests flowNexusEnvironment;
+in
+binaries "flow-configured-${version}" ([ configuredNexus ] ++ members) {
+  checked = [ configuredNexusCheck ] ++ memberChecks;
+  passthru = {
+    inherit generatedModule configuredNexusCheck;
+    configured = true;
+  };
+}

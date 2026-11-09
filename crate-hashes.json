@@ -1,0 +1,22 @@
+{
+  "git+https://github.com/LiGoldragon/datom-codec?rev=4dff16b4f7412febc3b71aac8b49680cd20988cb#0.32.2": "0fmfphn8ksqrrgayknb1yxk8ha6i6aza3mm8y5pgfjz6kpm2hap7",
+  "git+https://github.com/LiGoldragon/datom-codec?rev=4dff16b4f7412febc3b71aac8b49680cd20988cb#datom-codec-derive@0.32.0": "0fmfphn8ksqrrgayknb1yxk8ha6i6aza3mm8y5pgfjz6kpm2hap7",
+  "git+https://github.com/LiGoldragon/datom-codec?rev=eabead4#0.33.0": "1p2qa5jkrmq9nlc9cl89vc8s4zp29rvabfq2jyb1x4mh9biphvjg",
+  "git+https://github.com/LiGoldragon/datom-codec?rev=eabead4#datom-codec-derive@0.32.3": "1p2qa5jkrmq9nlc9cl89vc8s4zp29rvabfq2jyb1x4mh9biphvjg",
+  "git+https://github.com/LiGoldragon/ethos-zero?rev=07714b0171802787bea1eefe4caa2d826d9c4030#17.0.0": "05c78vr6l1zmhyvm4wi4dwq7hc8nl83pjqpm6hakcxppwnmnzd0c",
+  "git+https://github.com/LiGoldragon/ethos-zero?rev=5a5daca#19.2.0": "0n9wvmghq0zaqa86xib2bc6q4nis6f0rmcbgb6xdas5dhlm3nnak",
+  "git+https://github.com/LiGoldragon/ethos-zero?rev=c2653dd82adbdb1f1f2f654405c6620e0d06fd58#16.0.0": "1rn59mcxqca6jjp7yba8f5ljylrxh8clywyz1kmjnraxgavx528c",
+  "git+https://github.com/LiGoldragon/memory?rev=51d7927c872f0df12791bad8d39a4db6433b01a1#sema@0.1.1": "0yhm0k3a2b08c9b1rgymppxd3mgfli235d7p71v8f0h18ddvn3g1",
+  "git+https://github.com/LiGoldragon/message?rev=70b7daa3ff069b0b8c836ba6aff223992dcf59a1#message-defaults@0.22.0": "0skyvmkziqps4czi2c73fx89hrvvngp6v3f9k4fcmf7jisw442j5",
+  "git+https://github.com/LiGoldragon/message?rev=70b7daa3ff069b0b8c836ba6aff223992dcf59a1#message-nexus@0.22.0": "0skyvmkziqps4czi2c73fx89hrvvngp6v3f9k4fcmf7jisw442j5",
+  "git+https://github.com/LiGoldragon/meta-signal-flow?rev=1d3ebf0b5685285acff488453cdbe55d42960939#71.0.0": "09r9ryzgmw5vj88v09q41v5yx4kji4hf23xbh4b2biii876rwf78",
+  "git+https://github.com/LiGoldragon/meta-signal-message?rev=557f2dbbc50a448cb1358942ff383391d7f46669#3.0.0": "00rkch82sxi99llqg20qwsy7f5yvizqbii7cx5risb01c31kf45n",
+  "git+https://github.com/LiGoldragon/protos?rev=15b41da8f2579e73ead59bc0c2b97529b8ac32d3#0.32.2": "0l6manmxwr9rywvfwcsy3lmvi4kc8apgvwq87ijg77cllxx05za9",
+  "git+https://github.com/LiGoldragon/protos?rev=3c7ade3#0.33.0": "1crw7gc7b870xxk9pavzfpyav44163izylndfr8affbsm6hd863s",
+  "git+https://github.com/LiGoldragon/sema-engine?rev=6a95a0925c9e6a6a144037ffdbad8c7d3cc126f2#0.19.0": "0aiy61k4sx809kjks36q8rbidsfvc168zxy0s0jd14h7r1n2winq",
+  "git+https://github.com/LiGoldragon/sema-engine?rev=9884905ff9c660ad97a35c524e42532d5c7bac90#0.18.0": "1bva17pgcgzwjsgy26fp30in1ybfblf5l0iqmh2awcizjvr01yxf",
+  "git+https://github.com/LiGoldragon/signal-flow?rev=be85c63cf4514ee9a5379754cb493fe1a6b21e9a#56.0.0": "1n8wnc19l140i06w7glva7c1xawbm470bgc8h36cb19mc9ak92kq",
+  "git+https://github.com/LiGoldragon/signal-message?rev=17e509d3377034881f86dd6308455e95a0d21172#21.0.0": "08kv9hvr7pzdnh15icjfjfrkcz86j9i7mcj0y7kbpcifg7l4vgpn",
+  "git+https://github.com/LiGoldragon/signal-sema.git?rev=4f3a24e6677ab9d200672851016c4c760c1e36e8#signal-sema@0.2.0": "0q6pgw0ymn5ylqlcnqldn7pf1dpv43vi07vqwf7lj5wd04bm3qac",
+  "git+https://github.com/LiGoldragon/signal?rev=7afb68bcd19ce774f47d11c5e69f6e10054f78de#10.3.0": "0yyv9bylafhnpas51gz8ppmvv0r77rmfjc0yslkjk7f82rijvrm3"
+}

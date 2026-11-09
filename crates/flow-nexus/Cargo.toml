@@ -30,7 +30,9 @@ libc = "0.2"
 rustix = { version = "1", features = ["fs", "net", "time"] }
 rkyv.workspace = true
 redb = "4"
-sema = { git = "https://github.com/LiGoldragon/sema", rev = "51d7927c872f0df12791bad8d39a4db6433b01a1" }
+# The Sema kernel 0.1.1 at 51d7927: its repository was renamed memory, and
+# github.com/LiGoldragon/sema now holds another project.
+sema = { git = "https://github.com/LiGoldragon/memory", rev = "51d7927c872f0df12791bad8d39a4db6433b01a1" }
 sema-engine = { git = "https://github.com/LiGoldragon/sema-engine", rev = "6a95a0925c9e6a6a144037ffdbad8c7d3cc126f2" }
 serde_json.workspace = true
 sha1 = "0.10"

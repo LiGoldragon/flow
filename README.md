@@ -385,9 +385,14 @@ Launching remains available through an explicit typed Flow client invocation.
 
 This branch is source-published and is not an installed or live-accepted
 deployment. Its final compilation and test gate must run on the configured
-remote Nix builder; local fallback is not an acceptance path. Nix exposes
-the full `checks.<system>.default` gate plus focused
-`flow-v5-row-preservation`, `flow-herdr-route-durability`,
-`flow-stale-route-unavailable`, `flow-conflicting-registration-refusal`,
-`flow-herdr-registration-binding`, and
-`flow-native-resolution-serialization` checks.
+remote Nix builder; local fallback is not an acceptance path. Nix builds
+every crate as its own derivation on the build base
+(github:LiGoldragon/build-base) from the committed `Cargo.nix`. Each member
+with tests has one check, `checks.<system>.<member>`, which runs the test
+binaries its test build compiled and compiles nothing, and fails when no test
+ran; `checks.<system>.default` is every member's check, beside `cargo-nix`,
+`clippy`, `fmt`, `capsule-witnesses`, the trait-law checks, the
+`message-joint` and `request-id-migration-process` process checks and the
+immutable contract pins. After editing a `Cargo.toml` or `Cargo.lock`,
+regenerate `Cargo.nix` with
+`nix run github:LiGoldragon/build-base#crate2nix -- generate`.

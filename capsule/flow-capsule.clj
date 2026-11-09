@@ -58,6 +58,9 @@
 (def meta-socket (str places-root "/main/flow-meta.sock"))
 (def state-root (str home "/.local/state/flow-testing"))
 (def store-path (str state-root "/flow.sema"))
+;; The store of the Nexus in charge: its writes are the events of a wait on
+;; Flow's state that no subscription announces.
+(def nexus-store (atom store-path))
 (def config-home (str state-root "/config"))
 ;; The capsule's own XDG_CONFIG_HOME: Herdr reads its config and keeps its
 ;; sessions there, so the capsule's Herdr shares nothing with the user's.
@@ -86,7 +89,12 @@
 (def claude-root (str home "/.claude"))
 ;; Claude names a project's transcript directory by its working directory,
 ;; every character but a letter or digit written as a dash.
-(def capsule-transcripts (str claude-root "/projects/" (str/replace source-root #"[^A-Za-z0-9]" "-")))
+(def claude-projects (str claude-root "/projects"))
+(defn claude-project [root] (str claude-projects "/" (str/replace root #"[^A-Za-z0-9]" "-")))
+(def capsule-transcripts (claude-project source-root))
+;; Every directory a capsule seat's transcript can lie in: one per working
+;; directory a seat is given.
+(def capsule-projects (mapv claude-project [source-root workspace-a workspace-b]))
 (def curriculum-unit "curriculum-nexus.service")
 (def libexec (str (fs/parent (fs/canonicalize (System/getProperty "babashka.file")))))
 (def curriculum-package (str (fs/canonicalize (fs/file libexec "curriculum"))))
@@ -294,9 +302,13 @@
 
 (defn pane-ids [] (set (map :pane_id (panes))))
 
-(defn pane-text [pane]
-  (let [{:keys [exit out]} (herdr "pane" "read" pane "--source" "recent" "--lines" "400")]
-    (when (zero? exit) out)))
+(defn pane-text
+  "The pane's last 400 lines, as shown, or with lines unwrapped as
+  pane.output_matched searches them."
+  ([pane] (pane-text pane "recent"))
+  ([pane source]
+   (let [{:keys [exit out]} (herdr "pane" "read" pane "--source" source "--lines" "400")]
+     (when (zero? exit) out))))
 
 (def ^:dynamic *listed*
   "The metaflows as a running Observe.Metaflows holds them, as a Listed
@@ -344,62 +356,279 @@
 
 (defn listed-of [held] {:head "Listed" :body {:enclosure \[ :items held}})
 
-(defn watch-frames
-  "Asks f over the metaflows the queue `frames` carries, Observe.Metaflows
-  reply lines then ::ended: at the opening frame and again at each change,
-  until f answers truthy, the stream ends or `deadline` passes; the last
-  answer. Each wait is for the next frame. ::unavailable when the stream
-  opens on another frame or ends before opening: that Nexus serves no
-  metaflow subscription."
-  [deadline f ^java.util.concurrent.BlockingQueue frames]
-  (loop [held nil answer nil]
-    (let [remaining (- deadline (System/currentTimeMillis))
-          line (when (pos? remaining)
-                 (.poll frames remaining java.util.concurrent.TimeUnit/MILLISECONDS))]
-      (cond
-        (and (= line ::ended) (nil? held)) ::unavailable
-        (or (nil? line) (= line ::ended)) answer
-        :else (let [frame (read-datom line)]
-                (if (and (nil? held) (not= "MetaflowsObserved" (head frame)))
-                  ::unavailable
-                  (let [held (fold-metaflows held frame)
-                        v (binding [*listed* (listed-of held)] (f))]
-                    (if v v (recur held v)))))))))
+;; ---------------------------------------------------------------- events
+;; Every wait answers its event. It arms its sources, asks its question once
+;; they are armed, and asks again only when an event arrives. A source is a
+;; function of the event queue and the deadline; it answers, once armed, the
+;; function that closes it, puts each event on the queue, and puts ::ended
+;; when it can send no more. The deadline bounds how long the next event may
+;; take, never how often a question is asked.
 
-(declare re-check)
+;; The programs the sources wait through: inotify-tools' inotifywait and
+;; util-linux's waitpid (pidfd), as the package names them, else on PATH.
+(def inotifywait (or (not-empty (System/getenv "FLOW_CAPSULE_INOTIFYWAIT")) "inotifywait"))
+(def waitpid (or (not-empty (System/getenv "FLOW_CAPSULE_WAITPID")) "waitpid"))
 
-(defn watch
-  "Waits until f answers truthy over the metaflows, asked on open and again
-  at each change Observe.Metaflows sends, or until the time is up; the last
-  answer. Inside f, `current` and `metaflows` answer from the subscription.
-  A Nexus that serves no metaflow subscription (the takeover's old package)
-  has no change to wait on, and is re-checked."
-  [seconds f]
-  (let [deadline (+ (System/currentTimeMillis) (* 1000 seconds))
-        proc (p/process (into [(str @package "/bin/flow")]
-                              (client-arguments @package "flow" ordinary-socket "Observe.Metaflows"))
-                        {:env (clean-env (merge (marks @driver-pane) (place-configuration-env @package ordinary-socket)))
-                         :err :string :in ""})
-        frames (java.util.concurrent.LinkedBlockingQueue.)]
-    (future (try (doseq [line (line-seq (io/reader (:out proc)))] (.put frames line))
-                 (finally (.put frames ::ended))))
-    (try
-      (let [answer (watch-frames deadline f frames)]
-        (if (= answer ::unavailable)
-          (re-check (max 0 (quot (- deadline (System/currentTimeMillis)) 1000)) f)
-          answer))
-      (finally (p/destroy-tree proc)))))
+(defn- drained
+  "Every event already queued, taken."
+  [^java.util.concurrent.BlockingQueue events]
+  (let [taken (java.util.ArrayList.)]
+    (.drainTo events taken)
+    (vec taken)))
 
-(defn re-check
-  "Asks f every second until it answers truthy or the time is up; the last
-  answer. Still on a timer: the waits on files, panes, processes and
-  sockets, which the capsule has no event for yet, and on a Nexus with no
-  metaflow subscription."
-  [seconds f]
+(defn answer-on
+  "Asks f, then again at each arrival on the queue (the events already
+  queued taken with it), until f answers truthy, every one of the `sources`
+  sources has ended, or the deadline passes; the last answer. Each wait is
+  one blocking take of the next event, bounded by the deadline."
+  [deadline f ^java.util.concurrent.BlockingQueue events sources]
+  (loop [answer (f) ended 0]
+    (if (or answer (>= ended sources))
+      answer
+      (let [remaining (- deadline (System/currentTimeMillis))
+            event (when (pos? remaining)
+                    (.poll events remaining java.util.concurrent.TimeUnit/MILLISECONDS))]
+        (if (nil? event)
+          answer
+          (let [arrived (cons event (drained events))]
+            (recur (f) (+ ended (count (filter #{::ended} arrived))))))))))
+
+(defn await-events
+  "Arms the sources, then answer-on until `seconds` from now; the sources
+  closed after. `sources` is a vector of sources, or a function answering
+  one, armed again whenever f answers ::rearm (what it should watch has
+  changed)."
+  [seconds sources f]
   (let [deadline (+ (System/currentTimeMillis) (* 1000 seconds))]
     (loop []
-      (let [v (f)]
-        (if (or v (> (System/currentTimeMillis) deadline)) v (do (Thread/sleep 1000) (recur)))))))
+      (let [events (java.util.concurrent.LinkedBlockingQueue.)
+            armed (if (fn? sources) (sources) sources)
+            closers (atom [])
+            answer (try (doseq [source armed] (swap! closers conj (source events deadline)))
+                        (answer-on deadline f events (count armed))
+                        (finally (doseq [close @closers] (close))))]
+        (cond (not= answer ::rearm) answer
+              (< (System/currentTimeMillis) deadline) (recur)
+              :else nil)))))
+
+(defn arm
+  "Arms the sources now, before what they are to see is set off; answers the
+  wait on them, a function of seconds and f that runs answer-on over every
+  event they sent since and closes them."
+  [sources]
+  (let [events (java.util.concurrent.LinkedBlockingQueue.)
+        closers (atom [])]
+    (try (doseq [source sources]
+           (swap! closers conj (source events (+ (System/currentTimeMillis) 3600000))))
+         (catch Exception e
+           (doseq [close @closers] (close))
+           (throw e)))
+    (fn [seconds f]
+      (try (answer-on (+ (System/currentTimeMillis) (* 1000 seconds)) f events (count sources))
+           (finally (doseq [close @closers] (close)))))))
+
+(defn- feed!
+  "Puts (event line) for each line the reader gives on the queue, nil
+  dropped; ::ended when the stream ends or is closed."
+  [^java.util.concurrent.BlockingQueue events ^java.io.BufferedReader reader event]
+  (future (try (doseq [line (line-seq reader)]
+                 (when-some [e (event line)] (.put events e)))
+               (catch Exception _ nil)
+               (finally (.put events ::ended)))))
+
+(def socket-kinds
+  "A socket at its name: bound there (create), protected once it listens
+  (attrib: Flow before 0.53.3, Codex, Herdr), or moved in once it listens
+  (moved_to: Flow, Energy, Message)."
+  ["create" "attrib" "moved_to"])
+
+(def file-kinds ["create" "modify" "close_write" "moved_to"])
+
+(defn directory-events
+  "A source: each inotify event of `kinds` in the directories (recursively
+  with :recursive) whose file name names? accepts, from one inotifywait,
+  armed once it reports its watches established."
+  [dirs names? kinds & {:keys [recursive]}]
+  (fn [events _deadline]
+    (let [proc (p/process (concat [inotifywait "-m" "--format" "%f"] (when recursive ["-r"])
+                                  (mapcat #(vector "-e" %) kinds) dirs)
+                          {:in "" :out :stream :err :stream})
+          err (io/reader (:err proc))
+          said (loop [said []]
+                 (let [line (.readLine ^java.io.BufferedReader err)]
+                   (cond (nil? line) said
+                         (str/includes? line "Watches established") nil
+                         :else (recur (conj said line)))))]
+      (when said
+        (p/destroy-tree proc)
+        (throw (ex-info "inotifywait established no watch" {:dirs dirs :said said})))
+      (future (try (doseq [_ (line-seq err)]) (catch Exception _ nil)))
+      (feed! events (io/reader (:out proc)) #(when (names? %) %))
+      #(p/destroy-tree proc))))
+
+(defn socket-events
+  "A source: the sockets at their paths, all in one directory, made ready at
+  their names (socket-kinds). The directory is made first when missing
+  (mode 0700), so the watch is armed before anything binds there."
+  [& paths]
+  (let [dir (str (fs/parent (first paths)))]
+    (when-not (every? #(= dir (str (fs/parent %))) paths)
+      (throw (ex-info "socket-events watches one directory" {:paths paths})))
+    (fn [events deadline]
+      (when-not (fs/exists? dir)
+        (fs/create-dirs dir)
+        (fs/set-posix-file-permissions dir "rwx------"))
+      ((directory-events [dir] (set (map #(str (fs/file-name %)) paths)) socket-kinds) events deadline))))
+
+(defn file-events
+  "A source: the file at path created, written or moved in."
+  [path]
+  (directory-events [(str (fs/parent path))] #{(str (fs/file-name path))} file-kinds))
+
+(defn exit-of
+  "A source: the exit of a process the capsule started, as its own waiter
+  sees it; it ends there."
+  [proc]
+  (fn [^java.util.concurrent.BlockingQueue events _deadline]
+    (future (try (deref proc) (finally (.put events ::ended))))
+    (fn [])))
+
+(defn exits-of-pids
+  "A source: the exit of every process pids names, any process, one waitpid
+  on their pidfds; it ends when they all have."
+  [pids]
+  (fn [^java.util.concurrent.BlockingQueue events _deadline]
+    (let [proc (p/process (into [waitpid "--exited"] (map str pids)) {:in "" :out :string :err :string})]
+      (future (try (deref proc) (finally (.put events ::ended))))
+      #(p/destroy proc))))
+
+(def herdr-socket
+  "The capsule's Herdr session's socket API."
+  (str herdr-session-dir "/herdr.sock"))
+
+(defn herdr-events
+  "A source: Herdr's own event stream on the capsule's session,
+  events.subscribe with these subscriptions, armed at Herdr's
+  subscription_started; each event decoded, and gathered in seen when one is
+  given. A lifecycle subscription first sends again what Herdr still holds
+  of past events: a question asked at an event reads the present."
+  ([subscriptions] (herdr-events subscriptions nil))
+  ([subscriptions seen]
+   (fn [events _deadline]
+     (let [channel (java.nio.channels.SocketChannel/open java.net.StandardProtocolFamily/UNIX)]
+       (try
+         (.connect channel (java.net.UnixDomainSocketAddress/of ^String herdr-socket))
+         (let [reader (io/reader (java.nio.channels.Channels/newInputStream channel))
+               out (java.nio.channels.Channels/newOutputStream channel)
+               request {:id "flow-capsule" :method "events.subscribe" :params {:subscriptions subscriptions}}]
+           (.write out (.getBytes (str (json/generate-string request) "\n") "UTF-8"))
+           (.flush out)
+           (let [answer (some-> (.readLine ^java.io.BufferedReader reader) (json/parse-string true))]
+             (when-not (= "subscription_started" (get-in answer [:result :type]))
+               (throw (ex-info "Herdr did not start the subscription" {:answer answer}))))
+           (feed! events reader #(when-some [e (try (json/parse-string % true) (catch Exception _ nil))]
+                                   (some-> seen (swap! conj e))
+                                   e))
+           #(.close channel))
+         (catch Exception e
+           (.close channel)
+           (throw e)))))))
+
+(defn output-match
+  "Herdr's pane.output_matched for needle in the pane's last 400 lines,
+  answered at once when the pane already shows it."
+  [pane needle]
+  {:type "pane.output_matched" :pane_id pane :source "recent" :lines 400
+   :match {:type "substring" :value needle}})
+
+(defn pane-holds
+  "Whether the pane shows needle within seconds, on Herdr's
+  pane.output_matched."
+  [pane needle seconds]
+  (boolean
+   (when pane
+     (let [seen (atom [])]
+       (await-events seconds [(herdr-events [(output-match pane needle)] seen)] #(seq @seen))))))
+
+(defn frames-source
+  "A source over the Observe.Metaflows frames `open` streams ({:reader
+  :close}): armed at the opening frame, held taking the metaflows it lists;
+  each later frame is folded into held and is one event. A stream that opens
+  on another frame, ends before opening or has not opened by the deadline
+  serves no metaflow subscription: held is nil and the source `fallback`
+  answers is armed in its place."
+  [held open fallback]
+  (fn [events deadline]
+    (let [{:keys [reader close]} (open)
+          opening (deref (future (.readLine ^java.io.BufferedReader reader))
+                         (max 0 (- deadline (System/currentTimeMillis))) nil)
+          frame (read-datom opening)]
+      (if (= "MetaflowsObserved" (head frame))
+        (do (reset! held (fold-metaflows nil frame))
+            (feed! events reader #(do (swap! held fold-metaflows (read-datom %)) ::metaflows))
+            close)
+        (do (close)
+            (reset! held nil)
+            ((fallback) events deadline))))))
+
+(defn metaflow-source
+  "frames-source over the Nexus in charge's Observe.Metaflows. A Nexus that
+  serves no metaflow subscription (the takeover's old package) announces its
+  commits only by writing its store: then each change of that file is an
+  event."
+  [held]
+  (frames-source held
+                 (fn []
+                   (let [proc (p/process (into [(str @package "/bin/flow")]
+                                               (client-arguments @package "flow" ordinary-socket "Observe.Metaflows"))
+                                         {:env (clean-env (merge (marks @driver-pane)
+                                                                 (place-configuration-env @package ordinary-socket)))
+                                          :err :string :in ""})]
+                     {:reader (io/reader (:out proc)) :close #(p/destroy-tree proc)}))
+                 #(file-events @nexus-store)))
+
+(defn watch
+  "Waits until f answers truthy over the metaflows, asked once subscribed and
+  again at each change Observe.Metaflows sends, or until the time is up; the
+  last answer. Inside f, `current` and `metaflows` answer from the
+  subscription. A Nexus with no metaflow subscription is asked again at each
+  write of its store."
+  [seconds f]
+  (let [held (atom nil)]
+    (await-events seconds [(metaflow-source held)]
+                  #(binding [*listed* (some-> @held listed-of)] (f)))))
+
+(defn await-transcript
+  "Waits until f answers truthy over the capsule seats' Claude transcripts,
+  asked again at each write in a capsule project directory (and at each
+  directory made among the projects) and at each write of the Nexus's
+  store, where a seat's session is bound; the last answer. A project
+  directory that appears is watched from then on."
+  [seconds f]
+  (let [armed (atom nil)
+        present #(filterv fs/exists? capsule-projects)]
+    (await-events seconds
+                  (fn [] [(directory-events (into [claude-projects] (reset! armed (present)))
+                                            (constantly true) file-kinds)
+                          (file-events @nexus-store)])
+                  #(if (= @armed (present)) (f) ::rearm))))
+
+(defn await-codex-sessions
+  "Waits until f answers truthy over the Codex sessions of the capsule's
+  app-server, asked again at each write under its sessions directory."
+  [seconds f]
+  (await-events seconds [(directory-events [(str codex-home "/sessions")] (constantly true) file-kinds
+                                           :recursive true)]
+                f))
+
+(defn socket-listens?
+  "Whether a socket listens at path, as the kernel lists it."
+  [path]
+  (some (fn [row]
+          (let [cols (str/split (str/trim row) #"\s+")]
+            (and (= (get cols 7) path) (= (get cols 3) "00010000"))))
+        (rest (str/split-lines (try (String. (java.nio.file.Files/readAllBytes (fs/path "/proc/net/unix")))
+                                    (catch Exception _ ""))))))
 
 (defn inspect [addr] (flow-meta (str "Inspect." addr)))
 
@@ -658,7 +887,7 @@
             send-reply (str/trim (:out @sending))
             old-text (pane-text old-pane)
             fresh (str (watch 60 #(let [f (awake-flow quaternary)] (when (and f (not= (str f) old)) f))))
-            first-prompt (re-check 30 #(transcript-first-user (native-session (inspect quaternary))))]
+            first-prompt (await-transcript 30 #(transcript-first-user (native-session (inspect quaternary))))]
         {:reply (str "Refresh: " refresh-reply " / Send: " send-reply)
          :pass (boolean (and (str/starts-with? send-reply "SendAccepted.")
                              (seq fresh)
@@ -679,20 +908,25 @@
 
    ["7 Launch at an Awake metaflow"
     (fn []
+      ;; The successor's brief carries a tag the predecessor's pane has never
+      ;; shown: Herdr reports it there (pane.output_matched) if it is ever
+      ;; typed into that pane, until Herdr closes the pane.
       (let [old (str (awake-flow secondary))
             pane (bound-pane (inspect secondary))
-            before (pane-text pane)
-            last-seen (atom before)
-            watcher (future (loop [] (when-let [t (pane-text pane)] (reset! last-seen t) (Thread/sleep 200) (recur))))
-            reply (launch secondary)
-            _ (deref watcher 15000 nil)
+            tagged (str brief " Tag s7.")
+            seen (atom [])
+            wait (if pane
+                   (arm [(herdr-events [(output-match pane "Tag s7") {:type "pane.closed"}] seen)])
+                   (fn [_ _] nil))
+            reply (flow (str "Launch.{ " secondary " Predecessors.0 «" tagged "» }"))
+            closed (wait 15 #(not (contains? (pane-ids) pane)))
+            typed (some #(get-in % [:data :matched_line]) @seen)
             m (current secondary)]
         {:reply reply
-         :pass (boolean (and (str/starts-with? reply "Replaced.")
-                             (= (occurrences @last-seen brief) (occurrences before brief))))
-         :watched (str "predecessor " old " pane " pane " polled every 200 ms until gone: the brief appears "
-                       (occurrences before brief) " times before, " (occurrences @last-seen brief)
-                       " in its last reading; Opus Awake as " (:flow m))}))]
+         :pass (boolean (and (str/starts-with? reply "Replaced.") (nil? typed)))
+         :watched (str "predecessor " old " pane " pane (if closed " closed" " not closed in 15 s")
+                       "; the successor's brief (Tag s7) " (if typed (str "shown there: " typed) "never shown there")
+                       "; Opus Awake as " (:flow m))}))]
 
    ["8 Inspect.Address"
     (fn []
@@ -742,7 +976,7 @@
             kept (and (contains? (pane-ids) pane) (= (str (awake-flow secondary)) flow-id))
             declared (flow-meta (on-demand-secondary))
             reply (flow-meta (str "Retire." flow-id))
-            gone (re-check 10 #(not (contains? (pane-ids) pane)))
+            gone (await-events 10 [(herdr-events [{:type "pane.closed"}])] #(not (contains? (pane-ids) pane)))
             m (watch 20 #(let [m (current secondary)] (when (not= (str (:flow m)) flow-id) m)))]
         {:reply (str "Retire while Maintained: " refused " / Configure.Metaflows (Opus OnDemand): "
                      declared " / Retire: " reply)
@@ -979,9 +1213,15 @@
   (fs/create-dirs capsule-flows)
   (fs/create-dirs workspace-a)
   (fs/create-dirs workspace-b)
+  ;; The session's directory, made before the server so its socket's
+  ;; appearance there is watched from the first.
+  (fs/create-dirs herdr-session-dir)
   (reset! herdr-server (p/process ["herdr" "--session" session "server"]
                                   {:env (clean-env) :out :discard :err :discard :in ""}))
-  (when-not (re-check 15 #(get-in (herdr-json "workspace" "list") [:result :workspaces]))
+  (when-not (= :answering
+               (await-events 15 [(socket-events herdr-socket) (exit-of @herdr-server)]
+                             #(cond (get-in (herdr-json "workspace" "list") [:result :workspaces]) :answering
+                                    (not (p/alive? @herdr-server)) :exited)))
     (throw (ex-info "Herdr session did not answer" {})))
   (let [created (herdr-json "workspace" "create" "--cwd" source-root "--label" "capsule-driver" "--no-focus")]
     (reset! driver-pane (get-in created [:result :root_pane :pane_id]))))
@@ -1035,7 +1275,10 @@
     (reset! curriculum (p/process [(str curriculum-package "/bin/curriculum-nexus")]
                                   {:env env :dir source-root :out :append :out-file (fs/file log)
                                    :err :append :err-file (fs/file log) :in ""}))
-    (when-not (re-check 30 #(or (fs/exists? curriculum-socket) (not (p/alive? @curriculum))))
+    ;; Curriculum binds and listens in one call (tokio's UnixListener::bind)
+    ;; and announces nothing after: the socket bound at its name is the event.
+    (when-not (await-events 30 [(socket-events curriculum-socket) (exit-of @curriculum)]
+                            #(or (socket-listens? curriculum-socket) (not (p/alive? @curriculum))))
       (throw (ex-info "the Curriculum Nexus opened no socket" {})))
     (when-not (p/alive? @curriculum)
       (throw (ex-info "the Curriculum Nexus exited" {:log (str/trim (slurp log))})))
@@ -1056,6 +1299,8 @@
 (defn start-codex! [log]
   (when-not codex-binary (throw (ex-info "no Codex executable: set FLOW_CAPSULE_CODEX" {})))
   (fs/create-dirs codex-home)
+  ;; Watched for the sessions the seats write (await-codex-sessions).
+  (fs/create-dirs (str codex-home "/sessions"))
   (fs/create-dirs (fs/parent codex-socket))
   (fs/copy codex-login (str codex-home "/auth.json") {:replace-existing true})
   (fs/set-posix-file-permissions (str codex-home "/auth.json") "rw-------")
@@ -1066,7 +1311,11 @@
   (reset! codex-server (p/process [codex-binary "app-server" "--remote-control" "--listen" (str "unix://" codex-socket)]
                                   {:env (clean-env {"CODEX_HOME" codex-home}) :dir source-root
                                    :out :append :out-file (fs/file log) :err :append :err-file (fs/file log) :in ""}))
-  (when-not (re-check 30 #(fs/exists? codex-socket))
+  ;; The app-server protects its socket once it listens (attrib).
+  (when-not (= :listening
+               (await-events 30 [(socket-events codex-socket) (exit-of @codex-server)]
+                             #(cond (socket-listens? codex-socket) :listening
+                                    (not (p/alive? @codex-server)) :exited)))
     (throw (ex-info "the capsule's Codex app-server opened no socket" {})))
   (println (str "codex | " codex-binary " | " codex-model " | " codex-socket)))
 
@@ -1089,7 +1338,12 @@
   (fs/set-posix-file-permissions (fs/parent ordinary-socket) "rwx------")
   (reset! nexus (p/process [(str @package "/bin/flow-nexus") (start-text @package)]
                            {:env (clean-env) :out :append :out-file (fs/file log) :err :append :err-file (fs/file log) :in ""}))
-  (when-not (re-check 20 #(and (fs/exists? ordinary-socket) (fs/exists? meta-socket)))
+  (reset! nexus-store store-path)
+  ;; Each socket is moved to its name once it listens.
+  (when-not (= :placed
+               (await-events 20 [(socket-events ordinary-socket meta-socket) (exit-of @nexus)]
+                             #(cond (and (fs/exists? ordinary-socket) (fs/exists? meta-socket)) :placed
+                                    (not (p/alive? @nexus)) :exited)))
     (throw (ex-info "the Nexus opened no sockets" {:log (str/trim (slurp log))}))))
 
 (defn listens?
@@ -1115,7 +1369,10 @@
                            {:env (clean-env {"PATH" (str pkg "/bin:" (System/getenv "PATH"))})
                             :out :append :out-file (fs/file log) :err :append :err-file (fs/file log) :in ""})
           pid (.pid (:proc child))]
-      (when-not (re-check 10 #(or (listens? pid meta-socket) (not (p/alive? child))))
+      ;; An earlier Nexus binds its socket and protects it once it listens
+      ;; (attrib); a later one moves it to its name.
+      (when-not (await-events 10 [(socket-events meta-socket) (exit-of child)]
+                              #(or (listens? pid meta-socket) (not (p/alive? child))))
         (p/destroy child))
       (let [reply (if (p/alive? child)
                     (reply-text (apply run {:env (clean-env (merge {"PATH" (str pkg "/bin:" (System/getenv "PATH"))}
@@ -1177,7 +1434,22 @@
                     (str/includes? env (str "HERDR_SESSION=" session)))]
       (str pid " " (str/trim cmd)))))
 
+(defn processes-ended
+  "[] once every process carrying the capsule has ended, within seconds: the
+  ones listed are waited on by their pidfds, and the list read again when
+  they have; nil if some still run."
+  [seconds]
+  (let [armed (atom #{})
+        pids #(set (map (fn [line] (first (str/split line #" "))) (capsule-processes)))]
+    (await-events seconds
+                  (fn [] (let [left (reset! armed (pids))] (if (seq left) [(exits-of-pids left)] [])))
+                  #(let [left (pids)]
+                     (cond (empty? left) []
+                           (seq (remove @armed left)) ::rearm)))))
+
 (def herdr-session-left (atom nil))
+
+(declare stop-sender! stop-poller!)
 
 (defn teardown! []
   (println "teardown")
@@ -1195,13 +1467,10 @@
               (swap! steps conj (str "Retire." (body state) " -> " (flow-meta (str "Retire." (body state))))))))))
     (doseq [w (get-in (herdr-json "workspace" "list") [:result :workspaces])]
       (swap! steps conj (str "close workspace " (:workspace_id w) " (" (:label w) ") -> " (str/trim (:out (herdr "workspace" "close" (:workspace_id w)))))))
-    (when-let [{:keys [running future]} @sender]
-      (reset! running false)
-      (deref future 30000 nil)
+    (when @sender
+      (stop-sender!)
       (swap! steps conj "takeover sender loop stopped"))
-    (when-let [{:keys [running future]} @poller]
-      (reset! running false)
-      (deref future 5000 nil))
+    (stop-poller!)
     (doseq [n @takeover-nexuses :when (p/alive? n)]
       (p/destroy n)
       (swap! steps conj (str "takeover Nexus " (.pid (:proc n)) " stopped, exit "
@@ -1243,7 +1512,7 @@
     (fs/delete-tree capsule-runtime)
     (doseq [s @steps] (println (str "  " s)))
     (let [remaining {:herdr-session @herdr-session-left
-                     :processes (vec (or (re-check 20 #(let [left (capsule-processes)] (when (empty? left) []))) (capsule-processes)))
+                     :processes (vec (or (processes-ended 20) (capsule-processes)))
                      :store (fs/exists? state-root)
                      :source-root (fs/exists? source-parent)
                      :sockets (fs/exists? capsule-runtime)
@@ -1294,13 +1563,30 @@
 
 (defn log-text [] (try (slurp @nexus-log) (catch Exception _ "")))
 
+(defn log-line
+  "The first Nexus log line holding every one of needles."
+  [& needles]
+  (some #(when (every? (fn [needle] (str/includes? % needle)) needles) %) (str/split-lines (log-text))))
+
+(defn await-log-line
+  "The first Nexus log line holding every one of needles, asked again at each
+  write of the log, within seconds."
+  [seconds & needles]
+  (await-events seconds [(file-events @nexus-log)] #(apply log-line needles)))
+
+(defn await-stops
+  "Waits until f answers truthy over a flow's Stops, asked again at each
+  write of the Nexus's store, where its harness's events are recorded."
+  [seconds f]
+  (await-events seconds [(file-events @nexus-store)] f))
+
 (defn transcript-holds
   "Whether the transcript of the metaflow's current Claude session holds
   needle within seconds: a pane wraps long lines, a transcript does not."
   [addr needle seconds]
-  (re-check seconds #(when-let [native (native-session (inspect addr))]
-                    (when-let [file (first (fs/glob (str home "/.claude/projects") (str "*/" native ".jsonl")))]
-                      (str/includes? (slurp (str file)) needle)))))
+  (await-transcript seconds #(when-let [native (native-session (inspect addr))]
+                               (when-let [file (first (fs/glob claude-projects (str "*/" native ".jsonl")))]
+                                 (str/includes? (slurp (str file)) needle)))))
 
 (defn reminder-stamps
   "The transcript stamps of every line of the metaflow's current Claude
@@ -1310,9 +1596,6 @@
         file (when native (first (fs/glob (str home "/.claude/projects") (str "*/" native ".jsonl"))))]
     (keep #(when (str/includes? % needle) (second (re-find #"\"timestamp\":\"([^\"]+)\"" %)))
           (when file (str/split-lines (slurp (str file)))))))
-
-(defn pane-holds [pane needle seconds]
-  (re-check seconds #(some-> (pane-text pane) (str/includes? needle))))
 
 ;; The seat scenario 20 wakes: a Regular OnDemand seat, which takes its whole
 ;; queue on a wake (a Simplified seat takes its oldest alone).
@@ -1325,11 +1608,11 @@
             flow-id (str (watch 90 #(awake-flow tertiary-address)))
             pane (bound-pane (inspect tertiary-address))
             broken (flow-meta (broken-metaflows tertiary-address))
-            rested (re-check 150 #(pos? (stops-of flow-id)))
-            _ (Thread/sleep 8000)
+            rested (await-stops 150 #(pos? (stops-of flow-id)))
+            ;; The Nexus says it keeps the seat, at the Stop, in its log.
+            kept-line (await-log-line 60 flow-id "kept at its Stop")
             kept (= (str (awake-flow tertiary-address)) flow-id)
             open (contains? (pane-ids) pane)
-            kept-line (some #(when (and (str/includes? % flow-id) (str/includes? % "kept at its Stop")) %) (str/split-lines (log-text)))
             untold (not (pane-holds (sender-pane) (str "(flow " flow-id ") was refused") 60))
             queued (send-to tertiary-address "Queue" "Soft.Notice.«Answer with one word and stop. Tag ra2.»" (sender-pane))
             handed (pane-holds pane "Tag ra2" 90)
@@ -1348,10 +1631,9 @@
             broken (flow-meta (broken-metaflows secondary))
             low (flow-meta "Configure.Thresholds.[ { claude-haiku-5-5 1000 } ]")
             sent (flow (str "Send.{ " secondary " Wake Soft.Notice.«Answer with one word and stop. Tag rb1.» }") pane)
-            rested (re-check 120 #(> (stops-of flow-id) before))
-            _ (Thread/sleep 8000)
+            rested (await-stops 120 #(> (stops-of flow-id) before))
+            kept-line (await-log-line 60 flow-id "RefreshLaunchRefused")
             kept (= (str (awake-flow secondary)) flow-id)
-            kept-line (some #(when (and (str/includes? % flow-id) (str/includes? % "RefreshLaunchRefused")) %) (str/split-lines (log-text)))
             queued (flow (str "Send.{ " secondary " Queue Soft.Notice.«Answer with one word and stop. Tag rb2.» }") pane)
             handed (pane-holds pane "Tag rb2" 90)
             restored (restore-configuration!)]
@@ -1415,8 +1697,8 @@
             deadline (when id (admitted-deadline (log-text) id))
             stamp (when id (first (reminder-stamps secondary (str "Reminder 1 of 4: task " id))))
             lag (when (and deadline stamp) (reminder-lag deadline stamp))
-            _ (Thread/sleep 75000)
-            second-reminder (transcript-holds secondary (str "Reminder 2 of 4: task " id) 1)]
+            ;; An absence: Reminder 2 is watched for through the whole window.
+            second-reminder (transcript-holds secondary (str "Reminder 2 of 4: task " id) 75)]
         {:reply (str "Task: " sent " / Done: " done " / Done again: " again)
          :pass (boolean (and id reminded (str/starts-with? done "SendAccepted.")
                              (str/includes? again "NoOpenTask") (not second-reminder)
@@ -1435,12 +1717,16 @@
             second-sent (send-to waking-seat "Wake" (str "Soft.Order.«Second of two. " brief " Tag w2.»") pane)
             ids (vec (keep accepted-id [first-sent second-sent]))
             woke (watch 60 #(awake-flow waking-seat))
-            turn (re-check 60 #(transcript-first-user (native-session (inspect waking-seat))))
+            turn (await-transcript 60 #(transcript-first-user (native-session (inspect waking-seat))))
             entries (waking-entries turn)
             woken-pane (bound-pane (inspect waking-seat))
-            shown (re-check 60 #(let [t (some-> woken-pane pane-text)]
-                               (when (and t (every? (fn [id] (str/includes? t id)) ids)) t)))
-            _ (keep-text! "scenario-20-pane.txt" (or shown (some-> woken-pane pane-text)))
+            ;; Asked again as Herdr finds each id in the pane, read as it
+            ;; searches it, lines unwrapped.
+            shown (when (and woken-pane (seq ids))
+                    (await-events 60 [(herdr-events (mapv #(output-match woken-pane %) ids))]
+                                  #(let [t (pane-text woken-pane "recent-unwrapped")]
+                                     (when (and t (every? (fn [id] (str/includes? t id)) ids)) t))))
+            _ (keep-text! "scenario-20-pane.txt" (or shown (some-> woken-pane (pane-text "recent-unwrapped"))))
             ordered (boolean (and shown (= 2 (count ids))
                                   (< (str/index-of shown (first ids)) (str/index-of shown (second ids)))))]
         {:reply (str "Queue: " first-sent " / Wake: " second-sent)
@@ -1465,7 +1751,7 @@
       (let [reply (launch codex-quaternary)
             awake (when (str/starts-with? reply "Started.") (watch 60 #(awake-flow codex-quaternary)))
             queued (send-to codex-quaternary "Queue" "Soft.Order.«Answer with one word and stop. Tag c1.»" (sender-pane))
-            handed (re-check 120 #(codex-sessions-hold "Tag c1"))]
+            handed (await-codex-sessions 120 #(codex-sessions-hold "Tag c1"))]
         {:reply (str "Launch: " reply " / Send: " queued)
          :pass (boolean (and awake (str/starts-with? queued "SendAccepted.") handed))
          :watched (str "Mind test Terra Awake as " awake "; a session under " codex-home
@@ -1479,13 +1765,13 @@
             admitted (java.time.Instant/now)
             sent (send-to codex-quaternary "Wake" "Soft.Task.{ 1 «Answer with one word and stop. Tag g1.» }" (sender-pane))
             id (some-> (read-datom sent) body items first str)
-            handed (re-check 120 #(codex-sessions-hold "Tag g1"))
+            handed (await-codex-sessions 120 #(codex-sessions-hold "Tag g1"))
             reminded (transcript-holds secondary (str "Reminder 1 of 4: task " id) 150)
             done (send-to secondary "Queue" (str "Soft.Done.{ " id " «finished» }") codex-pane)
-            _ (Thread/sleep 75000)
-            second-reminder (transcript-holds secondary (str "Reminder 2 of 4: task " id) 1)
+            ;; An absence: Reminder 2 is watched for through the whole window.
+            second-reminder (transcript-holds secondary (str "Reminder 2 of 4: task " id) 75)
             native (native-session (inspect secondary))
-            file (when native (first (fs/glob (str home "/.claude/projects") (str "*/" native ".jsonl"))))
+            file (when native (first (fs/glob claude-projects (str "*/" native ".jsonl"))))
             lines (filter #(str/includes? % (str "Reminder 1 of 4: task " id))
                           (when file (str/split-lines (slurp (str file)))))
             stamps (keep #(second (re-find #"\"timestamp\":\"([^\"]+)\"" %)) lines)
@@ -1749,10 +2035,13 @@
 
 (defn serves?
   "Whether the Nexus process comes to answer Metaflows on the capsule's
-  socket: :serving, :exited, or nil after 30 s."
+  socket: :serving, :exited, or nil after 30 s. Asked again as its socket is
+  made ready at its name (an earlier Nexus protects it once it listens, a
+  later one moves it there) and when it exits."
   [proc]
-  (re-check 30 #(cond (not (p/alive? proc)) :exited
-                   (owner-answers? (flow "Metaflows")) :serving)))
+  (await-events 30 [(socket-events ordinary-socket) (exit-of proc)]
+                #(cond (not (p/alive? proc)) :exited
+                       (owner-answers? (flow "Metaflows")) :serving)))
 
 (defn digest [path]
   (when (fs/exists? path)
@@ -1812,43 +2101,57 @@
 
 (defn start-sender!
   "The trackers' cron, stood in for: every 15 s a Wake Notice to the
-  Haiku and the Sonnet, sent from pane by the client in charge."
+  Haiku and the Sonnet, sent from pane by the client in charge. The period
+  is the cron's own; a stop ends the wait for the next beat at once."
   [pane]
-  (let [running (atom true)
+  (let [stop (promise)
         sent (atom [])]
-    (reset! sender {:running running :sent sent
+    (reset! sender {:stop stop :sent sent
                     :future (future
-                              (while @running
+                              (loop []
                                 (doseq [addr [quaternary tertiary-address]]
                                   (swap! sent conj {:at (now) :to addr
                                                     :reply (send-to addr "Wake" "Soft.Notice.«beat. Answer with one word and stop.»" pane)}))
-                                (let [until (+ (now) 15000)]
-                                  (while (and @running (< (now) until)) (Thread/sleep 100)))))})))
+                                (when (= ::beat (deref stop 15000 ::beat)) (recur))))})))
 
 (defn stop-sender!
   "Stops the sender loop; every send it made."
   []
-  (when-let [{:keys [running sent] :as loop-state} @sender]
-    (reset! running false)
+  (when-let [{:keys [stop sent] :as loop-state} @sender]
+    (deliver stop true)
     (deref (:future loop-state) 30000 nil)
     (reset! sender nil)
     @sent))
 
+(defn sends-reached
+  "The sender's sends once they number n, within seconds; nil if they do not."
+  [n seconds]
+  (when-let [{:keys [sent]} @sender]
+    (let [reached (promise)]
+      (add-watch sent ::sends-reached (fn [_ _ _ now-sent] (when (>= (count now-sent) n) (deliver reached now-sent))))
+      (when (>= (count @sent) n) (deliver reached @sent))
+      (let [answer (deref reached (* 1000 seconds) nil)]
+        (remove-watch sent ::sends-reached)
+        answer))))
+
 (defn start-poller!
-  "Counts the session's panes every second."
+  "Counts the session's panes now, and again at each pane Herdr creates or
+  closes."
   []
-  (let [running (atom true)
-        counts (atom [])]
-    (reset! poller {:running running :counts counts
-                    :future (future (while @running
-                                      (swap! counts conj [(now) (count (panes))])
-                                      (Thread/sleep 1000)))})))
+  (let [counts (atom [[(now) (count (panes))]])
+        events (java.util.concurrent.LinkedBlockingQueue.)
+        close ((herdr-events [{:type "pane.created"} {:type "pane.closed"}]) events nil)]
+    (reset! poller {:close close :counts counts
+                    :future (future (loop []
+                                      (when-not (= ::ended (.take events))
+                                        (swap! counts conj [(now) (count (panes))])
+                                        (recur))))})))
 
 (defn stop-poller!
-  "Stops the pane poll; every count it took."
+  "Stops the pane count; every count it took."
   []
-  (when-let [{:keys [running counts] :as poll} @poller]
-    (reset! running false)
+  (when-let [{:keys [close counts] :as poll} @poller]
+    (close)
     (deref (:future poll) 5000 nil)
     (reset! poller nil)
     @counts))
@@ -1873,8 +2176,9 @@
                                       {:via :configure-only :datom datom :reply reply :exit exit}))
         running! (fn [steps]
                    (let [proc (start-command! {:argv [(str pkg "/bin/flow-nexus") start] :env (package-env pkg {})} log)
-                         up (re-check 30 #(cond (not (p/alive? proc)) :exited
-                                             (owner-answers? (meta-at pkg seed-meta-socket "Configuration")) :serving))
+                         up (await-events 30 [(socket-events seed-meta-socket) (exit-of proc)]
+                                          #(cond (not (p/alive? proc)) :exited
+                                                 (owner-answers? (meta-at pkg seed-meta-socket "Configuration")) :serving))
                          replies (mapv (fn [{:keys [datom]}]
                                          {:via :running :datom datom :up up
                                           :reply (if (= up :serving) (meta-at pkg seed-meta-socket datom) "not serving")})
@@ -1963,6 +2267,7 @@
         old-digest (digest store-path)
         guard (guard-probe @new-package)
         _ (reset! package @new-package)
+        _ (reset! nexus-store (:store seed))
         proc (start-command! (nexus-command @new-package (:store seed)) @nexus-log)
         serving (serves? proc)
         ready (now)]
@@ -1994,11 +2299,10 @@
   [lines]
   (vec (for [{:keys [pane flow-id address line]} lines]
          (let [started (now)
+               seen (atom [])
+               wait (arm [(herdr-events [(output-match pane (str "Bound." flow-id))] seen)])
                typed (herdr "pane" "run" pane line)
-               timeout (if (= address codex-secondary) 300000 120000)
-               waited (run {:timeout (+ timeout 20000)} "herdr" "--session" session "pane" "wait-output" pane
-                           "--match" (str "Bound." flow-id) "--timeout" (str timeout))
-               bound (zero? (:exit waited))]
+               bound (boolean (wait (if (= address codex-secondary) 300 120) #(seq @seen)))]
            (when-not bound (keep-text! (str "takeover-rebind-" (str/replace pane ":" "-") ".txt") (pane-text pane)))
            {:pane pane :address address :flow-id flow-id :typed (:exit typed) :bound bound
             :ms (- (now) started) :harness (if (str/starts-with? address "{ Mind") "Codex" "Claude")}))))
@@ -2083,6 +2387,7 @@
         free (guard-probe @old-package)
         untouched (= old-digest (digest store-path))
         _ (reset! package @old-package)
+        _ (reset! nexus-store store-path)
         proc (start-command! old-command @nexus-log)
         serving (serves? proc)
         _ (reset! nexus proc)
@@ -2135,11 +2440,13 @@
   (fn []
     (let [{:keys [last pane-count pane-set]} @takeover
           watched-for (select-keys (:awake last) [quaternary tertiary-address])
-          seen (re-check 90 #(let [after (awake-seats (read-datom (flow "Metaflows")))
-                                fresh (vec (remove pane-set (pane-ids)))
-                                moved (vec (for [[a f] watched-for :when (and (get after a) (not= f (get after a)))] a))]
-                            (when (or (> (count (panes)) pane-count) (seq moved))
-                              {:fresh fresh :moved moved :after after})))
+          ;; Asked again at each pane Herdr creates and each metaflow change.
+          seen (await-events 90 [(herdr-events [{:type "pane.created"}]) (metaflow-source (atom nil))]
+                             #(let [after (awake-seats (read-datom (flow "Metaflows")))
+                                    fresh (vec (remove pane-set (pane-ids)))
+                                    moved (vec (for [[a f] watched-for :when (and (get after a) (not= f (get after a)))] a))]
+                                (when (or (> (count (panes)) pane-count) (seq moved))
+                                  {:fresh fresh :moved moved :after after})))
           sent (stop-sender!)
           counts (stop-poller!)
           first-panes (into {} (for [[a f] watched-for] [a (pane-of-flow f)]))
@@ -2157,6 +2464,7 @@
   [["T0 old Nexus on the capsule's sockets and store, started by a recorded command"
     (fn []
       (reset! package @old-package)
+      (reset! nexus-store store-path)
       (configure! @nexus-log (:old (:configuration @takeover)))
       (let [command (nexus-command @old-package store-path)
             proc (start-command! command @nexus-log)
@@ -2188,7 +2496,7 @@
             busy (when-not skip-codex
                    (let [reply (flow (str "Launch.{ " codex-secondary " Predecessors.0 «Run the shell command sleep 240, then answer with one word and stop.» }"))]
                      [reply (watch 90 #(awake-flow codex-secondary))]))
-            sends (re-check 45 #(let [s @(:sent @sender)] (when (>= (count s) 4) s)))
+            sends (sends-reached 4 45)
             primary (current asleep-primary)]
         {:reply (str (pr-str launched) " / Fable " primary-launch " / Codex Sol " (if skip-codex "SKIPPED" (pr-str busy))
                      " / queued " queued)

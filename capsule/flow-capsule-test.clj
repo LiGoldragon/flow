@@ -418,11 +418,55 @@
                                              flow-capsule/waking-seat)))
     (println "skip | scenario 20's seat in configure.datom: no configure.datom beside this file")))
 
-;; The capsule's watch waits on Observe.Metaflows: it holds the metaflows
-;; the opening frame lists, replaces or adds one at each MetaflowChanged,
-;; drops one at each MetaflowGone, and asks its predicate at each frame,
-;; never on a timer. A Nexus that opens on another frame, or ends before
-;; opening, serves no subscription.
+;; Every wait of the capsule answers its event: it arms its sources, asks its
+;; question once armed, and asks again only when an event arrives; the
+;; deadline bounds the wait for the next event and nothing else.
+(require '[babashka.process :as p] '[clojure.java.io :as io] '[cheshire.core :as json])
+
+(defn acting-first
+  "A question that, asked first, sets off the action and answers nil, so
+  only an event can bring its next asking; then the check."
+  [action check]
+  (let [first-ask (atom true)]
+    #(if @first-ask (do (reset! first-ask false) (action) nil) (check))))
+
+(defn queue [events]
+  (let [q (java.util.concurrent.LinkedBlockingQueue.)]
+    (doseq [event events] (.put q event))
+    q))
+
+;; A deadline far off: every answer here comes from an event.
+(def later (+ (System/currentTimeMillis) 600000))
+
+(let [asked (atom 0)
+      answer (flow-capsule/answer-on later #(do (swap! asked inc) nil)
+                                     (queue [:a :b :flow-capsule/ended]) 1)]
+  (check "a question is asked once armed and again at each arrival, the events already queued taken together"
+         (and (nil? answer) (= 2 @asked))))
+(check "a question answered truthy ends the wait"
+       (= :yes (flow-capsule/answer-on later (constantly :yes) (queue []) 1)))
+(let [asked (atom 0)]
+  (check "a wait ends when every source has ended"
+         (nil? (flow-capsule/answer-on later #(do (swap! asked inc) nil)
+                                       (queue [:flow-capsule/ended :flow-capsule/ended]) 2))))
+(let [armed (atom 0)
+      source (fn [events _] (swap! armed inc) (.put events :changed) (fn []))]
+  (check "a question answering ::rearm arms its sources again"
+         (and (= :settled (flow-capsule/await-events 30 (fn [] [source])
+                                                     #(if (< @armed 2) :flow-capsule/rearm :settled)))
+              (= 2 @armed))))
+(let [closed (atom false)
+      wait (flow-capsule/arm [(fn [events _] (.put events :seen) #(reset! closed true))])]
+  (check "a source armed first keeps what it sees until the wait, and is closed after it"
+         (and (= :seen-it (wait 30 (let [first-ask (atom true)]
+                                     #(if @first-ask (do (reset! first-ask false) nil) :seen-it))))
+              @closed)))
+
+;; The metaflows: Observe.Metaflows opens on the metaflows listed, replaces or
+;; adds one at each MetaflowChanged, drops one at each MetaflowGone; each
+;; frame after the opening one is an event. A Nexus that opens on another
+;; frame, or ends before opening, serves no subscription: its fallback is
+;; armed instead (the store it writes).
 (let [opening "MetaflowsObserved.[ { { Psyche test Fable } Asleep [] [] } { { Mind test Sol } Awake.c1a0de [] [] } ]"
       woke "MetaflowChanged.{ { Psyche test Fable } Awake.5ec0d1 [] [] }"
       fresh "MetaflowChanged.{ { Psyche test Haiku } Awake.f1c841 [] [] }"
@@ -430,12 +474,15 @@
       fold (fn [lines] (reduce flow-capsule/fold-metaflows nil (map flow-capsule/read-datom lines)))
       at (fn [lines address]
            (flow-capsule/metaflow (flow-capsule/listed-of (fold lines)) address))
-      queue (fn [lines]
-              (let [q (java.util.concurrent.LinkedBlockingQueue.)]
-                (doseq [line lines] (.put q line))
-                q))
-      ;; A deadline far off: every answer here comes from a frame queued.
-      later (+ (System/currentTimeMillis) 600000)]
+      stream (fn [lines] (fn [] {:reader (java.io.BufferedReader. (java.io.StringReader. (str/join "\n" lines)))
+                                 :close (fn [])}))
+      no-fallback #(throw (ex-info "no fallback expected" {}))
+      watched (fn [held source]
+                (flow-capsule/await-events
+                 600 [source]
+                 #(when-let [listed (some-> @held flow-capsule/listed-of)]
+                    (binding [flow-capsule/*listed* listed]
+                      (:flow (flow-capsule/current "{ Psyche test Fable }"))))))]
   (check "the opening frame lists the metaflows"
          (= {:state :awake :flow "c1a0de" :past [] :queue []} (at [opening] "{ Mind test Sol }")))
   (check "a change replaces the metaflow at its Address"
@@ -447,20 +494,107 @@
               (= 1 (count (fold [opening gone])))))
   (check "nothing is held before the opening frame"
          (nil? (fold [woke])))
-  (check "the predicate is asked at each frame, over the subscription's metaflows"
-         (= "5ec0d1"
-            (flow-capsule/watch-frames later #(:flow (flow-capsule/current "{ Psyche test Fable }"))
-                                       (queue [opening woke :flow-capsule/ended]))))
-  (check "a stream that ends first answers the last answer"
-         (nil? (flow-capsule/watch-frames later #(:flow (flow-capsule/current "{ Psyche test Fable }"))
-                                          (queue [opening :flow-capsule/ended]))))
-  (check "a Nexus that opens on another frame serves no subscription"
-         (= :flow-capsule/unavailable
-            (flow-capsule/watch-frames later (constantly true)
-                                       (queue ["Refused.Store.«down»" :flow-capsule/ended]))))
-  (check "a stream that ends before opening serves no subscription"
-         (= :flow-capsule/unavailable
-            (flow-capsule/watch-frames later (constantly true) (queue [:flow-capsule/ended])))))
+  (let [held (atom nil)]
+    (check "the question is asked at each frame, over the subscription's metaflows"
+           (= "5ec0d1" (watched held (flow-capsule/frames-source held (stream [opening woke]) no-fallback)))))
+  (let [held (atom nil)]
+    (check "a stream that ends first answers the last answer"
+           (nil? (watched held (flow-capsule/frames-source held (stream [opening]) no-fallback)))))
+  (doseq [[what lines] [["opens on another frame" ["Refused.Store.«down»"]]
+                        ["ends before opening" []]]]
+    (let [held (atom :stale)
+          fell-back (atom false)
+          fallback (fn [] (fn [events _] (reset! fell-back true) (.put events :flow-capsule/ended) (fn [])))]
+      (watched held (flow-capsule/frames-source held (stream lines) fallback))
+      (check (str "a Nexus whose stream " what " serves no subscription: its fallback is armed")
+             (and @fell-back (nil? @held))))))
+
+;; Files and sockets: one inotifywait, armed (its watches established)
+;; before the question is first asked.
+(let [dir (str (fs/create-temp-dir {:prefix "capsule-events"}))
+      place (str dir "/place")
+      socket (str place "/flow.sock")
+      wait (flow-capsule/arm [(flow-capsule/socket-events socket)])]
+  (check "a socket's directory missing is made, mode 0700, before the watch"
+         (= "rwx------" (fs/posix->str (fs/posix-file-permissions place))))
+  (check "a socket moved to its name is seen at the move"
+         (wait 30 (acting-first #(do (spit (str place "/.flow.sock.1") "")
+                                     (fs/move (str place "/.flow.sock.1") socket))
+                                #(fs/exists? socket))))
+  (let [wait (flow-capsule/arm [(flow-capsule/socket-events socket)])
+        mode #(fs/posix->str (fs/posix-file-permissions socket))]
+    (check "a socket protected at its name is seen at the change"
+           (wait 30 (acting-first #(fs/set-posix-file-permissions socket "rw-------")
+                                  #(= "rw-------" (mode))))))
+  (let [store (str dir "/flow.sema")
+        wait (flow-capsule/arm [(flow-capsule/file-events store)])]
+    (check "a file written is seen"
+           (= "written\n" (wait 30 (acting-first #(spit store "written\n")
+                                                 #(let [text (when (fs/exists? store) (slurp store))]
+                                                    (when (= "written\n" text) text)))))))
+  (let [sessions (str dir "/sessions")
+        _ (fs/create-dirs sessions)
+        wait (flow-capsule/arm [(flow-capsule/directory-events [sessions] (constantly true) flow-capsule/file-kinds
+                                                               :recursive true)])
+        rollout (str sessions "/2026/11/09/rollout.jsonl")]
+    (check "a file written in a directory made under a recursive watch is seen"
+           (wait 30 (acting-first #(do (fs/create-dirs (fs/parent rollout)) (spit rollout "Tag c1\n"))
+                                  #(and (fs/exists? rollout) (str/includes? (slurp rollout) "Tag c1"))))))
+  (check "a watch on a directory missing is refused"
+         (try ((flow-capsule/directory-events [(str dir "/absent")] (constantly true) flow-capsule/file-kinds)
+               (java.util.concurrent.LinkedBlockingQueue.) later)
+              false
+              (catch clojure.lang.ExceptionInfo _ true)))
+  (fs/delete-tree dir))
+
+;; Processes: a child's exit as its own waiter sees it; any process's exit by
+;; its pidfd (util-linux waitpid). Each is ended here by closing its input.
+(let [exited? (fn [pid] (let [stat (try (slurp (str "/proc/" pid "/stat")) (catch Exception _ nil))]
+                          (or (nil? stat) (boolean (re-find #"\) Z " stat)))))]
+  (let [proc (p/process ["cat"] {:out :string})
+        wait (flow-capsule/arm [(flow-capsule/exit-of proc)])]
+    (check "a child's exit is seen as it exits"
+           (= :exited (wait 30 (acting-first #(.close (:in proc)) #(when-not (p/alive? proc) :exited))))))
+  (let [proc (p/process ["cat"] {:out :string})
+        pid (.pid (:proc proc))
+        wait (flow-capsule/arm [(flow-capsule/exits-of-pids [pid])])]
+    (check "a process's exit is seen through its pidfd"
+           (= :exited (wait 30 (acting-first #(.close (:in proc)) #(when (exited? pid) :exited)))))))
+
+;; Herdr: the capsule's session's socket, events.subscribe, armed at
+;; subscription_started; each later line one event. A Herdr stood in for by
+;; a socket of this test's own.
+(let [dir (str (fs/create-temp-dir {:prefix "capsule-herdr"}))
+      socket (str dir "/herdr.sock")
+      address (java.net.UnixDomainSocketAddress/of socket)
+      server (doto (java.nio.channels.ServerSocketChannel/open java.net.StandardProtocolFamily/UNIX) (.bind address))
+      asked (promise)
+      release (promise)
+      herdr (future
+              (let [peer (.accept server)
+                    reader (io/reader (java.nio.channels.Channels/newInputStream peer))
+                    out (java.nio.channels.Channels/newOutputStream peer)
+                    say #(do (.write out (.getBytes (str % "\n") "UTF-8")) (.flush out))]
+                (deliver asked (.readLine ^java.io.BufferedReader reader))
+                (say "{\"id\":\"flow-capsule\",\"result\":{\"type\":\"subscription_started\"}}")
+                (say "{\"event\":\"pane.output_matched\",\"data\":{\"pane_id\":\"w1:p2\",\"matched_line\":\"Tag ra2\"}}")
+                @release
+                (.close peer)))
+      seen (atom [])
+      answer (with-redefs [flow-capsule/herdr-socket socket]
+               (flow-capsule/await-events 30 [(flow-capsule/herdr-events [(flow-capsule/output-match "w1:p2" "Tag ra2")] seen)]
+                                          #(seq @seen)))]
+  (deliver release true)
+  @herdr
+  (.close server)
+  (check "Herdr is asked for the subscriptions named"
+         (= {:method "events.subscribe"
+             :params {:subscriptions [{:type "pane.output_matched" :pane_id "w1:p2" :source "recent" :lines 400
+                                       :match {:type "substring" :value "Tag ra2"}}]}}
+            (select-keys (json/parse-string (deref asked 1000 "{}") true) [:method :params])))
+  (check "an event Herdr sends after subscription_started is seen"
+         (= "Tag ra2" (get-in (first answer) [:data :matched_line])))
+  (fs/delete-tree dir))
 
 (if (seq @failures)
   (do (println (str (count @failures) " failed")) (System/exit 1))

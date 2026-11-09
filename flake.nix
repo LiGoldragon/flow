@@ -358,12 +358,19 @@
             '';
             clippy = pkgs.linkFarm "flow-clippy" (lib.mapAttrs (_: lint) testBuilds);
             # The capsule runner's own logic that runs no capsule: where a run
-            # keeps its witnesses and what it copies there before teardown.
-            # The tests run the workspace's own binaries (the invocation
+            # keeps its witnesses and what it copies there before teardown,
+            # and its waits on their events (inotify, pidfd, a socket). The
+            # tests run the workspace's own binaries (the invocation
             # composers), which the unconfigured default lacks.
             capsule-witnesses =
               pkgs.runCommand "flow-capsule-witnesses"
-                { nativeBuildInputs = [ pkgs.babashka ]; }
+                {
+                  nativeBuildInputs = [
+                    pkgs.babashka
+                    pkgs.inotify-tools
+                    pkgs.util-linux
+                  ];
+                }
                 ''
                   bb ${./capsule/flow-capsule-test.clj} ${./capsule/flow-capsule.clj} ${workspaceBinaries} > result.txt \
                     || { cat result.txt; exit 1; }
@@ -501,7 +508,9 @@
           curriculum = context.curriculum;
           # The capsule test: a Babashka script and the Configure datoms it
           # applies, kept side by side, with the Curriculum it runs. It is
-          # given the flow package to run.
+          # given the flow package to run. Its waits answer events through
+          # inotifywait (inotify) and util-linux's waitpid (pidfd), named
+          # to it by its launcher.
           flow-capsule = pkgs.runCommand "flow-capsule" { } ''
             mkdir -p "$out/libexec/flow-capsule" "$out/bin"
             ln -s ${self.packages.${system}.curriculum} "$out/libexec/flow-capsule/curriculum"
@@ -511,7 +520,13 @@
             } > "$out/libexec/flow-capsule/flow-capsule"
             chmod +x "$out/libexec/flow-capsule/flow-capsule"
             cp ${./capsule/configure.datom} "$out/libexec/flow-capsule/configure.datom"
-            ln -s "$out/libexec/flow-capsule/flow-capsule" "$out/bin/flow-capsule"
+            {
+              echo "#!${pkgs.runtimeShell}"
+              echo "export FLOW_CAPSULE_INOTIFYWAIT=${pkgs.inotify-tools}/bin/inotifywait"
+              echo "export FLOW_CAPSULE_WAITPID=${lib.getExe' pkgs.util-linux "waitpid"}"
+              echo "exec $out/libexec/flow-capsule/flow-capsule \"\$@\""
+            } > "$out/bin/flow-capsule"
+            chmod +x "$out/bin/flow-capsule"
           '';
         }
       );

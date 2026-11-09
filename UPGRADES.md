@@ -97,6 +97,16 @@ meta-signal-message 3.0.1 (`4d81b64`).
   Codex binds it in place, `IN_ATTRIB` as it sets its mode once it listens,
   `IN_MOVED_TO`), watched before every attempt; the 1 s to 60 s backoff is
   gone. An attempt that fails waits for the next appearance.
+- The capsule (`flow-capsule`) waits on events, armed before it looks:
+  metaflows on `Observe.Metaflows`, or on the store's writes for a Nexus
+  without it; sockets, the store, the log and transcripts on inotify
+  (`inotifywait`); process exits on the process's own waiter or its pidfd
+  (util-linux `waitpid`); panes on Herdr's `events.subscribe`
+  (`pane.output_matched`, `pane.created`, `pane.closed`). The once-a-second
+  re-check, the 200 ms and 1 s pane pollers and the fixed 8 s and 75 s
+  sleeps are gone; its launcher names the two programs
+  (`FLOW_CAPSULE_INOTIFYWAIT`, `FLOW_CAPSULE_WAITPID`). Scenario 7 tags the
+  successor's brief (`Tag s7`) and watches for it in the predecessor's pane.
 
 # Flow 0.53.1
 

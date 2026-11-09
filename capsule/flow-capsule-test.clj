@@ -224,11 +224,11 @@
          (= {:pane "w2:p1" :flow-id "0a1b2c" :address "{ Psyche test Opus }"}
             (dissoc (nth lines 2) :line)))
   (check "the typed line gives the new client the query alone; the pane's configuration names main"
-         (= (str "! " flow-package "/bin/flow 'BindSeat.{ Psyche test Opus }'")
+         (= (str "! " flow-package "/bin/flow-nexus 'BindSeat.{ Psyche test Opus }'")
             (:line (nth lines 2))))
   (check "a client of the new package takes the query alone"
          (= ["Metaflows"]
-            (flow-capsule/client-arguments flow-package "flow" flow-capsule/seed-socket "Metaflows")))
+            (flow-capsule/client-arguments flow-package :client flow-capsule/seed-socket "Metaflows")))
   (check "main's configuration is the capsule's own, which the panes inherit"
          (= flow-capsule/config-home (flow-capsule/place-configuration-home flow-capsule/ordinary-socket)))
   (check "another place's configuration is a home of its own"
@@ -236,16 +236,16 @@
             (flow-capsule/place-configuration-home flow-capsule/seed-socket)))
   (let [runtime (str (fs/create-temp-dir))
         configuration (str (fs/create-temp-dir))
-        client (str flow-package "/bin/flow")
+        client (flow-capsule/binary flow-package :client)
         env {"XDG_RUNTIME_DIR" runtime "XDG_CONFIG_HOME" configuration}
         missing (flow-capsule/run {:env env} client "Metaflows")
         _ (fs/create-dirs (str configuration "/nexus"))
-        _ (spit (str configuration "/nexus/flow.datom") "{ no-owner }\n")
+        _ (spit (str configuration "/nexus/flow-nexus.datom") "{ no-owner }\n")
         configured (flow-capsule/run {:env env} client "Metaflows")
         typed (flow-capsule/run {:env env} client "no-owner" "Metaflows")]
     (check "the packaged client with no configuration is refused, naming the file"
            (and (= 2 (:exit missing)) (str/starts-with? (:err missing) "Missing.")
-                (str/includes? (:err missing) (str configuration "/nexus/flow.datom"))))
+                (str/includes? (:err missing) (str configuration "/nexus/flow-nexus.datom"))))
     (check "the packaged client takes its place from its configuration, and reaches no Nexus there"
            (and (= 2 (:exit configured)) (not (str/includes? (:err configured) "invalid Flow Query"))
                 (not (str/includes? (:err configured) "usage:"))

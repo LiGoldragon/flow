@@ -43,7 +43,7 @@ impl RendersHandoverCommands for HandoverReminderNotice {
             section,
         });
         format!(
-            "flow '{}'",
+            "flow-nexus '{}'",
             query
                 .datomize(vec![])
                 .protosize()
@@ -71,7 +71,7 @@ impl RendersHandoverCommands for HandoverReminderNotice {
             title,
         });
         format!(
-            "flow '{}'",
+            "flow-nexus '{}'",
             query
                 .datomize(vec![])
                 .protosize()

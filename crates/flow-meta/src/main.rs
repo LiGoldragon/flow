@@ -13,10 +13,11 @@ use std::{
 
 struct FlowMetaClient;
 
-/// The CLI is `flow-meta '<Query>'`: it takes the datom and nothing else.
-/// The place is the Flow configuration's, `$XDG_CONFIG_HOME/nexus/flow.datom`,
-/// the same file `flow` reads, resolved under `$XDG_RUNTIME_DIR/nexus/` to
-/// the place's meta socket; no place is typed.
+/// The CLI is `flow-nexus-meta '<Query>'`: it takes the datom and nothing
+/// else. The place is the Flow configuration's,
+/// `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, the same file `flow-nexus`
+/// reads, resolved under `$XDG_RUNTIME_DIR/nexus/` to the place's meta
+/// socket; no place is typed.
 trait ParsesMetaCommand {
     fn parse_command(
         &self,
@@ -56,7 +57,7 @@ impl ParsesMetaCommand for FlowMetaClient {
         place: &dyn ResolvesCliPlace,
     ) -> Result<Invocation, String> {
         let usage = || {
-            "usage: flow-meta '<one inline Query datom>'; the place is read from $XDG_CONFIG_HOME/nexus/flow.datom".to_owned()
+            "usage: flow-nexus-meta '<one inline Query datom>'; the place is read from $XDG_CONFIG_HOME/nexus/flow-nexus.datom".to_owned()
         };
         let (Some(source), None) = (arguments.next(), arguments.next()) else {
             return Err(usage());

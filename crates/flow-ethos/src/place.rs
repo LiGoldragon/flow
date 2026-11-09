@@ -5,10 +5,10 @@
 //! A Nexus is started with its place and reads nothing from the
 //! environment. A client is named after the Nexus and takes its datom and
 //! nothing else: the place name is its configuration's, one datom at
-//! `$XDG_CONFIG_HOME/nexus/flow.datom` (`~/.config/nexus/flow.datom` when
-//! the variable is unset), and the place's Runtime is
-//! `$XDG_RUNTIME_DIR/nexus/<place-name>/`, each root taken from the standard
-//! variable and from nothing else. No place is ever typed.
+//! `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`
+//! (`~/.config/nexus/flow-nexus.datom` when the variable is unset), and the
+//! place's Runtime is `$XDG_RUNTIME_DIR/nexus/<place-name>/`, each root taken
+//! from the standard variable and from nothing else. No place is ever typed.
 
 pub use crate::generated::library::{CliConfiguration, ConfigurationFault, ConfigurationRefusal};
 use std::{
@@ -91,11 +91,11 @@ pub struct ConfigurationFile {
 pub trait LocatesConfiguration: Sized {
     /// The Nexus the configuration is named after: every Flow CLI, the
     /// ordinary and the meta, reads the same file.
-    const NEXUS_NAME: &'static str = "flow";
+    const NEXUS_NAME: &'static str = "flow-nexus";
     const NEXUS_DIRECTORY: &'static str = "nexus";
-    /// `<configuration home>/nexus/flow.datom`: the configuration home is
-    /// the value of `XDG_CONFIG_HOME`, else, unset or empty, `<HOME>/.config`;
-    /// either must be an absolute path.
+    /// `<configuration home>/nexus/flow-nexus.datom`: the configuration home
+    /// is the value of `XDG_CONFIG_HOME`, else, unset or empty,
+    /// `<HOME>/.config`; either must be an absolute path.
     fn under(
         configuration_home: Option<&OsStr>,
         home: Option<&OsStr>,
@@ -252,14 +252,14 @@ mod tests {
             ConfigurationFile::under(Some(OsStr::new("/c")), Some(OsStr::new("/home/li")))
                 .unwrap()
                 .path,
-            Path::new("/c/nexus/flow.datom")
+            Path::new("/c/nexus/flow-nexus.datom")
         );
         for unset in [None, Some(OsStr::new(""))] {
             assert_eq!(
                 ConfigurationFile::under(unset, Some(OsStr::new("/home/li")))
                     .unwrap()
                     .path,
-                Path::new("/home/li/.config/nexus/flow.datom")
+                Path::new("/home/li/.config/nexus/flow-nexus.datom")
             );
         }
         for (configuration_home, home) in [

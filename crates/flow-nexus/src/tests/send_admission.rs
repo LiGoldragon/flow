@@ -590,24 +590,24 @@ fn a_task_is_admitted_only_with_minutes_above_zero_and_a_reachable_deadline() {
     ));
 }
 
-/// The world a CLI send runs in: the flow CLI built beside this test, the
+/// The world a CLI send runs in: the flow-nexus CLI built beside this test, the
 /// sending seat 5e4de7 Awake as `{ Field flow Terra }` in pane w5:p1, which
 /// Herdr shows, and the recipient `{ Mind flow Sol }` Asleep; the Nexus
 /// serving its ordinary socket, and its meta socket, in the fixture
 /// directory.
 struct CliWorld {
     fixture: &'static super::NexusFixture,
-    /// The directory the flow and flow-meta CLIs are built in.
+    /// The directory the flow-nexus and flow-nexus-meta CLIs are built in.
     binaries: std::path::PathBuf,
     socket: std::path::PathBuf,
 }
 
 trait ServesCliWorld: Sized {
     fn serving() -> Self;
-    /// The flow CLI run in the sender's pane, its pane ID alone marked:
+    /// The flow-nexus CLI run in the sender's pane, its pane ID alone marked:
     /// its one line of output.
     fn flow(&self, text: &str) -> String;
-    /// The flow-meta CLI run in no pane, the owner: its one line of output.
+    /// The flow-nexus-meta CLI run in no pane, the owner: its one line of output.
     fn flow_meta(&self, text: &str) -> String;
     /// The runtime root the clients resolve the place `main` under.
     fn runtime(&self) -> std::path::PathBuf {
@@ -617,7 +617,7 @@ trait ServesCliWorld: Sized {
             .expect("the place lies under the runtime root's nexus directory")
             .to_path_buf()
     }
-    /// The configuration home whose nexus/flow.datom names the place
+    /// The configuration home whose nexus/flow-nexus.datom names the place
     /// `main`: the clients read their place from it.
     fn configuration_home(&self) -> std::path::PathBuf {
         self.runtime()
@@ -641,17 +641,17 @@ impl ServesCliWorld for CliWorld {
             HerdrRouteSelection, Origin,
         };
 
-        // The flow CLI is built in the profile directory this test
-        // executable lies under: `target/<profile>/flow`, whatever depth
+        // The flow-nexus CLI is built in the profile directory this test
+        // executable lies under: `target/<profile>/flow-nexus`, whatever depth
         // cargo gives the test itself.
         let executable = std::env::current_exe().expect("test executable");
         let binaries = executable
             .ancestors()
             .skip(1)
-            .find(|directory| directory.join("flow").is_file())
+            .find(|directory| directory.join("flow-nexus").is_file())
             .unwrap_or_else(|| {
                 panic!(
-                    "no flow CLI above {}: cargo test --workspace builds it",
+                    "no flow-nexus CLI above {}: cargo test --workspace builds it",
                     executable.display()
                 )
             })
@@ -730,7 +730,7 @@ impl ServesCliWorld for CliWorld {
         std::fs::create_dir_all(&place).expect("the place's runtime directory");
         let configuration = fixture.directory.path().join("config/nexus");
         std::fs::create_dir_all(&configuration).expect("the clients' configuration");
-        std::fs::write(configuration.join("flow.datom"), "{ main }\n")
+        std::fs::write(configuration.join("flow-nexus.datom"), "{ main }\n")
             .expect("the configuration names main");
         let socket = place.join("flow.sock");
         let meta_socket = place.join("flow-meta.sock");
@@ -761,26 +761,26 @@ impl ServesCliWorld for CliWorld {
     }
 
     fn flow(&self, text: &str) -> String {
-        let output = std::process::Command::new(self.binaries.join("flow"))
+        let output = std::process::Command::new(self.binaries.join("flow-nexus"))
             .env_clear()
             .env("HERDR_PANE_ID", "w5:p1")
             .env("XDG_RUNTIME_DIR", self.runtime())
             .env("XDG_CONFIG_HOME", self.configuration_home())
             .arg(text)
             .output()
-            .expect("flow runs");
+            .expect("flow-nexus runs");
         assert!(output.status.success(), "{text}: {output:?}");
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
 
     fn flow_meta(&self, text: &str) -> String {
-        let output = std::process::Command::new(self.binaries.join("flow-meta"))
+        let output = std::process::Command::new(self.binaries.join("flow-nexus-meta"))
             .env_clear()
             .env("XDG_RUNTIME_DIR", self.runtime())
             .env("XDG_CONFIG_HOME", self.configuration_home())
             .arg(text)
             .output()
-            .expect("flow-meta runs");
+            .expect("flow-nexus-meta runs");
         assert!(output.status.success(), "{text}: {output:?}");
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
@@ -825,11 +825,11 @@ fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
 }
 
 /// A Send whose text holds a nested guillemet pair, and one holding an
-/// escaped unbalanced guillemet, round-trips byte for byte: the flow CLI in
+/// escaped unbalanced guillemet, round-trips byte for byte: the flow-nexus CLI in
 /// the sender's pane reads the datom text and sends it on the ordinary
 /// socket; the Nexus names the sender, admits the Send and queues it for
 /// the recipient, Asleep; the queue holds the string as written; and the
-/// flow-meta CLI, reading the recipient over the meta socket, prints each
+/// flow-nexus-meta CLI, reading the recipient over the meta socket, prints each
 /// message back as the very text sent.
 #[test]
 fn a_send_with_nested_and_escaped_guillemets_round_trips_through_the_cli_and_the_nexus() {

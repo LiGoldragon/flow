@@ -222,7 +222,7 @@
     (str (fs/file-name directory))))
 
 (defn place-configuration-home
-  "The XDG_CONFIG_HOME whose nexus/flow.datom names the place socket lies
+  "The XDG_CONFIG_HOME whose nexus/flow-nexus.datom names the place socket lies
   in: the capsule's own for main, which the panes' harnesses inherit, a
   home of the place's own for any other."
   [socket]
@@ -238,7 +238,7 @@
   (if (= :place (get @package-interface pkg))
     (let [home (place-configuration-home socket)]
       (fs/create-dirs (str home "/nexus"))
-      (spit (str home "/nexus/flow.datom") (str "{ " (place-name-of socket) " }\n"))
+      (spit (str home "/nexus/flow-nexus.datom") (str "{ " (place-name-of socket) " }\n"))
       {"XDG_CONFIG_HOME" home})
     {}))
 
@@ -247,10 +247,10 @@
   (a client with a default socket, or one whose configuration names the
   socket's place: place-configuration-env), or the composed invocation
   naming the socket."
-  [pkg client socket query]
+  [pkg role socket query]
   (case (get @package-interface pkg)
     :query [query]
-    :invocation (let [composer (str pkg "/bin/" client "-compose-invocation")
+    :invocation (let [composer (str pkg "/bin/" (get-in binary-names [:invocation role]) "-compose-invocation")
                       {:keys [exit out err]} (run {} composer socket query)]
                   (if (zero? exit)
                     [(str/trim out)]
@@ -258,6 +258,22 @@
                                     {:package pkg :client client :error (str/trim err)}))))
     :place [query]
     (throw (ex-info "package client interface is undeclared" {:package pkg}))))
+
+(def binary-names
+  "Each package interface's binaries: a package whose clients read their
+  place from their configuration names its clients after the Nexus and its
+  daemon flow-nexus-daemon; an earlier package flow, flow-meta and
+  flow-nexus."
+  {:place {:client "flow-nexus" :meta "flow-nexus-meta" :daemon "flow-nexus-daemon"}
+   :query {:client "flow" :meta "flow-meta" :daemon "flow-nexus"}
+   :invocation {:client "flow" :meta "flow-meta" :daemon "flow-nexus"}})
+
+(defn binary
+  "The path of pkg's binary in role: :client, :meta or :daemon."
+  [pkg role]
+  (let [names (or (get binary-names (get @package-interface pkg))
+                  (throw (ex-info "package client interface is undeclared" {:package pkg})))]
+    (str pkg "/bin/" (get names role))))
 
 (defn herdr [& args]
   (apply run {} "herdr" "--session" session args))
@@ -280,20 +296,20 @@
   ([datom] (flow datom @driver-pane))
   ([datom pane]
    (reply-text (apply run {:env (clean-env (merge (marks pane) (place-configuration-env @package ordinary-socket)))}
-                    (str @package "/bin/flow")
-                    (client-arguments @package "flow" ordinary-socket datom)))))
+                    (binary @package :client)
+                    (client-arguments @package :client ordinary-socket datom)))))
 
 (defn flow-process
   "An ordinary-socket call started now and read later."
   [datom pane]
-  (p/process (into [(str @package "/bin/flow")] (client-arguments @package "flow" ordinary-socket datom))
+  (p/process (into [(binary @package :client)] (client-arguments @package :client ordinary-socket datom))
              {:env (clean-env (merge (marks pane) (place-configuration-env @package ordinary-socket)))
               :out :string :err :string :in ""}))
 
 (defn flow-meta [datom]
   (reply-text (apply run {:env (clean-env (merge (marks @driver-pane) (place-configuration-env @package meta-socket)))}
-                   (str @package "/bin/flow-meta")
-                   (client-arguments @package "flow-meta" meta-socket datom))))
+                   (binary @package :meta)
+                   (client-arguments @package :meta meta-socket datom))))
 
 ;; ---------------------------------------------------------------- observing
 
@@ -579,8 +595,8 @@
   [held]
   (frames-source held
                  (fn []
-                   (let [proc (p/process (into [(str @package "/bin/flow")]
-                                               (client-arguments @package "flow" ordinary-socket "Observe.Metaflows"))
+                   (let [proc (p/process (into [(binary @package :client)]
+                                               (client-arguments @package :client ordinary-socket "Observe.Metaflows"))
                                          {:env (clean-env (merge (marks @driver-pane)
                                                                  (place-configuration-env @package ordinary-socket)))
                                           :err :string :in ""})]
@@ -1208,7 +1224,7 @@
         (str "[agents]\ncodex_executables = [\"" codex-client "\"]\n"))
   ;; The Flow configuration every pane's client reads its place from: main.
   (fs/create-dirs (str config-home "/nexus"))
-  (spit (str config-home "/nexus/flow.datom") "{ main }\n")
+  (spit (str config-home "/nexus/flow-nexus.datom") "{ main }\n")
   (fs/create-dirs capsule-runtime)
   (fs/create-dirs capsule-flows)
   (fs/create-dirs workspace-a)
@@ -1336,7 +1352,7 @@
   ;; rules declare it (mode 0700); the Nexus finds it and never makes it.
   (fs/create-dirs (fs/parent ordinary-socket))
   (fs/set-posix-file-permissions (fs/parent ordinary-socket) "rwx------")
-  (reset! nexus (p/process [(str @package "/bin/flow-nexus") (start-text @package)]
+  (reset! nexus (p/process [(binary @package :daemon) (start-text @package)]
                            {:env (clean-env) :out :append :out-file (fs/file log) :err :append :err-file (fs/file log) :in ""}))
   (reset! nexus-store store-path)
   ;; Each socket is moved to its name once it listens.
@@ -1365,7 +1381,7 @@
   marks: such a peer is refused there."
   ([datom log] (configure-one! datom log @package (start-text @package) meta-socket))
   ([datom log pkg start meta-socket]
-    (let [child (p/process [(str pkg "/bin/flow-nexus") "--configure-only" start]
+    (let [child (p/process [(binary pkg :daemon) "--configure-only" start]
                            {:env (clean-env {"PATH" (str pkg "/bin:" (System/getenv "PATH"))})
                             :out :append :out-file (fs/file log) :err :append :err-file (fs/file log) :in ""})
           pid (.pid (:proc child))]
@@ -1377,8 +1393,8 @@
       (let [reply (if (p/alive? child)
                     (reply-text (apply run {:env (clean-env (merge {"PATH" (str pkg "/bin:" (System/getenv "PATH"))}
                                                                    (place-configuration-env pkg meta-socket)))}
-                                     (str pkg "/bin/flow-meta")
-                                     (client-arguments pkg "flow-meta" meta-socket datom)))
+                                     (binary pkg :meta)
+                                     (client-arguments pkg :meta meta-socket datom)))
                     (str "configuration-only Nexus exited before listening: " (str/trim (slurp log))))
             exit (:exit (deref child 15000 {:exit "still running"}))]
         (when (= exit "still running") (p/destroy child))
@@ -1400,8 +1416,8 @@
     (let [[reply exit] (if (= :place (get @package-interface @package))
                          ;; From no pane: the owner.
                          [(reply-text (apply run {:env (clean-env (place-configuration-env @package meta-socket))}
-                                             (str @package "/bin/flow-meta")
-                                             (client-arguments @package "flow-meta" meta-socket datom)))
+                                             (binary @package :meta)
+                                             (client-arguments @package :meta meta-socket datom)))
                           "running"]
                          (configure-one! datom log))
           family (second (re-find #"^Configure\.([A-Za-z]+)" datom))
@@ -1954,9 +1970,9 @@
                                 (re-matches #"\{ (\w+) (\S+) (\w+) ([0-9a-f]{6}) \}" (str label))]
                        (let [words (str aspect " " topic " " model)]
                          (let [query (str "BindSeat.{ " words " }")
-                               arguments (client-arguments pkg "flow" ordinary-socket query)]
+                               arguments (client-arguments pkg :client ordinary-socket query)]
                            {:pane pane_id :flow-id flow-id :address (str "{ " words " }")
-                            :line (str "! " pkg "/bin/flow " (str/join " " (map shell-quote arguments)))
+                            :line (str "! " (binary pkg :client) " " (str/join " " (map shell-quote arguments)))
                             :tracker (boolean (tracker? words))}))))
                    pane-list)]
     (mapv #(dissoc % :tracker) (concat (filter :tracker rows) (remove :tracker rows)))))
@@ -2002,8 +2018,8 @@
 (defn meta-at
   "One meta call by pkg's client on socket, from no pane: the owner."
   [pkg socket datom]
-  (reply-text (apply run {:env (package-env pkg (place-configuration-env pkg socket))} (str pkg "/bin/flow-meta")
-                   (client-arguments pkg "flow-meta" socket datom))))
+  (reply-text (apply run {:env (package-env pkg (place-configuration-env pkg socket))} (binary pkg :meta)
+                   (client-arguments pkg :meta socket datom))))
 
 (defn guard-probe
   "The guard's reading, as the declared unit's ExecStartPre would take it:
@@ -2011,8 +2027,8 @@
   [pkg]
   {:ordinary (reply-text (apply run {:env (package-env pkg (merge (marks @driver-pane)
                                                                  (place-configuration-env pkg ordinary-socket)))}
-                              (str pkg "/bin/flow")
-                              (client-arguments pkg "flow" ordinary-socket "Metaflows")))
+                              (binary pkg :client)
+                              (client-arguments pkg :client ordinary-socket "Metaflows")))
    :meta (meta-at pkg meta-socket "Configuration")})
 
 (defn guard-refuses? [probe] (boolean (some owner-answers? (vals probe))))
@@ -2020,7 +2036,7 @@
 (defn nexus-command
   "The command a Nexus of pkg is started by on the capsule's sockets."
   [pkg store]
-  {:argv [(str pkg "/bin/flow-nexus") (start-text pkg ordinary-socket meta-socket store)] :env (package-env pkg {})})
+  {:argv [(binary pkg :daemon) (start-text pkg ordinary-socket meta-socket store)] :env (package-env pkg {})})
 
 (defn start-command! [{:keys [argv env]} log]
   (let [proc (p/process argv {:env env :out :append :out-file (fs/file log)
@@ -2067,8 +2083,8 @@
   closed: the state of every logical delivery the sender sent. Nil when no
   frame comes in 20 s."
   [pane]
-  (let [proc (p/process (into [(str @package "/bin/flow")]
-                               (client-arguments @package "flow" ordinary-socket "ObserveSends.None"))
+  (let [proc (p/process (into [(binary @package :client)]
+                               (client-arguments @package :client ordinary-socket "ObserveSends.None"))
                         {:env (clean-env (merge (marks pane) (place-configuration-env @package ordinary-socket)))
                          :out :stream :err :string :in ""})
         line (deref (future (try (.readLine (java.io.BufferedReader. (java.io.InputStreamReader. (:out proc))))
@@ -2175,7 +2191,7 @@
         configure-only! (fn [datom] (let [[reply exit] (configure-one! datom log pkg start seed-meta-socket)]
                                       {:via :configure-only :datom datom :reply reply :exit exit}))
         running! (fn [steps]
-                   (let [proc (start-command! {:argv [(str pkg "/bin/flow-nexus") start] :env (package-env pkg {})} log)
+                   (let [proc (start-command! {:argv [(binary pkg :daemon) start] :env (package-env pkg {})} log)
                          up (await-events 30 [(socket-events seed-meta-socket) (exit-of proc)]
                                           #(cond (not (p/alive? proc)) :exited
                                                  (owner-answers? (meta-at pkg seed-meta-socket "Configuration")) :serving))
@@ -2556,7 +2572,7 @@
     (reset! package @old-package)
     (let [log (or (second (drop-while #(not= % "--log") options)) (str state-root "/nexus.log"))
           wall (now)
-          version-of #(str/trim (:out (run {} (str % "/bin/flow-nexus") "--version")))
+          version-of #(str/trim (:out (run {} (binary % :daemon) "--version")))
           old-version (version-of @old-package)
           new-version (version-of @new-package)
           root (witness-root (System/getenv))]
@@ -2601,7 +2617,7 @@
           log (or (second (drop-while #(not= % "--log") options)) (str state-root "/nexus.log"))
           wall (System/currentTimeMillis)
           passed (atom true)
-          version (str/trim (:out (run {} (str @package "/bin/flow-nexus") "--version")))
+          version (str/trim (:out (run {} (binary @package :daemon) "--version")))
           root (witness-root (System/getenv))]
       (when-not root
         (refuse "no witness directory: set FLOW_CAPSULE_WITNESS_DIR, or HOME and FLOW_ID (or FLOW_DIRECTORY); nothing started"))

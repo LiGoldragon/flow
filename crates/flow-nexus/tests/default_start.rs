@@ -106,7 +106,7 @@ fn start(home: &Path, place: &Place, environment: &[(&str, &str)]) -> (StartedNe
     notify
         .set_read_timeout(Some(EVENT_WAIT))
         .expect("the notify socket gives up eventually");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_flow-nexus"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_flow-nexus-daemon"));
     command
         .env_clear()
         .env("HOME", home)
@@ -345,7 +345,7 @@ fn environment_overrides_do_not_replace_the_explicit_configuration() {
         &[
             ("FLOW_SOURCE_ROOT", "/srv/elsewhere"),
             ("FLOW_CODEX_STABLE_CLIENT", "/opt/elsewhere-client"),
-            ("FLOW_HOOK", "/opt/elsewhere/flow-hook"),
+            ("FLOW_HOOK", "/opt/elsewhere/flow-nexus-hook"),
             ("XDG_RUNTIME_DIR", "/run/elsewhere"),
         ],
     );

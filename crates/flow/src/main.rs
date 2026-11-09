@@ -7,9 +7,9 @@ use flow_ethos::place::{
 use protos::ReaderBudget;
 use std::env;
 
-/// The CLI is `flow '<Query>'`: named after the Nexus, taking the datom and
-/// nothing else. The place is its configuration's,
-/// `$XDG_CONFIG_HOME/nexus/flow.datom`, resolved under
+/// The CLI is `flow-nexus '<Query>'`: named after the Nexus, taking the datom
+/// and nothing else. The place is its configuration's,
+/// `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, resolved under
 /// `$XDG_RUNTIME_DIR/nexus/` to the place's ordinary socket; no place is
 /// typed.
 trait ParsesFlowCommand {
@@ -27,7 +27,7 @@ impl ParsesFlowCommand for FlowClient {
         place: &dyn ResolvesCliPlace,
     ) -> Result<Invocation, String> {
         let usage = || {
-            "usage: flow '<one inline Query datom>'; the place is read from $XDG_CONFIG_HOME/nexus/flow.datom".to_owned()
+            "usage: flow-nexus '<one inline Query datom>'; the place is read from $XDG_CONFIG_HOME/nexus/flow-nexus.datom".to_owned()
         };
         let (Some(value), None) = (arguments.next(), arguments.next()) else {
             return Err(usage());

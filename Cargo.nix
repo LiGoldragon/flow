@@ -919,12 +919,12 @@ rec {
         edition = "2024";
         crateBin = [
           {
-            name = "flow";
+            name = "flow-nexus";
             path = "src/main.rs";
             requiredFeatures = [ ];
           }
           {
-            name = "flow-hook";
+            name = "flow-nexus-hook";
             path = "src/hook.rs";
             requiredFeatures = [ ];
           }
@@ -1054,7 +1054,7 @@ rec {
         edition = "2024";
         crateBin = [
           {
-            name = "flow-meta";
+            name = "flow-nexus-meta";
             path = "src/main.rs";
             requiredFeatures = [ ];
           }
@@ -1128,7 +1128,7 @@ rec {
         edition = "2024";
         crateBin = [
           {
-            name = "flow-nexus";
+            name = "flow-nexus-daemon";
             path = "src/main.rs";
             requiredFeatures = [ ];
           }

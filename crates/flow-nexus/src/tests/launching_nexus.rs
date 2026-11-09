@@ -142,7 +142,7 @@ fn the_hook_settings_name_the_main_place_socket() {
 
 /// The hook command comes from the configuration's HarnessHook, applied to
 /// the running Nexus at once: no environment is read, and no restart is
-/// needed. Unconfigured, it is the flow-hook beside the executable.
+/// needed. Unconfigured, it is the flow-nexus-hook beside the executable.
 #[test]
 fn a_configured_harness_hook_takes_effect_in_the_running_nexus_without_a_restart() {
     let directory = tempfile::tempdir().expect("fixture root");
@@ -153,9 +153,9 @@ fn a_configured_harness_hook_takes_effect_in_the_running_nexus_without_a_restart
         .expect("test executable")
         .parent()
         .expect("executable directory")
-        .join("flow-hook");
+        .join("flow-nexus-hook");
     assert_eq!(*nexus.herdr.harness_hook.current(), beside);
-    let stable = PathBuf::from("/home/someone/.local/bin/flow-hook");
+    let stable = PathBuf::from("/home/someone/.local/bin/flow-nexus-hook");
     assert_eq!(
         nexus.dispatch_meta(meta_signal_flow::Query::Configure(
             ConfigurationChange::HarnessHook(stable.to_string_lossy().into_owned())

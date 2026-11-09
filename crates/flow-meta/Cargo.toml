@@ -7,7 +7,7 @@ build = "build.rs"
 default = ["datom"]
 datom = []
 [[bin]]
-name = "flow-meta"
+name = "flow-nexus-meta"
 path = "src/main.rs"
 [dependencies]
 flow-ethos = { path = "../flow-ethos", features = ["datom"] }

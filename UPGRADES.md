@@ -4,6 +4,14 @@ Pins signal-flow 57.0.0 (`3d0a4cd`), meta-signal-flow 72.0.0 (`27d06b7`),
 Message 0.22.1 (`f46b38e`), signal-message 21.0.1 (`998c824`) and
 meta-signal-message 3.0.1 (`4d81b64`).
 
+- The binaries are named after the Nexus (vision:nexus, vision:nexus-v1):
+  the ordinary CLI `flow` is `flow-nexus`, the meta CLI `flow-meta` is
+  `flow-nexus-meta`, the hook `flow-hook` is `flow-nexus-hook`, and the
+  daemon, whose name the CLI now holds, is `flow-nexus-daemon`. The CLIs'
+  configuration is `flow-nexus.datom`. The socket names are unchanged:
+  `flow.sock`, `flow-meta.sock`. Every unit, wrapper and script that runs a
+  0.53.3 binary names the new one; a 0.53.1 package keeps its own names.
+
 - A Claude seat rests when its own last Stop names no background work and
   its turn is shown ended. Closing (a refresh, an OnDemand sleep) waits for
   that rest; Soft hand-over at a turn's end is unchanged.
@@ -15,35 +23,35 @@ meta-signal-message 3.0.1 (`4d81b64`).
 - The 0.53.2 -> 0.53.3 Memory upgrade evolves `flow-nexus-flow-events-v4`
   into v5 with the rest of the request-id evolution: every stored Stop
   carries no background work.
-- `flow-hook` reads `background_tasks` from every Stop; a Stop without it,
+- `flow-nexus-hook` reads `background_tasks` from every Stop; a Stop without it,
   or with a task missing a field, is refused (stderr
   `Stop\t-\t-\tRefused.BackgroundTasksAbsent` or
   `Refused.BackgroundTaskMalformed.<place>`, exit 1) and reports nothing.
   Claude Code 2.1.294 or later gives the field.
 - The hook command written into each Claude flow is the configuration's
   `HarnessHook` (`Configure.HarnessHook.<path>`, new) when it is an absolute
-  path, else the `flow-hook` beside the Nexus; no environment is read for
+  path, else the `flow-nexus-hook` beside the Nexus; no environment is read for
   it. A flow running an earlier hook (a store path, the earlier contract)
   reaches no 0.53.3 Nexus: Restart each adopted flow onto the new hook at
   the cutover. `flow_nexus_meta_harness_hook_configuration` is new, empty
   in a 0.53.2 store.
-- The Nexus starts in its place: `flow-nexus '{ <place-name> <runtime>
-  <state> }'`, one datom, replacing the Start datom (sockets, store,
+- The Nexus starts in its place: `flow-nexus-daemon '{ <place-name>
+  <runtime> <state> }'`, one datom, replacing the Start datom (sockets, store,
   landing watch). Its sockets are `<runtime>/flow.sock` and
   `<runtime>/flow-meta.sock`, its memory `<state>/flow.sema`; both
   directories are declared by the environment, and a Nexus whose place is
   absent does not start. `--configure-only` is gone: a fresh memory
   starts with the executable's built-in configuration, and every meta
   `Configure` is applied to the running Nexus at once, without a restart.
-- `flow` and `flow-meta` take the Query alone: `flow 'Metaflows'`. The
-  place is the configuration's, one datom at
-  `$XDG_CONFIG_HOME/nexus/flow.datom` (`~/.config/nexus/flow.datom` when
-  unset), `CliConfiguration.{ PlaceName }`, e.g. `{ main }`, resolved under
+- `flow-nexus` and `flow-nexus-meta` take the Query alone:
+  `flow-nexus 'Metaflows'`. The place is the configuration's, one datom at
+  `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`
+  (`~/.config/nexus/flow-nexus.datom` when unset), `CliConfiguration.{ PlaceName }`, e.g. `{ main }`, resolved under
   `$XDG_RUNTIME_DIR/nexus/` to the place's socket. A configuration missing,
   unreadable or naming no place is a typed `ConfigurationRefusal` naming
   the file (exit 2); a second argument, a typed place, is refused. The
   Invocation argument and the `*-compose-invocation` binaries are gone.
-  `flow-hook` calls its configured socket through the same client; its one
+  `flow-nexus-hook` calls its configured socket through the same client; its one
   argument stays the socket the launching Nexus wrote.
 - `ObserveConfiguration` (meta) streams the configuration, then each change.
 - A frame on the ordinary socket that decodes as no Query, an earlier

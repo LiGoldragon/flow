@@ -1,6 +1,6 @@
-//! The CLI is `flow-meta '<Query>'`: it takes the datom and nothing else.
-//! The place is the Flow configuration's, `$XDG_CONFIG_HOME/nexus/flow.datom`,
-//! resolved under `$XDG_RUNTIME_DIR/nexus/` to that place's meta socket
+//! The CLI is `flow-nexus-meta '<Query>'`: it takes the datom and nothing
+//! else. The place is the Flow configuration's,
+//! `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, resolved under `$XDG_RUNTIME_DIR/nexus/` to that place's meta socket
 //! alone.
 use std::{
     io::{Read, Write},
@@ -10,7 +10,7 @@ use std::{
 };
 
 fn client(runtime: &Path, configuration_home: &Path, other: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_flow-meta"))
+    Command::new(env!("CARGO_BIN_EXE_flow-nexus-meta"))
         .env_clear()
         .env("XDG_RUNTIME_DIR", runtime)
         .env("XDG_CONFIG_HOME", configuration_home)
@@ -25,7 +25,7 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
     let configuration = tempfile::tempdir().expect("temporary configuration home");
     std::fs::create_dir_all(configuration.path().join("nexus")).expect("nexus configuration");
-    std::fs::write(configuration.path().join("nexus/flow.datom"), "{ main }\n")
+    std::fs::write(configuration.path().join("nexus/flow-nexus.datom"), "{ main }\n")
         .expect("the configuration names main");
     let main = runtime.path().join("nexus/main");
     std::fs::create_dir_all(&main).expect("the place's runtime directory");
@@ -72,7 +72,7 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
     );
     assert_eq!(refused.status.code(), Some(2), "{refused:?}");
     assert!(
-        String::from_utf8_lossy(&refused.stderr).starts_with("usage: flow-meta '"),
+        String::from_utf8_lossy(&refused.stderr).starts_with("usage: flow-nexus-meta '"),
         "{refused:?}"
     );
 
@@ -83,7 +83,7 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
         stderr.starts_with("Missing.")
-            && stderr.contains(&*empty.path().join("nexus/flow.datom").to_string_lossy()),
+            && stderr.contains(&*empty.path().join("nexus/flow-nexus.datom").to_string_lossy()),
         "{stderr}"
     );
     assert_eq!(

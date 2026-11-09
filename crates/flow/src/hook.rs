@@ -1,9 +1,9 @@
-//! `flow-hook`: the Claude Code command hook Flow writes into every Claude
-//! flow it launches. Claude Code runs it on SessionStart, PostToolUse,
+//! `flow-nexus-hook`: the Claude Code command hook Flow writes into every
+//! Claude flow it launches. Claude Code runs it on SessionStart, PostToolUse,
 //! UserPromptSubmit, Stop and SessionEnd with the event as JSON on stdin; it turns the
 //! event into one `Report.{ FlowId Event }` and sends it, through the client
-//! the `flow` CLI speaks Signal with, to the socket its typed configuration
-//! names: the socket of the place whose Nexus launched the flow.
+//! the `flow-nexus` CLI speaks Signal with, to the socket its typed
+//! configuration names: the socket of the place whose Nexus launched the flow.
 //!
 //!   SessionStart     -> Report.{ «FLOW_ID» Started.Some.«session_id» }
 //!   PostToolUse      -> Report.{ «FLOW_ID» ToolUsed.«tool_name» }

@@ -1,4 +1,4 @@
-//! `flow-hook` reports through its typed socket configuration and ignores a
+//! `flow-nexus-hook` reports through its typed socket configuration and ignores a
 //! different socket in the inherited environment.
 use std::{
     io::{Read, Write},
@@ -38,7 +38,7 @@ fn the_hook_reports_only_to_its_typed_socket_configuration() {
             .and_then(|_| peer.write_all(&reply))
             .expect("reply written");
     });
-    let mut hook = Command::new(env!("CARGO_BIN_EXE_flow-hook"))
+    let mut hook = Command::new(env!("CARGO_BIN_EXE_flow-nexus-hook"))
         .arg(format!("{{ {} }}", launching.join("flow.sock").display()))
         .env_clear()
         .env("XDG_RUNTIME_DIR", &runtime)
@@ -47,7 +47,7 @@ fn the_hook_reports_only_to_its_typed_socket_configuration() {
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("flow-hook runs");
+        .expect("flow-nexus-hook runs");
     hook.stdin
         .take()
         .expect("hook stdin")
@@ -55,7 +55,7 @@ fn the_hook_reports_only_to_its_typed_socket_configuration() {
             br#"{"hook_event_name":"Stop","session_id":"s","transcript_path":"/t/s.jsonl","background_tasks":[]}"#,
         )
         .expect("event written");
-    let output = hook.wait_with_output().expect("flow-hook ends");
+    let output = hook.wait_with_output().expect("flow-nexus-hook ends");
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         receiving
@@ -97,20 +97,20 @@ fn an_undecodable_stop_is_refused_visibly_and_reaches_no_nexus() {
     let listener =
         UnixListener::bind(launching.join("flow.sock")).expect("fixture launching Nexus binds");
     listener.set_nonblocking(true).expect("nonblocking fixture");
-    let mut hook = Command::new(env!("CARGO_BIN_EXE_flow-hook"))
+    let mut hook = Command::new(env!("CARGO_BIN_EXE_flow-nexus-hook"))
         .arg(format!("{{ {} }}", launching.join("flow.sock").display()))
         .env_clear()
         .env("FLOW_ID", "5a4d0b")
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("flow-hook runs");
+        .expect("flow-nexus-hook runs");
     hook.stdin
         .take()
         .expect("hook stdin")
         .write_all(br#"{"hook_event_name":"Stop","session_id":"s","transcript_path":"/t/s.jsonl"}"#)
         .expect("event written");
-    let output = hook.wait_with_output().expect("flow-hook ends");
+    let output = hook.wait_with_output().expect("flow-nexus-hook ends");
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),

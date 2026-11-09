@@ -873,7 +873,7 @@ fn a_store_configured_while_stopped_opens_with_the_replaced_value() {
 /// Memory: a new Memory holds the constant Flow seeds it with, Configure
 /// replaces it whole and a reopen keeps it, and the Minutes rule a Task
 /// meets at admission refuses a zero, a negative or an unreachable default
-/// without changing it. Read and written as datom text, as flow-meta does.
+/// without changing it. Read and written as datom text, as flow-nexus-meta does.
 #[test]
 fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     use datom_codec::{Actualizing, Budget, Datomizable, Potential};

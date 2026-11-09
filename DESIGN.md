@@ -25,13 +25,13 @@ are not yet.
 Every harness event reaches Flow through the harness's hooks, which call the
 socket of the place whose Nexus launched the flow through the Flow client.
 The hook command Flow writes is the configuration's `HarnessHook`, the
-stable path the deployment declares (CriomOS-home: `~/.local/bin/flow-hook`,
-pointed at the active Flow's `flow-hook`), else the `flow-hook` beside the
+stable path the deployment declares (CriomOS-home: `~/.local/bin/flow-nexus-hook`,
+pointed at the active Flow's `flow-nexus-hook`), else the `flow-nexus-hook` beside the
 Nexus, so a running flow's hook moves with the deployment. A Stop whose input does not decode,
 no `background_tasks` or a task without its id, type, status and
-description, is refused by `flow-hook` with a typed refusal on stderr and
+description, is refused by `flow-nexus-hook` with a typed refusal on stderr and
 exit 1, reported to nothing and never read as rest.
-`flow-hook`, which Flow writes into each Claude flow's launch settings on
+`flow-nexus-hook`, which Flow writes into each Claude flow's launch settings on
 SessionStart, PostToolUse, UserPromptSubmit, Stop and SessionEnd, sends
 `Report.{ FlowId Event }` with the `FLOW_ID` from its environment; the Nexus
 performs it as `Record.Harness`, appending the event to that flow's events in
@@ -583,7 +583,7 @@ Codex thread its app-server shows resting and in no turn; a Claude seat
 whose own last turn event is a Stop naming no background work, its turn
 shown ended by Herdr resting or by its transcript's main turn end. Claude
 Code gives every Stop hook its `background_tasks` (shell, subagent, monitor,
-workflow and more, a monitor counted as any other); `flow-hook` carries them
+workflow and more, a monitor counted as any other); `flow-nexus-hook` carries them
 in the Stop's `BackgroundWork`, and when that work ends Claude wakes the
 seat into a turn whose Stop is the next idle event. No reading of Herdr
 stands for that Stop. A refresh never closes a working flow; a seat still in

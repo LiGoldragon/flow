@@ -40,7 +40,7 @@ trait ParsesPlace {
 impl ParsesPlace for [String] {
     fn parse_place(&self) -> Result<Place, String> {
         let [source] = self else {
-            return Err("usage: flow-nexus '{ «place-name» «runtime» «state» }'".into());
+            return Err("usage: flow-nexus-daemon '{ «place-name» «runtime» «state» }'".into());
         };
         let mut budget = Budget {
             remaining: 65_536,

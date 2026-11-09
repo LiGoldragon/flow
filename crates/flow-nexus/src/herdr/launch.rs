@@ -501,7 +501,7 @@ pub(crate) trait PreparesClaudePane {
     /// user settings name a non-auto default mode and no other settings
     /// source names one. Flag settings are such a source: naming the mode the
     /// launch already runs in suppresses the offer without touching any
-    /// settings file. They also carry the harness hook: `flow-hook` on
+    /// settings file. They also carry the harness hook: `flow-nexus-hook` on
     /// SessionStart, every PostToolUse, UserPromptSubmit, Stop and
     /// SessionEnd, so each harness event reaches Flow as a Report: a Stop is
     /// the flow's turn end, a submitted prompt the receipt of a queued

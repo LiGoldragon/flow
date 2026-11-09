@@ -83,7 +83,7 @@ Library
   StoreRefusal.{ Path Reason }
   StartRefusal.[ Store.StoreRefusal ]
   ; What a Flow CLI knows besides its datom, one datom at
-  ; $XDG_CONFIG_HOME/nexus/flow.datom: the place first, more as the CLI
+  ; $XDG_CONFIG_HOME/nexus/flow-nexus.datom: the place first, more as the CLI
   ; gains options. A CLI that cannot read it reaches no Nexus.
   PlaceName.String
   CliConfiguration.{ PlaceName }

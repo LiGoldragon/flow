@@ -121,9 +121,9 @@ fn typed_keep_and_drop_commands_are_shell_single_argument_forms() {
         body: "body with ' apostrophe".into(),
     };
     let parse = |text: String| {
-        assert!(text.starts_with("flow '") && text.ends_with("'"));
+        assert!(text.starts_with("flow-nexus '") && text.ends_with("'"));
         let payload = text
-            .strip_prefix("flow '")
+            .strip_prefix("flow-nexus '")
             .unwrap()
             .strip_suffix('\'')
             .unwrap()
@@ -797,7 +797,7 @@ fn atomic_same_expected_reminder_state_rejects_duplicate_admission() {
     let mut advanced = reminder.clone();
     advanced.sent = 1;
     advanced.next_due = 300;
-    let message = Message::HardAbrupt(Request::Notice("flow 'Notice'".into()));
+    let message = Message::HardAbrupt(Request::Notice("flow-nexus 'Notice'".into()));
     let first = fixture
         .nexus
         .store

@@ -1,6 +1,6 @@
-//! The CLI is `flow '<Query>'`: it takes the datom and nothing else. The
-//! place is its configuration's, `$XDG_CONFIG_HOME/nexus/flow.datom`,
-//! resolved under `$XDG_RUNTIME_DIR/nexus/` to that place's ordinary socket
+//! The CLI is `flow-nexus '<Query>'`: it takes the datom and nothing else.
+//! The place is its configuration's,
+//! `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, resolved under `$XDG_RUNTIME_DIR/nexus/` to that place's ordinary socket
 //! and to no other, whatever else the environment names.
 use std::{
     io::{Read, Write},
@@ -10,7 +10,7 @@ use std::{
 };
 
 fn client(runtime: &Path, configuration_home: &Path, other: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_flow"))
+    Command::new(env!("CARGO_BIN_EXE_flow-nexus"))
         .env_clear()
         .env("XDG_RUNTIME_DIR", runtime)
         .env("XDG_CONFIG_HOME", configuration_home)
@@ -25,7 +25,7 @@ fn the_client_reaches_only_the_socket_of_the_place_its_configuration_names() {
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
     let configuration = tempfile::tempdir().expect("temporary configuration home");
     std::fs::create_dir_all(configuration.path().join("nexus")).expect("nexus configuration");
-    std::fs::write(configuration.path().join("nexus/flow.datom"), "{ next }\n")
+    std::fs::write(configuration.path().join("nexus/flow-nexus.datom"), "{ next }\n")
         .expect("the configuration names next");
     let next = runtime.path().join("nexus/next");
     let main = runtime.path().join("nexus/main");
@@ -64,7 +64,7 @@ fn the_client_reaches_only_the_socket_of_the_place_its_configuration_names() {
         let refused = client(runtime.path(), configuration.path(), &other, typed);
         assert_eq!(refused.status.code(), Some(2), "{typed:?}: {refused:?}");
         assert!(
-            String::from_utf8_lossy(&refused.stderr).starts_with("usage: flow '"),
+            String::from_utf8_lossy(&refused.stderr).starts_with("usage: flow-nexus '"),
             "{typed:?}: {refused:?}"
         );
     }
@@ -90,7 +90,7 @@ fn a_missing_configuration_is_refused_naming_its_path() {
         .set_nonblocking(true)
         .expect("nonblocking fixture");
     let other = runtime.path().join("other.sock");
-    let path = configuration.path().join("nexus/flow.datom");
+    let path = configuration.path().join("nexus/flow-nexus.datom");
     let refused = client(runtime.path(), configuration.path(), &other, &["Metaflows"]);
     assert_eq!(refused.status.code(), Some(2), "{refused:?}");
     let stderr = String::from_utf8_lossy(&refused.stderr);
@@ -99,9 +99,9 @@ fn a_missing_configuration_is_refused_naming_its_path() {
         "{stderr}"
     );
 
-    // With no XDG_CONFIG_HOME the file is ~/.config/nexus/flow.datom.
+    // With no XDG_CONFIG_HOME the file is ~/.config/nexus/flow-nexus.datom.
     let home = tempfile::tempdir().expect("temporary home");
-    let refused = Command::new(env!("CARGO_BIN_EXE_flow"))
+    let refused = Command::new(env!("CARGO_BIN_EXE_flow-nexus"))
         .env_clear()
         .env("XDG_RUNTIME_DIR", runtime.path())
         .env("HOME", home.path())
@@ -110,7 +110,7 @@ fn a_missing_configuration_is_refused_naming_its_path() {
         .expect("client runs");
     assert_eq!(refused.status.code(), Some(2), "{refused:?}");
     let stderr = String::from_utf8_lossy(&refused.stderr);
-    let unset = home.path().join(".config/nexus/flow.datom");
+    let unset = home.path().join(".config/nexus/flow-nexus.datom");
     assert!(
         stderr.starts_with("Missing.") && stderr.contains(&*unset.to_string_lossy()),
         "{stderr}"

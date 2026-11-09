@@ -86,8 +86,8 @@
               inherit (flowEthosWithDatom) dependencies;
             };
           };
-          # The binaries of builds copied into one bin directory: flow-nexus
-          # finds flow-hook, and flow-hook finds flow, beside its own resolved
+          # The binaries of builds copied into one bin directory: the daemon,
+          # flow-nexus-daemon, finds flow-nexus-hook beside its own resolved
           # executable.
           binaries =
             name: builds: attributes:
@@ -138,15 +138,15 @@
           checkEnvironments = {
             # The approval pipeline's and the handover archive's tests read a
             # real git repository, one holds a pipe in a session of its own
-            # (setsid), and two drive the flow and flow-meta CLIs.
+            # (setsid), and two drive the flow-nexus and flow-nexus-meta CLIs.
             flow-nexus = {
               inputs = [
                 pkgs.git
                 pkgs.util-linux
               ];
               beside = [
-                "${members.flow}/bin/flow"
-                "${members.flow-meta}/bin/flow-meta"
+                "${members.flow}/bin/flow-nexus"
+                "${members.flow-meta}/bin/flow-nexus-meta"
               ];
             };
           };
@@ -338,7 +338,7 @@
               runHook postCheck
             '';
           });
-          flowNexus = "${members.flow-nexus}/bin/flow-nexus";
+          flowNexus = "${members.flow-nexus}/bin/flow-nexus-daemon";
           # The checks beyond each member's, which join checks.default.
           extraChecks = {
             # nix/curriculum/Cargo.nix is what the base's crate2nix generates

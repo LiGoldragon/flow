@@ -1,10 +1,11 @@
 # Flow Nexus
 
 Flow Nexus starts, restarts, delivers to, stops, lists, and resolves flows,
-and is the only writer into their panes. `flow-nexus` is the
-no-argument long-running process, `flow` is its ordinary client, and
-`flow-meta` is its privileged client. The Nexus persists Flow identity and
-policy in one Sema store, and its sockets carry only length-prefixed rkyv
+and is the only writer into their panes. `flow-nexus-daemon` is the
+long-running process, started with its place; `flow-nexus` is its ordinary
+client, `flow-nexus-meta` its privileged client, and `flow-nexus-hook` the
+hook Claude Code runs in every Claude flow. The Nexus persists Flow identity
+and policy in one Sema store, and its sockets carry only length-prefixed rkyv
 Signal archives.
 
 The wire contracts are independent repositories:
@@ -35,9 +36,9 @@ expanded USER skill vector. It does not change the typed profile or inspect
 the supplied precomposed SYSTEM file.
 
 ```sh
-flow '<one inline Query datom>'
-flow --system-modules '[ spirit-core vision-design ]' '<one inline Start or Replace Query datom>'
-flow --system-modules '[]' '<one inline Start or Replace Query datom>'
+flow-nexus '<one inline Query datom>'
+flow-nexus --system-modules '[ spirit-core vision-design ]' '<one inline Start or Replace Query datom>'
+flow-nexus --system-modules '[]' '<one inline Start or Replace Query datom>'
 ```
 
 `Rehearse` carries the same declared `LaunchRequest` as `Launch`. It reads the
@@ -62,23 +63,24 @@ launch effect.
 The ordinary pane operations use the same typed edge:
 
 ```sh
-flow 'Stop.00f95a'
-flow 'Metaflows'
-flow 'Observe.Agent.00f95a'
-flow 'Observe.Undecodable'
-flow 'Observe.TurnEnds'
-flow 'Observe.Metaflows'
-flow-meta 'ObserveConfiguration'
+flow-nexus 'Stop.00f95a'
+flow-nexus 'Metaflows'
+flow-nexus 'Observe.Agent.00f95a'
+flow-nexus 'Observe.Undecodable'
+flow-nexus 'Observe.TurnEnds'
+flow-nexus 'Observe.Metaflows'
+flow-nexus-meta 'ObserveConfiguration'
 ```
 
 A Nexus starts in its place, the one datom it is started with, and reads
-nothing else for it: `flow-nexus '{ main /run/user/1001/nexus/main
+nothing else for it: `flow-nexus-daemon '{ main /run/user/1001/nexus/main
 /home/li/.local/state/nexus/main }'`, the place name, Runtime (its sockets
 `flow.sock` and `flow-meta.sock`) and State (its memory `flow.sema`). A
-client takes the datom and nothing else: `flow '<Query>'` or `flow-meta
-'<Query>'`. The place is its configuration's, one datom at
-`$XDG_CONFIG_HOME/nexus/flow.datom` (`~/.config/nexus/flow.datom` when the
-variable is unset), `CliConfiguration.{ PlaceName }`, `{ main }`; the place
+client takes the datom and nothing else: `flow-nexus '<Query>'` or
+`flow-nexus-meta '<Query>'`, both named after the Nexus. The place is their
+configuration's, one datom at `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`
+(`~/.config/nexus/flow-nexus.datom` when the variable is unset),
+`CliConfiguration.{ PlaceName }`, `{ main }`; the place
 name resolves under `$XDG_RUNTIME_DIR/nexus/` to that place's socket. A
 configuration that is missing, cannot be read or names no place is a typed
 refusal naming the file (`Missing.<path>`, `Unreadable.{ <path> <reason> }`,
@@ -107,15 +109,16 @@ the Nexus binds and announces readiness before it is configured. Every
 meta `Configure` is applied to the running Nexus at once, without a
 restart, and `ObserveConfiguration` streams the configuration, then each
 change. `Configure.HarnessHook.<path>` names the hook command written into
-every Claude flow; unconfigured, it is the `flow-hook` beside the Nexus.
+every Claude flow; unconfigured, it is the `flow-nexus-hook` beside the
+Nexus.
 
 Every write into a pane goes through the privileged socket, and Flow is the
 only writer. `Deliver` carries a typed `Message` whose head is its Priority:
 
 ```sh
-flow-meta 'Deliver.{ m-7f3a2c:00f95a:0 00f95a Soft.{ m-7f3a2c Owner Text.«continue with the implementation» } }'
-flow-meta 'Deliver.{ m-81b0e4:00f95a:0 00f95a HardAbrupt.{ m-81b0e4 Flow.e167d8 Text.«stop the build» } }'
-flow-meta 'Command.{ 00f95a Compact }'
+flow-nexus-meta 'Deliver.{ m-7f3a2c:00f95a:0 00f95a Soft.{ m-7f3a2c Owner Text.«continue with the implementation» } }'
+flow-nexus-meta 'Deliver.{ m-81b0e4:00f95a:0 00f95a HardAbrupt.{ m-81b0e4 Flow.e167d8 Text.«stop the build» } }'
+flow-nexus-meta 'Command.{ 00f95a Compact }'
 ```
 
 Compaction is an emergency measure: `Command.{ 00f95a Compact }` is refused,
@@ -236,8 +239,8 @@ the composed modules and identity metadata, and the final text is hashed.
 Claude Code receives the whole authored text through
 `--system-prompt-file`; this makes no claim about hidden vendor context.
 
-`flow-meta reset <idempotency-key>` asks the Codex app-server to consume the
-next eligible reset credit. `flow-meta reset <idempotency-key> <credit-id>`
+`flow-nexus-meta reset <idempotency-key>` asks the Codex app-server to consume the
+next eligible reset credit. `flow-nexus-meta reset <idempotency-key> <credit-id>`
 selects a specific credit. Reusing the key makes a retry stable. It sends the
 privileged request through the meta socket; the command never talks to Codex
 directly.
@@ -246,8 +249,8 @@ Existing daemon sessions enter the authoritative registry through typed meta
 operations:
 
 ```sh
-flow-meta register-codex <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> [control-socket]
-flow-meta register-claude <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> [daemon-control-socket]
+flow-nexus-meta register-codex <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> [control-socket]
+flow-nexus-meta register-claude <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> [daemon-control-socket]
 ```
 
 The two sockets are mode `0600`. The meta edge separates ordinary Flow

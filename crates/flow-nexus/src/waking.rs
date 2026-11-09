@@ -23,8 +23,11 @@
 //! once. Held Soft work is the metaflow's durable queue, so a Nexus that
 //! starts again holds it as before.
 //!
-//! A seat past its model's refresh threshold is replaced at its Stop,
-//! whatever Herdr shows of its pane: the Stop is the idle fact. A
+//! A seat past its model's refresh threshold is replaced at its idle event,
+//! its Stop or its Codex thread's turn completed, and only once it rests by
+//! the evidence above: a refresh never closes a working seat, and one in its
+//! turn, or a Claude seat whose background agents still run, keeps its
+//! queue for its successor until a later idle event finds it resting. A
 //! Maintained metaflow, or one holding work that wakes it, is owed its
 //! successor: the intent is recorded, the successor is started and
 //! confirmed through Replace, and only then is the predecessor recorded
@@ -3029,34 +3032,15 @@ impl WakesInParts for RunningNexus {
             .map(|duration| duration.as_secs() as i64)
             .unwrap_or_default();
         self.send_due_handover_reminders(now);
-        // A seat refreshes automatically only when its latest handover touch
-        // is policy-qualified and reaches the inclusive warning boundary.
-        let refresh_due = match self.store.metaflow_awake_as(flow_id) {
-            Ok(Some(metaflow)) => match self.store.threshold_standing(flow_id) {
-                Ok(crate::store::context::ThresholdStanding::Past { refresh, .. }) => {
-                    match self
-                        .store
-                        .handover_green(&metaflow.address, flow_id, refresh)
-                    {
-                        Ok(green) => green,
-                        Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
-                    }
-                }
-                Ok(_) => false,
-                Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
-            },
-            Ok(None) => false,
-            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
-        };
         // A Codex seat's rest is its app-server's, and a Claude seat whose
         // transcript records its main turn's end_turn has ended its turn
         // whatever its screen shows (background agents keep Herdr at
         // Working). Otherwise Claude runs its Stop hook while its spinner is
         // still on screen, and Herdr reads its state from the screen: the
         // seat is given a bounded wait to show resting before the gate is
-        // taken.
-        if !refresh_due
-            && let Ok(Some(node)) = self.store.flow_node(flow_id)
+        // taken. A seat due a refresh is given the same wait: a refresh
+        // closes only a seat that rests.
+        if let Ok(Some(node)) = self.store.flow_node(flow_id)
             && let HerdrRouteSelection::Available(route) =
                 &self.herdr.refresh_route(node).herdr_route_selection
         {
@@ -3087,6 +3071,21 @@ impl WakesInParts for RunningNexus {
         if self.waking.is_waking(&address) {
             return AtStop::Kept(KeptAtStop::Waking);
         }
+        // A seat refreshes automatically only when its latest handover touch
+        // is policy-qualified and reaches the inclusive warning boundary.
+        // The decision is taken under the dispatch gate, as a Soft Send's
+        // hand-over at this idle event is: whichever comes first shuts out
+        // the other.
+        let refresh_due = match self.store.threshold_standing(flow_id) {
+            Ok(crate::store::context::ThresholdStanding::Past { refresh, .. }) => {
+                match self.store.handover_green(&address, flow_id, refresh) {
+                    Ok(green) => green,
+                    Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+                }
+            }
+            Ok(_) => false,
+            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+        };
         let node = match self.store.flow_node(flow_id) {
             Ok(Some(node)) => self.herdr.refresh_route(node),
             Ok(None) => return AtStop::Kept(KeptAtStop::UnknownFlow),
@@ -3112,8 +3111,6 @@ impl WakesInParts for RunningNexus {
                 }
                 true
             }
-            // A Claude seat due a refresh is closed at its Stop.
-            HarnessKind::Claude if refresh_due => true,
             HarnessKind::Claude => {
                 let pane_agent = self.herdr.pane_agent(&node);
                 let native_resting = matches!(
@@ -3127,7 +3124,11 @@ impl WakesInParts for RunningNexus {
                             .and_then(|target| self.writable_state(&target).ok()),
                         Some(AgentState::Working | AgentState::Idle | AgentState::Done)
                     );
-                if !native_resting && !claude_main_ready {
+                // A refresh never closes a working seat: one whose main
+                // turn ended while its background agents run waits, its
+                // queue kept for its successor, for a Stop at which Herdr
+                // shows it resting.
+                if (!native_resting && !claude_main_ready) || (refresh_due && !native_resting) {
                     return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
                 }
                 native_resting

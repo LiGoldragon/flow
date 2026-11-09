@@ -339,11 +339,12 @@ fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_fl
     );
 }
 
-/// A seat past its threshold is refreshed at its Stop hook though Herdr
-/// shows its pane Working and its transcript shows no ended turn: the Stop
-/// is the idle fact, and Herdr's pane state never holds a refresh.
+/// A seat past its threshold whose Stop finds it working, Herdr showing its
+/// pane Working and its transcript no ended turn, is not refreshed: a
+/// refresh never closes a working flow. The seat stays Awake, and the work
+/// queued for it stays queued for its next flow.
 #[test]
-fn a_seat_past_its_threshold_shown_working_is_refreshed_at_its_stop() {
+fn a_seat_past_its_threshold_shown_working_is_kept_until_it_rests() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![{
@@ -360,17 +361,61 @@ fn a_seat_past_its_threshold_shown_working_is_refreshed_at_its_stop() {
         Continuity::OnDemand,
         vec!["spirit-core".into(), "intent-flow".into()],
     );
-    seat_metaflow(&fixture, vec![]);
+    seat_metaflow(
+        &fixture,
+        vec![Request::Order("Held for the next flow.".into())],
+    );
 
     fixture
         .nexus
         .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
 
-    assert!(closed(&fixture), "the working seat's pane is closed");
-    assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
+    assert!(!closed(&fixture), "the working seat's pane stays open");
+    assert!(fixture.typed().is_none(), "nothing is typed into it");
+    assert_ne!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
     let metaflow = seat_metaflow_now(&fixture);
-    assert_eq!(metaflow.state, State::Asleep);
-    assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
+    assert_eq!(metaflow.state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(metaflow.queue.len(), 1, "the work waits for the next flow");
+}
+
+/// A seat past its threshold whose main turn has ended while Herdr still
+/// shows it Working, its background agents running or a Soft request just
+/// handed over at this idle event, is not closed: closing it would end that
+/// work. It stays Awake with its pane open, and its queue is kept.
+#[test]
+fn a_seat_past_its_threshold_working_after_its_turn_ended_is_not_closed() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![{
+            let mut agent = claude_agent(&fixture);
+            agent["agent_status"] = serde_json::Value::String("working".into());
+            agent
+        }],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 230_000);
+    append_main_rows(&fixture, &[end_turn("last-turn")]);
+    seat_refreshing_at(&fixture, 200_000);
+    declare_seat(
+        &fixture,
+        Continuity::OnDemand,
+        vec!["spirit-core".into(), "intent-flow".into()],
+    );
+    seat_metaflow(
+        &fixture,
+        vec![Request::Order("Held for the next flow.".into())],
+    );
+
+    fixture
+        .nexus
+        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+
+    assert!(!closed(&fixture), "the working seat's pane stays open");
+    assert!(fixture.typed().is_none(), "nothing is typed into it");
+    assert_ne!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
+    let metaflow = seat_metaflow_now(&fixture);
+    assert_eq!(metaflow.state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(metaflow.queue.len(), 1, "the work waits for the next flow");
 }
 
 /// An OnDemand seat resting past its threshold whose successor cannot be

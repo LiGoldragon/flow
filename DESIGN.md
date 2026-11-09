@@ -565,7 +565,14 @@ is measured at each Claude Stop from the transcript, and for Codex from each
 threshold is told nothing and writes no handover; it is given no new message
 (a Drain hands it nothing, a Deliver is refused), so what is queued stays for
 the metaflow's next flow. At its rest it is a seat due a refresh, the same
-predicate a landing sets. A Maintained metaflow, or one holding a request
+predicate a landing sets. The refresh is taken at its idle event, a Claude
+Stop or a Codex thread's turn completed, and only once the seat rests: a
+Codex thread its app-server shows resting, a Claude seat Herdr shows Idle or
+Done. A refresh never closes a working flow; a seat still in its turn, or
+whose background agents still run, keeps its queue for its successor until a
+later idle event finds it resting. The decision is taken under the dispatch
+gate, as a Soft Send's hand-over at that idle event is, so the two exclude
+each other. A Maintained metaflow, or one holding a request
 that wakes it, is owed its successor: the intent is recorded, the
 successor is started and confirmed through Replace, remembering its
 predecessor (`Predecessors.1`), and only then is the predecessor recorded

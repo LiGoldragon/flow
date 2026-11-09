@@ -3,7 +3,11 @@
 # flow keeps production Rust in its four workspace members' `src/`. `tests/`
 # is not production source, and neither are the `#[cfg(test)]` items inside
 # production files nor the files that only a `#[cfg(test)]` module declares
-# (`flow-nexus/src/tests/` and `flow-nexus/src/fixture_executable.rs`), so the
+# (`flow-nexus/src/tests/`, `flow-nexus/src/fixture_executable.rs`,
+# `flow-nexus/src/store/message_joint.rs` and
+# `flow-nexus/src/store/request_id_migration_process.rs`), nor the fixture the
+# predecessor's build declares (`flow-nexus/src/store/
+# request_id_predecessor_fixture.rs`), so the
 # scan reads each production file with its `#[cfg(test)]` items removed and
 # leaves the test-only files out. The stripper drops a `#[cfg(test)]` item
 # whole: the attribute line, and then either the rest of a statement ending in
@@ -48,5 +52,8 @@ strip_test_items() {
 production_rust_files() {
   find $(production_sources) -name '*.rs' -type f \
     -not -path '*/flow-nexus/src/tests/*' \
-    -not -path '*/flow-nexus/src/fixture_executable.rs' | sort
+    -not -path '*/flow-nexus/src/fixture_executable.rs' \
+    -not -path '*/flow-nexus/src/store/message_joint.rs' \
+    -not -path '*/flow-nexus/src/store/request_id_migration_process.rs' \
+    -not -path '*/flow-nexus/src/store/request_id_predecessor_fixture.rs' | sort
 }

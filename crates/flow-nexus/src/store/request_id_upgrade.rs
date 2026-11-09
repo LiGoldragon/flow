@@ -2309,7 +2309,7 @@ mod tests {
 
     #[test]
     fn a_single_uncertain_order_with_a_historical_result_evolves_closed() {
-        use crate::store::logical_delivery::{RequestClosure, open_answer_binding};
+        use crate::store::logical_delivery::{OpensAnswerBinding, RequestClosure};
 
         let directory = tempfile::tempdir().expect("temporary Memory");
         let path = directory.path().join("flow.sema");
@@ -2442,7 +2442,7 @@ mod tests {
             RequestClosure::Answered("singleton-answer".into())
         );
         assert_eq!(
-            open_answer_binding(Some(binding.clone())),
+            Some(binding.clone()).open_answer_binding(),
             Err(signal_flow::Refusal::Unresolved),
             "a duplicate Result after upgrade is unresolved"
         );

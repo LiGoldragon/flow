@@ -506,7 +506,10 @@ fn a_direct_send_read_by_its_answer_returns_sent_without_a_native_receipt() {
         delivery_state: signal_flow::DeliveryState::Uncertain,
     };
     assert_eq!(
-        crate::sending::completed_direct_response(&signal_flow::DeliveryState::Read, &acceptance,),
+        crate::sending::AnswersCompletedDirectSend::completed_direct_response(
+            &signal_flow::DeliveryState::Read,
+            &acceptance,
+        ),
         Some(signal_flow::PrivateSendResponse::Sent(
             signal_flow::SendReceipt {
                 logical_delivery_id: acceptance.logical_delivery_id,

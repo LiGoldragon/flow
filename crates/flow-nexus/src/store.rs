@@ -1913,7 +1913,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             ))?;
             engine.assert(Assertion::new(
                 meta_configuration_tables.handover,
-                handover_configuration::unconfigured(),
+                <handover_configuration::StoredHandoverConfiguration as handover_configuration::DefaultsToUnconfigured>::unconfigured(),
             ))?;
         }
         let policy_rows =
@@ -5693,7 +5693,7 @@ pub(crate) trait ReadsFlowMemory {
                     .records()
                     .first()
                     .cloned()
-                    .unwrap_or_else(handover_configuration::unconfigured);
+                    .unwrap_or_else(<handover_configuration::StoredHandoverConfiguration as handover_configuration::DefaultsToUnconfigured>::unconfigured);
                 FlowStore::replace_configuration_family(
                     engine,
                     tables.handover,

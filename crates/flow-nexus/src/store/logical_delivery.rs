@@ -109,12 +109,16 @@ impl MemoryDefinition for RequestIdBinding {
 /// The durable binding an answer may still close. This check is pure and
 /// precedes every answer mutation, so a delayed duplicate against an
 /// evolved closed binding is `Unresolved` and writes nothing.
-pub(crate) fn open_answer_binding(
-    binding: Option<RequestIdBinding>,
-) -> Result<RequestIdBinding, Refusal> {
-    match binding {
-        Some(binding) if binding.closure == RequestClosure::Open => Ok(binding),
-        _ => Err(Refusal::Unresolved),
+pub(crate) trait OpensAnswerBinding {
+    fn open_answer_binding(self) -> Result<RequestIdBinding, Refusal>;
+}
+
+impl OpensAnswerBinding for Option<RequestIdBinding> {
+    fn open_answer_binding(self) -> Result<RequestIdBinding, Refusal> {
+        match self {
+            Some(binding) if binding.closure == RequestClosure::Open => Ok(binding),
+            _ => Err(Refusal::Unresolved),
+        }
     }
 }
 
@@ -1757,7 +1761,10 @@ impl RecordsLogicalDeliveries for FlowStore {
             SendableRequest::Notice(value) => Request::Notice(value),
             SendableRequest::Task(value) => Request::Task(value),
             SendableRequest::Result(result) => {
-                let binding = match open_answer_binding(self.request_binding(&result.request_id)?) {
+                let binding = match self
+                    .request_binding(&result.request_id)?
+                    .open_answer_binding()
+                {
                     Ok(binding) => binding,
                     Err(refusal) => return Ok(Err(refusal)),
                 };
@@ -1771,7 +1778,10 @@ impl RecordsLogicalDeliveries for FlowStore {
                 }))
             }
             SendableRequest::Done(done) => {
-                let binding = match open_answer_binding(self.request_binding(&done.request_id)?) {
+                let binding = match self
+                    .request_binding(&done.request_id)?
+                    .open_answer_binding()
+                {
                     Ok(binding) => binding,
                     Err(refusal) => return Ok(Err(refusal)),
                 };

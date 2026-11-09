@@ -185,20 +185,29 @@ impl From<PrivateSendResponse> for SendAnswer {
 /// stronger than native placement: the authenticated answer already named
 /// this request. It therefore answers Sent without inventing a native
 /// receipt, just as Delivered does.
-pub(crate) fn completed_direct_response(
-    state: &signal_flow::DeliveryState,
-    acceptance: &signal_flow::SendAcceptance,
-) -> Option<PrivateSendResponse> {
-    if matches!(
-        state,
-        signal_flow::DeliveryState::Delivered(_) | signal_flow::DeliveryState::Read
-    ) {
-        Some(PrivateSendResponse::Sent(signal_flow::SendReceipt {
-            logical_delivery_id: acceptance.logical_delivery_id.clone(),
-            request_id: acceptance.request_id.clone(),
-        }))
-    } else {
-        None
+pub(crate) trait AnswersCompletedDirectSend {
+    fn completed_direct_response(
+        &self,
+        acceptance: &signal_flow::SendAcceptance,
+    ) -> Option<PrivateSendResponse>;
+}
+
+impl AnswersCompletedDirectSend for signal_flow::DeliveryState {
+    fn completed_direct_response(
+        &self,
+        acceptance: &signal_flow::SendAcceptance,
+    ) -> Option<PrivateSendResponse> {
+        if matches!(
+            self,
+            signal_flow::DeliveryState::Delivered(_) | signal_flow::DeliveryState::Read
+        ) {
+            Some(PrivateSendResponse::Sent(signal_flow::SendReceipt {
+                logical_delivery_id: acceptance.logical_delivery_id.clone(),
+                request_id: acceptance.request_id.clone(),
+            }))
+        } else {
+            None
+        }
     }
 }
 
@@ -1386,8 +1395,9 @@ impl CompletesDirectSends for RunningNexus {
                 self.store.logical_delivery_snapshot(&logical_id)
             };
             if let Ok(Some(snapshot)) = state {
-                if let Some(response) =
-                    completed_direct_response(&snapshot.delivery_state, &acceptance)
+                if let Some(response) = snapshot
+                    .delivery_state
+                    .completed_direct_response(&acceptance)
                 {
                     return response.into();
                 }
@@ -1449,7 +1459,7 @@ impl CompletesDirectSends for RunningNexus {
                 .finish_failed_direct(address, &logical_id, &observed)
         };
         if let Ok(delivery_state) = &state
-            && let Some(response) = completed_direct_response(delivery_state, &acceptance)
+            && let Some(response) = delivery_state.completed_direct_response(&acceptance)
         {
             return response.into();
         }

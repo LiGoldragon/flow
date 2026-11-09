@@ -2508,8 +2508,7 @@ impl OpensFlowStore for FlowStore {
                 .match_records(QueryPlan::all(purposes))?
                 .records()
                 .to_vec();
-            request_id_upgrade::evolve_request_id_memory(
-                &mut engine,
+            request_id_upgrade::EvolvesRequestIdMemory::evolve_request_id_memory(
                 request_id_upgrade::RequestIdEvolutionDescriptors {
                     metaflows: metaflows_descriptor.clone(),
                     address_holds: address_holds_descriptor.clone(),
@@ -2527,6 +2526,7 @@ impl OpensFlowStore for FlowStore {
                     upgrade_assignments: request_id_upgrade_descriptors.upgrade_assignments.clone(),
                     request_policy: request_policy_descriptor.clone(),
                 },
+                &mut engine,
                 &reminder_rows,
                 &simplified_reply_rows,
                 &purpose_rows,

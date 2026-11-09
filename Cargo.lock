@@ -164,15 +164,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "datom-codec"
-version = "0.33.1"
-source = "git+https://github.com/LiGoldragon/datom-codec?rev=09a0526949b043f921b6d3ce115b7f455291f2e2#09a0526949b043f921b6d3ce115b7f455291f2e2"
-dependencies = [
- "datom-codec-derive 0.32.3 (git+https://github.com/LiGoldragon/datom-codec?rev=09a0526949b043f921b6d3ce115b7f455291f2e2)",
- "protos 0.33.0 (git+https://github.com/LiGoldragon/protos?rev=c93b598)",
-]
-
-[[package]]
 name = "datom-codec-derive"
 version = "0.32.0"
 source = "git+https://github.com/LiGoldragon/datom-codec?rev=4dff16b4f7412febc3b71aac8b49680cd20988cb#4dff16b4f7412febc3b71aac8b49680cd20988cb"
@@ -186,16 +177,6 @@ dependencies = [
 name = "datom-codec-derive"
 version = "0.32.3"
 source = "git+https://github.com/LiGoldragon/datom-codec?rev=09a0526#09a0526949b043f921b6d3ce115b7f455291f2e2"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "datom-codec-derive"
-version = "0.32.3"
-source = "git+https://github.com/LiGoldragon/datom-codec?rev=09a0526949b043f921b6d3ce115b7f455291f2e2#09a0526949b043f921b6d3ce115b7f455291f2e2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -283,9 +264,9 @@ dependencies = [
 [[package]]
 name = "ethos-zero"
 version = "22.0.0"
-source = "git+https://github.com/LiGoldragon/ethos-zero?rev=1976e45fe1edfd5676cb33919dba1ec20c785a02#1976e45fe1edfd5676cb33919dba1ec20c785a02"
+source = "git+https://github.com/LiGoldragon/ethos-zero?rev=1976e45#1976e45fe1edfd5676cb33919dba1ec20c785a02"
 dependencies = [
- "datom-codec 0.33.1 (git+https://github.com/LiGoldragon/datom-codec?rev=09a0526)",
+ "datom-codec 0.33.1",
  "prettyplease",
  "proc-macro2",
  "protos 0.33.0 (git+https://github.com/LiGoldragon/protos?rev=c93b598)",
@@ -329,7 +310,7 @@ version = "0.53.3"
 name = "flow-ethos"
 version = "0.53.3"
 dependencies = [
- "datom-codec 0.33.1 (git+https://github.com/LiGoldragon/datom-codec?rev=09a0526949b043f921b6d3ce115b7f455291f2e2)",
+ "datom-codec 0.33.1",
  "ethos-zero 22.0.0",
  "protos 0.33.0 (git+https://github.com/LiGoldragon/protos?rev=c93b598)",
  "rkyv",

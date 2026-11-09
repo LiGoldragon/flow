@@ -193,11 +193,18 @@ impl ReadsHarnessArguments for RunningNexus {
     }
 }
 
-impl RunningNexus {
+pub(crate) trait ResolvesLaunchRoot {
     /// Resolves the declaration's optional launch workspace against the
     /// Nexus source root. The source root remains the home of records and
     /// reservations; this path is only the harness cwd.
-    pub(crate) fn launch_root(
+    fn launch_root(
+        &self,
+        address: &signal_flow::Address,
+    ) -> Result<meta_signal_flow::Root, StartRejection>;
+}
+
+impl ResolvesLaunchRoot for RunningNexus {
+    fn launch_root(
         &self,
         address: &signal_flow::Address,
     ) -> Result<meta_signal_flow::Root, StartRejection> {

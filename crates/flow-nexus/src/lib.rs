@@ -5160,6 +5160,7 @@ mod tests {
 
     #[test]
     fn metaflows_resolve_their_own_workspace_or_the_nexus_source_root() {
+        use crate::launching::ResolvesLaunchRoot as _;
         use crate::store::{ConfiguresFlowStore as _, ManagesMetaflowState as _};
         let fixture = NexusFixture::new();
         let first = fixture.staged_launch("workspace-first", None).profile;

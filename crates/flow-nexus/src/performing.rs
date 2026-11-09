@@ -20,6 +20,7 @@ use crate::herdr::launch::{
     StartsConfiguredNativeHerdrHarness, SubmitsStartupPart, TitleRefusal, TitlesNativeFlow,
 };
 use crate::herdr::{OperatesHerdrPane, ReadsHerdrPanes};
+use crate::launching::ResolvesLaunchRoot;
 use crate::send_tool::ServesLaunchCalls;
 use crate::store::{
     ConfirmsStartedFlow, FlowRegistration, RecordsFlowLifecycle, RecordsLaunchOutcome,

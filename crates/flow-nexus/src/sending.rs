@@ -982,7 +982,18 @@ impl BindsSeats for RunningNexus {
     }
 }
 
-impl RunningNexus {
+/// Binds a calling seat to its Address, idempotently for a seat Flow
+/// already knows.
+trait AdoptsSeat {
+    fn adopt_seat(
+        &self,
+        address: Address,
+        expected_session: Option<&str>,
+        peer: Option<&Process>,
+    ) -> Response;
+}
+
+impl AdoptsSeat for RunningNexus {
     fn adopt_seat(
         &self,
         address: Address,

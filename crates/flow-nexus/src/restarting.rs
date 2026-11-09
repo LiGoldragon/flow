@@ -1096,7 +1096,7 @@ impl RestartsInSteps for RunningNexus {
     }
 
     fn resume_launch(&self, record: &RestartRecord) -> Result<ResumeLaunch, RestartFailure> {
-        use crate::launching::ReadsHarnessArguments;
+        use crate::launching::{ReadsHarnessArguments, ResolvesLaunchRoot};
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
         let refused = |category: &str| RestartFailure::ResumeRefused(category.into());
         let last = self.last_profile(&record.flow_id);

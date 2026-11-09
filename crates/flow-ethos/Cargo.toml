@@ -13,12 +13,14 @@ default = []
 datom = ["dep:datom-codec", "dep:protos"]
 
 [dependencies]
-datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "eabead4", optional = true }
-protos = { git = "https://github.com/LiGoldragon/protos", rev = "3c7ade3", optional = true }
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09a0526949b043f921b6d3ce115b7f455291f2e2", optional = true }
+# Cargo tells a git source by its rev string: protos is pinned as datom-codec
+# 09a0526 pins it, so one protos stands in the graph.
+protos = { git = "https://github.com/LiGoldragon/protos", rev = "c93b598", optional = true }
 rkyv.workspace = true
 
 [build-dependencies]
-ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "07714b0171802787bea1eefe4caa2d826d9c4030" }
+ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "1976e45fe1edfd5676cb33919dba1ec20c785a02" }
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -10,6 +10,7 @@
 //! place's Runtime is `$XDG_RUNTIME_DIR/nexus/<place-name>/`, each root taken
 //! from the standard variable and from nothing else. No place is ever typed.
 
+use crate::generated::library::Reason;
 pub use crate::generated::library::{CliConfiguration, ConfigurationFault, ConfigurationRefusal};
 use std::{
     ffi::{OsStr, OsString},
@@ -113,16 +114,16 @@ impl LocatesConfiguration for ConfigurationFile {
             (Some(directory), _) => PathBuf::from(directory),
             (None, Some(home)) => PathBuf::from(home).join(".config"),
             (None, None) => {
-                return Err(ConfigurationRefusal::Unlocated(
+                return Err(ConfigurationRefusal::Unlocated(Reason(
                     "neither XDG_CONFIG_HOME nor HOME is set".into(),
-                ));
+                )));
             }
         };
         if !directory.is_absolute() {
-            return Err(ConfigurationRefusal::Unlocated(format!(
+            return Err(ConfigurationRefusal::Unlocated(Reason(format!(
                 "the configuration home {} is not absolute",
                 directory.display()
-            )));
+            ))));
         }
         Ok(Self {
             path: directory
@@ -143,10 +144,10 @@ pub trait ReadsCliConfiguration {
 impl ReadsCliConfiguration for ConfigurationFile {
     fn read(&self) -> Result<CliConfiguration, ConfigurationRefusal> {
         use datom_codec::{Actualizing, Budget, Potential};
-        let path = self.path.to_string_lossy().into_owned();
+        let path = crate::generated::library::Path(self.path.to_string_lossy().into_owned());
         let fault = |reason: String| ConfigurationFault {
             path: path.clone(),
-            reason,
+            reason: Reason(reason),
         };
         let source = match std::fs::read_to_string(&self.path) {
             Ok(source) => source,
@@ -169,7 +170,7 @@ impl ReadsCliConfiguration for ConfigurationFile {
         RuntimeRoot {
             directory: PathBuf::new(),
         }
-        .place(&configuration.place_name)
+        .place(&configuration.place_name.0)
         .map_err(|reason| ConfigurationRefusal::Invalid(fault(reason)))?;
         Ok(configuration)
     }
@@ -216,7 +217,7 @@ impl ResolvesCliPlace for CliEnvironment {
             ConfigurationFile::under(self.configuration_home.as_deref(), self.home.as_deref())
                 .and_then(|file| file.read())
                 .map_err(printed)?;
-        RuntimeRoot::under(self.runtime_directory.as_deref())?.place(&configuration.place_name)
+        RuntimeRoot::under(self.runtime_directory.as_deref())?.place(&configuration.place_name.0)
     }
 }
 
@@ -304,9 +305,10 @@ mod tests {
             CliConfiguration, CliEnvironment, ConfigurationFault, ConfigurationFile,
             ConfigurationRefusal, LocatesConfiguration, ReadsCliConfiguration, ResolvesCliPlace,
         };
+        use crate::generated::library::{Path as PathText, PlaceName};
         let scratch = Scratch::new("configuration");
         let file = ConfigurationFile::under(Some(scratch.0.as_os_str()), None).unwrap();
-        let path = file.path.to_string_lossy().into_owned();
+        let path = PathText(file.path.to_string_lossy().into_owned());
         assert_eq!(
             file.read(),
             Err(ConfigurationRefusal::Missing(path.clone()))
@@ -318,14 +320,14 @@ mod tests {
         };
         let refused = environment.place_runtime().unwrap_err();
         assert!(
-            refused.starts_with("Missing.") && refused.contains(&path),
+            refused.starts_with("Missing.") && refused.contains(&path.0),
             "{refused}"
         );
         std::fs::write(&file.path, "{ next }\n").unwrap();
         assert_eq!(
             file.read(),
             Ok(CliConfiguration {
-                place_name: "next".into()
+                place_name: PlaceName("next".into())
             })
         );
         assert_eq!(

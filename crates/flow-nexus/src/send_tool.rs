@@ -28,7 +28,10 @@
 //! commit. A replay is answered from its record and cannot create another
 //! logical delivery. The answer is the typed acceptance as a datom.
 //!
-//! The recipient state and priority determine submission: Awake receives every priority now; Asleep retains Soft and wakes for either abrupt priority.
+//! The recipient state and priority determine submission: an Awake seat
+//! receives HardAbrupt and MiddleAbrupt now, and Soft at its next idle event
+//! unless it rests already; Asleep retains Soft and wakes for either abrupt
+//! priority.
 
 use crate::caller::NamesRootThread;
 use crate::codex::{

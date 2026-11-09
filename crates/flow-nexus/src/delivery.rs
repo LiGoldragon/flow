@@ -6,9 +6,13 @@
 //!
 //! Every tier requires the route to match Herdr's snapshot, the agent not to
 //! be Blocked (typing into a permission dialog could answer it) and the
-//! composer to be blank (a person's draft is never appended to). Soft also
-//! requires the agent Idle or Done. The screen read is not atomic with the
-//! typing; that is stated, not solved.
+//! composer to be blank (a person's draft is never appended to). The screen
+//! read is not atomic with the typing; that is stated, not solved.
+//!
+//! Deliver types what it is handed when it is handed it. When a Soft request
+//! is handed over is the queue's: it waits for its recipient's idle event,
+//! the seat's Stop or its thread's turn completed (`waking`), never for a
+//! screen read here.
 
 use crate::delivery::body::ShowsPaneText;
 pub mod body;

@@ -2248,10 +2248,11 @@ fn a_duplicated_turn_completed_delivers_nothing_twice() {
     assert!(typed.contains("Second."), "{typed}");
 }
 
-/// Work queued while the seat is in a turn (here by a send call its own
-/// thread makes to it) is steered into its pane without starting a turn.
+/// Soft work queued while the seat is in a turn (here by a send call its
+/// own thread makes to it) waits for the turn's completion, the seat's idle
+/// event, and is then steered into its pane once, without starting a turn.
 #[test]
-fn work_queued_while_a_codex_turn_runs_is_delivered_through_its_pane() {
+fn soft_work_queued_while_a_codex_turn_runs_waits_for_its_completion() {
     let mut fixture = NexusFixture::new();
     fixture.awake_codex_seat(vec![]);
     let to_self = send_request(42, SEAT_THREAD, "call-self", &seat_at(), "Order", "later");
@@ -2268,25 +2269,27 @@ fn work_queued_while_a_codex_turn_runs_is_delivered_through_its_pane() {
         sent_by: SentBy::Sender(seat_at()),
         request: Request::Order("later".into()),
     };
-    assert_eq!(fixture.seat_queue(), vec![]);
-    assert_eq!(fixture.typed_count(&queued), 1, "typed while the turn runs");
-    let typed = fixture.typed().unwrap_or_default();
-    assert!(typed.contains("later"), "{typed}");
+    assert_eq!(fixture.seat_queue(), vec![queued.clone()], "held");
+    assert_eq!(fixture.typed_count(&queued), 0, "nothing typed in the turn");
+    assert!(fixture.typed().is_none());
 
     let second = seat_responding(
         &mut fixture,
         vec![turn_notice("turn/completed", SEAT_THREAD, "turn-running")],
         44,
     );
-    assert_eq!(fixture.typed_count(&queued), 1, "not handed over again");
+    assert_eq!(fixture.typed_count(&queued), 1, "typed at the completion");
     assert_eq!(fixture.seat_queue(), vec![]);
+    let typed = fixture.typed().unwrap_or_default();
+    assert!(typed.contains("later"), "{typed}");
     assert!(second.queued_turn_texts().is_empty());
 }
 
-/// A seat its app-server shows in a turn receives queued work through its
-/// pane without starting another native turn.
+/// A seat its app-server shows in a turn holds its Soft work: neither the
+/// turn nor a later wake hands it over. The turn's completion hands the
+/// whole queue into its pane, oldest first, without starting a native turn.
 #[test]
-fn a_working_codex_seat_is_drained_through_its_pane() {
+fn a_working_codex_seat_holds_soft_work_until_its_turn_completes() {
     let mut fixture = NexusFixture::new();
     let psyche = from_core(Request::Psyche(flow_ethos::Said {
         context: "The living".into(),
@@ -2308,13 +2311,24 @@ fn a_working_codex_seat_is_drained_through_its_pane() {
         matches!(at_stop, crate::waking::AtStop::Kept(_)),
         "the working seat itself stays in its turn: {at_stop:?}"
     );
+    assert_eq!(fixture.seat_queue(), vec![psyche.clone(), brief.clone()]);
+    assert!(fixture.typed().is_none(), "nothing typed in the turn");
+    assert!(fake.queued_turn_texts().is_empty());
+
+    let completed = seat_responding(
+        &mut fixture,
+        vec![turn_notice("turn/completed", SEAT_THREAD, "turn-working")],
+        46,
+    );
     assert_eq!(fixture.typed_count(&psyche), 1);
     assert_eq!(fixture.typed_count(&brief), 1);
     assert_eq!(fixture.seat_queue(), vec![]);
-    assert!(fake.queued_turn_texts().is_empty());
+    assert!(completed.queued_turn_texts().is_empty());
     let typed = fixture.typed().unwrap_or_default();
-    assert!(typed.contains("Words."), "{typed}");
-    assert!(typed.contains("Brief."), "{typed}");
+    assert!(
+        typed.find("Words.") < typed.find("Brief."),
+        "oldest first: {typed}"
+    );
 }
 
 /// A turn of the seat's thread as `thread/turns/list` answers it with
@@ -2742,15 +2756,14 @@ fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
     assert_eq!(seat.state, State::Awake("908786".into()));
 }
 
-/// A Codex seat in a turn receives an owner-resolved-absent request through
-/// its pane without starting another native turn.
+/// A Codex seat in a turn keeps an owner-resolved-absent Soft request
+/// queued for its idle event, and starts no native turn for it.
 #[test]
-fn a_working_codex_seat_resolved_absent_uses_its_pane() {
+fn a_working_codex_seat_resolved_absent_waits_for_its_idle_event() {
     use crate::codex_turns::TurnEvent;
     let (fixture, fake, first) = codex_resolved_absent(TurnEvent::Started("turn-running".into()));
     assert!(fake.queued_turn_texts().is_empty());
-    assert_eq!(fixture.seat_queue(), vec![]);
-    assert_eq!(fixture.typed_count(&first), 1);
-    let typed = fixture.typed().unwrap_or_default();
-    assert!(typed.contains("First."), "{typed}");
+    assert_eq!(fixture.seat_queue(), vec![first.clone()]);
+    assert_eq!(fixture.typed_count(&first), 0);
+    assert!(fixture.typed().is_none());
 }

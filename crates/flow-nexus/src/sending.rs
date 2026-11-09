@@ -42,8 +42,8 @@ use crate::store::{
     ExistingSeatAdoption, FlowStore, NamesConfiguredModel, ReadsFlowMemory, RegistersExistingFlow,
 };
 use crate::waking::{
-    HoldsWakingMetaflows, PerformsWakeAndDrain, ReconcilesQueueDelivery, RestsEndedAwake,
-    SleepsAndWakesSeats,
+    HoldsSoftForIdle, HoldsWakingMetaflows, PerformsWakeAndDrain, ReconcilesQueueDelivery,
+    RestsEndedAwake, SleepsAndWakesSeats,
 };
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
@@ -297,8 +297,12 @@ impl SendsRequests for RunningNexus {
             // Own the address until the direct call has a receipt or a
             // durable non-retryable failure. Background drain/wake may not
             // submit this same request independently. A metaflow another
-            // holds takes the request into its queue instead.
-            let direct_requested = abrupt || self.live_awake_flow(&recipient).is_some();
+            // holds takes the request into its queue instead. A Soft request
+            // to a seat in its turn is queued for the seat's idle event.
+            let direct_requested = abrupt
+                || self
+                    .live_awake_flow(&recipient)
+                    .is_some_and(|flow_id| self.rests_now(&flow_id));
             let direct_lease = if direct_requested {
                 match self.direct_send_lease(&recipient) {
                     Ok(lease) => lease,

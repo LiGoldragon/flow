@@ -150,8 +150,10 @@ session, pane id and terminal id, with the harness kind. The agent name is a
 label a running flow may change; it is re-read from the snapshot and
 reported, never matched. `Deliver` renders the typed Message (its Priority
 head first), refuses a body carrying a control character or a harness command
-(`delivery::body`), refuses a Blocked recipient and an occupied composer, and
-for `Soft` a recipient that is not Idle or Done. `HardAbrupt` presses the
+(`delivery::body`), and refuses a Blocked recipient and an occupied composer.
+A `Soft` request is handed to it only at its recipient's idle event, the
+seat's Stop or its Codex thread's turn completed; until then it waits in its
+metaflow's queue (`waking::HoldsSoftForIdle`). `HardAbrupt` presses the
 profile's interrupt keys when the recipient is Working and records whether it
 was seen leaving Working; the composer is read before any key, so a draft
 refuses it without cancelling the recipient's turn, and a prompt the

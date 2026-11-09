@@ -6,7 +6,7 @@ use crate::store::metaflow::SleepsMetaflows;
 use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::send_server::{NamesThreadMetaflow, SendServerTrust, TrustsSendServers};
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, StoreError};
-use crate::waking::RestsEndedAwake;
+use crate::waking::{HoldsSoftForIdle, RestsEndedAwake};
 use crate::{RunningNexus, store::metaflow::MutatesMetaflows};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
@@ -223,7 +223,12 @@ impl DispatchesMetaflowPeer for RunningNexus {
                         &request.sendable_message,
                         signal_flow::SendableMessage::Soft(_)
                     );
-                    let direct_requested = abrupt || self.live_awake_flow(&recipient).is_some();
+                    // A Soft request to a seat in its turn is queued for the
+                    // seat's idle event.
+                    let direct_requested = abrupt
+                        || self
+                            .live_awake_flow(&recipient)
+                            .is_some_and(|flow_id| self.rests_now(&flow_id));
                     // A metaflow another holds takes the request into its
                     // queue instead.
                     let direct_lease = if direct_requested {

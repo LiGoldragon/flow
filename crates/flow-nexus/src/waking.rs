@@ -12,9 +12,16 @@
 //! request is handed over (`Operation::Drain`). With nothing queued, an
 //! OnDemand seat sleeps: its harness is closed under the pane's lease and
 //! its flow recorded Stopped, its metaflow Asleep, keeping its Address and
-//! the flow's transcript; a Maintained seat stays Awake in its pane. Work
-//! queued later for an Awake seat known resting, by the same evidence, is
-//! handed over at once.
+//! the flow's transcript; a Maintained seat stays Awake in its pane.
+//!
+//! A HardAbrupt or MiddleAbrupt request queued later for an Awake seat is
+//! handed over at once, with the Soft work queued before it; the delivery
+//! engine interrupts only for HardAbrupt. Soft work alone waits for the
+//! seat's idle event, the turn end above, which hands over the whole queue,
+//! oldest first ([`HoldsSoftForIdle`]). A seat known resting by the same
+//! evidence has had its idle event, and its Soft work is handed over at
+//! once. Held Soft work is the metaflow's durable queue, so a Nexus that
+//! starts again holds it as before.
 //!
 //! A seat past its model's refresh threshold is replaced at its Stop,
 //! whatever Herdr shows of its pane: the Stop is the idle fact. A
@@ -124,6 +131,42 @@ pub trait WakePolicy {
 }
 
 impl WakePolicy for RunningNexus {}
+
+/// Soft work waits for its recipient's idle event. HardAbrupt and
+/// MiddleAbrupt are handed to an Awake seat when they arrive; a queue that
+/// holds only Soft work is handed over at the seat's next idle event, its
+/// Stop or its thread's turn completed, which drains the whole queue, oldest
+/// first. A seat whose last turn event already is its rest has had that
+/// event, and is handed its Soft work when it arrives.
+pub trait HoldsSoftForIdle {
+    /// Whether the seat's last turn event is its rest: a Codex thread its
+    /// app-server's events show resting, a Claude seat whose transcript
+    /// records its main turn's end.
+    fn rests_now(&self, flow_id: &str) -> bool;
+    /// Whether `queue`, at the seat Awake as `flow_id`, waits for that
+    /// seat's idle event: it holds only Soft work and the seat is in its
+    /// turn.
+    fn waits_for_idle(&self, queue: &[QueueEntry], flow_id: &str) -> bool;
+}
+
+impl HoldsSoftForIdle for RunningNexus {
+    fn rests_now(&self, flow_id: &str) -> bool {
+        match self.store.flow_node(flow_id) {
+            Ok(Some(node)) => match node.harness_kind {
+                HarnessKind::Codex => self.codex_resting(flow_id),
+                HarnessKind::Claude => self.claude_main_turn_ended(&node),
+            },
+            _ => false,
+        }
+    }
+
+    fn waits_for_idle(&self, queue: &[QueueEntry], flow_id: &str) -> bool {
+        queue
+            .iter()
+            .all(|entry| matches!(entry.message, signal_flow::Message::Soft(_)))
+            && !self.rests_now(flow_id)
+    }
+}
 
 /// The metaflows a wake is running for. Held for the whole wake and its
 /// drain; released under the dispatch gate once the queue is seen empty.
@@ -1323,8 +1366,12 @@ impl SleepsAndWakesSeats for RunningNexus {
                 let _ = self.perform(Operation::Record(Record_Data::Exited(flow_id)));
                 return;
             }
-            // Every priority is submitted immediately to an Awake seat.
-            // The delivery engine interrupts only for HardAbrupt.
+            // Pressing work is handed over now, the Soft work queued before
+            // it included; the delivery engine interrupts only for
+            // HardAbrupt. Soft work alone waits for the seat's idle event.
+            if self.waits_for_idle(&metaflow.queue, &flow_id) {
+                return;
+            }
             if let Some(lease) = self.waking.hold(address) {
                 let _ = self.drain_all_held(address.clone(), &lease);
             }

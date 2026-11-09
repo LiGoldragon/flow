@@ -457,6 +457,135 @@ fn a_request_to_an_idle_awake_claude_flow_is_delivered_into_its_pane() {
     );
 }
 
+/// A Maintained Claude seat Awake at the Sol Address, and a caller bound in
+/// pane-1 to send it work. Returns the caller, killed on drop, and its
+/// process.
+pub(super) fn soft_recipient(
+    fixture: &NexusFixture,
+    resting: bool,
+) -> (super::MarkedProcess, signal_flow::Process) {
+    use crate::store::{FlowStore, ReadsFlowMemory};
+    super::bind_existing_caller(fixture, "a001", "pane-1");
+    claude_seat(fixture, 40_000);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Model::Sol,
+        State::Awake(CLAUDE_SEAT.into()),
+        vec![],
+        vec![],
+    ));
+    maintain(fixture, address(Model::Sol));
+    soft_recipient_shows(fixture, resting);
+    let caller = super::MarkedProcess::spawn("sleep", &["30"], "pane-1");
+    let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
+    (caller, peer)
+}
+
+/// Shows the seat in its turn, Herdr showing it Working and its transcript
+/// recording no end of its main turn, or resting, its transcript recording
+/// that end and Herdr showing it Idle.
+pub(super) fn soft_recipient_shows(fixture: &NexusFixture, resting: bool) {
+    if resting {
+        append_main_rows(fixture, &[end_turn("turn-ended")]);
+    }
+    let seat = if resting {
+        claude_agent(fixture)
+    } else {
+        working_claude_agent(fixture)
+    };
+    fixture.accept_pane_operations(
+        vec![super::codex_agent_in("pane-1", "terminal-pane-1"), seat],
+        PromptFixture::Prompted("w1:p3"),
+    );
+}
+
+/// Sends `body` Soft from `peer` to the seat as a flow's own Send is
+/// answered: a request left pending is scheduled again once answered.
+pub(super) fn send_soft(
+    fixture: &NexusFixture,
+    peer: &signal_flow::Process,
+    body: &str,
+) -> signal_flow::Response {
+    use crate::sending::SendsRequests;
+    let answer = fixture.nexus.send_request(
+        signal_flow::SendRequest {
+            recipient: address(Model::Sol),
+            sendable_message: super::sendable_message(Message::Soft(Request::Order(body.into()))),
+        },
+        Some(peer),
+    );
+    if let Some(pending) = answer.pending {
+        fixture.nexus.wake_due(pending.address);
+    }
+    answer.response
+}
+
+/// A Soft request to a seat in its turn is held in its queue, and the
+/// seat's Stop, its idle event, hands it over.
+#[test]
+fn a_held_soft_is_delivered_at_its_recipients_idle_event() {
+    let fixture = NexusFixture::new();
+    let (_caller, peer) = soft_recipient(&fixture, false);
+    let response = send_soft(&fixture, &peer, "Read the ruling when you rest.");
+    assert!(
+        matches!(response, signal_flow::Response::SendAccepted(_)),
+        "{response:?}"
+    );
+    assert!(fixture.typed().is_none(), "nothing typed during the turn");
+    assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1, "held");
+
+    soft_recipient_shows(&fixture, true);
+    fixture
+        .nexus
+        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+
+    let typed = fixture.typed().expect("typed at the Stop");
+    assert!(typed.contains("Read the ruling when you rest."), "{typed}");
+    assert!(stored(&fixture, Model::Sol).queue.is_empty());
+    assert_eq!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(CLAUDE_SEAT.into())
+    );
+}
+
+/// Several Soft requests held during one turn are handed over together at
+/// its one idle event, oldest first.
+#[test]
+fn several_held_soft_messages_are_delivered_in_order_at_one_idle_event() {
+    let fixture = NexusFixture::new();
+    let (_caller, peer) = soft_recipient(&fixture, false);
+    for body in ["First held.", "Second held.", "Third held."] {
+        let response = send_soft(&fixture, &peer, body);
+        assert!(
+            matches!(response, signal_flow::Response::SendAccepted(_)),
+            "{response:?}"
+        );
+    }
+    assert!(fixture.typed().is_none(), "nothing typed during the turn");
+    assert_eq!(stored(&fixture, Model::Sol).queue.len(), 3, "all held");
+
+    soft_recipient_shows(&fixture, true);
+    fixture
+        .nexus
+        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+
+    let typed = fixture.typed().expect("typed at the Stop");
+    let at = |body: &str| {
+        typed
+            .find(body)
+            .unwrap_or_else(|| panic!("{body}: {typed}"))
+    };
+    assert!(
+        at("First held.") < at("Second held.") && at("Second held.") < at("Third held."),
+        "oldest first: {typed}"
+    );
+    assert_eq!(
+        super::prompts(&fixture.directory.path().join("herdr-operations.log")).len(),
+        1,
+        "one idle event, one hand-over"
+    );
+    assert!(stored(&fixture, Model::Sol).queue.is_empty());
+}
+
 /// A hand-over types every queued message as its own NativeInput under
 /// its own sender: a Task from one flow, the reminder Flow raised for it
 /// and a Done from another flow reach the pane as one top-level vector,

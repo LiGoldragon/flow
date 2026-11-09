@@ -88,8 +88,11 @@ key.
 The body may hold no control character but LF and TAB (`ControlCharacter`
 carries the byte offset in the pane text), and a first line that is a harness
 command is refused as `HarnessCommand`: use `Command`. Every tier needs the
-recipient bound, not Blocked, and its composer blank; `Soft` also needs it Idle
-or Done. `HardAbrupt` presses the harness profile's interrupt keys when the
+recipient bound, not Blocked, and its composer blank. A `Soft` Send to a
+recipient in its turn waits in its metaflow's queue for the recipient's idle
+event, its Stop or its Codex thread's turn completed, and is delivered then
+with everything queued for it, oldest first; `HardAbrupt` and `MiddleAbrupt`
+are delivered when they arrive. `HardAbrupt` presses the harness profile's interrupt keys when the
 recipient is Working and reports whether it was seen leaving Working; it reads
 the composer first, and a draft there refuses it before any key. A prompt the
 interrupt puts back into the blank composer is the cancelled turn's, and it is

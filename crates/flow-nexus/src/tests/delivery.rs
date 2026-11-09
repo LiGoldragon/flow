@@ -125,46 +125,43 @@ impl NexusFixture {
     }
 }
 
+/// A Soft Send waits for an idle recipient. To a seat in its turn nothing
+/// is typed and the request stays queued, accepted; a seat whose turn has
+/// ended has had its idle event, and the same Send is typed at once, without
+/// an interrupt.
 #[test]
-fn soft_is_presented_immediately_without_interrupting_a_working_recipient() {
+fn soft_waits_for_an_idle_recipient() {
+    use super::waking::{send_soft, soft_recipient, stored};
     let fixture = NexusFixture::new();
-    let log = fixture.accept_pane_operations(
-        vec![fixture.current_agent()],
-        PromptFixture::Prompted("w1:p3"),
+    let (_caller, peer) = soft_recipient(&fixture, false);
+    let response = send_soft(&fixture, &peer, "when you rest");
+    assert!(
+        matches!(response, Response::SendAccepted(_)),
+        "{response:?}"
     );
-    fixture.register_with(FlowLifecycle::Active);
+    assert!(prompts(&fixture.directory.path().join("herdr-operations.log")).is_empty());
+    assert_eq!(fixture.typed(), None);
     assert_eq!(
-        fixture.deliver("soft-1", Message::Soft(letter("when you rest"))),
-        MetaResponse::Delivered(meta_signal_flow::VisibleDelivery {
-            interrupt_witness: InterruptWitness::NotRequested,
-            delivery_grade: DeliveryGrade::Transported,
-        })
+        stored(&fixture, signal_flow::Model::Sol).queue.len(),
+        1,
+        "held for the idle event"
     );
-    let submitted = prompts(&log);
-    assert_eq!(submitted.len(), 1);
-    assert!(submitted[0].contains("agent prompt w1:p3 Soft.{ Notification Text.«when you rest» }"));
     assert_eq!(
-        fixture.typed().as_deref(),
-        Some("Soft.{ Notification Text.«when you rest» }")
+        stored(&fixture, signal_flow::Model::Sol).queue[0].message,
+        signal_flow::Message::Soft(signal_flow::Request::Order("when you rest".into()))
     );
 
     let fixture = NexusFixture::new();
-    fixture.accept_pane_operations(
-        vec![fixture.settled_agent()],
-        PromptFixture::Prompted("w1:p3"),
+    let (_caller, peer) = soft_recipient(&fixture, true);
+    send_soft(&fixture, &peer, "when you rest");
+    let typed = fixture.typed().expect("typed into the resting seat");
+    assert!(typed.contains("when you rest"), "{typed}");
+    assert!(
+        !fixture.operations().contains("send-keys"),
+        "no interrupt: {}",
+        fixture.operations()
     );
-    fixture.register_with(FlowLifecycle::Active);
-    assert_eq!(
-        fixture.deliver("soft-2", Message::Soft(letter("when you rest"))),
-        MetaResponse::Delivered(meta_signal_flow::VisibleDelivery {
-            interrupt_witness: InterruptWitness::NotRequested,
-            delivery_grade: DeliveryGrade::Presented,
-        })
-    );
-    assert_eq!(
-        fixture.typed().as_deref(),
-        Some("Soft.{ Notification Text.«when you rest» }")
-    );
+    assert!(stored(&fixture, signal_flow::Model::Sol).queue.is_empty());
 }
 
 /// Both native harnesses use one pane delivery path at every priority and

@@ -2886,11 +2886,16 @@ mod tests {
             )
             .expect("rollout written");
         }
-        let previous = fs::read(&fixture.snapshot_program).ok();
+        let previous = fs::read_to_string(&fixture.snapshot_program).ok();
         herdr_world(fixture, agents, std::process::id());
         let result = run();
+        // Restored as every fixture script is installed, never written from
+        // this process (fixture_executable).
         match previous {
-            Some(bytes) => fs::write(&fixture.snapshot_program, bytes).expect("Herdr restored"),
+            Some(body) => FixtureExecutable {
+                path: fixture.snapshot_program.clone(),
+            }
+            .install(&body),
             None => {
                 let _ = fs::remove_file(&fixture.snapshot_program);
             }

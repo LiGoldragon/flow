@@ -1059,30 +1059,36 @@ impl Dispatches for RunningNexus {
 }
 
 #[cfg(feature = "executable-default-configuration")]
-fn validate_executable_default_configuration(
-    configuration: &meta_signal_flow::ConfigureNexus,
-) -> Result<(), store::StoreError> {
-    let required_paths = [
-        configuration.source_root.as_str(),
-        configuration.stable_codex.client_path.as_str(),
-        configuration.stable_codex.home.as_str(),
-        configuration.stable_codex.control_socket_path.as_str(),
-        configuration.next_codex.client_path.as_str(),
-        configuration.next_codex.home.as_str(),
-        configuration.next_codex.control_socket_path.as_str(),
-        configuration.curriculum_nexus_path.as_str(),
-    ];
-    if required_paths
-        .iter()
-        .any(|path| !Path::new(path).is_absolute())
-        || configuration.stable_codex.model_name_vector.is_empty()
-        || configuration.harness_profiles.is_empty()
-        || configuration.meta_aspects.is_empty()
-        || configuration.lease <= 0
-    {
-        return Err(store::StoreError::MissingDefaultConfiguration);
+trait ChecksExecutableDefault {
+    fn validate_executable_default_configuration(&self) -> Result<(), store::StoreError>;
+}
+
+#[cfg(feature = "executable-default-configuration")]
+impl ChecksExecutableDefault for meta_signal_flow::ConfigureNexus {
+    fn validate_executable_default_configuration(&self) -> Result<(), store::StoreError> {
+        let configuration = self;
+        let required_paths = [
+            configuration.source_root.as_str(),
+            configuration.stable_codex.client_path.as_str(),
+            configuration.stable_codex.home.as_str(),
+            configuration.stable_codex.control_socket_path.as_str(),
+            configuration.next_codex.client_path.as_str(),
+            configuration.next_codex.home.as_str(),
+            configuration.next_codex.control_socket_path.as_str(),
+            configuration.curriculum_nexus_path.as_str(),
+        ];
+        if required_paths
+            .iter()
+            .any(|path| !Path::new(path).is_absolute())
+            || configuration.stable_codex.model_name_vector.is_empty()
+            || configuration.harness_profiles.is_empty()
+            || configuration.meta_aspects.is_empty()
+            || configuration.lease <= 0
+        {
+            return Err(store::StoreError::MissingDefaultConfiguration);
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 pub trait OpensRunningNexus {
@@ -1106,7 +1112,7 @@ impl OpensRunningNexus for RunningNexus {
         #[cfg(feature = "executable-default-configuration")]
         if !store_path.exists() {
             let default = executable_default_configuration::executable_default_configuration();
-            validate_executable_default_configuration(&default)?;
+            default.validate_executable_default_configuration()?;
             let configuration_store = store::ConfigurationOnlyStore::open(store_path)?;
             if configuration_store.configuration_snapshot()?.is_none() {
                 configuration_store

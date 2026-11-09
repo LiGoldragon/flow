@@ -64,7 +64,19 @@
           workspace = base.lib.workspace.${system} {
             cargoNix = ./Cargo.nix;
             memberChecks = _: memberChecks // lib.genAttrs untested (_: null);
-            extraChecks = _: extraChecks;
+            extraChecks =
+              { clippy, doc, ... }:
+              extraChecks
+              // {
+                # The base's clippy over every target of each member, and its
+                # rustdoc over each library, warnings denied.
+                clippy = pkgs.linkFarm "flow-clippy" (
+                  lib.mapAttrs (name: features: clippy name features [ "-D" "warnings" ]) lintFeatures
+                );
+                doc = pkgs.linkFarm "flow-doc" (
+                  lib.mapAttrs (name: features: doc name features [ "-D" "warnings" ]) lintFeatures
+                );
+              };
           };
           members = removeAttrs workspace.packages [ "default" ];
           # The frozen pre-request-id contracts the memory upgrade reads.
@@ -218,19 +230,11 @@
             inherit (members) flow flow-meta flow-nexus;
           };
           workspaceBinaries = binaries "flow-workspace-${version}" (lib.attrValues commands) { };
-          # Each member's test build compiled again through clippy-driver,
-          # over the same dependency builds: its library, binaries and tests,
-          # as `cargo clippy --all-targets` lints them.
-          lint =
-            tests:
-            tests.override {
-              useClippy = true;
-              clippy = context.toolchain;
-              # rustc keeps the first cap; forbid caps nothing, so
-              # -D warnings holds.
-              capLints = "forbid";
-              extraRustcOpts = [ "-D warnings" ];
-            };
+          # The feature sets each member is linted and documented under: every
+          # member as its dependents build it, flow-ethos in its datom form.
+          lintFeatures = lib.genAttrs (lib.attrNames workspace.tests) (_: [ "default" ]) // {
+            flow-ethos = [ "default" "datom" ];
+          };
           # The Rust text alone, for the checks that read it and compile
           # nothing.
           rustSource = lib.cleanSourceWith {
@@ -356,7 +360,6 @@
               cargo fmt --all --check
               touch "$out"
             '';
-            clippy = pkgs.linkFarm "flow-clippy" (lib.mapAttrs (_: lint) testBuilds);
             # The capsule runner's own logic that runs no capsule: where a run
             # keeps its witnesses and what it copies there before teardown,
             # and its waits on their events (inotify, pidfd, a socket). The
@@ -453,7 +456,7 @@
             checkEnvironments
             memberChecks
             workspaceBinaries
-            lint
+            lintFeatures
             rustSource
             lawSource
             ;

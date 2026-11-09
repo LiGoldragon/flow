@@ -32,9 +32,10 @@ fn a_waking_datom_composes_and_prints_back_unchanged() {
 #[test]
 fn a_waking_keeps_each_sender_as_admitted() {
     let senders: Vec<String> = waking()
+        .0
         .iter()
         .map(|input| match &input.sender {
-            Sender::Flow(flow) => flow.flow_id.clone(),
+            Sender::Flow(flow) => flow.flow_id.0.clone(),
             Sender::Living => "Living".to_owned(),
             Sender::Notification => "Notification".to_owned(),
         })
@@ -45,14 +46,14 @@ fn a_waking_keeps_each_sender_as_admitted() {
 #[test]
 fn an_order_carries_its_minutes_and_a_result_names_its_order() {
     let inputs = waking();
-    let Message::Soft(Request::Order(order)) = &inputs[0].message else {
+    let Message::Soft(Request::Order(order)) = &inputs.0[0].message else {
         panic!("the first input is a Soft Order");
     };
-    assert_eq!(order.minutes, 30);
-    let Message::MiddleAbrupt(Request::Result(result)) = &inputs[2].message else {
+    assert_eq!(order.minutes.0, 30);
+    let Message::MiddleAbrupt(Request::Result(result)) = &inputs.0[2].message else {
         panic!("the third input is a MiddleAbrupt Result");
     };
-    assert_eq!(result.logical_delivery_id, inputs[0].logical_delivery_id);
+    assert_eq!(result.logical_delivery_id, inputs.0[0].logical_delivery_id);
 }
 
 #[test]

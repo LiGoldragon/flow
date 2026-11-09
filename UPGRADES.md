@@ -1,8 +1,8 @@
 # Flow 0.53.3: replacement waits for rest; a Stop carries its background work
 
-Pins signal-flow 57.0.0 (`8e56457`), meta-signal-flow 72.0.0 (`0ee6593`),
-Message 0.22.1 (`e8299aa`), signal-message 21.0.1 (`a5e04b7`) and
-meta-signal-message 3.0.1 (`1ec9e00`).
+Pins signal-flow 57.0.0 (`3d0a4cd`), meta-signal-flow 72.0.0 (`27d06b7`),
+Message 0.22.1 (`f46b38e`), signal-message 21.0.1 (`998c824`) and
+meta-signal-message 3.0.1 (`4d81b64`).
 
 - A Claude seat rests when its own last Stop names no background work and
   its turn is shown ended. Closing (a refresh, an OnDemand sleep) waits for
@@ -53,6 +53,20 @@ meta-signal-message 3.0.1 (`1ec9e00`).
   it names, or a Codex thread's turn completed, once per turn, for a flow a
   metaflow is Awake as. The last of each harness is kept in
   `flow_nexus_turn_ends` (new, empty in a 0.53.2 store).
+- `Observe.Metaflows` streams the metaflows: `MetaflowsObserved` on open,
+  the metaflows as `Metaflows` lists them, then at each commit that changes
+  a metaflow's row or its declaration, `MetaflowChanged.Metaflow` for each
+  one no longer as last sent and `MetaflowGone.Address` for each no longer
+  listed. Memory announces those commits: the first subscriber registers
+  two engine subscriptions (the metaflow table and the declarations), kept
+  for the Nexus's life, so the store's subscription registry gains two rows
+  per Nexus run that is subscribed to. `Metaflows` stays the one-shot read.
+- The calls a Codex app-server replays on a resumed thread are taken up to a
+  second `thread/resume` of the same thread, whose answer follows the replay
+  (the app-server's thread listener answers each resume of a running thread
+  only after the replay of the one before it), then answered, and the
+  connection closes once a `thread/read`'s answer shows the answers read.
+  No window is waited out.
 - A socket appears at its name only once it listens: it is bound under
   `<runtime>/.<name>.<pid>`, its mode set to `0600`, made to listen, then
   renamed to its name (a stale socket there is replaced by the rename, a

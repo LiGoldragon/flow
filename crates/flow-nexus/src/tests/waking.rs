@@ -5045,8 +5045,11 @@ fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
             .unwrap()
     );
     // The app-server the restarted Nexus meets: the send-tool probe; the
-    // connection that resumes the thread, to which the pending call is
-    // replayed; and the account that archives the thread.
+    // connection that resumes the thread, to which the pending calls are
+    // replayed after its answer, then the barrier's answer, then the
+    // calls again (the barrier is itself a resume), then the answer to the
+    // read that shows the answers read; and the account that archives the
+    // thread.
     let initialized = websocket_frame(r#"{"id":1,"result":{}}"#);
     let probe = [
         initialized.clone(),
@@ -5060,6 +5063,11 @@ fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
         websocket_frame(r#"{"id":2,"result":{"thread":{}}}"#),
     ]
     .concat();
+    let barrier = [
+        websocket_frame(r#"{"id":3,"result":{"thread":{}}}"#),
+        websocket_frame(r#"{"id":4,"result":{"thread":{}}}"#),
+    ];
+    let (barrier, answers_read) = (&barrier[0], &barrier[1]);
     let account = [
         initialized.clone(),
         websocket_frame(r#"{"id":2,"result":{"data":[{"status":"inProgress"}]}}"#),
@@ -5077,11 +5085,111 @@ fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
         path: app_server.clone(),
     }
     .install(&format!(
-        "#!/bin/sh\nS='{state}'\nn=$(cat \"$S/restart-invocations\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$S/restart-invocations\"\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$S/restart-record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\ncase \"$((n % 3))\" in\n  1) printf '%b' '{probe}' ;;\n  2) printf '%b' '{resumed}'; printf '%b' \"$(cat \"$S/first-call\")\" ;;\n  0) if [ -e \"$S/archive-refused\" ]; then printf '%b' '{archive_refused}'; else printf '%b' '{account}'; fi ;;\nesac\nwait\n",
+        "#!/bin/sh\nS='{state}'\nn=$(cat \"$S/restart-invocations\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$S/restart-invocations\"\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$S/restart-record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\ncase \"$((n % 3))\" in\n  1) printf '%b' '{probe}' ;;\n  2) printf '%b' '{resumed}'; replay() {{ for c in first-call second-call; do [ -e \"$S/$c\" ] && printf '%b' \"$(cat \"$S/$c\")\"; done; }}; replay; printf '%b' '{barrier}'; replay; printf '%b' '{answers_read}' ;;\n  0) if [ -e \"$S/archive-refused\" ]; then printf '%b' '{archive_refused}'; else printf '%b' '{account}'; fi ;;\nesac\nwait\n",
         state = setup.world.state.display(),
     ));
     fixture.nexus.codex_endpoints.edit().stable.client_path = app_server;
     setup
+}
+
+/// What the restarted Nexus wrote on the connection `record` that resumed
+/// the interrupted thread, once it holds the read that shows the answers
+/// read: the Nexus writes that read after the answers, and the fixture
+/// copies the connection in order.
+fn resumed_connection(state: &std::path::Path, record: &str) -> Vec<serde_json::Value> {
+    use super::send_tool::ReadsClientFrames;
+    use crate::event_wait::AwaitsDirectory;
+    let path = state.join(record);
+    let shows_read = |messages: &[serde_json::Value]| {
+        messages.iter().any(|message| {
+            message.get("method").and_then(serde_json::Value::as_str) == Some("thread/read")
+                && message.get("id") == Some(&serde_json::json!(4))
+        })
+    };
+    let held = state.until_holds(
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+        &mut || shows_read(&path.client_messages()),
+    );
+    let messages = path.client_messages();
+    assert!(held, "the answers are shown read: {messages:?}");
+    messages
+}
+
+/// The calls an app-server replays on resume are all taken, however many:
+/// the Nexus resumes the thread a second time as the replay's end (the
+/// app-server answers each resume of a running thread only after the
+/// replay of the one before it), answers each call once, after that end,
+/// and closes the connection only once a read's answer shows its answers
+/// read. No window is waited out: the calls the barrier's own resume
+/// replays again after its answer are not answered twice.
+#[test]
+fn every_call_replayed_before_the_resume_barrier_is_answered_once() {
+    use crate::launching::ReconcilesInterruptedLaunches;
+    let mut fixture = NexusFixture::new();
+    let setup = interrupted_launch(&mut fixture);
+    let state = setup.world.state.clone();
+    let second = serde_json::json!({
+        "id": FIRST_CALL_REQUEST + 1,
+        "method": "item/tool/call",
+        "params": {
+            "threadId": FRESH_THREAD,
+            "turnId": "turn-fresh",
+            "callId": "call-second",
+            "tool": "send",
+            "arguments": {
+                "target": {
+                    "aspect": "Mind",
+                    "topic": setup.recipient.topic,
+                    "model": format!("{:?}", setup.recipient.model)
+                },
+                "priority": "Soft",
+                "kind": "Order",
+                "body": "a second call"
+            }
+        }
+    });
+    fs::write(
+        state.join("second-call"),
+        websocket_frame(&second.to_string()),
+    )
+    .unwrap();
+
+    fixture.nexus.reconcile_interrupted_launches();
+
+    let written = resumed_connection(&state, "restart-record-2");
+    let position = |holds: &dyn Fn(&serde_json::Value) -> bool| {
+        written
+            .iter()
+            .position(holds)
+            .unwrap_or_else(|| panic!("not written: {written:?}"))
+    };
+    let request = |id: u64, method: &'static str| {
+        move |message: &serde_json::Value| {
+            message.get("id") == Some(&serde_json::json!(id))
+                && message.get("method").and_then(serde_json::Value::as_str) == Some(method)
+        }
+    };
+    let resumed = position(&request(2, "thread/resume"));
+    let barrier = position(&request(3, "thread/resume"));
+    let read = position(&request(4, "thread/read"));
+    for call in [FIRST_CALL_REQUEST, FIRST_CALL_REQUEST + 1] {
+        let answers = written
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| {
+                message.get("id") == Some(&serde_json::json!(call))
+                    && message.get("method").is_none()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(answers.len(), 1, "call {call} answered once: {written:?}");
+        let (at, answer) = answers[0];
+        assert!(
+            resumed < barrier && barrier < at && at < read,
+            "{written:?}"
+        );
+        assert!(answer.to_string().contains("ThreadUnowned"), "{answer}");
+    }
+    assert!(stored(&fixture, Model::Sol).queue.is_empty());
 }
 
 /// A Nexus restarted after a Codex launch had durably opened its thread
@@ -5103,7 +5211,7 @@ fn a_launch_interrupted_with_its_first_call_pending_is_refused_archived_and_sett
 
     fixture.nexus.reconcile_interrupted_launches();
 
-    let replayed = state.join("restart-record-2").client_messages();
+    let replayed = resumed_connection(&state, "restart-record-2");
     let answer = replayed
         .iter()
         .find(|message| message.get("id") == Some(&serde_json::json!(FIRST_CALL_REQUEST)))
@@ -5435,7 +5543,7 @@ fn an_interrupted_launch_whose_cleanup_fails_is_settled_and_its_cleanup_resumed(
         fixture.nexus.store.launch_outcome(&launch).unwrap(),
         settled
     );
-    let replayed = state.join("restart-record-5").client_messages();
+    let replayed = resumed_connection(&state, "restart-record-5");
     assert!(
         replayed
             .iter()
@@ -5478,7 +5586,6 @@ fn an_interrupted_launch_whose_cleanup_fails_is_settled_and_its_cleanup_resumed(
 /// replay from its record and queues nothing more.
 #[test]
 fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_restart() {
-    use super::send_tool::ReadsClientFrames;
     use crate::generated::send_tool::{HandlesSendCall, ReadsToolCall, SendOutcome, ToolCall};
     use crate::launching::ReconcilesInterruptedLaunches;
     use crate::store::send_call::KeepsSendCalls;
@@ -5533,7 +5640,7 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
 
     restarted.nexus.reconcile_interrupted_launches();
 
-    let replayed = state.join("restart-record-2").client_messages();
+    let replayed = resumed_connection(&state, "restart-record-2");
     let answer = replayed
         .iter()
         .find(|message| message.get("id") == Some(&serde_json::json!(FIRST_CALL_REQUEST)))

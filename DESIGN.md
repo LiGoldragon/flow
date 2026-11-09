@@ -362,7 +362,9 @@ NativeLaunchIntentRecorded or NativeBound. Its outcome and its cleanup are
 apart: the Nexus first records the launch's cleanup, a thread step and a
 pane step both Pending, then settles the launch
 `NativeLaunchRefused.{ Spawn Unclassified }`. The thread step resumes the
-thread and answers each replayed call: one the earlier Nexus committed is
+thread, resumes it again as the replay's end (the app-server answers a
+resume of a running thread only after the replay of the one before), and
+answers each call replayed before that end: one the earlier Nexus committed is
 answered from its record and queues nothing more, any other is refused
 `ThreadUnowned` and queues nothing; then it archives the thread, and is Done
 only once the archive succeeded. The pane step takes down its pane and any

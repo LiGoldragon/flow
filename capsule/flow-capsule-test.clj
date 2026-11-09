@@ -402,6 +402,50 @@
                                              flow-capsule/waking-seat)))
     (println "skip | scenario 20's seat in configure.datom: no configure.datom beside this file")))
 
+;; The capsule's watch waits on Observe.Metaflows: it holds the metaflows
+;; the opening frame lists, replaces or adds one at each MetaflowChanged,
+;; drops one at each MetaflowGone, and asks its predicate at each frame,
+;; never on a timer. A Nexus that opens on another frame, or ends before
+;; opening, serves no subscription.
+(let [opening "MetaflowsObserved.[ { { Psyche test Fable } Asleep [] [] } { { Mind test Sol } Awake.c1a0de [] [] } ]"
+      woke "MetaflowChanged.{ { Psyche test Fable } Awake.5ec0d1 [] [] }"
+      fresh "MetaflowChanged.{ { Psyche test Haiku } Awake.f1c841 [] [] }"
+      gone "MetaflowGone.{ Mind test Sol }"
+      fold (fn [lines] (reduce flow-capsule/fold-metaflows nil (map flow-capsule/read-datom lines)))
+      at (fn [lines address]
+           (flow-capsule/metaflow (flow-capsule/listed-of (fold lines)) address))
+      queue (fn [lines]
+              (let [q (java.util.concurrent.LinkedBlockingQueue.)]
+                (doseq [line lines] (.put q line))
+                q))
+      ;; A deadline far off: every answer here comes from a frame queued.
+      later (+ (System/currentTimeMillis) 600000)]
+  (check "the opening frame lists the metaflows"
+         (= {:state :awake :flow "c1a0de" :past [] :queue []} (at [opening] "{ Mind test Sol }")))
+  (check "a change replaces the metaflow at its Address"
+         (= :awake (:state (at [opening woke] "{ Psyche test Fable }"))))
+  (check "a change at a new Address adds it"
+         (= "f1c841" (:flow (at [opening fresh] "{ Psyche test Haiku }"))))
+  (check "a metaflow gone is no longer held"
+         (and (nil? (at [opening gone] "{ Mind test Sol }"))
+              (= 1 (count (fold [opening gone])))))
+  (check "nothing is held before the opening frame"
+         (nil? (fold [woke])))
+  (check "the predicate is asked at each frame, over the subscription's metaflows"
+         (= "5ec0d1"
+            (flow-capsule/watch-frames later #(:flow (flow-capsule/current "{ Psyche test Fable }"))
+                                       (queue [opening woke :flow-capsule/ended]))))
+  (check "a stream that ends first answers the last answer"
+         (nil? (flow-capsule/watch-frames later #(:flow (flow-capsule/current "{ Psyche test Fable }"))
+                                          (queue [opening :flow-capsule/ended]))))
+  (check "a Nexus that opens on another frame serves no subscription"
+         (= :flow-capsule/unavailable
+            (flow-capsule/watch-frames later (constantly true)
+                                       (queue ["Refused.Store.«down»" :flow-capsule/ended]))))
+  (check "a stream that ends before opening serves no subscription"
+         (= :flow-capsule/unavailable
+            (flow-capsule/watch-frames later (constantly true) (queue [:flow-capsule/ended])))))
+
 (if (seq @failures)
   (do (println (str (count @failures) " failed")) (System/exit 1))
   (println "all passed"))

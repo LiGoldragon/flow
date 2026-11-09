@@ -80,13 +80,16 @@ fn unreported_codex(pane: &str) -> serde_json::Value {
 
 /// A command the app-server runs for `thread`, in no pane.
 fn command_of(thread: &str) -> (SpawnedProcess, signal_flow::Process) {
+    use crate::exec_witness::SpawnsWitnessedExec;
+    // Spawned so that the spawn returns once its exec is complete: its
+    // environment, the thread it names, is readable from then on.
     let command = SpawnedProcess(
         std::process::Command::new("sleep")
             .arg("30")
             .env_remove("HERDR_PANE_ID")
             .env_remove("HERDR_SESSION")
             .env("CODEX_THREAD_ID", thread)
-            .spawn()
+            .spawn_after_exec()
             .unwrap(),
     );
     let process = FlowStore::process_identity_for_pid(command.0.id()).unwrap();
@@ -272,20 +275,23 @@ impl CodexCliWorld {
         let shell_pid = pid("shell.pid");
         let script_pid = pid("script.pid");
         let wrapper_pid = pid("wrapper.pid");
+        // The wrapper waits behind `go`; traced before it is let go, it is
+        // seen again once its exec of the CLI is complete.
+        let exec = {
+            use crate::exec_witness::{SeizesUntilExec, Tracee};
+            Tracee::seized(wrapper_pid).expect("the wrapper is traced until its exec")
+        };
         go.release();
+        crate::exec_witness::SeizesUntilExec::exec_completed(exec)
+            .expect("the wrapper execs the real flow CLI");
         let cli = CallerProcess {
             process_id: wrapper_pid,
         };
-        loop {
-            if cli.executable().as_ref() == Some(&self.flow) {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "wrapper execs the real flow CLI"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        assert_eq!(
+            cli.executable().as_ref(),
+            Some(&self.flow),
+            "wrapper execs the real flow CLI"
+        );
         assert_eq!(
             cli.parent().map(|parent| parent.process_id),
             Some(script_pid)
@@ -800,14 +806,6 @@ fn failed_process_authority_evidence_never_becomes_owner() {
 
     let unconfigured = NexusFixture::new();
     let (_marked_child, marked) = command_of("unknown-native-session");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while unconfigured.nexus.process_authority(&marked).unwrap() == ProcessAuthority::Owner {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "child environment appears"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
     assert_eq!(
         unconfigured.nexus.process_authority(&marked).unwrap(),
         ProcessAuthority::Rejected,
@@ -821,14 +819,6 @@ fn failed_process_authority_evidence_never_becomes_owner() {
     let configured = NexusFixture::new();
     configured.serves_codex_commands();
     let (_unknown_child, unknown) = command_of("unknown-native-session");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while configured.nexus.process_authority(&unknown).unwrap() == ProcessAuthority::Owner {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "child ancestry appears"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
     assert_eq!(
         configured.nexus.process_authority(&unknown).unwrap(),
         ProcessAuthority::Rejected,

@@ -528,12 +528,12 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "message-defaults"
 version = "0.22.1"
-source = "git+https://github.com/LiGoldragon/message?rev=e8299aa0ac5046a05cc3d0c8a8be581e130f4c52#e8299aa0ac5046a05cc3d0c8a8be581e130f4c52"
+source = "git+https://github.com/LiGoldragon/message?rev=f46b38e0a9996e1593095f4154cd0597ff3ebe69#f46b38e0a9996e1593095f4154cd0597ff3ebe69"
 
 [[package]]
 name = "message-nexus"
 version = "0.22.1"
-source = "git+https://github.com/LiGoldragon/message?rev=e8299aa0ac5046a05cc3d0c8a8be581e130f4c52#e8299aa0ac5046a05cc3d0c8a8be581e130f4c52"
+source = "git+https://github.com/LiGoldragon/message?rev=f46b38e0a9996e1593095f4154cd0597ff3ebe69#f46b38e0a9996e1593095f4154cd0597ff3ebe69"
 dependencies = [
  "ethos-zero 16.0.0",
  "getrandom 0.4.3",
@@ -553,7 +553,7 @@ dependencies = [
 [[package]]
 name = "meta-signal-flow"
 version = "72.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=0ee659384a2c3935930923427f921e34ebc634ad#0ee659384a2c3935930923427f921e34ebc634ad"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=27d06b7b4995ad275c2c2c85dd0ffb5499482dd7#27d06b7b4995ad275c2c2c85dd0ffb5499482dd7"
 dependencies = [
  "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
@@ -578,7 +578,7 @@ dependencies = [
 [[package]]
 name = "meta-signal-message"
 version = "3.0.1"
-source = "git+https://github.com/LiGoldragon/meta-signal-message?rev=1ec9e004ad60e3789f529dcab5d3c10d2571056e#1ec9e004ad60e3789f529dcab5d3c10d2571056e"
+source = "git+https://github.com/LiGoldragon/meta-signal-message?rev=4d81b6481292f9212065a83c30f29640de60505e#4d81b6481292f9212065a83c30f29640de60505e"
 dependencies = [
  "ethos-zero 19.2.0",
  "rkyv",
@@ -975,7 +975,7 @@ dependencies = [
 [[package]]
 name = "signal-flow"
 version = "57.0.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=8e56457d41552f07df5b39a0b9e6e7248c72da43#8e56457d41552f07df5b39a0b9e6e7248c72da43"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=3d0a4cdd0364a30e5586eac7db59917faca5072f#3d0a4cdd0364a30e5586eac7db59917faca5072f"
 dependencies = [
  "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
@@ -998,7 +998,7 @@ dependencies = [
 [[package]]
 name = "signal-message"
 version = "21.0.1"
-source = "git+https://github.com/LiGoldragon/signal-message?rev=a5e04b756dc300ba90f9fde2fa3ff6f5cc24e445#a5e04b756dc300ba90f9fde2fa3ff6f5cc24e445"
+source = "git+https://github.com/LiGoldragon/signal-message?rev=998c824c98a1e2f5e32f9e3a69bf09d3a29aff6b#998c824c98a1e2f5e32f9e3a69bf09d3a29aff6b"
 dependencies = [
  "ethos-zero 17.0.0",
  "rkyv",

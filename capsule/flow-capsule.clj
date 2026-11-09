@@ -41,6 +41,7 @@
   (:require [babashka.fs :as fs]
             [babashka.process :as p]
             [cheshire.core :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]))
 
 ;; ---------------------------------------------------------------- places
@@ -274,8 +275,18 @@
   (let [{:keys [exit out]} (herdr "pane" "read" pane "--source" "recent" "--lines" "400")]
     (when (zero? exit) out)))
 
-(defn metaflows []
-  (let [reply (flow "Metaflows")] {:reply reply :datom (read-datom reply)}))
+(def ^:dynamic *listed*
+  "The metaflows as a running Observe.Metaflows holds them, as a Listed
+  reply: bound while `watch` asks its predicate, nil elsewhere."
+  nil)
+
+(defn metaflows
+  "The metaflows: the subscription's while `watch` runs, else the Nexus's
+  one-shot Metaflows."
+  []
+  (if *listed*
+    {:reply "Observe.Metaflows" :datom *listed*}
+    (let [reply (flow "Metaflows")] {:reply reply :datom (read-datom reply)})))
 
 (defn metaflow
   "The metaflow at an Address in a Listed reply: :state :awake/:asleep, :flow, :past, :queue."
@@ -292,8 +303,74 @@
 
 (defn current [addr] (metaflow (:datom (metaflows)) addr))
 
+(defn fold-metaflows
+  "The metaflows after one Observe.Metaflows frame: MetaflowsObserved opens
+  on its list, MetaflowChanged replaces the metaflow at its Address or adds
+  it, MetaflowGone removes the one at its Address. Nil until the opening
+  frame; a frame of another head leaves them as they were."
+  [held frame]
+  (let [address-of (fn [m] (map str (items (first (items m)))))
+        at (fn [address] (fn [m] (= (address-of m) address)))]
+    (case (head frame)
+      "MetaflowsObserved" (vec (items (body frame)))
+      "MetaflowChanged" (when held
+                          (let [m (body frame) here? (at (address-of m))]
+                            (if (some here? held) (mapv #(if (here? %) m %) held) (conj held m))))
+      "MetaflowGone" (when held (vec (remove (at (map str (items (body frame)))) held)))
+      held)))
+
+(defn listed-of [held] {:head "Listed" :body {:enclosure \[ :items held}})
+
+(defn watch-frames
+  "Asks f over the metaflows the queue `frames` carries, Observe.Metaflows
+  reply lines then ::ended: at the opening frame and again at each change,
+  until f answers truthy, the stream ends or `deadline` passes; the last
+  answer. Each wait is for the next frame. ::unavailable when the stream
+  opens on another frame or ends before opening: that Nexus serves no
+  metaflow subscription."
+  [deadline f ^java.util.concurrent.BlockingQueue frames]
+  (loop [held nil answer nil]
+    (let [remaining (- deadline (System/currentTimeMillis))
+          line (when (pos? remaining)
+                 (.poll frames remaining java.util.concurrent.TimeUnit/MILLISECONDS))]
+      (cond
+        (and (= line ::ended) (nil? held)) ::unavailable
+        (or (nil? line) (= line ::ended)) answer
+        :else (let [frame (read-datom line)]
+                (if (and (nil? held) (not= "MetaflowsObserved" (head frame)))
+                  ::unavailable
+                  (let [held (fold-metaflows held frame)
+                        v (binding [*listed* (listed-of held)] (f))]
+                    (if v v (recur held v)))))))))
+
+(declare re-check)
+
 (defn watch
-  "Polls f every period until it answers truthy or the time is up; the last answer."
+  "Waits until f answers truthy over the metaflows, asked on open and again
+  at each change Observe.Metaflows sends, or until the time is up; the last
+  answer. Inside f, `current` and `metaflows` answer from the subscription.
+  A Nexus that serves no metaflow subscription (the takeover's old package)
+  has no change to wait on, and is re-checked."
+  [seconds f]
+  (let [deadline (+ (System/currentTimeMillis) (* 1000 seconds))
+        proc (p/process (into [(str @package "/bin/flow")]
+                              (client-arguments @package "flow" ordinary-socket "Observe.Metaflows"))
+                        {:env (clean-env (marks @driver-pane)) :err :string :in ""})
+        frames (java.util.concurrent.LinkedBlockingQueue.)]
+    (future (try (doseq [line (line-seq (io/reader (:out proc)))] (.put frames line))
+                 (finally (.put frames ::ended))))
+    (try
+      (let [answer (watch-frames deadline f frames)]
+        (if (= answer ::unavailable)
+          (re-check (max 0 (quot (- deadline (System/currentTimeMillis)) 1000)) f)
+          answer))
+      (finally (p/destroy-tree proc)))))
+
+(defn re-check
+  "Asks f every second until it answers truthy or the time is up; the last
+  answer. Still on a timer: the waits on files, panes, processes and
+  sockets, which the capsule has no event for yet, and on a Nexus with no
+  metaflow subscription."
   [seconds f]
   (let [deadline (+ (System/currentTimeMillis) (* 1000 seconds))]
     (loop []
@@ -557,7 +634,7 @@
             send-reply (str/trim (:out @sending))
             old-text (pane-text old-pane)
             fresh (str (watch 60 #(let [f (awake-flow quaternary)] (when (and f (not= (str f) old)) f))))
-            first-prompt (watch 30 #(transcript-first-user (native-session (inspect quaternary))))]
+            first-prompt (re-check 30 #(transcript-first-user (native-session (inspect quaternary))))]
         {:reply (str "Refresh: " refresh-reply " / Send: " send-reply)
          :pass (boolean (and (str/starts-with? send-reply "SendAccepted.")
                              (seq fresh)
@@ -641,7 +718,7 @@
             kept (and (contains? (pane-ids) pane) (= (str (awake-flow secondary)) flow-id))
             declared (flow-meta (on-demand-secondary))
             reply (flow-meta (str "Retire." flow-id))
-            gone (watch 10 #(not (contains? (pane-ids) pane)))
+            gone (re-check 10 #(not (contains? (pane-ids) pane)))
             m (watch 20 #(let [m (current secondary)] (when (not= (str (:flow m)) flow-id) m)))]
         {:reply (str "Retire while Maintained: " refused " / Configure.Metaflows (Opus OnDemand): "
                      declared " / Retire: " reply)
@@ -877,7 +954,7 @@
   (fs/create-dirs workspace-b)
   (reset! herdr-server (p/process ["herdr" "--session" session "server"]
                                   {:env (clean-env) :out :discard :err :discard :in ""}))
-  (when-not (watch 15 #(get-in (herdr-json "workspace" "list") [:result :workspaces]))
+  (when-not (re-check 15 #(get-in (herdr-json "workspace" "list") [:result :workspaces]))
     (throw (ex-info "Herdr session did not answer" {})))
   (let [created (herdr-json "workspace" "create" "--cwd" source-root "--label" "capsule-driver" "--no-focus")]
     (reset! driver-pane (get-in created [:result :root_pane :pane_id]))))
@@ -931,7 +1008,7 @@
     (reset! curriculum (p/process [(str curriculum-package "/bin/curriculum-nexus")]
                                   {:env env :dir source-root :out :append :out-file (fs/file log)
                                    :err :append :err-file (fs/file log) :in ""}))
-    (when-not (watch 30 #(or (fs/exists? curriculum-socket) (not (p/alive? @curriculum))))
+    (when-not (re-check 30 #(or (fs/exists? curriculum-socket) (not (p/alive? @curriculum))))
       (throw (ex-info "the Curriculum Nexus opened no socket" {})))
     (when-not (p/alive? @curriculum)
       (throw (ex-info "the Curriculum Nexus exited" {:log (str/trim (slurp log))})))
@@ -962,7 +1039,7 @@
   (reset! codex-server (p/process [codex-binary "app-server" "--remote-control" "--listen" (str "unix://" codex-socket)]
                                   {:env (clean-env {"CODEX_HOME" codex-home}) :dir source-root
                                    :out :append :out-file (fs/file log) :err :append :err-file (fs/file log) :in ""}))
-  (when-not (watch 30 #(fs/exists? codex-socket))
+  (when-not (re-check 30 #(fs/exists? codex-socket))
     (throw (ex-info "the capsule's Codex app-server opened no socket" {})))
   (println (str "codex | " codex-binary " | " codex-model " | " codex-socket)))
 
@@ -985,7 +1062,7 @@
   (fs/set-posix-file-permissions (fs/parent ordinary-socket) "rwx------")
   (reset! nexus (p/process [(str @package "/bin/flow-nexus") (start-text @package)]
                            {:env (clean-env) :out :append :out-file (fs/file log) :err :append :err-file (fs/file log) :in ""}))
-  (when-not (watch 20 #(and (fs/exists? ordinary-socket) (fs/exists? meta-socket)))
+  (when-not (re-check 20 #(and (fs/exists? ordinary-socket) (fs/exists? meta-socket)))
     (throw (ex-info "the Nexus opened no sockets" {:log (str/trim (slurp log))}))))
 
 (defn listens?
@@ -1011,7 +1088,7 @@
                            {:env (clean-env {"PATH" (str pkg "/bin:" (System/getenv "PATH"))})
                             :out :append :out-file (fs/file log) :err :append :err-file (fs/file log) :in ""})
           pid (.pid (:proc child))]
-      (when-not (watch 10 #(or (listens? pid meta-socket) (not (p/alive? child))))
+      (when-not (re-check 10 #(or (listens? pid meta-socket) (not (p/alive? child))))
         (p/destroy child))
       (let [reply (if (p/alive? child)
                     (reply-text (apply run {:env (clean-env {"PATH" (str pkg "/bin:" (System/getenv "PATH"))})}
@@ -1137,7 +1214,7 @@
     (fs/delete-tree capsule-runtime)
     (doseq [s @steps] (println (str "  " s)))
     (let [remaining {:herdr-session @herdr-session-left
-                     :processes (vec (or (watch 20 #(let [left (capsule-processes)] (when (empty? left) []))) (capsule-processes)))
+                     :processes (vec (or (re-check 20 #(let [left (capsule-processes)] (when (empty? left) []))) (capsule-processes)))
                      :store (fs/exists? state-root)
                      :source-root (fs/exists? source-parent)
                      :sockets (fs/exists? capsule-runtime)
@@ -1192,7 +1269,7 @@
   "Whether the transcript of the metaflow's current Claude session holds
   needle within seconds: a pane wraps long lines, a transcript does not."
   [addr needle seconds]
-  (watch seconds #(when-let [native (native-session (inspect addr))]
+  (re-check seconds #(when-let [native (native-session (inspect addr))]
                     (when-let [file (first (fs/glob (str home "/.claude/projects") (str "*/" native ".jsonl")))]
                       (str/includes? (slurp (str file)) needle)))))
 
@@ -1206,7 +1283,7 @@
           (when file (str/split-lines (slurp (str file)))))))
 
 (defn pane-holds [pane needle seconds]
-  (watch seconds #(some-> (pane-text pane) (str/includes? needle))))
+  (re-check seconds #(some-> (pane-text pane) (str/includes? needle))))
 
 ;; The seat scenario 20 wakes: a Regular OnDemand seat, which takes its whole
 ;; queue on a wake (a Simplified seat takes its oldest alone).
@@ -1219,7 +1296,7 @@
             flow-id (str (watch 90 #(awake-flow tertiary-address)))
             pane (bound-pane (inspect tertiary-address))
             broken (flow-meta (broken-metaflows tertiary-address))
-            rested (watch 150 #(pos? (stops-of flow-id)))
+            rested (re-check 150 #(pos? (stops-of flow-id)))
             _ (Thread/sleep 8000)
             kept (= (str (awake-flow tertiary-address)) flow-id)
             open (contains? (pane-ids) pane)
@@ -1242,7 +1319,7 @@
             broken (flow-meta (broken-metaflows secondary))
             low (flow-meta "Configure.Thresholds.[ { claude-haiku-5-5 1000 } ]")
             sent (flow (str "Send.{ " secondary " Wake Soft.Notice.«Answer with one word and stop. Tag rb1.» }") pane)
-            rested (watch 120 #(> (stops-of flow-id) before))
+            rested (re-check 120 #(> (stops-of flow-id) before))
             _ (Thread/sleep 8000)
             kept (= (str (awake-flow secondary)) flow-id)
             kept-line (some #(when (and (str/includes? % flow-id) (str/includes? % "RefreshLaunchRefused")) %) (str/split-lines (log-text)))
@@ -1329,10 +1406,10 @@
             second-sent (send-to waking-seat "Wake" (str "Soft.Order.«Second of two. " brief " Tag w2.»") pane)
             ids (vec (keep accepted-id [first-sent second-sent]))
             woke (watch 60 #(awake-flow waking-seat))
-            turn (watch 60 #(transcript-first-user (native-session (inspect waking-seat))))
+            turn (re-check 60 #(transcript-first-user (native-session (inspect waking-seat))))
             entries (waking-entries turn)
             woken-pane (bound-pane (inspect waking-seat))
-            shown (watch 60 #(let [t (some-> woken-pane pane-text)]
+            shown (re-check 60 #(let [t (some-> woken-pane pane-text)]
                                (when (and t (every? (fn [id] (str/includes? t id)) ids)) t)))
             _ (keep-text! "scenario-20-pane.txt" (or shown (some-> woken-pane pane-text)))
             ordered (boolean (and shown (= 2 (count ids))
@@ -1359,7 +1436,7 @@
       (let [reply (launch codex-quaternary)
             awake (when (str/starts-with? reply "Started.") (watch 60 #(awake-flow codex-quaternary)))
             queued (send-to codex-quaternary "Queue" "Soft.Order.«Answer with one word and stop. Tag c1.»" (sender-pane))
-            handed (watch 120 #(codex-sessions-hold "Tag c1"))]
+            handed (re-check 120 #(codex-sessions-hold "Tag c1"))]
         {:reply (str "Launch: " reply " / Send: " queued)
          :pass (boolean (and awake (str/starts-with? queued "SendAccepted.") handed))
          :watched (str "Mind test Terra Awake as " awake "; a session under " codex-home
@@ -1373,7 +1450,7 @@
             admitted (java.time.Instant/now)
             sent (send-to codex-quaternary "Wake" "Soft.Task.{ 1 «Answer with one word and stop. Tag g1.» }" (sender-pane))
             id (some-> (read-datom sent) body items first str)
-            handed (watch 120 #(codex-sessions-hold "Tag g1"))
+            handed (re-check 120 #(codex-sessions-hold "Tag g1"))
             reminded (transcript-holds secondary (str "Reminder 1 of 4: task " id) 150)
             done (send-to secondary "Queue" (str "Soft.Done.{ " id " «finished» }") codex-pane)
             _ (Thread/sleep 75000)
@@ -1644,7 +1721,7 @@
   "Whether the Nexus process comes to answer Metaflows on the capsule's
   socket: :serving, :exited, or nil after 30 s."
   [proc]
-  (watch 30 #(cond (not (p/alive? proc)) :exited
+  (re-check 30 #(cond (not (p/alive? proc)) :exited
                    (owner-answers? (flow "Metaflows")) :serving)))
 
 (defn digest [path]
@@ -1766,7 +1843,7 @@
                                       {:via :configure-only :datom datom :reply reply :exit exit}))
         running! (fn [steps]
                    (let [proc (start-command! {:argv [(str pkg "/bin/flow-nexus") start] :env (package-env pkg {})} log)
-                         up (watch 30 #(cond (not (p/alive? proc)) :exited
+                         up (re-check 30 #(cond (not (p/alive? proc)) :exited
                                              (owner-answers? (meta-at pkg seed-meta-socket "Configuration")) :serving))
                          replies (mapv (fn [{:keys [datom]}]
                                          {:via :running :datom datom :up up
@@ -2028,7 +2105,7 @@
   (fn []
     (let [{:keys [last pane-count pane-set]} @takeover
           watched-for (select-keys (:awake last) [quaternary tertiary-address])
-          seen (watch 90 #(let [after (awake-seats (read-datom (flow "Metaflows")))
+          seen (re-check 90 #(let [after (awake-seats (read-datom (flow "Metaflows")))
                                 fresh (vec (remove pane-set (pane-ids)))
                                 moved (vec (for [[a f] watched-for :when (and (get after a) (not= f (get after a)))] a))]
                             (when (or (> (count (panes)) pane-count) (seq moved))
@@ -2081,7 +2158,7 @@
             busy (when-not skip-codex
                    (let [reply (flow (str "Launch.{ " codex-secondary " Predecessors.0 «Run the shell command sleep 240, then answer with one word and stop.» }"))]
                      [reply (watch 90 #(awake-flow codex-secondary))]))
-            sends (watch 45 #(let [s @(:sent @sender)] (when (>= (count s) 4) s)))
+            sends (re-check 45 #(let [s @(:sent @sender)] (when (>= (count s) 4) s)))
             primary (current asleep-primary)]
         {:reply (str (pr-str launched) " / Fable " primary-launch " / Codex Sol " (if skip-codex "SKIPPED" (pr-str busy))
                      " / queued " queued)

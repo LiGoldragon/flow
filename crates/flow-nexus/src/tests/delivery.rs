@@ -811,24 +811,18 @@ fn a_flow_whose_role_flow_does_not_know_is_not_taken_for_the_owner() {
 /// A process marked as running in a pane of the fixture session, in Herdr's
 /// default-session shape: `HERDR_PANE_ID` alone, under the test process
 /// standing as the Herdr server. `sleep` is spawned directly rather than
-/// through a shell that execs it, and its mark is waited for before it is
-/// used as a peer.
+/// through a shell that execs it, and is a peer once the kernel reports its
+/// exec complete (see SpawnsMarkedPeer).
 struct PanePeer(std::process::Child);
 
 impl PanePeer {
     fn spawn(pane: &str) -> Self {
-        let child = std::process::Command::new("sleep")
-            .arg("30")
-            .env_remove("HERDR_SESSION")
-            .env("HERDR_PANE_ID", pane)
-            .spawn()
-            .expect("marked peer");
-        // A peer is only a peer once its marks are readable: see
-        // SettlesItsMarks, and why exec alone does not settle them.
-        super::SettlesItsMarks::settled_pane_id(&crate::caller::CallerProcess {
-            process_id: child.id(),
-        });
-        Self(child)
+        use super::SpawnsMarkedPeer;
+        Self(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn_marked(pane),
+        )
     }
 }
 

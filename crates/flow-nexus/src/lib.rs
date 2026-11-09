@@ -49,6 +49,8 @@ pub mod repairing;
 pub mod restarting;
 use metaflow::DispatchesMetaflowPeer;
 #[cfg(test)]
+mod exec_witness;
+#[cfg(test)]
 mod fixture_executable;
 /// Generated from the operation and startup Ethos roots; `build.rs` keeps
 /// both outputs fresh. The `datom` feature enables their textual CLI surface.
@@ -68,6 +70,7 @@ pub mod herdr;
 pub mod launching;
 pub mod observe_agent;
 pub mod observe_configuration;
+pub mod observe_metaflows;
 mod observe_sends;
 pub mod peer;
 pub mod performing;
@@ -438,6 +441,13 @@ impl Dispatches for RunningNexus {
                     Err(error) => Response::Refused(signal_flow::Refusal::Store(error.to_string())),
                 }
             }
+            Query::Observe(ObserveSelection::Metaflows) => {
+                use crate::store::metaflow_watch::WatchesMetaflows;
+                match self.store.available_metaflows() {
+                    Ok(metaflows) => Response::MetaflowsObserved(metaflows),
+                    Err(error) => Response::Refused(signal_flow::Refusal::Store(error.to_string())),
+                }
+            }
             Query::Observe(ObserveSelection::Retirement(address)) => {
                 use crate::store::handover::HoldsHandovers;
                 match self.store.observe_handover_retirement(&address) {
@@ -569,25 +579,8 @@ impl Dispatches for RunningNexus {
             | Query::Deliver(_)
             | Query::Release(_) => Response::Refused(signal_flow::Refusal::NotMessage),
             Query::Metaflows => {
-                use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
-                let listed = self.store.list_metaflows().and_then(|metaflows| {
-                    let mut available = Vec::new();
-                    for metaflow in metaflows {
-                        // An undeclared sleeping row is history, not an address
-                        // an ordinary caller can launch. Keep its durable past
-                        // without advertising it as an available metaflow.
-                        if matches!(metaflow.state, flow_ethos::State::Awake(_))
-                            || self
-                                .store
-                                .metaflow_declaration(&metaflow.address)?
-                                .is_some()
-                        {
-                            available.push(metaflow);
-                        }
-                    }
-                    Ok(available)
-                });
-                listed.map_or_else(
+                use crate::store::metaflow_watch::WatchesMetaflows;
+                self.store.available_metaflows().map_or_else(
                     |error| Response::Refused(signal_flow::Refusal::Store(error.to_string())),
                     Response::Listed,
                 )
@@ -1346,6 +1339,9 @@ pub trait ServesConnection: Sized {
     /// Observe.TurnEnds: the last turn end of each harness, then each
     /// turn end, until the peer goes.
     fn serve_turn_ends(&mut self, nexus: &RunningNexus) -> Result<(), String>;
+    /// Observe.Metaflows: the metaflows, then each change, until the peer
+    /// goes.
+    fn serve_metaflows(&mut self, nexus: &RunningNexus) -> Result<(), String>;
     /// ObserveConfiguration on the meta socket: the configuration, then
     /// again at each change, until the peer goes.
     fn serve_configuration(&mut self, nexus: &RunningNexus) -> Result<(), String>;
@@ -1480,6 +1476,39 @@ impl ServesConnection for Connection {
         result.and(watcher_result)
     }
 
+    fn serve_metaflows(&mut self, nexus: &RunningNexus) -> Result<(), String> {
+        use crate::observe_metaflows::ObservesMetaflows;
+        let mut reader = self.peer.try_clone().map_err(|error| error.to_string())?;
+        reader
+            .set_read_timeout(None)
+            .map_err(|error| error.to_string())?;
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let watch_disconnected = Arc::clone(&disconnected);
+        let changes = nexus.store.metaflow_changes.clone();
+        let watcher = std::thread::Builder::new()
+            .name("flow-metaflow-observer-peer".into())
+            .spawn(move || {
+                let mut bytes = [0_u8; 256];
+                loop {
+                    match reader.read(&mut bytes) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+                watch_disconnected.store(true, Ordering::Release);
+                changes.announce();
+            })
+            .map_err(|error| error.to_string())?;
+        let result = nexus.observe_metaflows(&disconnected, &mut |response| {
+            self.peer.write_response(response)
+        });
+        let _ = self.peer.shutdown(Shutdown::Both);
+        let watcher_result = watcher
+            .join()
+            .map_err(|_| "peer-disconnect watcher panicked".to_owned());
+        result.and(watcher_result)
+    }
+
     fn serve_configuration(&mut self, nexus: &RunningNexus) -> Result<(), String> {
         use crate::observe_configuration::ObservesConfiguration;
         let mut reader = self.peer.try_clone().map_err(|error| error.to_string())?;
@@ -1552,6 +1581,9 @@ impl ServesConnection for Connection {
             }
             Query::Observe(ObserveSelection::TurnEnds) => {
                 return self.serve_turn_ends(nexus);
+            }
+            Query::Observe(ObserveSelection::Metaflows) => {
+                return self.serve_metaflows(nexus);
             }
             Query::Observe(ObserveSelection::Retirement(address)) => {
                 use crate::store::handover::HoldsHandovers;
@@ -1975,6 +2007,7 @@ impl StopsNexus for RunningNexus {
         }
         self.store.launch_changes.announce();
         self.store.reminder_changes.announce();
+        self.store.metaflow_changes.announce();
         self.configuration_changes.announce();
         // Each accept loop is blocked in accept; a connection wakes it. A
         // listener not yet bound sees the request once it binds.
@@ -2395,6 +2428,7 @@ mod tests {
     mod heartbeat_production;
     mod launching_nexus;
     mod model;
+    mod observe_metaflows;
     mod queue_drain;
     mod refresh_and_compaction;
     mod refreshing;
@@ -6357,29 +6391,63 @@ mod tests {
     /// environment into the new address space: for a few dozen microseconds
     /// `/proc/<pid>/environ` reads back empty (the `comm` is already the new
     /// program's). A reader cannot tell that from a scrubbed environment, so
-    /// it would take the peer for the owner. Every fixture peer therefore
-    /// waits for its own marks before it is used as one. The Nexus needs no
-    /// such wait: its peers are processes that have already connected to it.
-    trait SettlesItsMarks {
-        /// A pane's marks appear within microseconds; this is only a bound.
-        const SETTLING_LIMIT: Duration = Duration::from_secs(5);
-
-        fn settled_pane_id(&self) -> String;
+    /// it would take the peer for the owner. Every fixture peer is therefore
+    /// spawned so that the spawn returns once the kernel reports its
+    /// `execve` complete (`exec_witness`), and its marks are read then,
+    /// once. The Nexus needs no such wait: its peers are processes that have
+    /// already connected to it.
+    trait SpawnsMarkedPeer {
+        /// Spawns the command marked with `pane`, returning once its new
+        /// image runs and its marks are readable.
+        fn spawn_marked(&mut self, pane: &str) -> std::process::Child;
+        /// Spawns the command marked with `pane`, as `spawn_marked`, and
+        /// returns once the first process it starts has exec'd into an
+        /// image whose `comm` is `comm`, with that process's id.
+        fn spawn_marked_with_child(&mut self, pane: &str, comm: &str)
+        -> (std::process::Child, u32);
     }
 
-    impl SettlesItsMarks for CallerProcess {
-        fn settled_pane_id(&self) -> String {
-            let deadline = std::time::Instant::now() + Self::SETTLING_LIMIT;
-            loop {
-                if let Some(pane_id) = self.marked_pane_id() {
-                    return pane_id;
+    impl SpawnsMarkedPeer for std::process::Command {
+        fn spawn_marked(&mut self, pane: &str) -> std::process::Child {
+            use crate::exec_witness::SpawnsWitnessedExec;
+            let child = self
+                .env_remove("HERDR_SESSION")
+                .env("HERDR_PANE_ID", pane)
+                .spawn_after_exec()
+                .expect("marked fixture process");
+            assert_eq!(
+                CallerProcess {
+                    process_id: child.id(),
                 }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the fixture peer's Herdr marks never became readable"
-                );
-                std::thread::yield_now();
-            }
+                .marked_pane_id()
+                .as_deref(),
+                Some(pane),
+                "the fixture peer's Herdr marks are readable once its exec completed"
+            );
+            child
+        }
+
+        fn spawn_marked_with_child(
+            &mut self,
+            pane: &str,
+            comm: &str,
+        ) -> (std::process::Child, u32) {
+            use crate::exec_witness::SpawnsWitnessedExec;
+            let (child, started) = self
+                .env_remove("HERDR_SESSION")
+                .env("HERDR_PANE_ID", pane)
+                .spawn_until_child_execs(comm)
+                .expect("marked fixture process and its child");
+            assert_eq!(
+                CallerProcess {
+                    process_id: child.id(),
+                }
+                .marked_pane_id()
+                .as_deref(),
+                Some(pane),
+                "the fixture peer's Herdr marks are readable once its exec completed"
+            );
+            (child, started)
         }
     }
 
@@ -6391,25 +6459,19 @@ mod tests {
 
     impl MarkedProcess {
         /// The program is spawned directly, never through a shell that
-        /// `exec`s it: `SettlesItsMarks` settles the marks of one process,
-        /// and a second `execve` in that same process reopens the window it
-        /// waited out — `/proc/<pid>/environ` reads back empty again, which
-        /// a reader cannot tell from a scrubbed environment. A shell is
-        /// spawned only where the shell itself is the marked process and
-        /// stays (its command line ends in another word, so the shell does
-        /// not turn its last command into an `exec` of its own accord).
+        /// `exec`s it: the spawn is witnessed at the one `execve` it makes,
+        /// and a second `execve` in that same process reopens the window
+        /// — `/proc/<pid>/environ` reads back empty again, which a reader
+        /// cannot tell from a scrubbed environment. A shell is spawned only
+        /// where the shell itself is the marked process and stays (its
+        /// command line ends in another word, so the shell does not turn
+        /// its last command into an `exec` of its own accord).
         fn spawn(program: &str, arguments: &[&str], pane: &str) -> Self {
-            let child = std::process::Command::new(program)
-                .args(arguments)
-                .env_remove("HERDR_SESSION")
-                .env("HERDR_PANE_ID", pane)
-                .spawn()
-                .expect("marked fixture process");
-            CallerProcess {
-                process_id: child.id(),
-            }
-            .settled_pane_id();
-            Self(child)
+            Self(
+                std::process::Command::new(program)
+                    .args(arguments)
+                    .spawn_marked(pane),
+            )
         }
     }
 
@@ -6448,11 +6510,12 @@ mod tests {
         // carries a session: the session is the one whose socket their
         // Herdr server ancestor listens on.
         let marked = MarkedProcess::spawn("sleep", &["30"], "pane-1");
-        let scrubbed = MarkedProcess::spawn(
-            "sh",
-            &["-c", "env -u HERDR_SESSION -u HERDR_PANE_ID sleep 30; true"],
-            "pane-2",
-        );
+        // The shell's child is `env` until it execs `sleep` without the
+        // marks; the spawn returns once it has.
+        let (scrubbed, sleeper) = std::process::Command::new("sh")
+            .args(["-c", "env -u HERDR_SESSION -u HERDR_PANE_ID sleep 30; true"])
+            .spawn_marked_with_child("pane-2", "sleep");
+        let scrubbed = MarkedProcess(scrubbed);
         let marked_process = CallerProcess {
             process_id: marked.0.id(),
         };
@@ -6462,21 +6525,18 @@ mod tests {
             pane("pane-1")
         );
 
-        let shell = scrubbed.0.id();
-        let children = format!("/proc/{shell}/task/{shell}/children");
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        let sleeper = loop {
-            // The child is `env` until it execs `sleep` without the marks.
-            let listed = fs::read_to_string(&children).unwrap_or_default();
-            if let Some(child) = listed.split_whitespace().next()
-                && fs::read_to_string(format!("/proc/{child}/comm")).unwrap_or_default()
-                    == "sleep\n"
-            {
-                break child.parse::<u32>().expect("child process id");
-            }
-            assert!(std::time::Instant::now() < deadline, "sleeper started");
-            std::thread::yield_now();
-        };
+        assert_eq!(
+            fs::read_to_string(format!(
+                "/proc/{}/task/{}/children",
+                scrubbed.0.id(),
+                scrubbed.0.id()
+            ))
+            .unwrap_or_default()
+            .split_whitespace()
+            .next(),
+            Some(sleeper.to_string().as_str()),
+            "the sleeper is the shell's child"
+        );
         let sleeper = CallerProcess {
             process_id: sleeper,
         };
@@ -7155,23 +7215,13 @@ mod tests {
         let herdr_cli = fs::canonicalize(&fixture.snapshot_program).unwrap();
         assert_ne!(herdr_cli, server);
 
-        let shell = MarkedProcess::spawn("sh", &["-c", "sleep 30; true"], "pane-1");
-        let shell_id = shell.0.id();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        let peer = loop {
-            let children = fs::read_to_string(format!("/proc/{shell_id}/task/{shell_id}/children"))
-                .unwrap_or_default();
-            if let Some(child) = children.split_whitespace().next() {
-                let process = CallerProcess {
-                    process_id: child.parse().unwrap(),
-                };
-                if process.marked_pane_id().as_deref() == Some("pane-1") {
-                    break process;
-                }
-            }
-            assert!(std::time::Instant::now() < deadline, "fixture child");
-            std::thread::sleep(Duration::from_millis(20));
-        };
+        // The spawn returns once the shell's child has exec'd `sleep`.
+        let (shell, child) = std::process::Command::new("sh")
+            .args(["-c", "sleep 30; true"])
+            .spawn_marked_with_child("pane-1", "sleep");
+        let _shell = MarkedProcess(shell);
+        let peer = CallerProcess { process_id: child };
+        assert_eq!(peer.marked_pane_id().as_deref(), Some("pane-1"));
         assert_eq!(peer.caller_pane(&fixture.nexus.herdr), pane("pane-1"));
         assert_eq!(
             fixture

@@ -63,7 +63,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, mpsc},
     thread::Scope,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 /// The tool every Codex thread Flow opens declares.
@@ -1060,13 +1060,28 @@ pub struct InterruptedCalls {
 /// replays a pending call to it). Nothing is admitted here: a call the
 /// earlier Nexus committed before it could answer is answered from its
 /// record; any other call is refused.
+///
+/// The app-server marks no end of the replay: it answers `thread/resume`
+/// first and replays the pending calls after it. Both are written by the
+/// thread's listener task, which takes each `thread/resume` of a running
+/// thread in turn, its replay included, before the next. So the end is a
+/// second `thread/resume` of the same thread on the same connection: its
+/// answer comes after every call the first one replayed. A request any
+/// other task answers (`thread/read`, say) has no such order.
+///
+/// The app-server reads a connection's messages in order, and takes each
+/// answer to its request before it reads the next message. So once the
+/// answers are written, a `thread/read`'s answer shows they were read, and
+/// the connection is closed only then.
 pub(crate) trait RefusesInterruptedCalls {
-    /// How long the resumed connection is read for replayed calls.
-    const REPLAY_WINDOW: Duration = Duration::from_secs(2);
-    /// Answers every call the app-server replays on `thread` within the
-    /// window: from its record when one holds the same call, else refused
-    /// (`ThreadUnowned`; `KeyReused` when its key's record holds another
-    /// call).
+    /// The request id of the `thread/resume` that closes the replay.
+    const REPLAY_BARRIER: u64 = 3;
+    /// The request id of the `thread/read` that shows the answers read.
+    const ANSWERS_READ: u64 = 4;
+    /// Answers every call the app-server replays on `thread` before the
+    /// barrier's answer: from its record when one holds the same call,
+    /// else refused (`ThreadUnowned`; `KeyReused` when its key's record
+    /// holds another call).
     fn refuse_interrupted_calls(&self, thread: &str, adapter: &CodexAdapter) -> InterruptedCalls;
     /// The answer to one replayed call; true when it came from its record.
     fn interrupted_call_outcome(&self, thread: &str, call: Option<ToolCall>)
@@ -1105,17 +1120,36 @@ impl RefusesInterruptedCalls for RunningNexus {
             }
             subscription.answer(id, outcome.tool_response()).is_ok()
         };
-        let early = std::mem::take(&mut subscription.early);
-        let mut open = early
+        // Every replayed call arrives before the barrier's answer, kept in
+        // `early` in the order it came; the calls are answered after it.
+        let barrier = subscription.exchange(
+            &inbox,
+            Self::REPLAY_BARRIER,
+            "thread/resume",
+            serde_json::json!({ "threadId": thread, "excludeTurns": true }),
+        );
+        if let Err(SubscriptionEnd::Failed(error)) = &barrier {
+            eprintln!(
+                "flow-nexus: interrupted launch thread {thread}: replay end not seen ({error}); the calls read are answered"
+            );
+        }
+        let replayed = std::mem::take(&mut subscription.early);
+        let written = replayed
             .into_iter()
             .all(|request| answer(&mut subscription, request));
-        let deadline = Instant::now() + Self::REPLAY_WINDOW;
-        while open {
-            match subscription.next_event(&inbox, Some(deadline)) {
-                Ok(ProxyEvent::Reply(Ok(message))) => open = answer(&mut subscription, message),
-                Ok(ProxyEvent::Upgraded | ProxyEvent::Ping(_)) => {}
-                _ => open = false,
-            }
+        // What the barrier's own resume replays after its answer are the
+        // calls just answered; they are not answered twice.
+        if written
+            && let Err(SubscriptionEnd::Failed(error)) = subscription.exchange(
+                &inbox,
+                Self::ANSWERS_READ,
+                "thread/read",
+                serde_json::json!({ "threadId": thread, "includeTurns": false }),
+            )
+        {
+            eprintln!(
+                "flow-nexus: interrupted launch thread {thread}: answers not shown read ({error})"
+            );
         }
         subscription.close();
         tally

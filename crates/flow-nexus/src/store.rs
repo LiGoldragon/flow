@@ -21,6 +21,7 @@ pub(crate) mod logical_delivery;
 mod message_joint;
 pub(crate) mod metaflow;
 pub(crate) mod metaflow_declaration;
+pub mod metaflow_watch;
 pub(crate) mod nexus_configuration;
 pub(crate) mod opened_thread;
 pub(crate) mod ordered_replacement;
@@ -1712,6 +1713,13 @@ pub struct FlowStore {
     /// recorded, a handover generation closed, a Configure, and the stop.
     /// The reminding thread waits on it, bounded by the next due time.
     pub reminder_changes: LaunchChanges,
+    /// Announced at each commit that changes a metaflow's row or its
+    /// declaration, once a metaflow subscriber asked Memory for it, and at
+    /// the stop. Metaflow subscribers wait on it.
+    pub metaflow_changes: LaunchChanges,
+    /// Whether Memory announces `metaflow_changes`: subscribed once, at the
+    /// first metaflow subscriber.
+    pub(crate) metaflow_watch: Mutex<bool>,
 }
 
 impl ReadsRequestPolicy for FlowStore {
@@ -2726,6 +2734,8 @@ impl OpensFlowStore for FlowStore {
             fail_next_retirement_completion_read: Mutex::new(false),
             launch_changes: LaunchChanges::default(),
             reminder_changes: LaunchChanges::default(),
+            metaflow_changes: LaunchChanges::default(),
+            metaflow_watch: Mutex::new(false),
         };
 
         // Recognition already checked the authored Memory identity record;
@@ -2923,6 +2933,8 @@ impl OpensFlowStore for FlowStore {
             fail_next_retirement_completion_read: Mutex::new(false),
             launch_changes: LaunchChanges::default(),
             reminder_changes: LaunchChanges::default(),
+            metaflow_changes: LaunchChanges::default(),
+            metaflow_watch: Mutex::new(false),
         };
         store.seed_request_policy()?;
         store.archive_legacy_queue()?;

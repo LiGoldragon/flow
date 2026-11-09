@@ -19,8 +19,9 @@
     # The Message Nexus the joint check runs beside the real Flow Nexus.
     message.url = "github:LiGoldragon/message/70b7daa3ff069b0b8c836ba6aff223992dcf59a1";
     # The accepted 0.53.2 Flow, built by its own flake, whose Memory the
-    # request-id migration check evolves.
-    migration-predecessor.url = "github:LiGoldragon/flow/f7d2336a7380206728cbd5aef2ebb3656d0cfd87";
+    # request-id migration check evolves. The lock holds its commit, f7d2336,
+    # and the flake refuses any other (predecessorRevision below).
+    migration-predecessor.url = "github:LiGoldragon/flow";
   };
 
   # Every crate, third-party or member, is one buildRustCrate derivation.
@@ -45,6 +46,12 @@
       # The revision the process checks bind their test build and binaries
       # to: the committed revision, or the dirty one a working tree has.
       sourceRevision = self.rev or self.dirtyRev or "unpublished";
+      # The accepted 0.53.2 revision the migration check names; a lock that
+      # moved migration-predecessor elsewhere fails evaluation.
+      predecessorRevision =
+        assert lib.assertMsg (migration-predecessor.rev == "f7d2336a7380206728cbd5aef2ebb3656d0cfd87")
+          "migration-predecessor must stay locked at the accepted 0.53.2, f7d2336a7380206728cbd5aef2ebb3656d0cfd87";
+        migration-predecessor.rev;
       mkContext =
         system:
         let
@@ -384,7 +391,7 @@
                   export FLOW_MIGRATION_PREDECESSOR_BIN="${migrationPredecessorPackage}/bin/flow-nexus"
                   export FLOW_MIGRATION_PREDECESSOR_STORE="${migrationPredecessorFixture}/share/request-id-predecessor"
                   export FLOW_MIGRATION_CURRENT_BIN="${flowNexus}"
-                  export FLOW_MIGRATION_PREDECESSOR_REV="f7d2336a7380206728cbd5aef2ebb3656d0cfd87"
+                  export FLOW_MIGRATION_PREDECESSOR_REV="${predecessorRevision}"
                   export FLOW_MIGRATION_CURRENT_REV="${sourceRevision}"
                   sha256sum "$FLOW_MIGRATION_PREDECESSOR_BIN" "$FLOW_MIGRATION_CURRENT_BIN"
                 '';

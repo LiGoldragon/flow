@@ -23,7 +23,9 @@ pub(crate) struct MetaflowAnswer {
 impl From<signal_flow::PrivateSendResponse> for MetaflowAnswer {
     fn from(private_response: signal_flow::PrivateSendResponse) -> Self {
         Self {
-            response: crate::message_projection::visible_send_response(&private_response),
+            response: crate::message_projection::ProjectsSendResponse::visible_send_response(
+                &private_response,
+            ),
             private_response,
             _pending_answer: None,
         }
@@ -274,7 +276,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
                                         ),
                                     );
                                 response.response =
-                                    crate::message_projection::visible_send_response(
+                                    crate::message_projection::ProjectsSendResponse::visible_send_response(
                                         &response.private_response,
                                     );
                             }

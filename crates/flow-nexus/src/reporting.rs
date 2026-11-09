@@ -210,9 +210,11 @@ impl RecordsReports for RunningNexus {
         resolution: QueueDeliveryResolution,
         resolver: ResolverIdentity,
     ) -> meta_signal_flow::Response {
-        let rejected = |rejection| {
+        let rejected = |rejection: meta_signal_flow::ResolveQueueDeliveryRejection| {
             meta_signal_flow::Response::ResolveQueueDeliveryRejected(
-                crate::message_projection::visible_queue_rejection(rejection),
+                crate::message_projection::ProjectsQueueRejection::visible_queue_rejection(
+                    rejection,
+                ),
             )
         };
         let Some(unix_seconds) = std::time::SystemTime::now()
@@ -240,7 +242,9 @@ impl RecordsReports for RunningNexus {
                 meta_signal_flow::Response::QueueDeliveryResolved(QueueDeliveryResolved_Data {
                     address: attempt.address,
                     visible_queue_delivery_resolution:
-                        crate::message_projection::visible_queue_resolution(&resolution),
+                        crate::message_projection::ProjectsQueueResolution::visible_queue_resolution(
+                            &resolution,
+                        ),
                 })
             }
             Ok(Err(refusal)) => rejected(refusal),
@@ -262,7 +266,11 @@ impl RecordsReports for RunningNexus {
         let visible_queue_delivery_vector = attempts
             .into_iter()
             .filter_map(ShowsQueueDelivery::queue_delivery)
-            .map(|attempt| crate::message_projection::visible_queue_delivery(&attempt, &address))
+            .map(|attempt| {
+                crate::message_projection::ProjectsQueueDelivery::visible_queue_delivery(
+                    &attempt, &address,
+                )
+            })
             .collect();
         meta_signal_flow::Response::QueueDeliveriesRead(QueueDeliveriesRead_Data {
             address,

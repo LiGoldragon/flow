@@ -120,13 +120,15 @@ impl ObservesLogicalSends for RunningNexus {
             }
             if !opened {
                 send(&Response::SendsObserved(
-                    crate::message_projection::visible_send_observation(&observation),
+                    crate::message_projection::ProjectsSendObservation::visible_send_observation(
+                        &observation,
+                    ),
                 ))?;
                 opened = true;
             } else {
                 for snapshot in observation.delivery_snapshot_vector {
                     send(&Response::SendChanged(
-                        crate::message_projection::visible_delivery_snapshot(&snapshot),
+                        crate::message_projection::ProjectsDeliverySnapshot::visible_delivery_snapshot(&snapshot),
                     ))?;
                 }
             }

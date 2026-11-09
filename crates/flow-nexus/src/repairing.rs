@@ -39,9 +39,9 @@ impl RefusesStore for RunningNexus {
 impl RepairsFromMeta for RunningNexus {
     fn inspect(&self, address: Address) -> Response {
         match self.store.inspection(&address) {
-            Ok(Some(inspected)) => {
-                Response::Inspected(crate::message_projection::visible_inspection(inspected))
-            }
+            Ok(Some(inspected)) => Response::Inspected(
+                crate::message_projection::ProjectsInspection::visible_inspection(inspected),
+            ),
             Ok(None) => Response::InspectRejected(InspectRejected_Data::UnknownAddress),
             Err(error) => Self::store_refused(error),
         }

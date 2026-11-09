@@ -2740,7 +2740,7 @@ mod tests {
             let response = meta_signal_flow::Response::LegacyArchiveObserved(
                 archive
                     .iter()
-                    .map(crate::message_projection::visible_legacy_archive_entry)
+                    .map(crate::message_projection::ProjectsLegacyArchiveEntry::visible_legacy_archive_entry)
                     .collect(),
             );
             let text = response.datomize(Path::new()).protosize().compact();

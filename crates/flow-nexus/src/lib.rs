@@ -991,7 +991,7 @@ impl Dispatches for RunningNexus {
                     Ok(archive) => meta_signal_flow::Response::LegacyArchiveObserved(
                         archive
                             .iter()
-                            .map(crate::message_projection::visible_legacy_archive_entry)
+                            .map(crate::message_projection::ProjectsLegacyArchiveEntry::visible_legacy_archive_entry)
                             .collect(),
                     ),
                     Err(error) => meta_signal_flow::Response::ObserveLegacyArchiveRejected(
@@ -1003,7 +1003,7 @@ impl Dispatches for RunningNexus {
                 Ok(records) => meta_signal_flow::Response::SendOutcomesRead(
                     records
                         .iter()
-                        .map(crate::message_projection::visible_send_outcome_record)
+                        .map(crate::message_projection::ProjectsSendOutcomeRecord::visible_send_outcome_record)
                         .collect(),
                 ),
                 Err(_) => meta_signal_flow::Response::ReadSendOutcomesRejected(
@@ -2318,7 +2318,7 @@ mod tests {
             meta_signal_flow::Response::SendOutcomesRead(
                 records
                     .iter()
-                    .map(crate::message_projection::visible_send_outcome_record)
+                    .map(crate::message_projection::ProjectsSendOutcomeRecord::visible_send_outcome_record)
                     .collect()
             )
         );

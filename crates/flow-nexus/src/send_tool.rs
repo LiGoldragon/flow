@@ -372,30 +372,39 @@ enum VisibleToolOutcome {
     Refused(SendRefusal),
 }
 
-fn visible_tool_outcome(outcome: &SendOutcome) -> VisibleToolOutcome {
-    match outcome {
-        SendOutcome::Accepted(value) => VisibleToolOutcome::Accepted(VisibleToolAccepted {
-            sender: value.sender.clone(),
-            target: value.target.clone(),
-            visible_send_acceptance: signal_flow::VisibleSendAcceptance {
-                delivery_cursor: value.send_acceptance.delivery_cursor,
-                request_id: value.send_acceptance.request_id.clone(),
-                visible_delivery_state: crate::message_projection::visible_delivery_state(
-                    &value.send_acceptance.delivery_state,
-                ),
-            },
-        }),
-        SendOutcome::Archived(value) => VisibleToolOutcome::Archived(VisibleToolLegacyUnknown {
-            sender: value.sender.clone(),
-            target: value.target.clone(),
-        }),
-        SendOutcome::LegacyUnknown(value) => {
-            VisibleToolOutcome::LegacyUnknown(VisibleToolLegacyUnknown {
+trait ProjectsToolOutcome {
+    fn visible_tool_outcome(&self) -> VisibleToolOutcome;
+}
+
+impl ProjectsToolOutcome for SendOutcome {
+    fn visible_tool_outcome(&self) -> VisibleToolOutcome {
+        match self {
+            SendOutcome::Accepted(value) => VisibleToolOutcome::Accepted(VisibleToolAccepted {
                 sender: value.sender.clone(),
                 target: value.target.clone(),
-            })
+                visible_send_acceptance: signal_flow::VisibleSendAcceptance {
+                    delivery_cursor: value.send_acceptance.delivery_cursor,
+                    request_id: value.send_acceptance.request_id.clone(),
+                    visible_delivery_state:
+                        crate::message_projection::ProjectsDeliveryState::visible_delivery_state(
+                            &value.send_acceptance.delivery_state,
+                        ),
+                },
+            }),
+            SendOutcome::Archived(value) => {
+                VisibleToolOutcome::Archived(VisibleToolLegacyUnknown {
+                    sender: value.sender.clone(),
+                    target: value.target.clone(),
+                })
+            }
+            SendOutcome::LegacyUnknown(value) => {
+                VisibleToolOutcome::LegacyUnknown(VisibleToolLegacyUnknown {
+                    sender: value.sender.clone(),
+                    target: value.target.clone(),
+                })
+            }
+            SendOutcome::Refused(value) => VisibleToolOutcome::Refused(value.clone()),
         }
-        SendOutcome::Refused(value) => VisibleToolOutcome::Refused(value.clone()),
     }
 }
 
@@ -405,7 +414,7 @@ impl AnswersToolCall for SendOutcome {
             "success": matches!(self, SendOutcome::Accepted(_)),
             "contentItems": [{
                 "type": "inputText",
-                "text": visible_tool_outcome(self).datomize(Vec::new()).protosize().compact()
+                "text": self.visible_tool_outcome().datomize(Vec::new()).protosize().compact()
             }]
         })
     }

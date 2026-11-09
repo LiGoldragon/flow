@@ -72,11 +72,13 @@ impl MeasuresSendPayload for Message {
     fn native_prompt_bytes(&self, sender: &Address) -> usize {
         const PLACEHOLDER_REQUEST_ID: &str = "0000";
         let request_id = PLACEHOLDER_REQUEST_ID.to_owned();
-        vec![crate::message_projection::visible_input(
-            &request_id,
-            &SentBy::Sender(sender.clone()),
-            self,
-        )]
+        vec![
+            crate::message_projection::ProjectsAdmittedMessage::admitted_input(
+                self,
+                &request_id,
+                &SentBy::Sender(sender.clone()),
+            ),
+        ]
         .datomize(Vec::new())
         .protosize()
         .compact()
@@ -169,7 +171,9 @@ pub struct SendAnswer {
 impl From<PrivateSendResponse> for SendAnswer {
     fn from(private_response: PrivateSendResponse) -> Self {
         Self {
-            response: crate::message_projection::visible_send_response(&private_response),
+            response: crate::message_projection::ProjectsSendResponse::visible_send_response(
+                &private_response,
+            ),
             private_response,
             pending: None,
             _pending_answer: None,
@@ -353,7 +357,9 @@ impl SendsRequests for RunningNexus {
                     let pending = matches!(private_response, PrivateSendResponse::SendAccepted(_))
                         .then(|| PendingSend { address: recipient });
                     let response =
-                        crate::message_projection::visible_send_response(&private_response);
+                        crate::message_projection::ProjectsSendResponse::visible_send_response(
+                            &private_response,
+                        );
                     SendAnswer {
                         response,
                         private_response,
@@ -373,7 +379,9 @@ impl SendsRequests for RunningNexus {
                     signal_flow::SendFailureReason::Refused(refusal.clone()),
                 ));
             answer.response =
-                crate::message_projection::visible_send_response(&answer.private_response);
+                crate::message_projection::ProjectsSendResponse::visible_send_response(
+                    &answer.private_response,
+                );
         }
         match self.store.record_send_outcome(
             peer.cloned(),
@@ -1343,7 +1351,9 @@ impl CompletesDirectSends for RunningNexus {
         {
             let private_response = PrivateSendResponse::SendAccepted(acceptance);
             return SendAnswer {
-                response: crate::message_projection::visible_send_response(&private_response),
+                response: crate::message_projection::ProjectsSendResponse::visible_send_response(
+                    &private_response,
+                ),
                 private_response,
                 pending: Some(PendingSend {
                     address: address.clone(),

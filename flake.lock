@@ -265,17 +265,17 @@
         "nixpkgs": "nixpkgs_2"
       },
       "locked": {
-        "lastModified": 1794217512,
-        "narHash": "sha256-Epk1TXh966eLyJQKaOt95nHIS5/TsJNiIh2GjjLp5vE=",
+        "lastModified": 1794220408,
+        "narHash": "sha256-xEo+vSCLTPwHAP1Qu3IuHs8FDgU5Lf8VZe7za5xDH9k=",
         "owner": "LiGoldragon",
         "repo": "message",
-        "rev": "9e833e649a6d0a78b26828dcf1a42b0f4833496b",
+        "rev": "e0a0fe7a097983eb116ccd8290326e637e541b4c",
         "type": "github"
       },
       "original": {
         "owner": "LiGoldragon",
         "repo": "message",
-        "rev": "9e833e649a6d0a78b26828dcf1a42b0f4833496b",
+        "rev": "e0a0fe7a097983eb116ccd8290326e637e541b4c",
         "type": "github"
       }
     },

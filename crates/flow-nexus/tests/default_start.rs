@@ -225,6 +225,61 @@ fn two_explicit_starts_serve_disjoint_sockets_and_memory() {
     assert!(Path::new(&start_b.store_path).exists());
 }
 
+/// Under systemd's Type=notify the Nexus sends READY=1 to $NOTIFY_SOCKET,
+/// and only once its sockets are bound: when the message arrives, each
+/// socket accepts a connection and the ordinary one answers. The test waits
+/// on the message itself, never re-trying a connection.
+#[test]
+fn the_nexus_notifies_readiness_only_after_its_socket_is_bound() {
+    use std::os::unix::net::UnixDatagram;
+    let home = tempfile::tempdir().expect("temporary home");
+    let runtime = tempfile::tempdir().expect("temporary runtime directory");
+    let state = tempfile::tempdir().expect("dedicated state directory");
+    let start = start(runtime.path(), state.path());
+    // Configured in this process, so nothing waits on a configuring Nexus.
+    flow_nexus::store::ConfigurationOnlyStore::open(Path::new(&start.store_path))
+        .expect("a new configuration-only store opens")
+        .configure_change(meta_signal_flow::ConfigurationChange::Nexus(configuration(
+            &start,
+            home.path(),
+        )))
+        .expect("the Nexus configuration commits");
+    let notify_path = runtime.path().join("notify.sock");
+    let notify = UnixDatagram::bind(&notify_path).expect("the notify socket binds");
+    notify
+        .set_read_timeout(Some(Duration::from_secs(120)))
+        .expect("the notify socket gives up eventually");
+    let _nexus = Command::new(env!("CARGO_BIN_EXE_flow-nexus"))
+        .env_clear()
+        .env("HOME", home.path())
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .env("NOTIFY_SOCKET", &notify_path)
+        .arg(format!(
+            "{{ «{}» «{}» «{}» None }}",
+            start.ordinary_socket_path, start.meta_socket_path, start.store_path
+        ))
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|child| StartedNexus { child })
+        .expect("flow-nexus spawns with NOTIFY_SOCKET");
+
+    let mut message = [0_u8; 64];
+    let length = notify
+        .recv(&mut message)
+        .expect("the Nexus announces its readiness");
+    assert_eq!(&message[..length], b"READY=1");
+    UnixStream::connect(&start.meta_socket_path).expect("the meta socket listens at readiness");
+    let mut ordinary = UnixStream::connect(&start.ordinary_socket_path)
+        .expect("the ordinary socket listens at readiness");
+    ordinary
+        .write_query(&signal_flow::Query::Metaflows)
+        .expect("Metaflows written");
+    assert!(matches!(
+        ordinary.read_response().expect("Metaflows answered"),
+        signal_flow::Response::Listed(rows) if rows.is_empty()
+    ));
+}
+
 #[test]
 fn configure_only_commits_before_normal_start_uses_the_declared_store() {
     let home = tempfile::tempdir().expect("temporary home");

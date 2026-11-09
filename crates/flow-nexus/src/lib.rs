@@ -73,6 +73,7 @@ pub mod sending;
 pub mod store;
 pub mod store_check;
 pub mod title;
+pub mod undecodable;
 pub mod values;
 pub mod waking;
 
@@ -407,6 +408,13 @@ impl Dispatches for RunningNexus {
                 self.launch_status(&launch_request_id)
             }
             Query::Observe(ObserveSelection::Agent(flow_id)) => self.agent_observation(&flow_id),
+            Query::Observe(ObserveSelection::Undecodable) => {
+                use crate::store::undecodable_frame::RecordsUndecodableFrames;
+                match self.store.undecodable_frames() {
+                    Ok(frames) => Response::UndecodableObserved(frames),
+                    Err(error) => Response::Refused(signal_flow::Refusal::Store(error.to_string())),
+                }
+            }
             Query::Observe(ObserveSelection::Retirement(address)) => {
                 use crate::store::handover::HoldsHandovers;
                 match self.store.observe_handover_retirement(&address) {
@@ -1210,6 +1218,9 @@ pub trait ServesConnection: Sized {
         nexus: &RunningNexus,
         subscription: RetirementSubscription,
     ) -> Result<(), String>;
+    /// Observe.Undecodable: every recorded undecodable frame, then each new
+    /// one, until the peer goes.
+    fn serve_undecodable(&mut self, nexus: &RunningNexus) -> Result<(), String>;
     fn serve_ordinary(self, nexus: &RunningNexus) -> Result<(), String>;
     fn serve_meta(self, nexus: &RunningNexus) -> Result<(), String>;
 }
@@ -1275,6 +1286,39 @@ impl ServesConnection for Connection {
         result.and(watcher_result)
     }
 
+    fn serve_undecodable(&mut self, nexus: &RunningNexus) -> Result<(), String> {
+        use crate::undecodable::ObservesUndecodableFrames;
+        let mut reader = self.peer.try_clone().map_err(|error| error.to_string())?;
+        reader
+            .set_read_timeout(None)
+            .map_err(|error| error.to_string())?;
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let watch_disconnected = Arc::clone(&disconnected);
+        let changes = nexus.store.launch_changes.clone();
+        let watcher = std::thread::Builder::new()
+            .name("flow-undecodable-observer-peer".into())
+            .spawn(move || {
+                let mut bytes = [0_u8; 256];
+                loop {
+                    match reader.read(&mut bytes) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+                watch_disconnected.store(true, Ordering::Release);
+                changes.announce();
+            })
+            .map_err(|error| error.to_string())?;
+        let result = nexus.observe_undecodable(&disconnected, &mut |response| {
+            self.peer.write_response(response)
+        });
+        let _ = self.peer.shutdown(Shutdown::Both);
+        let watcher_result = watcher
+            .join()
+            .map_err(|_| "peer-disconnect watcher panicked".to_owned());
+        result.and(watcher_result)
+    }
+
     fn serve_retirement(
         &mut self,
         nexus: &RunningNexus,
@@ -1286,7 +1330,15 @@ impl ServesConnection for Connection {
     }
 
     fn serve_ordinary(mut self, nexus: &RunningNexus) -> Result<(), String> {
-        let query = self.peer.read_query()?;
+        use crate::undecodable::ReadsOrdinaryFrames;
+        let frame = self.peer.read_frame()?;
+        // A frame that decodes as no Query, an earlier hook's Report among
+        // them, is refused in this contract's words and recorded.
+        let query =
+            match nexus.ordinary_query(&frame, self.process.as_ref(), self.peer.peer_process()) {
+                Ok(query) => query,
+                Err(refused) => return self.peer.write_response(&refused),
+            };
         let response = match query {
             // Reads of launch state never wait behind a running launch.
             Query::LaunchStatus(launch_request_id) => nexus.launch_status(&launch_request_id),
@@ -1300,6 +1352,9 @@ impl ServesConnection for Connection {
                 let peer = &mut self.peer;
                 return nexus
                     .observe_agent(&flow_id, &mut |response| peer.write_response(response));
+            }
+            Query::Observe(ObserveSelection::Undecodable) => {
+                return self.serve_undecodable(nexus);
             }
             Query::Observe(ObserveSelection::Retirement(address)) => {
                 use crate::store::handover::HoldsHandovers;
@@ -1586,9 +1641,23 @@ pub trait ListensOnSocket {
     where
         Self: Sync + Sized,
     {
-        let listener = ClaimedSocket::bind(socket)?;
+        self.listen_on(ClaimedSocket::bind(socket)?, socket, surface, serve)
+    }
+
+    /// Serves `listener`, already bound at `socket`, each connection on its
+    /// own thread, until a stop; then removes the socket.
+    fn listen_on(
+        &self,
+        listener: UnixListener,
+        socket: &Path,
+        surface: &str,
+        serve: fn(Connection, &Self) -> Result<(), String>,
+    ) -> Result<(), String>
+    where
+        Self: Sync + Sized,
+    {
         std::thread::scope(|scope| {
-            // A stop requested before the bind found no listener to wake.
+            // A stop requested before serving began found no accept to wake.
             let incoming = listener
                 .incoming()
                 .take(if self.stopping() { 0 } else { usize::MAX });
@@ -1998,21 +2067,64 @@ impl DispatchesSerially for RunningNexus {
 
 pub trait ServesOrdinary {
     fn serve_ordinary(&self, socket: &Path) -> Result<(), String>;
+    /// Serves the ordinary socket already bound at `socket`.
+    fn serve_ordinary_on(&self, listener: UnixListener, socket: &Path) -> Result<(), String>;
 }
 
 impl ServesOrdinary for RunningNexus {
     fn serve_ordinary(&self, socket: &Path) -> Result<(), String> {
         self.listen(socket, "ordinary", Connection::serve_ordinary)
     }
+
+    fn serve_ordinary_on(&self, listener: UnixListener, socket: &Path) -> Result<(), String> {
+        self.listen_on(listener, socket, "ordinary", Connection::serve_ordinary)
+    }
 }
 
 pub trait ServesMeta {
     fn serve_meta(&self, socket: &Path) -> Result<(), String>;
+    /// Serves the meta socket already bound at `socket`.
+    fn serve_meta_on(&self, listener: UnixListener, socket: &Path) -> Result<(), String>;
 }
 
 impl ServesMeta for RunningNexus {
     fn serve_meta(&self, socket: &Path) -> Result<(), String> {
         self.listen(socket, "meta", Connection::serve_meta)
+    }
+
+    fn serve_meta_on(&self, listener: UnixListener, socket: &Path) -> Result<(), String> {
+        self.listen_on(listener, socket, "meta", Connection::serve_meta)
+    }
+}
+
+/// systemd's readiness protocol: a unit of Type=notify has started once its
+/// main process sends `READY=1` to the datagram socket `NOTIFY_SOCKET`
+/// names, a path or, after `@`, an abstract name.
+pub struct Readiness;
+
+/// Announces that the Nexus serves.
+pub trait AnnouncesReadiness {
+    /// Sends `READY=1` to `$NOTIFY_SOCKET` when it is set; does nothing
+    /// when it is not.
+    fn announce_ready() -> Result<(), String>;
+}
+
+impl AnnouncesReadiness for Readiness {
+    fn announce_ready() -> Result<(), String> {
+        use std::os::linux::net::SocketAddrExt;
+        use std::os::unix::net::{SocketAddr, UnixDatagram};
+        let Some(target) = std::env::var_os("NOTIFY_SOCKET") else {
+            return Ok(());
+        };
+        let address = match target.as_encoded_bytes().strip_prefix(b"@") {
+            Some(name) => SocketAddr::from_abstract_name(name),
+            None => SocketAddr::from_pathname(Path::new(&target)),
+        }
+        .map_err(|error| format!("NOTIFY_SOCKET {}: {error}", target.display()))?;
+        UnixDatagram::unbound()
+            .and_then(|socket| socket.send_to_addr(b"READY=1", &address))
+            .map(|_| ())
+            .map_err(|error| format!("NOTIFY_SOCKET {}: {error}", target.display()))
     }
 }
 
@@ -3040,8 +3152,10 @@ mod tests {
         }
     }
 
+    /// A malformed frame is answered FrameRefused on its own connection;
+    /// an idle peer and the next caller are untouched.
     #[test]
-    fn a_malformed_frame_drops_only_its_connection() {
+    fn a_malformed_frame_is_refused_on_its_own_connection_alone() {
         use super::{CarriesSignalFrames, ServesOrdinary};
         use std::{io::Write, os::unix::net::UnixStream};
         let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
@@ -3066,7 +3180,10 @@ mod tests {
             .write_all(&16u32.to_be_bytes())
             .and_then(|_| garbage.write_all(&[0xff; 16]))
             .expect("garbage frame written");
-        assert!(garbage.read_response().is_err());
+        assert!(matches!(
+            garbage.read_response(),
+            Ok(Response::FrameRefused(refused)) if refused.flow_id_option.is_none()
+        ));
 
         let mut peer = connect();
         peer.write_query(&Query::Metaflows)
@@ -6093,6 +6210,69 @@ mod tests {
                 .resolve_caller(marked_process.caller_pane(&fixture.nexus.herdr), None),
             Response::CallerResolved(mind_live())
         );
+    }
+
+    /// The Report of a hook built on an earlier contract, a Stop without its
+    /// background work, decodes as no Query: it is refused in this
+    /// contract's words, naming the calling process and its seat (the pane
+    /// it runs in and the flow bound there), and the refusal is recorded,
+    /// so Observe.Undecodable shows it to an owner the earlier client
+    /// could not answer.
+    #[test]
+    fn an_undecodable_report_frame_is_recorded_as_a_typed_refusal_with_process_and_seat_and_appears_in_observe()
+     {
+        use crate::store::ReadsFlowMemory;
+        use crate::undecodable::{ObservesUndecodableFrames, ReadsOrdinaryFrames};
+        let fixture = NexusFixture::new();
+        bind_existing_caller(&fixture, "a001", "pane-1");
+        fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
+        let hook = MarkedProcess::spawn("sleep", &["30"], "pane-1");
+        let caller = CallerProcess {
+            process_id: hook.0.id(),
+        };
+        let process = FlowStore::process_identity_for_pid(hook.0.id()).expect("hook identity");
+        let earlier = signal_flow_before_request_ids::Query::Report(
+            signal_flow_before_request_ids::Report_Data {
+                flow_id: "a001".into(),
+                event: signal_flow_before_request_ids::Event::Stopped(
+                    signal_flow_before_request_ids::NativeStop {
+                        native_session_id_option: Some("session-a001".into()),
+                        transcript_path_option: Some("/p/session-a001.jsonl".into()),
+                        last_assistant_message_option: None,
+                    },
+                ),
+            },
+        );
+        let frame = rkyv::to_bytes::<rkyv::rancor::Error>(&earlier).expect("earlier frame");
+
+        let refused = fixture
+            .nexus
+            .ordinary_query(&frame, Some(&process), Some(caller))
+            .map(|_| ())
+            .map_err(|refused| *refused);
+        let Err(Response::FrameRefused(refused)) = refused else {
+            panic!("an earlier hook's Report decodes as no Query");
+        };
+        assert_eq!(refused.flow_id_option.as_deref(), Some("a001"));
+        assert_eq!(refused.seat_evidence.process, process);
+        assert_eq!(
+            refused.seat_evidence.seat_pane_option,
+            Some(signal_flow::SeatPane {
+                herdr_session_name: "messaging-build".into(),
+                herdr_pane_id: "pane-1".into(),
+            })
+        );
+
+        let mut observed = Vec::new();
+        let ended = fixture.nexus.observe_undecodable(
+            &std::sync::atomic::AtomicBool::new(false),
+            &mut |response| {
+                observed.push(response.clone());
+                Err("the observer has what it came for".into())
+            },
+        );
+        assert!(ended.is_err());
+        assert_eq!(observed, vec![Response::UndecodableObserved(vec![refused])]);
     }
 
     /// A flow sends through Flow from the process it runs: the sender is

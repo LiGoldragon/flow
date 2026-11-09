@@ -37,6 +37,7 @@ pub(crate) mod send_server;
 pub(crate) mod sent;
 mod staged_open;
 pub(crate) mod successor;
+pub(crate) mod undecodable_frame;
 use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
@@ -149,6 +150,8 @@ const OPTIONAL_HANDOVER_RUNTIME_TABLE: &str = "flow_nexus_handovers";
 const OPTIONAL_HANDOVER_REMINDER_TABLE: &str = "flow_nexus_handover_reminders";
 /// Added in 0.53.3; a 0.53.2 store has no ordered replacements.
 const OPTIONAL_ORDERED_REPLACEMENT_TABLE: &str = "flow_nexus_ordered_replacements";
+/// Added in 0.53.3; a 0.53.2 store has recorded no undecodable frame.
+const OPTIONAL_UNDECODABLE_FRAME_TABLE: &str = "flow_nexus_undecodable_frames";
 const OPTIONAL_REQUEST_ID_TABLE: &str = "flow_nexus_request_ids";
 const OPTIONAL_STORE_IDENTITY_TABLE: &str = "flow_nexus_store_identity";
 const OPTIONAL_DELIVER_CALL_TABLE: &str = "flow_nexus_deliver_calls";
@@ -239,6 +242,7 @@ const RUNNING_TABLES: &[&str] = &[
     "flow_nexus_handovers",
     OPTIONAL_HANDOVER_REMINDER_TABLE,
     OPTIONAL_ORDERED_REPLACEMENT_TABLE,
+    OPTIONAL_UNDECODABLE_FRAME_TABLE,
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -1618,6 +1622,7 @@ pub struct FlowStore {
     reminders: TableReference<reminder::Reminder>,
     successor_intents: TableReference<successor::SuccessorIntent>,
     ordered_replacements: TableReference<ordered_replacement::OrderedReplacement>,
+    undecodable_frames: TableReference<undecodable_frame::UndecodableRecord>,
     queue_delivery: QueueDeliveryTables,
     send_outcomes: SendOutcomeTables,
     logical_deliveries: LogicalDeliveryTables,
@@ -2588,6 +2593,9 @@ impl OpensFlowStore for FlowStore {
         let ordered_replacements = engine.register_table(
             <ordered_replacement::OrderedReplacement as ordered_replacement::DescribesOrderedReplacementTable>::descriptor(),
         )?;
+        let undecodable_frames = engine.register_table(
+            <undecodable_frame::UndecodableRecord as undecodable_frame::DescribesUndecodableFrameTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2618,6 +2626,7 @@ impl OpensFlowStore for FlowStore {
             reminders,
             successor_intents,
             ordered_replacements,
+            undecodable_frames,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -2776,6 +2785,9 @@ impl OpensFlowStore for FlowStore {
         let ordered_replacements = engine.register_table(
             <ordered_replacement::OrderedReplacement as ordered_replacement::DescribesOrderedReplacementTable>::descriptor(),
         )?;
+        let undecodable_frames = engine.register_table(
+            <undecodable_frame::UndecodableRecord as undecodable_frame::DescribesUndecodableFrameTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2806,6 +2818,7 @@ impl OpensFlowStore for FlowStore {
             reminders,
             successor_intents,
             ordered_replacements,
+            undecodable_frames,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -5009,6 +5022,10 @@ pub(crate) trait ReadsFlowMemory {
                 ordered_replacement::ORDERED_REPLACEMENT_FAMILY,
                 ordered_replacement::ORDERED_REPLACEMENT_SCHEMA,
             ),
+            "flow_nexus_undecodable_frames" => (
+                undecodable_frame::UNDECODABLE_FRAME_FAMILY,
+                undecodable_frame::UNDECODABLE_FRAME_SCHEMA,
+            ),
             "flow_nexus_meta_leave_out_configuration" => {
                 return Some((
                     "flow-nexus-meta-leave-out-configuration",
@@ -5166,6 +5183,7 @@ pub(crate) trait ReadsFlowMemory {
                     || *name == OPTIONAL_HANDOVER_RUNTIME_TABLE
                     || *name == OPTIONAL_HANDOVER_REMINDER_TABLE
                     || *name == OPTIONAL_ORDERED_REPLACEMENT_TABLE
+                    || *name == OPTIONAL_UNDECODABLE_FRAME_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
                     || *name == OPTIONAL_DELIVER_CALL_TABLE
                     || *name == OPTIONAL_STORE_IDENTITY_TABLE

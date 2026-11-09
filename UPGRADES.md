@@ -1,8 +1,8 @@
 # Flow 0.53.3: replacement waits for rest; a Stop carries its background work
 
-Pins signal-flow 57.0.0 (`edfb7e6`), meta-signal-flow 72.0.0 (`00d38de`),
-Message 0.22.1 (`9e833e6`), signal-message 21.0.1 (`e2697f9`) and
-meta-signal-message 3.0.1 (`f0ccb9a`).
+Pins signal-flow 57.0.0 (`065730f`), meta-signal-flow 72.0.0 (`82be495`),
+Message 0.22.1 (`e0a0fe7`), signal-message 21.0.1 (`4c1cd69`) and
+meta-signal-message 3.0.1 (`f916df1`).
 
 - A Claude seat rests when its own last Stop names no background work and
   its turn is shown ended. Closing (a refresh, an OnDemand sleep) waits for
@@ -24,6 +24,14 @@ meta-signal-message 3.0.1 (`f0ccb9a`).
   an absolute path, else the `flow-hook` beside the Nexus. A flow running an
   earlier hook (a store path, the earlier contract) reaches no 0.53.3 Nexus:
   Restart each adopted flow onto the new hook at the cutover.
+- A frame on the ordinary socket that decodes as no Query, an earlier
+  hook's Report among them, is answered `FrameRefused.{ Option<FlowId>
+  SeatEvidence }`, naming the flow bound to the caller's seat and the
+  caller's seat and process, and recorded in `flow_nexus_undecodable_frames`
+  (new, empty in a 0.53.2 store). `Observe.Undecodable` streams every record,
+  then each new one.
+- The Nexus binds both sockets before serving and then sends `READY=1` to
+  `$NOTIFY_SOCKET` when set: its unit can be `Type=notify`.
 
 # Flow 0.53.1
 

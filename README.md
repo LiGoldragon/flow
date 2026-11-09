@@ -13,6 +13,9 @@ The wire contracts are independent repositories:
   `List`, `ResolveRecipient` for Message Nexus routing, `ResolveCaller`,
   which names the flow, aspect and model of the process that calls,
   and `Observe.Agent`, a flow's Herdr agent state on open and on each change.
+  A frame that decodes as no Query, an earlier hook's Report among them, is
+  answered `FrameRefused` with its caller's process and seat and recorded;
+  `Observe.Undecodable` shows every record and each new one.
   Nothing on the ordinary socket writes into a pane.
 - `meta-signal-flow` defines `Configure`, reset-credit consumption, `Retire`,
   and the pane writes: `Deliver`, `Vet`, `Command`, plus `ResolvePeer`.
@@ -55,7 +58,12 @@ The ordinary pane operations use the same typed edge:
 flow 'Stop.00f95a'
 flow 'List.{}'
 flow 'Observe.Agent.00f95a'
+flow 'Observe.Undecodable'
 ```
+
+The Nexus binds both sockets before it serves, then sends `READY=1` to
+`$NOTIFY_SOCKET` when it is set, so a systemd unit of `Type=notify` is
+started only once both listen.
 
 Every write into a pane goes through the privileged socket, and Flow is the
 only writer. `Deliver` carries a typed `Message` whose head is its Priority:

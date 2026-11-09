@@ -1,9 +1,9 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
 use flow_nexus::store::ConfiguresOnlyStore;
 use flow_nexus::{
-    CarriesSignalFrames, ClaimedSocket, ClaimsSocket, HoldsStopRequest, OpensRunningNexus,
-    RunningNexus, ServesMeta, ServesOrdinary, StopsNexus, TerminationSignals,
-    WatchesTerminationSignals,
+    AnnouncesReadiness, CarriesSignalFrames, ClaimedSocket, ClaimsSocket, HoldsStopRequest,
+    OpensRunningNexus, Readiness, RunningNexus, ServesMeta, ServesOrdinary, StopsNexus,
+    TerminationSignals, WatchesTerminationSignals,
     caller::{IdentifiesPeer, LocatesCallerPane},
     launching::ReconcilesInterruptedLaunches,
     send_tool::ServesSendTool,
@@ -149,10 +149,27 @@ fn main() -> ExitCode {
             nexus.stop(&sockets);
         }
     };
+    // Both sockets are bound before anything is served, and readiness is
+    // announced only once they are: a unit ordered after this one finds
+    // both listening.
+    let bound = |socket: &Path| {
+        ClaimedSocket::bind(socket).inspect_err(|error| eprintln!("flow-nexus: {error}"))
+    };
+    let Ok(ordinary_listener) = bound(ordinary) else {
+        return ExitCode::FAILURE;
+    };
+    let Ok(meta_listener) = bound(meta) else {
+        drop(ordinary_listener);
+        let _ = fs::remove_file(ordinary);
+        return ExitCode::FAILURE;
+    };
     // A Codex launch the last Nexus left mid-way, its first turn perhaps
     // pending on a send call, is refused and settled before anything is
     // served.
     nexus.reconcile_interrupted_launches();
+    if let Err(error) = Readiness::announce_ready() {
+        eprintln!("flow-nexus: readiness not announced: {error}");
+    }
     // Every thread borrows the Nexus inside this scope, so when a stop has
     // ended them all the Nexus drops here and its store closes cleanly.
     std::thread::scope(|scope| {
@@ -177,8 +194,14 @@ fn main() -> ExitCode {
                 nexus.stop(&sockets);
             }
         });
-        scope.spawn(|| serve("ordinary", ordinary, nexus.serve_ordinary(ordinary)));
-        serve("meta", meta, nexus.serve_meta(meta));
+        scope.spawn(|| {
+            serve(
+                "ordinary",
+                ordinary,
+                nexus.serve_ordinary_on(ordinary_listener, ordinary),
+            )
+        });
+        serve("meta", meta, nexus.serve_meta_on(meta_listener, meta));
     });
     drop(nexus);
     if failed.load(Ordering::SeqCst) {

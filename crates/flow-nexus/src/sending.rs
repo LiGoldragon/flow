@@ -701,16 +701,27 @@ impl RefusesUnidentified for Refusal {
     }
 
     fn unidentified_with(process: Process, evidence: SeatEvidence) -> Self {
-        Self::Unidentified(signal_flow::SeatEvidence {
-            seat_pane_option: evidence.pane.map(|pane| signal_flow::SeatPane {
+        Self::Unidentified(evidence.typed(process))
+    }
+}
+
+/// Seat evidence in the contract's words, with the process it was read for.
+pub(crate) trait TypesSeatEvidence {
+    fn typed(self, process: Process) -> signal_flow::SeatEvidence;
+}
+
+impl TypesSeatEvidence for SeatEvidence {
+    fn typed(self, process: Process) -> signal_flow::SeatEvidence {
+        signal_flow::SeatEvidence {
+            seat_pane_option: self.pane.map(|pane| signal_flow::SeatPane {
                 herdr_session_name: pane.herdr_session_name,
                 herdr_pane_id: pane.herdr_pane_id,
             }),
-            pane_label_option: evidence.pane_label,
-            native_session_id_option: evidence.native_session,
-            observed_at: i64::try_from(evidence.observed_at).unwrap_or(i64::MAX),
+            pane_label_option: self.pane_label,
+            native_session_id_option: self.native_session,
+            observed_at: i64::try_from(self.observed_at).unwrap_or(i64::MAX),
             process,
-        })
+        }
     }
 }
 

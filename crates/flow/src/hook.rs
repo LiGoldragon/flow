@@ -7,12 +7,22 @@
 //!   SessionStart     -> Report.{ «FLOW_ID» Started.Some.«session_id» }
 //!   PostToolUse      -> Report.{ «FLOW_ID» ToolUsed.«tool_name» }
 //!   UserPromptSubmit -> Report.{ «FLOW_ID» PromptSubmitted.{ Some.«session_id» Some.«prompt_id» SHA256 } }
-//!   Stop             -> Report.{ «FLOW_ID» Stopped.{ Some.«session_id» Some.«transcript_path» Some.«last_assistant_message» } }
+//!   Stop             -> Report.{ «FLOW_ID» Stopped.{ Some.«session_id» Some.«transcript_path» Some.«last_assistant_message» [ «background_tasks» ] } }
 //!   SessionEnd       -> Report.{ «FLOW_ID» Ended.Some.«session_id» }
 //!   SessionEnd clear -> Report.{ «FLOW_ID» Cleared.Some.«session_id» }
 //!
 //! A SessionEnd whose reason is `clear` is a session change, not an exit:
 //! the harness goes on in the session the SessionStart after it names.
+//!
+//! A Stop carries the background work Claude Code names in its input's
+//! `background_tasks`, one `{ id type status description }` each, `[]` when
+//! nothing is in flight: a Stop with work in flight is no rest, and the Stop
+//! Claude Code ends its turn with once that work has ended is. A Stop whose
+//! input has no `background_tasks`, or a task without those four strings,
+//! does not decode: it is refused, nothing is reported, and the hook exits
+//! 1 with the typed refusal on stderr, which Claude Code shows as a
+//! non-blocking hook error. A Stop that does not decode is never read as
+//! rest.
 //!
 //! A Stop and a submitted prompt carry the native identity Claude Code gave
 //! the hook, so the Nexus acts on them only when they are the flow's own
@@ -27,16 +37,20 @@
 //! flow f1c841). With no FLOW_ID, or on any other event, it reports
 //! nothing.
 //!
-//! It never blocks the harness: whatever happens it exits 0, writes nothing
-//! on stdout (which UserPromptSubmit would add to the model's context), and
-//! writes one tab-separated line on stderr (event, datom, the CLI's exit
-//! code, the CLI's whole output) for whoever reads it.
+//! It never blocks the harness: it exits 0, or 1 for a refused Stop, never
+//! 2, writes nothing on stdout (which UserPromptSubmit would add to the
+//! model's context), and writes one tab-separated line on stderr (event,
+//! datom, the CLI's exit code, the CLI's whole output; for a refused Stop,
+//! the refusal) for whoever reads it.
 
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
 use flow::{HookConfiguration, Invocation};
 use flow_native::{DigestsPrompt, ReadsClaudePaste};
 use protos::{Compactable, Protosizable, ReaderBudget};
-use signal_flow::{Event, NativePrompt, NativeStop, Query, Report_Data};
+use signal_flow::{
+    BackgroundTask, BackgroundTaskKind, BackgroundWork, Event, NativePrompt, NativeStop, Query,
+    Report_Data,
+};
 use std::{
     env,
     io::Read,
@@ -51,11 +65,64 @@ struct HarnessHook {
     configuration: Option<HookConfiguration>,
 }
 
+/// Why a Stop's input does not decode. It is never taken for the flow's
+/// rest: nothing is reported for it.
+#[derive(Debug, PartialEq, Eq)]
+enum StopRefusal {
+    /// The input carries no `background_tasks` array.
+    BackgroundTasksAbsent,
+    /// The task at this place lacks one of its id, type, status and
+    /// description strings.
+    BackgroundTaskMalformed(usize),
+}
+
 /// What the hook does with one event.
 #[derive(Debug, PartialEq, Eq)]
 enum HookCall {
     Report(Box<Query>),
     Nothing(&'static str),
+    Refused(StopRefusal),
+}
+
+/// A refusal written as the datom it names.
+trait NamesRefusal {
+    fn datom(&self) -> String;
+}
+
+impl NamesRefusal for StopRefusal {
+    fn datom(&self) -> String {
+        match self {
+            Self::BackgroundTasksAbsent => "Refused.BackgroundTasksAbsent".into(),
+            Self::BackgroundTaskMalformed(place) => {
+                format!("Refused.BackgroundTaskMalformed.{place}")
+            }
+        }
+    }
+}
+
+/// The background work a Stop's input names.
+trait ReadsBackgroundWork {
+    fn background_work(&self) -> Result<BackgroundWork, StopRefusal>;
+}
+
+/// The feature a background task's `type` label names.
+trait NamesBackgroundTaskKind {
+    fn background_task_kind(&self) -> BackgroundTaskKind;
+}
+
+impl NamesBackgroundTaskKind for str {
+    fn background_task_kind(&self) -> BackgroundTaskKind {
+        match self {
+            "shell" => BackgroundTaskKind::Shell,
+            "subagent" => BackgroundTaskKind::Subagent,
+            "monitor" => BackgroundTaskKind::Monitor,
+            "workflow" => BackgroundTaskKind::Workflow,
+            "teammate" => BackgroundTaskKind::Teammate,
+            "cloud session" => BackgroundTaskKind::CloudSession,
+            "MCP task" => BackgroundTaskKind::McpTask,
+            other => BackgroundTaskKind::Other(other.to_owned()),
+        }
+    }
 }
 
 trait ReadsHookInput: Sized {
@@ -72,7 +139,8 @@ trait ReadsHookField {
 }
 
 trait ReportsThroughCli {
-    fn run(&self) -> String;
+    /// The stderr line, and whether the event was refused.
+    fn run(&self) -> (String, bool);
 }
 
 impl ReadsHookInput for HarnessHook {
@@ -105,6 +173,39 @@ impl ReadsHookField for HarnessHook {
             .get(field)
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
+    }
+}
+
+impl ReadsBackgroundWork for HarnessHook {
+    fn background_work(&self) -> Result<BackgroundWork, StopRefusal> {
+        let Some(tasks) = self
+            .input
+            .get("background_tasks")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return Err(StopRefusal::BackgroundTasksAbsent);
+        };
+        tasks
+            .iter()
+            .enumerate()
+            .map(|(place, task)| {
+                let field = |name: &str| task.get(name).and_then(serde_json::Value::as_str);
+                match (
+                    field("id"),
+                    field("type"),
+                    field("status"),
+                    field("description"),
+                ) {
+                    (Some(id), Some(kind), Some(status), Some(description)) => Ok(BackgroundTask {
+                        background_task_id: id.to_owned(),
+                        background_task_kind: kind.background_task_kind(),
+                        background_task_status: status.to_owned(),
+                        description: description.to_owned(),
+                    }),
+                    _ => Err(StopRefusal::BackgroundTaskMalformed(place)),
+                }
+            })
+            .collect()
     }
 }
 
@@ -152,11 +253,15 @@ impl ChoosesHookCall for HarnessHook {
             // The session ends: the flow has exited, whether or not
             // anything looks at its pane.
             "SessionEnd" => Event::Ended(self.optional("session_id")),
-            "Stop" => Event::Stopped(NativeStop {
-                native_session_id_option: self.optional("session_id"),
-                transcript_path_option: self.optional("transcript_path"),
-                last_assistant_message_option: self.optional("last_assistant_message"),
-            }),
+            "Stop" => match self.background_work() {
+                Ok(background_work) => Event::Stopped(NativeStop {
+                    native_session_id_option: self.optional("session_id"),
+                    transcript_path_option: self.optional("transcript_path"),
+                    last_assistant_message_option: self.optional("last_assistant_message"),
+                    background_work,
+                }),
+                Err(refusal) => return HookCall::Refused(refusal),
+            },
             _ => return HookCall::Nothing("no Report for this event"),
         };
         HookCall::Report(Box::new(Query::Report(Report_Data {
@@ -167,16 +272,27 @@ impl ChoosesHookCall for HarnessHook {
 }
 
 impl ReportsThroughCli for HarnessHook {
-    fn run(&self) -> String {
+    fn run(&self) -> (String, bool) {
         let query = match self.call() {
             HookCall::Report(query) => *query,
-            HookCall::Nothing(reason) => return format!("{}\t-\t-\t{reason}", self.event_name()),
+            HookCall::Nothing(reason) => {
+                return (format!("{}\t-\t-\t{reason}", self.event_name()), false);
+            }
+            HookCall::Refused(refusal) => {
+                return (
+                    format!("{}\t-\t-\t{}", self.event_name(), refusal.datom()),
+                    true,
+                );
+            }
         };
         let datom = query.datomize(vec![]).protosize().compact();
         let Some(configuration) = &self.configuration else {
-            return format!(
-                "{}\t{datom}\t-\tinvalid hook configuration",
-                self.event_name()
+            return (
+                format!(
+                    "{}\t{datom}\t-\tinvalid hook configuration",
+                    self.event_name()
+                ),
+                false,
             );
         };
         let invocation = Invocation {
@@ -192,7 +308,7 @@ impl ReportsThroughCli for HarnessHook {
             .and_then(|path| path.parent().map(|directory| directory.join("flow")))
             .filter(|path| path.is_file())
             .unwrap_or_else(|| PathBuf::from("flow"));
-        match Command::new(client).arg(invocation).output() {
+        let line = match Command::new(client).arg(invocation).output() {
             Ok(output) => {
                 let reply = format!(
                     "{}{}",
@@ -207,18 +323,26 @@ impl ReportsThroughCli for HarnessHook {
                 )
             }
             Err(error) => format!("{}\t{datom}\t-\t{error}", self.event_name()),
-        }
+        };
+        (line, false)
     }
 }
 
 fn main() -> ExitCode {
-    eprintln!("{}", HarnessHook::from_environment().run());
-    ExitCode::SUCCESS
+    let (line, refused) = HarnessHook::from_environment().run();
+    eprintln!("{line}");
+    // A refused Stop is a non-blocking hook error Claude Code shows; 2 would
+    // keep the turn going, and is never used.
+    if refused {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ChoosesHookCall, HarnessHook, HookCall};
+    use super::{ChoosesHookCall, HarnessHook, HookCall, ReportsThroughCli, StopRefusal};
     use datom_codec::{Actualizing, Budget, Potential};
     use protos::ReaderBudget;
 
@@ -270,30 +394,31 @@ mod tests {
             hook(
                 serde_json::json!({"hook_event_name": "Stop", "prompt_id": "p",
                     "session_id": "s", "transcript_path": "/t/s.jsonl",
-                    "last_assistant_message": "answer"}),
+                    "last_assistant_message": "answer", "background_tasks": []}),
                 Some("5a4d0b")
             )
             .call(),
             report(
-                "Report.{ «5a4d0b» Stopped.{ Some.«s» Some.«/t/s.jsonl» Some.«answer» } }".into()
+                "Report.{ «5a4d0b» Stopped.{ Some.«s» Some.«/t/s.jsonl» Some.«answer» [] } }"
+                    .into()
             )
         );
         assert_eq!(
             hook(
-                serde_json::json!({"hook_event_name": "Stop"}),
+                serde_json::json!({"hook_event_name": "Stop", "background_tasks": []}),
                 Some("5a4d0b")
             )
             .call(),
-            report("Report.{ «5a4d0b» Stopped.{ None None None } }".into())
+            report("Report.{ «5a4d0b» Stopped.{ None None None [] } }".into())
         );
         assert_eq!(
             hook(
                 serde_json::json!({"hook_event_name": "Stop",
-                    "last_assistant_message": ""}),
+                    "last_assistant_message": "", "background_tasks": []}),
                 Some("5a4d0b")
             )
             .call(),
-            report("Report.{ «5a4d0b» Stopped.{ None None Some.«» } }".into())
+            report("Report.{ «5a4d0b» Stopped.{ None None Some.«» [] } }".into())
         );
         assert_eq!(
             hook(
@@ -312,6 +437,88 @@ mod tests {
             )
             .call(),
             report("Report.{ «5a4d0b» Ended.Some.«s» }".into())
+        );
+    }
+
+    /// A Stop carries every background task Claude Code names in flight, a
+    /// monitor as any other, each by the feature that created it; a label
+    /// none names is kept as written.
+    #[test]
+    fn a_stop_carries_its_background_work_a_monitor_included() {
+        assert_eq!(
+            hook(
+                serde_json::json!({"hook_event_name": "Stop", "session_id": "s",
+                "transcript_path": "/t/s.jsonl", "background_tasks": [
+                    {"id": "b1", "type": "shell", "status": "running",
+                        "description": "tail logs", "command": "tail -f log"},
+                    {"id": "a1", "type": "subagent", "status": "running",
+                        "description": "review", "agent_type": "Explore"},
+                    {"id": "m1", "type": "monitor", "status": "running",
+                        "description": "watch CI", "server": "ci", "tool": "watch"},
+                    {"id": "x1", "type": "MCP task", "status": "pending",
+                        "description": "fetch", "server": "s", "tool": "t"},
+                    {"id": "y1", "type": "later kind", "status": "running",
+                        "description": "new"}
+                ]}),
+                Some("5a4d0b")
+            )
+            .call(),
+            report(
+                "Report.{ «5a4d0b» Stopped.{ Some.«s» Some.«/t/s.jsonl» None [ \
+                 { «b1» Shell «running» «tail logs» } \
+                 { «a1» Subagent «running» «review» } \
+                 { «m1» Monitor «running» «watch CI» } \
+                 { «x1» McpTask «pending» «fetch» } \
+                 { «y1» Other.«later kind» «running» «new» } ] } }"
+                    .into()
+            )
+        );
+    }
+
+    /// A Stop whose input names no background work, as a Claude Code
+    /// before 2.1.294 writes it, or names a task without its four strings,
+    /// does not decode: it is refused, nothing is reported, and the hook's
+    /// line names the refusal and asks for the error exit.
+    #[test]
+    fn an_undecodable_stop_is_refused_visibly() {
+        let absent = hook(
+            serde_json::json!({"hook_event_name": "Stop", "session_id": "s",
+                "transcript_path": "/t/s.jsonl"}),
+            Some("5a4d0b"),
+        );
+        assert_eq!(
+            absent.call(),
+            HookCall::Refused(StopRefusal::BackgroundTasksAbsent)
+        );
+        assert_eq!(
+            absent.run(),
+            ("Stop\t-\t-\tRefused.BackgroundTasksAbsent".to_owned(), true)
+        );
+        assert_eq!(
+            hook(
+                serde_json::json!({"hook_event_name": "Stop", "background_tasks": {}}),
+                Some("5a4d0b")
+            )
+            .call(),
+            HookCall::Refused(StopRefusal::BackgroundTasksAbsent)
+        );
+        let malformed = hook(
+            serde_json::json!({"hook_event_name": "Stop", "background_tasks": [
+                {"id": "m1", "type": "monitor", "status": "running", "description": "watch"},
+                {"id": "a1", "type": "subagent", "description": "review"}
+            ]}),
+            Some("5a4d0b"),
+        );
+        assert_eq!(
+            malformed.call(),
+            HookCall::Refused(StopRefusal::BackgroundTaskMalformed(1))
+        );
+        assert_eq!(
+            malformed.run(),
+            (
+                "Stop\t-\t-\tRefused.BackgroundTaskMalformed.1".to_owned(),
+                true
+            )
         );
     }
 
@@ -402,7 +609,7 @@ mod tests {
         assert_eq!(
             read(
                 serde_json::json!({"hook_event_name": "Stop", "session_id": "s",
-                "transcript_path": "/t/a »b».jsonl"})
+                "transcript_path": "/t/a »b».jsonl", "background_tasks": []})
             ),
             signal_flow::Query::Report(signal_flow::Report_Data {
                 flow_id: "5a4d0b".into(),
@@ -410,6 +617,7 @@ mod tests {
                     native_session_id_option: Some("s".into()),
                     transcript_path_option: Some("/t/a »b».jsonl".into()),
                     last_assistant_message_option: None,
+                    background_work: vec![],
                 }),
             })
         );

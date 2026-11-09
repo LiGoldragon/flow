@@ -49,7 +49,7 @@ use signal_flow::{
 };
 use std::path::Path;
 
-trait InterpretsLaunchObservations {
+pub(crate) trait InterpretsLaunchObservations {
     fn stops_reported(&self, flow_id: &str) -> i64;
     fn composition_refused(outcome: Outcome) -> Response;
 }
@@ -848,9 +848,29 @@ impl LaunchesFlows for RunningNexus {
     }
 
     fn launch_status(&self, launch_request_id: &str) -> Response {
+        use crate::store::ordered_replacement::{
+            NamesOrderedLaunch, OrdersReplacements, ShowsWaitingAttempt,
+        };
         match self.store.launch_inspection_records(launch_request_id) {
             Ok(Some(records)) => Response::LaunchInspected(records.launch_inspection(&self.store)),
-            Ok(None) => Response::LaunchStatusRejected(LaunchStatusRejection::UnknownLaunchRequest),
+            // A Launch waiting for its predecessor's rest is pending, as the
+            // attempt it waits as.
+            Ok(None) => match self.store.ordered_launch_request(launch_request_id) {
+                Ok(Some(order)) => match order.ordered_launch() {
+                    Some(launch) => Response::LaunchInspected(LaunchInspection {
+                        launch_attempt: launch.waiting_attempt(),
+                        launch_status_outcome_option: None,
+                        flow_node_option: None,
+                    }),
+                    None => {
+                        Response::LaunchStatusRejected(LaunchStatusRejection::UnknownLaunchRequest)
+                    }
+                },
+                Ok(None) => {
+                    Response::LaunchStatusRejected(LaunchStatusRejection::UnknownLaunchRequest)
+                }
+                Err(_) => Response::LaunchStatusRejected(LaunchStatusRejection::PersistenceRefused),
+            },
             Err(StoreError::LaunchStatusReadViewChanged) => {
                 Response::LaunchStatusRejected(LaunchStatusRejection::ReadViewChanged)
             }
@@ -1165,7 +1185,7 @@ impl DescribesLaunchInspection for LaunchInspectionRecords {
 }
 
 /// Helpers of the launch verbs that are not themselves wire operations.
-trait ResumesReplacement {
+pub(crate) trait ResumesReplacement {
     fn resume_reaping(&self, launch_request_id: &str, attempt: LaunchAttempt) -> Response;
     fn as_replacement(response: Response) -> Response;
     /// The Record operation that stores what a launch request came to.

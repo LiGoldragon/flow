@@ -378,19 +378,20 @@ fn a_seat_past_its_threshold_shown_working_is_kept_until_it_rests() {
     assert_eq!(metaflow.queue.len(), 1, "the work waits for the next flow");
 }
 
-/// A seat past its threshold whose main turn has ended while Herdr still
-/// shows it Working, its background agents running or a Soft request just
-/// handed over at this idle event, is not closed: closing it would end that
-/// work. It stays Awake with its pane open, and its queue is kept.
+/// A seat past its threshold whose turn ends with a subagent and a monitor
+/// in flight has not rested, though Herdr shows it resting and its
+/// transcript records its turn's end: no reading of Herdr stands for the
+/// Stop, and closing it would end that work. It stays Awake with its pane
+/// open and its queue kept, while a monitor alone runs too. Claude wakes it
+/// when that work ends, and the Stop that turn ends with, naming none, is
+/// its rest: the seat due a refresh is closed then.
 #[test]
-fn a_seat_past_its_threshold_working_after_its_turn_ended_is_not_closed() {
+fn a_stop_with_live_background_work_is_not_rest_and_a_later_stop_with_none_closes() {
+    use super::waking::{background_task, report_claude_stop};
+    use signal_flow::BackgroundTaskKind;
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
-        vec![{
-            let mut agent = claude_agent(&fixture);
-            agent["agent_status"] = serde_json::Value::String("working".into());
-            agent
-        }],
+        vec![claude_agent(&fixture)],
         PromptFixture::Prompted("w1:p3"),
     );
     claude_seat(&fixture, 230_000);
@@ -406,15 +407,36 @@ fn a_seat_past_its_threshold_working_after_its_turn_ended_is_not_closed() {
         vec![Request::Order("Held for the next flow.".into())],
     );
 
-    fixture
-        .nexus
-        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
-
+    report_claude_stop(
+        &fixture,
+        vec![
+            background_task("a1", BackgroundTaskKind::Subagent),
+            background_task("m1", BackgroundTaskKind::Monitor),
+        ],
+    );
     assert!(!closed(&fixture), "the working seat's pane stays open");
     assert!(fixture.typed().is_none(), "nothing is typed into it");
     assert_ne!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
+    assert_eq!(
+        fixture.nexus.settle_stopped(CLAUDE_SEAT),
+        AtStop::Kept(crate::waking::KeptAtStop::BackgroundWorkOpen)
+    );
+
+    report_claude_stop(
+        &fixture,
+        vec![background_task("m1", BackgroundTaskKind::Monitor)],
+    );
+    assert!(!closed(&fixture), "a monitor in flight is work in flight");
     let metaflow = seat_metaflow_now(&fixture);
     assert_eq!(metaflow.state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(metaflow.queue.len(), 1, "the work waits for the next flow");
+
+    report_claude_stop(&fixture, vec![]);
+    assert!(closed(&fixture), "the resting seat's pane is closed");
+    assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
+    let metaflow = seat_metaflow_now(&fixture);
+    assert_eq!(metaflow.state, State::Asleep);
+    assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
     assert_eq!(metaflow.queue.len(), 1, "the work waits for the next flow");
 }
 

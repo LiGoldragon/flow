@@ -111,6 +111,7 @@ fn foreign_stop() -> Event {
         native_session_id_option: Some("0ther000-0000-4000-8000-000000000009".into()),
         transcript_path_option: Some("/elsewhere/other.jsonl".into()),
         last_assistant_message_option: None,
+        background_work: vec![],
     })
 }
 
@@ -577,6 +578,8 @@ fn a_foreign_stop_before_confirmation_is_not_a_turn_end() {
     );
     let first = from_core("first-request-body");
     claude_seat(&fixture, 40_000);
+    // The seat took its first request's prompt: it is in its turn.
+    super::waking::claude_prompt_taken(&fixture);
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address(Model::Sol),
         state: State::Awake(CLAUDE_SEAT.into()),

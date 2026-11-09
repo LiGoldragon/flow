@@ -271,6 +271,7 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
     // The ending flow was launched, so a wake composes its successor from
     // that launch.
     launched_claude_ended_by(&fixture, |_| true);
+    super::waking::rested_at_stop(&fixture, ENDING);
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: seat_address(),
         state: State::Awake(ENDING.into()),
@@ -1449,4 +1450,218 @@ fn a_nexus_start_starts_a_successor_owed_after_a_refresh_or_a_replace() {
         );
         assert!(!fixture.nexus.waking.is_waking(&seat_address()));
     }
+}
+
+/// The seat's own Address, as the Secondary's own seat asks.
+fn own_seat() -> crate::protecting::Asker {
+    crate::protecting::Asker::Ordinary(Origin::Flow(signal_flow::FlowOrigin {
+        flow_id: CLAUDE_SEAT.into(),
+        session_id: super::waking::CLAUDE_SESSION.into(),
+    }))
+}
+
+/// A flow that refreshes itself is working: its Refresh answers
+/// RefreshQueued at once and closes nothing. The seat stays Awake in its
+/// pane; the Stop that ends its turn with nothing in flight is its idle
+/// event, at which it is refreshed: its pane closed, its flow Stopped, its
+/// metaflow Asleep, the order spent.
+#[test]
+fn a_self_refresh_of_a_working_seat_waits_for_its_idle_event_and_answers_refresh_queued() {
+    use crate::store::ordered_replacement::OrdersReplacements;
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    awake_seat(&fixture, vec![]);
+    declare(&fixture, seat_address());
+    super::waking::claude_prompt_taken(&fixture);
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_asked(Query::Refresh(seat_address()), own_seat()),
+        Response::RefreshQueued(signal_flow::RefreshQueued {
+            address: seat_address(),
+            flow_id: CLAUDE_SEAT.into(),
+        })
+    );
+    assert!(!closed(&fixture), "the working flow's pane stays open");
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
+    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    assert!(
+        fixture
+            .nexus
+            .store
+            .ordered_replacement(&seat_address())
+            .unwrap()
+            .is_some(),
+        "the refresh is recorded"
+    );
+    assert!(!fixture.nexus.waking.is_waking(&seat_address()));
+
+    super::waking::report_claude_stop(&fixture, vec![]);
+
+    assert!(closed(&fixture), "the resting flow's pane is closed");
+    assert!(
+        fixture.typed().is_none(),
+        "the ending flow is given no turn"
+    );
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
+    let metaflow = stored(&fixture);
+    assert_eq!(metaflow.state, State::Asleep);
+    assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .ordered_replacement(&seat_address())
+            .unwrap(),
+        None,
+        "the order is spent"
+    );
+}
+
+/// A Launch naming a working flow answers LaunchPending at once with the
+/// attempt it waits as, its profile naming that flow, and LaunchStatus
+/// answers the same while it waits. Nothing is closed, and a Stop with a
+/// monitor still in flight is no rest: the Launch keeps waiting.
+#[test]
+fn a_replacing_launch_of_a_working_seat_answers_launch_pending_and_waits() {
+    use super::waking::background_task;
+    use crate::store::ordered_replacement::OrdersReplacements;
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    declare_seat(
+        &fixture,
+        Continuity::OnDemand,
+        vec!["spirit-core".into(), "intent-flow".into()],
+    );
+    awake_seat(&fixture, vec![]);
+    super::waking::claude_prompt_taken(&fixture);
+
+    let pending = fixture
+        .nexus
+        .dispatch(Query::Launch(signal_flow::LaunchRequest {
+            address: seat_address(),
+            remembering: signal_flow::Remembering::Predecessors(1),
+            instruction_prompt: "Take up the work.".into(),
+        }));
+    let Response::LaunchPending(attempt) = pending else {
+        panic!("a Launch of a working flow waits: {pending:?}");
+    };
+    assert_eq!(
+        attempt.launch_profile.flow_id_option,
+        Some(CLAUDE_SEAT.to_owned())
+    );
+    assert!(
+        attempt
+            .launch_profile
+            .instruction_prompt
+            .contains("Take up the work.")
+    );
+    assert_eq!(
+        attempt.launch_attempt_phase,
+        signal_flow::LaunchAttemptPhase::Reserved
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Query::LaunchStatus(attempt.launch_request_id.clone())),
+        Response::LaunchInspected(signal_flow::LaunchInspection {
+            launch_attempt: attempt.clone(),
+            launch_status_outcome_option: None,
+            flow_node_option: None,
+        })
+    );
+    assert!(!closed(&fixture), "the working flow's pane stays open");
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
+
+    super::waking::report_claude_stop(
+        &fixture,
+        vec![background_task(
+            "m1",
+            signal_flow::BackgroundTaskKind::Monitor,
+        )],
+    );
+
+    assert!(!closed(&fixture), "a monitor in flight is work in flight");
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
+    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    assert!(
+        fixture
+            .nexus
+            .store
+            .ordered_launch_request(&attempt.launch_request_id)
+            .unwrap()
+            .is_some(),
+        "the Launch still waits"
+    );
+}
+
+/// A refresh recorded for a working flow is kept by a Nexus that starts
+/// again on the same Memory: the reopened store holds it, the new Nexus's
+/// start keeps it while the flow works, and the flow's idle event carries
+/// it out.
+#[test]
+fn the_ordered_replacement_survives_a_nexus_restart() {
+    use crate::store::ordered_replacement::{OrdersReplacements, ReplacementOrder};
+    use crate::store::{OpensFlowStore, SetsNativeOwnerEnvironmentForTests};
+    use crate::waking::SleepsAndWakesSeats;
+    let mut fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    awake_seat(&fixture, vec![]);
+    declare(&fixture, seat_address());
+    super::waking::claude_prompt_taken(&fixture);
+    assert!(matches!(
+        fixture.nexus.dispatch(Query::Refresh(seat_address())),
+        Response::RefreshQueued(_)
+    ));
+
+    // The store closed and opened again at the same path.
+    let placeholder = FlowStore::open(&fixture.directory.path().join("placeholder.sema"))
+        .expect("placeholder store");
+    drop(std::mem::replace(
+        &mut fixture.nexus.store,
+        placeholder.into(),
+    ));
+    let mut reopened =
+        FlowStore::open(&fixture.directory.path().join("flow.sema")).expect("store reopens");
+    reopened.set_native_owner_environment_for_tests(crate::store::NativeOwnerEnvironment {
+        host_id: "isolated-test-host".into(),
+        boot_id: "isolated-test-boot".into(),
+    });
+    fixture.nexus.store = reopened.into();
+
+    let order = fixture
+        .nexus
+        .store
+        .ordered_replacement(&seat_address())
+        .unwrap()
+        .expect("the refresh survives");
+    assert_eq!(order.predecessor, CLAUDE_SEAT);
+    assert_eq!(order.order, ReplacementOrder::Refresh);
+
+    fixture.nexus.recover_wakes();
+    assert!(!closed(&fixture), "the working flow is not closed at start");
+    assert!(
+        fixture
+            .nexus
+            .store
+            .ordered_replacement(&seat_address())
+            .unwrap()
+            .is_some(),
+        "the refresh still waits"
+    );
+
+    super::waking::report_claude_stop(&fixture, vec![]);
+    assert!(closed(&fixture), "the resting flow's pane is closed");
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
+    assert_eq!(stored(&fixture).state, State::Asleep);
 }

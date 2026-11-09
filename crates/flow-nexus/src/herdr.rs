@@ -128,8 +128,7 @@ pub struct HerdrCli {
     /// Claude's own records of the sessions its processes run.
     pub(crate) claude_sessions: crate::claude::ClaudeSessions,
     /// The `flow-hook` Claude Code runs on SessionStart, PostToolUse and
-    /// Stop in every Claude flow Flow launches: the one installed beside
-    /// this Nexus's own executable.
+    /// Stop in every Claude flow Flow launches ([`HookChoice`]).
     pub(crate) harness_hook: PathBuf,
     /// This Nexus's own ordinary socket, carried in every Claude hook's
     /// typed configuration so its reports return to the launching Nexus.
@@ -193,14 +192,42 @@ impl Default for HerdrCli {
             claude_transcript_root: claude_home.join("projects"),
             claude_daemon: crate::claude::ClaudeDaemon::under(&claude_home),
             claude_sessions: crate::claude::ClaudeSessions::under(&claude_home),
-            harness_hook: std::env::current_exe()
-                .ok()
-                .and_then(|path| path.parent().map(|directory| directory.join("flow-hook")))
-                .unwrap_or_else(|| PathBuf::from("flow-hook")),
+            harness_hook: HookChoice {
+                stable: std::env::var_os("FLOW_HOOK").map(PathBuf::from),
+                executable: std::env::current_exe().ok(),
+            }
+            .harness_hook(),
             ordinary_socket: defaults.ordinary_socket_path(),
             held_system_prompts: Default::default(),
             title_readback_interval: std::time::Duration::from_millis(250),
             rest_wait: std::time::Duration::from_secs(30),
+        }
+    }
+}
+
+/// Where the hook command Flow writes into a Claude flow's settings points.
+/// The deployment names a stable path in `FLOW_HOOK` and repoints it at the
+/// `flow-hook` of each Flow it activates, so the hook a running flow was
+/// launched with moves with the deployment. A Nexus started without it, or
+/// with a relative one, names the `flow-hook` beside its own executable.
+pub(crate) struct HookChoice {
+    pub(crate) stable: Option<PathBuf>,
+    pub(crate) executable: Option<PathBuf>,
+}
+
+pub(crate) trait ChoosesHarnessHook {
+    fn harness_hook(&self) -> PathBuf;
+}
+
+impl ChoosesHarnessHook for HookChoice {
+    fn harness_hook(&self) -> PathBuf {
+        match &self.stable {
+            Some(stable) if stable.is_absolute() => stable.clone(),
+            _ => self
+                .executable
+                .as_ref()
+                .and_then(|path| path.parent().map(|directory| directory.join("flow-hook")))
+                .unwrap_or_else(|| PathBuf::from("flow-hook")),
         }
     }
 }
@@ -959,7 +986,7 @@ impl DecodesFlowClaim for FlowClaim {
 
 #[cfg(test)]
 mod tests {
-    use super::{HerdrCli, VerifiesFlowClaim};
+    use super::{ChoosesHarnessHook, HerdrCli, HookChoice, VerifiesFlowClaim};
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
     use crate::herdr::ReadsHerdrSnapshot;
@@ -1165,5 +1192,33 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// The hook a Claude flow is launched with is the stable path the
+    /// deployment names, so it moves with the next deployment; with none,
+    /// or a relative one, it is the flow-hook beside the Nexus.
+    #[test]
+    fn the_hook_command_is_the_stable_path_the_deployment_names() {
+        let executable = Some(PathBuf::from(
+            "/nix/store/abc-flow-configured/bin/flow-nexus",
+        ));
+        assert_eq!(
+            HookChoice {
+                stable: Some(PathBuf::from("/home/li/.local/bin/flow-hook")),
+                executable: executable.clone(),
+            }
+            .harness_hook(),
+            PathBuf::from("/home/li/.local/bin/flow-hook")
+        );
+        for stable in [None, Some(PathBuf::from("flow-hook"))] {
+            assert_eq!(
+                HookChoice {
+                    stable,
+                    executable: executable.clone(),
+                }
+                .harness_hook(),
+                PathBuf::from("/nix/store/abc-flow-configured/bin/flow-hook")
+            );
+        }
     }
 }

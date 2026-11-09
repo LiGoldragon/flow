@@ -1879,6 +1879,7 @@ impl AnswersOnMeta for Response {
                 meta_signal_flow::Response::RestartRefused(refusal)
             }
             Response::Refreshed(refreshed) => meta_signal_flow::Response::Refreshed(refreshed),
+            Response::RefreshQueued(queued) => meta_signal_flow::Response::RefreshQueued(queued),
             Response::RefreshRejected(rejection) => {
                 meta_signal_flow::Response::RefreshRejected(rejection)
             }
@@ -4731,6 +4732,7 @@ mod tests {
             native_session_id_option: Some("other-session".into()),
             transcript_path_option: None,
             last_assistant_message_option: None,
+            background_work: vec![],
         });
         assert_eq!(report("908786", stop.clone()), Response::Reported);
         assert_eq!(

@@ -51,7 +51,9 @@ fn the_hook_reports_only_to_its_typed_socket_configuration() {
     hook.stdin
         .take()
         .expect("hook stdin")
-        .write_all(br#"{"hook_event_name":"Stop","session_id":"s","transcript_path":"/t/s.jsonl"}"#)
+        .write_all(
+            br#"{"hook_event_name":"Stop","session_id":"s","transcript_path":"/t/s.jsonl","background_tasks":[]}"#,
+        )
         .expect("event written");
     let output = hook.wait_with_output().expect("flow-hook ends");
     assert!(output.status.success(), "{output:?}");
@@ -65,6 +67,7 @@ fn the_hook_reports_only_to_its_typed_socket_configuration() {
                 native_session_id_option: Some("s".into()),
                 transcript_path_option: Some("/t/s.jsonl".into()),
                 last_assistant_message_option: None,
+                background_work: vec![],
             }),
         })
     );
@@ -77,7 +80,47 @@ fn the_hook_reports_only_to_its_typed_socket_configuration() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "Stop\tReport.{ 5a4d0b Stopped.{ Some.s Some./t/s.jsonl None } }\t0\tReported\n"
+        "Stop\tReport.{ 5a4d0b Stopped.{ Some.s Some./t/s.jsonl None [] } }\t0\tReported\n"
     );
     assert!(!runtime.join("flow/flow.sock").exists());
+}
+
+/// A Stop whose input names no background work does not decode: the hook
+/// reports nothing to its Nexus, writes the typed refusal on stderr and
+/// exits 1, the non-blocking error Claude Code shows; never 2, which would
+/// keep the turn going.
+#[test]
+fn an_undecodable_stop_is_refused_visibly_and_reaches_no_nexus() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let launching = root.path().join("run/flow");
+    std::fs::create_dir_all(&launching).expect("launching Nexus's socket directory");
+    let listener =
+        UnixListener::bind(launching.join("flow.sock")).expect("fixture launching Nexus binds");
+    listener.set_nonblocking(true).expect("nonblocking fixture");
+    let mut hook = Command::new(env!("CARGO_BIN_EXE_flow-hook"))
+        .arg(format!("{{ {} }}", launching.join("flow.sock").display()))
+        .env_clear()
+        .env("FLOW_ID", "5a4d0b")
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("flow-hook runs");
+    hook.stdin
+        .take()
+        .expect("hook stdin")
+        .write_all(br#"{"hook_event_name":"Stop","session_id":"s","transcript_path":"/t/s.jsonl"}"#)
+        .expect("event written");
+    let output = hook.wait_with_output().expect("flow-hook ends");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "Stop\t-\t-\tRefused.BackgroundTasksAbsent\n"
+    );
+    assert_eq!(
+        listener
+            .accept()
+            .expect_err("nothing reached the Nexus")
+            .kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }

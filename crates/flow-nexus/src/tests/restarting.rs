@@ -278,6 +278,7 @@ fn stop_of(world: &RestartWorld, fixture: &NexusFixture) -> Event {
                 .into_owned(),
         ),
         last_assistant_message_option: None,
+        background_work: vec![],
     })
 }
 
@@ -2840,7 +2841,7 @@ fn restart_protected_from_outside_refused_no_effect() {
 /// The protected flow's own seat is admitted: its Restart passes the
 /// protection and reaches the restart this slice serves, which answers a
 /// restart the flow asks for itself Unsupported and writes nothing. Its own
-/// Refresh is not refused Protected.
+/// Refresh is not refused Protected: it is queued for its rest.
 #[test]
 fn restart_protected_self_accepted() {
     use crate::protecting::Asker;
@@ -2859,11 +2860,12 @@ fn restart_protected_self_accepted() {
     );
     assert_eq!(record(&fixture), None);
     assert_eq!(route_pane(&fixture), OLD_PANE);
+    // A flow refreshing itself is working: its Refresh waits for its rest.
     let refreshed = fixture
         .nexus
         .dispatch_asked(Query::Refresh(address(Model::Sol)), own);
     assert!(
-        matches!(&refreshed, Response::Refreshed(refreshed) if refreshed.flow_id == FLOW),
+        matches!(&refreshed, Response::RefreshQueued(queued) if queued.flow_id == FLOW),
         "{refreshed:?}"
     );
 }

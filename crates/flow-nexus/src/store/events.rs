@@ -9,6 +9,11 @@
 //! starts and so before it is registered: Reserve writes the flow's empty
 //! events row, and that row is what lets the harness's first `Started`
 //! land.
+//!
+//! 0.53.3 (signal-flow 57.0.0) gives a Stop the background work its harness
+//! had in flight, and stores events under v5. The 0.53.2 -> 0.53.3 upgrade
+//! converts every stored v4 row with the rest of that Memory, each Stop
+//! carrying no background work: a v4 Stop was read as the flow's rest.
 
 use super::{FlowStore, ReadsFlowStore, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -21,7 +26,7 @@ use std::sync::Mutex;
 
 pub(super) const FLOW_EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_flow_events");
 pub(super) const FLOW_EVENT_FAMILY: &str = "flow-nexus-flow-events";
-pub(super) const FLOW_EVENT_SCHEMA: &str = "flow-nexus-flow-events-v4";
+pub(super) const FLOW_EVENT_SCHEMA: &str = "flow-nexus-flow-events-v5";
 
 /// One flow's harness events, oldest first.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -38,7 +43,7 @@ impl EngineRecord for FlowEvents {
 
 impl MemoryDefinition for FlowEvents {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
+        MemoryVersion::new(5)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -57,6 +62,7 @@ impl DescribesEventTable for FlowEvents {
             FamilyName::new(FLOW_EVENT_FAMILY),
             SchemaHash::for_label(FLOW_EVENT_SCHEMA),
         )
+        .with_predecessor::<super::request_id_upgrade::PriorFlowEvents>()
     }
 }
 
@@ -236,6 +242,7 @@ mod tests {
             native_session_id_option: Some("c0ffee00-0000-4000-8000-000000000001".into()),
             transcript_path_option: Some("/t/c0ffee00.jsonl".into()),
             last_assistant_message_option: None,
+            background_work: vec![],
         })
     }
 

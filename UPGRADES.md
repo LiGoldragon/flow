@@ -1,3 +1,30 @@
+# Flow 0.53.3: replacement waits for rest; a Stop carries its background work
+
+Pins signal-flow 57.0.0 (`edfb7e6`), meta-signal-flow 72.0.0 (`00d38de`),
+Message 0.22.1 (`9e833e6`), signal-message 21.0.1 (`e2697f9`) and
+meta-signal-message 3.0.1 (`f0ccb9a`).
+
+- A Claude seat rests when its own last Stop names no background work and
+  its turn is shown ended. Closing (a refresh, an OnDemand sleep) waits for
+  that rest; Soft hand-over at a turn's end is unchanged.
+- `Refresh.Address`, whoever asks, and a Launch or Replace naming a live
+  flow, wait for the flow's rest: a working flow answers
+  `RefreshQueued.{ Address FlowId }` or `LaunchPending`, the order recorded
+  in `flow_nexus_ordered_replacements` and carried out at its idle event,
+  also by a Nexus that starts again.
+- The 0.53.2 -> 0.53.3 Memory upgrade evolves `flow-nexus-flow-events-v4`
+  into v5 with the rest of the request-id evolution: every stored Stop
+  carries no background work.
+- `flow-hook` reads `background_tasks` from every Stop; a Stop without it,
+  or with a task missing a field, is refused (stderr
+  `Stop\t-\t-\tRefused.BackgroundTasksAbsent` or
+  `Refused.BackgroundTaskMalformed.<place>`, exit 1) and reports nothing.
+  Claude Code 2.1.294 or later gives the field.
+- The hook command written into each Claude flow is `$FLOW_HOOK` when it is
+  an absolute path, else the `flow-hook` beside the Nexus. A flow running an
+  earlier hook (a store path, the earlier contract) reaches no 0.53.3 Nexus:
+  Restart each adopted flow onto the new hook at the cutover.
+
 # Flow 0.53.1
 
 A Restart composes and validates its resume before it closes anything: the

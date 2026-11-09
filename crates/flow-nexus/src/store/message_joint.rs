@@ -301,7 +301,7 @@ fn real_flow_and_message_share_the_durable_delivery_ledger() {
     );
     assert_eq!(
         std::env::var("FLOW_MESSAGE_JOINT_MESSAGE_REV").unwrap(),
-        "70b7daa3ff069b0b8c836ba6aff223992dcf59a1"
+        "9e833e649a6d0a78b26828dcf1a42b0f4833496b"
     );
     let flow_binary = required_path("FLOW_MESSAGE_JOINT_FLOW_BIN");
     let message_binary = required_path("FLOW_MESSAGE_JOINT_MESSAGE_BIN");

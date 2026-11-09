@@ -23,7 +23,14 @@ catalogs) are not operations, and delivery's own lease and delivery records
 are not yet.
 
 Every harness event reaches Flow through the harness's hooks calling the Flow
-CLI. `flow-hook`, which Flow writes into each Claude flow's launch settings on
+CLI. The hook command Flow writes is the stable path the deployment names in
+`FLOW_HOOK` (CriomOS-home: `~/.local/bin/flow-hook`, pointed at the active
+Flow's `flow-hook`), else the `flow-hook` beside the Nexus, so a running
+flow's hook moves with the deployment. A Stop whose input does not decode,
+no `background_tasks` or a task without its id, type, status and
+description, is refused by `flow-hook` with a typed refusal on stderr and
+exit 1, reported to nothing and never read as rest.
+`flow-hook`, which Flow writes into each Claude flow's launch settings on
 SessionStart, PostToolUse, UserPromptSubmit, Stop and SessionEnd, sends
 `Report.{ FlowId Event }` with the `FLOW_ID` from its environment; the Nexus
 performs it as `Record.Harness`, appending the event to that flow's events in
@@ -391,8 +398,8 @@ A metaflow continues as its declaration's `Continuity.[ OnDemand
 Maintained ]` names; a metaflow no declaration names is OnDemand. A
 metaflow is Maintained by its exact Address, never by its Model. When a seat's turn ends
 and it rests with nothing queued, an OnDemand seat sleeps: its harness and
-pane are closed under the pane's lease (a Claude seat only once Herdr shows
-it Idle or Done, so background agents are not ended) and its flow recorded
+pane are closed under the pane's lease (a Claude seat only once it rests,
+so background work is not ended) and its flow recorded
 Stopped, its metaflow Asleep, its Address and the flow's transcript kept.
 A Maintained seat stays Awake in its pane.
 A metaflow is Asleep once its flow has ended: slept, its pane closed by the
@@ -545,9 +552,7 @@ the witness. A seat due a refresh is never handed work: at its rest Flow
 closes its pane under the pane's lease, records it Stopped (its metaflow
 Asleep) and the refresh done on the landing, and work queued for the
 metaflow wakes a fresh flow composed from the deployed modules. A Claude seat
-rests for this only when Herdr shows it Idle or Done, since a main turn that
-ended while background agents run shows Working and closing it would end
-them.
+rests for this only when its own last Stop names no background work.
 
 Each changed module file, `<type>/<subject>.md`, is queued as an Order to
 Mind `<subject>` Sol, or to Mind core Sol when no such metaflow
@@ -567,10 +572,33 @@ threshold is told nothing and writes no handover; it is given no new message
 the metaflow's next flow. At its rest it is a seat due a refresh, the same
 predicate a landing sets. The refresh is taken at its idle event, a Claude
 Stop or a Codex thread's turn completed, and only once the seat rests: a
-Codex thread its app-server shows resting, a Claude seat Herdr shows Idle or
-Done. A refresh never closes a working flow; a seat still in its turn, or
-whose background agents still run, keeps its queue for its successor until a
-later idle event finds it resting. The decision is taken under the dispatch
+Codex thread its app-server shows resting and in no turn; a Claude seat
+whose own last turn event is a Stop naming no background work, its turn
+shown ended by Herdr resting or by its transcript's main turn end. Claude
+Code gives every Stop hook its `background_tasks` (shell, subagent, monitor,
+workflow and more, a monitor counted as any other); `flow-hook` carries them
+in the Stop's `BackgroundWork`, and when that work ends Claude wakes the
+seat into a turn whose Stop is the next idle event. No reading of Herdr
+stands for that Stop. A refresh never closes a working flow; a seat still in
+its turn, or whose Stop names work in flight, keeps its queue for its
+successor until a later idle event finds it resting. Soft work is handed
+over at the turn's end whatever background work runs: the rest governs
+closing alone.
+
+A replacement ordered from outside waits for the same rest, whoever asks:
+`Refresh.Address`, the flow refreshing itself included, and a Launch or
+Replace naming a live flow. A flow that rests now is replaced at once. A
+working one has the order recorded in `flow_nexus_ordered_replacements`
+(a Launch's whole profile, origin and first-prompt digest with it), and is
+answered at once: `RefreshQueued.{ Address FlowId }`, or `LaunchPending`
+with the attempt it waits as, which LaunchStatus and Observe.Launch answer
+until its replacement is under way and then follow to its outcome. Until it
+rests the flow is handed what it is sent; at the idle event that finds it
+resting the order is carried out under the metaflow's hold, the queue held
+for the successor, and spent. A Nexus that starts again carries out each
+recorded order whose flow rests, keeps the others for their idle event, and
+starts a Launch whose flow ended before it rested as the metaflow's next
+flow; a Refresh for an ended flow is spent. The decision is taken under the dispatch
 gate, as a Soft Send's hand-over at that idle event is, so the two exclude
 each other. A Maintained metaflow, or one holding a request
 that wakes it, is owed its successor: the intent is recorded, the

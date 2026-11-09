@@ -156,7 +156,8 @@ fn closes(fixture: &NexusFixture) -> bool {
 }
 
 /// A Claude seat `c1a0de` resting in pane w1:p3 of the fixture Herdr, its
-/// claim written, its native transcript showing a context of `tokens`.
+/// claim written, its native transcript showing a context of `tokens`, its
+/// last turn event its own Stop with nothing in flight.
 pub(super) const CLAUDE_SEAT: &str = "c1a0de";
 pub(super) const CLAUDE_SESSION: &str = "c1a0de00-0000-4000-8000-000000000001";
 
@@ -219,6 +220,103 @@ pub(super) fn claude_seat(fixture: &NexusFixture, tokens: i64) {
         ),
     )
     .unwrap();
+    use crate::store::events::RecordsHarnessEvents;
+    fixture
+        .nexus
+        .store
+        .record_event(CLAUDE_SEAT, claude_stop(fixture))
+        .expect("the seat's rest recorded");
+}
+
+/// The Stop the seat's own hook reports when its turn ends with
+/// `background_work` in flight.
+pub(super) fn claude_stop_with(
+    fixture: &NexusFixture,
+    background_work: Vec<signal_flow::BackgroundTask>,
+) -> signal_flow::Event {
+    signal_flow::Event::Stopped(signal_flow::NativeStop {
+        native_session_id_option: Some(CLAUDE_SESSION.into()),
+        transcript_path_option: Some(claude_transcript(fixture).to_string_lossy().into_owned()),
+        last_assistant_message_option: None,
+        background_work,
+    })
+}
+
+/// That Stop as the hook sends it: recorded, answered, then acted on.
+pub(super) fn report_claude_stop(
+    fixture: &NexusFixture,
+    background_work: Vec<signal_flow::BackgroundTask>,
+) {
+    let stop = claude_stop_with(fixture, background_work);
+    assert_eq!(
+        fixture.nexus.report(signal_flow::Report_Data {
+            flow_id: CLAUDE_SEAT.into(),
+            event: stop.clone(),
+        }),
+        signal_flow::Response::Reported
+    );
+    fixture.nexus.after_report(&CLAUDE_SEAT.to_owned(), &stop);
+}
+
+/// `flow_id`'s own Stop with nothing in flight, recorded as its last turn
+/// event: the flow rests.
+pub(super) fn rested_at_stop(fixture: &NexusFixture, flow_id: &str) {
+    use crate::store::events::RecordsHarnessEvents;
+    use crate::waking::ReadsClaudeDelivery;
+    let node = fixture
+        .nexus
+        .store
+        .flow_node(flow_id)
+        .unwrap()
+        .expect("the flow is held");
+    let transcript = fixture
+        .nexus
+        .claude_transcript(&node)
+        .expect("the flow's transcript");
+    fixture
+        .nexus
+        .store
+        .record_event(
+            flow_id,
+            signal_flow::Event::Stopped(signal_flow::NativeStop {
+                native_session_id_option: Some(node.session_id.clone()),
+                transcript_path_option: Some(transcript.to_string_lossy().into_owned()),
+                last_assistant_message_option: None,
+                background_work: vec![],
+            }),
+        )
+        .expect("the flow's rest recorded");
+}
+
+/// The seat's own session took a prompt after its last Stop: it is in its
+/// turn.
+pub(super) fn claude_prompt_taken(fixture: &NexusFixture) {
+    use crate::store::events::RecordsHarnessEvents;
+    fixture
+        .nexus
+        .store
+        .record_event(
+            CLAUDE_SEAT,
+            signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
+                native_session_id_option: Some(CLAUDE_SESSION.into()),
+                prompt_id_option: None,
+                prompt_sha256: "0".repeat(64),
+            }),
+        )
+        .expect("the seat's prompt recorded");
+}
+
+/// One task in flight, as Claude Code names it in a Stop.
+pub(super) fn background_task(
+    id: &str,
+    kind: signal_flow::BackgroundTaskKind,
+) -> signal_flow::BackgroundTask {
+    signal_flow::BackgroundTask {
+        background_task_id: id.into(),
+        background_task_kind: kind,
+        background_task_status: "running".into(),
+        description: format!("task {id}"),
+    }
 }
 
 /// The seat's own Claude transcript.
@@ -237,6 +335,7 @@ pub(super) fn claude_stop(fixture: &NexusFixture) -> signal_flow::Event {
         native_session_id_option: Some(CLAUDE_SESSION.into()),
         transcript_path_option: Some(claude_transcript(fixture).to_string_lossy().into_owned()),
         last_assistant_message_option: None,
+        background_work: vec![],
     })
 }
 
@@ -902,10 +1001,27 @@ fn a_flow_that_stopped_while_working_or_awaited_is_kept() {
             ..
         }))
     ));
-    // Its main turn ended while background agents still run: Herdr still
-    // shows Working, and the seat, with nothing queued, stays idle in its
-    // pane.
+    // Its main turn ended while a background agent still runs, as its Stop
+    // names: Herdr still shows Working, and the seat, with nothing queued,
+    // stays idle in its pane.
     append_main_rows(&working, &[end_turn("main-ended")]);
+    {
+        use crate::store::events::RecordsHarnessEvents;
+        working
+            .nexus
+            .store
+            .record_event(
+                CLAUDE_SEAT,
+                claude_stop_with(
+                    &working,
+                    vec![background_task(
+                        "a1",
+                        signal_flow::BackgroundTaskKind::Subagent,
+                    )],
+                ),
+            )
+            .expect("the Stop recorded");
+    }
     assert_eq!(working.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
     assert_eq!(
         stored(&working, Model::Sol).state,

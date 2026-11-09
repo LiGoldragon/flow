@@ -198,6 +198,7 @@ fn declare(fixture: &NexusFixture, root_option: Option<String>) {
 fn refreshed(left: Left<'_>, root_option: Option<String>) -> (NexusFixture, FreshWorld, Response) {
     let mut fixture = NexusFixture::new();
     let seat = launched_claude_ended_by(&fixture, |_| true);
+    super::waking::rested_at_stop(&fixture, "abc123");
     leave(fixture.directory.path(), "abc123", left);
     let at = address(Model::Sol);
     let world = fixture.fresh_claude_world();

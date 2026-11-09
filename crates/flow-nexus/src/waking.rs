@@ -23,11 +23,18 @@
 //! once. Held Soft work is the metaflow's durable queue, so a Nexus that
 //! starts again holds it as before.
 //!
+//! A seat is closed, refreshed or put to sleep, only once it rests: its
+//! turn ended by the evidence above and no work it started in flight. A
+//! Claude seat's work in flight is the background work its own last Stop
+//! names; Claude wakes the seat when that work ends, into a turn whose Stop
+//! is then its rest ([`JudgesClosingRest`]). Soft work is handed over at the
+//! turn's end whatever background work runs.
+//!
 //! A seat past its model's refresh threshold is replaced at its idle event,
-//! its Stop or its Codex thread's turn completed, and only once it rests by
-//! the evidence above: a refresh never closes a working seat, and one in its
-//! turn, or a Claude seat whose background agents still run, keeps its
-//! queue for its successor until a later idle event finds it resting. A
+//! its Stop or its Codex thread's turn completed, and only once it rests: a
+//! refresh never closes a working seat, and one in its turn, or a Claude
+//! seat whose Stop names work in flight, keeps its queue for its successor
+//! until a later idle event finds it resting. A
 //! Maintained metaflow, or one holding work that wakes it, is owed its
 //! successor: the intent is recorded, the successor is started and
 //! confirmed through Replace, and only then is the predecessor recorded
@@ -37,8 +44,14 @@
 //! write that records the exit, and woken with no queued request needed.
 //!
 //! A refresh ordered from outside (`Refresh.Address`,
-//! [`RefreshesMetaflows`]) takes the metaflow's hold and ends its flow
-//! without a turn. A Maintained metaflow, or one holding work that wakes it,
+//! [`RefreshesMetaflows`]), whoever asks, the flow itself included, and a
+//! Launch or Replace naming a live flow, wait for that flow's idle event
+//! too: a flow that does not rest has the order recorded
+//! ([`WaitsForRestToReplace`]), answered RefreshQueued or LaunchPending at
+//! once, and carried out at the idle event that finds it resting; a Nexus
+//! that starts again carries out what is recorded. Until it rests the flow
+//! is handed what it is sent. At its rest the refresh takes the metaflow's
+//! hold and ends its flow without a turn. A Maintained metaflow, or one holding work that wakes it,
 //! has its successor started and confirmed through Replace before the
 //! ending flow is reaped, and the queue is handed to it. Any other has its
 //! flow's harness closed and the flow recorded Stopped, the metaflow left
@@ -107,6 +120,10 @@ use crate::store::logical_delivery::{
     SimplifiedReplyStanding,
 };
 use crate::store::metaflow::SleepsMetaflows;
+use crate::store::ordered_replacement::{
+    NamesOrderedLaunch, OrderedLaunch, OrderedReplacement, OrdersReplacements, ReplacementOrder,
+    ShowsWaitingAttempt,
+};
 use crate::store::queue_delivery::{
     AbsenceRecord, AccountsQueueDelivery, NativeDeliveryReceipt, NativeHistoryAnchor,
     NativeTranscriptCursor, PrepareQueueDelivery, QueueDeliveryAttempt, QueueDeliveryPhase,
@@ -430,6 +447,13 @@ pub enum KeptAtStop {
     UnknownFlow,
     /// After the bounded wait, Herdr does not show the seat resting.
     NotResting(PaneAgent),
+    /// The seat's turn ended with work it started still in flight, which
+    /// closing it would end: it is not closed. The Stop its turn ends with
+    /// once that work has ended is its rest.
+    BackgroundWorkOpen,
+    /// A replacement ordered from outside was carried out at the seat's
+    /// rest and refused, with the refusal; the order is spent.
+    OrderedRefused(Box<Response>),
     /// The Codex seat's app-server shows its thread in a turn, or holding
     /// work Flow typed whose turn has not begun.
     InTurn,
@@ -962,6 +986,9 @@ pub(crate) trait CorrelatesNativeEvents {
     /// Of the flow's own Stops and submitted prompts, the last recorded is
     /// a Stop: a turn end landed with no prompt taken after it.
     fn turn_end_recorded(&self, flow_id: &str) -> bool;
+    /// That last Stop, when the last of the flow's own Stops and submitted
+    /// prompts is a Stop.
+    fn last_turn_end(&self, flow_id: &str) -> Option<NativeStop>;
 }
 
 impl CorrelatesNativeEvents for RunningNexus {
@@ -1001,22 +1028,65 @@ impl CorrelatesNativeEvents for RunningNexus {
     }
 
     fn turn_end_recorded(&self, flow_id: &str) -> bool {
+        self.last_turn_end(flow_id).is_some()
+    }
+
+    fn last_turn_end(&self, flow_id: &str) -> Option<NativeStop> {
         let Ok(Some(events)) = self.store.events(flow_id) else {
-            return false;
+            return None;
         };
         events
-            .iter()
+            .into_iter()
             .rev()
             .find_map(|event| match event {
-                Event::Stopped(stop) => self.correlated_stop(flow_id, stop).then_some(true),
+                Event::Stopped(stop) => self.correlated_stop(flow_id, &stop).then_some(Some(stop)),
                 Event::PromptSubmitted(prompt) => {
-                    self.correlated_prompt(flow_id, prompt).then_some(false)
+                    self.correlated_prompt(flow_id, &prompt).then_some(None)
                 }
                 Event::Started(_) | Event::ToolUsed(_) | Event::Ended(_) | Event::Cleared(_) => {
                     None
                 }
             })
-            .unwrap_or(false)
+            .flatten()
+    }
+}
+
+/// Whether a seat rests as closing it needs: its turn has ended and no
+/// work it started is in flight. A Claude seat rests when the last of its
+/// own Stops and submitted prompts is a Stop naming no background work, and
+/// Herdr shows it resting or its transcript records its main turn's end; a
+/// Codex seat when its app-server shows its thread resting and in no turn.
+/// No reading of Herdr stands for the Stop: a seat whose Stop names work in
+/// flight is not resting, and the Stop Claude ends its turn with once that
+/// work has ended is the event of its rest.
+pub(crate) trait JudgesClosingRest {
+    /// The flow's own last turn event is a Stop naming no background work.
+    fn background_settled(&self, flow_id: &str) -> bool;
+    /// The flow rests now, by every evidence closing it needs.
+    fn rests_for_closing(&self, flow_id: &str) -> bool;
+}
+
+impl JudgesClosingRest for RunningNexus {
+    fn background_settled(&self, flow_id: &str) -> bool {
+        self.last_turn_end(flow_id)
+            .is_some_and(|stop| stop.background_work.is_empty())
+    }
+
+    fn rests_for_closing(&self, flow_id: &str) -> bool {
+        let Ok(Some(node)) = self.store.flow_node(flow_id) else {
+            return false;
+        };
+        match node.harness_kind {
+            HarnessKind::Codex => !self.codex_in_turn(flow_id) && self.codex_resting(flow_id),
+            HarnessKind::Claude => {
+                self.background_settled(flow_id)
+                    && (self.claude_main_turn_ended(&node)
+                        || matches!(
+                            self.herdr.pane_agent(&self.herdr.refresh_route(node)),
+                            PaneAgent::Present { agent_state, .. } if Self::rests_at(&agent_state)
+                        ))
+            }
+        }
     }
 }
 
@@ -1387,6 +1457,9 @@ impl SleepsAndWakesSeats for RunningNexus {
         // as its turn's end would; one in a turn waits for the turn's end.
         // An Awake seat whose pane is gone is put Asleep, to wake below.
         self.drain_awake(&address);
+        if self.settle_orphaned_order(&address) {
+            return;
+        }
         let Some(lease) = self.waking.hold(&address) else {
             return;
         };
@@ -1564,6 +1637,10 @@ impl SleepsAndWakesSeats for RunningNexus {
                 }
             }
         }
+        // A replacement an earlier Nexus recorded waiting for its flow's
+        // rest is carried out now if the flow rests, else at its next idle
+        // event.
+        self.recover_ordered_replacements();
         let due = {
             let _turn = self
                 .dispatch_gate
@@ -1618,7 +1695,7 @@ pub trait RefreshesMetaflows {
 impl RefreshesMetaflows for RunningNexus {
     fn refresh(&self, address: &Address) -> Response {
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
-        use signal_flow::{RefreshRejection, Refreshed, Refusal, Unknown_Data};
+        use signal_flow::{RefreshRejection, Refusal, Unknown_Data};
         let turn = self
             .dispatch_gate
             .lock()
@@ -1694,6 +1771,128 @@ impl RefreshesMetaflows for RunningNexus {
             }
         }
         let node = self.herdr.refresh_route(node);
+        // A refresh never closes a working flow, whoever asks: one that does
+        // not rest now is refreshed at its idle event.
+        if !self.rests_for_closing(&flow_id) {
+            return self.queue_refresh(address, &flow_id);
+        }
+        self.refresh_held(address, metaflow, flow_id, node, turn, lock)
+    }
+
+    fn replace_held(&self, profile: LaunchProfile, origin: Origin) -> Response {
+        use signal_flow::ReplaceRejection;
+        let address = profile.address.clone();
+        let response = {
+            let turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(lock) = self.waking.hold(&address) else {
+                return Response::ReplaceRejected(ReplaceRejection::Locked);
+            };
+            // A restart holds the Address its predecessor runs at.
+            if let Ok(Some(_)) =
+                crate::store::restart::RecordsRestarts::restart_at(&*self.store, &address)
+            {
+                return Response::ReplaceRejected(ReplaceRejection::Locked);
+            }
+            // A working predecessor is never closed: the replacement waits
+            // for its idle event. One already under way or settled resumes.
+            if let Some(predecessor) = profile.flow_id_option.clone()
+                && matches!(
+                    self.store.metaflow(&address),
+                    Ok(Some(metaflow)) if metaflow.state == flow_ethos::State::Awake(predecessor.clone())
+                )
+                && !self.launch_known(&profile.launch_request_id)
+                && !self.rests_for_closing(&predecessor)
+            {
+                return self.queue_replacement(profile, origin, predecessor);
+            }
+            drop(turn);
+            let response = self.replace_owed(profile, origin);
+            drop(lock);
+            response
+        };
+        self.wake_deferred();
+        // What queued for the metaflow is handed to the flow it is Awake as
+        // now, oldest first.
+        self.wake_due(address);
+        response
+    }
+}
+
+/// Replacements ordered from outside wait for their flow's rest. A
+/// Refresh.Address, whoever asks, and a Launch or Replace naming a live
+/// flow, are carried out at once only when that flow rests; otherwise the
+/// order is recorded, answered RefreshQueued or LaunchPending, and carried
+/// out at the idle event that finds the flow resting. Until then the flow
+/// is handed what it is sent; then, under the metaflow's hold, the queue
+/// waits for the successor, as at a threshold refresh.
+pub(crate) trait WaitsForRestToReplace {
+    /// The refresh of a resting flow under the metaflow's `lock` and the
+    /// gate `turn`, both released by it: see [`RefreshesMetaflows::refresh`].
+    #[allow(clippy::too_many_arguments)]
+    fn refresh_held(
+        &self,
+        address: &Address,
+        metaflow: Metaflow,
+        flow_id: FlowId,
+        node: FlowNode,
+        turn: std::sync::MutexGuard<'_, ()>,
+        lock: WakingLease<'_>,
+    ) -> Response;
+    /// Records a Refresh of the working `flow_id`, under the gate, and
+    /// answers RefreshQueued; a Launch already waiting for it refuses it
+    /// Locked.
+    fn queue_refresh(&self, address: &Address, flow_id: &str) -> Response;
+    /// Records the Launch or Replace of the working `predecessor`, under the
+    /// gate, once its successor composes, and answers LaunchPending with the
+    /// attempt it waits as; another order waiting for it refuses it Locked.
+    fn queue_replacement(
+        &self,
+        profile: LaunchProfile,
+        origin: Origin,
+        predecessor: FlowId,
+    ) -> Response;
+    /// The replacement, under the metaflow's hold the caller has: its
+    /// successor owed until confirmed, started and confirmed, then its
+    /// predecessor reaped. Takes the gate.
+    fn replace_owed(&self, profile: LaunchProfile, origin: Origin) -> Response;
+    /// Whether Flow already holds an attempt, an outcome or a replacement of
+    /// this launch request.
+    fn launch_known(&self, launch_request_id: &str) -> bool;
+    /// Carries out the order at the rest of its flow, under the gate `turn`
+    /// the caller holds; the order is spent whatever it comes to.
+    fn replace_as_ordered(
+        &self,
+        order: OrderedReplacement,
+        metaflow: Metaflow,
+        node: FlowNode,
+        turn: std::sync::MutexGuard<'_, ()>,
+    ) -> AtStop;
+    /// A Launch ordered for a flow that ended before it rested starts as its
+    /// metaflow's next flow; a Refresh ordered for it is spent. True when a
+    /// Launch was started, whose own wake hands it the queue.
+    fn settle_orphaned_order(&self, address: &Address) -> bool;
+    /// Starts the Launch of `order` with no predecessor.
+    fn start_ordered(&self, order: OrderedReplacement, launch: OrderedLaunch);
+    /// At the Nexus's start: every order whose flow is still current is
+    /// carried out if it rests, else waits for its next idle event; one
+    /// whose metaflow is Asleep is settled as an orphan; any other is spent.
+    fn recover_ordered_replacements(&self);
+}
+
+impl WaitsForRestToReplace for RunningNexus {
+    fn refresh_held(
+        &self,
+        address: &Address,
+        metaflow: Metaflow,
+        flow_id: FlowId,
+        node: FlowNode,
+        turn: std::sync::MutexGuard<'_, ()>,
+        lock: WakingLease<'_>,
+    ) -> Response {
+        use signal_flow::{RefreshRejection, Refreshed, Refusal};
         let continuity = match self.store.continuity(address) {
             Ok(continuity) => continuity,
             Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
@@ -1769,50 +1968,258 @@ impl RefreshesMetaflows for RunningNexus {
         refreshed
     }
 
-    fn replace_held(&self, profile: LaunchProfile, origin: Origin) -> Response {
+    fn queue_refresh(&self, address: &Address, flow_id: &str) -> Response {
+        use signal_flow::{RefreshQueued, RefreshRejection, Refusal};
+        match self.store.ordered_replacement(address) {
+            Ok(Some(order)) if order.predecessor == flow_id => {
+                return match order.order {
+                    ReplacementOrder::Refresh => Response::RefreshQueued(RefreshQueued {
+                        address: address.clone(),
+                        flow_id: flow_id.to_owned(),
+                    }),
+                    ReplacementOrder::Launch(_) => {
+                        Response::RefreshRejected(RefreshRejection::Locked)
+                    }
+                };
+            }
+            Ok(_) => {}
+            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+        }
+        if let Err(error) = self.store.order_replacement(OrderedReplacement {
+            address: address.clone(),
+            predecessor: flow_id.to_owned(),
+            order: ReplacementOrder::Refresh,
+        }) {
+            return Response::Refused(Refusal::Store(error.to_string()));
+        }
+        eprintln!("flow-nexus: flow {flow_id} works; its refresh waits for its rest");
+        Response::RefreshQueued(RefreshQueued {
+            address: address.clone(),
+            flow_id: flow_id.to_owned(),
+        })
+    }
+
+    fn queue_replacement(
+        &self,
+        mut profile: LaunchProfile,
+        origin: Origin,
+        predecessor: FlowId,
+    ) -> Response {
+        use crate::launching::{InterpretsLaunchObservations, ResumesReplacement};
+        use signal_flow::{ReplaceRejection, StartRejection};
+        let persistence = || {
+            Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                StartRejection::LaunchPersistenceRefused,
+            ))
+        };
+        let address = profile.address.clone();
+        // The model the Replace launches with, as it will at the rest.
+        match self.store.configured_model(&address) {
+            Ok(Some(model)) => profile.model_name = model,
+            Ok(None) | Err(_) => return persistence(),
+        }
+        match self.store.ordered_replacement(&address) {
+            Ok(Some(order)) if order.predecessor == predecessor => {
+                return match order.ordered_launch() {
+                    Some(launch) if launch.launch_profile == profile && launch.origin == origin => {
+                        Response::LaunchPending(launch.waiting_attempt())
+                    }
+                    _ => Response::ReplaceRejected(ReplaceRejection::Locked),
+                };
+            }
+            Ok(_) => {}
+            Err(_) => return persistence(),
+        }
+        // A successor that cannot compose is refused now, not at the rest.
+        let mut composing = profile.clone();
+        composing.launch_request_id = crate::sending::MintsId::minted_id("compose");
+        let prompt_sha256 = match self.perform(Operation::Compose(composing)) {
+            Outcome::Composed(launch) => launch.first_prompt_payload.prompt_sha256,
+            refused => return Self::as_replacement(Self::composition_refused(refused)),
+        };
+        let launch = OrderedLaunch {
+            launch_profile: profile,
+            origin,
+            prompt_sha256,
+        };
+        if self
+            .store
+            .order_replacement(OrderedReplacement {
+                address,
+                predecessor: predecessor.clone(),
+                order: ReplacementOrder::Launch(Box::new(launch.clone())),
+            })
+            .is_err()
+        {
+            return persistence();
+        }
+        eprintln!("flow-nexus: flow {predecessor} works; its replacement waits for its rest");
+        Response::LaunchPending(launch.waiting_attempt())
+    }
+
+    fn replace_owed(&self, profile: LaunchProfile, origin: Origin) -> Response {
         use signal_flow::{ReplaceRejection, StartRejection};
         let address = profile.address.clone();
-        let response = {
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The successor is owed until it is confirmed, so a Nexus that
+        // stops before then starts it at its next start.
+        if let Some(predecessor) = profile.flow_id_option.clone()
+            && self
+                .store
+                .owe_successor(SuccessorIntent {
+                    address: address.clone(),
+                    predecessor,
+                    cause: SuccessionCause::Replace,
+                    launch_request_id: profile.launch_request_id.clone(),
+                })
+                .is_err()
+        {
+            return Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                StartRejection::LaunchPersistenceRefused,
+            ));
+        }
+        let response = self.replace(profile, origin);
+        self.settle_owed(&address, &response);
+        response
+    }
+
+    fn launch_known(&self, launch_request_id: &str) -> bool {
+        use crate::store::{RecordsLaunchOutcome, RecordsReplacement};
+        !matches!(self.store.launch_attempt(launch_request_id), Ok(None))
+            || !matches!(self.store.launch_outcome(launch_request_id), Ok(None))
+            || !matches!(self.store.replacement(launch_request_id), Ok(None))
+    }
+
+    fn replace_as_ordered(
+        &self,
+        order: OrderedReplacement,
+        metaflow: Metaflow,
+        node: FlowNode,
+        turn: std::sync::MutexGuard<'_, ()>,
+    ) -> AtStop {
+        let address = metaflow.address.clone();
+        let Some(lock) = self.waking.hold(&address) else {
+            return AtStop::Kept(KeptAtStop::Waking);
+        };
+        eprintln!(
+            "flow-nexus: flow {} rests; the replacement ordered for it runs",
+            order.predecessor
+        );
+        let response = match order.order {
+            ReplacementOrder::Refresh => {
+                self.refresh_held(&address, metaflow, order.predecessor, node, turn, lock)
+            }
+            ReplacementOrder::Launch(launch) => {
+                drop(turn);
+                let OrderedLaunch {
+                    launch_profile,
+                    origin,
+                    ..
+                } = *launch;
+                let response = self.replace_owed(launch_profile, origin);
+                drop(lock);
+                self.wake_deferred();
+                response
+            }
+        };
+        let _ = self.store.forget_ordered_replacement(&address);
+        match response {
+            Response::Refreshed(_) | Response::Replaced(_) => AtStop::Refreshed(address),
+            response => AtStop::Kept(KeptAtStop::OrderedRefused(Box::new(response))),
+        }
+    }
+
+    fn settle_orphaned_order(&self, address: &Address) -> bool {
+        let orphan = {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let Some(lock) = self.waking.hold(&address) else {
-                return Response::ReplaceRejected(ReplaceRejection::Locked);
-            };
-            // A restart holds the Address its predecessor runs at.
-            if let Ok(Some(_)) =
-                crate::store::restart::RecordsRestarts::restart_at(&*self.store, &address)
-            {
-                return Response::ReplaceRejected(ReplaceRejection::Locked);
+            match (
+                self.store.ordered_replacement(address),
+                self.store.metaflow(address),
+            ) {
+                (Ok(Some(order)), Ok(Some(metaflow)))
+                    if metaflow.state == flow_ethos::State::Asleep =>
+                {
+                    Some(order)
+                }
+                _ => None,
             }
-            // The successor is owed until it is confirmed, so a Nexus that
-            // stops before then starts it at its next start.
-            if let Some(predecessor) = profile.flow_id_option.clone()
-                && self
-                    .store
-                    .owe_successor(SuccessorIntent {
-                        address: address.clone(),
-                        predecessor,
-                        cause: SuccessionCause::Replace,
-                        launch_request_id: profile.launch_request_id.clone(),
-                    })
-                    .is_err()
-            {
-                return Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
-                    StartRejection::LaunchPersistenceRefused,
-                ));
-            }
-            let response = self.replace(profile, origin);
-            self.settle_owed(&address, &response);
-            drop(lock);
-            response
         };
-        self.wake_deferred();
-        // What queued for the metaflow is handed to the flow it is Awake as
-        // now, oldest first.
-        self.wake_due(address);
-        response
+        let Some(order) = orphan else {
+            return false;
+        };
+        match order.ordered_launch().cloned() {
+            Some(launch) => {
+                self.start_ordered(order, launch);
+                true
+            }
+            None => {
+                eprintln!(
+                    "flow-nexus: flow {} ended before it rested; its refresh is spent",
+                    order.predecessor
+                );
+                let _ = self.store.forget_ordered_replacement(address);
+                false
+            }
+        }
+    }
+
+    fn start_ordered(&self, order: OrderedReplacement, launch: OrderedLaunch) {
+        let mut profile = launch.launch_profile;
+        profile.flow_id_option = None;
+        let launch_request_id = profile.launch_request_id.clone();
+        let response = self.start(profile, launch.origin);
+        let response = self.settle(&launch_request_id, response);
+        let _ = self.store.forget_ordered_replacement(&order.address);
+        eprintln!(
+            "flow-nexus: flow {} ended before it rested; the Launch ordered for it starts: {response:?}",
+            order.predecessor
+        );
+        self.wake_due(order.address);
+    }
+
+    fn recover_ordered_replacements(&self) {
+        let (resting, orphans) = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut resting = Vec::new();
+            let mut orphans = Vec::new();
+            for order in self.store.ordered_replacements().unwrap_or_default() {
+                match self.store.metaflow(&order.address) {
+                    Ok(Some(metaflow)) => match metaflow.state {
+                        flow_ethos::State::Awake(current) if current == order.predecessor => {
+                            resting.push(current);
+                        }
+                        flow_ethos::State::Asleep => orphans.push(order.address),
+                        flow_ethos::State::Awake(_) => {
+                            let _ = self.store.forget_ordered_replacement(&order.address);
+                        }
+                    },
+                    Ok(None) => {
+                        let _ = self.store.forget_ordered_replacement(&order.address);
+                    }
+                    Err(_) => {}
+                }
+            }
+            (resting, orphans)
+        };
+        // A flow that rests now has had its idle event; one that works is
+        // kept for its next.
+        for flow_id in resting {
+            if self.rests_for_closing(&flow_id) {
+                self.settle_stopped(&flow_id);
+            }
+        }
+        for address in orphans {
+            self.settle_orphaned_order(&address);
+        }
     }
 }
 
@@ -3095,9 +3502,9 @@ impl WakesInParts for RunningNexus {
             Ok(continuity) => continuity,
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
-        // Whether the harness may be closed now: a Claude seat only once
-        // Herdr shows it resting, since a main turn that ended while its
-        // background agents run shows Working and closing it would end them.
+        // Whether the harness may be closed now: a Claude seat only once its
+        // Stop names no background work, since closing it would end that
+        // work.
         let closable = match node.harness_kind {
             // A Codex seat is handed work through its app-server, so only
             // the app-server's thread status says it rests, whatever its
@@ -3124,16 +3531,29 @@ impl WakesInParts for RunningNexus {
                             .and_then(|target| self.writable_state(&target).ok()),
                         Some(AgentState::Working | AgentState::Idle | AgentState::Done)
                     );
-                // A refresh never closes a working seat: one whose main
-                // turn ended while its background agents run waits, its
-                // queue kept for its successor, for a Stop at which Herdr
-                // shows it resting.
-                if (!native_resting && !claude_main_ready) || (refresh_due && !native_resting) {
+                if !native_resting && !claude_main_ready {
                     return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
                 }
-                native_resting
+                // Its turn has ended. A Stop naming work in flight is no
+                // rest: closing the seat would end that work. A refresh
+                // never closes a working seat: it waits, the queue kept for
+                // the successor, for the Stop that names none.
+                let settled = self.background_settled(flow_id);
+                if refresh_due && !settled {
+                    return AtStop::Kept(KeptAtStop::BackgroundWorkOpen);
+                }
+                settled
             }
         };
+        // A replacement ordered from outside is carried out once the seat
+        // rests; until then the seat is handed what it is sent.
+        let ordered = match self.store.ordered_replacement(&address) {
+            Ok(order) => order.filter(|order| order.predecessor == flow_id),
+            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+        };
+        if closable && let Some(order) = ordered {
+            return self.replace_as_ordered(order, metaflow, node, turn);
+        }
         if refresh_due {
             let wakes = metaflow
                 .queue

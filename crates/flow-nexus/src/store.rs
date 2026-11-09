@@ -23,6 +23,7 @@ pub(crate) mod metaflow;
 pub(crate) mod metaflow_declaration;
 pub(crate) mod nexus_configuration;
 pub(crate) mod opened_thread;
+pub(crate) mod ordered_replacement;
 pub(crate) mod queue_delivery;
 pub mod reminder;
 pub(crate) mod repair;
@@ -146,6 +147,8 @@ const ADDED_IN_0531: &[&str] = &["flow_nexus_meta_protected_address_configuratio
 const OPTIONAL_HANDOVER_TABLE: &str = "flow_nexus_meta_handover_configuration";
 const OPTIONAL_HANDOVER_RUNTIME_TABLE: &str = "flow_nexus_handovers";
 const OPTIONAL_HANDOVER_REMINDER_TABLE: &str = "flow_nexus_handover_reminders";
+/// Added in 0.53.3; a 0.53.2 store has no ordered replacements.
+const OPTIONAL_ORDERED_REPLACEMENT_TABLE: &str = "flow_nexus_ordered_replacements";
 const OPTIONAL_REQUEST_ID_TABLE: &str = "flow_nexus_request_ids";
 const OPTIONAL_STORE_IDENTITY_TABLE: &str = "flow_nexus_store_identity";
 const OPTIONAL_DELIVER_CALL_TABLE: &str = "flow_nexus_deliver_calls";
@@ -235,6 +238,7 @@ const RUNNING_TABLES: &[&str] = &[
     "flow_nexus_meta_handover_configuration",
     "flow_nexus_handovers",
     OPTIONAL_HANDOVER_REMINDER_TABLE,
+    OPTIONAL_ORDERED_REPLACEMENT_TABLE,
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -1613,6 +1617,7 @@ pub struct FlowStore {
     compactions: TableReference<compaction::Compaction>,
     reminders: TableReference<reminder::Reminder>,
     successor_intents: TableReference<successor::SuccessorIntent>,
+    ordered_replacements: TableReference<ordered_replacement::OrderedReplacement>,
     queue_delivery: QueueDeliveryTables,
     send_outcomes: SendOutcomeTables,
     logical_deliveries: LogicalDeliveryTables,
@@ -2525,6 +2530,7 @@ impl OpensFlowStore for FlowStore {
                     task_announcements: request_id_upgrade_descriptors.task_announcements.clone(),
                     upgrade_assignments: request_id_upgrade_descriptors.upgrade_assignments.clone(),
                     request_policy: request_policy_descriptor.clone(),
+                    flow_events: events_descriptor.clone(),
                 },
                 &mut engine,
                 &reminder_rows,
@@ -2579,6 +2585,9 @@ impl OpensFlowStore for FlowStore {
         let handover_reminders = engine.register_table(
             <handover_reminders::HandoverReminder as handover_reminders::DescribesHandoverReminderTable>::descriptor(),
         )?;
+        let ordered_replacements = engine.register_table(
+            <ordered_replacement::OrderedReplacement as ordered_replacement::DescribesOrderedReplacementTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2608,6 +2617,7 @@ impl OpensFlowStore for FlowStore {
             compactions,
             reminders,
             successor_intents,
+            ordered_replacements,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -2763,6 +2773,9 @@ impl OpensFlowStore for FlowStore {
         let handover_reminders = engine.register_table(
             <handover_reminders::HandoverReminder as handover_reminders::DescribesHandoverReminderTable>::descriptor(),
         )?;
+        let ordered_replacements = engine.register_table(
+            <ordered_replacement::OrderedReplacement as ordered_replacement::DescribesOrderedReplacementTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2792,6 +2805,7 @@ impl OpensFlowStore for FlowStore {
             compactions,
             reminders,
             successor_intents,
+            ordered_replacements,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -4991,6 +5005,10 @@ pub(crate) trait ReadsFlowMemory {
                 successor::SUCCESSOR_INTENT_FAMILY,
                 successor::SUCCESSOR_INTENT_SCHEMA,
             ),
+            "flow_nexus_ordered_replacements" => (
+                ordered_replacement::ORDERED_REPLACEMENT_FAMILY,
+                ordered_replacement::ORDERED_REPLACEMENT_SCHEMA,
+            ),
             "flow_nexus_meta_leave_out_configuration" => {
                 return Some((
                     "flow-nexus-meta-leave-out-configuration",
@@ -5081,6 +5099,9 @@ pub(crate) trait ReadsFlowMemory {
                 Some(("flow-nexus-send-outcome", "flow-nexus-send-outcome-v7"))
             }
             "flow_nexus_send_calls" => Some(("flow-nexus-send-call", "flow-nexus-send-call-v7")),
+            "flow_nexus_flow_events" => {
+                Some(("flow-nexus-flow-events", "flow-nexus-flow-events-v4"))
+            }
             OPTIONAL_REQUEST_ID_TABLE
             | OPTIONAL_DELIVER_CALL_TABLE
             | OPTIONAL_STORE_IDENTITY_TABLE
@@ -5144,6 +5165,7 @@ pub(crate) trait ReadsFlowMemory {
                     || *name == OPTIONAL_HANDOVER_TABLE
                     || *name == OPTIONAL_HANDOVER_RUNTIME_TABLE
                     || *name == OPTIONAL_HANDOVER_REMINDER_TABLE
+                    || *name == OPTIONAL_ORDERED_REPLACEMENT_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
                     || *name == OPTIONAL_DELIVER_CALL_TABLE
                     || *name == OPTIONAL_STORE_IDENTITY_TABLE

@@ -57,6 +57,27 @@ impl MemoryDefinition for PriorLogicalDeliveryEvent {
     }
 }
 
+/// One flow's harness events as 0.53.2 stored them (events v4): a Stop
+/// carries no background work.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PriorFlowEvents {
+    pub(crate) flow_id: String,
+    pub(crate) event_vector: Vec<old_signal::Event>,
+}
+impl EngineRecord for PriorFlowEvents {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.flow_id.clone())
+    }
+}
+impl MemoryDefinition for PriorFlowEvents {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(4)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-flow-events-v4")
+    }
+}
+
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PriorStoredMetaflow {
     pub(crate) metaflow: old_flow::Metaflow,
@@ -951,6 +972,49 @@ impl BecomesCurrentWithRequestIds for old_flow::Metaflow {
     }
 }
 
+/// A 0.53.2 harness event as 0.53.3 holds it: a Stop carries no background
+/// work, as every v4 Stop was read as its flow's rest.
+impl BecomesCurrent for old_signal::Event {
+    type Current = signal_flow::Event;
+    fn current(&self) -> Result<signal_flow::Event, StoreError> {
+        Ok(match self {
+            old_signal::Event::Started(session) => signal_flow::Event::Started(session.clone()),
+            old_signal::Event::ToolUsed(tool) => signal_flow::Event::ToolUsed(tool.clone()),
+            old_signal::Event::Stopped(stop) => {
+                signal_flow::Event::Stopped(signal_flow::NativeStop {
+                    native_session_id_option: stop.native_session_id_option.clone(),
+                    transcript_path_option: stop.transcript_path_option.clone(),
+                    last_assistant_message_option: stop.last_assistant_message_option.clone(),
+                    background_work: Vec::new(),
+                })
+            }
+            old_signal::Event::PromptSubmitted(prompt) => {
+                signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
+                    native_session_id_option: prompt.native_session_id_option.clone(),
+                    prompt_id_option: prompt.prompt_id_option.clone(),
+                    prompt_sha256: prompt.prompt_sha256.clone(),
+                })
+            }
+            old_signal::Event::Ended(session) => signal_flow::Event::Ended(session.clone()),
+            old_signal::Event::Cleared(session) => signal_flow::Event::Cleared(session.clone()),
+        })
+    }
+}
+
+impl BecomesCurrent for PriorFlowEvents {
+    type Current = super::events::FlowEvents;
+    fn current(&self) -> Result<super::events::FlowEvents, StoreError> {
+        Ok(super::events::FlowEvents {
+            flow_id: self.flow_id.clone(),
+            event_vector: self
+                .event_vector
+                .iter()
+                .map(BecomesCurrent::current)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
 impl BecomesCurrent for old_signal::Refusal {
     type Current = signal_flow::Refusal;
     fn current(&self) -> Result<signal_flow::Refusal, StoreError> {
@@ -1379,6 +1443,7 @@ pub(crate) struct RequestIdEvolutionDescriptors {
     pub(crate) task_announcements: TableDescriptor<TaskAnnouncement>,
     pub(crate) upgrade_assignments: TableDescriptor<UpgradeAssignment>,
     pub(crate) request_policy: TableDescriptor<super::StoredMetaRequestPolicyConfiguration>,
+    pub(crate) flow_events: TableDescriptor<super::events::FlowEvents>,
 }
 
 /// The logical delivery a predecessor row names, when it names one.
@@ -1640,6 +1705,17 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             .inspect_predecessor::<PriorSendCall, crate::generated::send_tool::SendCall>(
                 &descriptors.send_calls,
             )?;
+        let flow_event_inventory = engine
+            .inspect_predecessor::<PriorFlowEvents, super::events::FlowEvents>(
+                &descriptors.flow_events,
+            )?;
+        let mut flow_event_rows = Vec::new();
+        for (key, row) in flow_event_inventory.rows() {
+            if *key != row.record_key() {
+                return Err(StoreError::StateInvariant);
+            }
+            flow_event_rows.push(row.current()?);
+        }
 
         let mut currents = BTreeMap::new();
         for (key, row) in current_inventory.rows() {
@@ -2237,6 +2313,11 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             .evolve(attempt_inventory, descriptors.attempts, attempt_rows)
             .evolve(outcome_inventory, descriptors.outcomes, outcome_rows)
             .evolve(call_inventory, descriptors.send_calls, call_rows)
+            .evolve(
+                flow_event_inventory,
+                descriptors.flow_events,
+                flow_event_rows,
+            )
             .register(descriptors.request_ids, binding_rows)
             .register(descriptors.deliver_calls, Vec::new())
             .register(
@@ -2348,6 +2429,7 @@ mod tests {
             task_announcements: upgrade.task_announcements,
             upgrade_assignments: upgrade.upgrade_assignments,
             request_policy: StoredMetaRequestPolicyConfiguration::descriptor(),
+            flow_events: <crate::store::events::FlowEvents as crate::store::events::DescribesEventTable>::descriptor(),
         }
     }
 
@@ -2360,6 +2442,7 @@ mod tests {
         attempts: TableReference<PriorQueueDeliveryAttempt>,
         outcomes: TableReference<PriorStoredSendOutcome>,
         send_calls: TableReference<PriorSendCall>,
+        flow_events: TableReference<PriorFlowEvents>,
     }
 
     fn old_engine(
@@ -2412,6 +2495,11 @@ mod tests {
                 &descriptors.send_calls,
             ))
             .expect("old calls register");
+        let flow_events = engine
+            .register_table(predecessor_descriptor::<PriorFlowEvents, _>(
+                &descriptors.flow_events,
+            ))
+            .expect("old flow events register");
         engine
             .register_table(heartbeat.clone())
             .expect("unchanged heartbeat registers");
@@ -2426,6 +2514,7 @@ mod tests {
                 attempts,
                 outcomes,
                 send_calls,
+                flow_events,
             },
         )
     }
@@ -2486,6 +2575,114 @@ mod tests {
         let second = TASK_ANNOUNCEMENT_HEADER.render_bounded_line("0001 ", &words);
         let parts = TASK_ANNOUNCEMENT_HEADER.partition_rows([("first", first), ("second", second)]);
         assert_eq!(parts, vec![vec!["first"], vec!["second"]]);
+    }
+
+    /// A 0.53.2 Memory's harness events (events v4) evolve with the rest of
+    /// it into events v5: every stored Stop carries no background work, and
+    /// every other event, and their order, is kept.
+    #[test]
+    fn the_events_migration_converts_a_stored_v4_stop() {
+        use crate::store::events::FlowEvents;
+
+        let directory = tempfile::tempdir().expect("temporary Memory");
+        let path = directory.path().join("flow.sema");
+        let descriptors = evolution_descriptors();
+        let heartbeat = StoredHeartbeatStanding::descriptor();
+        let (predecessor, tables) = old_engine(&path, &descriptors, &heartbeat);
+        let stop = old_signal::Event::Stopped(old_signal::NativeStop {
+            native_session_id_option: Some("c0ffee00-0000-4000-8000-000000000001".into()),
+            transcript_path_option: Some("/t/c0ffee00.jsonl".into()),
+            last_assistant_message_option: Some("done".into()),
+        });
+        predecessor
+            .assert(Assertion::new(
+                tables.flow_events,
+                PriorFlowEvents {
+                    flow_id: "5a4d0b".into(),
+                    event_vector: vec![
+                        old_signal::Event::Started(Some(
+                            "c0ffee00-0000-4000-8000-000000000001".into(),
+                        )),
+                        old_signal::Event::ToolUsed("Bash".into()),
+                        stop,
+                        old_signal::Event::PromptSubmitted(old_signal::NativePrompt {
+                            native_session_id_option: Some(
+                                "c0ffee00-0000-4000-8000-000000000001".into(),
+                            ),
+                            prompt_id_option: None,
+                            prompt_sha256: "ab12".into(),
+                        }),
+                        old_signal::Event::Cleared(None),
+                    ],
+                },
+            ))
+            .expect("old flow events store");
+        drop(predecessor);
+
+        let mut engine = Engine::open(
+            EngineOpen::new(&path, SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION))
+                .with_family(&descriptors.current)
+                .with_family(&descriptors.events)
+                .with_family(&descriptors.metaflows)
+                .with_family(&descriptors.address_holds)
+                .with_family(&descriptors.requests)
+                .with_family(&descriptors.attempts)
+                .with_family(&descriptors.outcomes)
+                .with_family(&descriptors.send_calls)
+                .with_family(&descriptors.flow_events)
+                .with_family(&heartbeat),
+        )
+        .expect("predecessor catalog opens for evolution");
+        let heartbeat_table = engine.register_table(heartbeat).expect("heartbeat opens");
+        let flow_events = descriptors.flow_events.clone();
+        descriptors
+            .evolve_request_id_memory(
+                &mut engine,
+                &[],
+                &[],
+                &[],
+                heartbeat_table,
+                &[],
+                &ScriptedDrawer::new(&["a001", "a002", "a003", "a004"]),
+            )
+            .expect("events evolution commits");
+        let table = engine
+            .register_table(flow_events)
+            .expect("events v5 register");
+        let rows = engine
+            .match_records(QueryPlan::all(table))
+            .expect("events read");
+        let [row] = rows.records() else {
+            panic!("one flow's events")
+        };
+        assert_eq!(
+            *row,
+            FlowEvents {
+                flow_id: "5a4d0b".into(),
+                event_vector: vec![
+                    signal_flow::Event::Started(Some(
+                        "c0ffee00-0000-4000-8000-000000000001".into()
+                    )),
+                    signal_flow::Event::ToolUsed("Bash".into()),
+                    signal_flow::Event::Stopped(signal_flow::NativeStop {
+                        native_session_id_option: Some(
+                            "c0ffee00-0000-4000-8000-000000000001".into()
+                        ),
+                        transcript_path_option: Some("/t/c0ffee00.jsonl".into()),
+                        last_assistant_message_option: Some("done".into()),
+                        background_work: vec![],
+                    }),
+                    signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
+                        native_session_id_option: Some(
+                            "c0ffee00-0000-4000-8000-000000000001".into()
+                        ),
+                        prompt_id_option: None,
+                        prompt_sha256: "ab12".into(),
+                    }),
+                    signal_flow::Event::Cleared(None),
+                ],
+            }
+        );
     }
 
     #[test]
@@ -2590,6 +2787,7 @@ mod tests {
                 .with_family(&descriptors.attempts)
                 .with_family(&descriptors.outcomes)
                 .with_family(&descriptors.send_calls)
+                .with_family(&descriptors.flow_events)
                 .with_family(&heartbeat),
         )
         .expect("predecessor catalog opens for evolution");
@@ -2729,6 +2927,7 @@ mod tests {
                 .with_family(&descriptors.attempts)
                 .with_family(&descriptors.outcomes)
                 .with_family(&descriptors.send_calls)
+                .with_family(&descriptors.flow_events)
                 .with_family(&heartbeat),
         )
         .expect("predecessor catalog opens for validation");
@@ -2875,6 +3074,7 @@ mod tests {
                 .with_family(&descriptors.attempts)
                 .with_family(&descriptors.outcomes)
                 .with_family(&descriptors.send_calls)
+                .with_family(&descriptors.flow_events)
                 .with_family(&heartbeat),
         )
         .expect("predecessor catalog opens for evolution");
@@ -3093,6 +3293,7 @@ mod tests {
                 .with_family(&descriptors.attempts)
                 .with_family(&descriptors.outcomes)
                 .with_family(&descriptors.send_calls)
+                .with_family(&descriptors.flow_events)
                 .with_family(&heartbeat),
         )
         .expect("predecessor catalog opens for evolution");
@@ -3266,6 +3467,7 @@ mod tests {
                 .with_family(&descriptors.attempts)
                 .with_family(&descriptors.outcomes)
                 .with_family(&descriptors.send_calls)
+                .with_family(&descriptors.flow_events)
                 .with_family(&heartbeat),
         )
         .expect("predecessor catalog opens for evolution");
@@ -3474,6 +3676,7 @@ mod tests {
                 .with_family(&descriptors.attempts)
                 .with_family(&descriptors.outcomes)
                 .with_family(&descriptors.send_calls)
+                .with_family(&descriptors.flow_events)
                 .with_family(&heartbeat),
         )
         .expect("predecessor catalog opens for evolution");
@@ -3743,6 +3946,7 @@ mod tests {
                     .with_family(&descriptors.attempts)
                     .with_family(&descriptors.outcomes)
                     .with_family(&descriptors.send_calls)
+                    .with_family(&descriptors.flow_events)
                     .with_family(&heartbeat),
             )
             .expect("predecessor catalog opens for validation");
@@ -3860,6 +4064,7 @@ mod tests {
                 .with_family(&descriptors.attempts)
                 .with_family(&descriptors.outcomes)
                 .with_family(&descriptors.send_calls)
+                .with_family(&descriptors.flow_events)
                 .with_family(&heartbeat),
         )
         .expect("predecessor catalog opens for evolution");
@@ -3907,6 +4112,7 @@ mod tests {
                 .with_family(&descriptors.attempts)
                 .with_family(&descriptors.outcomes)
                 .with_family(&descriptors.send_calls)
+                .with_family(&descriptors.flow_events)
                 .with_family(&descriptors.request_ids)
                 .with_family(&descriptors.deliver_calls)
                 .with_family(&descriptors.store_identity)
@@ -3962,6 +4168,7 @@ mod tests {
                 .with_family(&descriptors.attempts)
                 .with_family(&descriptors.outcomes)
                 .with_family(&descriptors.send_calls)
+                .with_family(&descriptors.flow_events)
                 .with_family(&heartbeat),
         )
         .expect("predecessor catalog opens for validation");
@@ -4042,6 +4249,7 @@ mod tests {
                 .with_family(&descriptors.attempts)
                 .with_family(&descriptors.outcomes)
                 .with_family(&descriptors.send_calls)
+                .with_family(&descriptors.flow_events)
                 .with_family(&heartbeat),
         )
         .expect("predecessor catalog opens for validation");
@@ -4124,6 +4332,11 @@ mod tests {
             ))
             .expect("old calls register");
         predecessor
+            .register_table(predecessor_descriptor::<PriorFlowEvents, _>(
+                &descriptors.flow_events,
+            ))
+            .expect("old flow events register");
+        predecessor
             .register_table(heartbeat.clone())
             .expect("unchanged heartbeat registers");
         drop(predecessor);
@@ -4138,6 +4351,7 @@ mod tests {
                 .with_family(&descriptors.attempts)
                 .with_family(&descriptors.outcomes)
                 .with_family(&descriptors.send_calls)
+                .with_family(&descriptors.flow_events)
                 .with_family(&heartbeat),
         )
         .expect("exact predecessor catalog is recognized");
@@ -4168,6 +4382,7 @@ mod tests {
                 .with_family(&descriptors.attempts)
                 .with_family(&descriptors.outcomes)
                 .with_family(&descriptors.send_calls)
+                .with_family(&descriptors.flow_events)
                 .with_family(&descriptors.request_ids)
                 .with_family(&descriptors.deliver_calls)
                 .with_family(&descriptors.store_identity)

@@ -186,6 +186,7 @@ impl RunsGitCommand for RealGitCommand {
 pub trait AccessesExistingGitHandoverArchive: Sized {
     fn new(repository: impl Into<PathBuf>) -> Self;
     fn repository(&self) -> &Path;
+    fn with_deadline(self, deadline: Duration) -> Self;
 }
 
 impl AccessesExistingGitHandoverArchive for ExistingGitHandoverArchive {
@@ -199,16 +200,21 @@ impl AccessesExistingGitHandoverArchive for ExistingGitHandoverArchive {
     fn repository(&self) -> &Path {
         &self.repository
     }
-}
-
-impl ExistingGitHandoverArchive {
-    pub fn with_deadline(mut self, deadline: Duration) -> Self {
+    fn with_deadline(mut self, deadline: Duration) -> Self {
         self.deadline = deadline;
         self
     }
+}
 
-    #[cfg(test)]
-    pub(crate) fn with_git_runner(mut self, runner: Arc<dyn RunsGitCommand>) -> Self {
+/// A publisher whose Git runner a test substitutes.
+#[cfg(test)]
+pub(crate) trait SubstitutesGitRunner {
+    fn with_git_runner(self, runner: Arc<dyn RunsGitCommand>) -> Self;
+}
+
+#[cfg(test)]
+impl SubstitutesGitRunner for ExistingGitHandoverArchive {
+    fn with_git_runner(mut self, runner: Arc<dyn RunsGitCommand>) -> Self {
         self.runner = runner;
         self
     }
@@ -527,8 +533,11 @@ impl RunsWithDeadline for Command {
         let mut stdout = stdout;
         let mut stderr = stderr;
         let process_id = child.id();
-        if let Err(error) = make_nonblocking(&stdout).and_then(|_| make_nonblocking(&stderr)) {
-            terminate_process_group(&mut child, process_id);
+        if let Err(error) = stdout
+            .make_nonblocking()
+            .and_then(|_| stderr.make_nonblocking())
+        {
+            child.terminate_process_group(process_id);
             return Err(error);
         }
         let mut stdout_bytes = Vec::new();
@@ -538,19 +547,19 @@ impl RunsWithDeadline for Command {
         let mut status = None;
         while status.is_none() || !stdout_eof || !stderr_eof {
             if !stdout_eof {
-                stdout_eof = match drain_capture(&mut stdout, &mut stdout_bytes) {
+                stdout_eof = match stdout.drain_capture(&mut stdout_bytes) {
                     Ok(eof) => eof,
                     Err(error) => {
-                        terminate_process_group(&mut child, process_id);
+                        child.terminate_process_group(process_id);
                         return Err(error);
                     }
                 };
             }
             if !stderr_eof {
-                stderr_eof = match drain_capture(&mut stderr, &mut stderr_bytes) {
+                stderr_eof = match stderr.drain_capture(&mut stderr_bytes) {
                     Ok(eof) => eof,
                     Err(error) => {
-                        terminate_process_group(&mut child, process_id);
+                        child.terminate_process_group(process_id);
                         return Err(error);
                     }
                 };
@@ -564,7 +573,7 @@ impl RunsWithDeadline for Command {
                 break;
             }
             if Instant::now() >= deadline {
-                terminate_process_group(&mut child, process_id);
+                child.terminate_process_group(process_id);
                 // Dropping our nonblocking read ends is sufficient even when a
                 // hook deliberately moved a pipe-holding descendant into a
                 // different session. There is no reader thread left to join.
@@ -580,63 +589,86 @@ impl RunsWithDeadline for Command {
     }
 }
 
+/// A capture pipe switched to nonblocking reads.
+trait SetsNonblocking {
+    fn make_nonblocking(&self) -> Result<(), HandoverArchiveRefusal>;
+}
+
 #[cfg(unix)]
-fn make_nonblocking(reader: &impl std::os::fd::AsRawFd) -> Result<(), HandoverArchiveRefusal> {
-    let descriptor = std::os::fd::AsRawFd::as_raw_fd(reader);
-    // SAFETY: fcntl reads and updates flags on this live, owned descriptor.
-    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
-    if flags < 0 || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-    {
-        return Err(HandoverArchiveRefusal::Git(
-            io::Error::last_os_error().to_string(),
-        ));
+impl<Pipe: std::os::fd::AsRawFd> SetsNonblocking for Pipe {
+    fn make_nonblocking(&self) -> Result<(), HandoverArchiveRefusal> {
+        let descriptor = std::os::fd::AsRawFd::as_raw_fd(self);
+        // SAFETY: fcntl reads and updates flags on this live, owned descriptor.
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+        if flags < 0
+            || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+        {
+            return Err(HandoverArchiveRefusal::Git(
+                io::Error::last_os_error().to_string(),
+            ));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(not(unix))]
-fn make_nonblocking(_reader: &impl Sized) -> Result<(), HandoverArchiveRefusal> {
-    Ok(())
+impl<Pipe> SetsNonblocking for Pipe {
+    fn make_nonblocking(&self) -> Result<(), HandoverArchiveRefusal> {
+        Ok(())
+    }
 }
 
-fn drain_capture(
-    reader: &mut impl Read,
-    bytes: &mut Vec<u8>,
-) -> Result<bool, HandoverArchiveRefusal> {
-    let mut chunk = [0_u8; 8192];
-    loop {
-        match reader.read(&mut chunk) {
-            Ok(0) => return Ok(true),
-            Ok(count) => {
-                if bytes.len().saturating_add(count) > MAX_CAPTURE_BYTES {
-                    return Err(HandoverArchiveRefusal::Git(
-                        "git output exceeded capture bound".into(),
-                    ));
+/// A capture pipe drained of what it holds now, within the capture bound.
+trait DrainsCapture {
+    fn drain_capture(&mut self, bytes: &mut Vec<u8>) -> Result<bool, HandoverArchiveRefusal>;
+}
+
+impl<Pipe: Read> DrainsCapture for Pipe {
+    fn drain_capture(&mut self, bytes: &mut Vec<u8>) -> Result<bool, HandoverArchiveRefusal> {
+        let mut chunk = [0_u8; 8192];
+        loop {
+            match self.read(&mut chunk) {
+                Ok(0) => return Ok(true),
+                Ok(count) => {
+                    if bytes.len().saturating_add(count) > MAX_CAPTURE_BYTES {
+                        return Err(HandoverArchiveRefusal::Git(
+                            "git output exceeded capture bound".into(),
+                        ));
+                    }
+                    bytes.extend_from_slice(&chunk[..count]);
                 }
-                bytes.extend_from_slice(&chunk[..count]);
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+                Err(error) => return Err(HandoverArchiveRefusal::Git(error.to_string())),
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
-            Err(error) => return Err(HandoverArchiveRefusal::Git(error.to_string())),
         }
     }
 }
 
-fn terminate_process_group(child: &mut std::process::Child, process_id: u32) {
-    kill_process_group(process_id);
-    let _ = child.wait();
+/// A Git child that leads its own process group, ended with every
+/// descendant in it.
+trait OwnsProcessGroup {
+    fn terminate_process_group(&mut self, process_id: u32);
+    fn kill_process_group(&self, process_id: u32);
 }
 
-fn kill_process_group(process_id: u32) {
-    #[cfg(unix)]
-    {
-        // A negative pid addresses the process group whose id is the child
-        // pid.  Ignore ESRCH: the group may have exited between observation
-        // and cleanup.
-        let _ = unsafe { libc::kill(-(process_id as libc::pid_t), libc::SIGKILL) };
+impl OwnsProcessGroup for std::process::Child {
+    fn terminate_process_group(&mut self, process_id: u32) {
+        self.kill_process_group(process_id);
+        let _ = self.wait();
     }
-    #[cfg(not(unix))]
-    {
-        let _ = process_id;
+
+    fn kill_process_group(&self, process_id: u32) {
+        #[cfg(unix)]
+        {
+            // A negative pid addresses the process group whose id is the child
+            // pid.  Ignore ESRCH: the group may have exited between observation
+            // and cleanup.
+            let _ = unsafe { libc::kill(-(process_id as libc::pid_t), libc::SIGKILL) };
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = process_id;
+        }
     }
 }
 

@@ -161,21 +161,30 @@ impl ReadsHandoverConfiguration for super::FlowStore {
     }
 }
 
-pub(crate) fn upgrade_or_register(
-    engine: &mut Engine,
-) -> Result<TableReference<StoredHandoverConfiguration>, String> {
-    let descriptor = <StoredHandoverConfiguration as DescribesHandoverConfiguration>::descriptor();
-    match engine
-        .upgrade_table::<StoredHandoverConfigurationV1, StoredHandoverConfiguration>(descriptor)
-    {
-        UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-        UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-        UpgradeOutcome::Refused(refusal) => Err(format!(
-            "handover configuration upgrade refused: {refusal:?}"
-        )),
-        UpgradeOutcome::Failed(failure) => Err(format!(
-            "handover configuration upgrade failed: {failure:?}"
-        )),
+/// The current handover-configuration table, upgraded from its v1 family
+/// or registered fresh.
+pub(crate) trait UpgradesHandoverConfiguration: Sized {
+    fn upgrade_or_register(engine: &mut Engine) -> Result<TableReference<Self>, String>;
+}
+
+impl UpgradesHandoverConfiguration for StoredHandoverConfiguration {
+    fn upgrade_or_register(
+        engine: &mut Engine,
+    ) -> Result<TableReference<StoredHandoverConfiguration>, String> {
+        let descriptor =
+            <StoredHandoverConfiguration as DescribesHandoverConfiguration>::descriptor();
+        match engine
+            .upgrade_table::<StoredHandoverConfigurationV1, StoredHandoverConfiguration>(descriptor)
+        {
+            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+            UpgradeOutcome::Refused(refusal) => Err(format!(
+                "handover configuration upgrade refused: {refusal:?}"
+            )),
+            UpgradeOutcome::Failed(failure) => Err(format!(
+                "handover configuration upgrade failed: {failure:?}"
+            )),
+        }
     }
 }
 
@@ -293,7 +302,8 @@ mod tests {
                     .with_family(&handover_descriptor),
             )
             .unwrap();
-            let configuration = upgrade_or_register(&mut engine).unwrap();
+            let configuration =
+                StoredHandoverConfiguration::upgrade_or_register(&mut engine).unwrap();
             let handovers = engine.register_table(handover_descriptor.clone()).unwrap();
             assert_current(&engine, configuration, handovers);
         }
@@ -304,7 +314,8 @@ mod tests {
                     .with_family(&handover_descriptor),
             )
             .unwrap();
-            let configuration = upgrade_or_register(&mut engine).unwrap();
+            let configuration =
+                StoredHandoverConfiguration::upgrade_or_register(&mut engine).unwrap();
             let handovers = engine.register_table(handover_descriptor.clone()).unwrap();
             assert_current(&engine, configuration, handovers);
         }

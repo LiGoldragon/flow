@@ -3,6 +3,7 @@ use crate::handover_archive::{
     AccessesExistingGitHandoverArchive, ExistingGitHandoverArchive, HandoverArchivePublication,
     HandoverArchiveRefusal, HandoverArchiveRequest, HandoverRetirementRefusal,
     PublishesHandoverArchive, RealGitCommand, RetiresHandoverGenerations, RunsGitCommand,
+    SubstitutesGitRunner,
 };
 use crate::handover_observation::{ObservesHandoverRetirement, ReadsRetirementSubscription};
 use crate::reminding::ArchivesHandoverOnTick;

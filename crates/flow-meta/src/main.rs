@@ -1,20 +1,31 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+use flow_ethos::place::{NamesPlaceSockets, PlaceSockets, ResolvesPlace, RuntimeRoot};
 use flow_meta::Invocation;
-use meta_signal_flow::Response;
+use meta_signal_flow::{Query, Response};
 use protos::{Compactable, Protosizable, ReaderBudget};
 use std::{
     env,
+    ffi::OsStr,
     io::{Read, Write},
     os::unix::net::UnixStream,
 };
 
 struct FlowMetaClient;
 
+/// The CLI is `flow-meta <place-name> '<Query>'`: the place name picks the
+/// Nexus instance, resolved under `$XDG_RUNTIME_DIR/nexus/` to its meta
+/// socket.
 trait ParsesMetaCommand {
-    fn parse_command(&self, arguments: impl Iterator<Item = String>) -> Result<Invocation, String>;
+    fn parse_command(
+        &self,
+        arguments: impl Iterator<Item = String>,
+        runtime_directory: Option<&OsStr>,
+    ) -> Result<Invocation, String>;
 }
 trait CallsMetaNexus {
-    fn call(&self, invocation: &Invocation) -> Result<Response, String>;
+    /// Sends one query and hands each reply frame on: one, or for
+    /// ObserveConfiguration every frame until the Nexus ends the exchange.
+    fn call(&self, invocation: &Invocation, each: &mut dyn FnMut(Response)) -> Result<(), String>;
 }
 #[cfg(test)]
 trait ParsesMetaDatom {
@@ -40,27 +51,35 @@ impl ParsesMetaCommand for FlowMetaClient {
     fn parse_command(
         &self,
         mut arguments: impl Iterator<Item = String>,
+        runtime_directory: Option<&OsStr>,
     ) -> Result<Invocation, String> {
-        let Some(source) = arguments.next() else {
-            return Err("usage: flow-meta '<one inline Invocation datom>'".into());
+        let usage = || "usage: flow-meta <place-name> '<one inline Query datom>'".to_owned();
+        let (Some(place_name), Some(source), None) =
+            (arguments.next(), arguments.next(), arguments.next())
+        else {
+            return Err(usage());
         };
-        if arguments.next().is_some() {
-            return Err("usage: flow-meta '<one inline Invocation datom>'".into());
-        }
+        let runtime = RuntimeRoot::under(runtime_directory)?.place(&place_name)?;
         let mut budget = Budget {
             remaining: 65_536,
             reader: ReaderBudget::try_from(65_536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1_024,
         };
-        Potential::<Invocation>::from(source)
+        let query = Potential::<Query>::from(source)
             .actualize(&mut budget)
-            .map_err(|error| format!("invalid Flow meta invocation: {error:?}"))
+            .map_err(|error| format!("invalid Flow meta Query: {error:?}"))?;
+        Ok(Invocation {
+            meta_socket_path: PlaceSockets::meta_in(&runtime)
+                .to_string_lossy()
+                .into_owned(),
+            query,
+        })
     }
 }
 
 impl CallsMetaNexus for FlowMetaClient {
-    fn call(&self, invocation: &Invocation) -> Result<Response, String> {
+    fn call(&self, invocation: &Invocation, each: &mut dyn FnMut(Response)) -> Result<(), String> {
         let mut peer =
             UnixStream::connect(&invocation.meta_socket_path).map_err(|error| error.to_string())?;
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&invocation.query)
@@ -68,27 +87,47 @@ impl CallsMetaNexus for FlowMetaClient {
         peer.write_all(&(bytes.len() as u32).to_be_bytes())
             .map_err(|error| error.to_string())?;
         peer.write_all(&bytes).map_err(|error| error.to_string())?;
-        let mut length = [0; 4];
-        peer.read_exact(&mut length)
-            .map_err(|error| error.to_string())?;
-        let length = u32::from_be_bytes(length) as usize;
-        if length > 1024 * 1024 {
-            return Err("Signal frame exceeds 1 MiB".into());
+        let streams = invocation.query == Query::ObserveConfiguration;
+        loop {
+            let mut length = [0; 4];
+            match peer.read_exact(&mut length) {
+                Ok(()) => {}
+                Err(error) if streams && error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Ok(());
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+            let length = u32::from_be_bytes(length) as usize;
+            if length > 1024 * 1024 {
+                return Err("Signal frame exceeds 1 MiB".into());
+            }
+            let mut reply = vec![0; length];
+            peer.read_exact(&mut reply)
+                .map_err(|error| error.to_string())?;
+            each(
+                rkyv::from_bytes::<Response, rkyv::rancor::Error>(&reply)
+                    .map_err(|error| error.to_string())?,
+            );
+            if !streams {
+                return Ok(());
+            }
         }
-        let mut reply = vec![0; length];
-        peer.read_exact(&mut reply)
-            .map_err(|error| error.to_string())?;
-        rkyv::from_bytes::<Response, rkyv::rancor::Error>(&reply).map_err(|error| error.to_string())
     }
 }
 
 fn main() {
     let client = FlowMetaClient;
     match client
-        .parse_command(env::args().skip(1))
-        .and_then(|invocation| client.call(&invocation))
-    {
-        Ok(reply) => println!("{}", reply.datomize(vec![]).protosize().compact()),
+        .parse_command(
+            env::args().skip(1),
+            env::var_os("XDG_RUNTIME_DIR").as_deref(),
+        )
+        .and_then(|invocation| {
+            client.call(&invocation, &mut |reply| {
+                println!("{}", reply.datomize(vec![]).protosize().compact())
+            })
+        }) {
+        Ok(()) => {}
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(2)
@@ -119,8 +158,11 @@ mod tests {
             if arguments.next().is_some() {
                 return Err("extra fixture".into());
             }
-            self.parse_command([format!("{{ unused {query} }}")].into_iter())
-                .map(|Invocation { query, .. }| query)
+            self.parse_command(
+                ["main".to_owned(), query].into_iter(),
+                Some(std::ffi::OsStr::new("/run/user/test")),
+            )
+            .map(|Invocation { query, .. }| query)
         }
     }
     use datom_codec::Datomizable;
@@ -164,8 +206,8 @@ mod tests {
                 .parse_query([datom, "extra".into()].into_iter())
                 .is_err()
         );
-        // Sockets and StorePath belong to Start. The removed fragment wire
-        // type cannot silently be lowered into a different Nexus contract.
+        // Sockets belong to the place. The removed fragment wire type
+        // cannot silently be lowered into a different Nexus contract.
         assert!(client.parse_query(["{ [] }".into()].into_iter()).is_err());
         assert!(
             client
@@ -318,6 +360,7 @@ mod tests {
             },
             request_id_draws: 64,
             announcement_tries: 3,
+            harness_hook: meta_signal_flow::HarnessHookConfiguration::Unconfigured,
         };
         let printed = Response::Configuration(snapshot)
             .datomize(vec![])

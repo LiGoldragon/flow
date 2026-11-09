@@ -421,7 +421,8 @@ fn deliver_through_migrated(
     panic!("the expected migrated request is within the bounded delivery prefix")
 }
 
-fn start_argument(runtime: &Path, store: &Path) -> String {
+/// The accepted predecessor's Start: its sockets and its store named.
+fn predecessor_start_argument(runtime: &Path, store: &Path) -> String {
     format!(
         "{{ «{}» «{}» «{}» None }}",
         runtime.join("flow.sock").display(),
@@ -430,32 +431,45 @@ fn start_argument(runtime: &Path, store: &Path) -> String {
     )
 }
 
+/// The current Flow's place: its sockets in `runtime`, its memory, a
+/// `flow.sema`, in the store's directory.
+fn place_argument(runtime: &Path, store: &Path) -> String {
+    assert_eq!(
+        store.file_name().and_then(|name| name.to_str()),
+        Some("flow.sema"),
+        "a place keeps its memory as flow.sema"
+    );
+    format!(
+        "{{ main «{}» «{}» }}",
+        runtime.display(),
+        store.parent().expect("the store has a directory").display(),
+    )
+}
+
 fn spawn_flow(binary: &Path, home: &Path, runtime: &Path, store: &Path) -> FlowChild {
+    spawn_with(binary, home, runtime, place_argument(runtime, store))
+}
+
+fn spawn_predecessor(binary: &Path, home: &Path, runtime: &Path, store: &Path) -> FlowChild {
+    spawn_with(
+        binary,
+        home,
+        runtime,
+        predecessor_start_argument(runtime, store),
+    )
+}
+
+fn spawn_with(binary: &Path, home: &Path, runtime: &Path, argument: String) -> FlowChild {
     let child = Command::new(binary)
         .env_clear()
         .env("HOME", home)
         .env("XDG_RUNTIME_DIR", runtime)
-        .arg(start_argument(runtime, store))
+        .arg(argument)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
         .expect("Flow starts");
-    FlowChild { child }
-}
-
-fn spawn_configuration_only(binary: &Path, home: &Path, runtime: &Path, store: &Path) -> FlowChild {
-    let child = Command::new(binary)
-        .env_clear()
-        .env("HOME", home)
-        .env("XDG_RUNTIME_DIR", runtime)
-        .arg("--configure-only")
-        .arg(start_argument(runtime, store))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("configuration-only Flow starts");
     FlowChild { child }
 }
 
@@ -477,6 +491,12 @@ fn wait_for_socket(path: &Path) {
 
 fn serve_once(binary: &Path, home: &Path, runtime: &Path, store: &Path) {
     let child = spawn_flow(binary, home, runtime, store);
+    wait_for_socket(&runtime.join("flow.sock"));
+    child.stop();
+}
+
+fn serve_predecessor_once(binary: &Path, home: &Path, runtime: &Path, store: &Path) {
+    let child = spawn_predecessor(binary, home, runtime, store);
     wait_for_socket(&runtime.join("flow.sock"));
     child.stop();
 }
@@ -570,7 +590,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     // production FlowStore capabilities.
     let exact_binary_state = tempfile::tempdir().expect("exact predecessor state");
     let predecessor_runtime = tempfile::tempdir().expect("predecessor runtime");
-    serve_once(
+    serve_predecessor_once(
         &predecessor,
         home.path(),
         predecessor_runtime.path(),
@@ -929,8 +949,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     assert_eq!(request_policy_rows(&store_path), malformed);
     let refused_runtime = tempfile::tempdir().expect("refused runtime");
     let status =
-        spawn_configuration_only(&current, home.path(), refused_runtime.path(), &store_path)
-            .wait_for_failure();
+        spawn_flow(&current, home.path(), refused_runtime.path(), &store_path).wait_for_failure();
     assert_eq!(
         request_policy_rows(&store_path),
         malformed,

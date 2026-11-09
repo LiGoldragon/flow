@@ -1,70 +1,97 @@
-//! The ordinary socket is supplied by the typed Start input. Durable Nexus
-//! settings come from the committed Meta configuration snapshot.
+//! A Nexus opens in its place: its memory in State, the socket its flows
+//! report to in Runtime. Durable Nexus settings come from the committed Meta
+//! configuration snapshot, and a Configure applies to the running Nexus.
 
-use crate::store::{ConfiguresOnlyStore, LaysOutDefaults};
-use crate::{OpensRunningNexus, RunningNexus, store::ConfigurationOnlyStore};
-use meta_signal_flow::{ConfigurationChange, ConfigureNexus};
-use signal_flow::Start;
+use crate::herdr::launch::{ChecksComposedLaunch, PreparesClaudePane, tests::launch};
+use crate::live::HoldsLiveValue;
+use crate::place::{LaysOutPlace, Place};
+use crate::store::ConfiguresOnlyStore;
+use crate::{Dispatches, OpensRunningNexus, RunningNexus, store::ConfigurationOnlyStore};
+use meta_signal_flow::{ConfigurationChange, ConfigureNexus, ConfigureOutcome};
+use signal_flow::HarnessKind;
+use std::path::{Path, PathBuf};
+
+/// The place `name` under a fixture's runtime and state roots, as the
+/// deployment lays it out: `<runtime>/nexus/<name>`, `<state>/nexus/<name>`.
+fn place(root: &Path, name: &str) -> Place {
+    Place {
+        place_name: name.into(),
+        runtime: root
+            .join("run/nexus")
+            .join(name)
+            .to_string_lossy()
+            .into_owned(),
+        state: root
+            .join("state/nexus")
+            .join(name)
+            .to_string_lossy()
+            .into_owned(),
+    }
+}
+
+fn nexus_configuration(root: &Path) -> ConfigureNexus {
+    ConfigureNexus {
+        source_root: root.to_string_lossy().into_owned(),
+        stable_codex: endpoint(root, "stable"),
+        next_codex: endpoint(root, "next"),
+        harness_profiles: vec![],
+        meta_aspects: vec![meta_signal_flow::Aspect::Psyche],
+        message_nexus_path_option: Some(root.join("message.sock").to_string_lossy().into_owned()),
+        message_nexus_binary_option: Some(
+            root.join("message-nexus").to_string_lossy().into_owned(),
+        ),
+        curriculum_nexus_path: root
+            .join("run/curriculum/curriculum.sock")
+            .to_string_lossy()
+            .into_owned(),
+        lease: 60,
+        presentation_prompt_option: None,
+    }
+}
+
+/// A configured memory in the place's State.
+fn configured(place: &Place, root: &Path) {
+    std::fs::create_dir_all(place.state_directory()).expect("state directory");
+    let config = ConfigurationOnlyStore::open(&place.store()).expect("config store");
+    config
+        .configure_change(ConfigurationChange::Nexus(nexus_configuration(root)))
+        .expect("whole typed Nexus configuration commits");
+}
+
+/// Every hook command a Claude flow is launched with.
+fn hook_commands(nexus: &RunningNexus) -> Vec<String> {
+    let settings: serde_json::Value = serde_json::from_str(
+        &nexus
+            .herdr
+            .claude_flag_settings(&launch(HarnessKind::Claude).lean_start()),
+    )
+    .expect("settings JSON");
+    [
+        "SessionStart",
+        "PostToolUse",
+        "UserPromptSubmit",
+        "Stop",
+        "SessionEnd",
+    ]
+    .into_iter()
+    .map(|event| {
+        settings["hooks"][event][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("hook command")
+            .to_owned()
+    })
+    .collect()
+}
 
 #[test]
-fn a_launch_receives_the_socket_from_each_typed_start() {
+fn a_launch_receives_the_socket_of_the_place_the_nexus_opened_in() {
     let directory = tempfile::tempdir().expect("fixture root");
-    let defaults = crate::store::DefaultConfiguration {
-        home: directory.path().join("home"),
-        runtime_directory: directory.path().join("run/flow-next"),
-    };
-    std::fs::create_dir_all(defaults.state_directory()).expect("state directory");
-    let config = ConfigurationOnlyStore::open(&defaults.store_path()).expect("config store");
-    config
-        .configure_change(ConfigurationChange::Nexus(ConfigureNexus {
-            source_root: directory.path().to_string_lossy().into_owned(),
-            stable_codex: endpoint(directory.path(), "stable"),
-            next_codex: endpoint(directory.path(), "next"),
-            harness_profiles: vec![],
-            meta_aspects: vec![meta_signal_flow::Aspect::Psyche],
-            message_nexus_path_option: Some(
-                directory
-                    .path()
-                    .join("message.sock")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            message_nexus_binary_option: Some(
-                directory
-                    .path()
-                    .join("message-nexus")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            curriculum_nexus_path: directory
-                .path()
-                .join("run/curriculum/curriculum.sock")
-                .to_string_lossy()
-                .into_owned(),
-            lease: 60,
-            presentation_prompt_option: None,
-        }))
-        .expect("whole typed Nexus configuration commits");
-    drop(config);
-
-    let first_start = Start {
-        store_path: defaults.store_path().to_string_lossy().into_owned(),
-        ordinary_socket_path: directory
-            .path()
-            .join("run/flow-next/flow.sock")
-            .to_string_lossy()
-            .into_owned(),
-        meta_socket_path: directory
-            .path()
-            .join("run/flow-next/flow-meta.sock")
-            .to_string_lossy()
-            .into_owned(),
-        landing_watch_option: None,
-    };
-    let nexus = RunningNexus::open(&defaults, &first_start).expect("configured Nexus opens");
+    let main = place(directory.path(), "main");
+    configured(&main, directory.path());
+    let nexus = RunningNexus::open(&main).expect("configured Nexus opens");
     assert_eq!(
         nexus.herdr.ordinary_socket,
-        directory.path().join("run/flow-next/flow.sock")
+        directory.path().join("run/nexus/main/flow.sock")
     );
     // The context composer asks the Curriculum socket the configuration names.
     let composer = format!("{:?}", nexus.composer);
@@ -77,21 +104,75 @@ fn a_launch_receives_the_socket_from_each_typed_start() {
     );
     drop(nexus);
 
-    let second_start = Start {
-        store_path: first_start.store_path.clone(),
-        ordinary_socket_path: directory
+    // The same memory opened at another place serves that place's socket.
+    let elsewhere = Place {
+        runtime: directory
             .path()
-            .join("elsewhere/ordinary.sock")
+            .join("run/nexus/next")
             .to_string_lossy()
             .into_owned(),
-        meta_socket_path: first_start.meta_socket_path,
-        landing_watch_option: None,
+        ..main.clone()
     };
-    let reopened = RunningNexus::open(&defaults, &second_start).expect("configured Nexus reopens");
+    let reopened = RunningNexus::open(&elsewhere).expect("configured Nexus reopens");
     assert_eq!(
         reopened.herdr.ordinary_socket,
-        directory.path().join("elsewhere/ordinary.sock")
+        directory.path().join("run/nexus/next/flow.sock")
     );
+}
+
+/// The hook settings of every Claude flow a Nexus at the main place
+/// launches name the main place's socket, `$XDG_RUNTIME_DIR/nexus/main/
+/// flow.sock`, and no versioned directory: a later version started at main
+/// serves that same socket, so a flow keeps reporting to whichever version
+/// is main.
+#[test]
+fn the_hook_settings_name_the_main_place_socket() {
+    let directory = tempfile::tempdir().expect("fixture root");
+    let main = place(directory.path(), "main");
+    configured(&main, directory.path());
+    let nexus = RunningNexus::open(&main).expect("configured Nexus opens");
+    let socket = directory.path().join("run/nexus/main/flow.sock");
+    for command in hook_commands(&nexus) {
+        assert!(
+            command.ends_with(&format!("'{{ {} }}'", socket.display())),
+            "{command}"
+        );
+    }
+}
+
+/// The hook command comes from the configuration's HarnessHook, applied to
+/// the running Nexus at once: no environment is read, and no restart is
+/// needed. Unconfigured, it is the flow-hook beside the executable.
+#[test]
+fn a_configured_harness_hook_takes_effect_in_the_running_nexus_without_a_restart() {
+    let directory = tempfile::tempdir().expect("fixture root");
+    let main = place(directory.path(), "main");
+    configured(&main, directory.path());
+    let nexus = RunningNexus::open(&main).expect("configured Nexus opens");
+    let beside = std::env::current_exe()
+        .expect("test executable")
+        .parent()
+        .expect("executable directory")
+        .join("flow-hook");
+    assert_eq!(*nexus.herdr.harness_hook.current(), beside);
+    let stable = PathBuf::from("/home/someone/.local/bin/flow-hook");
+    assert_eq!(
+        nexus.dispatch_meta(meta_signal_flow::Query::Configure(
+            ConfigurationChange::HarnessHook(stable.to_string_lossy().into_owned())
+        )),
+        meta_signal_flow::Response::Configured(ConfigureOutcome::Replaced)
+    );
+    assert_eq!(*nexus.herdr.harness_hook.current(), stable);
+    for command in hook_commands(&nexus) {
+        assert!(
+            command.starts_with(&format!("'{}' ", stable.display())),
+            "{command}"
+        );
+    }
+    drop(nexus);
+    // The memory keeps it: the next start writes the same hook.
+    let reopened = RunningNexus::open(&main).expect("configured Nexus reopens");
+    assert_eq!(*reopened.herdr.harness_hook.current(), stable);
 }
 
 fn endpoint(root: &std::path::Path, name: &str) -> meta_signal_flow::CodexEndpoint {

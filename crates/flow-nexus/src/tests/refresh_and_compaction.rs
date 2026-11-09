@@ -9,6 +9,7 @@ use super::waking::{
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture, StagedLaunch};
 use crate::compacting::{CodexContextSignal, WatchesCompactions, WritesTranscriptTime};
 use crate::composition::{ComposesLaunch, HarnessedProfile};
+use crate::live::HoldsLiveValue;
 use crate::reporting::RecordsReports;
 use crate::store::compaction::{Investigation, RecordsCompactions};
 use crate::store::context::{
@@ -179,6 +180,7 @@ pub(super) fn staged_refresh_successor(fixture: &NexusFixture) -> StagedLaunch {
     successor.composed = fixture
         .nexus
         .composer
+        .current()
         .compose(
             HarnessedProfile {
                 remembered_flows: Vec::new(),

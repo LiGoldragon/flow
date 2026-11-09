@@ -77,7 +77,10 @@ fn counters(fixture: &NexusFixture) -> String {
     let open = snapshot
         .rfind(" { ")
         .expect("the snapshot ends with a struct");
-    snapshot[open + 1..snapshot.len() - 2].to_owned()
+    // The counters and the two request bounds; the HarnessHook follows.
+    snapshot[open + 1..snapshot.len() - 2]
+        .trim_end_matches(" Unconfigured")
+        .to_owned()
 }
 
 /// On a store that has recorded nothing, a Counters at or above each

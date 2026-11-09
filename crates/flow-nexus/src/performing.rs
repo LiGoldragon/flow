@@ -21,6 +21,7 @@ use crate::herdr::launch::{
 };
 use crate::herdr::{OperatesHerdrPane, ReadsHerdrPanes};
 use crate::launching::ResolvesLaunchRoot;
+use crate::live::HoldsLiveValue;
 use crate::send_tool::ServesLaunchCalls;
 use crate::store::{
     ConfirmsStartedFlow, FlowRegistration, RecordsFlowLifecycle, RecordsLaunchOutcome,
@@ -220,7 +221,10 @@ impl Performs for RunningNexus {
             // A model that is not exact on its harness is never launched: its
             // receipt could not match the model the transcript records.
             Operation::Compose(profile)
-                if !self.codex_endpoints.launches_exactly(&profile.model_name) =>
+                if !self
+                    .codex_endpoints
+                    .current()
+                    .launches_exactly(&profile.model_name) =>
             {
                 eprintln!(
                     "flow-nexus: launch {} not composed: model {} is not an exact native model",
@@ -234,7 +238,10 @@ impl Performs for RunningNexus {
                 // A Start naming no leave-outs takes its metaflow's default
                 // for the harness it starts on, and none when that harness
                 // has no default.
-                let harness_kind = self.codex_endpoints.harness_for(&profile.model_name);
+                let harness_kind = self
+                    .codex_endpoints
+                    .current()
+                    .harness_for(&profile.model_name);
                 let default = self
                     .store
                     .default_leave_outs(&profile.address, &harness_kind)
@@ -259,7 +266,7 @@ impl Performs for RunningNexus {
                         eprintln!("flow-nexus: launch {request} root unresolved: {rejection:?}");
                     })),
                 };
-                match self.composer.compose_in_root(
+                match self.composer.current().compose_in_root(
                     HarnessedProfile {
                         remembered_flows,
                         harness_kind,
@@ -350,6 +357,7 @@ impl Performs for RunningNexus {
                 let opened = match composed_launch.harness_kind {
                     HarnessKind::Codex => match self
                         .codex_endpoints
+                        .current()
                         .adapter_for(&composed_launch.launch_profile.model_name)
                         .and_then(|adapter| {
                             adapter.open_thread_in(
@@ -450,6 +458,7 @@ impl Performs for RunningNexus {
                         let opened_thread_option = opened.map(|thread| {
                             match self
                                 .codex_endpoints
+                                .current()
                                 .adapter_for(&composed_launch.launch_profile.model_name)
                             {
                                 Ok(adapter) => adapter.account_opened_thread(&thread),
@@ -515,6 +524,7 @@ impl Performs for RunningNexus {
                     // launch, holding the gate, answers it meanwhile.
                     HarnessKind::Codex => self.serving_launch_calls(|| {
                         self.codex_endpoints
+                            .current()
                             .adapter_for(&composed_launch.launch_profile.model_name)
                             .map_err(|_| Failed_Data::CodexRefused)
                             .and_then(|adapter| {

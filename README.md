@@ -55,15 +55,34 @@ launch effect.
 The ordinary pane operations use the same typed edge:
 
 ```sh
-flow 'Stop.00f95a'
-flow 'List.{}'
-flow 'Observe.Agent.00f95a'
-flow 'Observe.Undecodable'
+flow main 'Stop.00f95a'
+flow main 'Metaflows'
+flow main 'Observe.Agent.00f95a'
+flow main 'Observe.Undecodable'
+flow-meta main 'ObserveConfiguration'
 ```
 
-The Nexus binds both sockets before it serves, then sends `READY=1` to
-`$NOTIFY_SOCKET` when it is set, so a systemd unit of `Type=notify` is
-started only once both listen.
+A Nexus starts in its place, the one datom it is started with, and reads
+nothing else for it: `flow-nexus '{ main /run/user/1001/nexus/main
+/home/li/.local/state/nexus/main }'`, the place name, Runtime (its sockets
+`flow.sock` and `flow-meta.sock`) and State (its memory `flow.sema`). A
+client is `flow <place-name> '<Query>'` or `flow-meta <place-name>
+'<Query>'`; the place name resolves under `$XDG_RUNTIME_DIR/nexus/` to that
+place's socket. Two places are two names: the stable version runs at
+`main`, a candidate at `next` with its own memory, and a version becomes
+main by being started at `main` once the version there has stopped. The
+socket every flow's hook reports to is its launching place's, so a flow
+launched at main keeps reporting to whichever version is main.
+
+The Nexus makes its place's directories if absent (mode 0700), binds both
+sockets before it serves, then sends `READY=1` to `$NOTIFY_SOCKET` when it is
+set, so a systemd unit of `Type=notify` is started only once both listen. A
+fresh memory starts with the configuration built into the executable, so
+the Nexus binds and announces readiness before it is configured. Every
+meta `Configure` is applied to the running Nexus at once, without a
+restart, and `ObserveConfiguration` streams the configuration, then each
+change. `Configure.HarnessHook.<path>` names the hook command written into
+every Claude flow; unconfigured, it is the `flow-hook` beside the Nexus.
 
 Every write into a pane goes through the privileged socket, and Flow is the
 only writer. `Deliver` carries a typed `Message` whose head is its Priority:
@@ -230,12 +249,10 @@ The Message consumer owns its harness-specific blank-composer guard before it
 submits input. Rows written before the route table was added also resolve with
 an unavailable Herdr route.
 
-The binary starts with no arguments and derives every default from two
-anchors, `HOME` and `XDG_RUNTIME_DIR` (`flow-defaults` is their one home):
+The sockets and the store are the place's. The remaining defaults are
+derived from two anchors, `HOME` and `XDG_RUNTIME_DIR` (`flow-defaults` is
+their one home):
 
-- store: `$HOME/.local/state/flow/flow.sema`
-- ordinary socket: `$XDG_RUNTIME_DIR/flow/flow.sock`
-- meta socket: `$XDG_RUNTIME_DIR/flow/flow-meta.sock`
 - source root: `$HOME/primary`
 - Codex control socket:
   `$HOME/.codex/app-server-control/app-server-control.sock`

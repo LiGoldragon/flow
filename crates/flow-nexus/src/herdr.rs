@@ -8,6 +8,7 @@ pub mod pane;
 pub mod reservation;
 
 use crate::codex::{CodexEndpoint, CodexEndpoints};
+use crate::live::{HoldsLiveValue, Live};
 use std::collections::BTreeSet;
 use std::{
     fs,
@@ -107,6 +108,7 @@ impl LocatesNativeTranscripts for HerdrCli {
         match harness {
             HarnessKind::Codex => self
                 .codex_endpoints
+                .current()
                 .endpoint_for(model_name)
                 .map(|endpoint| endpoint.transcript_root.clone())
                 .map_err(|error| error.to_string()),
@@ -119,8 +121,9 @@ impl LocatesNativeTranscripts for HerdrCli {
 pub struct HerdrCli {
     pub(crate) executable: PathBuf,
     flow_id_executable: PathBuf,
-    flows_root: PathBuf,
-    codex_endpoints: CodexEndpoints,
+    /// The flows directory under the configured source root.
+    pub(crate) flows_root: crate::live::Live<PathBuf>,
+    pub(crate) codex_endpoints: crate::live::Live<CodexEndpoints>,
     claude_transcript_root: PathBuf,
     /// The Claude daemon's records, read for a daemon-owned session's
     /// readiness.
@@ -128,8 +131,9 @@ pub struct HerdrCli {
     /// Claude's own records of the sessions its processes run.
     pub(crate) claude_sessions: crate::claude::ClaudeSessions,
     /// The `flow-hook` Claude Code runs on SessionStart, PostToolUse and
-    /// Stop in every Claude flow Flow launches ([`HookChoice`]).
-    pub(crate) harness_hook: PathBuf,
+    /// Stop in every Claude flow Flow launches ([`HookChoice`]), as the
+    /// configuration's HarnessHook names it.
+    pub(crate) harness_hook: crate::live::Live<PathBuf>,
     /// This Nexus's own ordinary socket, carried in every Claude hook's
     /// typed configuration so its reports return to the launching Nexus.
     pub(crate) ordinary_socket: PathBuf,
@@ -159,8 +163,8 @@ impl Default for HerdrCli {
         Self {
             executable: PathBuf::from("herdr"),
             flow_id_executable: PathBuf::from("flow-id"),
-            flows_root: flows_root.clone(),
-            codex_endpoints: CodexEndpoints {
+            flows_root: Live::holding(flows_root.clone()),
+            codex_endpoints: Live::holding(CodexEndpoints {
                 stable: CodexEndpoint {
                     client_path: PathBuf::from("/fixture/codex"),
                     home: codex_home.clone(),
@@ -188,15 +192,18 @@ impl Default for HerdrCli {
                 timeout: std::time::Duration::from_secs(10),
                 workspace_root: workspace_root.clone(),
                 nonces: std::sync::Arc::new(crate::codex::RandomNonce),
-            },
+            }),
             claude_transcript_root: claude_home.join("projects"),
             claude_daemon: crate::claude::ClaudeDaemon::under(&claude_home),
             claude_sessions: crate::claude::ClaudeSessions::under(&claude_home),
-            harness_hook: HookChoice {
-                stable: std::env::var_os("FLOW_HOOK").map(PathBuf::from),
-                executable: std::env::current_exe().ok(),
-            }
-            .harness_hook(),
+            // The configured HarnessHook replaces this when the Nexus opens.
+            harness_hook: Live::holding(
+                HookChoice {
+                    stable: None,
+                    executable: std::env::current_exe().ok(),
+                }
+                .harness_hook(),
+            ),
             ordinary_socket: defaults.ordinary_socket_path(),
             held_system_prompts: Default::default(),
             title_readback_interval: std::time::Duration::from_millis(250),
@@ -206,20 +213,36 @@ impl Default for HerdrCli {
 }
 
 /// Where the hook command Flow writes into a Claude flow's settings points.
-/// The deployment names a stable path in `FLOW_HOOK` and repoints it at the
-/// `flow-hook` of each Flow it activates, so the hook a running flow was
-/// launched with moves with the deployment. A Nexus started without it, or
-/// with a relative one, names the `flow-hook` beside its own executable.
+/// The deployment declares a stable path as the configuration's
+/// HarnessHook and repoints it at the `flow-hook` of each Flow it
+/// activates, so the hook a running flow was launched with moves with the
+/// deployment. Unconfigured, or a relative path, names the `flow-hook`
+/// beside the Nexus's own executable.
 pub(crate) struct HookChoice {
     pub(crate) stable: Option<PathBuf>,
     pub(crate) executable: Option<PathBuf>,
 }
 
-pub(crate) trait ChoosesHarnessHook {
+pub(crate) trait ChoosesHarnessHook: Sized {
+    /// The choice the configuration's HarnessHook makes, beside this
+    /// process's executable.
+    fn configured(hook: &meta_signal_flow::HarnessHookConfiguration) -> Self;
     fn harness_hook(&self) -> PathBuf;
 }
 
 impl ChoosesHarnessHook for HookChoice {
+    fn configured(hook: &meta_signal_flow::HarnessHookConfiguration) -> Self {
+        Self {
+            stable: match hook {
+                meta_signal_flow::HarnessHookConfiguration::Configured(path) => {
+                    Some(PathBuf::from(path))
+                }
+                meta_signal_flow::HarnessHookConfiguration::Unconfigured => None,
+            },
+            executable: std::env::current_exe().ok(),
+        }
+    }
+
     fn harness_hook(&self) -> PathBuf {
         match &self.stable {
             Some(stable) if stable.is_absolute() => stable.clone(),
@@ -365,6 +388,18 @@ impl ReadsPromptReply for PromptReply {
 
 pub trait ConfiguresHerdrCli {
     fn with_codex_endpoints(self, codex_endpoints: CodexEndpoints) -> Self;
+    /// The hook command the configuration names, or the `flow-hook` beside
+    /// this executable ([`HookChoice`]).
+    fn with_harness_hook(self, configured: &meta_signal_flow::HarnessHookConfiguration) -> Self;
+    /// Takes a changed configuration at once: the Codex endpoints, the
+    /// flows directory under the source root and the hook command each
+    /// next use reads.
+    fn reconfigure(
+        &self,
+        codex_endpoints: CodexEndpoints,
+        source_root: &std::path::Path,
+        hook: &meta_signal_flow::HarnessHookConfiguration,
+    );
     /// The ordinary socket this Nexus serves, as its store configures it.
     fn with_ordinary_socket(self, ordinary_socket: &std::path::Path) -> Self;
     /// Re-roots the flows directory on the configured source root.
@@ -375,8 +410,28 @@ pub trait ConfiguresHerdrCli {
 
 impl ConfiguresHerdrCli for HerdrCli {
     fn with_codex_endpoints(mut self, codex_endpoints: CodexEndpoints) -> Self {
-        self.codex_endpoints = codex_endpoints;
+        self.codex_endpoints = Live::holding(codex_endpoints);
         self
+    }
+
+    fn with_harness_hook(
+        mut self,
+        configured: &meta_signal_flow::HarnessHookConfiguration,
+    ) -> Self {
+        self.harness_hook = Live::holding(HookChoice::configured(configured).harness_hook());
+        self
+    }
+
+    fn reconfigure(
+        &self,
+        codex_endpoints: CodexEndpoints,
+        source_root: &std::path::Path,
+        hook: &meta_signal_flow::HarnessHookConfiguration,
+    ) {
+        self.codex_endpoints.replace(codex_endpoints);
+        self.flows_root.replace(source_root.join("flows"));
+        self.harness_hook
+            .replace(HookChoice::configured(hook).harness_hook());
     }
 
     fn with_ordinary_socket(mut self, ordinary_socket: &std::path::Path) -> Self {
@@ -385,7 +440,7 @@ impl ConfiguresHerdrCli for HerdrCli {
     }
 
     fn with_source_root(mut self, source_root: &std::path::Path) -> Self {
-        self.flows_root = source_root.join("flows");
+        self.flows_root = Live::holding(source_root.join("flows"));
         self
     }
 
@@ -398,8 +453,8 @@ impl ConfiguresHerdrCli for HerdrCli {
         Self {
             executable,
             flow_id_executable: fixture_root.join("flow-id"),
-            flows_root: flows_root.clone(),
-            codex_endpoints: CodexEndpoints {
+            flows_root: Live::holding(flows_root.clone()),
+            codex_endpoints: Live::holding(CodexEndpoints {
                 stable: CodexEndpoint {
                     client_path: PathBuf::from("/fixture/codex"),
                     home: fixture_root.join("codex-home"),
@@ -420,13 +475,13 @@ impl ConfiguresHerdrCli for HerdrCli {
                     .expect("fixture flows root has a parent")
                     .to_path_buf(),
                 nonces: std::sync::Arc::new(crate::codex::SampleNonce),
-            },
+            }),
             claude_transcript_root: fixture_root.join("claude"),
             claude_daemon: crate::claude::ClaudeDaemon::under(&fixture_root.join("claude-home")),
             claude_sessions: crate::claude::ClaudeSessions::under(
                 &fixture_root.join("claude-home"),
             ),
-            harness_hook: PathBuf::from("/fixture/bin/flow-hook"),
+            harness_hook: Live::holding(PathBuf::from("/fixture/bin/flow-hook")),
             ordinary_socket: PathBuf::from("/fixture/run/flow-next/flow/flow.sock"),
             held_system_prompts: Default::default(),
             title_readback_interval: std::time::Duration::from_millis(1),
@@ -911,7 +966,10 @@ impl VerifiesFlowClaim for HerdrCli {
         {
             return false;
         }
-        let marker_path = self.flows_root.join(format!(".{}.flow-id", node.flow_id));
+        let marker_path = self
+            .flows_root
+            .current()
+            .join(format!(".{}.flow-id", node.flow_id));
         let Ok(metadata) = fs::symlink_metadata(&marker_path) else {
             return false;
         };

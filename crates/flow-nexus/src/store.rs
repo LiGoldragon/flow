@@ -152,6 +152,13 @@ const OPTIONAL_HANDOVER_REMINDER_TABLE: &str = "flow_nexus_handover_reminders";
 const OPTIONAL_ORDERED_REPLACEMENT_TABLE: &str = "flow_nexus_ordered_replacements";
 /// Added in 0.53.3; a 0.53.2 store has recorded no undecodable frame.
 const OPTIONAL_UNDECODABLE_FRAME_TABLE: &str = "flow_nexus_undecodable_frames";
+/// Added in 0.53.3; a 0.53.2 store names no harness hook.
+const OPTIONAL_HARNESS_HOOK_TABLE: &str = "flow_nexus_meta_harness_hook_configuration";
+const META_HARNESS_HOOK_CONFIGURATION_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_meta_harness_hook_configuration");
+const META_HARNESS_HOOK_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-harness-hook-configuration";
+const META_HARNESS_HOOK_CONFIGURATION_SCHEMA: &str =
+    "flow-nexus-meta-harness-hook-configuration-v1";
 const OPTIONAL_REQUEST_ID_TABLE: &str = "flow_nexus_request_ids";
 const OPTIONAL_STORE_IDENTITY_TABLE: &str = "flow_nexus_store_identity";
 const OPTIONAL_DELIVER_CALL_TABLE: &str = "flow_nexus_deliver_calls";
@@ -185,6 +192,7 @@ const CONFIGURATION_ONLY_TABLES: &[&str] = &[
     "flow_nexus_meta_metaflow_configuration",
     "flow_nexus_meta_protected_address_configuration",
     "flow_nexus_meta_handover_configuration",
+    OPTIONAL_HARNESS_HOOK_TABLE,
 ];
 /// The tables a running store holds, all of them.
 const RUNNING_TABLES: &[&str] = &[
@@ -243,6 +251,7 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_HANDOVER_REMINDER_TABLE,
     OPTIONAL_ORDERED_REPLACEMENT_TABLE,
     OPTIONAL_UNDECODABLE_FRAME_TABLE,
+    OPTIONAL_HARNESS_HOOK_TABLE,
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -946,6 +955,43 @@ impl DescribesHeartbeatTable for StoredMetaHeartbeatConfiguration {
     }
 }
 
+/// The hook command a Claude flow is launched with, one row; none until a
+/// HarnessHook is declared.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredMetaHarnessHookConfiguration {
+    harness_hook: String,
+}
+
+impl EngineRecord for StoredMetaHarnessHookConfiguration {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new("harness-hook")
+    }
+}
+
+impl MemoryDefinition for StoredMetaHarnessHookConfiguration {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(META_HARNESS_HOOK_CONFIGURATION_SCHEMA)
+    }
+}
+
+trait DescribesHarnessHookTable {
+    fn descriptor() -> TableDescriptor<StoredMetaHarnessHookConfiguration>;
+}
+
+impl DescribesHarnessHookTable for StoredMetaHarnessHookConfiguration {
+    fn descriptor() -> TableDescriptor<StoredMetaHarnessHookConfiguration> {
+        TableDescriptor::new(
+            META_HARNESS_HOOK_CONFIGURATION_TABLE_NAME,
+            FamilyName::new(META_HARNESS_HOOK_CONFIGURATION_FAMILY),
+            SchemaHash::for_label(META_HARNESS_HOOK_CONFIGURATION_SCHEMA),
+        )
+    }
+}
+
 /// One protected Address, one row per Address; none by default.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct StoredMetaProtectedAddressConfiguration {
@@ -1552,6 +1598,7 @@ pub(crate) struct MetaConfigurationTables {
     harness_flags: TableReference<StoredMetaHarnessFlagsConfiguration>,
     heartbeat: TableReference<StoredMetaHeartbeatConfiguration>,
     protected_addresses: TableReference<StoredMetaProtectedAddressConfiguration>,
+    harness_hook: TableReference<StoredMetaHarnessHookConfiguration>,
 }
 
 trait RegistersMetaConfigurationTables: Sized {
@@ -1580,6 +1627,7 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             heartbeat: engine.register_table(StoredMetaHeartbeatConfiguration::descriptor())?,
             protected_addresses: engine
                 .register_table(StoredMetaProtectedAddressConfiguration::descriptor())?,
+            harness_hook: engine.register_table(StoredMetaHarnessHookConfiguration::descriptor())?,
             metaflows: engine.register_table(
                 <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor(),
             )?,
@@ -1765,6 +1813,7 @@ pub struct ConfiguredFamilies {
     pub configured_harness_flags: Vec<ConfigureHarnessFlags>,
     pub heartbeat: Option<HeartbeatConfig>,
     pub protected_addresses: Vec<Address>,
+    pub harness_hook: meta_signal_flow::HarnessHookConfiguration,
     pub handover_policies: meta_signal_flow::HandoverPoliciesConfiguration,
     pub handover_archive: meta_signal_flow::HandoverArchiveConfiguration,
     pub handover_count: meta_signal_flow::HandoverCountConfiguration,
@@ -1799,6 +1848,7 @@ impl CompletesSnapshot for ConfiguredFamilies {
             counters,
             request_id_draws: self.request_id_draws,
             announcement_tries: self.announcement_tries,
+            harness_hook: self.harness_hook,
         }
     }
 }
@@ -1868,6 +1918,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let meta_heartbeat_descriptor = StoredMetaHeartbeatConfiguration::descriptor();
         let meta_protected_addresses_descriptor =
             StoredMetaProtectedAddressConfiguration::descriptor();
+        let meta_harness_hook_descriptor = StoredMetaHarnessHookConfiguration::descriptor();
         let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         let meta_metaflows_descriptor = <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor();
@@ -1891,6 +1942,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_harness_flags_descriptor)
                 .with_family(&meta_heartbeat_descriptor)
                 .with_family(&meta_protected_addresses_descriptor)
+                .with_family(&meta_harness_hook_descriptor)
                 .with_family(&meta_metaflows_descriptor)
                 .with_family(&meta_handover_descriptor),
         )?;
@@ -1912,6 +1964,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             harness_flags: engine.register_table(meta_harness_flags_descriptor)?,
             heartbeat: engine.register_table(meta_heartbeat_descriptor)?,
             protected_addresses: engine.register_table(meta_protected_addresses_descriptor)?,
+            harness_hook: engine.register_table(meta_harness_hook_descriptor)?,
             metaflows: engine.register_table(meta_metaflows_descriptor)?,
         };
         if !recognized {
@@ -4958,6 +5011,10 @@ pub(crate) trait ReadsFlowMemory {
                 META_HEARTBEAT_CONFIGURATION_FAMILY,
                 META_HEARTBEAT_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_meta_harness_hook_configuration" => (
+                META_HARNESS_HOOK_CONFIGURATION_FAMILY,
+                META_HARNESS_HOOK_CONFIGURATION_SCHEMA,
+            ),
             "flow_nexus_meta_protected_address_configuration" => (
                 META_PROTECTED_ADDRESS_CONFIGURATION_FAMILY,
                 META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA,
@@ -5184,6 +5241,7 @@ pub(crate) trait ReadsFlowMemory {
                     || *name == OPTIONAL_HANDOVER_REMINDER_TABLE
                     || *name == OPTIONAL_ORDERED_REPLACEMENT_TABLE
                     || *name == OPTIONAL_UNDECODABLE_FRAME_TABLE
+                    || *name == OPTIONAL_HARNESS_HOOK_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
                     || *name == OPTIONAL_DELIVER_CALL_TABLE
                     || *name == OPTIONAL_STORE_IDENTITY_TABLE
@@ -5419,6 +5477,7 @@ pub(crate) trait ReadsFlowMemory {
         let heartbeat_rows = engine.match_records(QueryPlan::all(tables.heartbeat))?;
         let protected_address_rows =
             engine.match_records(QueryPlan::all(tables.protected_addresses))?;
+        let harness_hook_rows = engine.match_records(QueryPlan::all(tables.harness_hook))?;
         let handover = handover_rows
             .records()
             .first()
@@ -5436,6 +5495,7 @@ pub(crate) trait ReadsFlowMemory {
             || harness_flags_rows.database_marker() != marker
             || heartbeat_rows.database_marker() != marker
             || protected_address_rows.database_marker() != marker
+            || harness_hook_rows.database_marker() != marker
             || engine.current_database_marker()? != marker
         {
             return Err(StoreError::ConfigurationReadViewChanged);
@@ -5458,6 +5518,13 @@ pub(crate) trait ReadsFlowMemory {
         let investigation = match investigation_rows.records() {
             [] => None,
             [stored] => Some(stored.investigation.clone()),
+            _ => return Err(StoreError::StateInvariant),
+        };
+        let harness_hook = match harness_hook_rows.records() {
+            [] => meta_signal_flow::HarnessHookConfiguration::Unconfigured,
+            [stored] => {
+                meta_signal_flow::HarnessHookConfiguration::Configured(stored.harness_hook.clone())
+            }
             _ => return Err(StoreError::StateInvariant),
         };
         // A Memory no DefaultMinutes was declared in holds the seed.
@@ -5526,6 +5593,7 @@ pub(crate) trait ReadsFlowMemory {
             configured_harness_flags,
             heartbeat,
             protected_addresses,
+            harness_hook,
             handover_policies: handover.policies,
             handover_archive: handover.archive,
             handover_count: handover.count,
@@ -5836,6 +5904,13 @@ pub(crate) trait ReadsFlowMemory {
                     engine,
                     tables.investigation,
                     vec![StoredMetaInvestigationConfiguration { investigation }],
+                )
+            }
+            ConfigurationChange::HarnessHook(harness_hook) => {
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.harness_hook,
+                    vec![StoredMetaHarnessHookConfiguration { harness_hook }],
                 )
             }
             // The default Minutes meets the rule a Task's Minutes meets at

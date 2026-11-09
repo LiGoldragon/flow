@@ -22,11 +22,12 @@ pruning a bundle copy) is one `Operation`, performed through `Performs` on
 catalogs) are not operations, and delivery's own lease and delivery records
 are not yet.
 
-Every harness event reaches Flow through the harness's hooks calling the Flow
-CLI. The hook command Flow writes is the stable path the deployment names in
-`FLOW_HOOK` (CriomOS-home: `~/.local/bin/flow-hook`, pointed at the active
-Flow's `flow-hook`), else the `flow-hook` beside the Nexus, so a running
-flow's hook moves with the deployment. A Stop whose input does not decode,
+Every harness event reaches Flow through the harness's hooks, which call the
+socket of the place whose Nexus launched the flow through the Flow client.
+The hook command Flow writes is the configuration's `HarnessHook`, the
+stable path the deployment declares (CriomOS-home: `~/.local/bin/flow-hook`,
+pointed at the active Flow's `flow-hook`), else the `flow-hook` beside the
+Nexus, so a running flow's hook moves with the deployment. A Stop whose input does not decode,
 no `background_tasks` or a task without its id, type, status and
 description, is refused by `flow-hook` with a typed refusal on stderr and
 exit 1, reported to nothing and never read as rest.
@@ -528,8 +529,10 @@ assigned-flow context, and the reset outcome mapping.
 ## The approval pipeline
 
 When the living approves a vision, its landing is a commit on the context
-repository's `main`. The Start datom names that checkout and the deploy
-executable (`LandingWatch`); the Nexus watches the checkout's ref files
+repository's `main`. A `LandingWatch` names that checkout and the deploy
+executable. The Nexus's place carries none, and no watch runs: the earlier
+Start's LandingWatch was read by no running Nexus either; the watch needs a
+configuration family of its own. Watched, the Nexus watches the checkout's ref files
 (`refs/heads/main`, `packed-refs`, and the remote refs, so a push of a
 landing counts), and every change, and its own start, runs one pass. A commit on `main` the context composer does not serve is a
 landing row (`flow_nexus_landings`), recorded once.

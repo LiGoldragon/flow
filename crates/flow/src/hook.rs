@@ -1,8 +1,9 @@
 //! `flow-hook`: the Claude Code command hook Flow writes into every Claude
 //! flow it launches. Claude Code runs it on SessionStart, PostToolUse,
 //! UserPromptSubmit, Stop and SessionEnd with the event as JSON on stdin; it turns the
-//! event into one `Report.{ FlowId Event }` datom and hands it to the `flow`
-//! CLI beside it, which is the only thing here that speaks Signal.
+//! event into one `Report.{ FlowId Event }` and sends it, through the client
+//! the `flow` CLI speaks Signal with, to the socket its typed configuration
+//! names: the socket of the place whose Nexus launched the flow.
 //!
 //!   SessionStart     -> Report.{ «FLOW_ID» Started.Some.«session_id» }
 //!   PostToolUse      -> Report.{ «FLOW_ID» ToolUsed.«tool_name» }
@@ -40,10 +41,12 @@
 //! It never blocks the harness: it exits 0, or 1 for a refused Stop, never
 //! 2, writes nothing on stdout (which UserPromptSubmit would add to the
 //! model's context), and writes one tab-separated line on stderr (event,
-//! datom, the CLI's exit code, the CLI's whole output; for a refused Stop,
-//! the refusal) for whoever reads it.
+//! datom, the call's exit code as the CLI would give it, 0 or 2, and the
+//! reply or the error; for a refused Stop, the refusal) for whoever reads
+//! it.
 
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+use flow::client::{CallsFlowNexus, FlowClient, TextualizesFlowReply};
 use flow::{HookConfiguration, Invocation};
 use flow_native::{DigestsPrompt, ReadsClaudePaste};
 use protos::{Compactable, Protosizable, ReaderBudget};
@@ -51,12 +54,7 @@ use signal_flow::{
     BackgroundTask, BackgroundTaskKind, BackgroundWork, Event, NativePrompt, NativeStop, Query,
     Report_Data,
 };
-use std::{
-    env,
-    io::Read,
-    path::PathBuf,
-    process::{Command, ExitCode},
-};
+use std::{env, io::Read, process::ExitCode};
 
 /// One hook invocation: the event Claude Code wrote, and the flow it ran in.
 struct HarnessHook {
@@ -298,31 +296,13 @@ impl ReportsThroughCli for HarnessHook {
         let invocation = Invocation {
             ordinary_socket_path: configuration.ordinary_socket_path.clone(),
             query,
-        }
-        .datomize(vec![])
-        .protosize()
-        .compact();
-        // The `flow` CLI installed beside this executable, else on PATH.
-        let client = env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(|directory| directory.join("flow")))
-            .filter(|path| path.is_file())
-            .unwrap_or_else(|| PathBuf::from("flow"));
-        let line = match Command::new(client).arg(invocation).output() {
-            Ok(output) => {
-                let reply = format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                format!(
-                    "{}\t{datom}\t{}\t{}",
-                    self.event_name(),
-                    output.status.code().unwrap_or(-1),
-                    reply.trim_end().replace('\n', " ")
-                )
-            }
-            Err(error) => format!("{}\t{datom}\t-\t{error}", self.event_name()),
+        };
+        let mut replies = Vec::new();
+        let line = match FlowClient.call(&invocation, &mut |reply| {
+            replies.push(FlowClient.textualize_reply(&reply))
+        }) {
+            Ok(()) => format!("{}\t{datom}\t0\t{}", self.event_name(), replies.join(" ")),
+            Err(error) => format!("{}\t{datom}\t2\t{error}", self.event_name()),
         };
         (line, false)
     }

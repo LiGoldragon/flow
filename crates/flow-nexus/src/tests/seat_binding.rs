@@ -172,18 +172,22 @@ impl CodexCliWorld {
             wrapper.display()
         ));
         FixtureExecutable { path: wrapper }.install(&format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$1/wrapper.pid\"\n: > \"$1/ready\"\nwhile [ ! -e \"$1/go\" ]; do sleep 0.01; done\nexec '{}' \"$2\"\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$1/wrapper.pid\"\n: > \"$1/ready\"\nwhile [ ! -e \"$1/go\" ]; do sleep 0.01; done\nexec '{}' \"$2\" \"$3\"\n",
             flow.display()
         ));
 
-        let socket = fixture.directory.path().join(format!(
-            "ordinary-{}.sock",
+        // The seat's place under the fixture's runtime root, where the
+        // client resolves it.
+        let place = fixture.directory.path().join(format!(
+            "run/nexus/{}",
             match seat_model {
                 Model::Terra => "terra",
                 Model::Luna => "luna",
                 _ => "other",
             }
         ));
+        fs::create_dir_all(&place).unwrap();
+        let socket = place.join("flow.sock");
         let served = socket.clone();
         std::thread::spawn(move || fixture.nexus.serve_ordinary(&served));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -221,19 +225,24 @@ impl CodexCliWorld {
             .path()
             .join(format!("cli-call-{number}"));
         fs::create_dir(&call).unwrap();
-        let invocation = flow::Invocation {
-            ordinary_socket_path: self.socket.to_string_lossy().into_owned(),
-            query,
-        }
-        .datomize(vec![])
-        .protosize()
-        .compact();
+        let query = query.datomize(vec![]).protosize().compact();
+        let place = self.socket.parent().expect("the socket lies in its place");
+        let place_name = place
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("a place name");
+        let runtime = place
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("the place lies under the runtime root");
         let gate = self.fixture.nexus.dispatch_gate.lock().unwrap();
         let mut command = Command::new("sh");
         command
             .arg(&self.shell)
             .arg(&call)
-            .arg(invocation)
+            .arg(place_name)
+            .arg(query)
+            .env("XDG_RUNTIME_DIR", runtime)
             .env_remove("HERDR_PANE_ID")
             .env_remove("HERDR_SESSION")
             .env_remove("FLOW_ID")

@@ -13,6 +13,7 @@ use crate::generated::starter::CarriesFlowId;
 use crate::harness_command::ParsesHarnessFlags;
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::{ChecksComposedLaunch, ObservesNativeLaunchBinding};
+use crate::live::HoldsLiveValue;
 use crate::performing::ClassifiesNativeLaunchFailure;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
@@ -979,6 +980,7 @@ impl ReconcilesInterruptedLaunches for RunningNexus {
             if cleanup.step(CleanupPart::Thread) == CleanupStep::Pending {
                 match self
                     .codex_endpoints
+                    .current()
                     .adapter_for(&attempt.launch_profile.model_name)
                 {
                     Ok(adapter) => {

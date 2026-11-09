@@ -28,6 +28,7 @@ use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::herdr::launch::ConstructsHarnessCommand;
 use crate::launching::ReadsHarnessArguments;
+use crate::live::HoldsLiveValue;
 use crate::metaflow::IdentifiesPeerProcess;
 use crate::model::RunsModel;
 use crate::performing::Performs;
@@ -925,7 +926,7 @@ impl FindsSeat for RunningNexus {
                 .codex_app_servers()
                 .ok()
                 .and_then(|app_servers| caller.codex_thread(&app_servers))
-                .map(|thread| self.codex_endpoints.root_thread(&thread));
+                .map(|thread| self.codex_endpoints.current().root_thread(&thread));
             let seat_thread = reported
                 .clone()
                 .or_else(|| self.unreported_thread(&pane.herdr_session_name, &agent));
@@ -945,7 +946,7 @@ impl FindsSeat for RunningNexus {
             .codex_app_servers()
             .ok()
             .and_then(|app_servers| caller.codex_thread(&app_servers))
-            .map(|thread| self.codex_endpoints.root_thread(&thread))
+            .map(|thread| self.codex_endpoints.current().root_thread(&thread))
         else {
             return Err(self.seat_evidence(None, None));
         };

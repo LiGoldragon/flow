@@ -108,6 +108,7 @@ use crate::generated::starter::ProfilesFreshSeat;
 use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes};
 use crate::launching::LaunchesFlows;
+use crate::live::HoldsLiveValue;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
 use crate::store::NamesConfiguredModel;
@@ -2414,7 +2415,7 @@ impl DrainsHeldSeats for RunningNexus {
                     Ok(Some(role)) => role.model_name,
                     _ => return refused(drained, Failed_Data::StoreRefused),
                 };
-                let adapter = match self.codex_endpoints.adapter_for(&model) {
+                let adapter = match self.codex_endpoints.current().adapter_for(&model) {
                     Ok(adapter) => adapter,
                     Err(_) => return refused(drained, Failed_Data::CodexRefused),
                 };
@@ -2658,7 +2659,12 @@ impl ParksCohort for RunningNexus {
                         .role(&attempt.flow_id)
                         .ok()
                         .flatten()
-                        .and_then(|role| self.codex_endpoints.adapter_for(&role.model_name).ok())
+                        .and_then(|role| {
+                            self.codex_endpoints
+                                .current()
+                                .adapter_for(&role.model_name)
+                                .ok()
+                        })
                         .and_then(|adapter| {
                             adapter
                                 .queued_turn_after(&attempt.thread_id, anchor.as_deref(), &text)

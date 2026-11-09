@@ -1,4 +1,6 @@
-//! The typed invocation selects exactly one Nexus socket.
+//! The CLI is `flow <place-name> '<Query>'`: the place name resolves under
+//! `$XDG_RUNTIME_DIR/nexus/` to that place's ordinary socket and to no
+//! other, whatever else the environment names.
 use std::{
     io::{Read, Write},
     os::unix::net::UnixListener,
@@ -6,9 +8,11 @@ use std::{
 };
 
 #[test]
-fn the_client_uses_only_the_explicit_socket() {
+fn the_client_reaches_only_the_socket_of_the_place_it_names() {
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
-    let selected = runtime.path().join("ordinary.sock");
+    let main = runtime.path().join("nexus/main");
+    std::fs::create_dir_all(&main).expect("the place's runtime directory");
+    let selected = main.join("flow.sock");
     let other = runtime.path().join("other.sock");
     let listener = UnixListener::bind(&selected).expect("selected fixture binds");
     let other_listener = UnixListener::bind(&other).expect("other fixture binds");
@@ -29,33 +33,37 @@ fn the_client_uses_only_the_explicit_socket() {
     });
     let output = Command::new(env!("CARGO_BIN_EXE_flow"))
         .env_clear()
+        .env("XDG_RUNTIME_DIR", runtime.path())
         .env("FLOW_SOCKET", &other)
-        .arg(format!("{{ {} {} }}", selected.display(), "Metaflows"))
+        .args(["main", "Metaflows"])
         .output()
         .expect("client runs");
     assert!(output.status.success(), "{output:?}");
     answering.join().expect("selected fixture answered");
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "Listed.[]");
+
+    // A place with no Nexus, a name that is no place, and no runtime root
+    // at all each fail, and nothing falls back to another socket.
+    for (place, runtime_directory) in [
+        ("next", Some(runtime.path())),
+        ("../other.sock", Some(runtime.path())),
+        ("main", None),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_flow"));
+        command.env_clear().env("FLOW_SOCKET", &other);
+        if let Some(directory) = runtime_directory {
+            command.env("XDG_RUNTIME_DIR", directory);
+        }
+        let failed = command
+            .args([place, "Metaflows"])
+            .output()
+            .expect("client runs");
+        assert!(!failed.status.success(), "{place}: {failed:?}");
+    }
     assert_eq!(
         other_listener
             .accept()
             .expect_err("other socket is untouched")
-            .kind(),
-        std::io::ErrorKind::WouldBlock
-    );
-
-    let absent = runtime.path().join("absent.sock");
-    let failed = Command::new(env!("CARGO_BIN_EXE_flow"))
-        .env_clear()
-        .env("FLOW_SOCKET", &other)
-        .arg(format!("{{ {} {} }}", absent.display(), "Metaflows"))
-        .output()
-        .expect("client runs");
-    assert!(!failed.status.success(), "{failed:?}");
-    assert_eq!(
-        other_listener
-            .accept()
-            .expect_err("no fallback connection")
             .kind(),
         std::io::ErrorKind::WouldBlock
     );

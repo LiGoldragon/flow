@@ -1,5 +1,6 @@
 //! The ordinary Message bridge uses the accepted socket's kernel identity.
 use crate::caller::{BindsCallerPane, CallerProcess, LocatesCallerPane, NamesRootThread};
+use crate::live::HoldsLiveValue;
 use crate::sending::RefusesUnidentified;
 use crate::sending::{CompletesDirectSends, IdentifiesSender, SendsRequests};
 use crate::store::metaflow::SleepsMetaflows;
@@ -114,7 +115,10 @@ impl IdentifiesThread for RunningNexus {
             }
             SendServerTrust::Trusted => {}
         }
-        let root_thread = self.codex_endpoints.root_thread(&native_session_id);
+        let root_thread = self
+            .codex_endpoints
+            .current()
+            .root_thread(&native_session_id);
         match self.store.thread_metaflow(&root_thread)? {
             Some(metaflow) if !self.rest_ended_awake(&metaflow.address) => {
                 Ok(Response::Identified(metaflow.address))

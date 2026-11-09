@@ -1,113 +1,49 @@
-use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+use datom_codec::{Actualizing, Budget, Potential};
 use flow::Invocation;
-use protos::{Compactable, Protosizable, ReaderBudget};
-use signal_flow::{ObserveSelection, Query, Response};
-use std::{
-    env,
-    io::{Read, Write},
-    os::unix::net::UnixStream,
-};
+use flow::client::{CallsFlowNexus, FlowClient, TextualizesFlowReply};
+use flow_ethos::place::{NamesPlaceSockets, PlaceSockets, ResolvesPlace, RuntimeRoot};
+use protos::ReaderBudget;
+use std::{env, ffi::OsStr};
 
-struct FlowClient;
-
-/// The CLI takes exactly one inline Invocation datom naming the target
-/// socket and the existing Query sent on that socket.
+/// The CLI is `flow <place-name> '<Query>'`: named after the Nexus, the
+/// place name picks the instance, resolved under `$XDG_RUNTIME_DIR/nexus/`
+/// to its ordinary socket.
 trait ParsesFlowCommand {
-    fn parse_command(&self, arguments: impl Iterator<Item = String>) -> Result<Invocation, String>;
-}
-
-trait CallsFlowNexus {
-    /// Sends one query and hands each reply frame on. Every query answers
-    /// with one frame except Observe, whose frames run until the Nexus ends
-    /// the exchange after the outcome.
-    fn call(&self, invocation: &Invocation, each: &mut dyn FnMut(Response)) -> Result<(), String>;
-}
-
-trait TextualizesFlowReply {
-    fn textualize_reply(&self, reply: &Response) -> String;
+    fn parse_command(
+        &self,
+        arguments: impl Iterator<Item = String>,
+        runtime_directory: Option<&OsStr>,
+    ) -> Result<Invocation, String>;
 }
 
 impl ParsesFlowCommand for FlowClient {
     fn parse_command(
         &self,
         mut arguments: impl Iterator<Item = String>,
+        runtime_directory: Option<&OsStr>,
     ) -> Result<Invocation, String> {
-        let Some(value) = arguments.next() else {
-            return Err("usage: flow '<one inline Invocation datom>'".into());
+        let usage = || "usage: flow <place-name> '<one inline Query datom>'".to_owned();
+        let (Some(place_name), Some(value), None) =
+            (arguments.next(), arguments.next(), arguments.next())
+        else {
+            return Err(usage());
         };
-        if arguments.next().is_some() {
-            return Err("usage: flow '<one inline Invocation datom>'".into());
-        }
+        let runtime = RuntimeRoot::under(runtime_directory)?.place(&place_name)?;
         let mut budget = Budget {
             remaining: 65_536,
             reader: ReaderBudget::try_from(65_536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1_024,
         };
-        Potential::<Invocation>::from(value)
+        let query = Potential::<signal_flow::Query>::from(value)
             .actualize(&mut budget)
-            .map_err(|error| format!("invalid Flow invocation: {error:?}"))
-    }
-}
-
-impl CallsFlowNexus for FlowClient {
-    fn call(&self, invocation: &Invocation, each: &mut dyn FnMut(Response)) -> Result<(), String> {
-        let query = &invocation.query;
-        let mut peer = UnixStream::connect(&invocation.ordinary_socket_path)
-            .map_err(|error| error.to_string())?;
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(query).map_err(|e| e.to_string())?;
-        peer.write_all(&(bytes.len() as u32).to_be_bytes())
-            .map_err(|e| e.to_string())?;
-        peer.write_all(&bytes).map_err(|e| e.to_string())?;
-        let streams = matches!(
+            .map_err(|error| format!("invalid Flow Query: {error:?}"))?;
+        Ok(Invocation {
+            ordinary_socket_path: PlaceSockets::ordinary_in(&runtime)
+                .to_string_lossy()
+                .into_owned(),
             query,
-            Query::Observe(_)
-                | Query::ObserveSends(_)
-                | Query::ObserveSender(_)
-                | Query::ObserveDeliveries(_)
-        );
-        let retirement_stream = matches!(query, Query::Observe(ObserveSelection::Retirement(_)));
-        loop {
-            let mut length = [0; 4];
-            match peer.read_exact(&mut length) {
-                Ok(()) => {}
-                Err(error)
-                    if streams
-                        && !retirement_stream
-                        && error.kind() == std::io::ErrorKind::UnexpectedEof =>
-                {
-                    return Ok(());
-                }
-                Err(error)
-                    if retirement_stream && error.kind() == std::io::ErrorKind::UnexpectedEof =>
-                {
-                    return Err("retirement observation ended without a terminal failure; its evidence is incomplete".into());
-                }
-                Err(error) => return Err(error.to_string()),
-            }
-            let length = u32::from_be_bytes(length) as usize;
-            if length > 1024 * 1024 {
-                return Err("Signal frame exceeds 1 MiB".into());
-            }
-            let mut reply = vec![0; length];
-            peer.read_exact(&mut reply).map_err(|e| e.to_string())?;
-            let response = rkyv::from_bytes::<Response, rkyv::rancor::Error>(&reply)
-                .map_err(|e| e.to_string())?;
-            let retirement_failed = matches!(response, Response::RetirementObservationFailed(_));
-            each(response);
-            if retirement_failed {
-                return Err("retirement observation failed; its evidence is incomplete".into());
-            }
-            if !streams {
-                return Ok(());
-            }
-        }
-    }
-}
-
-impl TextualizesFlowReply for FlowClient {
-    fn textualize_reply(&self, reply: &Response) -> String {
-        reply.datomize(vec![]).protosize().compact()
+        })
     }
 }
 
@@ -135,7 +71,10 @@ fn main() {
     }
     let client = FlowClient;
     match client
-        .parse_command(arguments.into_iter())
+        .parse_command(
+            arguments.into_iter(),
+            env::var_os("XDG_RUNTIME_DIR").as_deref(),
+        )
         .and_then(|invocation| {
             client.call(&invocation, &mut |reply| {
                 println!("{}", client.textualize_reply(&reply))
@@ -151,10 +90,9 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AnswersVersion, CallsFlowNexus, FlowClient, ParsesFlowCommand, TextualizesFlowReply,
-    };
+    use super::{AnswersVersion, ParsesFlowCommand};
     use flow::Invocation;
+    use flow::client::{CallsFlowNexus, FlowClient, TextualizesFlowReply};
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
 
@@ -176,8 +114,11 @@ mod tests {
             if arguments.next().is_some() {
                 return Err("extra fixture".into());
             }
-            self.parse_command([format!("{{ unused {query} }}")].into_iter())
-                .map(|Invocation { query, .. }| query)
+            self.parse_command(
+                ["main".to_owned(), query].into_iter(),
+                Some(std::ffi::OsStr::new("/run/user/test")),
+            )
+            .map(|Invocation { query, .. }| query)
         }
     }
     use signal_flow::{

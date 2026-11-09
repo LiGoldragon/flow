@@ -924,11 +924,6 @@ rec {
             requiredFeatures = [ ];
           }
           {
-            name = "flow-compose-invocation";
-            path = "src/compose_invocation.rs";
-            requiredFeatures = [ ];
-          }
-          {
             name = "flow-hook";
             path = "src/hook.rs";
             requiredFeatures = [ ];
@@ -1061,11 +1056,6 @@ rec {
           {
             name = "flow-meta";
             path = "src/main.rs";
-            requiredFeatures = [ ];
-          }
-          {
-            name = "flow-meta-compose-invocation";
-            path = "src/compose_invocation.rs";
             requiredFeatures = [ ];
           }
         ];
@@ -1864,8 +1854,8 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/message";
-          rev = "e0a0fe7a097983eb116ccd8290326e637e541b4c";
-          sha256 = "1n8z8ff6pwzfclazyb9r0l70bkqy5rrbnl7x003zqk4b42ykwjn4";
+          rev = "3d0fcbcdb829b09f80192d055d12e3af2754c9d0";
+          sha256 = "1mxkmjw8mvg5686mbw40v1s3m003fcnn57xrkb4mz3yk9xs3baw7";
         };
         libName = "message_defaults";
 
@@ -1878,8 +1868,8 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/message";
-          rev = "e0a0fe7a097983eb116ccd8290326e637e541b4c";
-          sha256 = "1n8z8ff6pwzfclazyb9r0l70bkqy5rrbnl7x003zqk4b42ykwjn4";
+          rev = "3d0fcbcdb829b09f80192d055d12e3af2754c9d0";
+          sha256 = "1mxkmjw8mvg5686mbw40v1s3m003fcnn57xrkb4mz3yk9xs3baw7";
         };
         libName = "message_nexus";
         dependencies = [
@@ -1953,8 +1943,8 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-flow";
-          rev = "82be495e12d06aaede190e11da384fc8e973d7fe";
-          sha256 = "1wgajkivla6yil6zvwb0s9jvnxkgg0dcpxyb8i83vp6wgf4ajgaj";
+          rev = "da773ffeaadc0033c29b6bc94288066e98dc397c";
+          sha256 = "06gfbxwp36vl5nsagvr4a9bf3c06zj4xpxq0al6ckiqii55c0yyx";
         };
         libName = "meta_signal_flow";
         dependencies = [

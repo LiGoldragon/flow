@@ -18,6 +18,7 @@ use crate::generated::starter::{
 };
 use crate::harness_command::HarnessCommandResources;
 use crate::herdr::reservation::ChoosesNativeSession;
+use crate::live::HoldsLiveValue;
 use crate::title::{NativeTitle, ShowsNativeTitle, TitlesFlow};
 use datom_codec::{Datomizable, Path as DatomPath};
 use flow::HookConfiguration;
@@ -532,7 +533,7 @@ impl PreparesClaudePane for HerdrCli {
         .compact();
         let command = format!(
             "{} {}",
-            self.harness_hook.to_string_lossy().shell_quoted(),
+            self.harness_hook.current().to_string_lossy().shell_quoted(),
             configuration.shell_quoted()
         );
         let hook = serde_json::json!([{
@@ -660,7 +661,7 @@ impl RunsHerdr for HerdrCli {
 
 pub(crate) trait ClaimsNativeIdentity {
     fn canonical_native_identity(native_session_id: &str) -> String;
-    fn configured_workspace_root(&self) -> Result<&Path, String>;
+    fn configured_workspace_root(&self) -> Result<PathBuf, String>;
     fn claimed_native_identity(
         &self,
         flow_id: &str,
@@ -689,21 +690,21 @@ impl ClaimsNativeIdentity for HerdrCli {
             .to_ascii_lowercase()
     }
 
-    fn configured_workspace_root(&self) -> Result<&Path, String> {
-        if !self.flows_root.is_absolute()
-            || self.flows_root.file_name().and_then(|name| name.to_str()) != Some("flows")
+    fn configured_workspace_root(&self) -> Result<PathBuf, String> {
+        let flows_root = self.flows_root.current();
+        if !flows_root.is_absolute()
+            || flows_root.file_name().and_then(|name| name.to_str()) != Some("flows")
         {
             return Err("configured Flow root must be an absolute directory named flows".into());
         }
-        let root = self
-            .flows_root
+        let root = flows_root
             .parent()
             .filter(|root| *root != Path::new("/"))
             .ok_or_else(|| "configured Flow root has no bounded workspace parent".to_owned())?;
         if !root.is_dir() {
             return Err("configured workspace root is not a directory".into());
         }
-        Ok(root)
+        Ok(root.to_path_buf())
     }
 
     fn claimed_native_identity(
@@ -711,7 +712,10 @@ impl ClaimsNativeIdentity for HerdrCli {
         flow_id: &str,
         harness: &HarnessKind,
     ) -> Result<String, String> {
-        let marker_path = self.flows_root.join(format!(".{flow_id}.flow-id"));
+        let marker_path = self
+            .flows_root
+            .current()
+            .join(format!(".{flow_id}.flow-id"));
         let metadata = fs::symlink_metadata(&marker_path)
             .map_err(|_| "native identity claim marker is absent".to_owned())?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -737,7 +741,7 @@ impl ClaimsNativeIdentity for HerdrCli {
         command
             .arg(harness_name)
             .arg("--flows-root")
-            .arg(&self.flows_root);
+            .arg(&*self.flows_root.current());
         match harness {
             HarnessKind::Codex => {
                 command.env("CODEX_SESSION_ID", native_session_id);
@@ -859,11 +863,11 @@ impl CapturesTranscripts for HerdrCli {
         model_name: Option<&str>,
     ) -> Result<(PathBuf, Metadata, Vec<PathBuf>), TranscriptRefusal> {
         self.verify_native_target(pane, native_session_id, harness)?;
+        let codex_endpoints = self.codex_endpoints.current();
         let root =
             match harness {
                 HarnessKind::Codex => {
-                    &self
-                        .codex_endpoints
+                    &codex_endpoints
                         .endpoint_for(model_name.ok_or_else(|| {
                             "Codex transcript selection requires a model".to_owned()
                         })?)
@@ -1753,6 +1757,7 @@ impl TitlesNativeFlow for HerdrCli {
             HarnessKind::Claude => self.title_claude_session(binding, &title)?,
             HarnessKind::Codex => self
                 .codex_endpoints
+                .current()
                 .adapter_for(&launch.launch_profile.model_name)
                 .and_then(|adapter| {
                     adapter.name_bound_thread(&binding.native_session_id, title.as_str())
@@ -1769,7 +1774,7 @@ impl TitlesNativeFlow for HerdrCli {
 
 impl CreatesHerdrLaunchPane for HerdrCli {
     fn create_launch_pane(&self, launch: &ComposedLaunch) -> Result<HerdrPaneBinding, String> {
-        let root = self.configured_workspace_root()?.to_path_buf();
+        let root = self.configured_workspace_root()?;
         self.create_launch_pane_in(launch, &root)
     }
 
@@ -2048,9 +2053,9 @@ impl SpawnsNativeHarness for HerdrCli {
         // The program Herdr types first: Herdr's own name for the kind, or
         // the configured Codex client.
         let mut program = launch.harness_kind.expected_harness().to_owned();
+        let codex_endpoints = self.codex_endpoints.current();
         let codex_endpoint = if launch.harness_kind == HarnessKind::Codex {
-            let endpoint = self
-                .codex_endpoints
+            let endpoint = codex_endpoints
                 .endpoint_for(&launch.launch_profile.model_name)
                 .map_err(|error| error.to_string())?;
             if !endpoint.client_path.is_absolute() || !Path::new(&endpoint.socket).is_absolute() {
@@ -2992,6 +2997,7 @@ pub(crate) mod tests {
     use crate::herdr::launch::TitlesClaudeSession;
     use crate::herdr::launch::{ChecksTypedCommand, HoldsSystemPrompt, SpawnFailure};
     use crate::herdr::launch::{NativeTargetRefusal, TitleRefusal};
+    use crate::live::HoldsLiveValue;
     use crate::title::ShowsNativeTitle;
     use signal_flow::{
         Aspect, ComposedLaunch, Effort, FirstPromptPayload, HarnessKind, HerdrPaneBinding,
@@ -3971,7 +3977,7 @@ printf '%s\n' "$alias"
             "1234567812344abc8def123456789abc",
             &agent_name,
         );
-        adapter.flows_root = root.path().join("not-flows");
+        adapter.flows_root = crate::live::Live::holding(root.path().join("not-flows"));
         assert!(
             adapter
                 .create_launch_pane(&launch)
@@ -5570,14 +5576,16 @@ printf '%s\n' "$alias"
         .install(&format!(
                 "#!/bin/sh\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\nprintf '%b' '{frames}'\nsleep 2\n"
             ));
-        adapter.codex_endpoints.stable.client_path = proxy;
+        adapter.codex_endpoints.edit().stable.client_path = proxy;
         adapter
             .codex_endpoints
+            .edit()
             .stable
             .model_names
             .insert("gpt-6-astra".into());
         adapter
             .codex_endpoints
+            .edit()
             .next
             .model_names
             .remove("gpt-6-astra");
@@ -5669,14 +5677,16 @@ printf '%s\n' "$alias"
         .install(&format!(
                 "#!/bin/sh\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\nprintf '%b' '{frames}'\nsleep 2\n"
             ));
-        adapter.codex_endpoints.stable.client_path = proxy;
+        adapter.codex_endpoints.edit().stable.client_path = proxy;
         adapter
             .codex_endpoints
+            .edit()
             .stable
             .model_names
             .insert("gpt-6-astra".into());
         adapter
             .codex_endpoints
+            .edit()
             .next
             .model_names
             .remove("gpt-6-astra");

@@ -49,8 +49,12 @@
 (def home (System/getenv "HOME"))
 (def runtime-root (or (System/getenv "XDG_RUNTIME_DIR") (str "/run/user/" (System/getenv "UID"))))
 (def capsule-runtime (str runtime-root "/flow-testing"))
-(def ordinary-socket (str capsule-runtime "/flow.sock"))
-(def meta-socket (str capsule-runtime "/flow-meta.sock"))
+;; Every capsule process runs with XDG_RUNTIME_DIR the capsule's runtime, so
+;; a place name a client is given resolves under it: the capsule's Nexus at
+;; main, a seeded candidate at next.
+(def places-root (str capsule-runtime "/nexus"))
+(def ordinary-socket (str places-root "/main/flow.sock"))
+(def meta-socket (str places-root "/main/flow-meta.sock"))
 (def state-root (str home "/.local/state/flow-testing"))
 (def store-path (str state-root "/flow.sema"))
 (def config-home (str state-root "/config"))
@@ -199,15 +203,29 @@
       (do (p/destroy-tree proc) {:exit -1 :out "" :err (str "timed out after " timeout " ms")})
       (select-keys result [:exit :out :err]))))
 
-(defn client-argument [pkg client socket query]
+(defn place-name-of
+  "The place a socket of the capsule lies in: the name of its directory
+  under the places root."
+  [socket]
+  (let [directory (fs/parent socket)]
+    (when-not (= (str (fs/parent directory)) (str (fs/path places-root)))
+      (throw (ex-info "socket lies in no place of the capsule" {:socket socket})))
+    (str (fs/file-name directory))))
+
+(defn client-arguments
+  "The arguments pkg's client takes to send query to socket: the query alone
+  (a client with a default socket), the composed invocation naming the
+  socket, or the place name the socket lies in and the query."
+  [pkg client socket query]
   (case (get @package-interface pkg)
-    :query query
+    :query [query]
     :invocation (let [composer (str pkg "/bin/" client "-compose-invocation")
                       {:keys [exit out err]} (run {} composer socket query)]
                   (if (zero? exit)
-                    (str/trim out)
+                    [(str/trim out)]
                     (throw (ex-info "typed client invocation composition failed"
                                     {:package pkg :client client :error (str/trim err)}))))
+    :place [(place-name-of socket) query]
     (throw (ex-info "package client interface is undeclared" {:package pkg}))))
 
 (defn herdr [& args]
@@ -230,20 +248,20 @@
   "One ordinary-socket call; `pane` is the pane the caller stands in."
   ([datom] (flow datom @driver-pane))
   ([datom pane]
-   (reply-text (run {:env (clean-env (marks pane))}
+   (reply-text (apply run {:env (clean-env (marks pane))}
                     (str @package "/bin/flow")
-                    (client-argument @package "flow" ordinary-socket datom)))))
+                    (client-arguments @package "flow" ordinary-socket datom)))))
 
 (defn flow-process
   "An ordinary-socket call started now and read later."
   [datom pane]
-  (p/process [(str @package "/bin/flow") (client-argument @package "flow" ordinary-socket datom)]
+  (p/process (into [(str @package "/bin/flow")] (client-arguments @package "flow" ordinary-socket datom))
              {:env (clean-env (marks pane)) :out :string :err :string :in ""}))
 
 (defn flow-meta [datom]
-  (reply-text (run {:env (clean-env (marks @driver-pane))}
+  (reply-text (apply run {:env (clean-env (marks @driver-pane))}
                    (str @package "/bin/flow-meta")
-                   (client-argument @package "flow-meta" meta-socket datom))))
+                   (client-arguments @package "flow-meta" meta-socket datom))))
 
 ;; ---------------------------------------------------------------- observing
 
@@ -949,11 +967,19 @@
   (println (str "codex | " codex-binary " | " codex-model " | " codex-socket)))
 
 (defn start-text
-  ([] (start-text ordinary-socket meta-socket store-path))
-  ([ordinary meta store] (str "{ «" ordinary "» «" meta "» «" store "» None }")))
+  "The datom pkg's Nexus is started with on these sockets and store: its
+  place, the directory of the sockets and of the store, or the earlier
+  Start naming each."
+  ([pkg] (start-text pkg ordinary-socket meta-socket store-path))
+  ([pkg ordinary meta store]
+   (if (= :place (get @package-interface pkg))
+     (do (when-not (= "flow.sema" (str (fs/file-name store)))
+           (throw (ex-info "a place keeps its memory as flow.sema" {:store store})))
+         (str "{ «" (place-name-of ordinary) "» «" (fs/parent ordinary) "» «" (fs/parent store) "» }"))
+     (str "{ «" ordinary "» «" meta "» «" store "» None }"))))
 
 (defn start-nexus! [log]
-  (reset! nexus (p/process [(str @package "/bin/flow-nexus") (start-text)]
+  (reset! nexus (p/process [(str @package "/bin/flow-nexus") (start-text @package)]
                            {:env (clean-env) :out :append :out-file (fs/file log) :err :append :err-file (fs/file log) :in ""}))
   (when-not (watch 20 #(and (fs/exists? ordinary-socket) (fs/exists? meta-socket)))
     (throw (ex-info "the Nexus opened no sockets" {:log (str/trim (slurp log))}))))
@@ -975,7 +1001,7 @@
   and exits: of the package in charge on the capsule's sockets and store, or
   of pkg on the sockets and store start names. Its caller carries no pane
   marks: such a peer is refused there."
-  ([datom log] (configure-one! datom log @package (start-text) meta-socket))
+  ([datom log] (configure-one! datom log @package (start-text @package) meta-socket))
   ([datom log pkg start meta-socket]
     (let [child (p/process [(str pkg "/bin/flow-nexus") "--configure-only" start]
                            {:env (clean-env {"PATH" (str pkg "/bin:" (System/getenv "PATH"))})
@@ -984,9 +1010,9 @@
       (when-not (watch 10 #(or (listens? pid meta-socket) (not (p/alive? child))))
         (p/destroy child))
       (let [reply (if (p/alive? child)
-                    (reply-text (run {:env (clean-env {"PATH" (str pkg "/bin:" (System/getenv "PATH"))})}
+                    (reply-text (apply run {:env (clean-env {"PATH" (str pkg "/bin:" (System/getenv "PATH"))})}
                                      (str pkg "/bin/flow-meta")
-                                     (client-argument pkg "flow-meta" meta-socket datom)))
+                                     (client-arguments pkg "flow-meta" meta-socket datom)))
                     (str "configuration-only Nexus exited before listening: " (str/trim (slurp log))))
             exit (:exit (deref child 15000 {:exit "still running"}))]
         (when (= exit "still running") (p/destroy child))
@@ -1000,14 +1026,20 @@
          (fill line))))
 
 (defn configure!
-  "Each datom through a configuration-only Nexus of the package in charge:
-  configure.datom's, or the lines given."
+  "Each datom through a configuration-only Nexus of the package in charge,
+  or, for a package whose Nexus starts in its place, through that running
+  Nexus: configure.datom's, or the lines given."
   [log & [lines]]
   (doseq [datom (or lines (configure-lines))]
-    (let [[reply exit] (configure-one! datom log)
+    (let [[reply exit] (if (= :place (get @package-interface @package))
+                         ;; From no pane: the owner.
+                         [(reply-text (apply run {:env (clean-env)} (str @package "/bin/flow-meta")
+                                             (client-arguments @package "flow-meta" meta-socket datom)))
+                          "running"]
+                         (configure-one! datom log))
           family (second (re-find #"^Configure\.([A-Za-z]+)" datom))
           ok (str/starts-with? reply "Configured.")]
-      (println (str "configure " family " | " reply " | " (if ok "pass" "fail") " | configuration-only Nexus exit " exit))
+      (println (str "configure " family " | " reply " | " (if ok "pass" "fail") " | Nexus " exit))
       (flush)
       (when-not ok (throw (ex-info (str "Configure." family " refused") {:reply reply}))))))
 
@@ -1387,8 +1419,8 @@
 (def counter-margin 10000)
 ;; The night's seat count the window is extrapolated to.
 (def night-seats 21)
-(def seed-socket (str capsule-runtime "/seed/flow.sock"))
-(def seed-meta-socket (str capsule-runtime "/seed/flow-meta.sock"))
+(def seed-socket (str places-root "/next/flow.sock"))
+(def seed-meta-socket (str places-root "/next/flow-meta.sock"))
 
 (defn split-replay
   "Datoms split as the production replay splits them: at a newline outside
@@ -1494,13 +1526,18 @@
   "The seed's steps, each {:via :configure-only|:running :datom}: the Nexus
   declared configuration-only; then a full Nexus given Counters, the lower
   one and the Configuration read; then the rest of the replay
-  configuration-only, in the file's order. Nil without a Nexus declaration."
-  [replay counters lowered]
-  (let [nexus? #(str/starts-with? % "Configure.Nexus.")]
-    (when-let [nexus (first (filter nexus? replay))]
-      (vec (concat [{:via :configure-only :datom nexus}]
-                   (for [datom [counters lowered "Configuration"]] {:via :running :datom datom})
-                   (for [datom (remove nexus? replay)] {:via :configure-only :datom datom}))))))
+  configuration-only, in the file's order. A Nexus that starts in its place
+  (interface :place) starts on the empty store with its built-in
+  configuration and takes every step running, in the same order. Nil
+  without a Nexus declaration."
+  ([replay counters lowered] (seed-plan replay counters lowered :invocation))
+  ([replay counters lowered interface]
+   (let [nexus? #(str/starts-with? % "Configure.Nexus.")
+         declared-via (if (= :place interface) :running :configure-only)]
+     (when-let [nexus (first (filter nexus? replay))]
+       (vec (concat [{:via declared-via :datom nexus}]
+                    (for [datom [counters lowered "Configuration"]] {:via :running :datom datom})
+                    (for [datom (remove nexus? replay)] {:via declared-via :datom datom})))))))
 
 (defn declared-start
   "The declared unit's start: its guard, as ExecStartPre, reads the probe;
@@ -1521,13 +1558,9 @@
                                 (re-matches #"\{ (\w+) (\S+) (\w+) ([0-9a-f]{6}) \}" (str label))]
                        (let [words (str aspect " " topic " " model)]
                          (let [query (str "BindSeat.{ " words " }")
-                               {:keys [exit out err]}
-                               (run {} (str pkg "/bin/flow-compose-invocation") ordinary-socket query)]
-                           (when-not (zero? exit)
-                             (throw (ex-info "typed rebind composition failed"
-                                             {:package pkg :error (str/trim err)})))
+                               arguments (client-arguments pkg "flow" ordinary-socket query)]
                            {:pane pane_id :flow-id flow-id :address (str "{ " words " }")
-                            :line (str "! " pkg "/bin/flow " (shell-quote (str/trim out)))
+                            :line (str "! " pkg "/bin/flow " (str/join " " (map shell-quote arguments)))
                             :tracker (boolean (tracker? words))}))))
                    pane-list)]
     (mapv #(dissoc % :tracker) (concat (filter :tracker rows) (remove :tracker rows)))))
@@ -1573,16 +1606,16 @@
 (defn meta-at
   "One meta call by pkg's client on socket, from no pane: the owner."
   [pkg socket datom]
-  (reply-text (run {:env (package-env pkg {})} (str pkg "/bin/flow-meta")
-                   (client-argument pkg "flow-meta" socket datom))))
+  (reply-text (apply run {:env (package-env pkg {})} (str pkg "/bin/flow-meta")
+                   (client-arguments pkg "flow-meta" socket datom))))
 
 (defn guard-probe
   "The guard's reading, as the declared unit's ExecStartPre would take it:
   each of the capsule's Flow sockets asked by pkg's client."
   [pkg]
-  {:ordinary (reply-text (run {:env (package-env pkg (marks @driver-pane))}
+  {:ordinary (reply-text (apply run {:env (package-env pkg (marks @driver-pane))}
                               (str pkg "/bin/flow")
-                              (client-argument pkg "flow" ordinary-socket "Metaflows")))
+                              (client-arguments pkg "flow" ordinary-socket "Metaflows")))
    :meta (meta-at pkg meta-socket "Configuration")})
 
 (defn guard-refuses? [probe] (boolean (some owner-answers? (vals probe))))
@@ -1590,7 +1623,7 @@
 (defn nexus-command
   "The command a Nexus of pkg is started by on the capsule's sockets."
   [pkg store]
-  {:argv [(str pkg "/bin/flow-nexus") (start-text ordinary-socket meta-socket store)] :env (package-env pkg {})})
+  {:argv [(str pkg "/bin/flow-nexus") (start-text pkg ordinary-socket meta-socket store)] :env (package-env pkg {})})
 
 (defn start-command! [{:keys [argv env]} log]
   (let [proc (p/process argv {:env env :out :append :out-file (fs/file log)
@@ -1634,8 +1667,8 @@
   closed: the state of every logical delivery the sender sent. Nil when no
   frame comes in 20 s."
   [pane]
-  (let [proc (p/process [(str @package "/bin/flow")
-                         (client-argument @package "flow" ordinary-socket "ObserveSends.None")]
+  (let [proc (p/process (into [(str @package "/bin/flow")]
+                               (client-arguments @package "flow" ordinary-socket "ObserveSends.None"))
                         {:env (clean-env (marks pane))
                          :out :stream :err :string :in ""})
         line (deref (future (try (.readLine (java.io.BufferedReader. (java.io.InputStreamReader. (:out proc))))
@@ -1720,11 +1753,11 @@
         store (str state-root "/" label "/flow.sema")
         _ (fs/create-dirs (fs/parent store))
         _ (fs/create-dirs (fs/parent seed-meta-socket))
-        start (start-text seed-socket seed-meta-socket store)
+        start (start-text pkg seed-socket seed-meta-socket store)
         counters (counters-datom maxima counter-margin)
         lowered (counters-datom maxima (dec counter-margin))
         replay (split-replay (str/join "\n" (:replay (:configuration @takeover))))
-        plan (seed-plan replay counters lowered)
+        plan (seed-plan replay counters lowered (get @package-interface pkg))
         configure-only! (fn [datom] (let [[reply exit] (configure-one! datom log pkg start seed-meta-socket)]
                                       {:via :configure-only :datom datom :reply reply :exit exit}))
         running! (fn [steps]
@@ -1746,7 +1779,7 @@
         counters-reply (str (reply-of counters))
         lowered-reply (str (reply-of lowered))
         configuration (str (reply-of "Configuration"))
-        declared (filter #(= :configure-only (:via %)) done)
+        declared (filter #(and (#{:configure-only :running} (:via %)) (some #{(:datom %)} replay)) done)
         stop (some #(when (= :stop (:via %)) %) done)
         check (reply-text (run {:env (package-env pkg {})} (str pkg "/bin/flow-store-check") (str "{ «" store "» }")))
         expected (mapv #(+ (get maxima %) counter-margin) [:logical-delivery :queue-attempt :send-outcome])
@@ -2100,7 +2133,7 @@
       (refuse "usage: flow-capsule --takeover <old flow package> <new flow package> [--log <path>]"))
     (reset! old-package (str (fs/canonicalize old)))
     (reset! new-package (str (fs/canonicalize new)))
-    (reset! package-interface {@old-package :query @new-package :invocation})
+    (reset! package-interface {@old-package :query @new-package :place})
     (reset! package @old-package)
     (let [log (or (second (drop-while #(not= % "--log") options)) (str state-root "/nexus.log"))
           wall (now)
@@ -2142,7 +2175,7 @@
     (when-not (and pkg (not (str/starts-with? pkg "--")))
       (refuse "usage: flow-capsule <flow-package> [--keep-going] [--log <path>]"))
     (reset! package (str (fs/canonicalize pkg)))
-    (reset! package-interface {@package :invocation})
+    (reset! package-interface {@package :place})
     (reset! keep-going (boolean (some #{"--keep-going"} options)))
     (let [workspace-only (boolean (some #{"--workspace-only"} options))
           selected-scenarios (if workspace-only (subvec base-scenarios 0 2) scenarios)
@@ -2164,9 +2197,11 @@
         (if skip-codex
           (println "codex | FLOW_CAPSULE_SKIP_CODEX=1: app-server not started, Codex scenarios skipped")
           (start-codex! log))
-        (configure! log)
+        ;; The Nexus starts in its place with its built-in configuration and
+        ;; is configured as it runs.
         (reset! nexus-log log)
         (start-nexus! log)
+        (configure! log)
         (println (str "configuration | " (flow-meta "Configuration")))
         (loop [[[name f] & more] selected-scenarios]
           (when name

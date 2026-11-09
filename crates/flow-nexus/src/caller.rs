@@ -26,6 +26,7 @@ use crate::RunningNexus;
 use crate::generated::starter::{CallerProcessing, DerivesOrigin};
 use crate::herdr::PanePresence;
 use crate::herdr::ReadsHerdrPanes;
+use crate::live::HoldsLiveValue;
 use crate::peer::FindsFlowInPane;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::send_call::KeepsSendCalls;
@@ -550,7 +551,7 @@ impl AuthenticatesProcessAuthority for RunningNexus {
         if process.has_codex_app_server_ancestor(&app_servers) {
             match process.codex_thread(&app_servers) {
                 Some(thread) => {
-                    let root_thread = self.codex_endpoints.root_thread(&thread);
+                    let root_thread = self.codex_endpoints.current().root_thread(&thread);
                     let live = self
                         .store
                         .flow_nodes()?

@@ -46,6 +46,7 @@ use crate::generated::send_tool::{
     SendRefusal, ToolCall, ToolCallCarrying, ToolCallKey, ToolName,
 };
 use crate::launching::NamesTopic;
+use crate::live::HoldsLiveValue;
 use crate::sending::{AdmitsSendPayload, MintsId};
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::send_call::KeepsSendCalls;
@@ -521,7 +522,7 @@ impl HandlesSendCall for RunningNexus {
                 Self::refused(SendRefusal::Store)
             };
             // The sender is read again for every call, a replayed one included.
-            let root_thread = self.codex_endpoints.root_thread(&key.thread_id);
+            let root_thread = self.codex_endpoints.current().root_thread(&key.thread_id);
             let sender = match self.store.thread_sender(&root_thread) {
                 Ok(Ok(sender)) => sender,
                 Ok(Err(refusal)) => return Self::refused(refusal),
@@ -1156,7 +1157,13 @@ impl KeepsSendToolResponders for SendToolResponders {
                 .role(&node.flow_id)
                 .ok()
                 .flatten()
-                .and_then(|role| nexus.codex_endpoints.adapter_for(&role.model_name).ok());
+                .and_then(|role| {
+                    nexus
+                        .codex_endpoints
+                        .current()
+                        .adapter_for(&role.model_name)
+                        .ok()
+                });
             match adapter {
                 Some(adapter) => {
                     wanted.insert(node.session_id, adapter);

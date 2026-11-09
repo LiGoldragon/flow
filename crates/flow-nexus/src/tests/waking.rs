@@ -14,6 +14,7 @@ use crate::generated::starter::ProfilesFreshSeat;
 use crate::herdr::launch::ChecksComposedLaunch;
 use crate::herdr::pane::PaneAgent;
 use crate::herdr::reservation::ChoosesNativeSession;
+use crate::live::HoldsLiveValue;
 use crate::performing::Performs;
 use crate::reporting::RecordsReports;
 use crate::store::ManagesMetaflowState;
@@ -1343,6 +1344,7 @@ fn a_fresh_wake_composes_modules_and_queued_work_in_the_first_prompt() {
     let composed = fixture
         .nexus
         .composer
+        .current()
         .compose(
             crate::composition::HarnessedProfile {
                 remembered_flows: Vec::new(),
@@ -1566,6 +1568,7 @@ fn launched_claude_ended_by_with(
     let composed = fixture
         .nexus
         .composer
+        .current()
         .compose(
             crate::composition::HarnessedProfile {
                 remembered_flows: Vec::new(),
@@ -3961,11 +3964,11 @@ esac
             state = state.display(),
             counter = invocations.display(),
         ));
-        self.nexus.codex_endpoints.stable.client_path = app_server;
+        self.nexus.codex_endpoints.edit().stable.client_path = app_server;
         // A Codex TUI is started only against an absolute endpoint socket.
-        self.nexus.codex_endpoints.stable.socket =
+        self.nexus.codex_endpoints.edit().stable.socket =
             root.join("codex.sock").to_string_lossy().into_owned();
-        let endpoints = self.nexus.codex_endpoints.clone();
+        let endpoints = (*self.nexus.codex_endpoints.current()).clone();
         let flows = root.join("flows");
         let herdr = std::mem::replace(
             &mut self.nexus.herdr,
@@ -4051,6 +4054,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
     let composed = fixture
         .nexus
         .composer
+        .current()
         .compose(
             crate::composition::HarnessedProfile {
                 remembered_flows: Vec::new(),
@@ -4151,6 +4155,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
     let first_part = fixture
         .nexus
         .composer
+        .current()
         .compose(
             crate::composition::HarnessedProfile {
                 remembered_flows: Vec::new(),
@@ -4670,6 +4675,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
         let first_part = self
             .nexus
             .composer
+            .current()
             .compose(
                 crate::composition::HarnessedProfile {
                     remembered_flows: Vec::new(),
@@ -4970,6 +4976,7 @@ fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
     let composed = fixture
         .nexus
         .composer
+        .current()
         .compose(
             crate::composition::HarnessedProfile {
                 remembered_flows: Vec::new(),
@@ -5056,7 +5063,7 @@ fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
         "#!/bin/sh\nS='{state}'\nn=$(cat \"$S/restart-invocations\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$S/restart-invocations\"\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$S/restart-record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\ncase \"$((n % 3))\" in\n  1) printf '%b' '{probe}' ;;\n  2) printf '%b' '{resumed}'; printf '%b' \"$(cat \"$S/first-call\")\"; exec sleep 30 ;;\n  0) if [ -e \"$S/archive-refused\" ]; then printf '%b' '{archive_refused}'; else printf '%b' '{account}'; fi ;;\nesac\nexec sleep 5\n",
         state = setup.world.state.display(),
     ));
-    fixture.nexus.codex_endpoints.stable.client_path = app_server;
+    fixture.nexus.codex_endpoints.edit().stable.client_path = app_server;
     setup
 }
 
@@ -5494,12 +5501,18 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
     assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1);
 
     // The Nexus exits: the store as it lies on disk opens in a new one.
-    let app_server = fixture.nexus.codex_endpoints.stable.client_path.clone();
+    let app_server = fixture
+        .nexus
+        .codex_endpoints
+        .current()
+        .stable
+        .client_path
+        .clone();
     let written = fixture.directory.path().join("flow.sema");
     let mut restarted = NexusFixture::with_store(|store| {
         fs::copy(&written, store).expect("the store as written");
     });
-    restarted.nexus.codex_endpoints.stable.client_path = app_server;
+    restarted.nexus.codex_endpoints.edit().stable.client_path = app_server;
 
     restarted.nexus.reconcile_interrupted_launches();
 

@@ -10,6 +10,7 @@
 
 use super::HerdrCli;
 use super::launch::ClaimsNativeIdentity;
+use crate::live::HoldsLiveValue;
 use sha2::{Digest, Sha256};
 use signal_flow::{ComposedLaunch, HarnessKind};
 
@@ -90,7 +91,10 @@ impl ReleasesFlowIdentity for HerdrCli {
         if flow_id.is_empty() || !flow_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("released FlowId is not a claim alias".into());
         }
-        let lock_path = self.flows_root.join(format!(".{flow_id}.flow-id.lock"));
+        let lock_path = self
+            .flows_root
+            .current()
+            .join(format!(".{flow_id}.flow-id.lock"));
         let lock = match fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -102,7 +106,10 @@ impl ReleasesFlowIdentity for HerdrCli {
         };
         lock.lock()
             .map_err(|error| format!("claim lock was not taken: {error}"))?;
-        let marker_path = self.flows_root.join(format!(".{flow_id}.flow-id"));
+        let marker_path = self
+            .flows_root
+            .current()
+            .join(format!(".{flow_id}.flow-id"));
         let marker = match fs::read_to_string(&marker_path) {
             Ok(marker) => marker,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
@@ -112,7 +119,7 @@ impl ReleasesFlowIdentity for HerdrCli {
             Some(claim) if claim.alias == flow_id && claim.harness_kind == HarnessKind::Claude => {}
             _ => return Ok(()),
         }
-        match fs::remove_dir(self.flows_root.join(flow_id)) {
+        match fs::remove_dir(self.flows_root.current().join(flow_id)) {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             // The lane holds something: the claim stays with it.

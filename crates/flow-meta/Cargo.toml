@@ -9,9 +9,6 @@ datom = []
 [[bin]]
 name = "flow-meta"
 path = "src/main.rs"
-[[bin]]
-name = "flow-meta-compose-invocation"
-path = "src/compose_invocation.rs"
 [dependencies]
 flow-ethos = { path = "../flow-ethos", features = ["datom"] }
 datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "eabead4" }

@@ -594,7 +594,6 @@ struct CliWorld {
     /// The directory the flow and flow-meta CLIs are built in.
     binaries: std::path::PathBuf,
     socket: std::path::PathBuf,
-    meta_socket: std::path::PathBuf,
 }
 
 trait ServesCliWorld: Sized {
@@ -604,6 +603,15 @@ trait ServesCliWorld: Sized {
     fn flow(&self, text: &str) -> String;
     /// The flow-meta CLI run in no pane, the owner: its one line of output.
     fn flow_meta(&self, text: &str) -> String;
+    /// The runtime root the clients resolve the place `main` under.
+    fn runtime(&self) -> std::path::PathBuf {
+        self.sockets_directory()
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("the place lies under the runtime root's nexus directory")
+            .to_path_buf()
+    }
+    fn sockets_directory(&self) -> std::path::PathBuf;
 }
 
 impl ServesCliWorld for CliWorld {
@@ -702,8 +710,12 @@ impl ServesCliWorld for CliWorld {
             vec![],
         ));
 
-        let socket = fixture.directory.path().join("ordinary.sock");
-        let meta_socket = fixture.directory.path().join("meta.sock");
+        // The place `main` under the fixture's runtime root, where the
+        // clients resolve it.
+        let place = fixture.directory.path().join("run/nexus/main");
+        std::fs::create_dir_all(&place).expect("the place's runtime directory");
+        let socket = place.join("flow.sock");
+        let meta_socket = place.join("flow-meta.sock");
         let (served, meta_served) = (socket.clone(), meta_socket.clone());
         std::thread::spawn(move || fixture.nexus.serve_ordinary(&served));
         std::thread::spawn(move || fixture.nexus.serve_meta(&meta_served));
@@ -719,15 +731,22 @@ impl ServesCliWorld for CliWorld {
             fixture,
             binaries,
             socket,
-            meta_socket,
         }
+    }
+
+    fn sockets_directory(&self) -> std::path::PathBuf {
+        self.socket
+            .parent()
+            .expect("the socket lies in its place")
+            .to_path_buf()
     }
 
     fn flow(&self, text: &str) -> String {
         let output = std::process::Command::new(self.binaries.join("flow"))
             .env_clear()
             .env("HERDR_PANE_ID", "w5:p1")
-            .arg(format!("{{ «{}» {text} }}", self.socket.to_string_lossy()))
+            .env("XDG_RUNTIME_DIR", self.runtime())
+            .args(["main", text])
             .output()
             .expect("flow runs");
         assert!(output.status.success(), "{text}: {output:?}");
@@ -737,10 +756,8 @@ impl ServesCliWorld for CliWorld {
     fn flow_meta(&self, text: &str) -> String {
         let output = std::process::Command::new(self.binaries.join("flow-meta"))
             .env_clear()
-            .arg(format!(
-                "{{ «{}» {text} }}",
-                self.meta_socket.to_string_lossy()
-            ))
+            .env("XDG_RUNTIME_DIR", self.runtime())
+            .args(["main", text])
             .output()
             .expect("flow-meta runs");
         assert!(output.status.success(), "{text}: {output:?}");

@@ -12,9 +12,6 @@ path = "src/main.rs"
 [[bin]]
 name = "flow-hook"
 path = "src/hook.rs"
-[[bin]]
-name = "flow-compose-invocation"
-path = "src/compose_invocation.rs"
 [dependencies]
 flow-ethos = { path = "../flow-ethos", features = ["datom"] }
 flow-native = { path = "../flow-native" }

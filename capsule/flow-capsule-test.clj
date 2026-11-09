@@ -216,21 +216,30 @@
              {:pane_id "w3:p1" :label "{ Psyche test Haiku 3d4e5f }"}
              {:pane_id "w4:p1" :label "{ Mind test Sol 6a7b8c }"}
              {:pane_id "w5:p1" :label "{ Mind test Terra 9d0e1f }"}]
+      _ (reset! flow-capsule/package-interface {flow-package :place})
       lines (flow-capsule/rebind-lines panes flow-package #(or (clojure.string/ends-with? % "Haiku") (clojure.string/ends-with? % "Terra")))]
   (check "the trackers' stand-ins come first, then the rest in pane order"
          (= ["w3:p1" "w5:p1" "w2:p1" "w4:p1"] (map :pane lines)))
   (check "each line names its pane's FlowId and Address"
          (= {:pane "w2:p1" :flow-id "0a1b2c" :address "{ Psyche test Opus }"}
             (dissoc (nth lines 2) :line)))
-  (check "the typed line carries the Rust-composed invocation to the new client"
-         (= (str "! " flow-package "/bin/flow '{ " flow-capsule/ordinary-socket
-                 " BindSeat.{ Psyche test Opus } }'")
+  (check "the typed line names the capsule's place and the query to the new client"
+         (= (str "! " flow-package "/bin/flow 'main' 'BindSeat.{ Psyche test Opus }'")
             (:line (nth lines 2))))
-  (let [{:keys [exit err]}
-        (flow-capsule/run {} (str flow-package "/bin/flow")
-                          "{ /run/user/1001/flow-testing/no-owner.sock Metaflows }")]
-    (check "the packaged client accepts the helper's envelope before transport"
-           (and (= 2 exit) (not (str/includes? err "invalid Flow invocation"))))))
+  (check "a socket of the capsule names its place"
+         (= ["next" "Metaflows"]
+            (flow-capsule/client-arguments flow-package "flow" flow-capsule/seed-socket "Metaflows")))
+  (let [runtime (str (fs/create-temp-dir))
+        {:keys [exit err]}
+        (flow-capsule/run {:env {"XDG_RUNTIME_DIR" runtime}} (str flow-package "/bin/flow")
+                          "no-owner" "Metaflows")]
+    (check "the packaged client takes a place name and the query, and reaches no Nexus there"
+           (and (= 2 exit) (not (str/includes? err "invalid Flow Query"))
+                (not (str/includes? err "usage:")))))
+  (check "a place-started Nexus is started with its place"
+         (= (str "{ «main» «" (fs/path flow-capsule/places-root "main") "» «/state/capsule» }")
+            (flow-capsule/start-text flow-package flow-capsule/ordinary-socket flow-capsule/meta-socket
+                                     "/state/capsule/flow.sema"))))
 
 ;; The readback: each Awake seat's FlowId by Address; a seat whose FlowId
 ;; changed, went Asleep or is gone is a changed seat.
@@ -278,6 +287,11 @@
             (drop 4 steps)))
   (check "no Counters goes to a configuration-only Nexus"
          (not-any? (fn [[via datom]] (and (= via :configure-only) (str/starts-with? datom "Configure.Counters."))) steps))
+  (let [place-steps (map (juxt :via :datom)
+                          (flow-capsule/seed-plan replay "Configure.Counters.{ 3 2 1 }" "Configure.Counters.{ 2 1 0 }" :place))]
+    (check "a Nexus that starts in its place takes every seed step running, in the same order"
+           (and (every? #(= :running (first %)) place-steps)
+                (= (map second steps) (map second place-steps)))))
   (check "a replay without a Nexus declaration plans no seed"
          (nil? (flow-capsule/seed-plan (remove #(str/starts-with? % "Configure.Nexus.") replay)
                                        "Configure.Counters.{ 3 2 1 }" "Configure.Counters.{ 2 1 0 }"))))

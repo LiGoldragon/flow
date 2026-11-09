@@ -1,7 +1,7 @@
 # Flow 0.53.3: replacement waits for rest; a Stop carries its background work
 
-Pins signal-flow 57.0.0 (`065730f`), meta-signal-flow 72.0.0 (`82be495`),
-Message 0.22.1 (`e0a0fe7`), signal-message 21.0.1 (`4c1cd69`) and
+Pins signal-flow 57.0.0 (`065730f`), meta-signal-flow 72.0.0 (`da773ff`),
+Message 0.22.1 (`3d0fcbc`), signal-message 21.0.1 (`4c1cd69`) and
 meta-signal-message 3.0.1 (`f916df1`).
 
 - A Claude seat rests when its own last Stop names no background work and
@@ -20,10 +20,25 @@ meta-signal-message 3.0.1 (`f916df1`).
   `Stop\t-\t-\tRefused.BackgroundTasksAbsent` or
   `Refused.BackgroundTaskMalformed.<place>`, exit 1) and reports nothing.
   Claude Code 2.1.294 or later gives the field.
-- The hook command written into each Claude flow is `$FLOW_HOOK` when it is
-  an absolute path, else the `flow-hook` beside the Nexus. A flow running an
-  earlier hook (a store path, the earlier contract) reaches no 0.53.3 Nexus:
-  Restart each adopted flow onto the new hook at the cutover.
+- The hook command written into each Claude flow is the configuration's
+  `HarnessHook` (`Configure.HarnessHook.<path>`, new) when it is an absolute
+  path, else the `flow-hook` beside the Nexus; no environment is read for
+  it. A flow running an earlier hook (a store path, the earlier contract)
+  reaches no 0.53.3 Nexus: Restart each adopted flow onto the new hook at
+  the cutover. `flow_nexus_meta_harness_hook_configuration` is new, empty
+  in a 0.53.2 store.
+- The Nexus starts in its place: `flow-nexus '{ <place-name> <runtime>
+  <state> }'`, one datom, replacing the Start datom (sockets, store,
+  landing watch). Its sockets are `<runtime>/flow.sock` and
+  `<runtime>/flow-meta.sock`, its memory `<state>/flow.sema`; it makes
+  both directories if absent. `--configure-only` is gone: a fresh memory
+  starts with the executable's built-in configuration, and every meta
+  `Configure` is applied to the running Nexus at once, without a restart.
+- `flow` and `flow-meta` take the place name and the Query: `flow main
+  'Metaflows'`, resolved under `$XDG_RUNTIME_DIR/nexus/` to the place's
+  socket. The Invocation argument and the `*-compose-invocation` binaries
+  are gone. `flow-hook` calls its configured socket through the same client.
+- `ObserveConfiguration` (meta) streams the configuration, then each change.
 - A frame on the ordinary socket that decodes as no Query, an earlier
   hook's Report among them, is answered `FrameRefused.{ Option<FlowId>
   SeatEvidence }`, naming the flow bound to the caller's seat and the

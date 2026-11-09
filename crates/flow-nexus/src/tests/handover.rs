@@ -15,6 +15,7 @@ use super::waking::{
 };
 use crate::generated::operation::{Failed_Data, Operation, Outcome};
 use crate::handover::{Handover, HandoverFile, YieldsHandover};
+use crate::live::HoldsLiveValue;
 use crate::performing::Performs;
 use crate::store::ManagesMetaflowState as _;
 use crate::store::RecordsLaunchOutcome as _;
@@ -642,14 +643,15 @@ fn an_installed_memory_source_reads_the_live_store_and_ignores_the_file() {
     let mut fixture = NexusFixture::new();
     leave(fixture.directory.path(), "abc123", Left::Text(b"file text"));
     let at = address(Model::Sol);
-    fixture.nexus.composer =
-        fixture
-            .nexus
-            .composer
-            .clone()
-            .with_handover_source(std::sync::Arc::new(crate::MemoryHandoverSource(
-                fixture.nexus.store.clone(),
-            )));
+    *fixture.nexus.composer.edit() = fixture
+        .nexus
+        .composer
+        .current()
+        .as_ref()
+        .clone()
+        .with_handover_source(std::sync::Arc::new(crate::MemoryHandoverSource(
+            fixture.nexus.store.clone(),
+        )));
     fixture
         .nexus
         .store

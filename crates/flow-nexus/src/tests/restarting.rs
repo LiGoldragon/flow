@@ -16,6 +16,7 @@ use crate::caller::{CallerPane, CallerProcess, LocatesCallerPane, ReadsProcess};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::memory::SeatBirth;
 use crate::generated::operation::{Operation, Outcome, Record_Data};
+use crate::live::HoldsLiveValue;
 use crate::performing::Performs;
 use crate::reporting::RecordsReports;
 use crate::restarting::{
@@ -2485,11 +2486,13 @@ impl OpensSecondNexus for NexusFixture {
             .expect("metaflow declared");
         crate::RunningNexus {
             store: opened.into(),
-            codex_endpoints: self.nexus.codex_endpoints.clone(),
+            codex_endpoints: crate::live::Live::holding(
+                (*self.nexus.codex_endpoints.current()).clone(),
+            ),
             herdr: crate::herdr::HerdrCli::at(self.snapshot_program.clone(), root.join("flows"))
-                .with_codex_endpoints(self.nexus.codex_endpoints.clone())
+                .with_codex_endpoints((*self.nexus.codex_endpoints.current()).clone())
                 .with_ordinary_socket(Path::new(ordinary_socket)),
-            composer: crate::composition::LaunchComposer::with_context(
+            composer: crate::live::Live::holding(crate::composition::LaunchComposer::with_context(
                 crate::context::ContextComposer(std::sync::Arc::new(
                     crate::context::FixtureComposer::from(
                         &[
@@ -2500,7 +2503,7 @@ impl OpensSecondNexus for NexusFixture {
                         ][..],
                     ),
                 )),
-            ),
+            )),
             dispatch_gate: std::sync::Mutex::new(()),
             pane_leases: crate::delivery::lease::PaneLeases::default(),
             waking: crate::waking::WakingMetaflows::default(),
@@ -2510,6 +2513,7 @@ impl OpensSecondNexus for NexusFixture {
             launch_calls: crate::send_tool::LaunchCalls::default(),
             codex_turns: crate::codex_turns::CodexTurns::default(),
             compactions: crate::compacting::CompactionWatch::default(),
+            configuration_changes: Default::default(),
         }
     }
 }
@@ -3209,7 +3213,7 @@ fn adopted_on_new(
     .install(IDEMPOTENT_FLOW_ID);
     let curriculum = SocketCurriculum::serving(fixture.directory.path().join("curriculum.sock"));
     let mut new = fixture.second_nexus(NEW_STORE, NEW_SOCKET);
-    new.composer = curriculum.composer();
+    *new.composer.edit() = curriculum.composer();
     assert_eq!(
         new.adopt(
             signal_flow::Adopt_Data {
@@ -3430,7 +3434,7 @@ fn restart_composition_against_curriculum_socket() {
     let expect = std::env::var("RESTART_PROOF_EXPECT").expect("refused or composed");
     let seats = fs::read_to_string(std::env::var("RESTART_PROOF_SEATS").expect("seats")).unwrap();
     let mut fixture = NexusFixture::new();
-    fixture.nexus.composer =
+    *fixture.nexus.composer.edit() =
         crate::composition::LaunchComposer::with_context(crate::context::ContextComposer(
             std::sync::Arc::new(crate::context::CurriculumComposer::at(socket.as_str())),
         ));

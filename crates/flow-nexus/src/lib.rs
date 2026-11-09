@@ -13,6 +13,7 @@ use crate::claude::ProjectsClaudeReadiness;
 use crate::codex::SelectsCodexEndpoint;
 use crate::herdr::ConfiguresHerdrCli;
 use crate::herdr::ReadsHerdrPanes;
+use crate::live::{HoldsLiveValue, Live};
 use crate::store::AnnouncesLaunchChanges;
 pub use caller::CallerProcess;
 pub use composition::CompositionError;
@@ -36,6 +37,7 @@ pub mod composition;
 pub mod context;
 pub mod delivery;
 pub mod lean;
+pub mod live;
 pub(crate) mod message_projection;
 mod metaflow;
 pub mod model;
@@ -64,9 +66,11 @@ pub mod heartbeat;
 pub mod herdr;
 pub mod launching;
 pub mod observe_agent;
+pub mod observe_configuration;
 mod observe_sends;
 pub mod peer;
 pub mod performing;
+pub mod place;
 pub mod reporting;
 pub mod send_tool;
 pub mod sending;
@@ -128,9 +132,13 @@ use waking::SleepsAndWakesSeats;
 
 pub struct RunningNexus {
     pub store: Arc<FlowStore>,
-    pub codex_endpoints: CodexEndpoints,
+    /// The Codex endpoints as the configuration names them; a Configure
+    /// replaces them at once ([`AppliesConfiguration`]).
+    pub codex_endpoints: Live<CodexEndpoints>,
     pub herdr: herdr::HerdrCli,
-    pub composer: LaunchComposer,
+    /// Composes through the Curriculum socket and presentation prompt the
+    /// configuration names; a Configure replaces it at once.
+    pub composer: Live<LaunchComposer>,
     /// Serializes dispatch; see `dispatch_serially`.
     pub dispatch_gate: Mutex<()>,
     /// The exclusive hold on each pane Flow is writing; see
@@ -152,6 +160,9 @@ pub struct RunningNexus {
     pub codex_turns: codex_turns::CodexTurns,
     /// How far each flow's compactions have been read; see `compacting`.
     pub compactions: compacting::CompactionWatch,
+    /// Announced each time a Configure replaces a family, and at a stop;
+    /// see `observe_configuration`.
+    pub configuration_changes: store::LaunchChanges,
 }
 
 /// The running Memory is the sole handover source for fresh successors.
@@ -699,19 +710,29 @@ impl Dispatches for RunningNexus {
                     ),
                 }
             }
-            meta_signal_flow::Query::Configuration => match self.store.configuration_snapshot() {
-                Ok(Some(snapshot)) => meta_signal_flow::Response::Configuration(snapshot),
-                Ok(None) => meta_signal_flow::Response::Unconfigured,
-                Err(error) => meta_signal_flow::Response::Refused(
-                    meta_signal_flow::StoreRefusal::Store(error.to_string()),
-                ),
-            },
-            // A declared family replaces the committed family whole; this
-            // Nexus keeps the Codex endpoints it opened with until its next
-            // start.
+            // A direct dispatch of the subscription answers its first frame;
+            // a meta connection streams the rest (`serve_meta`).
+            meta_signal_flow::Query::Configuration
+            | meta_signal_flow::Query::ObserveConfiguration => {
+                use observe_configuration::ObservesConfiguration;
+                self.configuration_response()
+            }
+            // A declared family replaces the committed family whole, and
+            // this Nexus takes the changed configuration at once.
             meta_signal_flow::Query::Configure(change) => {
+                let before = self.store.configuration_snapshot().ok().flatten();
                 match self.store.configure_change(change) {
-                    Ok(outcome) => meta_signal_flow::Response::Configured(outcome),
+                    Ok(outcome) => {
+                        if outcome == meta_signal_flow::ConfigureOutcome::Replaced {
+                            if let Err(error) = self.apply_configuration(before.as_ref()) {
+                                eprintln!(
+                                    "flow-nexus: a committed configuration was not applied: {error}"
+                                );
+                            }
+                            self.configuration_changes.announce();
+                        }
+                        meta_signal_flow::Response::Configured(outcome)
+                    }
                     Err(store::StoreError::DuplicateConfigurationEntry) => {
                         meta_signal_flow::Response::ConfigureRejected(
                             meta_signal_flow::ConfigureRejection::DuplicateEntry,
@@ -764,11 +785,17 @@ impl Dispatches for RunningNexus {
             }
             meta_signal_flow::Query::ConsumeReset(request) => self
                 .codex_endpoints
+                .current()
                 .next
                 .model_names
                 .first()
                 .ok_or(())
-                .and_then(|model| self.codex_endpoints.adapter_for(model).map_err(|_| ()))
+                .and_then(|model| {
+                    self.codex_endpoints
+                        .current()
+                        .adapter_for(model)
+                        .map_err(|_| ())
+                })
                 .and_then(|adapter| adapter.consume_reset_credit(&request).map_err(|_| ()))
                 .map(meta_signal_flow::Response::ResetConsumed)
                 .unwrap_or(meta_signal_flow::Response::ResetRejected(
@@ -1100,23 +1127,20 @@ impl ChecksExecutableDefault for meta_signal_flow::ConfigureNexus {
 }
 
 pub trait OpensRunningNexus {
-    /// Opens the configured Nexus from one typed Start payload. Durable
-    /// runner values come from the committed Meta configuration snapshot;
-    /// socket paths come only from this Start value.
-    fn open(
-        defaults: &store::DefaultConfiguration,
-        start: &flow_ethos::Start,
-    ) -> Result<Self, store::StoreError>
+    /// Opens the Nexus in its place: the memory in State, the socket its
+    /// flows report to in Runtime. Durable runner values come from the
+    /// committed Meta configuration snapshot; a fresh memory starts with
+    /// the configuration built into the executable.
+    fn open(place: &place::Place) -> Result<Self, store::StoreError>
     where
         Self: Sized;
 }
 
 impl OpensRunningNexus for RunningNexus {
-    fn open(
-        _defaults: &store::DefaultConfiguration,
-        start: &flow_ethos::Start,
-    ) -> Result<Self, store::StoreError> {
-        let store_path = Path::new(&start.store_path);
+    fn open(place: &place::Place) -> Result<Self, store::StoreError> {
+        use place::LaysOutPlace;
+        let store_path = place.store();
+        let store_path = store_path.as_path();
         #[cfg(feature = "executable-default-configuration")]
         if !store_path.exists() {
             let default = executable_default_configuration::executable_default_configuration();
@@ -1136,34 +1160,20 @@ impl OpensRunningNexus for RunningNexus {
         let snapshot = store
             .configuration_snapshot()?
             .ok_or(store::StoreError::NotConfigured)?;
-        let runtime = store::RuntimeConfiguration::from(&snapshot.nexus);
-        let codex_endpoints = CodexEndpoints::from(&runtime);
-        let overlap = codex_endpoints.overlapping_models();
-        if !overlap.is_empty() {
-            eprintln!(
-                "flow-nexus: models selected by both Codex endpoints are unavailable: {overlap:?}"
-            );
-        }
-        let source_root = PathBuf::from(&runtime.source_root);
-        // The socket this Nexus serves: a changed one takes effect only on
-        // restart, so the store's value at open is the one being served.
-        let ordinary_socket = PathBuf::from(&start.ordinary_socket_path);
+        let configured = ConfiguredRunner::from(&snapshot);
+        // The socket this Nexus serves is its place's, never the store's.
+        let ordinary_socket = place.ordinary_socket();
         Ok(Self {
             store: store.clone(),
-            codex_endpoints: codex_endpoints.clone(),
+            codex_endpoints: Live::holding(configured.codex_endpoints.clone()),
             herdr: herdr::HerdrCli::default()
-                .with_source_root(&source_root)
-                .with_codex_endpoints(codex_endpoints)
+                .with_source_root(&configured.source_root)
+                .with_codex_endpoints(configured.codex_endpoints.clone())
+                .with_harness_hook(&snapshot.harness_hook)
                 .with_ordinary_socket(&ordinary_socket),
             // A launch's context is composed by the Curriculum Nexus at the
-            // socket the configuration names, read as the Nexus opens.
-            composer: LaunchComposer::with_presentation_prompt(
-                context::ContextComposer(std::sync::Arc::new(CurriculumComposer::at(
-                    &snapshot.nexus.curriculum_nexus_path,
-                ))),
-                snapshot.nexus.presentation_prompt_option.clone(),
-            )
-            .with_handover_source(Arc::new(MemoryHandoverSource(store.clone()))),
+            // socket the configuration names.
+            composer: Live::holding(configured.composer(store.clone())),
             dispatch_gate: Mutex::new(()),
             pane_leases: delivery::lease::PaneLeases::default(),
             waking: waking::WakingMetaflows::default(),
@@ -1173,7 +1183,104 @@ impl OpensRunningNexus for RunningNexus {
             launch_calls: send_tool::LaunchCalls::default(),
             codex_turns: codex_turns::CodexTurns::default(),
             compactions: compacting::CompactionWatch::default(),
+            configuration_changes: store::LaunchChanges::default(),
         })
+    }
+}
+
+/// What a running Nexus derives from its committed configuration and
+/// holds between uses: the Codex endpoints, the source root its flows
+/// directory lies under, and the composer's Curriculum socket and
+/// presentation prompt.
+struct ConfiguredRunner {
+    codex_endpoints: CodexEndpoints,
+    source_root: PathBuf,
+    curriculum_nexus_path: String,
+    presentation_prompt_option: Option<String>,
+}
+
+impl From<&meta_signal_flow::ConfigurationSnapshot> for ConfiguredRunner {
+    fn from(snapshot: &meta_signal_flow::ConfigurationSnapshot) -> Self {
+        let runtime = store::RuntimeConfiguration::from(&snapshot.nexus);
+        let codex_endpoints = CodexEndpoints::from(&runtime);
+        let overlap = codex_endpoints.overlapping_models();
+        if !overlap.is_empty() {
+            eprintln!(
+                "flow-nexus: models selected by both Codex endpoints are unavailable: {overlap:?}"
+            );
+        }
+        Self {
+            codex_endpoints,
+            source_root: PathBuf::from(&runtime.source_root),
+            curriculum_nexus_path: snapshot.nexus.curriculum_nexus_path.clone(),
+            presentation_prompt_option: snapshot.nexus.presentation_prompt_option.clone(),
+        }
+    }
+}
+
+trait ComposesFromConfiguration {
+    fn composer(&self, store: Arc<FlowStore>) -> LaunchComposer;
+}
+
+impl ComposesFromConfiguration for ConfiguredRunner {
+    fn composer(&self, store: Arc<FlowStore>) -> LaunchComposer {
+        LaunchComposer::with_presentation_prompt(
+            context::ContextComposer(std::sync::Arc::new(CurriculumComposer::at(
+                &self.curriculum_nexus_path,
+            ))),
+            self.presentation_prompt_option.clone(),
+        )
+        .with_handover_source(Arc::new(MemoryHandoverSource(store)))
+    }
+}
+
+/// The running Nexus takes its committed configuration as it changes: a
+/// Configure that replaces a family is applied before it is answered, so
+/// the next launch, delivery or hook it writes reads the new value. Every
+/// other family is read from the store at each use already.
+pub trait AppliesConfiguration {
+    /// Applies what changed between `before` (none: everything) and the
+    /// committed configuration now.
+    fn apply_configuration(
+        &self,
+        before: Option<&meta_signal_flow::ConfigurationSnapshot>,
+    ) -> Result<(), store::StoreError>;
+}
+
+impl AppliesConfiguration for RunningNexus {
+    fn apply_configuration(
+        &self,
+        before: Option<&meta_signal_flow::ConfigurationSnapshot>,
+    ) -> Result<(), store::StoreError> {
+        let now = self
+            .store
+            .configuration_snapshot()?
+            .ok_or(store::StoreError::NotConfigured)?;
+        let configured = ConfiguredRunner::from(&now);
+        let launching_changed = before.is_none_or(|before| {
+            before.nexus.source_root != now.nexus.source_root
+                || before.nexus.stable_codex != now.nexus.stable_codex
+                || before.nexus.next_codex != now.nexus.next_codex
+                || before.harness_hook != now.harness_hook
+        });
+        let composing_changed = before.is_none_or(|before| {
+            before.nexus.curriculum_nexus_path != now.nexus.curriculum_nexus_path
+                || before.nexus.presentation_prompt_option != now.nexus.presentation_prompt_option
+        });
+        if launching_changed {
+            self.herdr.reconfigure(
+                configured.codex_endpoints.clone(),
+                &configured.source_root,
+                &now.harness_hook,
+            );
+            self.codex_endpoints
+                .replace(configured.codex_endpoints.clone());
+        }
+        if composing_changed {
+            self.composer
+                .replace(configured.composer(self.store.clone()));
+        }
+        Ok(())
     }
 }
 
@@ -1221,6 +1328,9 @@ pub trait ServesConnection: Sized {
     /// Observe.Undecodable: every recorded undecodable frame, then each new
     /// one, until the peer goes.
     fn serve_undecodable(&mut self, nexus: &RunningNexus) -> Result<(), String>;
+    /// ObserveConfiguration on the meta socket: the configuration, then
+    /// again at each change, until the peer goes.
+    fn serve_configuration(&mut self, nexus: &RunningNexus) -> Result<(), String>;
     fn serve_ordinary(self, nexus: &RunningNexus) -> Result<(), String>;
     fn serve_meta(self, nexus: &RunningNexus) -> Result<(), String>;
 }
@@ -1311,6 +1421,39 @@ impl ServesConnection for Connection {
             .map_err(|error| error.to_string())?;
         let result = nexus.observe_undecodable(&disconnected, &mut |response| {
             self.peer.write_response(response)
+        });
+        let _ = self.peer.shutdown(Shutdown::Both);
+        let watcher_result = watcher
+            .join()
+            .map_err(|_| "peer-disconnect watcher panicked".to_owned());
+        result.and(watcher_result)
+    }
+
+    fn serve_configuration(&mut self, nexus: &RunningNexus) -> Result<(), String> {
+        use crate::observe_configuration::ObservesConfiguration;
+        let mut reader = self.peer.try_clone().map_err(|error| error.to_string())?;
+        reader
+            .set_read_timeout(None)
+            .map_err(|error| error.to_string())?;
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let watch_disconnected = Arc::clone(&disconnected);
+        let changes = nexus.configuration_changes.clone();
+        let watcher = std::thread::Builder::new()
+            .name("flow-configuration-observer-peer".into())
+            .spawn(move || {
+                let mut bytes = [0_u8; 256];
+                loop {
+                    match reader.read(&mut bytes) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+                watch_disconnected.store(true, Ordering::Release);
+                changes.announce();
+            })
+            .map_err(|error| error.to_string())?;
+        let result = nexus.observe_configuration(&disconnected, &mut |response| {
+            self.peer.write_meta_response(response)
         });
         let _ = self.peer.shutdown(Shutdown::Both);
         let watcher_result = watcher
@@ -1560,6 +1703,11 @@ impl ServesConnection for Connection {
         let query = self.peer.read_meta_query()?;
         // The peer is read from the kernel; nothing in the query names it.
         let peer = self.peer.peer_process();
+        if query == meta_signal_flow::Query::ObserveConfiguration
+            && nexus.meta_refusal(peer).is_none()
+        {
+            return self.serve_configuration(nexus);
+        }
         let response = match nexus.meta_refusal(peer) {
             Some(refusal) => meta_signal_flow::Response::MetaRefused(refusal),
             None => {
@@ -1749,6 +1897,7 @@ impl StopsNexus for RunningNexus {
             );
         }
         self.store.launch_changes.announce();
+        self.configuration_changes.announce();
         // Each accept loop is blocked in accept; a connection wakes it. A
         // listener not yet bound sees the request once it binds.
         for socket in sockets {
@@ -2194,6 +2343,7 @@ impl CarriesSignalFrames for UnixStream {
 mod tests {
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
+    use crate::live::{HoldsLiveValue, Live};
     mod admission;
     mod configuring;
     mod counters;
@@ -2969,18 +3119,18 @@ mod tests {
             });
             let nexus = RunningNexus {
                 store: store.into(),
-                codex_endpoints: codex_endpoints.clone(),
+                codex_endpoints: Live::holding(codex_endpoints.clone()),
                 herdr: HerdrCli::at(snapshot_program.clone(), flows_root)
                     .with_codex_endpoints(codex_endpoints),
-                composer: LaunchComposer::with_context(crate::context::ContextComposer(
-                    std::sync::Arc::new(FixtureComposer::from(
+                composer: Live::holding(LaunchComposer::with_context(
+                    crate::context::ContextComposer(std::sync::Arc::new(FixtureComposer::from(
                         &[
                             ("spirit-core", "Spirit body."),
                             ("intent-flow", "Intent body."),
                             ("operation-main-flow", "Main flow body."),
                             ("knowledge-flow", "Knowledge body."),
                         ][..],
-                    )),
+                    ))),
                 )),
                 dispatch_gate: std::sync::Mutex::new(()),
                 pane_leases: crate::delivery::lease::PaneLeases::default(),
@@ -2991,6 +3141,7 @@ mod tests {
                 launch_calls: crate::send_tool::LaunchCalls::default(),
                 codex_turns: crate::codex_turns::CodexTurns::default(),
                 compactions: crate::compacting::CompactionWatch::default(),
+                configuration_changes: Default::default(),
             };
             let herdr_config = directory.path().join("herdr-config");
             let session_socket = herdr_config.join("sessions/messaging-build/herdr.sock");
@@ -5111,6 +5262,7 @@ mod tests {
             let composed = self
                 .nexus
                 .composer
+                .current()
                 .compose(
                     crate::composition::HarnessedProfile {
                         remembered_flows: Vec::new(),

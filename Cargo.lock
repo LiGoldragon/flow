@@ -528,12 +528,12 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "message-defaults"
 version = "0.22.1"
-source = "git+https://github.com/LiGoldragon/message?rev=e0a0fe7a097983eb116ccd8290326e637e541b4c#e0a0fe7a097983eb116ccd8290326e637e541b4c"
+source = "git+https://github.com/LiGoldragon/message?rev=3d0fcbcdb829b09f80192d055d12e3af2754c9d0#3d0fcbcdb829b09f80192d055d12e3af2754c9d0"
 
 [[package]]
 name = "message-nexus"
 version = "0.22.1"
-source = "git+https://github.com/LiGoldragon/message?rev=e0a0fe7a097983eb116ccd8290326e637e541b4c#e0a0fe7a097983eb116ccd8290326e637e541b4c"
+source = "git+https://github.com/LiGoldragon/message?rev=3d0fcbcdb829b09f80192d055d12e3af2754c9d0#3d0fcbcdb829b09f80192d055d12e3af2754c9d0"
 dependencies = [
  "ethos-zero 16.0.0",
  "getrandom 0.4.3",
@@ -553,7 +553,7 @@ dependencies = [
 [[package]]
 name = "meta-signal-flow"
 version = "72.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=82be495e12d06aaede190e11da384fc8e973d7fe#82be495e12d06aaede190e11da384fc8e973d7fe"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=da773ffeaadc0033c29b6bc94288066e98dc397c#da773ffeaadc0033c29b6bc94288066e98dc397c"
 dependencies = [
  "datom-codec 0.33.0",
  "ethos-zero 17.0.0",

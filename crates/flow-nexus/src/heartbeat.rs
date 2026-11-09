@@ -1,6 +1,7 @@
 //! Configured sampling heartbeat.  Its evidence deliberately excludes the
 //! deliveries it generates, so an otherwise idle system becomes quiet.
 
+use crate::live::HoldsLiveValue;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use signal_flow::Address;
 use std::collections::{BTreeMap, BTreeSet};
@@ -101,7 +102,7 @@ impl RunsHeartbeat for crate::RunningNexus {
             else {
                 continue;
             };
-            if endpoint.endpoint_path != self.codex_endpoints.next.socket {
+            if endpoint.endpoint_path != self.codex_endpoints.current().next.socket {
                 continue;
             }
             match &node.herdr_route_selection {

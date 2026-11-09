@@ -17,7 +17,7 @@
     # callers move explicitly to lib.<system>.mkFlowPackage.
     unconfigured-flow.url = "github:LiGoldragon/flow/d3ab87ee18b1dd30947d5f0089f5abb4bafa80d5";
     # The Message Nexus the joint check runs beside the real Flow Nexus.
-    message.url = "github:LiGoldragon/message/e0a0fe7a097983eb116ccd8290326e637e541b4c";
+    message.url = "github:LiGoldragon/message/3d0fcbcdb829b09f80192d055d12e3af2754c9d0";
     # The accepted 0.53.2 Flow, built by its own flake, whose Memory the
     # request-id migration check evolves. The lock holds its commit, f7d2336,
     # and the flake refuses any other (predecessorRevision below).
@@ -379,7 +379,7 @@
                   export FLOW_MESSAGE_JOINT_FLOW_BIN="${flowNexus}"
                   export FLOW_MESSAGE_JOINT_MESSAGE_BIN="${message.packages.${system}.default}/bin/message-nexus"
                   export FLOW_MESSAGE_JOINT_FLOW_REV="${sourceRevision}"
-                  export FLOW_MESSAGE_JOINT_MESSAGE_REV="e0a0fe7a097983eb116ccd8290326e637e541b4c"
+                  export FLOW_MESSAGE_JOINT_MESSAGE_REV="3d0fcbcdb829b09f80192d055d12e3af2754c9d0"
                   sha256sum "$FLOW_MESSAGE_JOINT_FLOW_BIN" "$FLOW_MESSAGE_JOINT_MESSAGE_BIN"
                 '';
             # The accepted 0.53.2's real Memory, evolved and served by this
@@ -400,9 +400,9 @@
               { nativeBuildInputs = [ pkgs.gnugrep ]; }
               ''
                 grep -F 'rev = "065730ff8b628657a692e8890714cadde881f1d4"' ${./Cargo.toml}
-                grep -F 'rev = "82be495e12d06aaede190e11da384fc8e973d7fe"' ${./Cargo.toml}
+                grep -F 'rev = "da773ffeaadc0033c29b6bc94288066e98dc397c"' ${./Cargo.toml}
                 grep -F 'signal-flow?rev=065730ff8b628657a692e8890714cadde881f1d4#065730ff8b628657a692e8890714cadde881f1d4' ${./Cargo.lock}
-                grep -F 'meta-signal-flow?rev=82be495e12d06aaede190e11da384fc8e973d7fe#82be495e12d06aaede190e11da384fc8e973d7fe' ${./Cargo.lock}
+                grep -F 'meta-signal-flow?rev=da773ffeaadc0033c29b6bc94288066e98dc397c#da773ffeaadc0033c29b6bc94288066e98dc397c' ${./Cargo.lock}
                 touch "$out"
               '';
 

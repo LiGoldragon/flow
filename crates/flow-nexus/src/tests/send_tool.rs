@@ -13,6 +13,7 @@ use crate::generated::send_tool::{
     HandlesSendCall, ReadsToolCall, SendCall, SendOutcome, SendRefusal, ToolCall, ToolCallKey,
 };
 use crate::heartbeat::DeliveryPurpose;
+use crate::live::HoldsLiveValue;
 use crate::send_tool::{
     DescribesSendInvocation, HandlesSendCallAnswers, RespondsToSendCalls, SendTool, ServesSendTool,
 };
@@ -477,7 +478,7 @@ impl SeatsCodexFlows for NexusFixture {
     }
 
     fn adapter(&mut self, model: &str, fake: &FakeAppServer) -> CodexAdapter {
-        let endpoints = &mut self.nexus.codex_endpoints;
+        let endpoints = self.nexus.codex_endpoints.edit();
         endpoints.timeout = Duration::from_secs(5);
         if endpoints.stable.model_names.contains(model) {
             endpoints.stable.client_path = fake.executable.clone();
@@ -1138,12 +1139,13 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
     let client = std::env::var_os("FLOW_SEND_TOOL_WITNESS_CODEX").expect("codex client");
     let socket = std::env::var("FLOW_SEND_TOOL_WITNESS_SOCKET").expect("app-server socket");
     let mut fixture = NexusFixture::new();
-    fixture.nexus.codex_endpoints.next.client_path = PathBuf::from(client);
-    fixture.nexus.codex_endpoints.next.socket = socket;
-    fixture.nexus.codex_endpoints.timeout = Duration::from_secs(60);
+    fixture.nexus.codex_endpoints.edit().next.client_path = PathBuf::from(client);
+    fixture.nexus.codex_endpoints.edit().next.socket = socket;
+    fixture.nexus.codex_endpoints.edit().timeout = Duration::from_secs(60);
     let adapter = fixture
         .nexus
         .codex_endpoints
+        .current()
         .adapter_for("gpt-6-luna")
         .expect("gpt-6-luna selects the next endpoint");
 
@@ -1292,12 +1294,13 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
     let socket = std::env::var("FLOW_SEND_TOOL_WITNESS_SOCKET").expect("app-server socket");
     let home = PathBuf::from(std::env::var_os("FLOW_SEND_TOOL_WITNESS_HOME").expect("codex home"));
     let mut fixture = NexusFixture::new();
-    fixture.nexus.codex_endpoints.next.client_path = PathBuf::from(client);
-    fixture.nexus.codex_endpoints.next.socket = socket;
-    fixture.nexus.codex_endpoints.timeout = Duration::from_secs(60);
+    fixture.nexus.codex_endpoints.edit().next.client_path = PathBuf::from(client);
+    fixture.nexus.codex_endpoints.edit().next.socket = socket;
+    fixture.nexus.codex_endpoints.edit().timeout = Duration::from_secs(60);
     let adapter = fixture
         .nexus
         .codex_endpoints
+        .current()
         .adapter_for("gpt-6-luna")
         .expect("gpt-6-luna selects the next endpoint");
     let mut profile = fixture_profile();
@@ -1441,12 +1444,13 @@ fn witness_interrupted_launch_first_half_exits_with_its_call_pending() {
     let state =
         PathBuf::from(std::env::var_os("FLOW_INTERRUPTED_LAUNCH_STATE").expect("state directory"));
     let mut fixture = NexusFixture::new();
-    fixture.nexus.codex_endpoints.next.client_path = PathBuf::from(client);
-    fixture.nexus.codex_endpoints.next.socket = socket;
-    fixture.nexus.codex_endpoints.timeout = Duration::from_secs(60);
+    fixture.nexus.codex_endpoints.edit().next.client_path = PathBuf::from(client);
+    fixture.nexus.codex_endpoints.edit().next.socket = socket;
+    fixture.nexus.codex_endpoints.edit().timeout = Duration::from_secs(60);
     let adapter = fixture
         .nexus
         .codex_endpoints
+        .current()
         .adapter_for("gpt-6-luna")
         .expect("gpt-6-luna selects the next endpoint");
     let mut profile = fixture_profile();
@@ -1554,9 +1558,9 @@ fn witness_interrupted_launch_second_half_is_reconciled_at_restart() {
     let mut fixture = NexusFixture::with_store(|store| {
         std::fs::copy(state.join("flow.sema"), store).expect("store restored");
     });
-    fixture.nexus.codex_endpoints.next.client_path = PathBuf::from(client);
-    fixture.nexus.codex_endpoints.next.socket = socket;
-    fixture.nexus.codex_endpoints.timeout = Duration::from_secs(60);
+    fixture.nexus.codex_endpoints.edit().next.client_path = PathBuf::from(client);
+    fixture.nexus.codex_endpoints.edit().next.socket = socket;
+    fixture.nexus.codex_endpoints.edit().timeout = Duration::from_secs(60);
 
     fixture.nexus.reconcile_interrupted_launches();
 

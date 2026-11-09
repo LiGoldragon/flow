@@ -1,10 +1,11 @@
 //! Configure declares one configuration family whole: the declaration
 //! replaces the committed family in one commit and leaves every other row as
 //! it was, so the effective family is always the last declaration. A refused
-//! declaration changes nothing. The running Nexus keeps the Codex endpoints it
-//! opened with; the next open serves the replaced ones.
+//! declaration changes nothing. The running Nexus takes a replaced value at
+//! once, without a restart, and a subscription sees it.
 
 use crate::generated::operation::{Operation, Outcome};
+use crate::live::HoldsLiveValue;
 use crate::performing::Performs;
 use crate::store::metaflow::MutatesMetaflows;
 use crate::store::{
@@ -136,12 +137,13 @@ const LUNA: &str = "gpt-5.6-luna";
 pub(crate) struct ConfiguredStore {
     _directory: tempfile::TempDir,
     defaults: DefaultConfiguration,
-    start: flow_ethos::Start,
+    place: crate::place::Place,
+    store_path: String,
 }
 
 impl ConfiguredStore {
     pub(crate) fn path(&self) -> &std::path::Path {
-        std::path::Path::new(&self.start.store_path)
+        std::path::Path::new(&self.store_path)
     }
     /// A configured store: Nexus, Models and Thresholds declared through
     /// Configure, a registered flow, Message bound and a lock held.
@@ -152,13 +154,14 @@ impl ConfiguredStore {
             runtime_directory: directory.path().join("runtime"),
         };
         let path = |name: &str| directory.path().join(name).to_string_lossy().into_owned();
-        let start = flow_ethos::Start {
-            ordinary_socket_path: path("ordinary.sock"),
-            meta_socket_path: path("meta.sock"),
-            store_path: path("flow.sema"),
-            landing_watch_option: None,
+        // The place keeps its memory at <State>/flow.sema.
+        let place = crate::place::Place {
+            place_name: "main".into(),
+            runtime: path("runtime/nexus/main"),
+            state: directory.path().to_string_lossy().into_owned(),
         };
-        let configuration = ConfigurationOnlyStore::open(std::path::Path::new(&start.store_path))
+        let store_path = path("flow.sema");
+        let configuration = ConfigurationOnlyStore::open(std::path::Path::new(&store_path))
             .expect("configuration store");
         for change in [
             ConfigurationChange::Nexus(Self::nexus(&defaults, &[TERRA, SOL, LUNA], 30)),
@@ -176,7 +179,7 @@ impl ConfiguredStore {
                 .expect("configuration commits");
         }
         drop(configuration);
-        let store = FlowStore::open_configured(std::path::Path::new(&start.store_path))
+        let store = FlowStore::open_configured(std::path::Path::new(&store_path))
             .expect("configured store opens");
         store
             .register_flow(Self::flow_node())
@@ -211,7 +214,8 @@ impl ConfiguredStore {
         Self {
             _directory: directory,
             defaults,
-            start,
+            place,
+            store_path,
         }
     }
 
@@ -267,7 +271,7 @@ impl ConfiguredStore {
     }
 
     fn open(&self) -> RunningNexus {
-        RunningNexus::open(&self.defaults, &self.start).expect("configured Nexus opens")
+        RunningNexus::open(&self.place).expect("configured Nexus opens")
     }
 }
 
@@ -311,7 +315,7 @@ fn snapshot(nexus: &RunningNexus) -> ConfigurationSnapshot {
 }
 
 fn stable_models(nexus: &RunningNexus) -> BTreeSet<String> {
-    nexus.codex_endpoints.stable.model_names.clone()
+    nexus.codex_endpoints.current().stable.model_names.clone()
 }
 
 fn configure(nexus: &RunningNexus, change: ConfigurationChange) -> MetaResponse {
@@ -326,8 +330,10 @@ fn quaternary_field() -> Address {
     }
 }
 
+/// A Configure value applied to a running Nexus takes effect without a
+/// restart: the next launch reads the replaced Codex endpoints.
 #[test]
-fn configure_nexus_replaces_only_the_nexus_value_and_keeps_every_other_row() {
+fn configure_nexus_replaces_only_the_nexus_value_and_takes_effect_without_a_restart() {
     let fixture = ConfiguredStore::new();
     let nexus = fixture.open();
     let before = other_rows(&nexus);
@@ -349,8 +355,11 @@ fn configure_nexus_replaces_only_the_nexus_value_and_keeps_every_other_row() {
         MetaResponse::Configured(ConfigureOutcome::Unchanged)
     );
 
-    // The running Nexus keeps the endpoints it opened with.
-    assert!(stable_models(&nexus).contains(TERRA));
+    // The running Nexus serves the replaced endpoints at once.
+    assert_eq!(
+        stable_models(&nexus),
+        BTreeSet::from([SOL.to_owned(), LUNA.to_owned()])
+    );
     drop(nexus);
 
     // The next open serves the replaced value and still holds every row.
@@ -361,6 +370,52 @@ fn configure_nexus_replaces_only_the_nexus_value_and_keeps_every_other_row() {
     );
     assert_eq!(snapshot(&reopened).nexus, replaced);
     assert_eq!(other_rows(&reopened), before);
+}
+
+/// ObserveConfiguration sees the configuration on open, then the value a
+/// Configure replaced, as it is applied: the subscriber sleeps until the
+/// change is announced.
+#[test]
+fn a_subscription_sees_the_configuration_as_it_changes() {
+    use crate::observe_configuration::ObservesConfiguration;
+    use crate::store::AnnouncesLaunchChanges;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let replaced = ConfiguredStore::nexus(&fixture.defaults, &[SOL, LUNA], 45);
+    let disconnected = AtomicBool::new(false);
+    let (frames, received) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let observer = scope.spawn(|| {
+            nexus.observe_configuration(&disconnected, &mut |response| {
+                frames
+                    .send(response.clone())
+                    .map_err(|error| error.to_string())
+            })
+        });
+        let MetaResponse::Configuration(first) = received
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the configuration on open")
+        else {
+            panic!("a configured store answers its snapshot")
+        };
+        assert_ne!(first.nexus, replaced);
+        assert_eq!(
+            configure(&nexus, ConfigurationChange::Nexus(replaced.clone())),
+            MetaResponse::Configured(ConfigureOutcome::Replaced)
+        );
+        let MetaResponse::Configuration(second) = received
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the configuration as it changed")
+        else {
+            panic!("the change is a snapshot")
+        };
+        assert_eq!(second.nexus, replaced);
+        disconnected.store(true, Ordering::Release);
+        nexus.configuration_changes.announce();
+        assert!(observer.join().expect("observer joins").is_err());
+    });
 }
 
 #[test]
@@ -525,6 +580,7 @@ fn each_family_is_its_last_declaration() {
             },
             request_id_draws: 64,
             announcement_tries: 3,
+            harness_hook: meta_signal_flow::HarnessHookConfiguration::Unconfigured,
         }
     );
     // An empty declaration empties the family.
@@ -543,7 +599,7 @@ fn each_family_is_its_last_declaration() {
 fn a_launch_after_a_replaced_declaration_takes_the_new_defaults() {
     let fixture = ConfiguredStore::new();
     let mut nexus = fixture.open();
-    nexus.composer = crate::composition::tests::fixture_composer();
+    *nexus.composer.edit() = crate::composition::tests::fixture_composer();
     let mut profile = crate::composition::tests::fixture_profile();
     profile.address = quaternary_field();
     // A first launch: it names no predecessor, so no handover is read under
@@ -607,7 +663,7 @@ fn a_launch_naming_a_claude_alias_is_not_composed_and_its_full_name_is() {
     use crate::generated::starter::DerivesHarness;
     let fixture = ConfiguredStore::new();
     let mut nexus = fixture.open();
-    nexus.composer = crate::composition::tests::fixture_composer();
+    *nexus.composer.edit() = crate::composition::tests::fixture_composer();
     let mut profile = crate::composition::tests::fixture_profile();
     profile.address = quaternary_field();
     // A first launch: it names no predecessor, so no handover is read under
@@ -635,9 +691,17 @@ fn a_launch_naming_a_claude_alias_is_not_composed_and_its_full_name_is() {
         nexus.perform(Operation::Compose(profile.clone())),
         Outcome::Composed(_)
     ));
-    assert_eq!(nexus.codex_endpoints.harness_for(SOL), HarnessKind::Codex);
-    assert!(nexus.codex_endpoints.launches_exactly(SOL));
-    assert!(!nexus.codex_endpoints.launches_exactly("gpt-6-unlisted"));
+    assert_eq!(
+        nexus.codex_endpoints.current().harness_for(SOL),
+        HarnessKind::Codex
+    );
+    assert!(nexus.codex_endpoints.current().launches_exactly(SOL));
+    assert!(
+        !nexus
+            .codex_endpoints
+            .current()
+            .launches_exactly("gpt-6-unlisted")
+    );
 }
 
 /// An entry naming a leave-out of another harness than its own is refused
@@ -689,9 +753,8 @@ fn a_leave_out_default_naming_another_harness_is_refused_and_writes_nothing() {
     }
     // The configuration-only listener refuses the same entry the same way.
     drop(nexus);
-    let configuration =
-        ConfigurationOnlyStore::open(std::path::Path::new(&fixture.start.store_path))
-            .expect("stopped store reopens");
+    let configuration = ConfigurationOnlyStore::open(std::path::Path::new(&fixture.store_path))
+        .expect("stopped store reopens");
     assert!(matches!(
         configuration.configure_change(ConfigurationChange::LeaveOuts(vec![ConfigureLeaveOut {
             address: quaternary_field(),
@@ -718,7 +781,7 @@ fn a_leave_out_default_naming_another_harness_is_refused_and_writes_nothing() {
 fn a_codex_start_naming_none_takes_no_claude_default() {
     let fixture = ConfiguredStore::new();
     let mut nexus = fixture.open();
-    nexus.composer = crate::composition::tests::fixture_composer();
+    *nexus.composer.edit() = crate::composition::tests::fixture_composer();
     assert_eq!(
         configure(
             &nexus,
@@ -789,7 +852,7 @@ fn a_fresh_store_takes_its_first_nexus_declaration() {
 #[test]
 fn a_store_configured_while_stopped_opens_with_the_replaced_value() {
     let fixture = ConfiguredStore::new();
-    let path = std::path::Path::new(&fixture.start.store_path);
+    let path = std::path::Path::new(&fixture.store_path);
     let rows = other_rows(&fixture.open());
     let replaced = ConfiguredStore::nexus(&fixture.defaults, &[SOL, LUNA], 30);
     let configuration = ConfigurationOnlyStore::open(path).expect("stopped store reopens");
@@ -835,7 +898,7 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     let nexus = fixture.open();
     let seeded = ask(&nexus, "Configuration");
     assert!(
-        seeded.ends_with(" None 30 None [] { 1 3 1 } 64 3 }"),
+        seeded.ends_with(" None 30 None [] { 1 3 1 } 64 3 Unconfigured }"),
         "seeded at 30: {seeded}"
     );
     assert_eq!(
@@ -858,14 +921,14 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     }
     let declared = ask(&nexus, "Configuration");
     assert!(
-        declared.ends_with(" None 45 None [] { 1 3 1 } 64 3 }"),
+        declared.ends_with(" None 45 None [] { 1 3 1 } 64 3 Unconfigured }"),
         "{declared}"
     );
     drop(nexus);
     let reopened = fixture.open();
     let kept = ask(&reopened, "Configuration");
     assert!(
-        kept.ends_with(" None 45 None [] { 1 3 1 } 64 3 }"),
+        kept.ends_with(" None 45 None [] { 1 3 1 } 64 3 Unconfigured }"),
         "kept across a reopen: {kept}"
     );
 }
@@ -902,7 +965,7 @@ fn configured_counters_are_kept_across_a_reopen() {
     let reopened = fixture.open();
     let kept = ask(&reopened, "Configuration");
     assert!(
-        kept.ends_with(" None 30 None [] { 120 45 300 } 64 3 }"),
+        kept.ends_with(" None 30 None [] { 120 45 300 } 64 3 Unconfigured }"),
         "kept across a reopen: {kept}"
     );
     assert_eq!(

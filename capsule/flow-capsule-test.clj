@@ -223,19 +223,35 @@
   (check "each line names its pane's FlowId and Address"
          (= {:pane "w2:p1" :flow-id "0a1b2c" :address "{ Psyche test Opus }"}
             (dissoc (nth lines 2) :line)))
-  (check "the typed line names the capsule's place and the query to the new client"
-         (= (str "! " flow-package "/bin/flow 'main' 'BindSeat.{ Psyche test Opus }'")
+  (check "the typed line gives the new client the query alone; the pane's configuration names main"
+         (= (str "! " flow-package "/bin/flow 'BindSeat.{ Psyche test Opus }'")
             (:line (nth lines 2))))
-  (check "a socket of the capsule names its place"
-         (= ["next" "Metaflows"]
+  (check "a client of the new package takes the query alone"
+         (= ["Metaflows"]
             (flow-capsule/client-arguments flow-package "flow" flow-capsule/seed-socket "Metaflows")))
+  (check "main's configuration is the capsule's own, which the panes inherit"
+         (= flow-capsule/config-home (flow-capsule/place-configuration-home flow-capsule/ordinary-socket)))
+  (check "another place's configuration is a home of its own"
+         (= (str flow-capsule/state-root "/config-next")
+            (flow-capsule/place-configuration-home flow-capsule/seed-socket)))
   (let [runtime (str (fs/create-temp-dir))
-        {:keys [exit err]}
-        (flow-capsule/run {:env {"XDG_RUNTIME_DIR" runtime}} (str flow-package "/bin/flow")
-                          "no-owner" "Metaflows")]
-    (check "the packaged client takes a place name and the query, and reaches no Nexus there"
-           (and (= 2 exit) (not (str/includes? err "invalid Flow Query"))
-                (not (str/includes? err "usage:")))))
+        configuration (str (fs/create-temp-dir))
+        client (str flow-package "/bin/flow")
+        env {"XDG_RUNTIME_DIR" runtime "XDG_CONFIG_HOME" configuration}
+        missing (flow-capsule/run {:env env} client "Metaflows")
+        _ (fs/create-dirs (str configuration "/nexus"))
+        _ (spit (str configuration "/nexus/flow.datom") "{ no-owner }\n")
+        configured (flow-capsule/run {:env env} client "Metaflows")
+        typed (flow-capsule/run {:env env} client "no-owner" "Metaflows")]
+    (check "the packaged client with no configuration is refused, naming the file"
+           (and (= 2 (:exit missing)) (str/starts-with? (:err missing) "Missing.")
+                (str/includes? (:err missing) (str configuration "/nexus/flow.datom"))))
+    (check "the packaged client takes its place from its configuration, and reaches no Nexus there"
+           (and (= 2 (:exit configured)) (not (str/includes? (:err configured) "invalid Flow Query"))
+                (not (str/includes? (:err configured) "usage:"))
+                (not (str/starts-with? (:err configured) "Missing."))))
+    (check "a typed place is a second argument, refused"
+           (and (= 2 (:exit typed)) (str/includes? (:err typed) "usage:"))))
   (check "a place-started Nexus is started with its place"
          (= (str "{ «main» «" (fs/path flow-capsule/places-root "main") "» «/state/capsule» }")
             (flow-capsule/start-text flow-package flow-capsule/ordinary-socket flow-capsule/meta-socket

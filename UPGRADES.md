@@ -35,10 +35,16 @@ meta-signal-message 3.0.1 (`4d81b64`).
   absent does not start. `--configure-only` is gone: a fresh memory
   starts with the executable's built-in configuration, and every meta
   `Configure` is applied to the running Nexus at once, without a restart.
-- `flow` and `flow-meta` take the place name and the Query: `flow main
-  'Metaflows'`, resolved under `$XDG_RUNTIME_DIR/nexus/` to the place's
-  socket. The Invocation argument and the `*-compose-invocation` binaries
-  are gone. `flow-hook` calls its configured socket through the same client.
+- `flow` and `flow-meta` take the Query alone: `flow 'Metaflows'`. The
+  place is the configuration's, one datom at
+  `$XDG_CONFIG_HOME/nexus/flow.datom` (`~/.config/nexus/flow.datom` when
+  unset), `CliConfiguration.{ PlaceName }`, e.g. `{ main }`, resolved under
+  `$XDG_RUNTIME_DIR/nexus/` to the place's socket. A configuration missing,
+  unreadable or naming no place is a typed `ConfigurationRefusal` naming
+  the file (exit 2); a second argument, a typed place, is refused. The
+  Invocation argument and the `*-compose-invocation` binaries are gone.
+  `flow-hook` calls its configured socket through the same client; its one
+  argument stays the socket the launching Nexus wrote.
 - `ObserveConfiguration` (meta) streams the configuration, then each change.
 - A frame on the ordinary socket that decodes as no Query, an earlier
   hook's Report among them, is answered `FrameRefused.{ Option<FlowId>

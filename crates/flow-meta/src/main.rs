@@ -1,25 +1,27 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
-use flow_ethos::place::{NamesPlaceSockets, PlaceSockets, ResolvesPlace, RuntimeRoot};
+use flow_ethos::place::{
+    CliEnvironment, NamesPlaceSockets, PlaceSockets, ReadsCliEnvironment, ResolvesCliPlace,
+};
 use flow_meta::Invocation;
 use meta_signal_flow::{Query, Response};
 use protos::{Compactable, Protosizable, ReaderBudget};
 use std::{
     env,
-    ffi::OsStr,
     io::{Read, Write},
     os::unix::net::UnixStream,
 };
 
 struct FlowMetaClient;
 
-/// The CLI is `flow-meta <place-name> '<Query>'`: the place name picks the
-/// Nexus instance, resolved under `$XDG_RUNTIME_DIR/nexus/` to its meta
-/// socket.
+/// The CLI is `flow-meta '<Query>'`: it takes the datom and nothing else.
+/// The place is the Flow configuration's, `$XDG_CONFIG_HOME/nexus/flow.datom`,
+/// the same file `flow` reads, resolved under `$XDG_RUNTIME_DIR/nexus/` to
+/// the place's meta socket; no place is typed.
 trait ParsesMetaCommand {
     fn parse_command(
         &self,
         arguments: impl Iterator<Item = String>,
-        runtime_directory: Option<&OsStr>,
+        place: &dyn ResolvesCliPlace,
     ) -> Result<Invocation, String>;
 }
 trait CallsMetaNexus {
@@ -51,15 +53,15 @@ impl ParsesMetaCommand for FlowMetaClient {
     fn parse_command(
         &self,
         mut arguments: impl Iterator<Item = String>,
-        runtime_directory: Option<&OsStr>,
+        place: &dyn ResolvesCliPlace,
     ) -> Result<Invocation, String> {
-        let usage = || "usage: flow-meta <place-name> '<one inline Query datom>'".to_owned();
-        let (Some(place_name), Some(source), None) =
-            (arguments.next(), arguments.next(), arguments.next())
-        else {
+        let usage = || {
+            "usage: flow-meta '<one inline Query datom>'; the place is read from $XDG_CONFIG_HOME/nexus/flow.datom".to_owned()
+        };
+        let (Some(source), None) = (arguments.next(), arguments.next()) else {
             return Err(usage());
         };
-        let runtime = RuntimeRoot::under(runtime_directory)?.place(&place_name)?;
+        let runtime = place.place_runtime()?;
         let mut budget = Budget {
             remaining: 65_536,
             reader: ReaderBudget::try_from(65_536).expect("a constant reader budget"),
@@ -118,10 +120,7 @@ impl CallsMetaNexus for FlowMetaClient {
 fn main() {
     let client = FlowMetaClient;
     match client
-        .parse_command(
-            env::args().skip(1),
-            env::var_os("XDG_RUNTIME_DIR").as_deref(),
-        )
+        .parse_command(env::args().skip(1), &CliEnvironment::of_process())
         .and_then(|invocation| {
             client.call(&invocation, &mut |reply| {
                 println!("{}", reply.datomize(vec![]).protosize().compact())
@@ -158,11 +157,17 @@ mod tests {
             if arguments.next().is_some() {
                 return Err("extra fixture".into());
             }
-            self.parse_command(
-                ["main".to_owned(), query].into_iter(),
-                Some(std::ffi::OsStr::new("/run/user/test")),
-            )
-            .map(|Invocation { query, .. }| query)
+            self.parse_command([query].into_iter(), &FixedPlace)
+                .map(|Invocation { query, .. }| query)
+        }
+    }
+
+    /// The place a test's configuration names, read from no file.
+    struct FixedPlace;
+
+    impl flow_ethos::place::ResolvesCliPlace for FixedPlace {
+        fn place_runtime(&self) -> Result<std::path::PathBuf, String> {
+            Ok("/run/user/test/nexus/main".into())
         }
     }
     use datom_codec::Datomizable;

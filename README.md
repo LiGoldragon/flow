@@ -62,24 +62,32 @@ launch effect.
 The ordinary pane operations use the same typed edge:
 
 ```sh
-flow main 'Stop.00f95a'
-flow main 'Metaflows'
-flow main 'Observe.Agent.00f95a'
-flow main 'Observe.Undecodable'
-flow main 'Observe.TurnEnds'
-flow main 'Observe.Metaflows'
-flow-meta main 'ObserveConfiguration'
+flow 'Stop.00f95a'
+flow 'Metaflows'
+flow 'Observe.Agent.00f95a'
+flow 'Observe.Undecodable'
+flow 'Observe.TurnEnds'
+flow 'Observe.Metaflows'
+flow-meta 'ObserveConfiguration'
 ```
 
 A Nexus starts in its place, the one datom it is started with, and reads
 nothing else for it: `flow-nexus '{ main /run/user/1001/nexus/main
 /home/li/.local/state/nexus/main }'`, the place name, Runtime (its sockets
 `flow.sock` and `flow-meta.sock`) and State (its memory `flow.sema`). A
-client is `flow <place-name> '<Query>'` or `flow-meta <place-name>
-'<Query>'`; the place name resolves under `$XDG_RUNTIME_DIR/nexus/` to that
-place's socket. Two places are two names: the stable version runs at
-`main`, a candidate at `next` with its own memory, and a version becomes
-main by being started at `main` once the version there has stopped. The
+client takes the datom and nothing else: `flow '<Query>'` or `flow-meta
+'<Query>'`. The place is its configuration's, one datom at
+`$XDG_CONFIG_HOME/nexus/flow.datom` (`~/.config/nexus/flow.datom` when the
+variable is unset), `CliConfiguration.{ PlaceName }`, `{ main }`; the place
+name resolves under `$XDG_RUNTIME_DIR/nexus/` to that place's socket. A
+configuration that is missing, cannot be read or names no place is a typed
+refusal naming the file (`Missing.<path>`, `Unreadable.{ <path> <reason> }`,
+`Invalid.{ <path> <reason> }`, exit 2), and nothing is sent. No place is
+ever typed: a second argument is refused. Two places are two names: the
+stable version runs at `main`, a candidate at `next` with its own memory,
+and a version becomes main by being started at `main` once the version
+there has stopped; a client reaches `next` by a configuration naming it.
+The
 socket every flow's hook reports to is its launching place's, so a flow
 launched at main keeps reporting to whichever version is main.
 

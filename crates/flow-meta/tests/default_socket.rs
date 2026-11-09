@@ -1,14 +1,32 @@
-//! The CLI is `flow-meta <place-name> '<Query>'`: the place name resolves
-//! under `$XDG_RUNTIME_DIR/nexus/` to that place's meta socket alone.
+//! The CLI is `flow-meta '<Query>'`: it takes the datom and nothing else.
+//! The place is the Flow configuration's, `$XDG_CONFIG_HOME/nexus/flow.datom`,
+//! resolved under `$XDG_RUNTIME_DIR/nexus/` to that place's meta socket
+//! alone.
 use std::{
     io::{Read, Write},
     os::unix::net::UnixListener,
-    process::Command,
+    path::Path,
+    process::{Command, Output},
 };
 
+fn client(runtime: &Path, configuration_home: &Path, other: &Path, arguments: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_flow-meta"))
+        .env_clear()
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env("XDG_CONFIG_HOME", configuration_home)
+        .env("FLOW_META_SOCKET", other)
+        .args(arguments)
+        .output()
+        .expect("client runs")
+}
+
 #[test]
-fn the_client_reaches_only_the_meta_socket_of_the_place_it_names() {
+fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names() {
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
+    let configuration = tempfile::tempdir().expect("temporary configuration home");
+    std::fs::create_dir_all(configuration.path().join("nexus")).expect("nexus configuration");
+    std::fs::write(configuration.path().join("nexus/flow.datom"), "{ main }\n")
+        .expect("the configuration names main");
     let main = runtime.path().join("nexus/main");
     std::fs::create_dir_all(&main).expect("the place's runtime directory");
     let selected = main.join("flow-meta.sock");
@@ -32,13 +50,12 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_it_names() {
             .and_then(|_| peer.write_all(&reply))
             .expect("reply written");
     });
-    let output = Command::new(env!("CARGO_BIN_EXE_flow-meta"))
-        .env_clear()
-        .env("XDG_RUNTIME_DIR", runtime.path())
-        .env("FLOW_META_SOCKET", &other)
-        .args(["main", "Retire.fac697"])
-        .output()
-        .expect("client runs");
+    let output = client(
+        runtime.path(),
+        configuration.path(),
+        &other,
+        &["Retire.fac697"],
+    );
     assert!(output.status.success(), "{output:?}");
     answering.join().expect("selected fixture answered");
     assert!(
@@ -46,22 +63,29 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_it_names() {
         "{output:?}"
     );
 
-    for (place, runtime_directory) in [
-        ("next", Some(runtime.path())),
-        ("", Some(runtime.path())),
-        ("main", None),
-    ] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_flow-meta"));
-        command.env_clear().env("FLOW_META_SOCKET", &other);
-        if let Some(directory) = runtime_directory {
-            command.env("XDG_RUNTIME_DIR", directory);
-        }
-        let failed = command
-            .args([place, "Retire.fac697"])
-            .output()
-            .expect("client runs");
-        assert!(!failed.status.success(), "{place:?}: {failed:?}");
-    }
+    // A typed place is a second argument, and refused.
+    let refused = client(
+        runtime.path(),
+        configuration.path(),
+        &other,
+        &["main", "Retire.fac697"],
+    );
+    assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).starts_with("usage: flow-meta '"),
+        "{refused:?}"
+    );
+
+    // A configuration that is missing is refused, naming its path.
+    let empty = tempfile::tempdir().expect("an empty configuration home");
+    let refused = client(runtime.path(), empty.path(), &other, &["Retire.fac697"]);
+    assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.starts_with("Missing.")
+            && stderr.contains(&*empty.path().join("nexus/flow.datom").to_string_lossy()),
+        "{stderr}"
+    );
     assert_eq!(
         other_listener
             .accept()

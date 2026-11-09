@@ -82,6 +82,16 @@ Library
   ; Startup refusal is distinct from the ordinary/meta socket Refusal.Store.String.
   StoreRefusal.{ Path Reason }
   StartRefusal.[ Store.StoreRefusal ]
+  ; What a Flow CLI knows besides its datom, one datom at
+  ; $XDG_CONFIG_HOME/nexus/flow.datom: the place first, more as the CLI
+  ; gains options. A CLI that cannot read it reaches no Nexus.
+  PlaceName.String
+  CliConfiguration.{ PlaceName }
+  ConfigurationFault.{ Path Reason }
+  ConfigurationRefusal.[ Unlocated.Reason
+                         Missing.Path
+                         Unreadable.ConfigurationFault
+                         Invalid.ConfigurationFault ]
   SourceRoot.String
   ClientPath.String
   Home.String

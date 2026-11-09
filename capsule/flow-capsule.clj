@@ -51,8 +51,8 @@
 (def runtime-root (or (System/getenv "XDG_RUNTIME_DIR") (str "/run/user/" (System/getenv "UID"))))
 (def capsule-runtime (str runtime-root "/flow-testing"))
 ;; Every capsule process runs with XDG_RUNTIME_DIR the capsule's runtime, so
-;; a place name a client is given resolves under it: the capsule's Nexus at
-;; main, a seeded candidate at next.
+;; the place name a client's configuration names resolves under it: the
+;; capsule's Nexus at main, a seeded candidate at next.
 (def places-root (str capsule-runtime "/nexus"))
 (def ordinary-socket (str places-root "/main/flow.sock"))
 (def meta-socket (str places-root "/main/flow-meta.sock"))
@@ -213,10 +213,32 @@
       (throw (ex-info "socket lies in no place of the capsule" {:socket socket})))
     (str (fs/file-name directory))))
 
+(defn place-configuration-home
+  "The XDG_CONFIG_HOME whose nexus/flow.datom names the place socket lies
+  in: the capsule's own for main, which the panes' harnesses inherit, a
+  home of the place's own for any other."
+  [socket]
+  (let [place (place-name-of socket)]
+    (if (= place "main") config-home (str state-root "/config-" place))))
+
+(defn place-configuration-env
+  "The environment a client of pkg reaches socket's place with: for a
+  package whose client takes its place from its configuration, the
+  configuration home naming that place, its file written; nothing for an
+  earlier client."
+  [pkg socket]
+  (if (= :place (get @package-interface pkg))
+    (let [home (place-configuration-home socket)]
+      (fs/create-dirs (str home "/nexus"))
+      (spit (str home "/nexus/flow.datom") (str "{ " (place-name-of socket) " }\n"))
+      {"XDG_CONFIG_HOME" home})
+    {}))
+
 (defn client-arguments
   "The arguments pkg's client takes to send query to socket: the query alone
-  (a client with a default socket), the composed invocation naming the
-  socket, or the place name the socket lies in and the query."
+  (a client with a default socket, or one whose configuration names the
+  socket's place: place-configuration-env), or the composed invocation
+  naming the socket."
   [pkg client socket query]
   (case (get @package-interface pkg)
     :query [query]
@@ -226,7 +248,7 @@
                     [(str/trim out)]
                     (throw (ex-info "typed client invocation composition failed"
                                     {:package pkg :client client :error (str/trim err)}))))
-    :place [(place-name-of socket) query]
+    :place [query]
     (throw (ex-info "package client interface is undeclared" {:package pkg}))))
 
 (defn herdr [& args]
@@ -249,7 +271,7 @@
   "One ordinary-socket call; `pane` is the pane the caller stands in."
   ([datom] (flow datom @driver-pane))
   ([datom pane]
-   (reply-text (apply run {:env (clean-env (marks pane))}
+   (reply-text (apply run {:env (clean-env (merge (marks pane) (place-configuration-env @package ordinary-socket)))}
                     (str @package "/bin/flow")
                     (client-arguments @package "flow" ordinary-socket datom)))))
 
@@ -257,10 +279,11 @@
   "An ordinary-socket call started now and read later."
   [datom pane]
   (p/process (into [(str @package "/bin/flow")] (client-arguments @package "flow" ordinary-socket datom))
-             {:env (clean-env (marks pane)) :out :string :err :string :in ""}))
+             {:env (clean-env (merge (marks pane) (place-configuration-env @package ordinary-socket)))
+              :out :string :err :string :in ""}))
 
 (defn flow-meta [datom]
-  (reply-text (apply run {:env (clean-env (marks @driver-pane))}
+  (reply-text (apply run {:env (clean-env (merge (marks @driver-pane) (place-configuration-env @package meta-socket)))}
                    (str @package "/bin/flow-meta")
                    (client-arguments @package "flow-meta" meta-socket datom))))
 
@@ -355,7 +378,8 @@
   (let [deadline (+ (System/currentTimeMillis) (* 1000 seconds))
         proc (p/process (into [(str @package "/bin/flow")]
                               (client-arguments @package "flow" ordinary-socket "Observe.Metaflows"))
-                        {:env (clean-env (marks @driver-pane)) :err :string :in ""})
+                        {:env (clean-env (merge (marks @driver-pane) (place-configuration-env @package ordinary-socket)))
+                         :err :string :in ""})
         frames (java.util.concurrent.LinkedBlockingQueue.)]
     (future (try (doseq [line (line-seq (io/reader (:out proc)))] (.put frames line))
                  (finally (.put frames ::ended))))
@@ -948,6 +972,9 @@
   ;; Herdr starts a Codex agent only from an executable its config allows.
   (spit (str config-home "/herdr/config.toml")
         (str "[agents]\ncodex_executables = [\"" codex-client "\"]\n"))
+  ;; The Flow configuration every pane's client reads its place from: main.
+  (fs/create-dirs (str config-home "/nexus"))
+  (spit (str config-home "/nexus/flow.datom") "{ main }\n")
   (fs/create-dirs capsule-runtime)
   (fs/create-dirs capsule-flows)
   (fs/create-dirs workspace-a)
@@ -1091,7 +1118,8 @@
       (when-not (re-check 10 #(or (listens? pid meta-socket) (not (p/alive? child))))
         (p/destroy child))
       (let [reply (if (p/alive? child)
-                    (reply-text (apply run {:env (clean-env {"PATH" (str pkg "/bin:" (System/getenv "PATH"))})}
+                    (reply-text (apply run {:env (clean-env (merge {"PATH" (str pkg "/bin:" (System/getenv "PATH"))}
+                                                                   (place-configuration-env pkg meta-socket)))}
                                      (str pkg "/bin/flow-meta")
                                      (client-arguments pkg "flow-meta" meta-socket datom)))
                     (str "configuration-only Nexus exited before listening: " (str/trim (slurp log))))
@@ -1114,7 +1142,8 @@
   (doseq [datom (or lines (configure-lines))]
     (let [[reply exit] (if (= :place (get @package-interface @package))
                          ;; From no pane: the owner.
-                         [(reply-text (apply run {:env (clean-env)} (str @package "/bin/flow-meta")
+                         [(reply-text (apply run {:env (clean-env (place-configuration-env @package meta-socket))}
+                                             (str @package "/bin/flow-meta")
                                              (client-arguments @package "flow-meta" meta-socket datom)))
                           "running"]
                          (configure-one! datom log))
@@ -1687,14 +1716,15 @@
 (defn meta-at
   "One meta call by pkg's client on socket, from no pane: the owner."
   [pkg socket datom]
-  (reply-text (apply run {:env (package-env pkg {})} (str pkg "/bin/flow-meta")
+  (reply-text (apply run {:env (package-env pkg (place-configuration-env pkg socket))} (str pkg "/bin/flow-meta")
                    (client-arguments pkg "flow-meta" socket datom))))
 
 (defn guard-probe
   "The guard's reading, as the declared unit's ExecStartPre would take it:
   each of the capsule's Flow sockets asked by pkg's client."
   [pkg]
-  {:ordinary (reply-text (apply run {:env (package-env pkg (marks @driver-pane))}
+  {:ordinary (reply-text (apply run {:env (package-env pkg (merge (marks @driver-pane)
+                                                                 (place-configuration-env pkg ordinary-socket)))}
                               (str pkg "/bin/flow")
                               (client-arguments pkg "flow" ordinary-socket "Metaflows")))
    :meta (meta-at pkg meta-socket "Configuration")})
@@ -1750,7 +1780,7 @@
   [pane]
   (let [proc (p/process (into [(str @package "/bin/flow")]
                                (client-arguments @package "flow" ordinary-socket "ObserveSends.None"))
-                        {:env (clean-env (marks pane))
+                        {:env (clean-env (merge (marks pane) (place-configuration-env @package ordinary-socket)))
                          :out :stream :err :string :in ""})
         line (deref (future (try (.readLine (java.io.BufferedReader. (java.io.InputStreamReader. (:out proc))))
                                  (catch Exception _ nil)))

@@ -617,6 +617,14 @@ trait ServesCliWorld: Sized {
             .expect("the place lies under the runtime root's nexus directory")
             .to_path_buf()
     }
+    /// The configuration home whose nexus/flow.datom names the place
+    /// `main`: the clients read their place from it.
+    fn configuration_home(&self) -> std::path::PathBuf {
+        self.runtime()
+            .parent()
+            .expect("the runtime root lies in the fixture's directory")
+            .join("config")
+    }
     fn sockets_directory(&self) -> std::path::PathBuf;
 }
 
@@ -717,9 +725,13 @@ impl ServesCliWorld for CliWorld {
         ));
 
         // The place `main` under the fixture's runtime root, where the
-        // clients resolve it.
+        // clients resolve it, named by the clients' configuration.
         let place = fixture.directory.path().join("run/nexus/main");
         std::fs::create_dir_all(&place).expect("the place's runtime directory");
+        let configuration = fixture.directory.path().join("config/nexus");
+        std::fs::create_dir_all(&configuration).expect("the clients' configuration");
+        std::fs::write(configuration.join("flow.datom"), "{ main }\n")
+            .expect("the configuration names main");
         let socket = place.join("flow.sock");
         let meta_socket = place.join("flow-meta.sock");
         let (served, meta_served) = (socket.clone(), meta_socket.clone());
@@ -753,7 +765,8 @@ impl ServesCliWorld for CliWorld {
             .env_clear()
             .env("HERDR_PANE_ID", "w5:p1")
             .env("XDG_RUNTIME_DIR", self.runtime())
-            .args(["main", text])
+            .env("XDG_CONFIG_HOME", self.configuration_home())
+            .arg(text)
             .output()
             .expect("flow runs");
         assert!(output.status.success(), "{text}: {output:?}");
@@ -764,7 +777,8 @@ impl ServesCliWorld for CliWorld {
         let output = std::process::Command::new(self.binaries.join("flow-meta"))
             .env_clear()
             .env("XDG_RUNTIME_DIR", self.runtime())
-            .args(["main", text])
+            .env("XDG_CONFIG_HOME", self.configuration_home())
+            .arg(text)
             .output()
             .expect("flow-meta runs");
         assert!(output.status.success(), "{text}: {output:?}");

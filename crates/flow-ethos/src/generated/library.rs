@@ -261,6 +261,30 @@ pub enum StartRefusal {
     Store(StoreRefusal),
 }
 #[rustfmt::skip]
+pub type PlaceName = String;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct CliConfiguration {
+    pub place_name: PlaceName,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ConfigurationFault {
+    pub path: Path,
+    pub reason: Reason,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum ConfigurationRefusal {
+    Unlocated(Reason),
+    Missing(Path),
+    Unreadable(ConfigurationFault),
+    Invalid(ConfigurationFault),
+}
+#[rustfmt::skip]
 pub type SourceRoot = String;
 #[rustfmt::skip]
 pub type ClientPath = String;

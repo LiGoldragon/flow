@@ -176,7 +176,7 @@ impl CodexCliWorld {
             wrapper.display()
         ));
         FixtureExecutable { path: wrapper }.install(&format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$1/wrapper.pid\"\n: > \"$1/ready\"\n: < \"$1/go\"\nexec '{}' \"$2\" \"$3\"\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$1/wrapper.pid\"\n: > \"$1/ready\"\n: < \"$1/go\"\nexec '{}' \"$2\"\n",
             flow.display()
         ));
 
@@ -236,14 +236,22 @@ impl CodexCliWorld {
             .parent()
             .and_then(std::path::Path::parent)
             .expect("the place lies under the runtime root");
+        // The client reads its place from its configuration.
+        let configuration = call.join("config");
+        fs::create_dir_all(configuration.join("nexus")).unwrap();
+        fs::write(
+            configuration.join("nexus/flow.datom"),
+            format!("{{ {place_name} }}\n"),
+        )
+        .unwrap();
         let gate = self.fixture.nexus.dispatch_gate.lock().unwrap();
         let mut command = Command::new("sh");
         command
             .arg(&self.shell)
             .arg(&call)
-            .arg(place_name)
             .arg(query)
             .env("XDG_RUNTIME_DIR", runtime)
+            .env("XDG_CONFIG_HOME", &configuration)
             .env_remove("HERDR_PANE_ID")
             .env_remove("HERDR_SESSION")
             .env_remove("FLOW_ID")

@@ -1,18 +1,22 @@
 use datom_codec::{Actualizing, Budget, Potential};
 use flow::Invocation;
 use flow::client::{CallsFlowNexus, FlowClient, TextualizesFlowReply};
-use flow_ethos::place::{NamesPlaceSockets, PlaceSockets, ResolvesPlace, RuntimeRoot};
+use flow_ethos::place::{
+    CliEnvironment, NamesPlaceSockets, PlaceSockets, ReadsCliEnvironment, ResolvesCliPlace,
+};
 use protos::ReaderBudget;
-use std::{env, ffi::OsStr};
+use std::env;
 
-/// The CLI is `flow <place-name> '<Query>'`: named after the Nexus, the
-/// place name picks the instance, resolved under `$XDG_RUNTIME_DIR/nexus/`
-/// to its ordinary socket.
+/// The CLI is `flow '<Query>'`: named after the Nexus, taking the datom and
+/// nothing else. The place is its configuration's,
+/// `$XDG_CONFIG_HOME/nexus/flow.datom`, resolved under
+/// `$XDG_RUNTIME_DIR/nexus/` to the place's ordinary socket; no place is
+/// typed.
 trait ParsesFlowCommand {
     fn parse_command(
         &self,
         arguments: impl Iterator<Item = String>,
-        runtime_directory: Option<&OsStr>,
+        place: &dyn ResolvesCliPlace,
     ) -> Result<Invocation, String>;
 }
 
@@ -20,15 +24,15 @@ impl ParsesFlowCommand for FlowClient {
     fn parse_command(
         &self,
         mut arguments: impl Iterator<Item = String>,
-        runtime_directory: Option<&OsStr>,
+        place: &dyn ResolvesCliPlace,
     ) -> Result<Invocation, String> {
-        let usage = || "usage: flow <place-name> '<one inline Query datom>'".to_owned();
-        let (Some(place_name), Some(value), None) =
-            (arguments.next(), arguments.next(), arguments.next())
-        else {
+        let usage = || {
+            "usage: flow '<one inline Query datom>'; the place is read from $XDG_CONFIG_HOME/nexus/flow.datom".to_owned()
+        };
+        let (Some(value), None) = (arguments.next(), arguments.next()) else {
             return Err(usage());
         };
-        let runtime = RuntimeRoot::under(runtime_directory)?.place(&place_name)?;
+        let runtime = place.place_runtime()?;
         let mut budget = Budget {
             remaining: 65_536,
             reader: ReaderBudget::try_from(65_536).expect("a constant reader budget"),
@@ -71,10 +75,7 @@ fn main() {
     }
     let client = FlowClient;
     match client
-        .parse_command(
-            arguments.into_iter(),
-            env::var_os("XDG_RUNTIME_DIR").as_deref(),
-        )
+        .parse_command(arguments.into_iter(), &CliEnvironment::of_process())
         .and_then(|invocation| {
             client.call(&invocation, &mut |reply| {
                 println!("{}", client.textualize_reply(&reply))
@@ -114,11 +115,17 @@ mod tests {
             if arguments.next().is_some() {
                 return Err("extra fixture".into());
             }
-            self.parse_command(
-                ["main".to_owned(), query].into_iter(),
-                Some(std::ffi::OsStr::new("/run/user/test")),
-            )
-            .map(|Invocation { query, .. }| query)
+            self.parse_command([query].into_iter(), &FixedPlace)
+                .map(|Invocation { query, .. }| query)
+        }
+    }
+
+    /// The place a test's configuration names, read from no file.
+    struct FixedPlace;
+
+    impl flow_ethos::place::ResolvesCliPlace for FixedPlace {
+        fn place_runtime(&self) -> Result<std::path::PathBuf, String> {
+            Ok("/run/user/test/nexus/main".into())
         }
     }
     use signal_flow::{

@@ -402,7 +402,7 @@ impl ReadsPromptReply for PromptReply {
 pub trait ConfiguresHerdrCli {
     fn with_codex_endpoints(self, codex_endpoints: CodexEndpoints) -> Self;
     /// The hook command the configuration names, or the `flow-nexus-hook` beside
-    /// this executable ([`HookChoice`]).
+    /// this executable (`HookChoice`).
     fn with_harness_hook(self, configured: &meta_signal_flow::HarnessHookConfiguration) -> Self;
     /// Takes a changed configuration at once: the Codex endpoints, the
     /// flows directory under the source root and the hook command each

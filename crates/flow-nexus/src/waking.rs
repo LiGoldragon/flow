@@ -27,7 +27,7 @@
 //! turn ended by the evidence above and no work it started in flight. A
 //! Claude seat's work in flight is the background work its own last Stop
 //! names; Claude wakes the seat when that work ends, into a turn whose Stop
-//! is then its rest ([`JudgesClosingRest`]). Soft work is handed over at the
+//! is then its rest (`JudgesClosingRest`). Soft work is handed over at the
 //! turn's end whatever background work runs.
 //!
 //! A seat past its model's refresh threshold is replaced at its idle event,
@@ -47,7 +47,7 @@
 //! [`RefreshesMetaflows`]), whoever asks, the flow itself included, and a
 //! Launch or Replace naming a live flow, wait for that flow's idle event
 //! too: a flow that does not rest has the order recorded
-//! ([`WaitsForRestToReplace`]), answered RefreshQueued or LaunchPending at
+//! (`WaitsForRestToReplace`), answered RefreshQueued or LaunchPending at
 //! once, and carried out at the idle event that finds it resting; a Nexus
 //! that starts again carries out what is recorded. Until it rests the flow
 //! is handed what it is sent. At its rest the refresh takes the metaflow's

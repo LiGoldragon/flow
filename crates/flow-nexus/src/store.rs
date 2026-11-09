@@ -5383,7 +5383,7 @@ pub(crate) trait ReadsFlowMemory {
             .records()
             .first()
             .cloned()
-            .unwrap_or_else(handover_configuration::unconfigured);
+            .unwrap_or_else(<handover_configuration::StoredHandoverConfiguration as handover_configuration::DefaultsToUnconfigured>::unconfigured);
         let metaflow_rows = engine.match_records(QueryPlan::all(tables.metaflows))?;
         if models_rows.database_marker() != marker
             || metaflow_rows.database_marker() != marker
@@ -5627,7 +5627,7 @@ pub(crate) trait ReadsFlowMemory {
                     .records()
                     .first()
                     .cloned()
-                    .unwrap_or_else(handover_configuration::unconfigured);
+                    .unwrap_or_else(<handover_configuration::StoredHandoverConfiguration as handover_configuration::DefaultsToUnconfigured>::unconfigured);
                 FlowStore::replace_configuration_family(
                     engine,
                     tables.handover,
@@ -5647,7 +5647,7 @@ pub(crate) trait ReadsFlowMemory {
                     .records()
                     .first()
                     .cloned()
-                    .unwrap_or_else(handover_configuration::unconfigured);
+                    .unwrap_or_else(<handover_configuration::StoredHandoverConfiguration as handover_configuration::DefaultsToUnconfigured>::unconfigured);
                 FlowStore::replace_configuration_family(
                     engine,
                     tables.handover,
@@ -5670,7 +5670,7 @@ pub(crate) trait ReadsFlowMemory {
                     .records()
                     .first()
                     .cloned()
-                    .unwrap_or_else(handover_configuration::unconfigured);
+                    .unwrap_or_else(<handover_configuration::StoredHandoverConfiguration as handover_configuration::DefaultsToUnconfigured>::unconfigured);
                 FlowStore::replace_configuration_family(
                     engine,
                     tables.handover,

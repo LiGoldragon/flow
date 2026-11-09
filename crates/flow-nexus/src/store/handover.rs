@@ -505,7 +505,7 @@ impl HoldsHandovers for FlowStore {
         ensure_owner(address, caller)?;
         let mut row = self
             .handover_row(address)
-            .map_err(store_refusal)?
+            .map_err(StoreError::handover_refusal)?
             .unwrap_or_else(|| HandoverMemory {
                 address: address.clone(),
                 current: Vec::new(),
@@ -524,7 +524,8 @@ impl HoldsHandovers for FlowStore {
             row.current.push(section);
         }
         row.touch = Some(touch.clone());
-        self.write_handover(row).map_err(store_refusal)?;
+        self.write_handover(row)
+            .map_err(StoreError::handover_refusal)?;
         Ok(touch)
     }
 
@@ -538,10 +539,10 @@ impl HoldsHandovers for FlowStore {
             .handover_write_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        ensure_live_writer(self, &writer.address, &writer.flow_id)?;
+        self.ensure_live_writer(&writer.address, &writer.flow_id)?;
         let mut row = self
             .handover_row(&writer.address)
-            .map_err(store_refusal)?
+            .map_err(StoreError::handover_refusal)?
             .unwrap_or_else(|| HandoverMemory {
                 address: writer.address.clone(),
                 current: Vec::new(),
@@ -561,7 +562,8 @@ impl HoldsHandovers for FlowStore {
         }
         row.current_flow_id = Some(writer.flow_id.clone());
         row.touch = Some(touch.clone());
-        self.write_handover(row).map_err(store_refusal)?;
+        self.write_handover(row)
+            .map_err(StoreError::handover_refusal)?;
         Ok(touch)
     }
 
@@ -580,7 +582,7 @@ impl HoldsHandovers for FlowStore {
         ensure_owner(address, caller)?;
         let mut row = self
             .handover_row(address)
-            .map_err(store_refusal)?
+            .map_err(StoreError::handover_refusal)?
             .unwrap_or_else(|| HandoverMemory {
                 address: address.clone(),
                 current: Vec::new(),
@@ -594,7 +596,8 @@ impl HoldsHandovers for FlowStore {
         }
         row.current.retain(|section| section.title != title);
         row.touch = Some(touch.clone());
-        self.write_handover(row).map_err(store_refusal)?;
+        self.write_handover(row)
+            .map_err(StoreError::handover_refusal)?;
         Ok(touch)
     }
 
@@ -608,10 +611,10 @@ impl HoldsHandovers for FlowStore {
             .handover_write_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        ensure_live_writer(self, &writer.address, &writer.flow_id)?;
+        self.ensure_live_writer(&writer.address, &writer.flow_id)?;
         let mut row = self
             .handover_row(&writer.address)
-            .map_err(store_refusal)?
+            .map_err(StoreError::handover_refusal)?
             .ok_or(HandoverRefusal::MissingTitle)?;
         if !row.current.iter().any(|section| section.title == title) {
             return Err(HandoverRefusal::MissingTitle);
@@ -619,7 +622,8 @@ impl HoldsHandovers for FlowStore {
         row.current.retain(|section| section.title != title);
         row.current_flow_id = Some(writer.flow_id.clone());
         row.touch = Some(touch.clone());
-        self.write_handover(row).map_err(store_refusal)?;
+        self.write_handover(row)
+            .map_err(StoreError::handover_refusal)?;
         Ok(touch)
     }
 
@@ -735,20 +739,30 @@ fn ensure_owner(address: &Address, caller: &Address) -> Result<(), HandoverRefus
     }
 }
 
-fn ensure_live_writer(
-    store: &FlowStore,
-    address: &Address,
-    flow_id: &str,
-) -> Result<(), HandoverRefusal> {
-    if let Some(row) = store.handover_row(address).map_err(store_refusal)?
-        && let Some(owner) = row.current_flow_id.as_deref()
-        && owner != flow_id
-    {
-        return Err(HandoverRefusal::NotOwner);
-    }
-    Ok(())
+trait ChecksLiveHandoverWriter {
+    fn ensure_live_writer(&self, address: &Address, flow_id: &str) -> Result<(), HandoverRefusal>;
 }
 
-fn store_refusal(error: StoreError) -> HandoverRefusal {
-    HandoverRefusal::Store(error.to_string())
+impl ChecksLiveHandoverWriter for FlowStore {
+    fn ensure_live_writer(&self, address: &Address, flow_id: &str) -> Result<(), HandoverRefusal> {
+        if let Some(row) = self
+            .handover_row(address)
+            .map_err(StoreError::handover_refusal)?
+            && let Some(owner) = row.current_flow_id.as_deref()
+            && owner != flow_id
+        {
+            return Err(HandoverRefusal::NotOwner);
+        }
+        Ok(())
+    }
+}
+
+trait BecomesHandoverRefusal {
+    fn handover_refusal(self) -> HandoverRefusal;
+}
+
+impl BecomesHandoverRefusal for StoreError {
+    fn handover_refusal(self) -> HandoverRefusal {
+        HandoverRefusal::Store(self.to_string())
+    }
 }

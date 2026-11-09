@@ -75,12 +75,17 @@ impl DescribesHandoverConfiguration for StoredHandoverConfiguration {
         .with_predecessor::<StoredHandoverConfigurationV1>()
     }
 }
-pub(crate) fn unconfigured() -> StoredHandoverConfiguration {
-    StoredHandoverConfiguration {
-        policies: HandoverPoliciesConfiguration::Unconfigured,
-        archive: HandoverArchiveConfiguration::Unconfigured,
-        count: HandoverCountConfiguration::Unconfigured,
-        publication_deadline: 60_000,
+pub(crate) trait DefaultsToUnconfigured {
+    fn unconfigured() -> Self;
+}
+impl DefaultsToUnconfigured for StoredHandoverConfiguration {
+    fn unconfigured() -> Self {
+        StoredHandoverConfiguration {
+            policies: HandoverPoliciesConfiguration::Unconfigured,
+            archive: HandoverArchiveConfiguration::Unconfigured,
+            count: HandoverCountConfiguration::Unconfigured,
+            publication_deadline: 60_000,
+        }
     }
 }
 

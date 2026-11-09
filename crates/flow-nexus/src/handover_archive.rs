@@ -2,9 +2,10 @@
 
 use crate::{
     RunningNexus,
+    model::RunsModel,
     store::handover::{ClosedHandover, HandoverRemovalOutcome, HoldsHandovers},
 };
-use signal_flow::{Address, Aspect, HandoverArchiveIdentity, Model};
+use signal_flow::{Address, Aspect, HandoverArchiveIdentity};
 use std::{
     fs, io,
     io::Read,
@@ -113,7 +114,7 @@ impl RetiresHandoverGenerations for RunningNexus {
             let publication = match publisher.publish(HandoverArchiveRequest {
                 address: address.clone(),
                 flow_id: closed.predecessor.clone(),
-                document: render_closed(&closed),
+                document: closed.archive_document(),
             }) {
                 Ok(publication) => publication,
                 Err(error) => {
@@ -137,11 +138,18 @@ impl RetiresHandoverGenerations for RunningNexus {
     }
 }
 
-fn render_closed(closed: &ClosedHandover) -> String {
-    format!(
-        "generation={} predecessor={} successor={} sections={:?} touch={:?}\n",
-        closed.generation, closed.predecessor, closed.successor, closed.sections, closed.touch
-    )
+/// A closed handover as the archive document writes it.
+trait RendersArchiveDocument {
+    fn archive_document(&self) -> String;
+}
+
+impl RendersArchiveDocument for ClosedHandover {
+    fn archive_document(&self) -> String {
+        format!(
+            "generation={} predecessor={} successor={} sections={:?} touch={:?}\n",
+            self.generation, self.predecessor, self.successor, self.sections, self.touch
+        )
+    }
 }
 
 /// A publisher bound to one pre-existing Git work tree.
@@ -212,54 +220,45 @@ impl PublishesHandoverArchive for ExistingGitHandoverArchive {
         request: HandoverArchiveRequest,
     ) -> Result<HandoverArchivePublication, HandoverArchiveRefusal> {
         let deadline = Instant::now() + self.deadline;
-        ensure_repository(self.runner.as_ref(), &self.repository, deadline)?;
-        validate_component(&request.flow_id)?;
-        validate_component(&request.address.topic)?;
-        let aspect = aspect_name(&request.address.aspect);
-        let model = model_name(&request.address.model);
+        self.ensure_repository(deadline)?;
+        request.flow_id.validate_component()?;
+        request.address.topic.validate_component()?;
+        let aspect = request.address.aspect.aspect_name();
+        let model = request.address.model.name();
         let relative = PathBuf::from(aspect)
             .join(&request.address.topic)
             .join(model)
             .join(format!("{}.md", request.flow_id));
         let target = self.repository.join(&relative);
-        reject_symlink_components(&self.repository, &target)?;
+        self.reject_symlink_components(&target)?;
         match fs::read_to_string(&target) {
             Ok(existing) => {
                 if existing != request.document {
                     return Err(HandoverArchiveRefusal::Conflict);
                 }
-                if !is_tracked_and_clean(self.runner.as_ref(), &self.repository, &target, deadline)?
-                {
-                    commit_target(self.runner.as_ref(), &self.repository, &target, deadline)?;
+                if !self.is_tracked_and_clean(&target, deadline)? {
+                    self.commit_target(&target, deadline)?;
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 fs::create_dir_all(target.parent().expect("archive path has parent"))
                     .and_then(|_| fs::write(&target, request.document.as_bytes()))
                     .map_err(|error| HandoverArchiveRefusal::Write(error.to_string()))?;
-                commit_target(self.runner.as_ref(), &self.repository, &target, deadline)?;
+                self.commit_target(&target, deadline)?;
             }
             Err(error) => return Err(HandoverArchiveRefusal::Write(error.to_string())),
         }
-        let commit = run_git_output(
-            self.runner.as_ref(),
-            &self.repository,
-            ["rev-parse", "HEAD"],
-            deadline,
-        )?
-        .trim()
-        .to_owned();
-        let object = format!("{commit}:{}", path_string(&target, &self.repository));
-        let blob = run_git_output(
-            self.runner.as_ref(),
-            &self.repository,
-            ["rev-parse", object.as_str()],
-            deadline,
-        )?
-        .trim()
-        .to_owned();
-        let archived = run_git_output(
-            self.runner.as_ref(),
+        let runner = self.runner.as_ref();
+        let commit = runner
+            .run_git_output(&self.repository, ["rev-parse", "HEAD"], deadline)?
+            .trim()
+            .to_owned();
+        let object = format!("{commit}:{}", self.path_string(&target));
+        let blob = runner
+            .run_git_output(&self.repository, ["rev-parse", object.as_str()], deadline)?
+            .trim()
+            .to_owned();
+        let archived = runner.run_git_output(
             &self.repository,
             ["cat-file", "blob", blob.as_str()],
             deadline,
@@ -275,163 +274,203 @@ impl PublishesHandoverArchive for ExistingGitHandoverArchive {
     }
 }
 
-fn validate_component(value: &str) -> Result<(), HandoverArchiveRefusal> {
-    if value.is_empty()
-        || value == "."
-        || value == ".."
-        || value.contains('/')
-        || value.contains('\\')
-    {
-        Err(HandoverArchiveRefusal::InvalidPath)
-    } else {
+/// One path component of an archive document's coordinates.
+trait ValidatesArchiveComponent {
+    fn validate_component(&self) -> Result<(), HandoverArchiveRefusal>;
+}
+
+impl ValidatesArchiveComponent for str {
+    fn validate_component(&self) -> Result<(), HandoverArchiveRefusal> {
+        let value = self;
+        if value.is_empty()
+            || value == "."
+            || value == ".."
+            || value.contains('/')
+            || value.contains('\\')
+        {
+            Err(HandoverArchiveRefusal::InvalidPath)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// The Aspect directory an archive document is filed under.
+trait NamesAspect {
+    fn aspect_name(&self) -> &'static str;
+}
+
+impl NamesAspect for Aspect {
+    fn aspect_name(&self) -> &'static str {
+        match self {
+            Aspect::Psyche => "Psyche",
+            Aspect::Mind => "Mind",
+            Aspect::Field => "Field",
+        }
+    }
+}
+
+/// The archive work tree's own checks: it is a Git work tree, and no
+/// component of a document's path inside it is a symlink.
+trait ChecksArchiveTree {
+    fn ensure_repository(&self, deadline: Instant) -> Result<(), HandoverArchiveRefusal>;
+    fn reject_symlink_components(&self, target: &Path) -> Result<(), HandoverArchiveRefusal>;
+}
+
+impl ChecksArchiveTree for ExistingGitHandoverArchive {
+    fn ensure_repository(&self, deadline: Instant) -> Result<(), HandoverArchiveRefusal> {
+        let repository = &self.repository;
+        if !repository.is_dir() {
+            return Err(HandoverArchiveRefusal::Unconfigured);
+        }
+        let output = self.runner.run(
+            repository,
+            &["rev-parse", "--is-inside-work-tree"],
+            deadline,
+        )?;
+        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true" {
+            Ok(())
+        } else {
+            Err(HandoverArchiveRefusal::Unconfigured)
+        }
+    }
+
+    fn reject_symlink_components(&self, target: &Path) -> Result<(), HandoverArchiveRefusal> {
+        let repository = &self.repository;
+        let relative = target
+            .strip_prefix(repository)
+            .map_err(|_| HandoverArchiveRefusal::InvalidPath)?;
+        let mut cursor = repository.to_path_buf();
+        for component in relative.components() {
+            cursor.push(component);
+            match fs::symlink_metadata(&cursor) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(HandoverArchiveRefusal::InvalidPath);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(HandoverArchiveRefusal::Write(error.to_string())),
+            }
+        }
         Ok(())
     }
 }
 
-fn reject_symlink_components(
-    repository: &Path,
-    target: &Path,
-) -> Result<(), HandoverArchiveRefusal> {
-    let relative = target
-        .strip_prefix(repository)
-        .map_err(|_| HandoverArchiveRefusal::InvalidPath)?;
-    let mut cursor = repository.to_path_buf();
-    for component in relative.components() {
-        cursor.push(component);
-        match fs::symlink_metadata(&cursor) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(HandoverArchiveRefusal::InvalidPath);
-            }
+/// An archive document committed into the work tree by its path there.
+trait CommitsArchiveDocument {
+    fn path_string(&self, target: &Path) -> String;
+    fn is_tracked_and_clean(
+        &self,
+        target: &Path,
+        deadline: Instant,
+    ) -> Result<bool, HandoverArchiveRefusal>;
+    fn commit_target(&self, target: &Path, deadline: Instant)
+    -> Result<(), HandoverArchiveRefusal>;
+}
+
+impl CommitsArchiveDocument for ExistingGitHandoverArchive {
+    fn path_string(&self, target: &Path) -> String {
+        target
+            .strip_prefix(&self.repository)
+            .unwrap_or(target)
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn is_tracked_and_clean(
+        &self,
+        target: &Path,
+        deadline: Instant,
+    ) -> Result<bool, HandoverArchiveRefusal> {
+        let relative = self.path_string(target);
+        let runner = self.runner.as_ref();
+        match runner.run_git_output(
+            &self.repository,
+            ["ls-files", "--error-unmatch", "--", relative.as_str()],
+            deadline,
+        ) {
             Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(HandoverArchiveRefusal::Write(error.to_string())),
+            Err(HandoverArchiveRefusal::PublicationTimedOut) => {
+                return Err(HandoverArchiveRefusal::PublicationTimedOut);
+            }
+            Err(_) => return Ok(false),
         }
+        Ok(runner
+            .run_git_output(
+                &self.repository,
+                ["status", "--porcelain", "--", relative.as_str()],
+                deadline,
+            )?
+            .trim()
+            .is_empty())
     }
-    Ok(())
-}
-fn aspect_name(aspect: &Aspect) -> &'static str {
-    match aspect {
-        Aspect::Psyche => "Psyche",
-        Aspect::Mind => "Mind",
-        Aspect::Field => "Field",
-    }
-}
-fn model_name(model: &Model) -> &'static str {
-    match model {
-        Model::Fable => "Fable",
-        Model::Opus => "Opus",
-        Model::Sonnet => "Sonnet",
-        Model::Haiku => "Haiku",
-        Model::Astra => "Astra",
-        Model::Sol => "Sol",
-        Model::Luna => "Luna",
-        Model::Terra => "Terra",
-    }
-}
-fn ensure_repository(
-    runner: &dyn RunsGitCommand,
-    repository: &Path,
-    deadline: Instant,
-) -> Result<(), HandoverArchiveRefusal> {
-    if !repository.is_dir() {
-        return Err(HandoverArchiveRefusal::Unconfigured);
-    }
-    let output = runner.run(
-        repository,
-        &["rev-parse", "--is-inside-work-tree"],
-        deadline,
-    )?;
-    if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true" {
-        Ok(())
-    } else {
-        Err(HandoverArchiveRefusal::Unconfigured)
+
+    fn commit_target(
+        &self,
+        target: &Path,
+        deadline: Instant,
+    ) -> Result<(), HandoverArchiveRefusal> {
+        let relative = self.path_string(target);
+        let runner = self.runner.as_ref();
+        runner.run_git(&self.repository, ["add", "--", relative.as_str()], deadline)?;
+        runner.run_git(
+            &self.repository,
+            [
+                "commit",
+                "--only",
+                "-m",
+                "Archive handover",
+                "--",
+                relative.as_str(),
+            ],
+            deadline,
+        )
     }
 }
-fn path_string(target: &Path, repository: &Path) -> String {
-    target
-        .strip_prefix(repository)
-        .unwrap_or(target)
-        .to_string_lossy()
-        .into_owned()
+
+/// Git run inside a repository by any Git command runner, bounded by the
+/// publication deadline.
+trait RunsArchiveGit {
+    fn run_git<const N: usize>(
+        &self,
+        repository: &Path,
+        args: [&str; N],
+        deadline: Instant,
+    ) -> Result<(), HandoverArchiveRefusal>;
+    fn run_git_output<const N: usize>(
+        &self,
+        repository: &Path,
+        args: [&str; N],
+        deadline: Instant,
+    ) -> Result<String, HandoverArchiveRefusal>;
 }
-fn is_tracked_and_clean(
-    runner: &dyn RunsGitCommand,
-    repository: &Path,
-    target: &Path,
-    deadline: Instant,
-) -> Result<bool, HandoverArchiveRefusal> {
-    let relative = path_string(target, repository);
-    match run_git_output(
-        runner,
-        repository,
-        ["ls-files", "--error-unmatch", "--", relative.as_str()],
-        deadline,
-    ) {
-        Ok(_) => {}
-        Err(HandoverArchiveRefusal::PublicationTimedOut) => {
-            return Err(HandoverArchiveRefusal::PublicationTimedOut);
+
+impl<Runner: RunsGitCommand + ?Sized> RunsArchiveGit for Runner {
+    fn run_git<const N: usize>(
+        &self,
+        repository: &Path,
+        args: [&str; N],
+        deadline: Instant,
+    ) -> Result<(), HandoverArchiveRefusal> {
+        self.run_git_output(repository, args, deadline).map(|_| ())
+    }
+
+    fn run_git_output<const N: usize>(
+        &self,
+        repository: &Path,
+        args: [&str; N],
+        deadline: Instant,
+    ) -> Result<String, HandoverArchiveRefusal> {
+        let output = self.run(repository, &args, deadline)?;
+        if output.status.success() {
+            String::from_utf8(output.stdout).map_err(|error| {
+                HandoverArchiveRefusal::Git(format!("git returned non-UTF-8 evidence: {error}"))
+            })
+        } else {
+            Err(HandoverArchiveRefusal::Git(
+                String::from_utf8_lossy(&output.stderr).trim().into(),
+            ))
         }
-        Err(_) => return Ok(false),
-    }
-    Ok(run_git_output(
-        runner,
-        repository,
-        ["status", "--porcelain", "--", relative.as_str()],
-        deadline,
-    )?
-    .trim()
-    .is_empty())
-}
-fn commit_target(
-    runner: &dyn RunsGitCommand,
-    repository: &Path,
-    target: &Path,
-    deadline: Instant,
-) -> Result<(), HandoverArchiveRefusal> {
-    let relative = path_string(target, repository);
-    run_git(
-        runner,
-        repository,
-        ["add", "--", relative.as_str()],
-        deadline,
-    )?;
-    run_git(
-        runner,
-        repository,
-        [
-            "commit",
-            "--only",
-            "-m",
-            "Archive handover",
-            "--",
-            relative.as_str(),
-        ],
-        deadline,
-    )
-}
-fn run_git<const N: usize>(
-    runner: &dyn RunsGitCommand,
-    repository: &Path,
-    args: [&str; N],
-    deadline: Instant,
-) -> Result<(), HandoverArchiveRefusal> {
-    run_git_output(runner, repository, args, deadline).map(|_| ())
-}
-fn run_git_output<const N: usize>(
-    runner: &dyn RunsGitCommand,
-    repository: &Path,
-    args: [&str; N],
-    deadline: Instant,
-) -> Result<String, HandoverArchiveRefusal> {
-    let output = runner.run(repository, &args, deadline)?;
-    if output.status.success() {
-        String::from_utf8(output.stdout).map_err(|error| {
-            HandoverArchiveRefusal::Git(format!("git returned non-UTF-8 evidence: {error}"))
-        })
-    } else {
-        Err(HandoverArchiveRefusal::Git(
-            String::from_utf8_lossy(&output.stderr).trim().into(),
-        ))
     }
 }
 
@@ -604,6 +643,7 @@ fn kill_process_group(process_id: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use signal_flow::Model;
     use std::io::Write;
 
     #[test]
@@ -624,13 +664,13 @@ mod tests {
     #[test]
     fn invalid_utf8_git_evidence_is_rejected_instead_of_aliasing_replacement_text() {
         let repository = tempfile::tempdir().unwrap();
-        run_git(
-            &RealGitCommand,
-            repository.path(),
-            ["init", "-q"],
-            Instant::now() + Duration::from_secs(60),
-        )
-        .unwrap();
+        RealGitCommand
+            .run_git(
+                repository.path(),
+                ["init", "-q"],
+                Instant::now() + Duration::from_secs(60),
+            )
+            .unwrap();
         let mut hash = Command::new("git")
             .arg("-C")
             .arg(repository.path())
@@ -644,8 +684,7 @@ mod tests {
         assert!(output.status.success());
         let blob = String::from_utf8(output.stdout).unwrap();
         assert!(matches!(
-            run_git_output(
-                &RealGitCommand,
+            RealGitCommand.run_git_output(
                 repository.path(),
                 ["cat-file", "blob", blob.trim()],
                 Instant::now() + Duration::from_secs(60)
@@ -658,27 +697,27 @@ mod tests {
     #[test]
     fn publication_timeout_owns_and_kills_a_hanging_hook_process_group() {
         let repository = tempfile::tempdir().unwrap();
-        run_git(
-            &RealGitCommand,
-            repository.path(),
-            ["init", "-q"],
-            Instant::now() + Duration::from_secs(60),
-        )
-        .unwrap();
-        run_git(
-            &RealGitCommand,
-            repository.path(),
-            ["config", "user.email", "flow@example.invalid"],
-            Instant::now() + Duration::from_secs(60),
-        )
-        .unwrap();
-        run_git(
-            &RealGitCommand,
-            repository.path(),
-            ["config", "user.name", "Flow Test"],
-            Instant::now() + Duration::from_secs(60),
-        )
-        .unwrap();
+        RealGitCommand
+            .run_git(
+                repository.path(),
+                ["init", "-q"],
+                Instant::now() + Duration::from_secs(60),
+            )
+            .unwrap();
+        RealGitCommand
+            .run_git(
+                repository.path(),
+                ["config", "user.email", "flow@example.invalid"],
+                Instant::now() + Duration::from_secs(60),
+            )
+            .unwrap();
+        RealGitCommand
+            .run_git(
+                repository.path(),
+                ["config", "user.name", "Flow Test"],
+                Instant::now() + Duration::from_secs(60),
+            )
+            .unwrap();
         fs::create_dir_all(repository.path().join(".git/hooks")).unwrap();
         let hook = repository.path().join(".git/hooks/pre-commit");
         fs::write(&hook, "#!/bin/sh\nsleep 30\n").unwrap();
@@ -758,27 +797,27 @@ mod tests {
     #[test]
     fn publication_rejects_unbounded_hook_output() {
         let repository = tempfile::tempdir().unwrap();
-        run_git(
-            &RealGitCommand,
-            repository.path(),
-            ["init", "-q"],
-            Instant::now() + Duration::from_secs(60),
-        )
-        .unwrap();
-        run_git(
-            &RealGitCommand,
-            repository.path(),
-            ["config", "user.email", "flow@example.invalid"],
-            Instant::now() + Duration::from_secs(60),
-        )
-        .unwrap();
-        run_git(
-            &RealGitCommand,
-            repository.path(),
-            ["config", "user.name", "Flow Test"],
-            Instant::now() + Duration::from_secs(60),
-        )
-        .unwrap();
+        RealGitCommand
+            .run_git(
+                repository.path(),
+                ["init", "-q"],
+                Instant::now() + Duration::from_secs(60),
+            )
+            .unwrap();
+        RealGitCommand
+            .run_git(
+                repository.path(),
+                ["config", "user.email", "flow@example.invalid"],
+                Instant::now() + Duration::from_secs(60),
+            )
+            .unwrap();
+        RealGitCommand
+            .run_git(
+                repository.path(),
+                ["config", "user.name", "Flow Test"],
+                Instant::now() + Duration::from_secs(60),
+            )
+            .unwrap();
         let hook = repository.path().join(".git/hooks/pre-commit");
         fs::write(&hook, "#!/bin/sh\nyes output\n").unwrap();
         use std::os::unix::fs::PermissionsExt;

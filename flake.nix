@@ -18,6 +18,9 @@
     unconfigured-flow.url = "github:LiGoldragon/flow/d3ab87ee18b1dd30947d5f0089f5abb4bafa80d5";
     # The Message Nexus the joint check runs beside the real Flow Nexus.
     message.url = "github:LiGoldragon/message/70b7daa3ff069b0b8c836ba6aff223992dcf59a1";
+    # The accepted 0.53.2 Flow, built by its own flake, whose Memory the
+    # request-id migration check evolves.
+    migration-predecessor.url = "github:LiGoldragon/flow/f7d2336a7380206728cbd5aef2ebb3656d0cfd87";
   };
 
   # Every crate, third-party or member, is one buildRustCrate derivation.
@@ -33,14 +36,12 @@
       curriculum,
       unconfigured-flow,
       message,
+      migration-predecessor,
     }:
     let
       lib = base.inputs.nixpkgs.lib;
       version = "0.53.3";
       forSystems = function: lib.genAttrs base.lib.systems function;
-      # packages.<system>.<member> is each member's build, and
-      # checks.<system>.<member>.tests its test build.
-      workspace = base.lib.workspaceOutputs { cargoNix = ./Cargo.nix; };
       # The revision the process checks bind their test build and binaries
       # to: the committed revision, or the dirty one a working tree has.
       sourceRevision = self.rev or self.dirtyRev or "unpublished";
@@ -48,8 +49,17 @@
         system:
         let
           context = base.lib.contexts.${system};
-          pkgs = context.pkgs;
-          members = removeAttrs workspace.packages.${system} [ "default" ];
+          inherit (context) pkgs toolchain;
+          # The base's workspace: each member's build and test build, and
+          # checks.default, every check below with the base's cargo-nix. Each
+          # member with tests is checked in its own environment, and the
+          # frozen contract crates have no check.
+          workspace = base.lib.workspace.${system} {
+            cargoNix = ./Cargo.nix;
+            memberChecks = _: memberChecks // lib.genAttrs untested (_: null);
+            extraChecks = _: extraChecks;
+          };
+          members = removeAttrs workspace.packages [ "default" ];
           # The frozen pre-request-id contracts the memory upgrade reads.
           # They carry no tests; flow-nexus's tests exercise them.
           untested = [
@@ -63,8 +73,8 @@
           flowEthosWithDatom = lib.findFirst (
             dependency: dependency.crateName == "flow-ethos"
           ) (throw "flow builds no flow-ethos") members.flow.dependencies;
-          testBuilds = lib.mapAttrs (name: _: workspace.checks.${system}.${name}.tests) members // {
-            flow-ethos = workspace.checks.${system}.flow-ethos.tests.override {
+          testBuilds = workspace.tests // {
+            flow-ethos = workspace.tests.flow-ethos.override {
               features = [ "datom" ];
               inherit (flowEthosWithDatom) dependencies;
             };
@@ -236,123 +246,10 @@
               || (type == "regular" && lib.hasSuffix ".rs" path)
               || (type == "regular" && lib.hasSuffix ".sh" path);
           };
-          # The pinned Curriculum, built per crate on the same base.
-          curriculumCrates = import ./nix/curriculum/Cargo.nix {
-            inherit pkgs;
-            inherit (context) buildRustCrateForPkgs;
-            defaultCrateOverrides = context.crateOverrides // {
-              curriculum =
-                attributes:
-                (context.crateOverrides.curriculum or (_: { })) attributes // { src = curriculum; };
-            };
-            rootFeatures = [
-              "default"
-              "datom"
-            ];
-          };
-        in
-        {
-          inherit
-            pkgs
-            members
-            commands
-            testBuilds
-            stampedNexusTests
-            findTest
-            binaries
-            crateCheck
-            processCheck
-            checkEnvironments
-            memberChecks
-            workspaceBinaries
-            lint
-            rustSource
-            lawSource
-            ;
-          toolchain = context.toolchain;
-          crate2nix = context.crate2nix;
-          curriculum = curriculumCrates.rootCrate.build;
-        };
-    in
-    {
-      lib = forSystems (
-        system:
-        let
-          context = mkContext system;
-        in
-        {
-          mkFlowPackage = import ./nix/mk-flow-package.nix {
-            inherit lib version;
-            inherit (context) pkgs crateCheck binaries;
-            flowNexus = context.members.flow-nexus;
-            flowNexusTests = context.testBuilds.flow-nexus;
-            members = lib.attrValues (removeAttrs context.commands [ "flow-nexus" ]);
-            memberChecks = lib.attrValues (removeAttrs context.memberChecks [ "flow-nexus" ]);
-            flowNexusEnvironment = context.checkEnvironments.flow-nexus;
-          };
-        }
-      );
-
-      packages = forSystems (
-        system:
-        let
-          context = mkContext system;
-          pkgs = context.pkgs;
-        in
-        context.members
-        // {
-          # Intentionally the last unconfigured artifact. A 0.43 package
-          # is built only through lib.<system>.mkFlowPackage with an explicit
-          # defaultConfiguration; production has supplied none yet.
-          default = unconfigured-flow.packages.${system}.default;
-          # The flow-nexus library test executable, from its stamped test
-          # build, so a test kept out of every check (one that needs a store
-          # no repository holds, named at run time) can be run by name where
-          # a build runs.
-          store-proof = pkgs.runCommand "flow-nexus-store-proof" { } ''
-            ${context.findTest "binary" context.stampedNexusTests
-              "store::request_id_migration_process::actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without_writing"
-            }
-            mkdir -p "$out/bin"
-            cp "$binary" "$out/bin/flow-nexus-store-proof"
-          '';
-          # The Curriculum Nexus and CLI of the Curriculum revision Flow
-          # pins, as the capsule runs them.
-          curriculum = context.curriculum;
-          # The capsule test: a Babashka script and the Configure datoms it
-          # applies, kept side by side, with the Curriculum it runs. It is
-          # given the flow package to run.
-          flow-capsule = pkgs.runCommand "flow-capsule" { } ''
-            mkdir -p "$out/libexec/flow-capsule" "$out/bin"
-            ln -s ${self.packages.${system}.curriculum} "$out/libexec/flow-capsule/curriculum"
-            {
-              echo "#!${pkgs.babashka}/bin/bb"
-              cat ${./capsule/flow-capsule.clj}
-            } > "$out/libexec/flow-capsule/flow-capsule"
-            chmod +x "$out/libexec/flow-capsule/flow-capsule"
-            cp ${./capsule/configure.datom} "$out/libexec/flow-capsule/configure.datom"
-            ln -s "$out/libexec/flow-capsule/flow-capsule" "$out/bin/flow-capsule"
-          '';
-        }
-      );
-
-      apps = forSystems (system: {
-        flow-capsule = {
-          type = "app";
-          program = "${self.packages.${system}.flow-capsule}/bin/flow-capsule";
-        };
-      });
-
-      checks = forSystems (
-        system:
-        let
-          context = mkContext system;
-          pkgs = context.pkgs;
           # The accepted 0.53.2 Flow, built by its own flake, whose Memory
           # the request-id migration evolves.
-          migrationPredecessor = builtins.getFlake "git+file:///git/github.com/LiGoldragon/flow?rev=f7d2336a7380206728cbd5aef2ebb3656d0cfd87";
           migrationRoot = "/tmp/flow-request-id-migration-intermediate";
-          migrationPredecessorPackage = (migrationPredecessor.lib.${system}.mkFlowPackage {
+          migrationPredecessorPackage = (migration-predecessor.lib.${system}.mkFlowPackage {
             defaultConfiguration = {
               sourceRoot = "${migrationRoot}/source";
               runtimeDirectory = "${migrationRoot}/runtime";
@@ -426,82 +323,194 @@
               runHook postCheck
             '';
           });
-          flowNexus = "${context.members.flow-nexus}/bin/flow-nexus";
-        in
-        # One check per member: its test binaries, run.
-        context.memberChecks
-        // {
-          default = pkgs.linkFarm "flow-checks" context.memberChecks;
-          # The committed Cargo.nix is what the base's crate2nix generates
-          # from this workspace.
-          cargo-nix = workspace.checks.${system}.cargo-nix;
-          fmt = pkgs.runCommand "flow-fmt" { nativeBuildInputs = [ context.toolchain ]; } ''
-            cp -r ${context.rustSource} source
-            chmod -R u+w source
-            cd source
-            export CARGO_HOME="$NIX_BUILD_TOP/cargo-home"
-            cargo fmt --all --check
-            touch "$out"
-          '';
-          clippy = pkgs.linkFarm "flow-clippy" (lib.mapAttrs (_: context.lint) context.testBuilds);
-          # The capsule runner's own logic that runs no capsule: where a run
-          # keeps its witnesses and what it copies there before teardown.
-          # The tests run the workspace's own binaries (the invocation
-          # composers), which the unconfigured default lacks.
-          capsule-witnesses =
-            pkgs.runCommand "flow-capsule-witnesses"
-              { nativeBuildInputs = [ pkgs.babashka ]; }
-              ''
-                bb ${./capsule/flow-capsule-test.clj} ${./capsule/flow-capsule.clj} ${context.workspaceBinaries} > result.txt \
-                  || { cat result.txt; exit 1; }
-                cat result.txt
-                cp result.txt "$out"
-              '';
-          # `fn main()` is the only production free function, and every
-          # production method lives in a trait.
-          no-free-functions =
-            pkgs.runCommand "flow-no-free-functions" { src = context.lawSource; }
-              (builtins.readFile ./checks/no-free-functions.sh);
-          no-inherent-methods =
-            pkgs.runCommand "flow-no-inherent-methods" { src = context.lawSource; }
-              (builtins.readFile ./checks/no-inherent-methods.sh);
-          # The real Flow Nexus and the real Message Nexus share one durable
-          # delivery ledger.
-          message-joint =
-            context.processCheck "message-joint"
-              "store::message_joint::real_flow_and_message_share_the_durable_delivery_ledger"
-              ''
-                export FLOW_MESSAGE_JOINT_FLOW_BIN="${flowNexus}"
-                export FLOW_MESSAGE_JOINT_MESSAGE_BIN="${message.packages.${system}.default}/bin/message-nexus"
-                export FLOW_MESSAGE_JOINT_FLOW_REV="${sourceRevision}"
-                export FLOW_MESSAGE_JOINT_MESSAGE_REV="70b7daa3ff069b0b8c836ba6aff223992dcf59a1"
-                sha256sum "$FLOW_MESSAGE_JOINT_FLOW_BIN" "$FLOW_MESSAGE_JOINT_MESSAGE_BIN"
-              '';
-          # The accepted 0.53.2's real Memory, evolved and served by this
-          # Flow Nexus, which refuses a malformed policy without writing.
-          request-id-migration-process =
-            context.processCheck "request-id-migration-process"
-              "store::request_id_migration_process::actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without_writing"
-              ''
-                export FLOW_MIGRATION_PREDECESSOR_BIN="${migrationPredecessorPackage}/bin/flow-nexus"
-                export FLOW_MIGRATION_PREDECESSOR_STORE="${migrationPredecessorFixture}/share/request-id-predecessor"
-                export FLOW_MIGRATION_CURRENT_BIN="${flowNexus}"
-                export FLOW_MIGRATION_PREDECESSOR_REV="f7d2336a7380206728cbd5aef2ebb3656d0cfd87"
-                export FLOW_MIGRATION_CURRENT_REV="${sourceRevision}"
-                sha256sum "$FLOW_MIGRATION_PREDECESSOR_BIN" "$FLOW_MIGRATION_CURRENT_BIN"
-              '';
-          flow-request-id-immutable-contract-pins = pkgs.runCommand
-            "flow-request-id-immutable-contract-pins"
-            { nativeBuildInputs = [ pkgs.gnugrep ]; }
-            ''
-              grep -F 'rev = "be85c63cf4514ee9a5379754cb493fe1a6b21e9a"' ${./Cargo.toml}
-              grep -F 'rev = "1d3ebf0b5685285acff488453cdbe55d42960939"' ${./Cargo.toml}
-              grep -F 'signal-flow?rev=be85c63cf4514ee9a5379754cb493fe1a6b21e9a#be85c63cf4514ee9a5379754cb493fe1a6b21e9a' ${./Cargo.lock}
-              grep -F 'meta-signal-flow?rev=1d3ebf0b5685285acff488453cdbe55d42960939#1d3ebf0b5685285acff488453cdbe55d42960939' ${./Cargo.lock}
+          flowNexus = "${members.flow-nexus}/bin/flow-nexus";
+          # The checks beyond each member's, which join checks.default.
+          extraChecks = {
+            # nix/curriculum/Cargo.nix is what the base's crate2nix generates
+            # from the pinned Curriculum, as cargo-nix proves Cargo.nix.
+            curriculum-cargo-nix = context.cargoNixCheck {
+              source = curriculum;
+              cargoNix = ./nix/curriculum/Cargo.nix;
+              crateHashes = ./nix/curriculum/crate-hashes.json;
+            };
+            fmt = pkgs.runCommand "flow-fmt" { nativeBuildInputs = [ toolchain ]; } ''
+              cp -r ${rustSource} source
+              chmod -R u+w source
+              cd source
+              export CARGO_HOME="$NIX_BUILD_TOP/cargo-home"
+              cargo fmt --all --check
               touch "$out"
             '';
+            clippy = pkgs.linkFarm "flow-clippy" (lib.mapAttrs (_: lint) testBuilds);
+            # The capsule runner's own logic that runs no capsule: where a run
+            # keeps its witnesses and what it copies there before teardown.
+            # The tests run the workspace's own binaries (the invocation
+            # composers), which the unconfigured default lacks.
+            capsule-witnesses =
+              pkgs.runCommand "flow-capsule-witnesses"
+                { nativeBuildInputs = [ pkgs.babashka ]; }
+                ''
+                  bb ${./capsule/flow-capsule-test.clj} ${./capsule/flow-capsule.clj} ${workspaceBinaries} > result.txt \
+                    || { cat result.txt; exit 1; }
+                  cat result.txt
+                  cp result.txt "$out"
+                '';
+            # `fn main()` is the only production free function, and every
+            # production method lives in a trait.
+            no-free-functions =
+              pkgs.runCommand "flow-no-free-functions" { src = lawSource; }
+                (builtins.readFile ./checks/no-free-functions.sh);
+            no-inherent-methods =
+              pkgs.runCommand "flow-no-inherent-methods" { src = lawSource; }
+                (builtins.readFile ./checks/no-inherent-methods.sh);
+            # The real Flow Nexus and the real Message Nexus share one durable
+            # delivery ledger.
+            message-joint =
+              processCheck "message-joint"
+                "store::message_joint::real_flow_and_message_share_the_durable_delivery_ledger"
+                ''
+                  export FLOW_MESSAGE_JOINT_FLOW_BIN="${flowNexus}"
+                  export FLOW_MESSAGE_JOINT_MESSAGE_BIN="${message.packages.${system}.default}/bin/message-nexus"
+                  export FLOW_MESSAGE_JOINT_FLOW_REV="${sourceRevision}"
+                  export FLOW_MESSAGE_JOINT_MESSAGE_REV="70b7daa3ff069b0b8c836ba6aff223992dcf59a1"
+                  sha256sum "$FLOW_MESSAGE_JOINT_FLOW_BIN" "$FLOW_MESSAGE_JOINT_MESSAGE_BIN"
+                '';
+            # The accepted 0.53.2's real Memory, evolved and served by this
+            # Flow Nexus, which refuses a malformed policy without writing.
+            request-id-migration-process =
+              processCheck "request-id-migration-process"
+                "store::request_id_migration_process::actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without_writing"
+                ''
+                  export FLOW_MIGRATION_PREDECESSOR_BIN="${migrationPredecessorPackage}/bin/flow-nexus"
+                  export FLOW_MIGRATION_PREDECESSOR_STORE="${migrationPredecessorFixture}/share/request-id-predecessor"
+                  export FLOW_MIGRATION_CURRENT_BIN="${flowNexus}"
+                  export FLOW_MIGRATION_PREDECESSOR_REV="f7d2336a7380206728cbd5aef2ebb3656d0cfd87"
+                  export FLOW_MIGRATION_CURRENT_REV="${sourceRevision}"
+                  sha256sum "$FLOW_MIGRATION_PREDECESSOR_BIN" "$FLOW_MIGRATION_CURRENT_BIN"
+                '';
+            flow-request-id-immutable-contract-pins = pkgs.runCommand
+              "flow-request-id-immutable-contract-pins"
+              { nativeBuildInputs = [ pkgs.gnugrep ]; }
+              ''
+                grep -F 'rev = "be85c63cf4514ee9a5379754cb493fe1a6b21e9a"' ${./Cargo.toml}
+                grep -F 'rev = "1d3ebf0b5685285acff488453cdbe55d42960939"' ${./Cargo.toml}
+                grep -F 'signal-flow?rev=be85c63cf4514ee9a5379754cb493fe1a6b21e9a#be85c63cf4514ee9a5379754cb493fe1a6b21e9a' ${./Cargo.lock}
+                grep -F 'meta-signal-flow?rev=1d3ebf0b5685285acff488453cdbe55d42960939#1d3ebf0b5685285acff488453cdbe55d42960939' ${./Cargo.lock}
+                touch "$out"
+              '';
+
+          };
+          # The pinned Curriculum, built per crate on the same base.
+          curriculumCrates = import ./nix/curriculum/Cargo.nix {
+            inherit pkgs;
+            inherit (context) buildRustCrateForPkgs;
+            defaultCrateOverrides = context.crateOverrides // {
+              curriculum =
+                attributes:
+                (context.crateOverrides.curriculum or (_: { })) attributes // { src = curriculum; };
+            };
+            rootFeatures = [
+              "default"
+              "datom"
+            ];
+          };
+        in
+        {
+          inherit
+            pkgs
+            toolchain
+            workspace
+            members
+            commands
+            testBuilds
+            stampedNexusTests
+            findTest
+            binaries
+            crateCheck
+            processCheck
+            checkEnvironments
+            memberChecks
+            workspaceBinaries
+            lint
+            rustSource
+            lawSource
+            ;
+          crate2nix = context.crate2nix;
+          curriculum = curriculumCrates.rootCrate.build;
+        };
+    in
+    {
+      lib = forSystems (
+        system:
+        let
+          context = mkContext system;
+        in
+        {
+          mkFlowPackage = import ./nix/mk-flow-package.nix {
+            inherit lib version;
+            inherit (context) pkgs crateCheck binaries;
+            flowNexus = context.members.flow-nexus;
+            flowNexusTests = context.testBuilds.flow-nexus;
+            members = lib.attrValues (removeAttrs context.commands [ "flow-nexus" ]);
+            memberChecks = lib.attrValues (removeAttrs context.memberChecks [ "flow-nexus" ]);
+            flowNexusEnvironment = context.checkEnvironments.flow-nexus;
+          };
         }
       );
+
+      packages = forSystems (
+        system:
+        let
+          context = mkContext system;
+          pkgs = context.pkgs;
+        in
+        context.members
+        // {
+          # Intentionally the last unconfigured artifact. A 0.43 package
+          # is built only through lib.<system>.mkFlowPackage with an explicit
+          # defaultConfiguration; production has supplied none yet.
+          default = unconfigured-flow.packages.${system}.default;
+          # The flow-nexus library test executable, from its stamped test
+          # build, so a test kept out of every check (one that needs a store
+          # no repository holds, named at run time) can be run by name where
+          # a build runs.
+          store-proof = pkgs.runCommand "flow-nexus-store-proof" { } ''
+            ${context.findTest "binary" context.stampedNexusTests
+              "store::request_id_migration_process::actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without_writing"
+            }
+            mkdir -p "$out/bin"
+            cp "$binary" "$out/bin/flow-nexus-store-proof"
+          '';
+          # The Curriculum Nexus and CLI of the Curriculum revision Flow
+          # pins, as the capsule runs them.
+          curriculum = context.curriculum;
+          # The capsule test: a Babashka script and the Configure datoms it
+          # applies, kept side by side, with the Curriculum it runs. It is
+          # given the flow package to run.
+          flow-capsule = pkgs.runCommand "flow-capsule" { } ''
+            mkdir -p "$out/libexec/flow-capsule" "$out/bin"
+            ln -s ${self.packages.${system}.curriculum} "$out/libexec/flow-capsule/curriculum"
+            {
+              echo "#!${pkgs.babashka}/bin/bb"
+              cat ${./capsule/flow-capsule.clj}
+            } > "$out/libexec/flow-capsule/flow-capsule"
+            chmod +x "$out/libexec/flow-capsule/flow-capsule"
+            cp ${./capsule/configure.datom} "$out/libexec/flow-capsule/configure.datom"
+            ln -s "$out/libexec/flow-capsule/flow-capsule" "$out/bin/flow-capsule"
+          '';
+        }
+      );
+
+      apps = forSystems (system: {
+        flow-capsule = {
+          type = "app";
+          program = "${self.packages.${system}.flow-capsule}/bin/flow-capsule";
+        };
+      });
+
+      # Every check, the base's cargo-nix with the ones above; checks.default
+      # is all of them, so a green default is the whole gate.
+      checks = forSystems (system: (mkContext system).workspace.checks);
 
       devShells = forSystems (
         system:

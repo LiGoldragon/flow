@@ -333,7 +333,9 @@ pending while no answer came is replayed to the next connection that resumes
 the thread. The Nexus keeps one connection per live Codex thread it holds,
 subscribed by `thread/resume` (without its turns) when the Nexus starts, when
 the store announces a change that brings the thread's flow, and after every
-reconnect. That connection starts no turn and carries no model content, and it
+reconnect: at once when a connection closes, and on the app-server's socket
+appearing at its name (an inotify event watched before each attempt) when an
+attempt fails. That connection starts no turn and carries no model content, and it
 is the one intended responder. First answer wins is how the app-server
 behaves, not a security guarantee: any process of the same user that resumes
 the thread can answer a call first.

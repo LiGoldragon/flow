@@ -3,6 +3,7 @@
 use crate::claude::{ProjectsClaudeReadiness, ReadsClaudeSessions};
 use crate::codex::SelectsCodexEndpoint;
 pub(crate) mod claude_paste;
+pub(crate) mod events;
 pub mod launch;
 pub mod pane;
 pub mod reservation;
@@ -141,10 +142,17 @@ pub struct HerdrCli {
     /// by launch request, held from the start until its session has bound.
     pub(crate) held_system_prompts:
         std::sync::Mutex<std::collections::HashMap<String, std::fs::File>>,
-    /// How long to wait between two readbacks of a pane's title.
-    title_readback_interval: std::time::Duration,
+    /// How long a launch's title is waited for: each change Herdr announces
+    /// of the pane, or the session's transcript records, is read until the
+    /// title shows or this passes.
+    title_wait: std::time::Duration,
     /// How long Herdr's `agent wait` may take before a bind or a first prompt.
     rest_wait: std::time::Duration,
+    /// How long a seat's own word of a submission is waited for once Flow
+    /// typed into its pane.
+    submission_wait: std::time::Duration,
+    /// How long a composer is given to show keys whose effect no event marks.
+    render_wait: std::time::Duration,
 }
 
 impl Default for HerdrCli {
@@ -206,8 +214,10 @@ impl Default for HerdrCli {
             ),
             ordinary_socket: defaults.ordinary_socket_path(),
             held_system_prompts: Default::default(),
-            title_readback_interval: std::time::Duration::from_millis(250),
+            title_wait: std::time::Duration::from_secs(10),
             rest_wait: std::time::Duration::from_secs(30),
+            submission_wait: std::time::Duration::from_secs(5),
+            render_wait: std::time::Duration::from_secs(1),
         }
     }
 }
@@ -484,8 +494,10 @@ impl ConfiguresHerdrCli for HerdrCli {
             harness_hook: Live::holding(PathBuf::from("/fixture/bin/flow-hook")),
             ordinary_socket: PathBuf::from("/fixture/run/flow-next/flow/flow.sock"),
             held_system_prompts: Default::default(),
-            title_readback_interval: std::time::Duration::from_millis(1),
+            title_wait: std::time::Duration::from_secs(2),
             rest_wait: std::time::Duration::from_secs(1),
+            submission_wait: std::time::Duration::from_secs(2),
+            render_wait: std::time::Duration::from_millis(1),
         }
     }
 }

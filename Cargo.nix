@@ -1854,8 +1854,8 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/message";
-          rev = "8a60367d00860c0b1d91b522641648ee1ae01e91";
-          sha256 = "0pkvv5qbahha1kydc4vlfg78m5v166q4zsfznnrbdbak9yh5gadj";
+          rev = "e8299aa0ac5046a05cc3d0c8a8be581e130f4c52";
+          sha256 = "07gsb4kswaygas4y8hxg3vzhc0c8wccqaswxzwz2abvp0i3rvn5i";
         };
         libName = "message_defaults";
 
@@ -1868,8 +1868,8 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/message";
-          rev = "8a60367d00860c0b1d91b522641648ee1ae01e91";
-          sha256 = "0pkvv5qbahha1kydc4vlfg78m5v166q4zsfznnrbdbak9yh5gadj";
+          rev = "e8299aa0ac5046a05cc3d0c8a8be581e130f4c52";
+          sha256 = "07gsb4kswaygas4y8hxg3vzhc0c8wccqaswxzwz2abvp0i3rvn5i";
         };
         libName = "message_nexus";
         dependencies = [

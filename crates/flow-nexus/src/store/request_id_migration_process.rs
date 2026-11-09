@@ -833,6 +833,10 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
             open_order.request_id.as_str(),
         )],
     );
+    // The heartbeat the current process admits at its first beat (one
+    // second) has no event outside that process: it is a Flow-admitted
+    // delivery, and ObserveDeliveries carries Message-admitted ones only, so
+    // the beat is given one bounded wait.
     std::thread::sleep(Duration::from_millis(1_750));
     current_process.stop();
     let reopened = FlowStore::open_configured(&store_path).expect("operated Memory reopens");

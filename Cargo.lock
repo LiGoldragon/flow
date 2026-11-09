@@ -528,12 +528,12 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "message-defaults"
 version = "0.22.1"
-source = "git+https://github.com/LiGoldragon/message?rev=8a60367d00860c0b1d91b522641648ee1ae01e91#8a60367d00860c0b1d91b522641648ee1ae01e91"
+source = "git+https://github.com/LiGoldragon/message?rev=e8299aa0ac5046a05cc3d0c8a8be581e130f4c52#e8299aa0ac5046a05cc3d0c8a8be581e130f4c52"
 
 [[package]]
 name = "message-nexus"
 version = "0.22.1"
-source = "git+https://github.com/LiGoldragon/message?rev=8a60367d00860c0b1d91b522641648ee1ae01e91#8a60367d00860c0b1d91b522641648ee1ae01e91"
+source = "git+https://github.com/LiGoldragon/message?rev=e8299aa0ac5046a05cc3d0c8a8be581e130f4c52#e8299aa0ac5046a05cc3d0c8a8be581e130f4c52"
 dependencies = [
  "ethos-zero 16.0.0",
  "getrandom 0.4.3",

@@ -1,7 +1,7 @@
 # Flow 0.53.3: replacement waits for rest; a Stop carries its background work
 
 Pins signal-flow 57.0.0 (`8e56457`), meta-signal-flow 72.0.0 (`0ee6593`),
-Message 0.22.1 (`8a60367`), signal-message 21.0.1 (`a5e04b7`) and
+Message 0.22.1 (`e8299aa`), signal-message 21.0.1 (`a5e04b7`) and
 meta-signal-message 3.0.1 (`1ec9e00`).
 
 - A Claude seat rests when its own last Stop names no background work and
@@ -60,6 +60,23 @@ meta-signal-message 3.0.1 (`1ec9e00`).
   `IN_MOVED_TO`, and connects at once. Both sockets are placed before
   serving, and then the Nexus sends `READY=1` to `$NOTIFY_SOCKET` when set:
   its unit can be `Type=notify`.
+- A text Flow types into a resting seat is seen submitted on the seat's
+  own word, never on a composer read again: Claude Code's UserPromptSubmit
+  (the hook's `PromptSubmitted` of the text's exact digest in the flow's own
+  session) or a `turn/started` on a Codex flow's thread, read by every
+  connection subscribed to it as it arrives. Presented is Herdr's reaction
+  and that word; a text that left the composer with no word of the seat is
+  Transported. A working seat, which announces nothing until it takes its
+  input, and keys that submit nothing (a take-back, a retract) are read off
+  the composer once, after one bounded wait.
+- A Claude launch's title readback waits on Herdr's events of the pane
+  (`pane.updated`, its agent's status, its agent detected), subscribed
+  before the first read, instead of reading again every 250 ms.
+- A send-tool responder connects again when the app-server's control
+  socket appears at its name (inotify on its directory: `IN_CREATE` as
+  Codex binds it in place, `IN_ATTRIB` as it sets its mode once it listens,
+  `IN_MOVED_TO`), watched before every attempt; the 1 s to 60 s backoff is
+  gone. An attempt that fails waits for the next appearance.
 
 # Flow 0.53.1
 

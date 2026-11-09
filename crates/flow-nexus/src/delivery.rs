@@ -13,6 +13,14 @@
 //! is handed over is the queue's: it waits for its recipient's idle event,
 //! the seat's Stop or its thread's turn completed (`waking`), never for a
 //! screen read here.
+//!
+//! A text typed into a resting seat is seen submitted by the seat's own
+//! word (`submission`): Claude Code's UserPromptSubmit of its exact digest,
+//! or a Codex turn started on its thread, waited for from a mark taken
+//! before the first key. A working seat announces nothing until it takes
+//! its input, and a take-back or a retract submits nothing; Herdr announces
+//! no composer change, so those are read off the composer once, after one
+//! bounded wait.
 
 use crate::delivery::body::ShowsPaneText;
 pub mod body;
@@ -26,15 +34,19 @@ use crate::performing::Performs;
 use crate::store::context::JudgesCompaction;
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
 use crate::store::{ReadsFlowRows, RecordsReplacement};
+use crate::submission::{SeatSubmission, WitnessesSubmissions};
 use crate::waking::{HoldsWakingMetaflows, IdentifiesWakingLease, WakingLease};
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
+use flow_native::DigestsPrompt;
 use lease::LeasesPanes;
 use meta_signal_flow::{
     CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Content, Delivery,
     DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommand, HarnessProfile,
     InterruptWitness, Message, Response,
 };
-use signal_flow::{AgentState, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection};
+use signal_flow::{
+    AgentState, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
+};
 
 /// Why a flow cannot be written to, before its pane is looked at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,8 +386,12 @@ impl DeliversMessages for RunningNexus {
 /// What became of a placed letter in the composer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Submitted {
-    /// It left the composer on Herdr's own submit.
-    Seen,
+    /// The seat reported taking it on Herdr's own submit: Claude Code's
+    /// UserPromptSubmit with its exact digest, or a Codex turn started.
+    Witnessed,
+    /// It left the composer on Herdr's own submit, and no word of the seat
+    /// marks it: a seat that was working, or one whose word did not come.
+    Cleared,
     /// It left only after Flow pressed the submit key once more.
     AfterPress,
     /// The composer could not be read after placing.
@@ -384,6 +400,14 @@ enum Submitted {
     TakenBack,
     /// It would neither submit nor be taken back.
     Stuck,
+}
+
+/// The seat's word a writer waits for after typing: a submission of its
+/// session after the mark taken before the keys, of the kind `wanted`
+/// accepts.
+struct AwaitedSubmission {
+    mark: crate::submission::SubmissionMark,
+    wanted: Box<dyn Fn(&SeatSubmission) -> bool>,
 }
 
 /// One delivery's key sequence, run while its pane lease is held.
@@ -408,10 +432,20 @@ trait RunsLeasedDelivery<'run> {
         interrupt_witness: InterruptWitness,
         delivery_grade: DeliveryGrade,
     ) -> Result<Delivery, DeliveryRejection>;
-    /// Sees the placed text leave the composer. When it stays, the submit
-    /// key is pressed once; when it stays after that too, the text is taken
-    /// back, so the pane is never left holding a letter.
-    fn submitted(&self, lines: usize) -> Submitted;
+    /// The submission of the seat's own session a writer about to press
+    /// keys waits for: a prompt of exactly `text`'s digest from a Claude
+    /// seat, any when `text` is not known, or a turn started on a Codex
+    /// seat's thread. None when the seat has no session to report under.
+    fn awaited_submission(&self, text: Option<&str>) -> Option<AwaitedSubmission>;
+    /// Whether the seat reported the submission `awaited` waits for within
+    /// the pane writer's submission wait.
+    fn seat_took(&self, awaited: Option<&AwaitedSubmission>) -> bool;
+    /// Sees the placed text submitted: the seat's own word of it when the
+    /// seat was resting (`awaited`), else the composer read once. When the
+    /// text stays in the composer, the submit key is pressed once; when it
+    /// stays after that too, the text is taken back, so the pane is never
+    /// left holding a letter.
+    fn submitted(&self, lines: usize, awaited: Option<&AwaitedSubmission>) -> Submitted;
     /// Empties the composer of a letter an interrupt put back into it; a
     /// text that is not a letter is a person's and is never touched.
     fn retracted_restored_letter(&self) -> bool;
@@ -473,25 +507,77 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         Ok(delivery)
     }
 
-    fn submitted(&self, lines: usize) -> Submitted {
+    fn awaited_submission(&self, text: Option<&str>) -> Option<AwaitedSubmission> {
+        let session = self.target.node.session_id.as_str();
+        if session.is_empty() {
+            return None;
+        }
+        let wanted: Box<dyn Fn(&SeatSubmission) -> bool> = match &self.target.node.harness_kind {
+            HarnessKind::Claude => {
+                let digest = text.map(|text| text.prompt_sha256());
+                Box::new(
+                    move |submission: &SeatSubmission| match (submission, &digest) {
+                        (SeatSubmission::Prompt(reported), Some(digest)) => reported == digest,
+                        (SeatSubmission::Prompt(_), None) => true,
+                        (SeatSubmission::TurnStarted, _) => false,
+                    },
+                )
+            }
+            HarnessKind::Codex => {
+                Box::new(|submission: &SeatSubmission| *submission == SeatSubmission::TurnStarted)
+            }
+        };
+        Some(AwaitedSubmission {
+            mark: self.nexus.seat_submissions.mark(session),
+            wanted,
+        })
+    }
+
+    fn seat_took(&self, awaited: Option<&AwaitedSubmission>) -> bool {
+        let Some(awaited) = awaited else {
+            return false;
+        };
+        self.nexus.seat_submissions.witnessed_by(
+            &awaited.mark,
+            &*awaited.wanted,
+            std::time::Instant::now() + self.nexus.herdr.submission_wait(),
+        )
+    }
+
+    fn submitted(&self, lines: usize, awaited: Option<&AwaitedSubmission>) -> Submitted {
         let herdr = &self.nexus.herdr;
         let route = &self.target.route;
         let harness_kind = &self.target.node.harness_kind;
-        match herdr.submission(route, harness_kind) {
-            Submission::Seen => return Submitted::Seen,
+        // The seat's word, else the composer: read at once after a word
+        // that did not come in its wait, or once after a render wait when
+        // no word was awaited.
+        let composer = |awaited: Option<&AwaitedSubmission>| match awaited {
+            Some(_) => herdr.composer_now(route, harness_kind),
+            None => herdr.composer_after_keys(route, harness_kind),
+        };
+        if self.seat_took(awaited) {
+            return Submitted::Witnessed;
+        }
+        match composer(awaited) {
+            Submission::Seen => return Submitted::Cleared,
             Submission::Unreadable => return Submitted::Unreadable,
             Submission::Unseen => {}
         }
         if herdr.submit(route, harness_kind) {
             let _ = self.step(LeaseStep::Submitted);
-            match herdr.submission(route, harness_kind) {
+            if self.seat_took(awaited) {
+                return Submitted::AfterPress;
+            }
+            match composer(awaited) {
                 Submission::Seen => return Submitted::AfterPress,
                 Submission::Unreadable => return Submitted::Unreadable,
                 Submission::Unseen => {}
             }
         }
+        // A take-back submits nothing, and nothing marks it but the
+        // composer emptying.
         if herdr.take_back(route, harness_kind, lines)
-            && herdr.submission(route, harness_kind) == Submission::Seen
+            && herdr.composer_after_keys(route, harness_kind) == Submission::Seen
         {
             return Submitted::TakenBack;
         }
@@ -507,19 +593,25 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         let herdr = &self.nexus.herdr;
         let route = &self.target.route;
         let harness_kind = &self.target.node.harness_kind;
+        // A retract submits nothing: the composer emptying is all that
+        // shows it.
         herdr
             .composer_text(route, harness_kind)
             .is_some_and(|text| text.opens_a_letter())
             && herdr.retract(route, harness_kind)
-            && herdr.submission(route, harness_kind) == Submission::Seen
+            && herdr.composer_after_keys(route, harness_kind) == Submission::Seen
     }
 
     fn resubmitted_cancelled_prompt(&self) -> bool {
         let herdr = &self.nexus.herdr;
         let route = &self.target.route;
         let harness_kind = &self.target.node.harness_kind;
+        // The cancelled prompt's text is not known here: any submission of
+        // the seat's session after the press is its word.
+        let awaited = self.awaited_submission(None);
         herdr.submit(route, harness_kind)
-            && herdr.submission(route, harness_kind) == Submission::Seen
+            && (self.seat_took(awaited.as_ref())
+                || herdr.composer_now(route, harness_kind) == Submission::Seen)
     }
 
     fn run(&self) -> Result<Delivery, DeliveryRejection> {
@@ -599,6 +691,12 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         }
         let observe = matches!(agent_state, AgentState::Idle | AgentState::Done);
         let text = self.request.message.pane_text();
+        // A resting seat reports taking the text; a working one announces
+        // nothing until it takes its input, so only its composer shows the
+        // submission. The mark is taken before any key.
+        let awaited = observe
+            .then(|| self.awaited_submission(Some(text.as_str())))
+            .flatten();
         // Whether Herdr saw the recipient react; None when what followed
         // the text is not known.
         let reacted = match self
@@ -620,29 +718,32 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         }
         // Whatever Herdr answered, the letter must not be left typed and
         // unsubmitted: a composer holding it refuses every later letter.
-        let submitted = self.submitted(text.as_str().lines().count());
+        let submitted = self.submitted(text.as_str().lines().count(), awaited.as_ref());
         let observed = match (reacted, submitted) {
             (_, Submitted::TakenBack) => {
                 return self.refuse(DeliveryRejection::ComposerOccupied);
             }
-            (_, Submitted::Stuck) | (None, Submitted::Seen | Submitted::Unreadable) => {
+            (_, Submitted::Stuck)
+            | (None, Submitted::Witnessed | Submitted::Cleared | Submitted::Unreadable) => {
                 return self.settle(interrupt_witness, DeliveryGrade::Uncertain);
             }
-            (Some(observed), Submitted::Seen) => observed,
-            // Flow's own press submitted it, or the composer could not be
-            // read: Herdr took the text, and no reaction to it is witnessed.
-            (_, Submitted::AfterPress | Submitted::Unreadable) => false,
+            (Some(observed), Submitted::Witnessed) => observed,
+            // The text left the composer with no word of the seat, Flow's
+            // own press submitted it, or the composer could not be read:
+            // Herdr took the text, and the seat taking it is not witnessed.
+            (_, Submitted::Cleared | Submitted::AfterPress | Submitted::Unreadable) => false,
         };
         if !observed {
             return self.settle(interrupt_witness, DeliveryGrade::Transported);
         }
         // Presented is two observations: Herdr waited for the recipient's
         // reaction and answered `agent_prompted` for the exact pane and
-        // terminal this route names, and the letter was seen to leave the
-        // composer. Herdr's answer alone is not a submission: it matches
-        // any lifecycle change after the text, and in the e167d8 sandbox
-        // (fms-9a3e2b) it answered for a letter Claude Code left typed and
-        // unsubmitted. The agent's *name* is never re-read: it is a label
+        // terminal this route names, and the seat itself reported taking
+        // the letter (its UserPromptSubmit of the letter's exact digest, or
+        // a turn started on its thread). Herdr's answer alone is not a
+        // submission: it matches any lifecycle change after the text, and
+        // in the e167d8 sandbox (fms-9a3e2b) it answered for a letter
+        // Claude Code left typed and unsubmitted. The agent's *name* is never re-read: it is a label
         // an imported pane may not carry at all.
         //
         // A Pending flow seen reacting to a real Deliver is witnessed live.

@@ -145,21 +145,34 @@ fn wait_for_flow_socket(path: &Path) -> UnixStream {
     UnixStream::connect(path).expect("Flow's socket listens")
 }
 
-/// Message 8a60367 binds its socket in place and announces no readiness:
-/// its name appears before it listens, and nothing marks the listen, so a
-/// connection is tried until one is taken.
-fn wait_for_socket(path: &Path) -> UnixStream {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        if let Ok(peer) = UnixStream::connect(path) {
-            return peer;
-        }
+/// Message's socket, moved in at its name only once it listens: its
+/// arrival is watched before Message starts, so a stale socket an earlier
+/// Message left there is never taken for it, and awaited as that event.
+struct SocketArrival {
+    path: PathBuf,
+    arrived: std::sync::mpsc::Receiver<()>,
+    _watch: crate::event_wait::NameWatch,
+}
+
+fn socket_arrival(path: &Path) -> SocketArrival {
+    use crate::event_wait::WatchesName;
+    let (arrival, arrived) = std::sync::mpsc::channel();
+    let watch = crate::event_wait::NameWatch::arm(path, Box::new(move || arrival.send(()).is_ok()))
+        .expect("Message's socket is watched");
+    SocketArrival {
+        path: path.to_owned(),
+        arrived,
+        _watch: watch,
+    }
+}
+
+impl SocketArrival {
+    fn awaited(self) {
         assert!(
-            Instant::now() < deadline,
+            self.arrived.recv_timeout(Duration::from_secs(30)).is_ok(),
             "{} never listened",
-            path.display()
+            self.path.display()
         );
-        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -236,7 +249,7 @@ fn send_through_message(
     message_socket: &Path,
     recipient: Address,
 ) -> signal_flow::VisibleSendAcceptance {
-    let mut peer = wait_for_socket(message_socket);
+    let mut peer = UnixStream::connect(message_socket).expect("Message's socket listens");
     FramedStream::write_frame(
         &mut peer,
         &signal_message::Query::Send(SendRequest {
@@ -295,7 +308,7 @@ fn real_flow_and_message_share_the_durable_delivery_ledger() {
     );
     assert_eq!(
         std::env::var("FLOW_MESSAGE_JOINT_MESSAGE_REV").unwrap(),
-        "8a60367d00860c0b1d91b522641648ee1ae01e91"
+        "e8299aa0ac5046a05cc3d0c8a8be581e130f4c52"
     );
     let flow_binary = required_path("FLOW_MESSAGE_JOINT_FLOW_BIN");
     let message_binary = required_path("FLOW_MESSAGE_JOINT_MESSAGE_BIN");
@@ -314,8 +327,9 @@ fn real_flow_and_message_share_the_durable_delivery_ledger() {
         model: Model::Sol,
     };
     bind_sender(flow_socket, &sender);
+    let arrival = socket_arrival(&message_socket);
     let message = spawn_message(&message_binary, home.path(), runtime.path());
-    wait_for_socket(&message_socket);
+    arrival.awaited();
     let message_address = Address {
         aspect: Aspect::Field,
         topic: "message".into(),
@@ -324,8 +338,9 @@ fn real_flow_and_message_share_the_durable_delivery_ledger() {
     let acceptance = send_through_message(&message_socket, message_address);
     message.stop();
 
+    let arrival = socket_arrival(&message_socket);
     let recovered = spawn_message(&message_binary, home.path(), runtime.path());
-    wait_for_socket(&message_socket);
+    arrival.awaited();
     recovered.stop();
     let tracking = message_tracking(home.path(), runtime.path());
     assert_eq!(tracking.ledger.len(), 1);
@@ -363,8 +378,9 @@ fn real_flow_and_message_share_the_durable_delivery_ledger() {
 
     let flow = spawn_flow(&flow_binary, home.path(), runtime.path(), &place);
     drop(wait_for_flow_socket(flow_socket));
+    let arrival = socket_arrival(&message_socket);
     let message = spawn_message(&message_binary, home.path(), runtime.path());
-    wait_for_socket(&message_socket);
+    arrival.awaited();
     message.stop();
     flow.stop();
     let resumed = message_tracking(home.path(), runtime.path());

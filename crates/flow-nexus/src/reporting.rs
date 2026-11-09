@@ -6,10 +6,12 @@
 //! `ReadEvents`. A `Stopped` event, once answered, lets a launch waiting on
 //! it send its next part; when it names the flow's registered session and
 //! that session's transcript, it is the flow's turn end: it writes the
-//! flow's context size, and may drain its queue. A `PromptSubmitted` event in the flow's registered session whose
-//! digest is exactly the request a hand-over typed is that request's
-//! receipt, and settles it (`after_report`). An event naming another session
-//! is kept and acts on nothing.
+//! flow's context size, and may drain its queue. A `PromptSubmitted` event
+//! in the flow's registered session is the seat's word that it took a
+//! prompt, which a writer that typed into its pane waits for
+//! (`submission`); whose digest is exactly the request a hand-over typed is
+//! that request's receipt, and settles it (`after_report`). An event naming
+//! another session is kept and acts on nothing.
 //!
 //! A Claude session /clear ends is a session change, not an exit: its
 //! `Cleared` is kept and records nothing else, the flow stays live and its
@@ -100,6 +102,20 @@ impl RecordsReports for RunningNexus {
     }
 
     fn after_attributed_report(&self, flow_id: &FlowId, event: &Event) {
+        // A prompt the flow's own session took is first the seat's word of
+        // a submission: a writer that typed it waits for it, holding the
+        // gate the settlement below takes, so it is witnessed before
+        // anything here waits.
+        if let Event::PromptSubmitted(prompt) = event
+            && self.correlated_prompt(flow_id, prompt)
+            && let Some(session) = prompt.native_session_id_option.as_deref()
+        {
+            use crate::submission::{SeatSubmission, WitnessesSubmissions};
+            self.seat_submissions.witness(
+                session,
+                SeatSubmission::Prompt(prompt.prompt_sha256.clone()),
+            );
+        }
         if let Event::Started(Some(session)) = event {
             self.follow_cleared_session(flow_id, session);
         }

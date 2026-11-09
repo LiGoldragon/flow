@@ -5,6 +5,7 @@
 use crate::generated::send_tool::DeclaresSendTool;
 use crate::send_tool::SendTool;
 use crate::store::{CodexEndpointConfiguration, RuntimeConfiguration};
+use crate::submission::{NotesAppServerMessage, NothingNoted};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha1::{Digest, Sha1};
 use signal_flow::{ComposedLaunch, HarnessKind, PromptDeliveryIntent, PromptDeliveryResult};
@@ -1084,8 +1085,11 @@ impl OpensCodexThread for CodexAdapter {
         // opened only once the app-server is shown to gate the tool on it.
         self.probe_send_tool()?;
         let (signals, inbox) = mpsc::channel();
+        // The launch submits its first turn itself: no writer waits on this
+        // connection for a submission.
+        let nothing: Arc<dyn NotesAppServerMessage> = Arc::new(NothingNoted);
         let subscription = self
-            .connect_experimental(1, &signals, &inbox)
+            .connect_experimental(1, &signals, &inbox, &nothing)
             .map_err(<CodexAdapterUnavailable as EndsSubscription>::ended)?;
         let mut connection = ThreadConnection {
             subscription,
@@ -1564,12 +1568,15 @@ impl NamesBoundCodexThread for CodexAdapter {
 }
 
 /// What reaches a send-tool responder: an event of one of its connections,
-/// named by the connection's generation, the order to stop, or, for a
-/// launch's responder alone, the end of the launch's work it serves beside.
+/// named by the connection's generation, the order to stop, for a launch's
+/// responder alone the end of the launch's work it serves beside, or the
+/// app-server's socket appearing at its name, named by the generation of
+/// the attempt whose watch saw it.
 pub(crate) enum ResponderSignal {
     Proxy(u64, ProxyEvent),
     Stop,
     WorkEnded,
+    SocketAppeared(u64),
 }
 
 /// Why a responder's connection ended, or its wait.
@@ -1601,12 +1608,15 @@ pub(crate) struct ThreadSubscription {
 
 pub(crate) trait SubscribesThread {
     /// A connection initialized with the experimental API, its events sent
-    /// to `signals` under `generation`, subscribed to no thread yet.
+    /// to `signals` under `generation`, subscribed to no thread yet. Each
+    /// message is shown to `notes` on the connection's reader as it is
+    /// read, before it is queued.
     fn connect_experimental(
         &self,
         generation: u64,
         signals: &mpsc::Sender<ResponderSignal>,
         inbox: &Receiver<ResponderSignal>,
+        notes: &Arc<dyn NotesAppServerMessage>,
     ) -> Result<ThreadSubscription, SubscriptionEnd>;
     fn subscribe_thread(
         &self,
@@ -1614,6 +1624,7 @@ pub(crate) trait SubscribesThread {
         generation: u64,
         signals: &mpsc::Sender<ResponderSignal>,
         inbox: &Receiver<ResponderSignal>,
+        notes: &Arc<dyn NotesAppServerMessage>,
     ) -> Result<ThreadSubscription, SubscriptionEnd>;
 }
 
@@ -1670,6 +1681,8 @@ impl ExchangesOnSubscription for ThreadSubscription {
             match signal {
                 ResponderSignal::Stop => return Err(SubscriptionEnd::Stopped),
                 ResponderSignal::WorkEnded => return Err(SubscriptionEnd::WorkEnded),
+                // A connection that is open needs no cue to connect.
+                ResponderSignal::SocketAppeared(_) => {}
                 ResponderSignal::Proxy(generation, _) if generation != self.generation => {}
                 ResponderSignal::Proxy(_, ProxyEvent::Ping(payload)) => self
                     .proxy
@@ -1742,10 +1755,17 @@ impl SubscribesThread for CodexAdapter {
         generation: u64,
         signals: &mpsc::Sender<ResponderSignal>,
         inbox: &Receiver<ResponderSignal>,
+        notes: &Arc<dyn NotesAppServerMessage>,
     ) -> Result<ThreadSubscription, SubscriptionEnd> {
         let sink = signals.clone();
+        let notes = Arc::clone(notes);
         let proxy = self
-            .spawn_proxy(move |event| sink.send(ResponderSignal::Proxy(generation, event)).is_ok())
+            .spawn_proxy(move |event| {
+                if let ProxyEvent::Reply(Ok(message)) = &event {
+                    notes.noted(message);
+                }
+                sink.send(ResponderSignal::Proxy(generation, event)).is_ok()
+            })
             .map_err(SubscriptionEnd::Failed)?;
         let mut subscription = ThreadSubscription {
             proxy,
@@ -1795,9 +1815,10 @@ impl SubscribesThread for CodexAdapter {
         generation: u64,
         signals: &mpsc::Sender<ResponderSignal>,
         inbox: &Receiver<ResponderSignal>,
+        notes: &Arc<dyn NotesAppServerMessage>,
     ) -> Result<ThreadSubscription, SubscriptionEnd> {
         self.probe_send_tool().map_err(SubscriptionEnd::Failed)?;
-        let mut subscription = self.connect_experimental(generation, signals, inbox)?;
+        let mut subscription = self.connect_experimental(generation, signals, inbox, notes)?;
         match subscription.exchange(
             inbox,
             2,

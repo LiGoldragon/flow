@@ -40,6 +40,7 @@ use crate::codex::{
 };
 use crate::codex_turns::{ReadsThreadStatus, ReadsTurnEvent, SettlesRestingCodexSeats, TurnEvent};
 use crate::compacting::{ReadsCodexContextSignal, WatchesCompactions};
+use crate::event_wait::{NameWatch, WatchesName};
 use crate::generated::send_tool::{
     AnswersToolCall, DeclaresSendTool, HandlesSendCall, ParamsCarrying, ReadsSendArguments,
     ReadsToolCall, SendArguments, SendCall, SendInvocation, SendKind, SendOutcome, SendPriority,
@@ -51,6 +52,7 @@ use crate::sending::{AdmitsSendPayload, MintsId};
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows};
+use crate::submission::NotesAppServerMessage;
 use crate::waking::{RestsEndedAwake, SleepsAndWakesSeats};
 use crate::{HoldsStopRequest, RunningNexus, store::AnnouncesLaunchChanges};
 use datom_codec::Datomizable;
@@ -59,7 +61,7 @@ use sha2::{Digest, Sha256};
 use signal_flow::{Address, Aspect, HarnessKind, Message, Model, Request};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::mpsc,
+    sync::{Arc, mpsc},
     thread::Scope,
     time::{Duration, Instant},
 };
@@ -612,25 +614,55 @@ impl HandlesSendCall for RunningNexus {
     }
 }
 
-/// How long a responder waits before it reconnects: from the first wait,
-/// doubling after each connection that fails, to the longest.
-pub(crate) trait PacesReconnection {
-    const FIRST_WAIT: Duration = Duration::from_secs(1);
-    const LONGEST_WAIT: Duration = Duration::from_secs(60);
-    /// Waits `wait` unless told to stop first; true when told to stop.
-    fn stopped_within(inbox: &mpsc::Receiver<ResponderSignal>, wait: Duration) -> bool {
-        let deadline = Instant::now() + wait;
+/// When a responder connects again: once the app-server's control socket
+/// appears at its name. The socket is watched before every attempt, so an
+/// appearance while the attempt runs is not missed; an attempt that fails
+/// waits for the next appearance, and nothing is tried again on a timer.
+/// Codex's app-server (app-server-transport, 0.149) binds its socket in
+/// place, made at its name (`IN_CREATE`), and sets its mode to 0600 once it
+/// listens (`IN_ATTRIB`); a socket renamed into its name (`IN_MOVED_TO`)
+/// is read the same.
+pub(crate) trait AwaitsAppServerSocket {
+    /// The watch of the socket of `adapter`, its cues sent to `signals` as
+    /// `SocketAppeared(generation)`; None when the socket cannot be
+    /// watched, so only the order to stop is waited for.
+    fn socket_watch(
+        adapter: &CodexAdapter,
+        generation: u64,
+        signals: &mpsc::Sender<ResponderSignal>,
+    ) -> Option<NameWatch> {
+        let signals = signals.clone();
+        NameWatch::arm(
+            std::path::Path::new(&adapter.socket),
+            Box::new(move || {
+                signals
+                    .send(ResponderSignal::SocketAppeared(generation))
+                    .is_ok()
+            }),
+        )
+        .inspect_err(|error| {
+            eprintln!(
+                "flow-nexus: Codex app-server socket {} is not watched: {error}",
+                adapter.socket
+            );
+        })
+        .ok()
+    }
+
+    /// Waits for the socket's appearance seen by `generation`'s watch, or
+    /// for the order to stop; true when told to stop.
+    fn stopped_before_appearance(inbox: &mpsc::Receiver<ResponderSignal>, generation: u64) -> bool {
         loop {
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                return false;
-            };
-            match inbox.recv_timeout(remaining) {
-                Ok(ResponderSignal::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return true;
-                }
-                // Events of a connection already closed.
-                Ok(ResponderSignal::Proxy(..) | ResponderSignal::WorkEnded) => {}
-                Err(mpsc::RecvTimeoutError::Timeout) => return false,
+            match inbox.recv() {
+                Ok(ResponderSignal::Stop) | Err(mpsc::RecvError) => return true,
+                Ok(ResponderSignal::SocketAppeared(seen)) if seen == generation => return false,
+                // Events of a connection already closed, and cues of an
+                // earlier attempt's watch.
+                Ok(
+                    ResponderSignal::Proxy(..)
+                    | ResponderSignal::WorkEnded
+                    | ResponderSignal::SocketAppeared(_),
+                ) => {}
             }
         }
     }
@@ -659,7 +691,7 @@ pub(crate) trait RespondsToSendCalls {
     ) -> Result<(), crate::codex::CodexAdapterUnavailable>;
 }
 
-impl PacesReconnection for RunningNexus {}
+impl AwaitsAppServerSocket for RunningNexus {}
 
 impl RespondsToSendCalls for RunningNexus {
     fn respond_for(
@@ -669,24 +701,26 @@ impl RespondsToSendCalls for RunningNexus {
         signals: mpsc::Sender<ResponderSignal>,
         inbox: mpsc::Receiver<ResponderSignal>,
     ) {
+        let notes: Arc<dyn NotesAppServerMessage> = self.seat_submissions.clone();
         let mut generation = 0;
-        let mut wait = Self::FIRST_WAIT;
         loop {
             generation += 1;
-            match adapter.subscribe_thread(thread, generation, &signals, &inbox) {
+            // Armed before the look: the socket appearing while this
+            // attempt runs is the cue for the next one.
+            let watch = Self::socket_watch(adapter, generation, &signals);
+            match adapter.subscribe_thread(thread, generation, &signals, &inbox, &notes) {
                 Err(SubscriptionEnd::Stopped) => return,
                 // No launch work is served beside a responder of its own.
                 Err(SubscriptionEnd::WorkEnded) => continue,
                 Err(SubscriptionEnd::Failed(error)) => {
                     eprintln!("flow-nexus: send tool for thread {thread} not subscribed: {error}");
-                    if Self::stopped_within(&inbox, wait) {
+                    if Self::stopped_before_appearance(&inbox, generation) {
                         return;
                     }
-                    wait = (wait * 2).min(Self::LONGEST_WAIT);
                     continue;
                 }
                 Ok(mut subscription) => {
-                    wait = Self::FIRST_WAIT;
+                    drop(watch);
                     let early = std::mem::take(&mut subscription.early);
                     let mut open = early.into_iter().all(|request| {
                         self.answer_request(&mut subscription, request)
@@ -728,10 +762,9 @@ impl RespondsToSendCalls for RunningNexus {
                             }
                         }
                     }
+                    // The connection closed: the next attempt is made at
+                    // once, its own watch armed first.
                     subscription.close();
-                    if Self::stopped_within(&inbox, wait) {
-                        return;
-                    }
                 }
             }
         }
@@ -1044,7 +1077,8 @@ impl RefusesInterruptedCalls for RunningNexus {
     fn refuse_interrupted_calls(&self, thread: &str, adapter: &CodexAdapter) -> InterruptedCalls {
         let mut tally = InterruptedCalls::default();
         let (signals, inbox) = mpsc::channel();
-        let mut subscription = match adapter.subscribe_thread(thread, 1, &signals, &inbox) {
+        let notes: Arc<dyn NotesAppServerMessage> = self.seat_submissions.clone();
+        let mut subscription = match adapter.subscribe_thread(thread, 1, &signals, &inbox, &notes) {
             Ok(subscription) => subscription,
             Err(SubscriptionEnd::Failed(error)) => {
                 eprintln!("flow-nexus: interrupted launch thread {thread} not resumed: {error}");

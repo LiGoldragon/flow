@@ -2526,6 +2526,7 @@ impl OpensSecondNexus for NexusFixture {
             codex_turns: crate::codex_turns::CodexTurns::default(),
             turn_ends: crate::turn_ends::TurnEndSubscribers::default(),
             compactions: crate::compacting::CompactionWatch::default(),
+            seat_submissions: std::sync::Arc::default(),
             configuration_changes: Default::default(),
         }
     }

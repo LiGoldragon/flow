@@ -1,5 +1,5 @@
-//! A delivery is Presented only when its submission is seen: the letter
-//! left the composer. Against a fixture Herdr whose composer keeps what
+//! A delivery is Presented only when its submission is seen: the seat
+//! itself reported taking the letter. Against a fixture Herdr whose composer keeps what
 //! `agent prompt` typed until a key takes it away, as Claude Code's did in
 //! the e167d8 sandbox (fms-9a3e2b, Haiku 4.5, 2.1.280): Herdr answered
 //! `agent_prompted` after a state change, and the letter sat typed and
@@ -104,13 +104,20 @@ impl NexusFixture {
         let held = self.directory.path().join("composer.txt");
         let log = self.directory.path().join("herdr-operations.log");
         let take = format!("rm -f '{}'", held.display());
+        // Submitted, the harness says so as its hook or app-server does.
+        let submit = format!(
+            "submitted \"$5\" \"$(cat '{0}')\"; rm -f '{0}'",
+            held.display()
+        );
         let (on_enter, on_kill) = match composer {
-            Composer::SubmitsOnEnter => (take.as_str(), ":"),
+            Composer::SubmitsOnEnter => (submit.as_str(), ":"),
             Composer::ClearsOnKill => (":", take.as_str()),
             Composer::Holds => (":", ":"),
         };
         let body = fs::read_to_string(&self.snapshot_program).expect("Herdr fixture");
+        // The text stays in the composer: the harness took nothing yet.
         let body = body
+            .replacen("submitted \"$5\" \"$6\"; ", "", 1)
             .replacen(
                 "\"agent prompt\") printf",
                 &format!("\"agent prompt\") printf '%s' \"$6\" > '{}'; printf", held.display()),
@@ -155,7 +162,7 @@ impl NexusFixture {
             ":".to_owned()
         } else {
             format!(
-                "if [ -f '{0}' ]; then cat '{0}' >> '{1}'; rm -f '{0}'; fi",
+                "if [ -f '{0}' ]; then submitted \"$5\" \"$(cat '{0}')\"; cat '{0}' >> '{1}'; rm -f '{0}'; fi",
                 held.display(),
                 resubmitted.display()
             )

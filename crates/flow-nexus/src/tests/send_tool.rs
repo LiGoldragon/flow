@@ -147,13 +147,12 @@ fn tool_call(thread: &str, call: &str, body: &str) -> ToolCall {
 }
 
 /// What one subscribed connection of the fake does: the server requests it
-/// sends after the initialize and resume answers, whether it closes once it
-/// has sent them, and whether it stops reading first, so the client's
-/// answer to them fails to be written.
+/// sends after the initialize and resume answers, and whether it closes once
+/// it has sent them; else it holds the connection until the client closes
+/// it.
 struct FakeConnection {
     requests: Vec<serde_json::Value>,
     closes: bool,
-    deaf: bool,
 }
 
 pub(super) struct FakeAppServer {
@@ -209,16 +208,13 @@ impl RunsFakeAppServer for FakeAppServer {
             if connection.closes {
                 std::fs::write(root.join(format!("close-{}", run + 1)), "").unwrap();
             }
-            if connection.deaf {
-                std::fs::write(root.join(format!("deaf-{}", run + 1)), "").unwrap();
-            }
         }
         let executable = root.join("codex");
         FixtureExecutable {
             path: executable.clone(),
         }
         .install(&format!(
-            "#!/bin/sh\nd='{root}'\nn=$(cat \"$d/count\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$d/count\"\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$d/record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\n[ -f \"$d/frames-$n\" ] || exit 1\nprintf '%b' \"$(cat \"$d/frames-$n\")\"\nif [ -f \"$d/deaf-$n\" ]; then sleep 1; kill $! 2>/dev/null; exec 0<&- 3<&-; printf '%b' \"$(cat \"$d/calls-$n\")\"; exit 0; fi\n[ -f \"$d/calls-$n\" ] && printf '%b' \"$(cat \"$d/calls-$n\")\"\n[ -f \"$d/close-$n\" ] && {{ kill $! 2>/dev/null; exit 0; }}\nsleep 30\n",
+            "#!/bin/sh\nd='{root}'\nn=$(cat \"$d/count\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$d/count\"\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$d/record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\n[ -f \"$d/frames-$n\" ] || exit 1\nprintf '%b' \"$(cat \"$d/frames-$n\")\"\n[ -f \"$d/calls-$n\" ] && printf '%b' \"$(cat \"$d/calls-$n\")\"\n[ -f \"$d/close-$n\" ] && {{ kill $! 2>/dev/null; exit 0; }}\nwait\n",
             root = root.display(),
         ));
         FakeAppServer {
@@ -530,12 +526,10 @@ fn two_threads_are_each_attributed_to_their_own_metaflow() {
     let fake_a = FakeAppServer::install(vec![FakeConnection {
         requests: vec![tool_call_request(10, THREAD_A, "call-a", "from a")],
         closes: false,
-        deaf: false,
     }]);
     let fake_b = FakeAppServer::install(vec![FakeConnection {
         requests: vec![tool_call_request(11, THREAD_B, "call-b", "from b")],
         closes: false,
-        deaf: false,
     }]);
     let adapter_a = fixture.adapter("gpt-sol", &fake_a);
     let adapter_b = fixture.adapter("gpt-6-sol", &fake_b);
@@ -586,7 +580,6 @@ fn a_call_from_a_thread_flow_does_not_hold_is_refused_and_queues_nothing() {
     let fake = FakeAppServer::install(vec![FakeConnection {
         requests: vec![tool_call_request(12, foreign, "call-x", "intruder")],
         closes: false,
-        deaf: false,
     }]);
     let adapter = fixture.adapter("gpt-sol", &fake);
     let answer = responding(&fixture, THREAD_A, &adapter, || {
@@ -660,7 +653,6 @@ fn a_call_queued_before_a_crash_is_answered_from_its_record_when_replayed() {
     let fake = FakeAppServer::install(vec![FakeConnection {
         requests: vec![tool_call_request(13, THREAD_A, "call-a", "exactly once")],
         closes: false,
-        deaf: false,
     }]);
     let adapter = fixture.adapter("gpt-sol", &fake);
     let answer = responding(&fixture, THREAD_A, &adapter, || {
@@ -933,12 +925,10 @@ fn a_pending_call_is_answered_after_start_and_reconnect() {
         FakeConnection {
             requests: vec![],
             closes: true,
-            deaf: false,
         },
         FakeConnection {
             requests: vec![tool_call_request(14, THREAD_A, "call-a", "after restart")],
             closes: false,
-            deaf: false,
         },
     ]);
     fixture.adapter("gpt-sol", &fake);
@@ -1186,7 +1176,9 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
     // The first connection receives the call, the Nexus queues and records
     // it, and the connection closes unanswered.
     let (signals, inbox) = mpsc::channel();
-    let mut first = match adapter.subscribe_thread(&thread, 1, &signals, &inbox) {
+    let notes: std::sync::Arc<dyn crate::submission::NotesAppServerMessage> =
+        fixture.nexus.seat_submissions.clone();
+    let mut first = match adapter.subscribe_thread(&thread, 1, &signals, &inbox, &notes) {
         Ok(subscription) => subscription,
         Err(crate::codex::SubscriptionEnd::Failed(error)) => panic!("first subscription: {error}"),
         Err(crate::codex::SubscriptionEnd::Stopped | crate::codex::SubscriptionEnd::WorkEnded) => {
@@ -2173,7 +2165,6 @@ fn seat_responding(
     let fake = FakeAppServer::install(vec![FakeConnection {
         requests,
         closes: false,
-        deaf: false,
     }]);
     fake.accept_queued_turns(SEAT_THREAD, 3..=12);
     let adapter = fixture.adapter("gpt-sol", &fake);
@@ -2629,9 +2620,16 @@ fn a_start_reading_an_unanswering_codex_history_still_serves_metaflows() {
     );
     std::thread::scope(|scope| {
         let recovery = scope.spawn(|| fixture.nexus.recover_deliveries());
-        while fake.runs() == 0 {
-            std::thread::yield_now();
-        }
+        // The fake counts each run in its directory: the first is a write
+        // there.
+        assert!(
+            crate::event_wait::AwaitsDirectory::until_holds(
+                fake.directory.path(),
+                Instant::now() + Duration::from_secs(30),
+                &mut || fake.runs() > 0,
+            ),
+            "the native read reaches the app-server"
+        );
         let listed = fixture.nexus.dispatch_serially(
             signal_flow::Query::Metaflows,
             signal_flow::Origin::Unbound.into(),

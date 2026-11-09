@@ -13,17 +13,14 @@
 
 use crate::RunningNexus;
 use crate::herdr::HerdrCli;
+use crate::herdr::events::{HerdrCue, HerdrEvents, SubscribesHerdrEvents};
 use crate::herdr::pane::ReadsAgentStatus;
 use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use signal_flow::{
     AgentObservation, AgentState, FlowNode, HerdrRoute, HerdrRouteSelection, Response,
 };
-use std::{
-    io::{BufRead, BufReader, Write},
-    os::unix::net::UnixStream,
-    path::PathBuf,
-};
+use std::path::PathBuf;
 
 /// Answers and streams a flow's agent state.
 pub trait ObservesAgent {
@@ -180,7 +177,7 @@ impl ObservesAgent for RunningNexus {
             .herdr
             .session_socket(&route.herdr_session_name)
             .ok_or("Herdr session socket not found")?;
-        let mut events = HerdrEvents::subscribe(&socket, &route.herdr_pane_id)?;
+        let mut events = PaneEvents::subscribe(&socket, &route.herdr_pane_id)?;
         loop {
             let Some(event) = events.next_event(&self.stopping)? else {
                 // Herdr closed the subscription: the session is gone. The
@@ -231,15 +228,14 @@ enum PaneEvent {
     Gone,
 }
 
-/// One open Herdr event subscription for one pane.
-struct HerdrEvents {
+/// The observed pane's stream: Herdr's events of it, waited on with the
+/// Nexus's stop.
+struct PaneEvents {
     pane_id: String,
-    reader: BufReader<UnixStream>,
-    /// What has arrived of the line not yet ended.
-    pending: Vec<u8>,
+    events: HerdrEvents,
 }
 
-trait SubscribesHerdrEvents: Sized {
+trait ReadsPaneEvents: Sized {
     fn subscribe(socket: &std::path::Path, pane_id: &str) -> Result<Self, String>;
     /// The next event about this pane; None when Herdr closes the stream,
     /// an error once the Nexus is stopping. The stream and the stop's
@@ -247,86 +243,39 @@ trait SubscribesHerdrEvents: Sized {
     fn next_event(&mut self, stopping: &crate::Stopping) -> Result<Option<PaneEvent>, String>;
 }
 
-impl SubscribesHerdrEvents for HerdrEvents {
+impl ReadsPaneEvents for PaneEvents {
     fn subscribe(socket: &std::path::Path, pane_id: &str) -> Result<Self, String> {
-        let mut stream = UnixStream::connect(socket).map_err(|error| error.to_string())?;
-        let request = serde_json::json!({
-            "id": "flow-nexus:observe-agent",
-            "method": "events.subscribe",
-            "params": {"subscriptions": [
+        let events = HerdrEvents::subscribe(
+            socket,
+            "flow-nexus:observe-agent",
+            serde_json::json!([
                 {"type": "pane.agent_status_changed", "pane_id": pane_id},
                 {"type": "pane.closed"},
                 {"type": "pane.exited"}
-            ]}
-        });
-        stream
-            .write_all(format!("{request}\n").as_bytes())
-            .map_err(|error| error.to_string())?;
-        let mut events = Self {
+            ]),
+            None,
+        )?;
+        Ok(Self {
             pane_id: pane_id.to_owned(),
-            reader: BufReader::new(stream),
-            pending: Vec::new(),
-        };
-        let mut started = String::new();
-        events
-            .reader
-            .read_line(&mut started)
-            .map_err(|error| error.to_string())?;
-        let reply: serde_json::Value =
-            serde_json::from_str(&started).map_err(|error| error.to_string())?;
-        if reply
-            .pointer("/result/type")
-            .and_then(serde_json::Value::as_str)
-            != Some("subscription_started")
-        {
-            return Err(format!("Herdr refused the subscription: {started}"));
-        }
-        Ok(events)
+            events,
+        })
     }
 
     fn next_event(&mut self, stopping: &crate::Stopping) -> Result<Option<PaneEvent>, String> {
         use crate::HoldsStopRequest;
-        use crate::event_wait::AwaitsDescriptors;
-        use std::os::fd::AsFd;
-        // Reads never block: the wait is the poll below, on the stream and
-        // the stop together.
-        self.reader
-            .get_ref()
-            .set_nonblocking(true)
-            .map_err(|error| error.to_string())?;
         loop {
             if stopping.requested() {
                 return Err("the Nexus is stopping".into());
             }
-            if self.reader.buffer().is_empty() {
-                let ready = [self.reader.get_ref().as_fd(), stopping.descriptor()]
-                    .ready(None)
-                    .map_err(|error| error.to_string())?;
-                if ready[1] {
-                    return Err("the Nexus is stopping".into());
+            match self.events.next_cue(&[stopping.descriptor()], None)? {
+                HerdrCue::Event(event) => {
+                    if let Some(event) = event.pane_event(&self.pane_id) {
+                        return Ok(Some(event));
+                    }
                 }
-            }
-            // A read that would block keeps what it read in `pending`.
-            match self.reader.read_until(b'\n', &mut self.pending) {
-                Ok(0) => return Ok(None),
-                Ok(_) if self.pending.last() != Some(&b'\n') => return Ok(None),
-                Ok(_) => {}
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    continue;
-                }
-                Err(error) => return Err(error.to_string()),
-            }
-            let line = String::from_utf8_lossy(&std::mem::take(&mut self.pending)).into_owned();
-            let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
-            if let Some(event) = event.pane_event(&self.pane_id) {
-                return Ok(Some(event));
+                HerdrCue::Other => return Err("the Nexus is stopping".into()),
+                HerdrCue::Closed => return Ok(None),
+                HerdrCue::Passed => {}
             }
         }
     }

@@ -17,6 +17,7 @@ use crate::generated::starter::{
     ReadsTypedUserText, RendersLeanStart, StartupReading, Textual,
 };
 use crate::harness_command::HarnessCommandResources;
+use crate::herdr::events::{HerdrCue, HerdrEvents, NamesEventPane, SubscribesHerdrEvents};
 use crate::herdr::reservation::ChoosesNativeSession;
 use crate::live::HoldsLiveValue;
 use crate::title::{NativeTitle, ShowsNativeTitle, TitlesFlow};
@@ -1488,12 +1489,58 @@ impl ReadsTranscriptRow for serde_json::Value {
     }
 }
 
+/// What a Claude launch's title readback waits on between two reads:
+/// Herdr's events of the launch pane, subscribed before the first read, so
+/// a change after it is never missed. Nothing is read again on a timer.
+pub(crate) struct TitleCues {
+    pane_id: String,
+    events: Option<HerdrEvents>,
+    deadline: std::time::Instant,
+}
+
+pub(crate) trait AwaitsTitleCue {
+    /// Blocks until Herdr announces a change of the pane: `pane.updated`
+    /// (its terminal title, its agent, its session, its readiness), its
+    /// agent's status changed, or its agent detected. False once the
+    /// deadline passed, the pane closed or exited, the stream closed, or no
+    /// stream could be opened. The session's transcript is read again at
+    /// each of these, so a title record written with no change of the pane
+    /// is read at the next one.
+    fn changed(&mut self) -> bool;
+}
+
+impl AwaitsTitleCue for TitleCues {
+    fn changed(&mut self) -> bool {
+        let Some(events) = self.events.as_mut() else {
+            return false;
+        };
+        loop {
+            match events.next_cue(&[], Some(self.deadline)) {
+                Ok(HerdrCue::Event(event)) => {
+                    if event.event_pane() != Some(self.pane_id.as_str()) {
+                        continue;
+                    }
+                    let kind = event
+                        .get("event")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    return !(kind.ends_with("closed") || kind.ends_with("exited"));
+                }
+                Ok(HerdrCue::Other) => {}
+                Ok(HerdrCue::Closed | HerdrCue::Passed) | Err(_) => return false,
+            }
+        }
+    }
+}
+
 pub(crate) trait TitlesClaudeSession {
-    const TITLE_READBACK_ATTEMPTS: usize = 40;
     /// The source under which Flow reports a pane's displayed agent to Herdr.
     const DISPLAY_SOURCE: &'static str = "flow";
-    /// How long to wait between two readbacks of a pane's title.
-    fn title_readback_interval(&self) -> Duration;
+    /// How long a launch's title is waited for.
+    fn title_wait(&self) -> Duration;
+    /// Herdr's events of the launch pane, subscribed now, bounded by the
+    /// title wait.
+    fn title_cues(&self, pane: &HerdrPaneBinding) -> TitleCues;
     /// Every title the native Claude transcript records for its session, in
     /// the order written; empty while no transcript or no title record
     /// exists.
@@ -1504,10 +1551,12 @@ pub(crate) trait TitlesClaudeSession {
     ) -> Result<Vec<String>, String>;
     /// Waits, through Herdr's `agent wait`, for a just-bound Claude to come
     /// to rest, then for Herdr to report its official native session and
-    /// interactive readiness; returns the agent Herdr then reports.
+    /// interactive readiness, read again at each of `cues`; returns the
+    /// agent Herdr then reports.
     fn await_claude_title_readiness(
         &self,
         binding: &NativeLaunchBinding,
+        cues: &mut TitleCues,
     ) -> Result<serde_json::Value, TitleRefusal>;
     /// Reads back the title the Claude session was named with at launch
     /// (`--name`): the terminal title Herdr reports must be the title, and
@@ -1537,8 +1586,40 @@ pub(crate) trait TitlesClaudeSession {
 }
 
 impl TitlesClaudeSession for HerdrCli {
-    fn title_readback_interval(&self) -> Duration {
-        self.title_readback_interval
+    fn title_wait(&self) -> Duration {
+        self.title_wait
+    }
+
+    fn title_cues(&self, pane: &HerdrPaneBinding) -> TitleCues {
+        let deadline = std::time::Instant::now() + self.title_wait();
+        let events = self
+            .herdr_session_socket(&pane.herdr_session_name)
+            .and_then(|socket| {
+                HerdrEvents::subscribe(
+                    Path::new(&socket),
+                    "flow-nexus:title",
+                    serde_json::json!([
+                        {"type": "pane.updated"},
+                        {"type": "pane.agent_status_changed", "pane_id": pane.herdr_pane_id},
+                        {"type": "pane.agent_detected"},
+                        {"type": "pane.closed"},
+                        {"type": "pane.exited"}
+                    ]),
+                    Some(deadline),
+                )
+            })
+            .inspect_err(|error| {
+                eprintln!(
+                    "flow-nexus: the title of pane {} is read once: Herdr's events are not open: {error}",
+                    pane.herdr_pane_id
+                );
+            })
+            .ok();
+        TitleCues {
+            pane_id: pane.herdr_pane_id.clone(),
+            events,
+            deadline,
+        }
     }
 
     fn claude_transcript_titles(
@@ -1572,16 +1653,19 @@ impl TitlesClaudeSession for HerdrCli {
     fn await_claude_title_readiness(
         &self,
         binding: &NativeLaunchBinding,
+        cues: &mut TitleCues,
     ) -> Result<serde_json::Value, TitleRefusal> {
         let pane = &binding.herdr_pane_binding;
         // Herdr may report a just-bound Claude before its session and its
         // readiness: it is waited for, never checked once.
         self.await_pane_rest(pane)
             .map_err(|_| TitleRefusal::NotReady)?;
-        let mut last = TitleRefusal::NotReady;
-        for _ in 0..Self::TITLE_READBACK_ATTEMPTS {
-            match self.verify_native_target(pane, &binding.native_session_id, &HarnessKind::Claude)
-            {
+        loop {
+            let last = match self.verify_native_target(
+                pane,
+                &binding.native_session_id,
+                &HarnessKind::Claude,
+            ) {
                 Ok(agent)
                     if agent
                         .get("interactive_ready")
@@ -1590,15 +1674,16 @@ impl TitlesClaudeSession for HerdrCli {
                 {
                     return Ok(agent);
                 }
-                Ok(_) => last = TitleRefusal::NotReady,
+                Ok(_) => TitleRefusal::NotReady,
                 Err(NativeTargetRefusal::NoNativeSession) => {
-                    last = TitleRefusal::Target(NativeTargetRefusal::NoNativeSession);
+                    TitleRefusal::Target(NativeTargetRefusal::NoNativeSession)
                 }
                 Err(refusal) => return Err(refusal.into()),
+            };
+            if !cues.changed() {
+                return Err(last);
             }
-            std::thread::sleep(self.title_readback_interval());
         }
-        Err(last)
     }
 
     fn title_claude_session(
@@ -1607,8 +1692,10 @@ impl TitlesClaudeSession for HerdrCli {
         title: &NativeTitle,
     ) -> Result<(), TitleRefusal> {
         let pane = &binding.herdr_pane_binding;
-        self.await_claude_title_readiness(binding)?;
-        for _ in 0..Self::TITLE_READBACK_ATTEMPTS {
+        // Subscribed before the first read: a change after it is a cue.
+        let mut cues = self.title_cues(pane);
+        self.await_claude_title_readiness(binding, &mut cues)?;
+        loop {
             let agent =
                 self.verify_native_target(pane, &binding.native_session_id, &HarnessKind::Claude)?;
             let terminal = agent
@@ -1623,9 +1710,10 @@ impl TitlesClaudeSession for HerdrCli {
             if terminal == Some(title.as_str()) && record_agrees {
                 return Ok(());
             }
-            std::thread::sleep(self.title_readback_interval());
+            if !cues.changed() {
+                return Err(TitleRefusal::ReadbackDiffers);
+            }
         }
-        Err(TitleRefusal::ReadbackDiffers)
     }
 
     fn label_herdr_pane(&self, pane: &HerdrPaneBinding, title: &NativeTitle) -> Result<(), String> {
@@ -3147,9 +3235,16 @@ esac
         }
         .install(&script);
         // The fixture Herdr server's socket: each `agent.prompt` request
-        // line is kept, and answered as Herdr 0.8.2 answers it.
+        // line is kept, and answered as Herdr 0.8.2 answers it. An
+        // `events.subscribe` is answered `subscription_started` and noted in
+        // `herdr-subscriptions`; then each file a test puts in
+        // `herdr-events/` is one `pane.updated` of the launch pane, as Herdr
+        // announces a change of the pane's title or agent.
         let listener = UnixListener::bind(root.path().join("herdr.sock")).expect("Herdr socket");
         let prompts = root.path().join("socket-prompts");
+        let subscriptions = root.path().join("herdr-subscriptions");
+        let announced = root.path().join("herdr-events");
+        fs::create_dir(&announced).expect("fixture Herdr events");
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else {
@@ -3157,6 +3252,39 @@ esac
                 };
                 let mut line = String::new();
                 if BufReader::new(&stream).read_line(&mut line).is_err() {
+                    continue;
+                }
+                if line.contains("\"events.subscribe\"") {
+                    let announced = announced.clone();
+                    let subscriptions = subscriptions.clone();
+                    std::thread::spawn(move || {
+                        use crate::event_wait::AwaitsDirectory;
+                        if stream
+                            .write_all(
+                                b"{\"id\":\"flow-nexus:title\",\"result\":{\"type\":\"subscription_started\"}}\n",
+                            )
+                            .is_err()
+                        {
+                            return;
+                        }
+                        let _ = fs::write(&subscriptions, line.as_bytes());
+                        let mut sent = std::collections::BTreeSet::new();
+                        announced.clone().holds_by(None, &mut || {
+                            let Ok(entries) = fs::read_dir(&announced) else {
+                                return true;
+                            };
+                            for entry in entries.flatten() {
+                                if !sent.insert(entry.file_name()) {
+                                    continue;
+                                }
+                                let event = b"{\"data\":{\"pane\":{\"pane_id\":\"w7:p1\"},\"type\":\"pane_updated\"},\"event\":\"pane_updated\"}\n";
+                                if stream.write_all(event).is_err() {
+                                    return true;
+                                }
+                            }
+                            false
+                        });
+                    });
                     continue;
                 }
                 let _ = fs::OpenOptions::new()
@@ -5303,6 +5431,46 @@ printf '%s\n' "$alias"
             TitleRefusal::ReadbackDiffers
         );
         assert!(!root.path().join("pane-label").exists());
+    }
+
+    /// A title Claude shows only after the first read is read again when
+    /// Herdr announces the pane changed (`pane.updated`), subscribed before
+    /// the first read; nothing is read again on a timer.
+    #[test]
+    fn a_title_shown_after_the_first_read_is_read_on_herdrs_pane_update() {
+        use crate::event_wait::AwaitsPath;
+        let launch = launch(HarnessKind::Claude);
+        let (root, adapter, _, pane) = reserved_claude(&launch);
+        adapter
+            .start_native_harness(&launch, &pane, Some("123456"))
+            .unwrap();
+        let binding = adapter
+            .observe_native_binding(&launch, &pane, Some("123456"))
+            .unwrap();
+        let title_file = root.path().join("native-title");
+        let expected = fs::read_to_string(&title_file).unwrap();
+        fs::write(&title_file, "a title of the session's start").unwrap();
+        let title = std::thread::scope(|scope| {
+            let shown = scope.spawn(|| {
+                assert!(
+                    root.path().join("herdr-subscriptions").appeared_by(
+                        std::time::Instant::now() + std::time::Duration::from_secs(30)
+                    ),
+                    "the readback subscribes to Herdr's events"
+                );
+                fs::write(&title_file, &expected).unwrap();
+                fs::write(root.path().join("herdr-events/title-shown"), "").unwrap();
+            });
+            let title = adapter.title_native_flow(&launch, &binding);
+            shown.join().unwrap();
+            title
+        });
+        assert_eq!(
+            title.expect("the title read on the update").as_str(),
+            expected
+        );
+        let subscription = fs::read_to_string(root.path().join("herdr-subscriptions")).unwrap();
+        assert!(subscription.contains("pane.updated"), "{subscription}");
     }
 
     /// A Claude harness has no name but its title, so a start without a

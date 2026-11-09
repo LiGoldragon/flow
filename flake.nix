@@ -17,7 +17,7 @@
     # callers move explicitly to lib.<system>.mkFlowPackage.
     unconfigured-flow.url = "github:LiGoldragon/flow/d3ab87ee18b1dd30947d5f0089f5abb4bafa80d5";
     # The Message Nexus the joint check runs beside the real Flow Nexus.
-    message.url = "github:LiGoldragon/message/8a60367d00860c0b1d91b522641648ee1ae01e91";
+    message.url = "github:LiGoldragon/message/e8299aa0ac5046a05cc3d0c8a8be581e130f4c52";
     # The accepted 0.53.2 Flow, built by its own flake, whose Memory the
     # request-id migration check evolves. The lock holds its commit, f7d2336,
     # and the flake refuses any other (predecessorRevision below).
@@ -387,7 +387,7 @@
                   export FLOW_MESSAGE_JOINT_FLOW_BIN="${flowNexus}"
                   export FLOW_MESSAGE_JOINT_MESSAGE_BIN="${message.packages.${system}.default}/bin/message-nexus"
                   export FLOW_MESSAGE_JOINT_FLOW_REV="${sourceRevision}"
-                  export FLOW_MESSAGE_JOINT_MESSAGE_REV="8a60367d00860c0b1d91b522641648ee1ae01e91"
+                  export FLOW_MESSAGE_JOINT_MESSAGE_REV="e8299aa0ac5046a05cc3d0c8a8be581e130f4c52"
                   sha256sum "$FLOW_MESSAGE_JOINT_FLOW_BIN" "$FLOW_MESSAGE_JOINT_MESSAGE_BIN"
                 '';
             # The accepted 0.53.2's real Memory, evolved and served by this

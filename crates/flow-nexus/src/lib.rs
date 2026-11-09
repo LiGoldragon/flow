@@ -78,6 +78,7 @@ pub mod send_tool;
 pub mod sending;
 pub mod store;
 pub mod store_check;
+pub mod submission;
 pub mod title;
 pub mod turn_ends;
 pub mod undecodable;
@@ -162,6 +163,8 @@ pub struct RunningNexus {
     pub turn_ends: turn_ends::TurnEndSubscribers,
     /// How far each flow's compactions have been read; see `compacting`.
     pub compactions: compacting::CompactionWatch,
+    /// The submissions each seat reported taking; see `submission`.
+    pub seat_submissions: Arc<submission::SeatSubmissions>,
     /// Announced each time a Configure replaces a family, and at a stop;
     /// see `observe_configuration`.
     pub configuration_changes: store::LaunchChanges,
@@ -1194,6 +1197,7 @@ impl OpensRunningNexus for RunningNexus {
             codex_turns: codex_turns::CodexTurns::default(),
             turn_ends: turn_ends::TurnEndSubscribers::default(),
             compactions: compacting::CompactionWatch::default(),
+            seat_submissions: Arc::default(),
             configuration_changes: store::LaunchChanges::default(),
         })
     }
@@ -2711,10 +2715,14 @@ mod tests {
                         "id":"cli:agent:prompt",
                         "result":{ "type":"agent_prompted", "agent":agent }
                     });
-                    format!("{typing}; printf '%s\\n' '{reply}'")
+                    format!("{typing}; submitted \"$5\" \"$6\"; printf '%s\\n' '{reply}'")
                 }
                 Self::RefusedBeforeInput(code) => error(code),
-                Self::FailedAfterInput(code) => format!("{typing}; {}", error(code)),
+                // The text was typed and the fixture's composer shows it
+                // gone: the harness took it, whatever Herdr answered.
+                Self::FailedAfterInput(code) => {
+                    format!("{typing}; submitted \"$5\" \"$6\"; {}", error(code))
+                }
             }
         }
     }
@@ -3097,6 +3105,62 @@ mod tests {
         }
     }
 
+    /// Stands for each seat's own word of a submission: every file the
+    /// fixture Herdr's `submitted` renames into `directory` names a pane
+    /// and the text its harness took, and is reported as that pane's live
+    /// flow's harness would report it (Claude Code's UserPromptSubmit
+    /// digest, a Codex turn started), until the directory is gone. The
+    /// store is held only while a file is read, so the fixture's store is
+    /// never held open past the fixture.
+    fn report_fixture_submissions(
+        directory: PathBuf,
+        store: std::sync::Weak<FlowStore>,
+        submissions: std::sync::Arc<crate::submission::SeatSubmissions>,
+    ) {
+        std::thread::spawn(move || {
+            use crate::event_wait::AwaitsDirectory;
+            use crate::store::{NamesLiveFlow, ReadsFlowRows};
+            use crate::submission::{SeatSubmission, WitnessesSubmissions};
+            use flow_native::DigestsPrompt;
+            let watched = directory.clone();
+            watched.holds_by(None, &mut || {
+                let Ok(entries) = fs::read_dir(&directory) else {
+                    return true;
+                };
+                for path in entries.flatten().map(|entry| entry.path()) {
+                    let named = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("sub-"));
+                    let Some(body) = named.then(|| fs::read_to_string(&path).ok()).flatten() else {
+                        continue;
+                    };
+                    let _ = fs::remove_file(&path);
+                    let (pane, text) = body.split_once('\n').unwrap_or((body.as_str(), ""));
+                    let Some(nodes) = store.upgrade().and_then(|store| store.flow_nodes().ok())
+                    else {
+                        continue;
+                    };
+                    for node in nodes {
+                        let in_pane = matches!(
+                            &node.herdr_route_selection,
+                            HerdrRouteSelection::Available(route) if route.herdr_pane_id == pane
+                        );
+                        if !in_pane || !node.flow_lifecycle.is_live() {
+                            continue;
+                        }
+                        let submission = match node.harness_kind {
+                            HarnessKind::Claude => SeatSubmission::Prompt(text.prompt_sha256()),
+                            HarnessKind::Codex => SeatSubmission::TurnStarted,
+                        };
+                        submissions.witness(&node.session_id, submission);
+                    }
+                }
+                false
+            });
+        });
+    }
+
     impl NexusFixture {
         fn new() -> Self {
             Self::with_store(|_| {})
@@ -3176,6 +3240,7 @@ mod tests {
                 codex_turns: crate::codex_turns::CodexTurns::default(),
                 turn_ends: crate::turn_ends::TurnEndSubscribers::default(),
                 compactions: crate::compacting::CompactionWatch::default(),
+                seat_submissions: std::sync::Arc::default(),
                 configuration_changes: Default::default(),
             };
             let herdr_config = directory.path().join("herdr-config");
@@ -3184,6 +3249,13 @@ mod tests {
                 .expect("fixture Herdr session directory");
             let herdr_server =
                 UnixListener::bind(&session_socket).expect("fixture Herdr server socket");
+            let submissions = directory.path().join("seat-submissions");
+            fs::create_dir(&submissions).expect("fixture seat submissions");
+            report_fixture_submissions(
+                submissions,
+                std::sync::Arc::downgrade(&nexus.store),
+                nexus.seat_submissions.clone(),
+            );
             let fixture = Self {
                 directory,
                 nexus,
@@ -3196,6 +3268,17 @@ mod tests {
                 ("messaging-build", session_socket),
             ]);
             fixture
+        }
+
+        /// The fixture Herdr's shell function `submitted PANE TEXT`: a
+        /// harness's own word that it took TEXT in PANE, as its hook or its
+        /// app-server would give it, written whole into `seat-submissions/`
+        /// for `report_fixture_submissions` to report.
+        fn submission_report(&self) -> String {
+            format!(
+                "submitted() {{ d='{}'; t=\"$d/.part-$$\"; printf '%s\\n%s' \"$1\" \"$2\" > \"$t\" && mv \"$t\" \"$d/sub-$$-$(date +%s%N)\"; }}",
+                self.directory.path().join("seat-submissions").display()
+            )
         }
 
         /// What the fixture Herdr's `session list --json` answers.
@@ -3315,8 +3398,9 @@ mod tests {
                     .join(format!("{session}.jsonl"))
             });
             let body = format!(
-                "#!/bin/sh\n{}\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{}' ;;\n  \"agent prompt\") printf '%s\\n' \"$*\" >> '{}'; {} ;;\n  \"pane close\"|\"pane send-keys\"|\"agent wait\") printf '%s\\n' \"$*\" >> '{}' ;;\n  \"agent read\") printf '%s\\n' '❯ ' '› ' ;;\n  *) exit 64 ;;\nesac\n",
+                "#!/bin/sh\n{}\n{}\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{}' ;;\n  \"agent prompt\") printf '%s\\n' \"$*\" >> '{}'; {} ;;\n  \"pane close\"|\"pane send-keys\"|\"agent wait\") printf '%s\\n' \"$*\" >> '{}' ;;\n  \"agent read\") printf '%s\\n' '❯ ' '› ' ;;\n  *) exit 64 ;;\nesac\n",
                 self.session_listing(),
+                self.submission_report(),
                 snapshot,
                 log.display(),
                 prompt.shell(

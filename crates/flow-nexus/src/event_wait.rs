@@ -204,3 +204,196 @@ impl AwaitsPath for Path {
         directory.until_holds(deadline, &mut || self.exists())
     }
 }
+
+/// A name watched, on a thread of its own, for something placed at it: an
+/// entry made there (`IN_CREATE`), moved there (`IN_MOVED_TO`), or given a
+/// mode or owner (`IN_ATTRIB`) is a cue. A directory of the name's path not
+/// yet made is waited for the same way, from the deepest one that exists;
+/// once it is made the watch moves into it, and a name already there then
+/// is a cue too. The watch is set when `arm` returns, so nothing placed
+/// after it is missed; dropping the watch ends its thread.
+pub struct NameWatch {
+    done: std::sync::Arc<Announcement>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// What a name watch's thread follows: its inotify descriptor, the
+/// directory it watches and the entry of it toward the name.
+struct NameFollower {
+    inotify: OwnedFd,
+    watch: i32,
+    directory: std::path::PathBuf,
+    entry: std::ffi::OsString,
+    name: std::path::PathBuf,
+    cue: Box<dyn FnMut() -> bool + Send>,
+    done: std::sync::Arc<Announcement>,
+}
+
+pub trait WatchesName: Sized {
+    /// Watches `name`, an absolute path; `cue` is called at each cue, and
+    /// the watch ends when it answers false.
+    fn arm(name: &Path, cue: Box<dyn FnMut() -> bool + Send>) -> io::Result<Self>;
+}
+
+trait FollowsName: Sized {
+    const MASK: u32 = libc::IN_CREATE
+        | libc::IN_MOVED_TO
+        | libc::IN_ATTRIB
+        | libc::IN_DELETE_SELF
+        | libc::IN_MOVE_SELF;
+    /// The deepest existing directory of `name`'s path, and its entry
+    /// toward `name`.
+    fn nearest(name: &Path) -> io::Result<(std::path::PathBuf, std::ffi::OsString)>;
+    /// Sets the inotify watch on the nearest directory; its descriptor.
+    fn watched(inotify: &OwnedFd, directory: &Path) -> io::Result<i32>;
+    /// Moves the watch to the nearest directory as it is now.
+    fn rewatch(&mut self) -> io::Result<()>;
+    /// Reads cues until the watch is dropped or the cue says to end.
+    fn follow(self);
+}
+
+impl WatchesName for NameWatch {
+    fn arm(name: &Path, cue: Box<dyn FnMut() -> bool + Send>) -> io::Result<Self> {
+        if !name.is_absolute() || name.file_name().is_none() {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        // SAFETY: inotify_init1 takes flags and returns a new descriptor or
+        // -1; no memory is passed.
+        let descriptor = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
+        if descriptor < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the descriptor was just opened and is owned by nothing else.
+        let inotify = unsafe { OwnedFd::from_raw_fd(descriptor) };
+        let (directory, entry) = NameFollower::nearest(name)?;
+        let watch = NameFollower::watched(&inotify, &directory)?;
+        let done = std::sync::Arc::new(Announcement::open()?);
+        let follower = NameFollower {
+            inotify,
+            watch,
+            directory,
+            entry,
+            name: name.to_owned(),
+            cue,
+            done: done.clone(),
+        };
+        let thread = std::thread::spawn(move || follower.follow());
+        Ok(Self {
+            done,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for NameWatch {
+    fn drop(&mut self) {
+        self.done.announce();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl FollowsName for NameFollower {
+    fn nearest(name: &Path) -> io::Result<(std::path::PathBuf, std::ffi::OsString)> {
+        let mut entry = name;
+        while let Some(directory) = entry.parent() {
+            if directory.is_dir() {
+                let entry = entry
+                    .file_name()
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+                return Ok((directory.to_owned(), entry.to_owned()));
+            }
+            entry = directory;
+        }
+        Err(io::Error::from(io::ErrorKind::NotFound))
+    }
+
+    fn watched(inotify: &OwnedFd, directory: &Path) -> io::Result<i32> {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(directory.as_os_str().as_bytes())
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        // SAFETY: the path is zero-terminated and outlives the call.
+        let watch =
+            unsafe { libc::inotify_add_watch(inotify.as_raw_fd(), path.as_ptr(), Self::MASK) };
+        if watch < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(watch)
+    }
+
+    fn rewatch(&mut self) -> io::Result<()> {
+        // SAFETY: rm_watch takes the descriptor this follower owns and a
+        // watch number; a watch already gone is refused harmlessly.
+        unsafe { libc::inotify_rm_watch(self.inotify.as_raw_fd(), self.watch) };
+        let (directory, entry) = Self::nearest(&self.name)?;
+        self.watch = Self::watched(&self.inotify, &directory)?;
+        self.directory = directory;
+        self.entry = entry;
+        Ok(())
+    }
+
+    fn follow(mut self) {
+        use std::os::unix::ffi::OsStrExt;
+        let header = std::mem::size_of::<libc::inotify_event>();
+        let mut buffer = vec![0_u8; 64 * (header + 256)];
+        loop {
+            match [self.inotify.as_fd(), self.done.descriptor()].ready(None) {
+                Ok(ready) if ready[1] => return,
+                Ok(_) => {}
+                Err(_) => return,
+            }
+            // SAFETY: read writes at most the buffer's length into it.
+            let read = unsafe {
+                libc::read(
+                    self.inotify.as_raw_fd(),
+                    buffer.as_mut_ptr().cast::<libc::c_void>(),
+                    buffer.len(),
+                )
+            };
+            if read <= 0 {
+                continue;
+            }
+            let read = read as usize;
+            let mut offset = 0;
+            let (mut cued, mut moved) = (false, false);
+            while offset + header <= read {
+                // SAFETY: the kernel wrote a whole inotify_event at `offset`;
+                // it is read unaligned, as the buffer is bytes.
+                let event = unsafe {
+                    std::ptr::read_unaligned(
+                        buffer[offset..].as_ptr().cast::<libc::inotify_event>(),
+                    )
+                };
+                let length = event.len as usize;
+                let name = buffer[offset + header..(offset + header + length).min(read)]
+                    .split(|byte| *byte == 0)
+                    .next()
+                    .unwrap_or_default();
+                offset += header + length;
+                if event.wd != self.watch {
+                    continue;
+                }
+                if event.mask & (libc::IN_DELETE_SELF | libc::IN_MOVE_SELF | libc::IN_IGNORED) != 0
+                {
+                    moved = true;
+                } else if name == self.entry.as_bytes() {
+                    if self.directory.as_path() == self.name.parent().unwrap_or(Path::new("/")) {
+                        cued = true;
+                    } else {
+                        moved = true;
+                    }
+                }
+            }
+            if moved {
+                if self.rewatch().is_err() {
+                    return;
+                }
+                cued |= self.name.exists();
+            }
+            if cued && !(self.cue)() {
+                return;
+            }
+        }
+    }
+}

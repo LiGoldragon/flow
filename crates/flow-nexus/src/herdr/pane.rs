@@ -45,11 +45,6 @@ pub enum Placement {
 
 /// The pane operations Flow's writer uses, each one Herdr call.
 pub trait WritesPane {
-    /// The composer is read this many times, each `SUBMISSION_SPACING` after
-    /// the last: long enough for Herdr's CR, sent 300 ms after the text, and
-    /// a harness's render of a large paste.
-    const SUBMISSION_READS: usize = 12;
-    const SUBMISSION_SPACING: std::time::Duration = std::time::Duration::from_millis(350);
     /// Each press is given `INTERRUPT_WAIT_MILLISECONDS` to show.
     const INTERRUPT_PRESSES: usize = 3;
     /// How long each interrupt press is given to show: an interrupted turn
@@ -86,38 +81,31 @@ pub trait WritesPane {
     /// wait timed out or Herdr refused it.
     fn rested(&self, route: &HerdrRoute) -> bool;
 
-    /// Whether the text just placed is seen to leave the composer: the
-    /// submission itself. `agent prompt` sends its submitting CR as a
-    /// separate write 300 ms after the text, and its `agent_prompted`
-    /// answers any lifecycle change, which need not be this text's.
-    ///
-    /// Herdr offers no event for a composer emptying, so the composer is
-    /// read again, a bounded number of times, until it is seen blank: an
-    /// exception to subscribing, taken because there is nothing to
-    /// subscribe to.
-    fn submission(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Submission {
-        let mut submission = Submission::Unreadable;
-        for _ in 0..Self::SUBMISSION_READS {
-            // The first read waits too, past Herdr's delayed CR.
-            std::thread::sleep(Self::SUBMISSION_SPACING);
-            match self.composer_is_blank(route, harness_kind) {
-                Some(true) => return Submission::Seen,
-                Some(false) => submission = Submission::Unseen,
-                None => {}
-            }
+    /// How long a seat's own word of a submission is waited for once Flow
+    /// typed into its pane (`submission`): past Herdr's CR, sent 300 ms
+    /// after the text, and the harness's hook or app-server announcing it.
+    fn submission_wait(&self) -> std::time::Duration;
+    /// How long a composer is given to show what keys did when no event
+    /// marks it: keys that submit nothing (a take-back, a retract), or a
+    /// submission into a seat that is working, which neither harness
+    /// announces until it takes the input. Herdr announces no change of a
+    /// composer, so the composer is read once, after this one wait.
+    fn render_wait(&self) -> std::time::Duration;
+
+    /// The composer as it is now: Seen when it holds no text of its own.
+    fn composer_now(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Submission {
+        match self.composer_is_blank(route, harness_kind) {
+            Some(true) => Submission::Seen,
+            Some(false) => Submission::Unseen,
+            None => Submission::Unreadable,
         }
-        submission
     }
 
-    /// Waits, boundedly, for the composer to hold no text of its own: text
-    /// typed just before leaves it once Herdr's CR, sent 300 ms after the
-    /// text, has reached the harness.
-    /// A composer already blank is not waited for.
-    fn composer_cleared(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Submission {
-        if self.composer_is_blank(route, harness_kind) == Some(true) {
-            return Submission::Seen;
-        }
-        self.submission(route, harness_kind)
+    /// The composer read once, `render_wait` after keys whose effect no
+    /// event marks.
+    fn composer_after_keys(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Submission {
+        std::thread::sleep(self.render_wait());
+        self.composer_now(route, harness_kind)
     }
 
     /// Presses the composer's submit key once.
@@ -182,10 +170,10 @@ pub enum Interruption {
     Unobserved,
 }
 
-/// Whether a placed text was seen to leave the composer.
+/// What one read of the composer showed of a text placed in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Submission {
-    /// The composer was seen blank: the text was submitted.
+    /// The composer was seen blank: the text left it.
     Seen,
     /// The composer was seen still holding text.
     Unseen,
@@ -194,6 +182,14 @@ pub enum Submission {
 }
 
 impl WritesPane for HerdrCli {
+    fn submission_wait(&self) -> std::time::Duration {
+        self.submission_wait
+    }
+
+    fn render_wait(&self) -> std::time::Duration {
+        self.render_wait
+    }
+
     fn pane_agent(&self, node: &FlowNode) -> PaneAgent {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
             return PaneAgent::Absent;

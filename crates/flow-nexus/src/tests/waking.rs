@@ -3717,6 +3717,7 @@ impl BuildsFreshWorld for NexusFixture {
         let herdr = format!(
             r##"#!/bin/sh
 {sessions}
+{submitted}
 S='{state}'
 printf '%s\n' "$*" >> "$S/calls"
 # The first pane is w7:p1 on terminal term-fresh; each later one is the next
@@ -3741,8 +3742,10 @@ agents() {{
 panes() {{
   [ -f "$S/restart-world" ] && [ -f "$S/workspace" ] && [ ! -f "$S/closed-$ws" ] && printf '{{"pane_id":"%s","terminal_id":"%s"}}' "$pane" "$term"
 }}
+# A process's end, awaited on its pidfd (util-linux waitpid): one already
+# ended, a zombie included, is not waited for.
 gone() {{
-  while [ -e "/proc/$1" ] && ! grep -q ') Z' "/proc/$1/stat" 2>/dev/null; do sleep 0.01; done
+  waitpid --exited --timeout 30 "$1" > /dev/null 2>&1 || :
 }}
 case "$*" in
   *"workspace create"*)
@@ -3804,19 +3807,18 @@ case "$*" in
       printf '{{"type":"custom-title","customTitle":"%s","sessionId":"%s"}}\n' "$(cat "$S/title")" "$(cat "$S/session")" >> '{claude_root}/'"$(cat "$S/session")"'.jsonl'
     fi
     # As Herdr 0.8.2 does, a Codex start returns only once the agent is idle:
-    # with START_WAITS, while a turn runs (TURN_STARTED, the test having seen
-    # a turn/start reach the app-server, and no TURN_DONE) it waits, and
-    # times out as Herdr does. START_REFUSED then refuses the start.
-    if [ "$harness" = codex ] && [ -f "$S/start-waits" ]; then
-      sleep 0.3
-      i=0; while [ -f "$S/turn-started" ] && [ ! -f "$S/turn-done" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
-      if [ -f "$S/turn-started" ] && [ ! -f "$S/turn-done" ]; then printf '%s\n' '{{"id":"cli:agent:start","error":{{"code":"timeout","message":"timed out waiting for agent startup"}}}}'; exit 1; fi
+    # with START_WAITS, a start that meets a running turn (TURN_STARTED, the
+    # test having seen a turn/start reach the app-server) waits for its end,
+    # which no fixture turn has, and times out as Herdr does. START_REFUSED
+    # then refuses the start.
+    if [ "$harness" = codex ] && [ -f "$S/start-waits" ] && [ -f "$S/turn-started" ]; then
+      printf '%s\n' '{{"id":"cli:agent:start","error":{{"code":"timeout","message":"timed out waiting for agent startup"}}}}'; exit 1
     fi
     if [ "$harness" = codex ] && [ -f "$S/start-refused" ]; then printf '%s\n' '{{"id":"cli:agent:start","error":{{"code":"agent_start_failed","message":"refused after the first turn"}}}}'; exit 1; fi
     printf '{{"result":{{"agent":{{"name":"%s"}}}}}}\n' "$5" ;;
   *"agent wait"*)
     # A pane whose turn runs is not at rest.
-    if [ -f "$S/turn-started" ] && [ ! -f "$S/turn-done" ]; then printf '%s\n' '{{"id":"cli:agent:wait","error":{{"code":"timeout","message":"timed out"}}}}'; exit 1; fi
+    if [ -f "$S/turn-started" ]; then printf '%s\n' '{{"id":"cli:agent:wait","error":{{"code":"timeout","message":"timed out"}}}}'; exit 1; fi
     printf '%s\n' '{{"result":{{"status":"idle"}}}}' ;;
   *"agent get"*) printf '{{"result":{{"agent":%s}}}}\n' "$(agent)" ;;
   *"api snapshot"*) if [ -f "$S/restart-world" ]; then printf '{{"id":"cli:api:snapshot","result":{{"snapshot":{{"agents":[%s],"panes":[%s],"protocol":20,"version":"0.8.2"}},"type":"session_snapshot"}}}}\n' "$(agents)" "$(panes)"; else a=; [ -f "$S/harness" ] && a=$(agent); printf '{{"id":"cli:api:snapshot","result":{{"snapshot":{{"agents":[%s],"protocol":20,"version":"0.8.2"}},"type":"session_snapshot"}}}}\n' "$a"; fi ;;
@@ -3847,11 +3849,13 @@ case "$*" in
     # for the test to append once the prompt's hook has reported.
     row=$(printf '{{"type":"user","sessionId":"%s","uuid":"typed-%s","message":{{"content":"%s"}}}}' "$s" "$(wc -l < "$t")" "$escaped")
     if [ -f "$S/rows-later" ]; then printf '%s\n' "$row" > "$S/held-row"; else printf '%s\n' "$row" >> "$t"; fi
+    submitted "$5" "$6"
     printf '{{"id":"cli:agent:prompt","result":{{"type":"agent_prompted","agent":%s}}}}\n' "$(agent)" ;;
   *) exit 64 ;;
 esac
 "##,
             sessions = self.session_listing(),
+            submitted = self.submission_report(),
             state = state.display(),
             claude_root = claude_root.display(),
         );
@@ -3878,6 +3882,17 @@ esac
                     continue;
                 }
                 let request: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                // A title readback's subscription to the pane's events is
+                // started and announces nothing: the fresh seat shows its
+                // title at the first read.
+                if request.get("method").and_then(serde_json::Value::as_str)
+                    == Some("events.subscribe")
+                {
+                    let _ = stream.write_all(
+                        b"{\"id\":\"flow-nexus:title\",\"result\":{\"type\":\"subscription_started\"}}\n",
+                    );
+                    continue;
+                }
                 let text = request
                     .pointer("/params/text")
                     .and_then(serde_json::Value::as_str)
@@ -3906,12 +3921,8 @@ esac
         // start was refused in place of the naming. Each connection's client
         // frames are kept (record-N), and its start is logged among the
         // Herdr calls. The opening connection is subscribed to the thread it
-        // started: with FIRST_CALL it sends that server request once the
-        // first turn has started (TURN_STARTED), as the app-server sends a
-        // first turn's tool call to every connection subscribed to its
-        // thread, and stays open; the first turn's own connection then
-        // answers the turn/start only once the call was answered
-        // (TURN_DONE), so the launch submitting it serves the call.
+        // started and stays open; every connection is held until the client
+        // closes it.
         let invocations = state.join("codex-invocations");
         let opened = |id: u64| {
             websocket_frame(
@@ -3966,7 +3977,7 @@ esac
             path: app_server.clone(),
         }
         .install(&format!(
-            "#!/bin/sh\nS='{state}'\nn=$(cat '{counter}' 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > '{counter}'\nprintf 'app-server connection %s\\n' \"$n\" >> \"$S/calls\"\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$S/record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\ncase \"$n\" in\n  1) printf '%b' '{probe}' ;;\n  2) printf '%b' '{opening}'; if [ -f \"$S/first-call\" ]; then i=0; while [ ! -f \"$S/turn-started\" ] && [ \"$i\" -lt 400 ]; do sleep 0.05; i=$((i + 1)); done; printf '%b' \"$(cat \"$S/first-call\")\"; fi; exec sleep 30 ;;\n  3) if [ -f \"$S/start-refused\" ]; then printf '%b' '{account}'; else printf '%b' '{naming}'; fi ;;\n  4) printf '%b' '{readback}'; if [ -f \"$S/first-call\" ]; then i=0; while [ ! -f \"$S/turn-done\" ] && [ \"$i\" -lt 400 ]; do sleep 0.05; i=$((i + 1)); done; fi; printf '%b' '{turn}' ;;\n  *) exit 1 ;;\nesac\nexec sleep 5\n",
+            "#!/bin/sh\nS='{state}'\nn=$(cat '{counter}' 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > '{counter}'\nprintf 'app-server connection %s\\n' \"$n\" >> \"$S/calls\"\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$S/record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\ncase \"$n\" in\n  1) printf '%b' '{probe}' ;;\n  2) printf '%b' '{opening}' ;;\n  3) if [ -f \"$S/start-refused\" ]; then printf '%b' '{account}'; else printf '%b' '{naming}'; fi ;;\n  4) printf '%b' '{readback}{turn}' ;;\n  *) exit 1 ;;\nesac\nwait\n",
             state = state.display(),
             counter = invocations.display(),
         ));
@@ -4773,8 +4784,7 @@ printf '%s\n' "$alias"
 
 /// Stands for the app-server's view of the first turn: once any connection
 /// has carried a `turn/start`, TURN_STARTED is written, which the fake Herdr
-/// reads as a turn running and the opening connection as the moment to
-/// send FIRST_CALL. Returns the connection that carried it.
+/// reads as a turn running. Returns the connection that carried it.
 fn turn_started_when_requested(
     state: std::path::PathBuf,
 ) -> std::thread::JoinHandle<Option<std::path::PathBuf>> {
@@ -4895,7 +4905,6 @@ fn a_codex_first_turn_starts_after_the_tui_attached_and_a_long_turn_refuses_noth
     };
     assert_eq!(started_flow.flow_id, FRESH_CODEX_FLOW);
     setup.shows_thread_start_then_agent_start_then_turn_start(started.join().unwrap());
-    assert!(!setup.world.state.join("turn-done").exists());
 }
 
 /// Herdr refuses the start: the launch is refused, and the thread it
@@ -5068,7 +5077,7 @@ fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
         path: app_server.clone(),
     }
     .install(&format!(
-        "#!/bin/sh\nS='{state}'\nn=$(cat \"$S/restart-invocations\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$S/restart-invocations\"\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$S/restart-record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\ncase \"$((n % 3))\" in\n  1) printf '%b' '{probe}' ;;\n  2) printf '%b' '{resumed}'; printf '%b' \"$(cat \"$S/first-call\")\"; exec sleep 30 ;;\n  0) if [ -e \"$S/archive-refused\" ]; then printf '%b' '{archive_refused}'; else printf '%b' '{account}'; fi ;;\nesac\nexec sleep 5\n",
+        "#!/bin/sh\nS='{state}'\nn=$(cat \"$S/restart-invocations\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$S/restart-invocations\"\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$S/restart-record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\ncase \"$((n % 3))\" in\n  1) printf '%b' '{probe}' ;;\n  2) printf '%b' '{resumed}'; printf '%b' \"$(cat \"$S/first-call\")\" ;;\n  0) if [ -e \"$S/archive-refused\" ]; then printf '%b' '{archive_refused}'; else printf '%b' '{account}'; fi ;;\nesac\nwait\n",
         state = setup.world.state.display(),
     ));
     fixture.nexus.codex_endpoints.edit().stable.client_path = app_server;

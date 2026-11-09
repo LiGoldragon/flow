@@ -17,7 +17,7 @@
     # callers move explicitly to lib.<system>.mkFlowPackage.
     unconfigured-flow.url = "github:LiGoldragon/flow/d3ab87ee18b1dd30947d5f0089f5abb4bafa80d5";
     # The Message Nexus the joint check runs beside the real Flow Nexus.
-    message.url = "github:LiGoldragon/message/3d0fcbcdb829b09f80192d055d12e3af2754c9d0";
+    message.url = "github:LiGoldragon/message/8a60367d00860c0b1d91b522641648ee1ae01e91";
     # The accepted 0.53.2 Flow, built by its own flake, whose Memory the
     # request-id migration check evolves. The lock holds its commit, f7d2336,
     # and the flake refuses any other (predecessorRevision below).
@@ -379,7 +379,7 @@
                   export FLOW_MESSAGE_JOINT_FLOW_BIN="${flowNexus}"
                   export FLOW_MESSAGE_JOINT_MESSAGE_BIN="${message.packages.${system}.default}/bin/message-nexus"
                   export FLOW_MESSAGE_JOINT_FLOW_REV="${sourceRevision}"
-                  export FLOW_MESSAGE_JOINT_MESSAGE_REV="3d0fcbcdb829b09f80192d055d12e3af2754c9d0"
+                  export FLOW_MESSAGE_JOINT_MESSAGE_REV="8a60367d00860c0b1d91b522641648ee1ae01e91"
                   sha256sum "$FLOW_MESSAGE_JOINT_FLOW_BIN" "$FLOW_MESSAGE_JOINT_MESSAGE_BIN"
                 '';
             # The accepted 0.53.2's real Memory, evolved and served by this
@@ -399,10 +399,10 @@
               "flow-request-id-immutable-contract-pins"
               { nativeBuildInputs = [ pkgs.gnugrep ]; }
               ''
-                grep -F 'rev = "065730ff8b628657a692e8890714cadde881f1d4"' ${./Cargo.toml}
-                grep -F 'rev = "da773ffeaadc0033c29b6bc94288066e98dc397c"' ${./Cargo.toml}
-                grep -F 'signal-flow?rev=065730ff8b628657a692e8890714cadde881f1d4#065730ff8b628657a692e8890714cadde881f1d4' ${./Cargo.lock}
-                grep -F 'meta-signal-flow?rev=da773ffeaadc0033c29b6bc94288066e98dc397c#da773ffeaadc0033c29b6bc94288066e98dc397c' ${./Cargo.lock}
+                grep -F 'rev = "8e56457d41552f07df5b39a0b9e6e7248c72da43"' ${./Cargo.toml}
+                grep -F 'rev = "0ee659384a2c3935930923427f921e34ebc634ad"' ${./Cargo.toml}
+                grep -F 'signal-flow?rev=8e56457d41552f07df5b39a0b9e6e7248c72da43#8e56457d41552f07df5b39a0b9e6e7248c72da43' ${./Cargo.lock}
+                grep -F 'meta-signal-flow?rev=0ee659384a2c3935930923427f921e34ebc634ad#0ee659384a2c3935930923427f921e34ebc634ad' ${./Cargo.lock}
                 touch "$out"
               '';
 

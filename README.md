@@ -16,6 +16,9 @@ The wire contracts are independent repositories:
   A frame that decodes as no Query, an earlier hook's Report among them, is
   answered `FrameRefused` with its caller's process and seat and recorded;
   `Observe.Undecodable` shows every record and each new one.
+  `Observe.TurnEnds` sends the last turn end of each harness, then each
+  turn end (a Claude Stop in its own session, a Codex turn completed) with
+  the metaflow's Address, the harness and the flow.
   Nothing on the ordinary socket writes into a pane.
 - `meta-signal-flow` defines `Configure`, reset-credit consumption, `Retire`,
   and the pane writes: `Deliver`, `Vet`, `Command`, plus `ResolvePeer`.
@@ -59,6 +62,7 @@ flow main 'Stop.00f95a'
 flow main 'Metaflows'
 flow main 'Observe.Agent.00f95a'
 flow main 'Observe.Undecodable'
+flow main 'Observe.TurnEnds'
 flow-meta main 'ObserveConfiguration'
 ```
 

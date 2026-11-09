@@ -1,8 +1,8 @@
 # Flow 0.53.3: replacement waits for rest; a Stop carries its background work
 
-Pins signal-flow 57.0.0 (`065730f`), meta-signal-flow 72.0.0 (`da773ff`),
-Message 0.22.1 (`3d0fcbc`), signal-message 21.0.1 (`4c1cd69`) and
-meta-signal-message 3.0.1 (`f916df1`).
+Pins signal-flow 57.0.0 (`8e56457`), meta-signal-flow 72.0.0 (`0ee6593`),
+Message 0.22.1 (`8a60367`), signal-message 21.0.1 (`a5e04b7`) and
+meta-signal-message 3.0.1 (`1ec9e00`).
 
 - A Claude seat rests when its own last Stop names no background work and
   its turn is shown ended. Closing (a refresh, an OnDemand sleep) waits for
@@ -45,6 +45,13 @@ meta-signal-message 3.0.1 (`f916df1`).
   caller's seat and process, and recorded in `flow_nexus_undecodable_frames`
   (new, empty in a 0.53.2 store). `Observe.Undecodable` streams every record,
   then each new one.
+- `Observe.TurnEnds` streams turn ends: `TurnEndsObserved` on open, the
+  last turn end of each harness (Claude, then Codex), then one
+  `TurnEnded.{ Address HarnessKind FlowId ObservedAt }` per turn end. A turn
+  end is a Claude flow's Stop in its own session, whatever background work
+  it names, or a Codex thread's turn completed, once per turn, for a flow a
+  metaflow is Awake as. The last of each harness is kept in
+  `flow_nexus_turn_ends` (new, empty in a 0.53.2 store).
 - The Nexus binds both sockets before serving and then sends `READY=1` to
   `$NOTIFY_SOCKET` when set: its unit can be `Type=notify`.
 

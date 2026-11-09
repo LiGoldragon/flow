@@ -30,6 +30,7 @@ use crate::RunningNexus;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
+use crate::turn_ends::RecordsTurnEnd;
 use crate::waking::{HoldsWakingMetaflows, NotesStopsAtConfirmation, SleepsAndWakesSeats};
 use signal_flow::{Address, FlowId, FlowNode, HarnessKind};
 use std::collections::{HashMap, VecDeque};
@@ -66,6 +67,15 @@ pub enum ThreadStatus {
     Active,
     /// Not loaded, or a system error.
     Unavailable,
+}
+
+/// What one event did to a thread: whether it brought the thread to rest,
+/// and whether it ended a turn not seen ending before, a turn end
+/// `Observe.TurnEnds` sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnObservation {
+    pub rested: bool,
+    pub ended: bool,
 }
 
 /// How many completed turns of a thread are kept to recognise a repeat.
@@ -143,21 +153,23 @@ impl ReadsThreadStatus for serde_json::Value {
 }
 
 pub trait TracksCodexTurns {
-    /// Applies one event; true when it brought the thread to rest.
-    fn observe(&self, thread: &str, event: TurnEvent) -> bool;
+    /// Applies one event: whether it brought the thread to rest, and
+    /// whether it ended a turn for the first time.
+    fn observe(&self, thread: &str, event: TurnEvent) -> TurnObservation;
     /// Flow typed work into the seat on `thread`.
     fn delivered(&self, thread: &str);
     fn turn(&self, thread: &str) -> ThreadTurn;
 }
 
 impl TracksCodexTurns for CodexTurns {
-    fn observe(&self, thread: &str, event: TurnEvent) -> bool {
+    fn observe(&self, thread: &str, event: TurnEvent) -> TurnObservation {
         let mut threads = self
             .threads
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let state = threads.entry(thread.to_owned()).or_default();
         let was_resting = state.turn == ThreadTurn::Resting;
+        let mut ended = false;
         match event {
             TurnEvent::Started(turn) => {
                 // A start read after its own completion changes nothing.
@@ -167,8 +179,12 @@ impl TracksCodexTurns for CodexTurns {
             }
             TurnEvent::Completed(turn) => {
                 if state.completed.contains(&turn) {
-                    return false;
+                    return TurnObservation {
+                        rested: false,
+                        ended: false,
+                    };
                 }
+                ended = true;
                 state.completed.push_back(turn.clone());
                 if state.completed.len() > REMEMBERED_TURNS {
                     state.completed.pop_front();
@@ -205,7 +221,10 @@ impl TracksCodexTurns for CodexTurns {
             TurnEvent::Status(ThreadStatus::Unavailable)
             | TurnEvent::Resumed(ThreadStatus::Unavailable) => state.turn = ThreadTurn::Unknown,
         }
-        !was_resting && state.turn == ThreadTurn::Resting
+        TurnObservation {
+            rested: !was_resting && state.turn == ThreadTurn::Resting,
+            ended,
+        }
     }
 
     fn delivered(&self, thread: &str) {
@@ -256,19 +275,30 @@ impl SettlesRestingCodexSeats for RunningNexus {
         if events.is_empty() {
             return;
         }
-        let seat = {
+        let (seat, ended) = {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            for event in events {
-                self.codex_turns.observe(thread, event);
-            }
-            self.codex_flow_on(thread).and_then(|node| {
+            let ended = events
+                .into_iter()
+                .map(|event| self.codex_turns.observe(thread, event))
+                .filter(|observed| observed.ended)
+                .count();
+            let flow = self.codex_flow_on(thread);
+            let seat = flow.as_ref().and_then(|node| {
                 let metaflow = self.store.metaflow_awake_as(&node.flow_id).ok()??;
                 self.resting_codex_seat(&metaflow.address)
-            })
+            });
+            (seat, flow.map(|node| (node.flow_id, ended)))
         };
+        // Each turn the events ended is a turn end, sent before the
+        // settlement it allows.
+        if let Some((flow_id, ended)) = ended {
+            for _ in 0..ended {
+                self.turn_ended(&flow_id);
+            }
+        }
         // Settled as a Stop is: off the gate, which it takes, reading the
         // thread's turn again under it.
         if let Some(flow_id) = seat {
@@ -277,8 +307,17 @@ impl SettlesRestingCodexSeats for RunningNexus {
     }
 
     fn observe_codex_events(&self, thread: &str, events: Vec<TurnEvent>) {
-        for event in events {
-            self.codex_turns.observe(thread, event);
+        let ended = events
+            .into_iter()
+            .map(|event| self.codex_turns.observe(thread, event))
+            .filter(|observed| observed.ended)
+            .count();
+        if ended > 0
+            && let Some(node) = self.codex_flow_on(thread)
+        {
+            for _ in 0..ended {
+                self.turn_ended(&node.flow_id);
+            }
         }
         if self.codex_turns.turn(thread) == ThreadTurn::Resting
             && let Some(node) = self.codex_flow_on(thread)

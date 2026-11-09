@@ -136,6 +136,9 @@ impl RecordsReports for RunningNexus {
                 // Stop before its next part.
                 self.store.launch_changes.announce();
                 if self.correlated_stop(flow_id, stop) {
+                    // A Stop in the flow's own session ends a turn, whatever
+                    // background work it names.
+                    crate::turn_ends::RecordsTurnEnd::turn_ended(self, flow_id);
                     // A simplified seat's answer is read from its own
                     // transcript once its input is received there: the
                     // payloads typed into it settle first, since the

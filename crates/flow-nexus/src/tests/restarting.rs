@@ -2512,6 +2512,7 @@ impl OpensSecondNexus for NexusFixture {
             stopping: crate::Stopping::default(),
             launch_calls: crate::send_tool::LaunchCalls::default(),
             codex_turns: crate::codex_turns::CodexTurns::default(),
+            turn_ends: crate::turn_ends::TurnEndSubscribers::default(),
             compactions: crate::compacting::CompactionWatch::default(),
             configuration_changes: Default::default(),
         }

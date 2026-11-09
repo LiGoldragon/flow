@@ -77,6 +77,7 @@ pub mod sending;
 pub mod store;
 pub mod store_check;
 pub mod title;
+pub mod turn_ends;
 pub mod undecodable;
 pub mod values;
 pub mod waking;
@@ -158,6 +159,8 @@ pub struct RunningNexus {
     /// Whether each Codex thread is in a turn, as its app-server's events
     /// show it; see `codex_turns`.
     pub codex_turns: codex_turns::CodexTurns,
+    /// The open `Observe.TurnEnds` subscriptions; see `turn_ends`.
+    pub turn_ends: turn_ends::TurnEndSubscribers,
     /// How far each flow's compactions have been read; see `compacting`.
     pub compactions: compacting::CompactionWatch,
     /// Announced each time a Configure replaces a family, and at a stop;
@@ -423,6 +426,13 @@ impl Dispatches for RunningNexus {
                 use crate::store::undecodable_frame::RecordsUndecodableFrames;
                 match self.store.undecodable_frames() {
                     Ok(frames) => Response::UndecodableObserved(frames),
+                    Err(error) => Response::Refused(signal_flow::Refusal::Store(error.to_string())),
+                }
+            }
+            Query::Observe(ObserveSelection::TurnEnds) => {
+                use crate::store::turn_end::RecordsTurnEnds;
+                match self.store.last_turn_ends() {
+                    Ok(turn_ends) => Response::TurnEndsObserved(turn_ends),
                     Err(error) => Response::Refused(signal_flow::Refusal::Store(error.to_string())),
                 }
             }
@@ -1182,6 +1192,7 @@ impl OpensRunningNexus for RunningNexus {
             stopping: Stopping::default(),
             launch_calls: send_tool::LaunchCalls::default(),
             codex_turns: codex_turns::CodexTurns::default(),
+            turn_ends: turn_ends::TurnEndSubscribers::default(),
             compactions: compacting::CompactionWatch::default(),
             configuration_changes: store::LaunchChanges::default(),
         })
@@ -1328,6 +1339,9 @@ pub trait ServesConnection: Sized {
     /// Observe.Undecodable: every recorded undecodable frame, then each new
     /// one, until the peer goes.
     fn serve_undecodable(&mut self, nexus: &RunningNexus) -> Result<(), String>;
+    /// Observe.TurnEnds: the last turn end of each harness, then each
+    /// turn end, until the peer goes.
+    fn serve_turn_ends(&mut self, nexus: &RunningNexus) -> Result<(), String>;
     /// ObserveConfiguration on the meta socket: the configuration, then
     /// again at each change, until the peer goes.
     fn serve_configuration(&mut self, nexus: &RunningNexus) -> Result<(), String>;
@@ -1429,6 +1443,39 @@ impl ServesConnection for Connection {
         result.and(watcher_result)
     }
 
+    fn serve_turn_ends(&mut self, nexus: &RunningNexus) -> Result<(), String> {
+        use crate::turn_ends::ObservesTurnEnds;
+        let mut reader = self.peer.try_clone().map_err(|error| error.to_string())?;
+        reader
+            .set_read_timeout(None)
+            .map_err(|error| error.to_string())?;
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let watch_disconnected = Arc::clone(&disconnected);
+        let changes = nexus.store.launch_changes.clone();
+        let watcher = std::thread::Builder::new()
+            .name("flow-turn-end-observer-peer".into())
+            .spawn(move || {
+                let mut bytes = [0_u8; 256];
+                loop {
+                    match reader.read(&mut bytes) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+                watch_disconnected.store(true, Ordering::Release);
+                changes.announce();
+            })
+            .map_err(|error| error.to_string())?;
+        let result = nexus.observe_turn_ends(&disconnected, &mut |response| {
+            self.peer.write_response(response)
+        });
+        let _ = self.peer.shutdown(Shutdown::Both);
+        let watcher_result = watcher
+            .join()
+            .map_err(|_| "peer-disconnect watcher panicked".to_owned());
+        result.and(watcher_result)
+    }
+
     fn serve_configuration(&mut self, nexus: &RunningNexus) -> Result<(), String> {
         use crate::observe_configuration::ObservesConfiguration;
         let mut reader = self.peer.try_clone().map_err(|error| error.to_string())?;
@@ -1498,6 +1545,9 @@ impl ServesConnection for Connection {
             }
             Query::Observe(ObserveSelection::Undecodable) => {
                 return self.serve_undecodable(nexus);
+            }
+            Query::Observe(ObserveSelection::TurnEnds) => {
+                return self.serve_turn_ends(nexus);
             }
             Query::Observe(ObserveSelection::Retirement(address)) => {
                 use crate::store::handover::HoldsHandovers;
@@ -2366,6 +2416,7 @@ mod tests {
     mod send_tool;
     mod start_admission;
     mod submission;
+    mod turn_ends;
     mod waking;
 
     pub(crate) fn sendable_message(message: signal_flow::Message) -> signal_flow::SendableMessage {
@@ -3135,6 +3186,7 @@ mod tests {
                 stopping: crate::Stopping::default(),
                 launch_calls: crate::send_tool::LaunchCalls::default(),
                 codex_turns: crate::codex_turns::CodexTurns::default(),
+                turn_ends: crate::turn_ends::TurnEndSubscribers::default(),
                 compactions: crate::compacting::CompactionWatch::default(),
                 configuration_changes: Default::default(),
             };

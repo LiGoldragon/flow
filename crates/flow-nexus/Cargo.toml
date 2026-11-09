@@ -45,5 +45,5 @@ tungstenite = "0.28"
 [build-dependencies]
 ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "07714b0171802787bea1eefe4caa2d826d9c4030" }
 [dev-dependencies]
-message-nexus = { git = "https://github.com/LiGoldragon/message", rev = "3d0fcbcdb829b09f80192d055d12e3af2754c9d0" }
-signal-message = { git = "https://github.com/LiGoldragon/signal-message", rev = "4c1cd6936cc1bae03e63fad820c4fcf386608ff0" }
+message-nexus = { git = "https://github.com/LiGoldragon/message", rev = "8a60367d00860c0b1d91b522641648ee1ae01e91" }
+signal-message = { git = "https://github.com/LiGoldragon/signal-message", rev = "a5e04b756dc300ba90f9fde2fa3ff6f5cc24e445" }

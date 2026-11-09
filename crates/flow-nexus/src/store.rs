@@ -37,6 +37,7 @@ pub(crate) mod send_server;
 pub(crate) mod sent;
 mod staged_open;
 pub(crate) mod successor;
+pub(crate) mod turn_end;
 pub(crate) mod undecodable_frame;
 use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
@@ -152,6 +153,8 @@ const OPTIONAL_HANDOVER_REMINDER_TABLE: &str = "flow_nexus_handover_reminders";
 const OPTIONAL_ORDERED_REPLACEMENT_TABLE: &str = "flow_nexus_ordered_replacements";
 /// Added in 0.53.3; a 0.53.2 store has recorded no undecodable frame.
 const OPTIONAL_UNDECODABLE_FRAME_TABLE: &str = "flow_nexus_undecodable_frames";
+/// Added in 0.53.3; a 0.53.2 store has recorded no turn end.
+const OPTIONAL_TURN_END_TABLE: &str = "flow_nexus_turn_ends";
 /// Added in 0.53.3; a 0.53.2 store names no harness hook.
 const OPTIONAL_HARNESS_HOOK_TABLE: &str = "flow_nexus_meta_harness_hook_configuration";
 const META_HARNESS_HOOK_CONFIGURATION_TABLE_NAME: TableName =
@@ -251,6 +254,7 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_HANDOVER_REMINDER_TABLE,
     OPTIONAL_ORDERED_REPLACEMENT_TABLE,
     OPTIONAL_UNDECODABLE_FRAME_TABLE,
+    OPTIONAL_TURN_END_TABLE,
     OPTIONAL_HARNESS_HOOK_TABLE,
 ];
 // These are this Flow source's authored Memory version candidates. They are
@@ -1671,6 +1675,7 @@ pub struct FlowStore {
     successor_intents: TableReference<successor::SuccessorIntent>,
     ordered_replacements: TableReference<ordered_replacement::OrderedReplacement>,
     undecodable_frames: TableReference<undecodable_frame::UndecodableRecord>,
+    turn_ends: TableReference<turn_end::TurnEndRecord>,
     queue_delivery: QueueDeliveryTables,
     send_outcomes: SendOutcomeTables,
     logical_deliveries: LogicalDeliveryTables,
@@ -2649,6 +2654,9 @@ impl OpensFlowStore for FlowStore {
         let undecodable_frames = engine.register_table(
             <undecodable_frame::UndecodableRecord as undecodable_frame::DescribesUndecodableFrameTable>::descriptor(),
         )?;
+        let turn_ends = engine.register_table(
+            <turn_end::TurnEndRecord as turn_end::DescribesTurnEndTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2680,6 +2688,7 @@ impl OpensFlowStore for FlowStore {
             successor_intents,
             ordered_replacements,
             undecodable_frames,
+            turn_ends,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -2841,6 +2850,9 @@ impl OpensFlowStore for FlowStore {
         let undecodable_frames = engine.register_table(
             <undecodable_frame::UndecodableRecord as undecodable_frame::DescribesUndecodableFrameTable>::descriptor(),
         )?;
+        let turn_ends = engine.register_table(
+            <turn_end::TurnEndRecord as turn_end::DescribesTurnEndTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2872,6 +2884,7 @@ impl OpensFlowStore for FlowStore {
             successor_intents,
             ordered_replacements,
             undecodable_frames,
+            turn_ends,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -5083,6 +5096,7 @@ pub(crate) trait ReadsFlowMemory {
                 undecodable_frame::UNDECODABLE_FRAME_FAMILY,
                 undecodable_frame::UNDECODABLE_FRAME_SCHEMA,
             ),
+            "flow_nexus_turn_ends" => (turn_end::TURN_END_FAMILY, turn_end::TURN_END_SCHEMA),
             "flow_nexus_meta_leave_out_configuration" => {
                 return Some((
                     "flow-nexus-meta-leave-out-configuration",
@@ -5241,6 +5255,7 @@ pub(crate) trait ReadsFlowMemory {
                     || *name == OPTIONAL_HANDOVER_REMINDER_TABLE
                     || *name == OPTIONAL_ORDERED_REPLACEMENT_TABLE
                     || *name == OPTIONAL_UNDECODABLE_FRAME_TABLE
+                    || *name == OPTIONAL_TURN_END_TABLE
                     || *name == OPTIONAL_HARNESS_HOOK_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
                     || *name == OPTIONAL_DELIVER_CALL_TABLE

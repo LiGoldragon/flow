@@ -3033,30 +3033,26 @@ impl Drop for SpawnedProcess {
     }
 }
 
-/// The one child of `parent`, read from the kernel once it has started.
-fn child_of(parent: u32) -> signal_flow::Process {
+/// The child whose pid its parent wrote at `written`, read at each change
+/// in that file's directory until it is there, bounded.
+fn child_written_at(written: &std::path::Path) -> signal_flow::Process {
+    use crate::event_wait::AwaitsDirectory;
     use crate::store::{FlowStore, ReadsFlowMemory};
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let child = fs::read_dir("/proc")
-            .unwrap()
-            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
-            .find(|pid| {
-                fs::read_to_string(format!("/proc/{pid}/stat"))
-                    .ok()
-                    .and_then(|stat| {
-                        let (_, fields) = stat.rsplit_once(") ")?;
-                        fields.split_whitespace().nth(1)?.parse::<u32>().ok()
-                    })
-                    == Some(parent)
-            })
-            .and_then(FlowStore::process_identity_for_pid);
-        if let Some(child) = child {
-            return child;
-        }
-        assert!(std::time::Instant::now() < deadline, "the child started");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    let child = || {
+        fs::read_to_string(written)
+            .ok()?
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .and_then(FlowStore::process_identity_for_pid)
+    };
+    let directory = written.parent().expect("the pid file's directory");
+    assert!(
+        directory.until_holds(deadline, &mut || child().is_some()),
+        "the child started"
+    );
+    child().expect("the child started")
 }
 
 /// A Codex thread on a shared app-server sends through an MCP send server
@@ -3196,10 +3192,14 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
         identify(&send_server_process, "", &message),
         &send_server_process,
     );
-    // The right thread from another executable is refused.
+    // The right thread from another executable is refused. The shell
+    // writes its child's pid once the child has started.
+    let child_pid = tempfile::tempdir().unwrap();
+    let child_pid_file = child_pid.path().join("child.pid");
     let shell = SpawnedProcess(
         std::process::Command::new("sh")
-            .args(["-c", "sleep 30; :"])
+            .args(["-c", "sleep 30 & printf '%s' \"$!\" > \"$0\"; wait; :"])
+            .arg(&child_pid_file)
             .spawn()
             .unwrap(),
     );
@@ -3209,7 +3209,7 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
         Response::Refused(Refusal::NotSendServer(shell_process.clone()))
     );
     // The send server's own executable under another parent is refused.
-    let foreign_child = child_of(shell.0.id());
+    let foreign_child = child_written_at(&child_pid_file);
     assert_eq!(
         identify(&foreign_child, thread, &message),
         Response::Refused(Refusal::NotSendServer(foreign_child.clone()))
@@ -3409,10 +3409,11 @@ fn an_unconfirmed_launch_that_fails_or_ends_leaves_no_awake_registration() {
 /// A Herdr stand-in for the Claude seat in pane w1:p3 that shows it working
 /// until an `agent wait` has run, and resting (`done`) after: Claude runs
 /// its Stop hook while its spinner is still on screen. The wait first
-/// waits, boundedly, for `released` to exist. Every call is logged.
+/// waits, boundedly, for the `released` latch to open. Every call is
+/// logged.
 fn herdr_working_until_waited(
     fixture: &NexusFixture,
-    released: &std::path::Path,
+    released: &crate::fixture_executable::Latch,
 ) -> std::path::PathBuf {
     let log = fixture.directory.path().join("herdr-operations.log");
     let waited = fixture.directory.path().join("herdr-waited");
@@ -3426,10 +3427,10 @@ fn herdr_working_until_waited(
         })
     };
     let body = format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$3 $4\" in\n  \"api snapshot\") if [ -e '{waited}' ]; then printf '%s\\n' '{done}'; else printf '%s\\n' '{working}'; fi ;;\n  \"agent wait\") i=0; while [ ! -e '{released}' ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; if [ -e '{released}' ]; then echo 'wait released by the closed hook' >> '{log}'; else echo 'wait timed out' >> '{log}'; fi; : > '{waited}' ;;\n  \"pane close\") ;;\n  \"agent read\") printf '%s\\n' '❯ ' ;;\n  *) exit 64 ;;\nesac\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$3 $4\" in\n  \"api snapshot\") if [ -e '{waited}' ]; then printf '%s\\n' '{done}'; else printf '%s\\n' '{working}'; fi ;;\n  \"agent wait\") if timeout 10 sh -c ': < \"$0\"' '{released}'; then echo 'wait released by the closed hook' >> '{log}'; else echo 'wait timed out' >> '{log}'; fi; : > '{waited}' ;;\n  \"pane close\") ;;\n  \"agent read\") printf '%s\\n' '❯ ' ;;\n  *) exit 64 ;;\nesac\n",
         log = log.display(),
         waited = waited.display(),
-        released = released.display(),
+        released = released.path.display(),
         done = snapshot("done"),
         working = snapshot("working"),
     );
@@ -3446,8 +3447,9 @@ fn herdr_working_until_waited(
 #[test]
 fn a_seat_herdr_shows_working_at_its_stop_is_idle_once_herdr_shows_it_done() {
     let fixture = NexusFixture::new();
-    let released = fixture.directory.path().join("released");
-    fs::write(&released, b"").unwrap();
+    use crate::fixture_executable::{HoldsLatch, Latch};
+    let released = Latch::closed(fixture.directory.path().join("released"));
+    released.release();
     let log = herdr_working_until_waited(&fixture, &released);
     claude_seat(&fixture, 40_000);
     fixture.nexus.store.seed_metaflow(metaflow(
@@ -3520,7 +3522,8 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
     use std::time::{Duration, Instant};
 
     let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
-    let released = fixture.directory.path().join("hook-closed");
+    use crate::fixture_executable::{HoldsLatch, Latch};
+    let released = Latch::closed(fixture.directory.path().join("hook-closed"));
     let log = herdr_working_until_waited(fixture, &released);
     claude_seat(fixture, 40_000);
     fixture.nexus.store.seed_metaflow(metaflow(
@@ -3532,14 +3535,15 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
     let socket = fixture.directory.path().join("ordinary.sock");
     let served = socket.clone();
     std::thread::spawn(move || fixture.nexus.serve_ordinary(&served));
-    let mut hook = (0..200)
-        .find_map(|_| {
-            UnixStream::connect(&socket).ok().or_else(|| {
-                std::thread::sleep(Duration::from_millis(10));
-                None
-            })
-        })
-        .expect("ordinary socket listens");
+    // The name is moved in only once the socket listens.
+    assert!(
+        crate::event_wait::AwaitsPath::appeared_by(
+            socket.as_path(),
+            Instant::now() + Duration::from_secs(2)
+        ),
+        "ordinary socket listens"
+    );
+    let mut hook = UnixStream::connect(&socket).expect("ordinary socket listens");
     hook.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     hook.write_query(&signal_flow::Query::Report(signal_flow::Report_Data {
         flow_id: CLAUDE_SEAT.into(),
@@ -3556,17 +3560,19 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
             .expect("the connection closes while the wait still runs"),
         0
     );
-    fs::write(&released, b"").unwrap();
+    released.release();
 
     let deadline = Instant::now() + Duration::from_secs(20);
-    let calls = loop {
-        let calls = fs::read_to_string(&log).unwrap_or_default();
-        if calls.contains("wait released") || calls.contains("wait timed out") {
-            break calls;
-        }
-        assert!(Instant::now() < deadline, "the rest wait never ended");
-        std::thread::sleep(Duration::from_millis(20));
-    };
+    let calls = || fs::read_to_string(&log).unwrap_or_default();
+    let directory = log.parent().expect("the log's directory");
+    assert!(
+        crate::event_wait::AwaitsDirectory::until_holds(directory, deadline, &mut || {
+            let calls = calls();
+            calls.contains("wait released") || calls.contains("wait timed out")
+        }),
+        "the rest wait never ended"
+    );
+    let calls = calls();
     assert!(
         calls.contains("wait released by the closed hook"),
         "{calls}"
@@ -3760,7 +3766,7 @@ case "$*" in
     # telling the test it is held; RESUME_REFUSED refuses it.
     if [ -n "$resumed" ] && [ -f "$S/hold-start" ]; then
       : > "$S/start-held"
-      i=0; while [ ! -f "$S/release-start" ] && [ "$i" -lt 2000 ]; do sleep 0.01; i=$((i + 1)); done
+      timeout 20 sh -c ': < "$0"' "$S/release-start" || true
     fi
     if [ -n "$resumed" ] && [ -f "$S/resume-refused" ]; then printf '%s\n' '{{"id":"cli:agent:start","error":{{"code":"agent_start_failed","message":"resume refused"}}}}'; exit 1; fi
     # RESUME_REFUSED_ONCE refuses the next resume only.
@@ -4774,23 +4780,25 @@ fn turn_started_when_requested(
 ) -> std::thread::JoinHandle<Option<std::path::PathBuf>> {
     use super::send_tool::ReadsClientFrames;
     std::thread::spawn(move || {
+        use crate::event_wait::AwaitsDirectory;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while std::time::Instant::now() < deadline {
-            let started = (1..=6)
+        let started = || {
+            (1..=6)
                 .map(|n| state.join(format!("record-{n}")))
                 .find(|record| {
                     record.client_messages().iter().any(|message| {
                         message.get("method").and_then(serde_json::Value::as_str)
                             == Some("turn/start")
                     })
-                });
-            if let Some(record) = started {
-                fs::write(state.join("turn-started"), "").unwrap();
-                return Some(record);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+                })
+        };
+        // Each frame a connection records is a write in the state directory.
+        if !state.until_holds(deadline, &mut || started().is_some()) {
+            return None;
         }
-        None
+        let record = started();
+        fs::write(state.join("turn-started"), "").unwrap();
+        record
     })
 }
 

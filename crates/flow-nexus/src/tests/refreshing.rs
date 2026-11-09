@@ -18,11 +18,13 @@ use super::{
     ControlsHerdrSnapshot, MarkedProcess, NexusFixture, PromptFixture, bind_existing_caller,
     codex_agent_in,
 };
-use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+use crate::event_wait::AwaitsPath;
+use crate::fixture_executable::{FixtureExecutable, HoldsLatch, InstallsScript, Latch};
 use crate::generated::operation::{Operation, Outcome};
 use crate::handover_reminding::RemindsHandoverCallers;
 use crate::performing::Performs;
 use crate::sending::{IdentifiesSender, SendsRequests};
+use crate::store::AnnouncesLaunchChanges as _;
 use crate::store::SeedsRole;
 use crate::store::context::{JudgesThreshold, RecordsContextSize};
 use crate::store::handover::HoldsHandovers as _;
@@ -49,11 +51,12 @@ use std::time::Duration;
 /// Releases a fixture operation even when an assertion unwinds before the
 /// scoped worker threads are joined. Cleanup is idempotent and cannot replace
 /// the assertion that exposed it.
-struct ReleasesFixtureOnDrop(std::path::PathBuf);
+/// Releases a fixture's latch whatever the test came to, so a scope joins.
+struct ReleasesFixtureOnDrop<'latch>(&'latch Latch);
 
-impl Drop for ReleasesFixtureOnDrop {
+impl Drop for ReleasesFixtureOnDrop<'_> {
     fn drop(&mut self) {
-        let _ = fs::write(&self.0, "");
+        self.0.release();
     }
 }
 
@@ -333,7 +336,7 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
     // waits for the test to release it: the refresh holds the metaflow, its
     // flow not yet recorded ended, for as long as the test needs.
     let closing = fixture.directory.path().join("close-reached");
-    let release = fixture.directory.path().join("close-released");
+    let release = Latch::closed(fixture.directory.path().join("close-released"));
     let script = fs::read_to_string(&fixture.snapshot_program).expect("fixture Herdr");
     let pattern = "  \"pane close\"|\"pane send-keys\"|\"agent wait\")";
     assert!(script.contains(pattern), "{script}");
@@ -343,9 +346,9 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
     .install(&script.replacen(
         pattern,
         &format!(
-            "  \"pane close\") : > '{closing}'; while [ ! -e '{release}' ]; do sleep 0.02; done; printf '%s\\n' \"$*\" >> '{log}' ;;\n{pattern}",
+            "  \"pane close\") : > '{closing}'; : < '{release}'; printf '%s\\n' \"$*\" >> '{log}' ;;\n{pattern}",
             closing = closing.display(),
-            release = release.display(),
+            release = release.path.display(),
             log = log.display(),
         ),
         1,
@@ -367,17 +370,16 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
     };
 
     let (refreshed, sent) = std::thread::scope(|scope| {
-        let _release_on_drop = ReleasesFixtureOnDrop(release.clone());
+        let _release_on_drop = ReleasesFixtureOnDrop(&release);
         let refreshing = scope.spawn(|| {
             fixture
                 .nexus
                 .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound.into())
         });
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        while !closing.exists() {
-            assert!(std::time::Instant::now() < deadline, "the close never ran");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        assert!(
+            closing.appeared_by(std::time::Instant::now() + Duration::from_secs(20)),
+            "the close never ran"
+        );
         // The refresh holds the metaflow and its flow is still Awake.
         assert!(fixture.nexus.waking.is_waking(&seat_address()));
         assert_eq!(stored(&fixture).state, State::Awake(ENDING.into()));
@@ -408,7 +410,7 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
         }
         .install(&fresh_script);
         assert!(fixture.typed().is_none(), "nothing reaches the ending flow");
-        fs::write(&release, "").expect("close released");
+        release.release();
         (
             refreshing.join().expect("refresh answered"),
             sending.join().expect("send answered"),
@@ -978,7 +980,7 @@ fn a_launch_ordered_replace_holds_the_metaflow_and_types_nothing_into_its_predec
 
     // The predecessor's close announces itself, then waits for the test.
     let closing = fixture.directory.path().join("close-reached");
-    let release = fixture.directory.path().join("close-released");
+    let release = Latch::closed(fixture.directory.path().join("close-released"));
     let script = fs::read_to_string(&fixture.snapshot_program).expect("fixture Herdr");
     let pattern = "  *\" pane close \"*) exit 0 ;;";
     assert!(script.contains(pattern), "{script}");
@@ -988,20 +990,19 @@ fn a_launch_ordered_replace_holds_the_metaflow_and_types_nothing_into_its_predec
     .install(&script.replacen(
         pattern,
         &format!(
-            "  *\" pane close \"*) : > '{closing}'; while [ ! -e '{release}' ]; do sleep 0.02; done; exit 0 ;;",
+            "  *\" pane close \"*) : > '{closing}'; : < '{release}'; exit 0 ;;",
             closing = closing.display(),
-            release = release.display(),
+            release = release.path.display(),
         ),
         1,
     ));
 
     let replaced = std::thread::scope(|scope| {
         let replacing = scope.spawn(|| fixture.nexus.dispatch(Query::Replace(profile.clone())));
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        while !closing.exists() {
-            assert!(std::time::Instant::now() < deadline, "the reap never ran");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        assert!(
+            closing.appeared_by(std::time::Instant::now() + Duration::from_secs(20)),
+            "the reap never ran"
+        );
         assert!(
             fixture.nexus.waking.is_waking(&seat_address()),
             "the replacement holds the metaflow"
@@ -1009,7 +1010,7 @@ fn a_launch_ordered_replace_holds_the_metaflow_and_types_nothing_into_its_predec
         let draining = scope.spawn(|| fixture.nexus.drain_awake(&seat_address()));
         // The drain waits on the gate the replacement holds; it runs once
         // the close is released, and the typing check below covers it.
-        fs::write(&release, "").expect("close released");
+        release.release();
         draining.join().expect("drain asked");
         replacing.join().expect("replace answered")
     });
@@ -1114,7 +1115,7 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
     let predecessor_calls = typing_calls(&fixture).len();
 
     let closing = fixture.directory.path().join("warning-close-reached");
-    let release = fixture.directory.path().join("warning-close-release");
+    let release = Latch::closed(fixture.directory.path().join("warning-close-release"));
     let script = fs::read_to_string(&fixture.snapshot_program).expect("fixture Herdr");
     let pattern = "  *\" pane close \"*) exit 0 ;;";
     assert!(script.contains(pattern), "{script}");
@@ -1124,9 +1125,9 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
     .install(&script.replacen(
         pattern,
         &format!(
-            "  *\" pane close \"*) : > '{closing}'; while [ ! -e '{release}' ]; do sleep 0.02; done; exit 0 ;;",
+            "  *\" pane close \"*) : > '{closing}'; : < '{release}'; exit 0 ;;",
             closing = closing.display(),
-            release = release.display(),
+            release = release.path.display(),
         ),
         1,
     ));
@@ -1135,32 +1136,35 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
         // Scope joins its children after this closure returns or unwinds.
         // Keep the release guard inside the closure so an assertion releases
         // the fixture's native close before that join can wait on it.
-        let _release_before_join = ReleasesFixtureOnDrop(release.clone());
+        let _release_before_join = ReleasesFixtureOnDrop(&release);
         let replacing = scope.spawn(|| fixture.nexus.dispatch(Query::Replace(profile.clone())));
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        while !closing.exists() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the reap never reached close"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        assert!(
+            closing.appeared_by(deadline),
+            "the reap never reached close"
+        );
         let reminding = scope.spawn(|| fixture.nexus.send_due_handover_reminders(310));
-        let warning_id = loop {
-            let metaflow = stored(&fixture);
-            if let Some(entry) = metaflow.queue.iter().find(|entry| {
-                entry.logical_delivery_id != first_warning_id
-                    && matches!(&entry.message, Message::HardAbrupt(Request::Notice(text))
-                    if text.contains("flow Keep."))
-            }) {
-                break entry.logical_delivery_id.clone();
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "warning was not durably admitted"
-            );
-            std::thread::sleep(Duration::from_millis(10));
+        let admitted = || {
+            stored(&fixture)
+                .queue
+                .iter()
+                .find(|entry| {
+                    entry.logical_delivery_id != first_warning_id
+                        && matches!(&entry.message, Message::HardAbrupt(Request::Notice(text))
+                        if text.contains("flow Keep."))
+                })
+                .map(|entry| entry.logical_delivery_id.clone())
         };
+        // Asked again at each change the store announces.
+        assert!(
+            fixture
+                .nexus
+                .store
+                .launch_changes
+                .until_holds(deadline, &mut || admitted().is_some()),
+            "warning was not durably admitted"
+        );
+        let warning_id = admitted().expect("the warning admitted");
         let timer = fixture
             .nexus
             .store
@@ -1179,7 +1183,7 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
             signal_flow::DeliveryState::Queued
         ));
         assert_eq!(typing_calls(&fixture).len(), predecessor_calls);
-        fs::write(&release, "").expect("release replacement");
+        release.release();
         reminding.join().expect("reminder tick completed");
         (replacing.join().expect("replacement answered"), warning_id)
     });

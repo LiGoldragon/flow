@@ -288,6 +288,7 @@
           });
           migrationPredecessorFixture = migrationPredecessorPackage.overrideAttrs (old: {
             pname = "flow-configured-request-id-predecessor-fixture";
+            nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [ pkgs.inotify-tools ];
             postPatch = (old.postPatch or "") + ''
               cp ${./crates/flow-nexus/src/store/request_id_predecessor_fixture.rs} \
                 crates/flow-nexus/src/store/request_id_predecessor_fixture.rs
@@ -304,22 +305,29 @@
               fixture_home="$TMPDIR/predecessor-home"
               fixture_runtime="$TMPDIR/predecessor-runtime"
               mkdir -m 700 -p "$fixture_home" "$fixture_runtime" "$FLOW_PREDECESSOR_FIXTURE_OUT"
+              # The predecessor's socket is awaited as the inotify event of its
+              # name, watched before the predecessor starts; each read is
+              # bounded, so a predecessor that never binds fails the check.
+              coproc runtime_events {
+                exec inotifywait -m -e create -e moved_to --format '%f' "$fixture_runtime" 2>&1
+              }
+              while IFS= read -r -t 60 line <&"''${runtime_events[0]}"; do
+                [ "$line" = "Watches established." ] && break
+              done
               HOME="$fixture_home" XDG_RUNTIME_DIR="$fixture_runtime" \
                 target/release/flow-nexus \
                 "{ «$fixture_runtime/flow.sock» «$fixture_runtime/flow-meta.sock» «$FLOW_PREDECESSOR_FIXTURE_OUT/flow.sema» None }" &
               predecessor_pid=$!
-              for attempt in $(seq 1 3000); do
-                if [ -S "$fixture_runtime/flow.sock" ]; then
-                  break
-                fi
-                if ! kill -0 "$predecessor_pid" 2>/dev/null; then
-                  wait "$predecessor_pid"
-                  echo "the exact predecessor exited before its socket opened" >&2
-                  exit 1
-                fi
-                sleep 0.01
+              while IFS= read -r -t 60 name <&"''${runtime_events[0]}"; do
+                [ "$name" = flow.sock ] && break
               done
-              test -S "$fixture_runtime/flow.sock"
+              kill "$runtime_events_PID"
+              if ! test -S "$fixture_runtime/flow.sock"; then
+                echo "the exact predecessor never opened its socket" >&2
+                kill -TERM "$predecessor_pid" 2>/dev/null || true
+                wait "$predecessor_pid" || true
+                exit 1
+              fi
               kill -TERM "$predecessor_pid"
               wait "$predecessor_pid"
               cargoWithProfile test -p flow-nexus --lib \

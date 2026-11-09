@@ -159,30 +159,36 @@ fn ended(process: &Process) -> bool {
     }
 }
 
-/// Waits, bounded, for a file a fixture process writes.
+/// Waits, bounded, for a file a fixture process writes: read at each
+/// change in its directory.
 fn await_path(path: &Path) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !path.exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "{} never appeared",
-            path.display()
-        );
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    use crate::event_wait::AwaitsPath;
+    assert!(
+        path.appeared_by(std::time::Instant::now() + Duration::from_secs(10)),
+        "{} never appeared",
+        path.display()
+    );
 }
 
-/// The pid a fixture process wrote.
+/// The pid a fixture process wrote, read at each change in the file's
+/// directory until it parses, bounded.
 fn pid_in(path: &Path) -> u32 {
-    await_path(path);
+    use crate::event_wait::AwaitsDirectory;
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Ok(pid) = fs::read_to_string(path).unwrap_or_default().trim().parse() {
-            return pid;
-        }
-        assert!(std::time::Instant::now() < deadline, "no pid written");
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    let written = || {
+        fs::read_to_string(path)
+            .unwrap_or_default()
+            .trim()
+            .parse::<u32>()
+            .ok()
+    };
+    let directory = path.parent().expect("the pid file's directory");
+    assert!(
+        directory.until_holds(deadline, &mut || written().is_some()),
+        "no pid written at {}",
+        path.display()
+    );
+    written().expect("the pid written")
 }
 
 impl RestartWorld {
@@ -511,6 +517,8 @@ fn restart_arrival_queued_delivered_once() {
     let mut fixture = NexusFixture::new();
     let world = fixture.restart_world(true);
     let from = bound_sender(&fixture);
+    use crate::fixture_executable::{HoldsLatch, Latch};
+    let release_start = Latch::closed(world.fresh.state.join("release-start"));
     fs::write(world.fresh.state.join("hold-start"), "").unwrap();
 
     std::thread::scope(|scope| {
@@ -535,7 +543,7 @@ fn restart_arrival_queued_delivered_once() {
         );
         assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1);
         assert!(world.calls_naming("agent prompt").is_empty());
-        fs::write(world.fresh.state.join("release-start"), "").unwrap();
+        release_start.release();
         assert_eq!(restarting.join().unwrap(), Response::Restarted(FLOW.into()));
     });
 
@@ -2034,6 +2042,8 @@ fn restart_owner_stop_during_bound() {
         .store
         .record_restart(failed_after_close(&world, 1))
         .unwrap();
+    use crate::fixture_executable::{HoldsLatch, Latch};
+    let release_start = Latch::closed(world.fresh.state.join("release-start"));
     fs::write(world.fresh.state.join("hold-start"), "").unwrap();
     std::thread::scope(|scope| {
         let recovering = scope.spawn(|| fixture.nexus.recover_restarts());
@@ -2049,7 +2059,7 @@ fn restart_owner_stop_during_bound() {
             Response::StopRejected(StopRejection::Restarting)
         );
         assert_eq!(record(&fixture), Some(spawning));
-        fs::write(world.fresh.state.join("release-start"), "").unwrap();
+        release_start.release();
         recovering.join().unwrap();
     });
     assert_eq!(record(&fixture), None);
@@ -2136,14 +2146,16 @@ fn killed(process: &Process) {
             .expect("kill")
             .success()
     );
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !ended(process) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the orphan never ended"
-        );
-        std::thread::sleep(Duration::from_millis(5));
+    // Its exit is awaited as its pidfd; a pid already gone has ended.
+    use crate::event_wait::{AwaitsDescriptors, OpensExitDescriptor};
+    use std::os::fd::AsFd;
+    if !ended(process)
+        && let Ok(pid) = u32::try_from(process.pid)
+        && let Ok(exit) = pid.exit_descriptor()
+    {
+        let _ = [exit.as_fd()].ready(Some(std::time::Instant::now() + Duration::from_secs(10)));
     }
+    assert!(ended(process), "the orphan never ended");
 }
 
 /// abc123's restart whose first resumed pane reports another session and

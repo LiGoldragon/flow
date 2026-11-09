@@ -1,5 +1,6 @@
 //! Publication of closed handovers into a configured Git archive.
 
+use crate::event_wait::{AwaitsDescriptors, OpensExitDescriptor};
 use crate::{
     RunningNexus,
     model::RunsModel,
@@ -9,10 +10,10 @@ use signal_flow::{Address, Aspect, HandoverArchiveIdentity};
 use std::{
     fs, io,
     io::Read,
+    os::fd::AsFd,
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
-    thread,
     time::{Duration, Instant},
 };
 use thiserror::Error;
@@ -540,6 +541,14 @@ impl RunsWithDeadline for Command {
             child.terminate_process_group(process_id);
             return Err(error);
         }
+        // The child's exit is waited on as its pidfd, beside its two pipes.
+        let exit = match process_id.exit_descriptor() {
+            Ok(exit) => exit,
+            Err(error) => {
+                child.terminate_process_group(process_id);
+                return Err(HandoverArchiveRefusal::Git(error.to_string()));
+            }
+        };
         let mut stdout_bytes = Vec::new();
         let mut stderr_bytes = Vec::new();
         let mut stdout_eof = false;
@@ -572,14 +581,32 @@ impl RunsWithDeadline for Command {
             if status.is_some() && stdout_eof && stderr_eof {
                 break;
             }
-            if Instant::now() >= deadline {
+            // Blocks until a pipe has bytes or ends, or the child exits; the
+            // publication deadline bounds the wait.
+            let mut waited = Vec::with_capacity(3);
+            if !stdout_eof {
+                waited.push(stdout.as_fd());
+            }
+            if !stderr_eof {
+                waited.push(stderr.as_fd());
+            }
+            if status.is_none() {
+                waited.push(exit.as_fd());
+            }
+            let ready = match waited.as_slice().ready(Some(deadline)) {
+                Ok(ready) => ready,
+                Err(error) => {
+                    child.terminate_process_group(process_id);
+                    return Err(HandoverArchiveRefusal::Git(error.to_string()));
+                }
+            };
+            if !ready.contains(&true) {
                 child.terminate_process_group(process_id);
                 // Dropping our nonblocking read ends is sufficient even when a
                 // hook deliberately moved a pipe-holding descendant into a
                 // different session. There is no reader thread left to join.
                 return Err(HandoverArchiveRefusal::PublicationTimedOut);
             }
-            thread::sleep(Duration::from_millis(2));
         }
         Ok(std::process::Output {
             status: status.expect("Git exited before both pipes reached EOF"),
@@ -813,16 +840,19 @@ mod tests {
         let pid = fs::read_to_string(child_pid)
             .unwrap()
             .trim()
-            .parse::<libc::pid_t>()
+            .parse::<u32>()
             .unwrap();
-        for _ in 0..100 {
-            if unsafe { libc::kill(pid, 0) } == -1 {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
+        // The descendant's exit is awaited as its pidfd; a pid already gone
+        // has exited.
+        if let Ok(exit) = pid.exit_descriptor() {
+            assert_eq!(
+                [exit.as_fd()]
+                    .ready(Some(Instant::now() + Duration::from_secs(10)))
+                    .unwrap(),
+                vec![true],
+                "the descendant holding the capture pipes was killed"
+            );
         }
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
-        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
     }
 
     #[cfg(unix)]

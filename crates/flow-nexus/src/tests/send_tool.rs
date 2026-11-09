@@ -232,15 +232,15 @@ impl RunsFakeAppServer for FakeAppServer {
         run: u64,
         wanted: impl Fn(&serde_json::Value) -> bool,
     ) -> Vec<serde_json::Value> {
+        use crate::event_wait::AwaitsDirectory;
         let path = self.directory.path().join(format!("record-{run}"));
         let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let messages = path.client_messages();
-            if messages.iter().any(&wanted) || Instant::now() > deadline {
-                return messages;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        // The fake app-server appends each client frame to the record; each
+        // write is a change in its directory.
+        self.directory
+            .path()
+            .until_holds(deadline, &mut || path.client_messages().iter().any(&wanted));
+        path.client_messages()
     }
 
     fn runs(&self) -> u64 {
@@ -1189,7 +1189,9 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
     let mut first = match adapter.subscribe_thread(&thread, 1, &signals, &inbox) {
         Ok(subscription) => subscription,
         Err(crate::codex::SubscriptionEnd::Failed(error)) => panic!("first subscription: {error}"),
-        Err(crate::codex::SubscriptionEnd::Stopped) => panic!("first subscription stopped"),
+        Err(crate::codex::SubscriptionEnd::Stopped | crate::codex::SubscriptionEnd::WorkEnded) => {
+            panic!("first subscription stopped")
+        }
     };
     let mut pending = std::mem::take(&mut first.early);
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -1232,21 +1234,20 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
         // rollout shows the tool's output.
         // The target is woken and its queue handed over: that is the
         // observable end of the answered call.
-        let poll_deadline = Instant::now() + Duration::from_secs(120);
-        loop {
-            let woken = nexus
-                .store
-                .metaflow(&asleep_target())
-                .expect("metaflow readable")
-                .expect("metaflow held");
-            if matches!(&woken.state, State::Awake(flow_id) if flow_id != "abc123")
-                && woken.queue.is_empty()
-            {
-                break;
-            }
-            assert!(Instant::now() < poll_deadline, "the target was never woken");
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        // Asked again at each change the store announces.
+        let woken = nexus.store.launch_changes.until_holds(
+            Instant::now() + Duration::from_secs(120),
+            &mut || {
+                let woken = nexus
+                    .store
+                    .metaflow(&asleep_target())
+                    .expect("metaflow readable")
+                    .expect("metaflow held");
+                matches!(&woken.state, State::Awake(flow_id) if flow_id != "abc123")
+                    && woken.queue.is_empty()
+            },
+        );
+        assert!(woken, "the target was never woken");
         stop.send(ResponderSignal::Stop).unwrap();
         responder.join().expect("responder stops");
     });
@@ -1378,19 +1379,19 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
     start_first_turn(&mut connection, &launch, &thread);
     nexus.hold_launch_responder(connection);
     let rollout_shows_turn_complete = || {
-        let deadline = Instant::now() + Duration::from_secs(180);
-        while Instant::now() < deadline {
-            let found = walk(&home.join("sessions"))
+        use crate::fixture_executable::AwaitsTree;
+        let sessions = home.join("sessions");
+        let found = || {
+            walk(&sessions)
                 .into_iter()
                 .filter(|path| path.to_string_lossy().contains(&thread))
                 .filter_map(|path| std::fs::read_to_string(path).ok())
-                .find(|rollout| rollout.contains("task_complete"));
-            if let Some(rollout) = found {
-                return Some(rollout);
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        None
+                .find(|rollout| rollout.contains("task_complete"))
+        };
+        sessions.until_holds_below(Instant::now() + Duration::from_secs(180), &mut || {
+            found().is_some()
+        });
+        found()
     };
     let rollout = nexus.serving_launch_calls(rollout_shows_turn_complete);
     nexus.close_launch_responder();
@@ -1514,19 +1515,21 @@ fn witness_interrupted_launch_first_half_exits_with_its_call_pending() {
         })
         .expect("the thread opens and is named");
     start_first_turn(&mut connection, &launch, &thread);
-    let deadline = Instant::now() + Duration::from_secs(180);
-    let pending = loop {
-        assert!(Instant::now() < deadline, "no send call appeared");
-        let called = walk(&home.join("sessions"))
+    let sessions = home.join("sessions");
+    let called = || {
+        walk(&sessions)
             .into_iter()
             .filter(|path| path.to_string_lossy().contains(&thread))
             .filter_map(|path| std::fs::read_to_string(path).ok())
-            .find(|rollout| rollout.contains("tools.send"));
-        if let Some(rollout) = called {
-            break rollout;
-        }
-        std::thread::sleep(Duration::from_millis(100));
+            .find(|rollout| rollout.contains("tools.send"))
     };
+    {
+        use crate::fixture_executable::AwaitsTree;
+        sessions.until_holds_below(Instant::now() + Duration::from_secs(180), &mut || {
+            called().is_some()
+        });
+    }
+    let pending = called().expect("no send call appeared");
     assert!(
         !pending.contains("tool_call_output"),
         "the call is unanswered"
@@ -1573,23 +1576,26 @@ fn witness_interrupted_launch_second_half_is_reconciled_at_restart() {
     let target = fixture.stored_at(&asleep_target());
     eprintln!("witness target {:?} queue {:?}", target.state, target.queue);
     assert!(target.queue.is_empty());
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let rollout = loop {
-        let found = walk(&home)
+    let found = || {
+        walk(&home)
             .into_iter()
             .filter(|path| path.to_string_lossy().contains(&thread))
-            .collect::<Vec<_>>();
-        if let Some(path) = found
-            .iter()
+            .collect::<Vec<_>>()
+    };
+    let archived = || {
+        found()
+            .into_iter()
             .find(|path| path.to_string_lossy().contains("archived_sessions"))
-        {
-            break std::fs::read_to_string(path).unwrap();
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the thread is not archived: {found:?}"
-        );
-        std::thread::sleep(Duration::from_millis(200));
+    };
+    {
+        use crate::fixture_executable::AwaitsTree;
+        home.until_holds_below(Instant::now() + Duration::from_secs(30), &mut || {
+            archived().is_some()
+        });
+    }
+    let rollout = match archived() {
+        Some(path) => std::fs::read_to_string(path).unwrap(),
+        None => panic!("the thread is not archived: {:?}", found()),
     };
     let outputs = rollout
         .lines()

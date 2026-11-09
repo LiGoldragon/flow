@@ -4,6 +4,7 @@
 //! delivery remain the ordinary logical-delivery path; the Nexus decides when
 //! to call `advance_handover_reminder` and what address/message to deliver.
 
+use super::AnnouncesLaunchChanges;
 use super::{FlowStore, ReadsFlowMemory, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -72,6 +73,9 @@ pub trait SchedulesHandoverReminders {
         generation: i64,
     ) -> Result<Option<HandoverReminder>, StoreError>;
     fn due_handover_reminders(&self, now: i64) -> Result<Vec<HandoverReminder>, StoreError>;
+    /// The earliest time after `now` a handover reminder falls due, in
+    /// Unix seconds.
+    fn next_handover_reminder_due(&self, now: i64) -> Result<Option<i64>, StoreError>;
     fn hold_handover_reminder(&self, reminder: HandoverReminder) -> Result<(), StoreError>;
     fn close_handover_reminder(
         &self,
@@ -108,6 +112,16 @@ impl SchedulesHandoverReminders for FlowStore {
             .cloned()
             .collect())
     }
+    fn next_handover_reminder_due(&self, now: i64) -> Result<Option<i64>, StoreError> {
+        Ok(self
+            .engine
+            .match_records(sema_engine::QueryPlan::all(self.handover_reminders))?
+            .records()
+            .iter()
+            .map(|row| row.next_due)
+            .filter(|due| *due > now)
+            .min())
+    }
     fn hold_handover_reminder(&self, reminder: HandoverReminder) -> Result<(), StoreError> {
         let key = reminder.record_key();
         if self
@@ -128,6 +142,7 @@ impl SchedulesHandoverReminders for FlowStore {
                 reminder,
             ))?;
         }
+        self.reminder_changes.announce();
         Ok(())
     }
     fn close_handover_reminder(
@@ -142,6 +157,7 @@ impl SchedulesHandoverReminders for FlowStore {
             self.handover_reminders,
             row.record_key(),
         ))?;
+        self.reminder_changes.announce();
         Ok(true)
     }
 }

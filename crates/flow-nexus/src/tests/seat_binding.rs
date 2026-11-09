@@ -8,7 +8,8 @@
 
 use super::NexusFixture;
 use super::waking::SpawnedProcess;
-use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+use crate::event_wait::{AwaitsDirectory, AwaitsPath};
+use crate::fixture_executable::{FixtureExecutable, HoldsLatch, InstallsScript, Latch};
 use crate::sending::{BindsSeats, IdentifiesSender};
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::metaflow::{MutatesMetaflows, SleepsMetaflows};
@@ -172,7 +173,7 @@ impl CodexCliWorld {
             wrapper.display()
         ));
         FixtureExecutable { path: wrapper }.install(&format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$1/wrapper.pid\"\n: > \"$1/ready\"\nwhile [ ! -e \"$1/go\" ]; do sleep 0.01; done\nexec '{}' \"$2\" \"$3\"\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$1/wrapper.pid\"\n: > \"$1/ready\"\n: < \"$1/go\"\nexec '{}' \"$2\" \"$3\"\n",
             flow.display()
         ));
 
@@ -190,14 +191,11 @@ impl CodexCliWorld {
         let socket = place.join("flow.sock");
         let served = socket.clone();
         std::thread::spawn(move || fixture.nexus.serve_ordinary(&served));
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !socket.exists() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "ordinary socket listens"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        // The name is moved in only once the socket listens.
+        assert!(
+            socket.appeared_by(std::time::Instant::now() + std::time::Duration::from_secs(5)),
+            "ordinary socket listens"
+        );
         Self {
             fixture,
             socket,
@@ -257,15 +255,13 @@ impl CodexCliWorld {
                 command.env_remove("CODEX_THREAD_ID");
             }
         }
+        let go = Latch::closed(call.join("go"));
         let child = command.spawn().unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !call.join("ready").exists() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "wrapper becomes ready"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        assert!(
+            call.join("ready").appeared_by(deadline),
+            "wrapper becomes ready"
+        );
         let pid = |name: &str| {
             fs::read_to_string(call.join(name))
                 .unwrap()
@@ -276,7 +272,7 @@ impl CodexCliWorld {
         let shell_pid = pid("shell.pid");
         let script_pid = pid("script.pid");
         let wrapper_pid = pid("wrapper.pid");
-        fs::write(call.join("go"), b"").unwrap();
+        go.release();
         let cli = CallerProcess {
             process_id: wrapper_pid,
         };
@@ -897,15 +893,19 @@ fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
     let script = format!("sleep 30 & echo $! > {}; wait; :", child_file.display());
     let root = MarkedProcess::spawn("sh", &["-c", &script], "w1:p3");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let child_pid = loop {
-        if let Ok(text) = fs::read_to_string(&child_file)
-            && let Ok(pid) = text.trim().parse::<u32>()
-        {
-            break pid;
-        }
-        assert!(std::time::Instant::now() < deadline);
-        std::thread::yield_now();
+    let written = || {
+        fs::read_to_string(&child_file)
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
     };
+    assert!(
+        fixture
+            .directory
+            .path()
+            .until_holds(deadline, &mut || written().is_some()),
+        "the child's pid is written"
+    );
+    let child_pid = written().expect("the child's pid");
     for pid in [root.0.id(), child_pid] {
         let peer = FlowStore::process_identity_for_pid(pid).unwrap();
         assert_eq!(

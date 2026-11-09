@@ -262,17 +262,20 @@ impl FlowChild {
     }
 
     fn wait_for_exit(&mut self, timeout: &str) -> ExitStatus {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Some(status) = self.child.try_wait().expect("fixture child status") {
-                return status;
-            }
-            if Instant::now() >= deadline {
+        use crate::event_wait::{AwaitsDescriptors, OpensExitDescriptor};
+        use std::os::fd::AsFd;
+        // The child's exit is awaited as its pidfd, bounded by ten seconds;
+        // a child already reaped needs no wait.
+        if let Ok(exit) = self.child.id().exit_descriptor() {
+            let _ = [exit.as_fd()].ready(Some(Instant::now() + Duration::from_secs(10)));
+        }
+        match self.child.try_wait().expect("fixture child status") {
+            Some(status) => status,
+            None => {
                 let _ = self.child.kill();
                 let _ = self.child.wait();
                 panic!("{timeout}");
             }
-            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }
@@ -473,20 +476,16 @@ fn spawn_with(binary: &Path, home: &Path, runtime: &Path, argument: String) -> F
     FlowChild { child }
 }
 
+/// The current Flow's socket, moved in at its name only once it listens:
+/// awaited as that event, then connected.
 fn wait_for_socket(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        if let Ok(peer) = std::os::unix::net::UnixStream::connect(path) {
-            drop(peer);
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "{} never listened",
-            path.display()
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    use crate::event_wait::AwaitsPath;
+    assert!(
+        path.appeared_by(Instant::now() + Duration::from_secs(30)),
+        "{} never listened",
+        path.display()
+    );
+    drop(UnixStream::connect(path).expect("the current Flow's socket listens"));
 }
 
 fn serve_once(binary: &Path, home: &Path, runtime: &Path, store: &Path) {

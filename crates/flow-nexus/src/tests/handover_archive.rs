@@ -332,15 +332,16 @@ fn separate_session_pipe_holder_cannot_extend_the_budget_or_remove_the_generatio
         .close_handover_for_successor(&address, "before", "after")
         .unwrap();
     let pid_path = archive.path().join("separate-session-pid");
-    let ready_path = archive.path().join("separate-session-ready");
+    // The hook waits on the descendant's word through a FIFO: its read
+    // returns once the descendant, in its own session, has written it.
+    let ready_path = archive.path().join(".git/separate-session-ready");
     let hook = archive.path().join(".git/hooks/pre-commit");
     fs::write(
         &hook,
         format!(
-            "#!/bin/sh\nexec 3>&1 4>&2\nsetsid sh -c 'echo $$ > \"{}\"; echo ready > \"{}\"; sleep 30' >&3 2>&4 &\nwhile test ! -f '{}'; do sleep 0.01; done\nexit 0\n",
-            pid_path.display(),
-            ready_path.display(),
-            ready_path.display()
+            "#!/bin/sh\nexec 3>&1 4>&2\nmkfifo '{ready}'\nsetsid sh -c 'echo $$ > \"{pid}\"; echo ready > \"{ready}\"; sleep 30' >&3 2>&4 &\nread word < '{ready}'\nexit 0\n",
+            pid = pid_path.display(),
+            ready = ready_path.display(),
         ),
     )
     .unwrap();

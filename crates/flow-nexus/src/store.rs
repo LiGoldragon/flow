@@ -1484,6 +1484,19 @@ pub trait AnnouncesLaunchChanges {
     fn until(&self, seen: u64, deadline: std::time::Instant) -> bool;
     /// Blocks until the count moves past `seen`, then returns the new count.
     fn after(&self, seen: u64) -> u64;
+    /// Blocks until `holds` answers true, asked now and again at each
+    /// announced change, or until `deadline` passes; whether it held.
+    fn until_holds(&self, deadline: std::time::Instant, holds: &mut dyn FnMut() -> bool) -> bool {
+        loop {
+            let seen = self.current();
+            if holds() {
+                return true;
+            }
+            if !self.until(seen, deadline) {
+                return holds();
+            }
+        }
+    }
 }
 
 impl AnnouncesLaunchChanges for LaunchChanges {
@@ -1694,6 +1707,11 @@ pub struct FlowStore {
     #[cfg(test)]
     pub(crate) fail_next_retirement_completion_read: Mutex<bool>,
     pub launch_changes: LaunchChanges,
+    /// Announced at every change a reminder's due time or a handover
+    /// warning can follow: a reminder held or closed, a context size
+    /// recorded, a handover generation closed, a Configure, and the stop.
+    /// The reminding thread waits on it, bounded by the next due time.
+    pub reminder_changes: LaunchChanges,
 }
 
 impl ReadsRequestPolicy for FlowStore {
@@ -2707,6 +2725,7 @@ impl OpensFlowStore for FlowStore {
             #[cfg(test)]
             fail_next_retirement_completion_read: Mutex::new(false),
             launch_changes: LaunchChanges::default(),
+            reminder_changes: LaunchChanges::default(),
         };
 
         // Recognition already checked the authored Memory identity record;
@@ -2903,6 +2922,7 @@ impl OpensFlowStore for FlowStore {
             #[cfg(test)]
             fail_next_retirement_completion_read: Mutex::new(false),
             launch_changes: LaunchChanges::default(),
+            reminder_changes: LaunchChanges::default(),
         };
         store.seed_request_policy()?;
         store.archive_legacy_queue()?;

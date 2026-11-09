@@ -629,7 +629,7 @@ pub(crate) trait PacesReconnection {
                     return true;
                 }
                 // Events of a connection already closed.
-                Ok(ResponderSignal::Proxy(..)) => {}
+                Ok(ResponderSignal::Proxy(..) | ResponderSignal::WorkEnded) => {}
                 Err(mpsc::RecvTimeoutError::Timeout) => return false,
             }
         }
@@ -675,6 +675,8 @@ impl RespondsToSendCalls for RunningNexus {
             generation += 1;
             match adapter.subscribe_thread(thread, generation, &signals, &inbox) {
                 Err(SubscriptionEnd::Stopped) => return,
+                // No launch work is served beside a responder of its own.
+                Err(SubscriptionEnd::WorkEnded) => continue,
                 Err(SubscriptionEnd::Failed(error)) => {
                     eprintln!("flow-nexus: send tool for thread {thread} not subscribed: {error}");
                     if Self::stopped_within(&inbox, wait) {
@@ -708,6 +710,7 @@ impl RespondsToSendCalls for RunningNexus {
                                 subscription.close();
                                 return;
                             }
+                            Err(SubscriptionEnd::WorkEnded) => {}
                             Ok(ProxyEvent::Reply(Ok(message))) => {
                                 if let Err(error) = self.answer_request(&mut subscription, message)
                                 {
@@ -795,9 +798,6 @@ pub struct LaunchCalls {
 
 /// A running Codex launch serves its own thread's calls.
 pub(crate) trait ServesLaunchCalls {
-    /// How long one read of the launch's connection waits before the launch
-    /// looks again whether the work it waits on has ended.
-    const SERVING_SLICE: Duration = Duration::from_millis(50);
     /// Keeps the connection that opened the launch's thread as its
     /// responder.
     fn hold_launch_responder(&self, responder: LaunchResponder);
@@ -845,8 +845,15 @@ impl ServesLaunchCalls for RunningNexus {
             return work();
         };
         let mut open = true;
+        // The work's end reaches the connection's inbox as an event of its
+        // own, so the launch waits on the connection and the work together.
+        let ended = responder._signals.clone();
         let outcome = std::thread::scope(|scope| {
-            let running = scope.spawn(work);
+            let running = scope.spawn(move || {
+                let outcome = work();
+                let _ = ended.send(ResponderSignal::WorkEnded);
+                outcome
+            });
             // The calls that arrived before the subscription was answered.
             for request in std::mem::take(&mut responder.subscription.early) {
                 if let Err(error) = self.answer_launch_call(&mut responder, request) {
@@ -854,12 +861,10 @@ impl ServesLaunchCalls for RunningNexus {
                     open = false;
                 }
             }
-            while open && !running.is_finished() {
-                let deadline = Instant::now() + Self::SERVING_SLICE;
-                match responder
-                    .subscription
-                    .next_event(&responder.inbox, Some(deadline))
-                {
+            // Served until the work's end is read, so that event never
+            // stays behind in the inbox of a responder that is kept.
+            while open {
+                match responder.subscription.next_event(&responder.inbox, None) {
                     Ok(ProxyEvent::Reply(Ok(message))) => {
                         if let Err(error) = self.answer_launch_call(&mut responder, message) {
                             eprintln!("flow-nexus: launch send tool: {error}");
@@ -867,9 +872,7 @@ impl ServesLaunchCalls for RunningNexus {
                         }
                     }
                     Ok(ProxyEvent::Upgraded | ProxyEvent::Ping(_)) => {}
-                    Err(SubscriptionEnd::Failed(
-                        crate::codex::CodexAdapterUnavailable::TimedOut,
-                    )) => {}
+                    Err(SubscriptionEnd::WorkEnded) => break,
                     Ok(ProxyEvent::Reply(Err(error))) | Err(SubscriptionEnd::Failed(error)) => {
                         eprintln!("flow-nexus: launch send tool connection ended: {error}");
                         open = false;
@@ -970,10 +973,12 @@ impl ServesLaunchCalls for RunningNexus {
         for request in std::mem::take(&mut responder.subscription.early) {
             let _ = self.answer_launch_call(&mut responder, request);
         }
-        let deadline = Instant::now() + Self::SERVING_SLICE;
+        // The calls already read are those already in the inbox: they are
+        // taken without waiting for any more.
+        let read_by_now = Instant::now();
         while let Ok(ProxyEvent::Reply(Ok(message))) = responder
             .subscription
-            .next_event(&responder.inbox, Some(deadline))
+            .next_event(&responder.inbox, Some(read_by_now))
         {
             if self.answer_launch_call(&mut responder, message).is_err() {
                 break;
@@ -1045,7 +1050,7 @@ impl RefusesInterruptedCalls for RunningNexus {
                 eprintln!("flow-nexus: interrupted launch thread {thread} not resumed: {error}");
                 return tally;
             }
-            Err(SubscriptionEnd::Stopped) => return tally,
+            Err(SubscriptionEnd::Stopped | SubscriptionEnd::WorkEnded) => return tally,
         };
         let mut answer = |subscription: &mut ThreadSubscription, request: serde_json::Value| {
             if request.get("method").and_then(serde_json::Value::as_str) != Some("item/tool/call") {

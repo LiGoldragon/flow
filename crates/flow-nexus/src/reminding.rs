@@ -14,9 +14,6 @@ use crate::waking::SleepsAndWakesSeats;
 use signal_flow::{Address, Message, Request, SentBy};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// How often Flow looks for reminders due.
-const REMINDER_TICK: Duration = Duration::from_secs(5);
-
 /// A time as Unix seconds.
 pub trait CountsUnixSeconds {
     fn seconds_since_epoch(&self) -> i64;
@@ -36,6 +33,10 @@ pub trait RemindsCallers {
     fn send_due_reminders(&self);
     /// Sends reminders as they fall due, until the Nexus stops.
     fn keep_reminding(&self);
+    /// When the earliest held reminder or handover reminder falls due
+    /// after now. One already due and still held could not be sent; it is
+    /// tried again at the next announced change, not on a timer.
+    fn next_reminder_due(&self) -> Option<std::time::Instant>;
 }
 
 impl RemindsCallers for RunningNexus {
@@ -121,14 +122,37 @@ impl RemindsCallers for RunningNexus {
     }
 
     fn keep_reminding(&self) {
+        use crate::store::AnnouncesLaunchChanges;
+        // Reminders move on two events: a change the store announces (a
+        // reminder held or closed, a context size, a closed generation, a
+        // Configure, the stop) and the earliest due time arriving. The
+        // thread blocks on the announcement, bounded by that due time.
         while !self.stopping.requested() {
+            let seen = self.store.reminder_changes.current();
             self.send_due_reminders();
-            let mut waited = Duration::ZERO;
-            while waited < REMINDER_TICK && !self.stopping.requested() {
-                std::thread::sleep(Duration::from_millis(250));
-                waited += Duration::from_millis(250);
+            match self.next_reminder_due() {
+                Some(due) => {
+                    self.store.reminder_changes.until(seen, due);
+                }
+                None => {
+                    self.store.reminder_changes.after(seen);
+                }
             }
         }
+    }
+
+    fn next_reminder_due(&self) -> Option<std::time::Instant> {
+        use crate::store::handover_reminders::SchedulesHandoverReminders;
+        let now = SystemTime::now().seconds_since_epoch();
+        let due = [
+            self.store.next_reminder_due(now).ok().flatten(),
+            self.store.next_handover_reminder_due(now).ok().flatten(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()?;
+        let ahead = u64::try_from(due.saturating_sub(now)).unwrap_or_default();
+        Some(std::time::Instant::now() + Duration::from_secs(ahead))
     }
 }
 

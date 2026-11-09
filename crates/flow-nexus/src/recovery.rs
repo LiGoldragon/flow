@@ -10,7 +10,6 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
-    thread,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -123,7 +122,14 @@ impl<L: LaunchesDisposableField, O: ObservesReplacement> ExecutesDurableRecovery
                     let _ = fs::remove_file(&admission);
                     return result;
                 }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => thread::yield_now(),
+                // Another requester holds the admission: wait for its
+                // receipt, or for its admission to go, as changes in the
+                // state directory.
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    use crate::event_wait::AwaitsDirectory;
+                    self.state_directory
+                        .holds_by(None, &mut || receipt.exists() || !admission.exists());
+                }
                 Err(error) => return Err(RecoveryFiles::io_error(error)),
             }
         }
@@ -259,6 +265,7 @@ mod tests {
     use std::{
         sync::Arc,
         sync::atomic::{AtomicUsize, Ordering},
+        thread,
     };
 
     #[derive(Clone)]

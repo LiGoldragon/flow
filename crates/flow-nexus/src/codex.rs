@@ -1181,7 +1181,9 @@ impl EndsSubscription for CodexAdapterUnavailable {
     fn ended(end: SubscriptionEnd) -> CodexAdapterUnavailable {
         match end {
             SubscriptionEnd::Failed(error) => error,
-            SubscriptionEnd::Stopped => CodexAdapterUnavailable::Closed,
+            SubscriptionEnd::Stopped | SubscriptionEnd::WorkEnded => {
+                CodexAdapterUnavailable::Closed
+            }
         }
     }
 }
@@ -1562,17 +1564,22 @@ impl NamesBoundCodexThread for CodexAdapter {
 }
 
 /// What reaches a send-tool responder: an event of one of its connections,
-/// named by the connection's generation, or the order to stop.
+/// named by the connection's generation, the order to stop, or, for a
+/// launch's responder alone, the end of the launch's work it serves beside.
 pub(crate) enum ResponderSignal {
     Proxy(u64, ProxyEvent),
     Stop,
+    WorkEnded,
 }
 
-/// Why a responder's connection ended.
+/// Why a responder's connection ended, or its wait.
 pub(crate) enum SubscriptionEnd {
     /// The responder was told to stop.
     Stopped,
     Failed(CodexAdapterUnavailable),
+    /// The launch work served beside the connection ended; the connection
+    /// itself stays open.
+    WorkEnded,
 }
 
 /// One connection subscribed to one thread: initialized with the
@@ -1646,9 +1653,9 @@ impl ExchangesOnSubscription for ThreadSubscription {
             let signal = match deadline {
                 None => inbox.recv().map_err(|_| SubscriptionEnd::Stopped)?,
                 Some(deadline) => {
-                    let remaining = deadline
-                        .checked_duration_since(Instant::now())
-                        .ok_or(SubscriptionEnd::Failed(CodexAdapterUnavailable::TimedOut))?;
+                    // A deadline already passed still takes what has
+                    // arrived, and waits for nothing more.
+                    let remaining = deadline.saturating_duration_since(Instant::now());
                     match inbox.recv_timeout(remaining) {
                         Ok(signal) => signal,
                         Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -1662,6 +1669,7 @@ impl ExchangesOnSubscription for ThreadSubscription {
             };
             match signal {
                 ResponderSignal::Stop => return Err(SubscriptionEnd::Stopped),
+                ResponderSignal::WorkEnded => return Err(SubscriptionEnd::WorkEnded),
                 ResponderSignal::Proxy(generation, _) if generation != self.generation => {}
                 ResponderSignal::Proxy(_, ProxyEvent::Ping(payload)) => self
                     .proxy
@@ -2011,8 +2019,28 @@ mod tests {
 
     impl ReadsRecordedRequests for std::path::Path {
         fn requests(&self, count: usize) -> Vec<serde_json::Value> {
+            use crate::event_wait::AwaitsDirectory;
+            // Read again at each change in the record's directory: each
+            // frame the fake proxy records is a write there.
             let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
+            let directory = self.parent().expect("the record's directory");
+            let mut read = Vec::new();
+            directory.until_holds(deadline, &mut || {
+                read = self.recorded_requests();
+                read.len() >= count
+            });
+            read
+        }
+    }
+
+    /// The JSON messages a recorded client stream holds now.
+    trait ParsesRecordedRequests {
+        fn recorded_requests(&self) -> Vec<serde_json::Value>;
+    }
+
+    impl ParsesRecordedRequests for std::path::Path {
+        fn recorded_requests(&self) -> Vec<serde_json::Value> {
+            {
                 let bytes = std::fs::read(self).unwrap_or_default();
                 let mut messages = Vec::new();
                 let mut at = 0;
@@ -2042,10 +2070,7 @@ mod tests {
                     messages.push(serde_json::from_slice(&payload).expect("a JSON request"));
                     at = start + length;
                 }
-                if messages.len() >= count || Instant::now() > deadline {
-                    return messages;
-                }
-                thread::sleep(Duration::from_millis(20));
+                messages
             }
         }
     }

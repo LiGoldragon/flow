@@ -928,7 +928,8 @@ fn direct_delivery_is_refused_while_refresh_owns_address() {
 #[test]
 fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
     use crate::DispatchesSerially;
-    use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+    use crate::event_wait::AwaitsPath;
+    use crate::fixture_executable::{FixtureExecutable, HoldsLatch, InstallsScript, Latch};
     use signal_flow::{Origin, Query, RefreshRejection};
     use std::time::{Duration, Instant};
 
@@ -940,7 +941,7 @@ fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
     fixture.register_with(FlowLifecycle::Active);
     fixture.at_secondary_refreshing_at(200_000);
     let reached = fixture.directory.path().join("direct-prompt-reached");
-    let release = fixture.directory.path().join("direct-prompt-release");
+    let release = Latch::closed(fixture.directory.path().join("direct-prompt-release"));
     let body = fs::read_to_string(&fixture.snapshot_program).expect("Herdr fixture");
     let pattern = "\"agent prompt\") ";
     assert!(body.contains(pattern), "{body}");
@@ -950,9 +951,9 @@ fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
     .install(&body.replacen(
         pattern,
         &format!(
-            "\"agent prompt\") : > '{}'; while [ ! -e '{}' ]; do sleep 0.02; done; ",
+            "\"agent prompt\") : > '{}'; : < '{}'; ",
             reached.display(),
-            release.display(),
+            release.path.display(),
         ),
         1,
     ));
@@ -965,11 +966,10 @@ fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
     let (delivery, refresh) = std::thread::scope(|scope| {
         let delivery =
             scope.spawn(|| fixture.deliver("custody-race", middle_abrupt("custody race")));
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while !reached.exists() {
-            assert!(Instant::now() < deadline, "direct input never started");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        assert!(
+            reached.appeared_by(Instant::now() + Duration::from_secs(20)),
+            "direct input never started"
+        );
         let refresh = fixture
             .nexus
             .dispatch_serially(Query::Refresh(address.clone()), Origin::Unbound.into());
@@ -977,7 +977,7 @@ fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
             refresh,
             signal_flow::Response::RefreshRejected(RefreshRejection::Locked)
         );
-        fs::write(&release, "").expect("release direct pane input");
+        release.release();
         (delivery.join().expect("direct delivery"), refresh)
     });
     assert!(matches!(delivery, meta_signal_flow::Response::Delivered(_)));
@@ -1005,7 +1005,8 @@ fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
 #[test]
 fn public_direct_delivery_finishes_before_a_concurrent_existing_bind() {
     use crate::DispatchesSerially;
-    use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+    use crate::event_wait::AwaitsPath;
+    use crate::fixture_executable::{FixtureExecutable, HoldsLatch, InstallsScript, Latch};
     use std::os::unix::net::UnixListener;
     use std::time::{Duration, Instant};
 
@@ -1019,13 +1020,14 @@ fn public_direct_delivery_finishes_before_a_concurrent_existing_bind() {
     let socket_path = fixture.directory.path().join("serial-bind.sock");
     let _listener = UnixListener::bind(&socket_path).expect("live fixture container");
     let reached = fixture.directory.path().join("serial-deliver-reached");
-    let release = fixture.directory.path().join("serial-deliver-release");
+    let release = Latch::closed(fixture.directory.path().join("serial-deliver-release"));
 
-    struct ReleasesPublicDelivery(std::path::PathBuf);
+    /// Releases the latch whatever the test came to, so the scope joins.
+    struct ReleasesPublicDelivery<'latch>(&'latch Latch);
 
-    impl Drop for ReleasesPublicDelivery {
+    impl Drop for ReleasesPublicDelivery<'_> {
         fn drop(&mut self) {
-            let _ = fs::write(&self.0, "");
+            self.0.release();
         }
     }
 
@@ -1042,15 +1044,15 @@ fn public_direct_delivery_finishes_before_a_concurrent_existing_bind() {
         .install(&body.replacen(
             pattern,
             &format!(
-                "  \"agent read\") printf '%s\\n' '› ' ;;\n  \"agent prompt\") : > '{reached}'; while [ ! -e '{release}' ]; do sleep 0.02; done; printf '%s' \"$6\" > '{typed}'; printf '%s\\n' '{{\"id\":\"cli:agent:prompt\",\"result\":{{\"type\":\"agent_prompted\",\"agent\":{{\"pane_id\":\"w1:p3\"}}}}}}' ;;\n{pattern}",
+                "  \"agent read\") printf '%s\\n' '› ' ;;\n  \"agent prompt\") : > '{reached}'; : < '{release}'; printf '%s' \"$6\" > '{typed}'; printf '%s\\n' '{{\"id\":\"cli:agent:prompt\",\"result\":{{\"type\":\"agent_prompted\",\"agent\":{{\"pane_id\":\"w1:p3\"}}}}}}' ;;\n{pattern}",
                 reached = reached.display(),
-                release = release.display(),
+                release = release.path.display(),
                 typed = fixture.directory.path().join("pane-typed.txt").display(),
             ),
             1,
         ));
         std::thread::scope(|scope| {
-            let _release_before_join = ReleasesPublicDelivery(release.clone());
+            let _release_before_join = ReleasesPublicDelivery(&release);
             let (delivery_answered, observe_delivery_answer) = std::sync::mpsc::channel();
             let delivery_fixture: &'static NexusFixture = fixture;
             let delivering = scope.spawn(move || {
@@ -1067,17 +1069,11 @@ fn public_direct_delivery_finishes_before_a_concurrent_existing_bind() {
                     .expect("Deliver response observed");
                 response
             });
-            let deadline = Instant::now() + Duration::from_secs(20);
-            while !reached.exists() {
-                if let Ok(response) = observe_delivery_answer.try_recv() {
-                    panic!("public Deliver answered before Herdr input: {response}");
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "public Deliver never entered Herdr"
-                );
-                std::thread::sleep(Duration::from_millis(10));
+            let entered = reached.appeared_by(Instant::now() + Duration::from_secs(20));
+            if let Ok(response) = observe_delivery_answer.try_recv() {
+                panic!("public Deliver answered before Herdr input: {response}");
             }
+            assert!(entered, "public Deliver never entered Herdr");
             assert!(fixture.nexus.dispatch_gate.try_lock().is_err());
             let binding_for_thread = binding.clone();
             let socket_for_thread = socket_path.clone();
@@ -1101,7 +1097,7 @@ fn public_direct_delivery_finishes_before_a_concurrent_existing_bind() {
                 .recv_timeout(Duration::from_secs(2))
                 .expect("Bind reached public dispatcher");
             assert!(fixture.nexus.dispatch_gate.try_lock().is_err());
-            fs::write(&release, "").expect("release public Deliver");
+            release.release();
             (
                 delivering.join().expect("Deliver answered"),
                 binding_attempt.join().expect("Bind answered"),

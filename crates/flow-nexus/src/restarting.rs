@@ -261,21 +261,36 @@ pub(crate) trait ProvesExit {
     /// Exited only when `/proc/<pid>` is not found, its parsed start time
     /// differs from the recorded birth, or its parsed state is Z or X.
     fn exit_proof(&self, kernel: &impl ReadsProcessStatus) -> ExitProof;
-    /// The proof now, or within `wait` once it is Exited; the last one read
-    /// otherwise.
-    fn exit_proof_within(&self, kernel: &impl ReadsProcessStatus, wait: Duration) -> ExitProof {
-        let deadline = std::time::Instant::now() + wait;
-        loop {
-            let proof = self.exit_proof(kernel);
-            if matches!(proof, ExitProof::Exited(_)) || std::time::Instant::now() >= deadline {
-                return proof;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
+    /// The proof now, or, while the process runs, the proof read once its
+    /// exit is announced, waited on as its pidfd for at most `wait`.
+    fn exit_proof_within(&self, kernel: &impl ReadsProcessStatus, wait: Duration) -> ExitProof;
 }
 
 impl ProvesExit for Process {
+    fn exit_proof_within(&self, kernel: &impl ReadsProcessStatus, wait: Duration) -> ExitProof {
+        use crate::event_wait::{AwaitsDescriptors, OpensExitDescriptor};
+        use std::os::fd::AsFd;
+        let proof = self.exit_proof(kernel);
+        if !matches!(proof, ExitProof::Running) || wait.is_zero() {
+            return proof;
+        }
+        let Ok(pid) = u32::try_from(self.pid) else {
+            return proof;
+        };
+        let Ok(exit) = pid.exit_descriptor() else {
+            // The pid is gone already, or no pidfd is given: read again.
+            return self.exit_proof(kernel);
+        };
+        // The pidfd names the recorded process only if the proof still
+        // reads it running once the pidfd is open.
+        let proof = self.exit_proof(kernel);
+        if !matches!(proof, ExitProof::Running) {
+            return proof;
+        }
+        let _ = [exit.as_fd()].ready(Some(std::time::Instant::now() + wait));
+        self.exit_proof(kernel)
+    }
+
     fn exit_proof(&self, kernel: &impl ReadsProcessStatus) -> ExitProof {
         let Some(pid) = u32::try_from(self.pid)
             .ok()

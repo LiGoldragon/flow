@@ -7,6 +7,7 @@
 //! with the last, the sender is told the task's failure. A Done naming the
 //! task closes it.
 
+use super::AnnouncesLaunchChanges;
 use super::{FlowStore, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -174,6 +175,9 @@ pub trait RecordsReminders {
     fn close_reminder(&self, key: &str) -> Result<bool, StoreError>;
     /// Every reminder due at or before `now`.
     fn due_reminders(&self, now: i64) -> Result<Vec<Reminder>, StoreError>;
+    /// The earliest time after `now` a held reminder falls due, in Unix
+    /// seconds.
+    fn next_reminder_due(&self, now: i64) -> Result<Option<i64>, StoreError>;
 }
 
 impl RecordsReminders for FlowStore {
@@ -186,6 +190,7 @@ impl RecordsReminders for FlowStore {
             self.engine
                 .assert(Assertion::new(self.reminders, reminder))?;
         }
+        self.reminder_changes.announce();
         Ok(())
     }
 
@@ -209,6 +214,7 @@ impl RecordsReminders for FlowStore {
             self.reminders,
             RecordKey::new(key.to_owned()),
         ))?;
+        self.reminder_changes.announce();
         Ok(true)
     }
 
@@ -221,6 +227,17 @@ impl RecordsReminders for FlowStore {
             .filter(|reminder| reminder.due.is_some_and(|due| due <= now))
             .cloned()
             .collect())
+    }
+
+    fn next_reminder_due(&self, now: i64) -> Result<Option<i64>, StoreError> {
+        Ok(self
+            .engine
+            .match_records(QueryPlan::all(self.reminders))?
+            .records()
+            .iter()
+            .filter_map(|reminder| reminder.due)
+            .filter(|due| *due > now)
+            .min())
     }
 }
 

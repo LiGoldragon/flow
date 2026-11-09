@@ -374,17 +374,16 @@ fn recovery_flag(store: &Path) -> u8 {
         .map_or(0, |god| god & 2)
 }
 
+/// A stale socket at `socket`: one that never listened, so it is refused at
+/// once, whatever child of a concurrent test still holds its descriptor.
 fn plant_stale_socket(socket: &Path) {
     std::fs::create_dir_all(socket.parent().expect("socket directory")).expect("directory");
-    drop(std::os::unix::net::UnixListener::bind(socket).expect("socket inode"));
-    // A child forked by a concurrent test holds the listener until it execs.
-    for _ in 0..500 {
-        if UnixStream::connect(socket).is_err() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("{} never became stale", socket.display())
+    plant_unlistened_socket(socket);
+    assert!(
+        UnixStream::connect(socket).is_err(),
+        "{} is stale",
+        socket.display()
+    );
 }
 
 #[test]

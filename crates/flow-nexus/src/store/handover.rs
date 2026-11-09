@@ -1,5 +1,6 @@
 //! Durable current and closed handover generations.
 
+use super::AnnouncesLaunchChanges;
 use super::context::NamesFlowModel;
 use super::handover_configuration::ReadsHandoverConfiguration;
 use super::{FlowStore, ReadsFlowMemory, StoreError};
@@ -660,6 +661,7 @@ impl HoldsHandovers for FlowStore {
                 .change(RetirementChange::GenerationClosed(
                     closed.generation_key(address),
                 ));
+            self.reminder_changes.announce();
             return Ok(());
         };
         if predecessor == successor {
@@ -692,6 +694,7 @@ impl HoldsHandovers for FlowStore {
             .change(RetirementChange::GenerationClosed(
                 closed.generation_key(address),
             ));
+        self.reminder_changes.announce();
         Ok(())
     }
 }

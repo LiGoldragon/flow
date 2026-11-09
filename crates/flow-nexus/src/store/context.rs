@@ -6,6 +6,7 @@
 //! against the refresh threshold of the flow's model: a flow at or past it
 //! is given no new message and is replaced as it goes idle.
 
+use super::AnnouncesLaunchChanges;
 use super::{FlowStore, ManagesMetaflowState, ReadsFlowRoles, ReadsLaunchAttempt, StoreError};
 use meta_signal_flow::{CompactionRefusal, ContextBelowThreshold};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -96,6 +97,7 @@ impl RecordsContextSize for FlowStore {
             self.engine
                 .assert(Assertion::new(self.context_sizes(), row))?;
         }
+        self.reminder_changes.announce();
         Ok(())
     }
 

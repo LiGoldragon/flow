@@ -28,19 +28,24 @@ impl JointChild {
     fn stop(mut self) {
         // SAFETY: this pid belongs to the fixture child, and both Nexuses
         // document SIGTERM as their orderly stop request.
+        use crate::event_wait::{AwaitsDescriptors, OpensExitDescriptor};
+        use std::os::fd::AsFd;
+        // The child's exit is awaited as its pidfd, opened before the stop
+        // is asked, bounded by ten seconds.
+        let exit = self
+            .child
+            .id()
+            .exit_descriptor()
+            .expect("the child's pidfd");
         let _ = unsafe { libc::kill(self.child.id() as i32, libc::SIGTERM) };
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Some(status) = self.child.try_wait().expect("fixture child status") {
-                assert!(status.success(), "{} exited with {status}", self.name);
-                return;
-            }
-            if Instant::now() >= deadline {
+        let _ = [exit.as_fd()].ready(Some(Instant::now() + Duration::from_secs(10)));
+        match self.child.try_wait().expect("fixture child status") {
+            Some(status) => assert!(status.success(), "{} exited with {status}", self.name),
+            None => {
                 let _ = self.child.kill();
                 let _ = self.child.wait();
                 panic!("{} did not stop in ten seconds", self.name);
             }
-            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }
@@ -128,6 +133,21 @@ fn spawn_message(binary: &Path, home: &Path, runtime: &Path) -> JointChild {
     }
 }
 
+/// Flow's socket, moved in at its name only once it listens: awaited as
+/// that event, then connected.
+fn wait_for_flow_socket(path: &Path) -> UnixStream {
+    use crate::event_wait::AwaitsPath;
+    assert!(
+        path.appeared_by(Instant::now() + Duration::from_secs(30)),
+        "{} never listened",
+        path.display()
+    );
+    UnixStream::connect(path).expect("Flow's socket listens")
+}
+
+/// Message 8a60367 binds its socket in place and announces no readiness:
+/// its name appears before it listens, and nothing marks the listen, so a
+/// connection is tried until one is taken.
 fn wait_for_socket(path: &Path) -> UnixStream {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -200,7 +220,7 @@ fn configure_flow(message_binary: &Path, home: &Path, runtime: &Path, place: &cr
 }
 
 fn bind_sender(flow_socket: &Path, sender: &Address) {
-    let mut peer = wait_for_socket(flow_socket);
+    let mut peer = wait_for_flow_socket(flow_socket);
     peer.write_query(&FlowQuery::Bind(Bind_Data {
         address: sender.clone(),
         process: process(),
@@ -342,7 +362,7 @@ fn real_flow_and_message_share_the_durable_delivery_ledger() {
     drop(store);
 
     let flow = spawn_flow(&flow_binary, home.path(), runtime.path(), &place);
-    drop(wait_for_socket(flow_socket));
+    drop(wait_for_flow_socket(flow_socket));
     let message = spawn_message(&message_binary, home.path(), runtime.path());
     wait_for_socket(&message_socket);
     message.stop();

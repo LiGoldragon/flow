@@ -319,10 +319,15 @@ impl RunsHeartbeat for crate::RunningNexus {
     }
 
     fn keep_heartbeating(&self) {
-        use crate::store::ManagesMetaflowState;
+        use crate::store::{AnnouncesLaunchChanges, ManagesMetaflowState};
+        // Two events move the heartbeat: a Configure (or the stop, which
+        // announces the same change) and the configured period ending. The
+        // thread blocks on the configuration change, bounded by the next
+        // beat; nothing wakes to look again.
         let mut active: Option<meta_signal_flow::HeartbeatConfig> = None;
-        let mut waited = std::time::Duration::ZERO;
+        let mut next_beat: Option<std::time::Instant> = None;
         while !crate::HoldsStopRequest::requested(&self.stopping) {
+            let seen = self.configuration_changes.current();
             let configured = self
                 .store
                 .configuration_snapshot()
@@ -331,22 +336,36 @@ impl RunsHeartbeat for crate::RunningNexus {
                 .and_then(|snapshot| snapshot.heartbeat);
             if configured != active {
                 active = configured;
-                waited = std::time::Duration::ZERO;
+                next_beat = active
+                    .as_ref()
+                    .map(|config| std::time::Instant::now() + config.period());
                 if let Some(config) = active.as_ref() {
                     self.sync_heartbeat(&config.heartbeat_recipients);
                 }
             }
-            let step = std::time::Duration::from_millis(250);
-            std::thread::sleep(step);
-            let Some(config) = active.as_ref() else {
-                continue;
-            };
-            waited += step;
-            let period = std::time::Duration::from_secs(config.heartbeat_period_seconds as u64);
-            if waited >= period {
-                waited = std::time::Duration::ZERO;
-                self.heartbeat_tick(&config.heartbeat_recipients);
+            match (active.as_ref(), next_beat) {
+                (Some(config), Some(beat)) => {
+                    if !self.configuration_changes.until(seen, beat) {
+                        next_beat = Some(beat + config.period());
+                        self.heartbeat_tick(&config.heartbeat_recipients);
+                    }
+                }
+                _ => {
+                    self.configuration_changes.after(seen);
+                }
             }
         }
+    }
+}
+
+/// The configured period between two beats; Configure refuses one that is
+/// not positive.
+trait HasHeartbeatPeriod {
+    fn period(&self) -> std::time::Duration;
+}
+
+impl HasHeartbeatPeriod for meta_signal_flow::HeartbeatConfig {
+    fn period(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.heartbeat_period_seconds.max(1) as u64)
     }
 }

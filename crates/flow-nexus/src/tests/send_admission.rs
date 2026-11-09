@@ -283,14 +283,20 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         let transcript = claude_transcript(&fixture);
         let typed = fixture.directory.path().join("pane-typed.txt");
         let writer = std::thread::spawn(move || {
+            use crate::event_wait::AwaitsDirectory;
             let deadline = Instant::now() + Duration::from_secs(12);
-            while !std::fs::read_to_string(&typed)
-                .unwrap_or_default()
-                .contains("real direct receipt")
-            {
-                assert!(Instant::now() < deadline, "direct message never submitted");
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            let directory = typed
+                .parent()
+                .expect("the typed file's directory")
+                .to_owned();
+            assert!(
+                directory.until_holds(deadline, &mut || {
+                    std::fs::read_to_string(&typed)
+                        .unwrap_or_default()
+                        .contains("real direct receipt")
+                }),
+                "direct message never submitted"
+            );
             // The seat records the very text typed: the message's datom.
             let typed_text = std::fs::read_to_string(&typed).unwrap();
             let row = serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"direct-native-receipt", "message":{"content":typed_text}});
@@ -719,13 +725,14 @@ impl ServesCliWorld for CliWorld {
         let (served, meta_served) = (socket.clone(), meta_socket.clone());
         std::thread::spawn(move || fixture.nexus.serve_ordinary(&served));
         std::thread::spawn(move || fixture.nexus.serve_meta(&meta_served));
+        // Each name is moved in only once its socket listens.
         for path in [&socket, &meta_socket] {
-            for _ in 0..200 {
-                if std::os::unix::net::UnixStream::connect(path).is_ok() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
+            use crate::event_wait::AwaitsPath;
+            assert!(
+                path.appeared_by(std::time::Instant::now() + std::time::Duration::from_secs(2)),
+                "{} listens",
+                path.display()
+            );
         }
         CliWorld {
             fixture,

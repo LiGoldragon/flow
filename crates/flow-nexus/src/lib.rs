@@ -36,6 +36,7 @@ pub mod compacting;
 pub mod composition;
 pub mod context;
 pub mod delivery;
+pub mod event_wait;
 pub mod lean;
 pub mod live;
 pub(crate) mod message_projection;
@@ -738,6 +739,7 @@ impl Dispatches for RunningNexus {
                                 );
                             }
                             self.configuration_changes.announce();
+                            self.store.reminder_changes.announce();
                         }
                         meta_signal_flow::Response::Configured(outcome)
                     }
@@ -1900,16 +1902,31 @@ impl ListensOnSocket for RunningNexus {
     }
 }
 
-/// The Nexus's stop request: once set it stays set.
-#[derive(Default)]
+/// The Nexus's stop request: once set it stays set, and its announcement
+/// is a descriptor that becomes readable, so a thread blocked on its own
+/// descriptors wakes on the stop with them.
 pub struct Stopping {
     requested: AtomicBool,
+    announced: event_wait::Announcement,
 }
 
-/// What a stop request can say: whether it was made, and making it.
+impl Default for Stopping {
+    fn default() -> Self {
+        use event_wait::AnnouncesOnce;
+        Self {
+            requested: AtomicBool::new(false),
+            announced: event_wait::Announcement::open()
+                .expect("the kernel opens an eventfd for the stop request"),
+        }
+    }
+}
+
+/// What a stop request can say: whether it was made, making it, and the
+/// descriptor that is readable once it is made.
 pub trait HoldsStopRequest {
     fn requested(&self) -> bool;
     fn request(&self);
+    fn descriptor(&self) -> std::os::fd::BorrowedFd<'_>;
 }
 
 impl HoldsStopRequest for Stopping {
@@ -1918,14 +1935,21 @@ impl HoldsStopRequest for Stopping {
     }
 
     fn request(&self) {
+        use event_wait::AnnouncesOnce;
         self.requested.store(true, Ordering::SeqCst);
+        self.announced.announce();
+    }
+
+    fn descriptor(&self) -> std::os::fd::BorrowedFd<'_> {
+        use event_wait::AnnouncesOnce;
+        self.announced.descriptor()
     }
 }
 
 /// Stops a running Nexus so that every thread borrowing it returns and the
 /// store closes cleanly: the accept loops stop taking connections and join
 /// the ones in flight, the launch promoter and launch observers return, and
-/// agent observers end at their next read timeout.
+/// agent observers wake on the stop's descriptor and end.
 pub trait StopsNexus {
     fn stop(&self, sockets: &[&Path]);
 }
@@ -1946,6 +1970,7 @@ impl StopsNexus for RunningNexus {
             );
         }
         self.store.launch_changes.announce();
+        self.store.reminder_changes.announce();
         self.configuration_changes.announce();
         // Each accept loop is blocked in accept; a connection wakes it. A
         // listener not yet bound sees the request once it binds.
@@ -1957,51 +1982,79 @@ impl StopsNexus for RunningNexus {
 
 /// SIGTERM and SIGINT, taken by one watching thread instead of killing the
 /// process, so a stop closes the store. The signals are blocked before any
-/// thread starts, so every thread inherits the block; a spawned child
-/// process starts with an empty mask.
+/// thread starts, so every thread inherits the block, and are read from a
+/// signalfd; a spawned child process starts with an empty mask.
 pub struct TerminationSignals {
-    set: libc::sigset_t,
+    signals: std::os::fd::OwnedFd,
 }
 
 /// Blocks the termination signals, then watches for them.
 pub trait WatchesTerminationSignals: Sized {
-    /// Blocks SIGTERM and SIGINT in the calling thread; call before any
-    /// other thread starts.
+    /// Blocks SIGTERM and SIGINT in the calling thread and opens the
+    /// signalfd they are read from; call before any other thread starts.
     fn block() -> Self;
 
-    /// Waits for SIGTERM or SIGINT until `finished` holds; true when a
-    /// signal came.
-    fn watch(&self, finished: &dyn Fn() -> bool) -> bool;
+    /// Blocks until SIGTERM or SIGINT arrives, true, or until `stopping`
+    /// is requested by another path, false. Both are events: the
+    /// signalfd and the stop's descriptor are waited on together.
+    fn watch(&self, stopping: &Stopping) -> bool;
 }
 
 impl WatchesTerminationSignals for TerminationSignals {
     fn block() -> Self {
-        // SAFETY: the set is initialized by sigemptyset before use, and
-        // pthread_sigmask only reads it.
+        use std::os::fd::FromRawFd;
+        // SAFETY: the set is initialized by sigemptyset before use;
+        // pthread_sigmask and signalfd only read it, and the descriptor
+        // signalfd returns is owned by nothing else.
         unsafe {
             let mut set = std::mem::zeroed::<libc::sigset_t>();
             libc::sigemptyset(&mut set);
             libc::sigaddset(&mut set, libc::SIGTERM);
             libc::sigaddset(&mut set, libc::SIGINT);
             libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-            Self { set }
+            let descriptor = libc::signalfd(-1, &set, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK);
+            assert!(
+                descriptor >= 0,
+                "the kernel opens a signalfd for the termination signals"
+            );
+            Self {
+                signals: std::os::fd::OwnedFd::from_raw_fd(descriptor),
+            }
         }
     }
 
-    fn watch(&self, finished: &dyn Fn() -> bool) -> bool {
-        const POLL: libc::timespec = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 200_000_000,
-        };
-        while !finished() {
-            // SAFETY: the set and timeout are valid for the call; no
-            // siginfo is requested.
-            let signal = unsafe { libc::sigtimedwait(&self.set, std::ptr::null_mut(), &POLL) };
-            if signal == libc::SIGTERM || signal == libc::SIGINT {
-                return true;
+    fn watch(&self, stopping: &Stopping) -> bool {
+        use event_wait::AwaitsDescriptors;
+        use std::os::fd::{AsFd, AsRawFd};
+        loop {
+            let ready = match [self.signals.as_fd(), stopping.descriptor()].ready(None) {
+                Ok(ready) => ready,
+                Err(error) => {
+                    eprintln!("flow-nexus: termination signals unwatchable: {error}");
+                    return false;
+                }
+            };
+            if ready[0] {
+                // SAFETY: signalfd_siginfo is plain integers, valid zeroed.
+                let mut information = unsafe { std::mem::zeroed::<libc::signalfd_siginfo>() };
+                // SAFETY: the buffer is one signalfd_siginfo, the unit a
+                // signalfd read returns, borrowed for the call.
+                let read = unsafe {
+                    libc::read(
+                        self.signals.as_raw_fd(),
+                        (&raw mut information).cast::<libc::c_void>(),
+                        std::mem::size_of::<libc::signalfd_siginfo>(),
+                    )
+                };
+                let signal = information.ssi_signo as i32;
+                if read > 0 && (signal == libc::SIGTERM || signal == libc::SIGINT) {
+                    return true;
+                }
+            }
+            if ready[1] || stopping.requested() {
+                return false;
             }
         }
-        false
     }
 }
 
@@ -3295,16 +3348,19 @@ mod tests {
         let socket = fixture.directory.path().join("ordinary.sock");
         let served = socket.clone();
         std::thread::spawn(move || fixture.nexus.serve_ordinary(&served));
+        // The name is moved in only once the socket listens.
+        assert!(
+            crate::event_wait::AwaitsPath::appeared_by(
+                socket.as_path(),
+                std::time::Instant::now() + Duration::from_secs(2)
+            ),
+            "ordinary socket never listened"
+        );
         let connect = || {
-            for _ in 0..200 {
-                if let Ok(peer) = UnixStream::connect(&socket) {
-                    peer.set_read_timeout(Some(Duration::from_secs(2)))
-                        .expect("test peer timeout");
-                    return peer;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            panic!("ordinary socket never listened")
+            let peer = UnixStream::connect(&socket).expect("the ordinary socket listens");
+            peer.set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("test peer timeout");
+            peer
         };
 
         let mut idle = connect();

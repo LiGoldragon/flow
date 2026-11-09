@@ -11,11 +11,11 @@
 //! metaflow Asleep and retracts every lock it holds as a sender, and a
 //! Maintained metaflow so ended is woken into its successor.
 
+use crate::RunningNexus;
 use crate::herdr::HerdrCli;
 use crate::herdr::pane::ReadsAgentStatus;
 use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
-use crate::{HoldsStopRequest, RunningNexus};
 use signal_flow::{
     AgentObservation, AgentState, FlowNode, HerdrRoute, HerdrRouteSelection, Response,
 };
@@ -182,7 +182,7 @@ impl ObservesAgent for RunningNexus {
             .ok_or("Herdr session socket not found")?;
         let mut events = HerdrEvents::subscribe(&socket, &route.herdr_pane_id)?;
         loop {
-            let Some(event) = events.next_event(&|| self.stopping.requested())? else {
+            let Some(event) = events.next_event(&self.stopping)? else {
                 // Herdr closed the subscription: the session is gone. The
                 // pane is read once more before the flow is recorded ended.
                 if let Some((node, _)) = self.observable(flow_id)
@@ -241,11 +241,10 @@ struct HerdrEvents {
 
 trait SubscribesHerdrEvents: Sized {
     fn subscribe(socket: &std::path::Path, pane_id: &str) -> Result<Self, String>;
-    /// How often a waiting subscription looks whether the Nexus is stopping.
-    const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(500);
     /// The next event about this pane; None when Herdr closes the stream,
-    /// an error once `stopping` holds.
-    fn next_event(&mut self, stopping: &dyn Fn() -> bool) -> Result<Option<PaneEvent>, String>;
+    /// an error once the Nexus is stopping. The stream and the stop's
+    /// descriptor are waited on together, so either wakes the wait.
+    fn next_event(&mut self, stopping: &crate::Stopping) -> Result<Option<PaneEvent>, String>;
 }
 
 impl SubscribesHerdrEvents for HerdrEvents {
@@ -285,16 +284,29 @@ impl SubscribesHerdrEvents for HerdrEvents {
         Ok(events)
     }
 
-    fn next_event(&mut self, stopping: &dyn Fn() -> bool) -> Result<Option<PaneEvent>, String> {
+    fn next_event(&mut self, stopping: &crate::Stopping) -> Result<Option<PaneEvent>, String> {
+        use crate::HoldsStopRequest;
+        use crate::event_wait::AwaitsDescriptors;
+        use std::os::fd::AsFd;
+        // Reads never block: the wait is the poll below, on the stream and
+        // the stop together.
         self.reader
             .get_ref()
-            .set_read_timeout(Some(Self::STOP_POLL))
+            .set_nonblocking(true)
             .map_err(|error| error.to_string())?;
         loop {
-            if stopping() {
+            if stopping.requested() {
                 return Err("the Nexus is stopping".into());
             }
-            // A timed-out read keeps what it read in `pending`.
+            if self.reader.buffer().is_empty() {
+                let ready = [self.reader.get_ref().as_fd(), stopping.descriptor()]
+                    .ready(None)
+                    .map_err(|error| error.to_string())?;
+                if ready[1] {
+                    return Err("the Nexus is stopping".into());
+                }
+            }
+            // A read that would block keeps what it read in `pending`.
             match self.reader.read_until(b'\n', &mut self.pending) {
                 Ok(0) => return Ok(None),
                 Ok(_) if self.pending.last() != Some(&b'\n') => return Ok(None),

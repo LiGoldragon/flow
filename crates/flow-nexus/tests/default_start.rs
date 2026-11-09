@@ -502,6 +502,184 @@ fn a_stopped_nexus_removes_only_its_own_sockets() {
     assert!(place.runtime_directory().is_dir() && place.state_directory().is_dir());
 }
 
+/// A socket bound at `path` that never listened, then closed, as a Nexus
+/// that died leaves one: a connection to it is refused, whoever else holds
+/// the descriptor.
+fn plant_unlistened_socket(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: the address is a valid sockaddr_un holding the path within its
+    // bounds; the descriptor is closed before return.
+    unsafe {
+        let descriptor = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+        assert!(descriptor >= 0, "a socket opens");
+        let mut address: libc::sockaddr_un = std::mem::zeroed();
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        assert!(path.as_os_str().len() < address.sun_path.len());
+        for (slot, byte) in address.sun_path.iter_mut().zip(path.as_os_str().as_bytes()) {
+            *slot = *byte as libc::c_char;
+        }
+        let bound = libc::bind(
+            descriptor,
+            (&raw const address).cast::<libc::sockaddr>(),
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        );
+        assert_eq!(bound, 0, "the socket binds at {}", path.display());
+        libc::close(descriptor);
+    }
+}
+
+/// One inotify event on the place's Runtime, as a watching peer reads it.
+#[derive(Debug)]
+struct RuntimeEvent {
+    mask: u32,
+    name: String,
+    /// For a name moved in: a connection made the moment the event was read.
+    connected: Option<bool>,
+}
+
+/// Watches `directory` as a peer of the Nexus does, on a thread blocked in
+/// read(2): every event is handed over, and on each name moved in a
+/// connection is made at once.
+fn watch_runtime(directory: &Path) -> mpsc::Receiver<RuntimeEvent> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(directory.as_os_str().as_bytes()).expect("path");
+    // SAFETY: inotify_init1 takes no pointer; add_watch reads a
+    // zero-terminated path that outlives the call.
+    let descriptor = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+    assert!(descriptor >= 0, "inotify opens");
+    let mask = libc::IN_CREATE
+        | libc::IN_MOVED_TO
+        | libc::IN_MOVED_FROM
+        | libc::IN_ATTRIB
+        | libc::IN_DELETE;
+    // SAFETY: see above.
+    assert!(unsafe { libc::inotify_add_watch(descriptor, path.as_ptr(), mask) } >= 0);
+    let directory = directory.to_owned();
+    let (sent, events) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buffer = [0_u8; 4096];
+        loop {
+            // SAFETY: read writes at most the buffer's length into it.
+            let length =
+                unsafe { libc::read(descriptor, buffer.as_mut_ptr().cast(), buffer.len()) };
+            if length <= 0 {
+                return;
+            }
+            let mut at = 0;
+            while at < length as usize {
+                // SAFETY: the kernel writes whole events; the header is read
+                // unaligned from within the bytes read.
+                let header = unsafe {
+                    std::ptr::read_unaligned(buffer[at..].as_ptr().cast::<libc::inotify_event>())
+                };
+                let start = at + std::mem::size_of::<libc::inotify_event>();
+                let name_bytes = &buffer[start..start + header.len as usize];
+                let name = String::from_utf8_lossy(name_bytes)
+                    .trim_end_matches('\0')
+                    .to_owned();
+                at = start + header.len as usize;
+                let connected = (header.mask & libc::IN_MOVED_TO != 0)
+                    .then(|| UnixStream::connect(directory.join(&name)).is_ok());
+                if sent
+                    .send(RuntimeEvent {
+                        mask: header.mask,
+                        name,
+                        connected,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
+    });
+    events
+}
+
+/// A socket appears at its name only listening: each name is moved in,
+/// never made, changed or removed in place, and a peer that sees it moved in
+/// connects at once. A stale socket at a name from a crash is replaced by
+/// the move, with no removal before it, and a leftover temporary name of
+/// another process is neither served nor touched.
+#[test]
+fn each_socket_appears_at_its_name_only_listening() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let runtime = tempfile::tempdir().expect("temporary runtime directory");
+    let state = tempfile::tempdir().expect("dedicated state directory");
+    let place = declared(runtime.path(), state.path());
+    configured(&place, home.path());
+    let names = ["flow.sock", "flow-meta.sock"];
+    plant_unlistened_socket(&place.ordinary_socket());
+    let leftovers = [".flow.sock.1", ".flow-meta.sock.1"]
+        .map(|leftover| place.runtime_directory().join(leftover));
+    for leftover in &leftovers {
+        plant_unlistened_socket(leftover);
+    }
+    let events = watch_runtime(place.runtime_directory());
+    let nexus = start_ready(home.path(), &place, &[]);
+
+    // Every event up to both names moved in, in the order they came.
+    let mut moved_in = Vec::new();
+    while moved_in.len() < names.len() {
+        let event = events
+            .recv_timeout(EVENT_WAIT)
+            .expect("the Nexus places its sockets");
+        if !names.contains(&event.name.as_str()) {
+            assert!(
+                event.name.starts_with('.')
+                    && !leftovers.iter().any(|left| left.ends_with(&event.name)),
+                "only the Nexus's own temporary names change beside its sockets: {event:?}"
+            );
+            continue;
+        }
+        assert_eq!(
+            event.mask & !libc::IN_ISDIR,
+            libc::IN_MOVED_TO,
+            "a name is only ever moved in: {event:?}"
+        );
+        assert_eq!(
+            event.connected,
+            Some(true),
+            "listening when moved in: {event:?}"
+        );
+        moved_in.push(event.name);
+    }
+    moved_in.sort();
+    assert_eq!(moved_in, ["flow-meta.sock", "flow.sock"]);
+    assert!(metaflows_listed(&place));
+    for leftover in &leftovers {
+        assert!(leftover.exists(), "another's leftover stays");
+        assert!(
+            UnixStream::connect(leftover).is_err(),
+            "a leftover is never served"
+        );
+    }
+    let mut runtime_names = std::fs::read_dir(place.runtime_directory())
+        .expect("the Runtime reads")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    runtime_names.sort();
+    assert_eq!(
+        runtime_names,
+        [
+            ".flow-meta.sock.1",
+            ".flow.sock.1",
+            "flow-meta.sock",
+            "flow.sock"
+        ],
+        "no temporary name of the Nexus's own is left"
+    );
+    assert!(nexus.terminate().success());
+    assert!(!place.ordinary_socket().exists() && !place.meta_socket().exists());
+    assert!(leftovers.iter().all(|leftover| leftover.exists()));
+}
+
 #[cfg(feature = "executable-default-configuration")]
 #[test]
 fn configured_executable_seeds_only_its_fresh_typed_nexus_row() {

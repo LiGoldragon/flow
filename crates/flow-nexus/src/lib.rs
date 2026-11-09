@@ -71,6 +71,7 @@ mod observe_sends;
 pub mod peer;
 pub mod performing;
 pub mod place;
+pub mod placed_socket;
 pub mod reporting;
 pub mod send_tool;
 pub mod sending;
@@ -109,10 +110,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::Shutdown,
-    os::unix::{
-        fs::PermissionsExt,
-        net::{UnixListener, UnixStream},
-    },
+    os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -1839,7 +1837,8 @@ pub trait ListensOnSocket {
     where
         Self: Sync + Sized,
     {
-        self.listen_on(ClaimedSocket::bind(socket)?, socket, surface, serve)
+        use placed_socket::{PlacedSocket, PlacesSocket};
+        self.listen_on(PlacedSocket::at(socket)?.claim()?, socket, surface, serve)
     }
 
     /// Serves `listener`, already bound at `socket`, each connection on its
@@ -1953,70 +1952,6 @@ impl StopsNexus for RunningNexus {
         for socket in sockets {
             let _ = UnixStream::connect(socket);
         }
-    }
-}
-
-/// A socket path this process binds, after making sure no live listener is
-/// there: a socket file nobody accepts on is stale and removed, a socket
-/// that accepts belongs to a live process and is refused. The directory it
-/// is bound in is found, never made: a place's Runtime is shared with every
-/// other Nexus at it and declared by the environment.
-pub struct ClaimedSocket;
-
-/// Binds a socket path this process claims.
-pub trait ClaimsSocket {
-    fn bind(socket: &Path) -> Result<UnixListener, String>;
-}
-
-impl ClaimsSocket for ClaimedSocket {
-    fn bind(socket: &Path) -> Result<UnixListener, String> {
-        use std::os::unix::fs::FileTypeExt;
-        match fs::symlink_metadata(socket) {
-            Ok(metadata) if metadata.file_type().is_socket() => match UnixStream::connect(socket) {
-                Ok(_peer) => {
-                    return Err(format!(
-                        "socket {} is already accepting connections",
-                        socket.display()
-                    ));
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
-                    fs::remove_file(socket).map_err(|error| {
-                        format!("cannot remove stale socket {}: {error}", socket.display())
-                    })?;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(format!(
-                        "cannot establish whether socket {} is stale: {error}",
-                        socket.display()
-                    ));
-                }
-            },
-            Ok(_) => {
-                return Err(format!(
-                    "socket path {} exists and is not a socket",
-                    socket.display()
-                ));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(format!(
-                    "cannot inspect socket {}: {error}",
-                    socket.display()
-                ));
-            }
-        }
-        let listener = UnixListener::bind(socket)
-            .map_err(|error| format!("cannot bind socket {}: {error}", socket.display()))?;
-        if let Err(error) = fs::set_permissions(socket, fs::Permissions::from_mode(0o600)) {
-            drop(listener);
-            let _ = fs::remove_file(socket);
-            return Err(format!(
-                "cannot protect socket {}: {error}",
-                socket.display()
-            ));
-        }
-        Ok(listener)
     }
 }
 

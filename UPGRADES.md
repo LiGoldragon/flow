@@ -30,8 +30,9 @@ meta-signal-message 3.0.1 (`1ec9e00`).
 - The Nexus starts in its place: `flow-nexus '{ <place-name> <runtime>
   <state> }'`, one datom, replacing the Start datom (sockets, store,
   landing watch). Its sockets are `<runtime>/flow.sock` and
-  `<runtime>/flow-meta.sock`, its memory `<state>/flow.sema`; it makes
-  both directories if absent. `--configure-only` is gone: a fresh memory
+  `<runtime>/flow-meta.sock`, its memory `<state>/flow.sema`; both
+  directories are declared by the environment, and a Nexus whose place is
+  absent does not start. `--configure-only` is gone: a fresh memory
   starts with the executable's built-in configuration, and every meta
   `Configure` is applied to the running Nexus at once, without a restart.
 - `flow` and `flow-meta` take the place name and the Query: `flow main
@@ -52,8 +53,13 @@ meta-signal-message 3.0.1 (`1ec9e00`).
   it names, or a Codex thread's turn completed, once per turn, for a flow a
   metaflow is Awake as. The last of each harness is kept in
   `flow_nexus_turn_ends` (new, empty in a 0.53.2 store).
-- The Nexus binds both sockets before serving and then sends `READY=1` to
-  `$NOTIFY_SOCKET` when set: its unit can be `Type=notify`.
+- A socket appears at its name only once it listens: it is bound under
+  `<runtime>/.<name>.<pid>`, its mode set to `0600`, made to listen, then
+  renamed to its name (a stale socket there is replaced by the rename, a
+  live one refused). A peer waits for a Nexus on its socket's name moved in,
+  `IN_MOVED_TO`, and connects at once. Both sockets are placed before
+  serving, and then the Nexus sends `READY=1` to `$NOTIFY_SOCKET` when set:
+  its unit can be `Type=notify`.
 
 # Flow 0.53.1
 

@@ -1,8 +1,9 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
 use flow_nexus::place::{LaysOutPlace, Place};
+use flow_nexus::placed_socket::{PlacedSocket, PlacesSocket};
 use flow_nexus::{
-    AnnouncesReadiness, ClaimedSocket, ClaimsSocket, OpensRunningNexus, Readiness, RunningNexus,
-    ServesMeta, ServesOrdinary, StopsNexus, TerminationSignals, WatchesTerminationSignals,
+    AnnouncesReadiness, OpensRunningNexus, Readiness, RunningNexus, ServesMeta, ServesOrdinary,
+    StopsNexus, TerminationSignals, WatchesTerminationSignals,
     launching::ReconcilesInterruptedLaunches, send_tool::ServesSendTool, store::StoreError,
     waking::SleepsAndWakesSeats,
 };
@@ -123,11 +124,14 @@ fn main() -> ExitCode {
             nexus.stop(&sockets);
         }
     };
-    // Both sockets are bound before anything is served, and readiness is
-    // announced only once they are: a unit ordered after this one finds
-    // both listening.
+    // Both sockets are placed, each at its name only once it listens,
+    // before anything is served, and readiness is announced only once they
+    // are: a unit ordered after this one, or a peer that saw a name moved
+    // in, finds both listening.
     let bound = |socket: &Path| {
-        ClaimedSocket::bind(socket).inspect_err(|error| eprintln!("flow-nexus: {error}"))
+        PlacedSocket::at(socket)
+            .and_then(|placed| placed.claim())
+            .inspect_err(|error| eprintln!("flow-nexus: {error}"))
     };
     let Ok(ordinary_listener) = bound(ordinary) else {
         return ExitCode::FAILURE;

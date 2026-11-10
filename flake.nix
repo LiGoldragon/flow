@@ -19,6 +19,7 @@
     unconfigured-flow.url = "github:LiGoldragon/flow/d3ab87ee18b1dd30947d5f0089f5abb4bafa80d5";
     # The Message Nexus the joint check runs beside the real Flow Nexus.
     message.url = "github:LiGoldragon/message/69a9eb7b2e95fb7ba85f138f58d38f38996f6d70";
+    message.inputs.base.follows = "base";
     # The accepted 0.53.2 Flow, built by its own flake, whose Memory the
     # request-id migration check evolves. The lock holds its commit, f7d2336,
     # and the flake refuses any other (predecessorRevision below).

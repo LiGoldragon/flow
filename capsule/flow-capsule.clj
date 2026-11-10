@@ -68,12 +68,17 @@
 ;; The capsule's own Codex app-server: a private CODEX_HOME holding only a
 ;; copy of the user's Codex login, a private control socket, and a client
 ;; that runs Codex in that home. The Codex executable, its model and the
-;; login it copies are taken from the environment where given.
+;; login it uses are taken from the environment where given.
 (def codex-home (str state-root "/codex-home"))
 (def codex-socket (str capsule-runtime "/codex/app-server-control.sock"))
 (def codex-client (str state-root "/codex-client"))
 (def codex-binary (or (System/getenv "FLOW_CAPSULE_CODEX") (some-> (fs/which "codex") str)))
 (def codex-model (or (System/getenv "FLOW_CAPSULE_CODEX_MODEL") "gpt-5.6-luna"))
+;; The machine's one login for the account, used in place: the capsule's
+;; home links to it, so a renewal inside the capsule and one outside write
+;; the same file. Codex resolves the link and replaces the target, and
+;; commits through a lock beside the target (codex 0.167), so the processes
+;; sharing it renew one at a time.
 (def codex-login (or (System/getenv "FLOW_CAPSULE_CODEX_LOGIN") (str home "/.codex-next/auth.json")))
 (def curriculum-socket (str capsule-runtime "/curriculum/curriculum.sock"))
 (def curriculum-contexts (str state-root "/curriculum-context"))
@@ -1318,8 +1323,10 @@
   ;; Watched for the sessions the seats write (await-codex-sessions).
   (fs/create-dirs (str codex-home "/sessions"))
   (fs/create-dirs (fs/parent codex-socket))
-  (fs/copy codex-login (str codex-home "/auth.json") {:replace-existing true})
-  (fs/set-posix-file-permissions (str codex-home "/auth.json") "rw-------")
+  (when-not (fs/exists? codex-login)
+    (throw (ex-info (str "no Codex login at " codex-login ": log in once there, or set FLOW_CAPSULE_CODEX_LOGIN") {})))
+  (fs/delete-if-exists (str codex-home "/auth.json"))
+  (fs/create-sym-link (str codex-home "/auth.json") (str (fs/canonicalize codex-login)))
   (spit (str codex-home "/config.toml")
         (str "approval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"\nmodel = \"" codex-model "\"\n"))
   (spit codex-client (str "#!/bin/sh\nexport CODEX_HOME=" codex-home "\nexec " codex-binary " \"$@\"\n"))

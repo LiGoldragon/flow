@@ -1111,23 +1111,26 @@ trait ChecksExecutableDefault {
 impl ChecksExecutableDefault for meta_signal_flow::ConfigureNexus {
     fn validate_executable_default_configuration(&self) -> Result<(), store::StoreError> {
         let configuration = self;
+        // The first Codex endpoint is the stable one, the second the next.
+        let stable_codex = &configuration.first_codex_endpoint;
+        let next_codex = &configuration.second_codex_endpoint;
         let required_paths = [
-            configuration.source_root.as_str(),
-            configuration.stable_codex.client_path.as_str(),
-            configuration.stable_codex.home.as_str(),
-            configuration.stable_codex.control_socket_path.as_str(),
-            configuration.next_codex.client_path.as_str(),
-            configuration.next_codex.home.as_str(),
-            configuration.next_codex.control_socket_path.as_str(),
-            configuration.curriculum_nexus_path.as_str(),
+            configuration.source_root.0.as_str(),
+            stable_codex.client_path.0.as_str(),
+            stable_codex.home.0.as_str(),
+            stable_codex.control_socket_path.0.as_str(),
+            next_codex.client_path.0.as_str(),
+            next_codex.home.0.as_str(),
+            next_codex.control_socket_path.0.as_str(),
+            configuration.curriculum_nexus_path.0.as_str(),
         ];
         if required_paths
             .iter()
             .any(|path| !Path::new(path).is_absolute())
-            || configuration.stable_codex.model_name_vector.is_empty()
-            || configuration.harness_profiles.is_empty()
-            || configuration.meta_aspects.is_empty()
-            || configuration.lease <= 0
+            || stable_codex.model_name_vector.is_empty()
+            || configuration.harness_profiles.0.is_empty()
+            || configuration.meta_aspects.0.is_empty()
+            || configuration.lease.0 <= 0
         {
             return Err(store::StoreError::MissingDefaultConfiguration);
         }

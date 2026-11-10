@@ -4,7 +4,7 @@ use super::{FlowStore, OpensFlowStore, RecordsLogicalDeliveries};
 use crate::CarriesSignalFrames;
 use message_nexus::{
     frame::FramedStream,
-    generated::memory::Standard,
+    generated::memory::{MetaConfigured, Standard},
     request_tracking::Classification,
     store::{KeepsRequestTracking, MessageStore, OpensStore},
 };
@@ -285,20 +285,26 @@ fn message_tracking(home: &Path, runtime: &Path) -> message_nexus::store::Durabl
         &home.join(".local/state/message/message.sema"),
         Standard {
             configuration: signal_message::Configuration {
-                ordinary: runtime
-                    .join("message/message.sock")
-                    .to_string_lossy()
-                    .into_owned(),
-                meta: runtime
-                    .join("message/message-owner.sock")
-                    .to_string_lossy()
-                    .into_owned(),
-                flow: runtime
-                    .join("flow/flow.sock")
-                    .to_string_lossy()
-                    .into_owned(),
+                ordinary: signal_message::Ordinary(
+                    runtime
+                        .join("message/message.sock")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                meta: signal_message::Meta(
+                    runtime
+                        .join("message/message-owner.sock")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                flow: signal_message::Flow(
+                    runtime
+                        .join("flow/flow.sock")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
             },
-            meta_configured: false,
+            meta_configured: MetaConfigured(false),
         },
     )
     .expect("Message Memory reopens");
@@ -319,7 +325,7 @@ fn real_flow_and_message_share_the_durable_delivery_ledger() {
     );
     assert_eq!(
         std::env::var("FLOW_MESSAGE_JOINT_MESSAGE_REV").unwrap(),
-        "f46b38e0a9996e1593095f4154cd0597ff3ebe69"
+        "69a9eb7b2e95fb7ba85f138f58d38f38996f6d70"
     );
     let flow_binary = required_path("FLOW_MESSAGE_JOINT_FLOW_BIN");
     let message_binary = required_path("FLOW_MESSAGE_JOINT_MESSAGE_BIN");
@@ -361,7 +367,7 @@ fn real_flow_and_message_share_the_durable_delivery_ledger() {
         tracking.classified_events[0].classification,
         Classification::MessageRelay
     );
-    assert!(tracking.observation_cursor >= Some(acceptance.delivery_cursor));
+    assert!(tracking.observation_cursor >= Some(acceptance.delivery_cursor.0));
     let key = tracking.ledger[0].deliver_key.clone();
     let identity = tracking.store_identity.clone().expect("Flow identity held");
     let cursor = tracking.observation_cursor;
@@ -379,7 +385,7 @@ fn real_flow_and_message_share_the_durable_delivery_ledger() {
     let history = store
         .read_message_delivery_snapshots(Some(0))
         .expect("Message-private history reads");
-    assert_eq!(history.store_identity, identity);
+    assert_eq!(history.store_identity.0, identity);
     assert_eq!(history.delivery_snapshot_vector.len(), 1);
     assert_eq!(
         history.delivery_snapshot_vector[0].request_id,

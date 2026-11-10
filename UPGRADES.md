@@ -2,9 +2,11 @@
 
 Pins protos `c93b598`, datom-codec and datom-codec-derive `09a0526`,
 ethos-zero `1976e45`, signal 11.0.0 (`6d4eb74`), signal-flow 58.0.1
-(`6881724`) and meta-signal-flow 73.0.1 (`a90a889`), each by the string its
-other consumers write, so the lock holds one source of each. The flake's
-base is build-base `404cf8d`.
+(`6881724`) and meta-signal-flow 73.0.2 (`8d8a22e`), each by the string its
+other consumers write, so the lock holds one source of each. The
+message-joint test runs against Message 0.23.0 (`69a9eb7`) and
+signal-message 22.0.0 (`2fed750`). The flake's base is build-base
+`1089d69`.
 
 - ethos-zero 22 makes a head over one type a newtype (`FlowId(String)`,
   `RequestId(String)`, `Path(String)`, …) and refuses a head over a named
@@ -22,11 +24,11 @@ base is build-base `404cf8d`.
   Signalizable.
 - The workspace takes flow-ethos without default features, as signal-flow
   and meta-signal-flow do, so one flow-ethos build serves them all.
-- The message-joint test is compiled only with the `message-joint` feature:
-  Message `f46b38e` and signal-message `998c824` pin signal 10, whose
-  `links = "signal"` cannot share a lock with signal 11. Their
-  dev-dependency entries stand commented in `crates/flow-nexus/Cargo.toml`
-  until both pin signal-flow `6881724`.
+- The message-joint test follows Message 0.23.0's newtypes: the seed's
+  Configuration paths are `Ordinary`, `Meta` and `Flow`, its
+  `MetaConfigured` a newtype, and the acceptance cursor and store identity
+  are read as their inner values. Its check runs Message's `message-nexus`
+  build, whose binary is its own file rather than a link.
 
 # Flow 0.53.4: a successor is given its permaflow's open requests
 

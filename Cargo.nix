@@ -1101,10 +1101,20 @@ rec {
             packageId = "ethos-zero";
           }
         ];
+        devDependencies = [
+          {
+            name = "message-nexus";
+            packageId = "message-nexus";
+          }
+          {
+            name = "signal-message";
+            packageId = "signal-message";
+          }
+        ];
         features = {
           "default" = [ "datom" ];
         };
-        resolvedDefaultFeatures = [ "datom" "default" "executable-default-configuration" "message-joint" ];
+        resolvedDefaultFeatures = [ "datom" "default" "executable-default-configuration" ];
       };
       "fsevent-sys" = rec {
         crateName = "fsevent-sys";
@@ -1673,15 +1683,109 @@ rec {
         };
         resolvedDefaultFeatures = [ "alloc" "std" ];
       };
+      "message-defaults" = rec {
+        crateName = "message-defaults";
+        version = "0.23.0";
+        edition = "2024";
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/message";
+          rev = "69a9eb7b2e95fb7ba85f138f58d38f38996f6d70";
+          sha256 = "04gfddjx66k9klqph7fim17kvl26iw7mvc75nr7d71z4m1lq18an";
+        };
+        libName = "message_defaults";
+
+      };
+      "message-nexus" = rec {
+        crateName = "message-nexus";
+        version = "0.23.0";
+        edition = "2024";
+        crateBin = [];
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/message";
+          rev = "69a9eb7b2e95fb7ba85f138f58d38f38996f6d70";
+          sha256 = "04gfddjx66k9klqph7fim17kvl26iw7mvc75nr7d71z4m1lq18an";
+        };
+        libName = "message_nexus";
+        dependencies = [
+          {
+            name = "flow-ethos";
+            packageId = "flow-ethos";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "getrandom";
+            packageId = "getrandom 0.4.3";
+          }
+          {
+            name = "libc";
+            packageId = "libc";
+          }
+          {
+            name = "message-defaults";
+            packageId = "message-defaults";
+          }
+          {
+            name = "meta-signal-flow";
+            packageId = "meta-signal-flow";
+          }
+          {
+            name = "meta-signal-message";
+            packageId = "meta-signal-message";
+          }
+          {
+            name = "redb";
+            packageId = "redb";
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+          {
+            name = "rustix";
+            packageId = "rustix";
+            features = [ "net" "time" ];
+          }
+          {
+            name = "sema-engine";
+            packageId = "sema-engine";
+          }
+          {
+            name = "signal-flow";
+            packageId = "signal-flow";
+          }
+          {
+            name = "signal-message";
+            packageId = "signal-message";
+          }
+          {
+            name = "thiserror";
+            packageId = "thiserror";
+          }
+        ];
+        buildDependencies = [
+          {
+            name = "ethos-zero";
+            packageId = "ethos-zero";
+          }
+        ];
+        features = {
+          "datom" = [ "dep:datom-codec" ];
+        };
+        resolvedDefaultFeatures = [ "default" ];
+      };
       "meta-signal-flow" = rec {
         crateName = "meta-signal-flow";
-        version = "73.0.1";
+        version = "73.0.2";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-flow";
-          rev = "a90a889af74d2582ef1b9f36cda73627f975a4a6";
-          sha256 = "161cffghilhlzy1rfmyqpdara2yaxq3kjyqvxx1cmbkidbjhmhdm";
+          rev = "8d8a22ed2cacd1e1173459f5e65b16abc855e930";
+          sha256 = "1cc5bphb0grw64qkkvf9lqqyk11db6rmrr8m3wslhngnym4jqnxa";
         };
         libName = "meta_signal_flow";
         dependencies = [
@@ -1765,6 +1869,51 @@ rec {
           "datom" = [ "dep:datom-codec" "flow-ethos/datom" "signal-flow/datom" "signal/datom" ];
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
+      };
+      "meta-signal-message" = rec {
+        crateName = "meta-signal-message";
+        version = "4.0.0";
+        edition = "2024";
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/meta-signal-message";
+          rev = "01d5553290428b093552be10cfde21c69ba7054e";
+          sha256 = "0pzqsvk2hiip2qz5nb2cahhdqnlk7g3vp7l2mdz5afq3nc1x3ahq";
+        };
+        libName = "meta_signal_message";
+        dependencies = [
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+          {
+            name = "signal";
+            packageId = "signal";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "signal-message";
+            packageId = "signal-message";
+            usesDefaultFeatures = false;
+          }
+        ];
+        buildDependencies = [
+          {
+            name = "ethos-zero";
+            packageId = "ethos-zero";
+          }
+          {
+            name = "signal-message";
+            packageId = "signal-message";
+            usesDefaultFeatures = false;
+          }
+        ];
+        features = {
+          "datom" = [ "dep:datom-codec" "dep:protos" "signal-message/datom" "signal/datom" ];
+        };
+        resolvedDefaultFeatures = [ "default" ];
       };
       "mio" = rec {
         crateName = "mio";
@@ -3054,6 +3203,45 @@ rec {
           "datom" = [ "dep:datom-codec" "flow-ethos/datom" "signal/datom" ];
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
+      };
+      "signal-message" = rec {
+        crateName = "signal-message";
+        version = "22.0.0";
+        edition = "2024";
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/signal-message";
+          rev = "2fed7500c915befc8fc42359771e8a27d43a451e";
+          sha256 = "1ynal4j1jz475gfvg1nlhdkd6fahr1xbj11db2b93m9apidwz8l5";
+        };
+        libName = "signal_message";
+        dependencies = [
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+          {
+            name = "signal";
+            packageId = "signal";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "signal-flow";
+            packageId = "signal-flow";
+          }
+        ];
+        buildDependencies = [
+          {
+            name = "ethos-zero";
+            packageId = "ethos-zero";
+          }
+        ];
+        features = {
+          "datom" = [ "dep:datom-codec" "dep:protos" "signal-flow/datom" "signal/datom" ];
+        };
+        resolvedDefaultFeatures = [ "default" ];
       };
       "signal-sema" = rec {
         crateName = "signal-sema";

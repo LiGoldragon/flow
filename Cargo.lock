@@ -277,6 +277,7 @@ dependencies = [
  "flow-native",
  "getrandom 0.3.4",
  "libc",
+ "message-nexus",
  "meta-signal-flow",
  "meta-signal-flow-before-request-ids",
  "notify",
@@ -291,6 +292,7 @@ dependencies = [
  "sha2",
  "signal-flow",
  "signal-flow-before-request-ids",
+ "signal-message",
  "tempfile",
  "thiserror",
  "tungstenite",
@@ -476,9 +478,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "message-defaults"
+version = "0.23.0"
+source = "git+https://github.com/LiGoldragon/message?rev=69a9eb7#69a9eb7b2e95fb7ba85f138f58d38f38996f6d70"
+
+[[package]]
+name = "message-nexus"
+version = "0.23.0"
+source = "git+https://github.com/LiGoldragon/message?rev=69a9eb7#69a9eb7b2e95fb7ba85f138f58d38f38996f6d70"
+dependencies = [
+ "ethos-zero",
+ "flow-ethos",
+ "getrandom 0.4.3",
+ "libc",
+ "message-defaults",
+ "meta-signal-flow",
+ "meta-signal-message",
+ "redb",
+ "rkyv",
+ "rustix",
+ "sema-engine",
+ "signal-flow",
+ "signal-message",
+ "thiserror",
+]
+
+[[package]]
 name = "meta-signal-flow"
-version = "73.0.1"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=a90a889#a90a889af74d2582ef1b9f36cda73627f975a4a6"
+version = "73.0.2"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=8d8a22e#8d8a22ed2cacd1e1173459f5e65b16abc855e930"
 dependencies = [
  "datom-codec",
  "ethos-zero",
@@ -498,6 +526,17 @@ dependencies = [
  "rkyv",
  "signal",
  "signal-flow-before-request-ids",
+]
+
+[[package]]
+name = "meta-signal-message"
+version = "4.0.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-message?rev=01d5553#01d5553290428b093552be10cfde21c69ba7054e"
+dependencies = [
+ "ethos-zero",
+ "rkyv",
+ "signal",
+ "signal-message",
 ]
 
 [[package]]
@@ -887,6 +926,17 @@ dependencies = [
  "flow-ethos-before-request-ids",
  "rkyv",
  "signal",
+]
+
+[[package]]
+name = "signal-message"
+version = "22.0.0"
+source = "git+https://github.com/LiGoldragon/signal-message?rev=2fed750#2fed7500c915befc8fc42359771e8a27d43a451e"
+dependencies = [
+ "ethos-zero",
+ "rkyv",
+ "signal",
+ "signal-flow",
 ]
 
 [[package]]

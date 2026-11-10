@@ -10,7 +10,6 @@ path = "src/main.rs"
 default = ["datom"]
 datom = []
 executable-default-configuration = []
-message-joint = []
 [dependencies]
 flow = { path = "../flow" }
 flow-defaults = { path = "../flow-defaults" }
@@ -45,11 +44,6 @@ thiserror.workspace = true
 tungstenite = "0.28"
 [build-dependencies]
 ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "1976e45" }
-# The message-joint test (src/store/message_joint.rs) is compiled only with
-# the message-joint feature. Message f46b38e and signal-message 998c824 pin
-# signal 10, whose `links = "signal"` conflicts with signal 11 here, so
-# their entries leave the graph, kept verbatim below, until both pin
-# signal-flow 6881724.
-# [dev-dependencies]
-# message-nexus = { git = "https://github.com/LiGoldragon/message", rev = "f46b38e0a9996e1593095f4154cd0597ff3ebe69" }
-# signal-message = { git = "https://github.com/LiGoldragon/signal-message", rev = "998c824c98a1e2f5e32f9e3a69bf09d3a29aff6b" }
+[dev-dependencies]
+message-nexus = { git = "https://github.com/LiGoldragon/message", rev = "69a9eb7" }
+signal-message = { git = "https://github.com/LiGoldragon/signal-message", rev = "2fed750" }

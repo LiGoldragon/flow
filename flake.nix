@@ -18,7 +18,7 @@
     # callers move explicitly to lib.<system>.mkFlowPackage.
     unconfigured-flow.url = "github:LiGoldragon/flow/d3ab87ee18b1dd30947d5f0089f5abb4bafa80d5";
     # The Message Nexus the joint check runs beside the real Flow Nexus.
-    message.url = "github:LiGoldragon/message/f46b38e0a9996e1593095f4154cd0597ff3ebe69";
+    message.url = "github:LiGoldragon/message/69a9eb7b2e95fb7ba85f138f58d38f38996f6d70";
     # The accepted 0.53.2 Flow, built by its own flake, whose Memory the
     # request-id migration check evolves. The lock holds its commit, f7d2336,
     # and the flake refuses any other (predecessorRevision below).
@@ -181,13 +181,6 @@
                 };
             };
           });
-          # The stamped test build with the message-joint test compiled in.
-          # Its dev-dependencies, Message f46b38e and signal-message 998c824,
-          # are out of the graph until both pin signal-flow 6881724 (see
-          # crates/flow-nexus/Cargo.toml), so this build does not compile yet.
-          messageJointTests = stampedNexusTests.override (old: {
-            features = old.features ++ [ "message-joint" ];
-          });
           # The one test binary of a test build that lists the named test,
           # ignored ones included; the shell variable it is bound to.
           findTest =
@@ -211,10 +204,6 @@
           # once with the given environment from a copy of the source.
           processCheck =
             name: testName: environment:
-            processCheckOf stampedNexusTests name testName environment;
-          # One ignored test of a given test build, run as processCheck runs it.
-          processCheckOf =
-            tests: name: testName: environment:
             pkgs.runCommand "flow-${name}"
               {
                 nativeBuildInputs = [
@@ -224,10 +213,10 @@
               }
               ''
                 set -o pipefail
-                cp -r ${tests.src} "$NIX_BUILD_TOP/source"
+                cp -r ${stampedNexusTests.src} "$NIX_BUILD_TOP/source"
                 chmod -R u+w "$NIX_BUILD_TOP/source"
                 cd "$NIX_BUILD_TOP/source"
-                ${findTest "binary" tests testName}
+                ${findTest "binary" stampedNexusTests testName}
                 ${environment}
                 "$binary" --exact ${testName} --ignored --nocapture 2>&1 | tee "$NIX_BUILD_TOP/${name}.log"
                 ran=$(grep -cF "test ${testName} ... ok" "$NIX_BUILD_TOP/${name}.log" || true)
@@ -403,13 +392,13 @@
             # The real Flow Nexus and the real Message Nexus share one durable
             # delivery ledger.
             message-joint =
-              processCheckOf messageJointTests "message-joint"
+              processCheck "message-joint"
                 "store::message_joint::real_flow_and_message_share_the_durable_delivery_ledger"
                 ''
                   export FLOW_MESSAGE_JOINT_FLOW_BIN="${flowNexus}"
-                  export FLOW_MESSAGE_JOINT_MESSAGE_BIN="${message.packages.${system}.default}/bin/message-nexus"
+                  export FLOW_MESSAGE_JOINT_MESSAGE_BIN="${message.packages.${system}.message-nexus}/bin/message-nexus"
                   export FLOW_MESSAGE_JOINT_FLOW_REV="${sourceRevision}"
-                  export FLOW_MESSAGE_JOINT_MESSAGE_REV="f46b38e0a9996e1593095f4154cd0597ff3ebe69"
+                  export FLOW_MESSAGE_JOINT_MESSAGE_REV="69a9eb7b2e95fb7ba85f138f58d38f38996f6d70"
                   sha256sum "$FLOW_MESSAGE_JOINT_FLOW_BIN" "$FLOW_MESSAGE_JOINT_MESSAGE_BIN"
                 '';
             # The accepted 0.53.2's real Memory, evolved and served by this
@@ -430,9 +419,9 @@
               { nativeBuildInputs = [ pkgs.gnugrep ]; }
               ''
                 grep -F 'rev = "6881724"' ${./Cargo.toml}
-                grep -F 'rev = "a90a889"' ${./Cargo.toml}
+                grep -F 'rev = "8d8a22e"' ${./Cargo.toml}
                 grep -F 'signal-flow?rev=6881724#6881724d1752058195a770ab8244763151904541' ${./Cargo.lock}
-                grep -F 'meta-signal-flow?rev=a90a889#a90a889af74d2582ef1b9f36cda73627f975a4a6' ${./Cargo.lock}
+                grep -F 'meta-signal-flow?rev=8d8a22e#8d8a22ed2cacd1e1173459f5e65b16abc855e930' ${./Cargo.lock}
                 touch "$out"
               '';
 

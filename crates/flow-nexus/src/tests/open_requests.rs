@@ -22,7 +22,7 @@ use crate::store::queue_delivery::{
     PrepareQueueDelivery, QueueDeliveryAttempt,
 };
 use crate::store::reminder::RecordsReminders;
-use flow_ethos::{AnswerableTask, State};
+use flow_ethos::{AnswerableTask, FlowId, State};
 use signal_flow::{
     Address, Aspect, DeliveryState, Message, Model, PrivateSendResponse, Query, QueueEntry,
     Refreshed, Refusal, Request, Response, SendAcceptance, SendableMessage, SendableRequest,
@@ -308,7 +308,7 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
     // One line, naming the predecessor, directly precedes the block.
     let line = "Flow abc123, which this flow succeeds, left these requests open; \
                 answer each by its id.";
-    assert_eq!(line, "abc123".open_requests_line());
+    assert_eq!(line, FlowId("abc123".into()).open_requests_line());
     assert!(
         first.ends_with(&format!("{HANDOVER}\n\n{line}\n{delivered}")),
         "the line and the open requests follow the handover, last: {first}"
@@ -370,7 +370,7 @@ fn a_successor_with_nothing_open_is_given_no_open_requests_line() {
         "the handover is last: {first}"
     );
     assert!(
-        !first.contains(&"abc123".open_requests_line())
+        !first.contains(&FlowId("abc123".into()).open_requests_line())
             && !first.contains("left these requests open"),
         "no open-requests line: {first}"
     );

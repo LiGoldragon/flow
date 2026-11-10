@@ -786,7 +786,7 @@ pub trait RendersOpenRequests {
 impl RendersOpenRequests for [QueueEntry] {
     fn successor_text(&self, profile: &LaunchProfile) -> Option<String> {
         use crate::handover::FramesOpenRequests;
-        let predecessor = profile.flow_id_option.as_deref()?;
+        let predecessor = profile.flow_id_option.as_ref()?;
         if self.is_empty() {
             return None;
         }

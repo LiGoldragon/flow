@@ -10,7 +10,7 @@
 //! [`crate::composition::OpensLaunchComposer::with_handover_source`]; the order
 //! of the prompt does not change.
 
-use signal_flow::{Address, HandoverFault};
+use signal_flow::{Address, FlowId, HandoverFault};
 use std::path::Path;
 
 /// What a source holds of a predecessor's handover.
@@ -78,11 +78,12 @@ pub trait FramesOpenRequests {
     fn open_requests_line(&self) -> String;
 }
 
-impl FramesOpenRequests for str {
+impl FramesOpenRequests for FlowId {
     /// `self` is the predecessor's FlowId.
     fn open_requests_line(&self) -> String {
         format!(
-            "Flow {self}, which this flow succeeds, left these requests open; answer each by its id."
+            "Flow {}, which this flow succeeds, left these requests open; answer each by its id.",
+            self.0
         )
     }
 }

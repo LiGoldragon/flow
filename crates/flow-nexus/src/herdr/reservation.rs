@@ -35,7 +35,7 @@ impl ChoosesNativeSession for HerdrCli {
             format!(
                 "flow-claude-session-v2\0{}\0{}",
                 self.ordinary_socket.to_string_lossy(),
-                launch.launch_profile.launch_request_id
+                launch.launch_profile.launch_request_id.0
             )
             .as_bytes(),
         );
@@ -140,7 +140,7 @@ mod tests {
 
     fn profile(harness_kind: HarnessKind) -> ComposedLaunch {
         let mut launch = crate::herdr::launch::tests::launch(harness_kind);
-        launch.launch_profile.launch_request_id = "request-1".into();
+        launch.launch_profile.launch_request_id = signal_flow::LaunchRequestId("request-1".into());
         launch
     }
 

@@ -82,7 +82,10 @@ impl RecordsReports for RunningNexus {
             // a store that fails is answered as a flow Flow cannot vouch
             // for, and logged.
             outcome => {
-                eprintln!("flow-nexus: Report for {flow_id} not recorded: {outcome:?}");
+                eprintln!(
+                    "flow-nexus: Report for {flow_id} not recorded: {outcome:?}",
+                    flow_id = flow_id.0
+                );
                 Response::Refused(signal_flow::Refusal::Unknown(
                     signal_flow::Unknown_Data::FlowId(flow_id),
                 ))
@@ -92,11 +95,12 @@ impl RecordsReports for RunningNexus {
 
     fn after_report(&self, flow_id: &FlowId, event: &Event) {
         use crate::restarting::FencesSeatEvents;
-        if self.report_acts(flow_id, None) {
+        if self.report_acts(&flow_id.0, None) {
             self.after_attributed_report(flow_id, event);
         } else {
             eprintln!(
-                "flow-nexus: a report for flow {flow_id} has no caller of its bound seat; it acts on nothing"
+                "flow-nexus: a report for flow {flow_id} has no caller of its bound seat; it acts on nothing",
+                flow_id = flow_id.0
             );
         }
     }
@@ -107,22 +111,25 @@ impl RecordsReports for RunningNexus {
         // gate the settlement below takes, so it is witnessed before
         // anything here waits.
         if let Event::PromptSubmitted(prompt) = event
-            && self.correlated_prompt(flow_id, prompt)
-            && let Some(session) = prompt.native_session_id_option.as_deref()
+            && self.correlated_prompt(&flow_id.0, prompt)
+            && let Some(session) = prompt
+                .native_session_id_option
+                .as_ref()
+                .map(|value| value.0.as_str())
         {
             use crate::submission::{SeatSubmission, WitnessesSubmissions};
             self.seat_submissions.witness(
                 session,
-                SeatSubmission::Prompt(prompt.prompt_sha256.clone()),
+                SeatSubmission::Prompt(prompt.prompt_sha256.clone().0),
             );
         }
         if let Event::Started(Some(session)) = event {
-            self.follow_cleared_session(flow_id, session);
+            self.follow_cleared_session(flow_id, &session.0);
         }
         // Every report of a Claude flow has its transcript read for a
         // compaction its harness made on its own; SessionStart follows one
         // at once.
-        crate::compacting::WatchesCompactions::watch_claude_compactions(self, flow_id);
+        crate::compacting::WatchesCompactions::watch_claude_compactions(self, &flow_id.0);
         match event {
             // The flow's own Claude session ended: it has exited, its locks
             // go with it, and a Maintained metaflow is owed its successor.
@@ -131,19 +138,23 @@ impl RecordsReports for RunningNexus {
             Event::Ended(session) => {
                 let own = self
                     .store
-                    .flow_node(flow_id)
+                    .flow_node(&flow_id.0)
                     .ok()
                     .flatten()
                     .is_some_and(|node| {
                         node.harness_kind == signal_flow::HarnessKind::Claude
-                            && !node.session_id.is_empty()
-                            && session.as_deref() == Some(node.session_id.as_str())
+                            && !node.session_id.0.is_empty()
+                            && session.as_ref().map(|session| session.0.as_str())
+                                == Some(node.session_id.0.as_str())
                     });
                 if own {
-                    crate::observe_agent::RecordsWitnessedExit::exited_as_witnessed(self, flow_id);
+                    crate::observe_agent::RecordsWitnessedExit::exited_as_witnessed(
+                        self, &flow_id.0,
+                    );
                 } else {
                     eprintln!(
-                        "flow-nexus: flow {flow_id} reported a session end not its own: {session:?}"
+                        "flow-nexus: flow {flow_id} reported a session end not its own: {session:?}",
+                        flow_id = flow_id.0
                     );
                 }
             }
@@ -151,10 +162,10 @@ impl RecordsReports for RunningNexus {
                 // A launch sending its first message in parts waits on a
                 // Stop before its next part.
                 self.store.launch_changes.announce();
-                if self.correlated_stop(flow_id, stop) {
+                if self.correlated_stop(&flow_id.0, stop) {
                     // A Stop in the flow's own session ends a turn, whatever
                     // background work it names.
-                    crate::turn_ends::RecordsTurnEnd::turn_ended(self, flow_id);
+                    crate::turn_ends::RecordsTurnEnd::turn_ended(self, &flow_id.0);
                     // A simplified seat's answer is read from its own
                     // transcript once its input is received there: the
                     // payloads typed into it settle first, since the
@@ -165,42 +176,50 @@ impl RecordsReports for RunningNexus {
                             .dispatch_gate
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        if let Ok(Some(metaflow)) = self.store.metaflow_awake_as(flow_id) {
+                        if let Ok(Some(metaflow)) = self.store.metaflow_awake_as(&flow_id.0) {
                             self.reconcile_typed(&metaflow.address);
                         }
-                        self.queue_simplified_answer(flow_id)
+                        self.queue_simplified_answer(&flow_id.0)
                     };
                     let later = "it is looked for again at the seat's next rest or drain";
                     match &answer {
                         SimplifiedAnswer::NoneOwed => {}
                         SimplifiedAnswer::Queued { recipient, .. } => eprintln!(
                             "flow-nexus: simplified answer of {flow_id} queued to {:?} {} {:?}",
-                            recipient.aspect, recipient.topic, recipient.model
+                            recipient.aspect,
+                            recipient.topic.0,
+                            recipient.model,
+                            flow_id = flow_id.0
                         ),
                         SimplifiedAnswer::InputUnreceived { .. } => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} not queued at its Stop: its input is not yet Delivered; {later}"
+                            "flow-nexus: simplified answer of {flow_id} not queued at its Stop: its input is not yet Delivered; {later}",
+                            flow_id = flow_id.0
                         ),
                         SimplifiedAnswer::TurnUnanswered { .. } => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} not queued at its Stop: its transcript shows no ended answer; {later}"
+                            "flow-nexus: simplified answer of {flow_id} not queued at its Stop: its transcript shows no ended answer; {later}",
+                            flow_id = flow_id.0
                         ),
                         SimplifiedAnswer::Undelivered { .. } => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} refused by the store: its recipient is unknown or its receipt changed; {later}"
+                            "flow-nexus: simplified answer of {flow_id} refused by the store: its recipient is unknown or its receipt changed; {later}",
+                            flow_id = flow_id.0
                         ),
                         SimplifiedAnswer::StoreRefused => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} not queued at its Stop: the store refused; {later}"
+                            "flow-nexus: simplified answer of {flow_id} not queued at its Stop: the store refused; {later}",
+                            flow_id = flow_id.0
                         ),
                     }
-                    self.settle_stopped(flow_id);
+                    self.settle_stopped(&flow_id.0);
                 } else {
                     eprintln!(
                         "flow-nexus: a Stop reported for flow {flow_id} names session {:?}, not its own; it settles nothing",
-                        stop.native_session_id_option
+                        stop.native_session_id_option,
+                        flow_id = flow_id.0
                     );
                 }
             }
             Event::PromptSubmitted(prompt) => {
-                if self.correlated_prompt(flow_id, prompt) {
-                    self.settle_submitted_prompt(flow_id, prompt);
+                if self.correlated_prompt(&flow_id.0, prompt) {
+                    self.settle_submitted_prompt(&flow_id.0, prompt);
                 }
             }
             // A cleared session is not an exit: the harness goes on in the
@@ -210,7 +229,7 @@ impl RecordsReports for RunningNexus {
     }
 
     fn read_events(&self, flow_id: FlowId) -> meta_signal_flow::Response {
-        match self.store.events(&flow_id) {
+        match self.store.events(&flow_id.0) {
             Ok(Some(event_vector)) => meta_signal_flow::Response::EventsRead(EventsRead_Data {
                 flow_id,
                 event_vector,
@@ -247,11 +266,11 @@ impl RecordsReports for RunningNexus {
             queue_resolution_outcome: resolution.queue_resolution_outcome.clone(),
             resolver_identity: resolver,
             queue_resolution_reason: resolution.queue_resolution_reason.clone(),
-            unix_seconds,
+            unix_seconds: meta_signal_flow::UnixSeconds(unix_seconds),
         };
         match self
             .store
-            .resolve_uncertain_delivery(&resolution.queue_attempt_id, record)
+            .resolve_uncertain_delivery(&resolution.queue_attempt_id.0, record)
         {
             Ok(Ok(attempt)) => {
                 eprintln!(
@@ -309,16 +328,16 @@ trait FollowsClearedSession {
 
 impl FollowsClearedSession for RunningNexus {
     fn follow_cleared_session(&self, flow_id: &FlowId, session: &str) {
-        let Ok(Some(node)) = self.store.flow_node(flow_id) else {
+        let Ok(Some(node)) = self.store.flow_node(&flow_id.0) else {
             return;
         };
         if node.harness_kind != signal_flow::HarnessKind::Claude
-            || node.session_id.is_empty()
-            || node.session_id == session
+            || node.session_id.0.is_empty()
+            || node.session_id.0 == session
         {
             return;
         }
-        let Ok(Some(events)) = self.store.events(flow_id) else {
+        let Ok(Some(events)) = self.store.events(&flow_id.0) else {
             return;
         };
         let cleared_own = events
@@ -326,9 +345,10 @@ impl FollowsClearedSession for RunningNexus {
             .rev()
             .skip(1)
             .find_map(|earlier| match earlier {
-                Event::Cleared(cleared) => {
-                    Some(cleared.as_deref() == Some(node.session_id.as_str()))
-                }
+                Event::Cleared(cleared) => Some(
+                    cleared.as_ref().map(|cleared| cleared.0.as_str())
+                        == Some(node.session_id.0.as_str()),
+                ),
                 Event::Started(_) | Event::Ended(_) => Some(false),
                 Event::ToolUsed(_) | Event::Stopped(_) | Event::PromptSubmitted(_) => None,
             })
@@ -338,12 +358,13 @@ impl FollowsClearedSession for RunningNexus {
         }
         match self
             .store
-            .rebind_native_session(flow_id, &node.session_id, session)
+            .rebind_native_session(&flow_id.0, &node.session_id.0, session)
         {
-            Ok(true) => crate::compacting::WatchesCompactions::session_rebound(self, flow_id),
+            Ok(true) => crate::compacting::WatchesCompactions::session_rebound(self, &flow_id.0),
             Ok(false) => {}
             Err(error) => eprintln!(
-                "flow-nexus: flow {flow_id} was not rebound to its new session {session}: {error:?}"
+                "flow-nexus: flow {flow_id} was not rebound to its new session {session}: {error:?}",
+                flow_id = flow_id.0
             ),
         }
     }

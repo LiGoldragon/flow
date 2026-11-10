@@ -11,6 +11,13 @@ use crate::store::send_outcome::RecordsSendOutcomes;
 extern crate self as flow_nexus;
 use crate::claude::ProjectsClaudeReadiness;
 use crate::codex::SelectsCodexEndpoint;
+pub use crate::generated::curriculum::{
+    ContextProvenance, Outcome as CurriculumOutcome, Query as CurriculumQuery, StartupComposition,
+    StartupSelection,
+};
+pub use crate::generated::memory::{LaunchOutcome, Replacement, SeatBirth};
+pub use crate::generated::operation::Outcome as OperationOutcome;
+pub use crate::generated::starter::{LaunchedRecord, ReplacedRecord};
 use crate::herdr::ConfiguresHerdrCli;
 use crate::herdr::ReadsHerdrPanes;
 use crate::live::{HoldsLiveValue, Live};
@@ -18,13 +25,6 @@ use crate::store::AnnouncesLaunchChanges;
 pub use caller::CallerProcess;
 pub use composition::CompositionError;
 pub use context::VerifiedContext;
-pub use generated::curriculum::{
-    ContextProvenance, Outcome as CurriculumOutcome, Query as CurriculumQuery, StartupComposition,
-    StartupSelection,
-};
-pub use generated::memory::{LaunchOutcome, Replacement, SeatBirth};
-pub use generated::operation::Outcome as OperationOutcome;
-pub use generated::starter::{LaunchedRecord, ReplacedRecord};
 pub use store::StoreError;
 pub(crate) mod admission;
 pub mod binding;
@@ -88,13 +88,13 @@ pub mod undecodable;
 pub mod values;
 pub mod waking;
 
+use crate::generated::operation::{Operation, Outcome, Record_Data};
 use binding::{ChecksFlowContainer, ChecksProcessIdentity, VerifiesAdoptedSeat};
 use caller::{IdentifiesPeer, LocatesCallerPane, ResolvesCaller};
 use codex::{CodexEndpoints, ConsumesResetCredit};
 use composition::{LaunchComposer, OpensLaunchComposer};
 use context::{CurriculumComposer, OpensCurriculumComposer};
 use delivery::{DeliversMessages, lease::LeasesPanes};
-use generated::operation::{Operation, Outcome, Record_Data};
 use handover_observation::{
     ObservesHandoverRetirement, ReadsRetirementSubscription, RetirementSubscription,
 };
@@ -201,7 +201,7 @@ impl crate::handover::YieldsHandover for MemoryHandoverSource {
                     .map(|section| {
                         format!(
                             "## {}\n{}\n{}",
-                            section.title, section.description, section.body
+                            section.title.0, section.description.0, section.body.0
                         )
                     })
                     .collect::<Vec<_>>()
@@ -287,7 +287,7 @@ impl MeasuresHandoverTouch for RunningNexus {
         };
         let tokens = self
             .store
-            .context_size(&origin.flow_id)
+            .context_size(&origin.flow_id.0)
             .map_err(|error| signal_flow::HandoverRefusal::Store(error.to_string()))?;
         let Some(tokens) = tokens else {
             return Ok(signal_flow::Touch::Unknown);
@@ -295,8 +295,8 @@ impl MeasuresHandoverTouch for RunningNexus {
         let timestamp = std::time::SystemTime::now().seconds_since_epoch();
         Ok(signal_flow::Touch::Known(signal_flow::Known_Data {
             flow_id: origin.flow_id.clone(),
-            tokens,
-            timestamp,
+            tokens: signal_flow::Tokens(tokens),
+            timestamp: signal_flow::Timestamp(timestamp),
         }))
     }
 }
@@ -341,7 +341,7 @@ impl Dispatches for RunningNexus {
                         ),
                     ));
                 };
-                let caller = match self.store.metaflow_awake_as(&flow.flow_id) {
+                let caller = match self.store.metaflow_awake_as(&flow.flow_id.0) {
                     Ok(Some(metaflow)) => metaflow.address,
                     Ok(None) => {
                         return Response::ArchiveRejected(signal_flow::ArchiveRejection::Caller(
@@ -356,7 +356,7 @@ impl Dispatches for RunningNexus {
                         );
                     }
                 };
-                match self.store.archive_request(&request_id, &caller) {
+                match self.store.archive_request(&request_id.0, &caller) {
                     Ok(Ok(())) => Response::RequestArchived(request_id),
                     Ok(Err(rejection)) => Response::ArchiveRejected(rejection),
                     Err(_) => {
@@ -379,7 +379,7 @@ impl Dispatches for RunningNexus {
                     }
                 }
                 let response = self.start(profile, origin);
-                self.settle(&launch_request_id, response)
+                self.settle(&launch_request_id.0, response)
             }
             // Off the gate: the replacement takes it under the metaflow's
             // lock. A protected Address's flow is replaced only by its own
@@ -411,7 +411,10 @@ impl Dispatches for RunningNexus {
             | Query::ObserveSender(_)
             | Query::ObserveDeliveries(_) => Response::Refused(
                 <signal_flow::Refusal as sending::RefusesUnidentified>::unidentified(
-                    signal_flow::Process { pid: 0, started: 0 },
+                    signal_flow::Process {
+                        pid: flow_ethos::generated::library::Pid(0),
+                        started: flow_ethos::generated::library::Started(0),
+                    },
                 ),
             ),
             Query::Send(send) => self.send_request(send, None).response,
@@ -420,13 +423,13 @@ impl Dispatches for RunningNexus {
                 Err(refusal) => *refusal,
             },
             Query::Rehearse(launch) => self.rehearse_declared(launch),
-            Query::LaunchStatus(launch_request_id) => self.launch_status(&launch_request_id),
+            Query::LaunchStatus(launch_request_id) => self.launch_status(&launch_request_id.0),
             // Over a connection Observe streams; a direct dispatch answers the
             // subscription's opening frame.
             Query::Observe(ObserveSelection::Launch(launch_request_id)) => {
-                self.launch_status(&launch_request_id)
+                self.launch_status(&launch_request_id.0)
             }
-            Query::Observe(ObserveSelection::Agent(flow_id)) => self.agent_observation(&flow_id),
+            Query::Observe(ObserveSelection::Agent(flow_id)) => self.agent_observation(&flow_id.0),
             Query::Observe(ObserveSelection::Undecodable) => {
                 use crate::store::undecodable_frame::RecordsUndecodableFrames;
                 match self.store.undecodable_frames() {
@@ -476,7 +479,7 @@ impl Dispatches for RunningNexus {
             // Off the gate: the restart takes it for each of its steps.
             Query::Restart(flow_id) => {
                 use crate::restarting::RestartsFlows;
-                self.restart(&flow_id, &asker)
+                self.restart(&flow_id.0, &asker)
             }
             Query::Keep(request) => self.keep_handover(request, asker),
             Query::Drop(request) => self.drop_handover(request, asker),
@@ -493,7 +496,7 @@ impl Dispatches for RunningNexus {
                 }
             }
             Query::Stop(flow_id) => {
-                let node = match self.store.flow_node(&flow_id) {
+                let node = match self.store.flow_node(&flow_id.0) {
                     Ok(Some(node)) => node,
                     Ok(None) => {
                         return Response::StopRejected(signal_flow::StopRejection::UnknownFlow);
@@ -504,7 +507,7 @@ impl Dispatches for RunningNexus {
                 };
                 // A protected Address's flow is stopped only by its own
                 // seat or the owner, before anything is written.
-                match self.admits(&flow_id, &asker, GuardedAct::Stop) {
+                match self.admits(&flow_id.0, &asker, GuardedAct::Stop) {
                     Ok(true) => {}
                     Ok(false) => {
                         return Response::StopRejected(signal_flow::StopRejection::Protected);
@@ -518,7 +521,7 @@ impl Dispatches for RunningNexus {
                 {
                     use crate::restarting::RestartsFlows;
                     use crate::store::restart::RecordsRestarts;
-                    match self.store.restart_record(&flow_id) {
+                    match self.store.restart_record(&flow_id.0) {
                         Ok(None) => {}
                         Ok(Some(record)) => return self.stop_restarting(record),
                         Err(error) => {
@@ -598,11 +601,11 @@ impl Dispatches for RunningNexus {
         };
         let _ = self
             .store
-            .flow_node(&origin.flow_id)
+            .flow_node(&origin.flow_id.0)
             .map_err(|error| signal_flow::HandoverRefusal::Store(error.to_string()))?;
         let Some(metaflow) = self
             .store
-            .metaflow_awake_as(&origin.flow_id)
+            .metaflow_awake_as(&origin.flow_id.0)
             .map_err(|error| signal_flow::HandoverRefusal::Store(error.to_string()))?
         else {
             return Err(signal_flow::HandoverRefusal::UnknownCaller);
@@ -623,7 +626,7 @@ impl Dispatches for RunningNexus {
         let writer = crate::store::handover::HandoverWriter {
             address: caller,
             flow_id: match asker.origin() {
-                signal_flow::Origin::Flow(origin) => origin.flow_id.clone(),
+                signal_flow::Origin::Flow(origin) => origin.flow_id.clone().0,
                 _ => return Response::KeepRefused(signal_flow::HandoverRefusal::UnknownCaller),
             },
         };
@@ -658,7 +661,7 @@ impl Dispatches for RunningNexus {
         let writer = crate::store::handover::HandoverWriter {
             address: caller,
             flow_id: match asker.origin() {
-                signal_flow::Origin::Flow(origin) => origin.flow_id.clone(),
+                signal_flow::Origin::Flow(origin) => origin.flow_id.clone().0,
                 _ => return Response::DropRefused(signal_flow::HandoverRefusal::UnknownCaller),
             },
         };
@@ -756,7 +759,7 @@ impl Dispatches for RunningNexus {
                     }
                     Err(store::StoreError::TopicRefused(topic)) => {
                         meta_signal_flow::Response::ConfigureRejected(
-                            meta_signal_flow::ConfigureRejection::TopicRefused(topic),
+                            meta_signal_flow::ConfigureRejection::TopicRefused(flow_ethos::Topic(topic)),
                         )
                     }
                     Err(store::StoreError::MinutesRefused(refusal)) => {
@@ -820,7 +823,7 @@ impl Dispatches for RunningNexus {
             // flow without that flow acting.
             meta_signal_flow::Query::Retire(flow_id) => {
                 use protecting::{Asker, GuardedAct};
-                let node = match self.store.flow_node(&flow_id) {
+                let node = match self.store.flow_node(&flow_id.0) {
                     Ok(Some(node)) => node,
                     Ok(None) => {
                         return meta_signal_flow::Response::RetireRejected(
@@ -836,11 +839,11 @@ impl Dispatches for RunningNexus {
                 // A protected Address's flow is retired by the owner or by
                 // itself, never by another flow, before anything is written.
                 let asker = Asker::Meta(
-                    resolver
+                    (resolver
                         .as_ref()
-                        .and_then(|identity| identity.flow_id_option.clone()),
+                        .and_then(|identity| identity.flow_id_option.clone())).map(|value| value.0),
                 );
-                match self.admits(&flow_id, &asker, GuardedAct::Retire) {
+                match self.admits(&flow_id.0, &asker, GuardedAct::Retire) {
                     Ok(true) => {}
                     Ok(false) => {
                         return meta_signal_flow::Response::RetireRejected(
@@ -863,7 +866,7 @@ impl Dispatches for RunningNexus {
                 // record goes with the flow.
                 {
                     use crate::store::restart::RecordsRestarts;
-                    match self.store.restart_record(&flow_id) {
+                    match self.store.restart_record(&flow_id.0) {
                         Ok(None) => {}
                         Ok(Some(record))
                             if matches!(
@@ -885,7 +888,7 @@ impl Dispatches for RunningNexus {
                 {
                     use crate::store::metaflow::SleepsMetaflows;
                     use crate::store::successor::ReadsContinuity;
-                    let maintained = self.store.metaflow_awake_as(&flow_id).and_then(|awake| {
+                    let maintained = self.store.metaflow_awake_as(&flow_id.0).and_then(|awake| {
                         awake
                             .map(|metaflow| self.store.continuity(&metaflow.address))
                             .transpose()
@@ -927,7 +930,7 @@ impl Dispatches for RunningNexus {
                         meta_signal_flow::RetireRejection::StoreRefused,
                     );
                 }
-                match self.store.flow_node(&flow_id) {
+                match self.store.flow_node(&flow_id.0) {
                     Ok(Some(retired)) => meta_signal_flow::Response::FlowRetired(retired),
                     Ok(None) | Err(_) => meta_signal_flow::Response::RetireRejected(
                         meta_signal_flow::RetireRejection::StoreRefused,
@@ -940,8 +943,8 @@ impl Dispatches for RunningNexus {
             meta_signal_flow::Query::Restart(flow_id) => {
                 use crate::restarting::RestartsFlows;
                 let asker =
-                    protecting::Asker::Meta(resolver.and_then(|identity| identity.flow_id_option));
-                self.restart(&flow_id, &asker).into_meta()
+                    protecting::Asker::Meta(resolver.and_then(|identity| identity.flow_id_option).map(|value| value.0));
+                self.restart(&flow_id.0, &asker).into_meta()
             }
             meta_signal_flow::Query::Refresh(address) => {
                 use crate::waking::RefreshesMetaflows;
@@ -954,15 +957,15 @@ impl Dispatches for RunningNexus {
                         meta_signal_flow::BindExistingRejection::ContainerUnavailable,
                     );
                 }
-                if !container.herdr_server_process_identity.is_live_process() {
+                if !container.process_identity.is_live_process() {
                     return meta_signal_flow::Response::BindExistingRejected(
                         meta_signal_flow::BindExistingRejection::ContainerIdentityMismatch,
                     );
                 }
                 if resolver
                     .as_ref()
-                    .and_then(|identity| identity.flow_id_option.as_deref())
-                    != Some(container.meta_flow_owner_id.as_str())
+                    .and_then(|identity| identity.flow_id_option.as_ref().map(|value| value.0.as_str()))
+                    != Some(container.meta_flow_owner_id.0.0.as_str())
                 {
                     return meta_signal_flow::Response::BindExistingRejected(
                         meta_signal_flow::BindExistingRejection::OwnerMismatch,
@@ -980,13 +983,13 @@ impl Dispatches for RunningNexus {
                     )
                 };
                 let result = match self.verified_seat_node(
-                    &container.herdr_session_name,
+                    &container.herdr_session_name.0,
                     &request.address,
                     &binding,
                 ) {
                     Err(reason) => refusal(reason),
                     Ok(node) => {
-                        let role = signal_flow::Caller {
+                        let role = signal_flow::CallerIdentity {
                             flow_id: flow_id.clone(),
                             aspect: binding.aspect.clone(),
                             model_name: binding.model_name.clone(),
@@ -1175,7 +1178,7 @@ impl OpensRunningNexus for RunningNexus {
             herdr: herdr::HerdrCli::default()
                 .with_source_root(&configured.source_root)
                 .with_codex_endpoints(configured.codex_endpoints.clone())
-                .with_harness_hook(&snapshot.harness_hook)
+                .with_harness_hook(&snapshot.configured_harness_hook.0)
                 .with_ordinary_socket(&ordinary_socket),
             // A launch's context is composed by the Curriculum Nexus at the
             // socket the configuration names.
@@ -1209,7 +1212,7 @@ struct ConfiguredRunner {
 
 impl From<&meta_signal_flow::ConfigurationSnapshot> for ConfiguredRunner {
     fn from(snapshot: &meta_signal_flow::ConfigurationSnapshot) -> Self {
-        let runtime = store::RuntimeConfiguration::from(&snapshot.nexus);
+        let runtime = store::RuntimeConfiguration::from(&snapshot.configured_nexus.0);
         let codex_endpoints = CodexEndpoints::from(&runtime);
         let overlap = codex_endpoints.overlapping_models();
         if !overlap.is_empty() {
@@ -1220,8 +1223,13 @@ impl From<&meta_signal_flow::ConfigurationSnapshot> for ConfiguredRunner {
         Self {
             codex_endpoints,
             source_root: PathBuf::from(&runtime.source_root),
-            curriculum_nexus_path: snapshot.nexus.curriculum_nexus_path.clone(),
-            presentation_prompt_option: snapshot.nexus.presentation_prompt_option.clone(),
+            curriculum_nexus_path: snapshot.configured_nexus.0.curriculum_nexus_path.clone().0,
+            presentation_prompt_option: snapshot
+                .configured_nexus
+                .0
+                .presentation_prompt_option
+                .clone()
+                .map(|value| value.0),
         }
     }
 }
@@ -1266,20 +1274,24 @@ impl AppliesConfiguration for RunningNexus {
             .ok_or(store::StoreError::NotConfigured)?;
         let configured = ConfiguredRunner::from(&now);
         let launching_changed = before.is_none_or(|before| {
-            before.nexus.source_root != now.nexus.source_root
-                || before.nexus.stable_codex != now.nexus.stable_codex
-                || before.nexus.next_codex != now.nexus.next_codex
-                || before.harness_hook != now.harness_hook
+            before.configured_nexus.0.source_root != now.configured_nexus.0.source_root
+                || before.configured_nexus.0.first_codex_endpoint
+                    != now.configured_nexus.0.first_codex_endpoint
+                || before.configured_nexus.0.second_codex_endpoint
+                    != now.configured_nexus.0.second_codex_endpoint
+                || before.configured_harness_hook != now.configured_harness_hook
         });
         let composing_changed = before.is_none_or(|before| {
-            before.nexus.curriculum_nexus_path != now.nexus.curriculum_nexus_path
-                || before.nexus.presentation_prompt_option != now.nexus.presentation_prompt_option
+            before.configured_nexus.0.curriculum_nexus_path
+                != now.configured_nexus.0.curriculum_nexus_path
+                || before.configured_nexus.0.presentation_prompt_option
+                    != now.configured_nexus.0.presentation_prompt_option
         });
         if launching_changed {
             self.herdr.reconfigure(
                 configured.codex_endpoints.clone(),
                 &configured.source_root,
-                &now.harness_hook,
+                &now.configured_harness_hook.0,
             );
             self.codex_endpoints
                 .replace(configured.codex_endpoints.clone());
@@ -1564,17 +1576,17 @@ impl ServesConnection for Connection {
             };
         let response = match query {
             // Reads of launch state never wait behind a running launch.
-            Query::LaunchStatus(launch_request_id) => nexus.launch_status(&launch_request_id),
+            Query::LaunchStatus(launch_request_id) => nexus.launch_status(&launch_request_id.0),
             Query::Observe(ObserveSelection::Launch(launch_request_id)) => {
                 let peer = &mut self.peer;
-                return nexus.observe_launch(&launch_request_id, &mut |response| {
+                return nexus.observe_launch(&launch_request_id.0, &mut |response| {
                     peer.write_response(response)
                 });
             }
             Query::Observe(ObserveSelection::Agent(flow_id)) => {
                 let peer = &mut self.peer;
                 return nexus
-                    .observe_agent(&flow_id, &mut |response| peer.write_response(response));
+                    .observe_agent(&flow_id.0, &mut |response| peer.write_response(response));
             }
             Query::Observe(ObserveSelection::Undecodable) => {
                 return self.serve_undecodable(nexus);
@@ -1605,7 +1617,10 @@ impl ServesConnection for Connection {
                 let Some(process) = self.process.as_ref() else {
                     return self.peer.write_response(&Response::Refused(
                         <signal_flow::Refusal as sending::RefusesUnidentified>::unidentified(
-                            Process { pid: 0, started: 0 },
+                            Process {
+                                pid: flow_ethos::generated::library::Pid(0),
+                                started: flow_ethos::generated::library::Started(0),
+                            },
                         ),
                     ));
                 };
@@ -1613,7 +1628,7 @@ impl ServesConnection for Connection {
                     Ok(sender) => sender,
                     Err(refusal) => return self.peer.write_response(&refusal),
                 };
-                return self.serve_sends(nexus, &sender, cursor);
+                return self.serve_sends(nexus, &sender, cursor.map(|value| value.0));
             }
             Query::ObserveSender(forwarded) => {
                 let Some(process) = self.process.as_ref() else {
@@ -1625,7 +1640,11 @@ impl ServesConnection for Connection {
                     Ok(sender) => sender,
                     Err(refusal) => return self.peer.write_response(&refusal),
                 };
-                return self.serve_sends(nexus, &sender, forwarded.delivery_cursor_option);
+                return self.serve_sends(
+                    nexus,
+                    &sender,
+                    forwarded.delivery_cursor_option.map(|value| value.0),
+                );
             }
             Query::ObserveDeliveries(cursor) => {
                 let Some(process) = self.process.as_ref() else {
@@ -1646,7 +1665,7 @@ impl ServesConnection for Connection {
                         ));
                     }
                 };
-                return self.serve_deliveries(nexus, cursor);
+                return self.serve_deliveries(nexus, cursor.map(|value| value.0));
             }
             // A hook's Report never waits behind a running launch: the
             // launch may itself be waiting on the harness whose hook this is.
@@ -1659,7 +1678,7 @@ impl ServesConnection for Connection {
             Query::Report(report) => {
                 use crate::restarting::FencesSeatEvents;
                 let (flow_id, event) = (report.flow_id.clone(), report.event.clone());
-                let acts = nexus.report_acts(&flow_id, self.peer.peer_process());
+                let acts = nexus.report_acts(&flow_id.0, self.peer.peer_process());
                 let response = nexus.report(report);
                 self.peer.write_response(&response)?;
                 drop(self);
@@ -1668,7 +1687,8 @@ impl ServesConnection for Connection {
                         nexus.after_attributed_report(&flow_id, &event);
                     } else {
                         eprintln!(
-                            "flow-nexus: a report for flow {flow_id} is not its bound seat's; it acts on nothing"
+                            "flow-nexus: a report for flow {flow_id} is not its bound seat's; it acts on nothing",
+                            flow_id = flow_id.0
                         );
                     }
                 }
@@ -1695,7 +1715,7 @@ impl ServesConnection for Connection {
                 return self.peer.write_response(&answer.response);
             }
             Query::Deliver(request) => {
-                let address = request.lock.address.clone();
+                let address = request.lock.second_address.clone();
                 let answer =
                     nexus.dispatch_metaflow_peer(Query::Deliver(request), self.process.as_ref());
                 let accepted = matches!(answer.response, Response::SendAccepted(_));
@@ -1809,7 +1829,7 @@ impl ServesConnection for Connection {
             && let meta_signal_flow::FlowBindingResult::Bound(binding) = &bound.flow_binding_result
             && let Ok(Some(metaflow)) = crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(
                 &*nexus.store,
-                &binding.flow_id,
+                &binding.flow_id.0,
             )
         {
             nexus.drain_awake(&metaflow.address);
@@ -2481,8 +2501,8 @@ mod tests {
 
     pub(crate) fn deliver_key(counter: i64) -> signal_flow::DeliverKey {
         signal_flow::DeliverKey {
-            namespace: "testMessageMemory".into(),
-            counter,
+            namespace: signal_flow::Namespace("testMessageMemory".into()),
+            counter: signal_flow::Counter(counter),
         }
     }
 
@@ -2520,9 +2540,9 @@ mod tests {
         },
     };
     use signal_flow::{
-        Aspect, Caller, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
-        HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchAttemptPhase, LaunchProfile,
-        LaunchStatusOutcome, Model, NativeLaunchBinding, NativeLaunchIntent,
+        Aspect, CallerIdentity, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin,
+        HarnessKind, HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchAttemptPhase,
+        LaunchProfile, LaunchStatusOutcome, Model, NativeLaunchBinding, NativeLaunchIntent,
         NativeTranscriptAbsence, NativeTranscriptBoundary, Origin, PromptDeliveryIntent,
         PromptDeliveryResult, Query, RegistrationAcknowledgement, Response, StartRejection,
     };
@@ -2552,14 +2572,14 @@ mod tests {
         let fixture = NexusFixture::new();
         let address = signal_flow::Address {
             aspect: Aspect::Psyche,
-            topic: "retiredTest".into(),
+            topic: flow_ethos::Topic("retiredTest".into()),
             model: signal_flow::Model::Haiku,
         };
         let history = signal_flow::Metaflow {
             address: address.clone(),
             state: flow_ethos::State::Asleep,
-            past: vec!["abcdef".into()],
-            queue: vec![],
+            past: flow_ethos::Past(vec![flow_ethos::FlowId("abcdef".into())]),
+            queue: flow_ethos::Queue(vec![]),
         };
         fixture.nexus.store.seed_metaflow(history.clone());
         let Response::Listed(listed) = fixture.nexus.dispatch(Query::Metaflows) else {
@@ -2571,7 +2591,7 @@ mod tests {
             vec![history.clone()]
         );
         fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
-            state: flow_ethos::State::Awake("123abc".into()),
+            state: flow_ethos::State::Awake(flow_ethos::FlowId("123abc".into())),
             ..history
         });
         let Response::Listed(listed) = fixture.nexus.dispatch(Query::Metaflows) else {
@@ -2586,9 +2606,9 @@ mod tests {
         use meta_signal_flow::OrdinarySendOutcome;
         let fixture = NexusFixture::new();
         let send = signal_flow::SendRequest {
-            recipient: signal_flow::Address {
+            address: signal_flow::Address {
                 aspect: Aspect::Psyche,
-                topic: "core".into(),
+                topic: flow_ethos::Topic("core".into()),
                 model: signal_flow::Model::Opus,
             },
             sendable_message: signal_flow::SendableMessage::Soft(
@@ -2602,15 +2622,15 @@ mod tests {
         ));
         for response in [
             signal_flow::PrivateSendResponse::SendAccepted(signal_flow::SendAcceptance {
-                logical_delivery_id: "logical-delivery-1".into(),
-                request_id: "req1".into(),
-                delivery_cursor: 1,
+                logical_delivery_id: flow_ethos::LogicalDeliveryId("logical-delivery-1".into()),
+                request_id: flow_ethos::RequestId("req1".into()),
+                delivery_cursor: signal_flow::DeliveryCursor(1),
                 delivery_state: signal_flow::DeliveryState::Queued,
             }),
             signal_flow::PrivateSendResponse::SendAccepted(signal_flow::SendAcceptance {
-                logical_delivery_id: "logical-delivery-2".into(),
-                request_id: "req2".into(),
-                delivery_cursor: 2,
+                logical_delivery_id: flow_ethos::LogicalDeliveryId("logical-delivery-2".into()),
+                request_id: flow_ethos::RequestId("req2".into()),
+                delivery_cursor: signal_flow::DeliveryCursor(2),
                 delivery_state: signal_flow::DeliveryState::Attempting,
             }),
         ] {
@@ -2671,7 +2691,7 @@ mod tests {
             panic!("expected a launch inspection, got {response:?}")
         };
         assert_eq!(
-            inspection.launch_attempt.launch_profile.launch_request_id,
+            inspection.launch_attempt.launch_profile.launch_request_id.0,
             launch_request_id
         );
         inspection
@@ -2692,7 +2712,7 @@ mod tests {
             inspection
                 .flow_node_option
                 .as_ref()
-                .map(|node| node.flow_id.as_str()),
+                .map(|node| node.flow_id.0.as_str()),
             expected_flow_id
         );
     }
@@ -2795,33 +2815,39 @@ mod tests {
         let stat = fs::read_to_string(format!("/proc/{process_id}/stat")).expect("process stat");
         let (_, fields) = stat.rsplit_once(") ").expect("process comm boundary");
         meta_signal_flow::ProcessIdentity {
-            process_id,
-            process_user_id: i64::from(metadata.uid()),
-            process_start_token: fields
-                .split_whitespace()
-                .nth(19)
-                .expect("process start token")
-                .into(),
+            process_id: meta_signal_flow::ProcessId(process_id),
+            process_user_id: meta_signal_flow::ProcessUserId(i64::from(metadata.uid())),
+            process_start_token: meta_signal_flow::ProcessStartToken(
+                fields
+                    .split_whitespace()
+                    .nth(19)
+                    .expect("process start token")
+                    .into(),
+            ),
         }
     }
 
     fn existing_binding(flow_id: &str, pane: &str) -> meta_signal_flow::FlowBinding {
         meta_signal_flow::FlowBinding {
-            flow_id: flow_id.into(),
+            flow_id: flow_ethos::FlowId(flow_id.into()),
             aspect: Aspect::Mind,
-            model_name: "gpt-sol".into(),
+            model_name: flow_ethos::ModelName("gpt-sol".into()),
             harness_kind: HarnessKind::Codex,
-            native_session_id: "01a0b22ce24f7452994064490878680f".into(),
-            herdr_workspace_id: "workspace".into(),
-            herdr_pane_id: pane.into(),
-            herdr_tab_id: "tab".into(),
-            herdr_terminal_id: format!("terminal-{pane}"),
-            herdr_agent_name: format!("agent-{pane}"),
+            native_session_id: signal_flow::NativeSessionId(
+                "01a0b22ce24f7452994064490878680f".into(),
+            ),
+            herdr_workspace_id: signal_flow::HerdrWorkspaceId("workspace".into()),
+            herdr_pane_id: signal_flow::HerdrPaneId(pane.into()),
+            herdr_tab_id: meta_signal_flow::HerdrTabId("tab".into()),
+            herdr_terminal_id: signal_flow::HerdrTerminalId(format!("terminal-{pane}")),
+            herdr_agent_name: signal_flow::HerdrAgentName(format!("agent-{pane}")),
             process_identity: current_process_identity(),
-            working_directory: fs::read_link("/proc/self/cwd")
-                .expect("current cwd")
-                .to_string_lossy()
-                .into_owned(),
+            working_directory: meta_signal_flow::WorkingDirectory(
+                fs::read_link("/proc/self/cwd")
+                    .expect("current cwd")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
         }
     }
 
@@ -2833,7 +2859,7 @@ mod tests {
             .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
                 meta_signal_flow::ConfigureModel {
                     model: Model::Sol,
-                    native: "gpt-sol".into(),
+                    native: meta_signal_flow::Native("gpt-sol".into()),
                 },
             ]))
             .expect("existing binding model declared");
@@ -2846,7 +2872,7 @@ mod tests {
         use crate::herdr::launch::{ClaimsNativeIdentity, NamesHerdrHarness};
         let harness = binding.harness_kind.expected_harness();
         let identity = <crate::herdr::HerdrCli as ClaimsNativeIdentity>::canonical_native_identity(
-            &binding.native_session_id,
+            &binding.native_session_id.0,
         );
         let version = if binding.harness_kind == HarnessKind::Claude {
             "uuid-version=uuid-v4\n"
@@ -2858,10 +2884,10 @@ mod tests {
                 .directory
                 .path()
                 .join("flows")
-                .join(format!(".{}.flow-id", binding.flow_id)),
+                .join(format!(".{}.flow-id", binding.flow_id.0)),
             format!(
                 "version=1\nharness={}\nidentity={}\nalias={}\n{}",
-                harness, identity, binding.flow_id, version
+                harness, identity, binding.flow_id.0, version
             ),
         )
         .expect("native identity claim written");
@@ -2888,10 +2914,10 @@ mod tests {
                     "agent": harness,
                     "agent_status": "idle",
                     "interactive_ready": true,
-                    "name": binding.herdr_agent_name,
-                    "pane_id": binding.herdr_pane_id,
-                    "terminal_id": binding.herdr_terminal_id,
-                    "workspace_id": binding.herdr_workspace_id,
+                    "name": binding.herdr_agent_name.0,
+                    "pane_id": binding.herdr_pane_id.0,
+                    "terminal_id": binding.herdr_terminal_id.0,
+                    "workspace_id": binding.herdr_workspace_id.0,
                 });
                 // A Claude pane reports its session; a Codex one reports
                 // none, and its rollout below proves it.
@@ -2900,7 +2926,7 @@ mod tests {
                         "source": format!("herdr:{harness}"),
                         "agent": harness,
                         "kind": "id",
-                        "value": binding.native_session_id,
+                        "value": binding.native_session_id.0,
                     });
                 }
                 agent
@@ -2913,10 +2939,10 @@ mod tests {
             .filter(|binding| binding.harness_kind == HarnessKind::Codex)
         {
             fs::write(
-                rollouts.join(format!("rollout-{}.jsonl", binding.native_session_id)),
+                rollouts.join(format!("rollout-{}.jsonl", binding.native_session_id.0)),
                 format!(
                     "{}\n",
-                    serde_json::json!({"type":"session_meta","payload":{"id":binding.native_session_id}})
+                    serde_json::json!({"type":"session_meta","payload":{"id":binding.native_session_id.0}})
                 ),
             )
             .expect("rollout written");
@@ -2969,7 +2995,7 @@ mod tests {
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
         let address = signal_flow::Address {
             aspect: binding.aspect.clone(),
-            topic: "core".into(),
+            topic: flow_ethos::Topic("core".into()),
             model: signal_flow::Model::Sol,
         };
         let meta_signal_flow::Response::BoundExisting(bound) = fixture.nexus.dispatch_meta_from(
@@ -3010,9 +3036,9 @@ mod tests {
             serde_json::json!({
                 "agent": if binding.harness_kind == HarnessKind::Claude { "claude" } else { "codex" },
                 "agent_status": "idle",
-                "pane_id": binding.herdr_pane_id,
-                "terminal_id": binding.herdr_terminal_id,
-                "workspace_id": binding.herdr_workspace_id,
+                "pane_id": binding.herdr_pane_id.0,
+                "terminal_id": binding.herdr_terminal_id.0,
+                "workspace_id": binding.herdr_workspace_id.0,
             })
         };
         let me = std::process::id();
@@ -3077,7 +3103,7 @@ mod tests {
         let rollouts = fixture.directory.path().join("native-transcripts/codex");
         fs::create_dir_all(&rollouts).unwrap();
         fs::write(
-            rollouts.join(format!("rollout-{}.jsonl", unproven.native_session_id)),
+            rollouts.join(format!("rollout-{}.jsonl", unproven.native_session_id.0)),
             "{\"type\":\"session_meta\",\"payload\":{\"id\":\"another-thread\"}}\n",
         )
         .unwrap();
@@ -3087,10 +3113,10 @@ mod tests {
         );
         // The rollout naming it proves it.
         fs::write(
-            rollouts.join(format!("rollout-{}.jsonl", unproven.native_session_id)),
+            rollouts.join(format!("rollout-{}.jsonl", unproven.native_session_id.0)),
             format!(
                 "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\"}}}}\n",
-                unproven.native_session_id
+                unproven.native_session_id.0
             ),
         )
         .unwrap();
@@ -3103,7 +3129,8 @@ mod tests {
         let claude_fixture = NexusFixture::new();
         let mut claude = existing_binding("b006", "pane-6");
         claude.harness_kind = HarnessKind::Claude;
-        claude.native_session_id = "01a0b22ce24f4452994064490878680f".into();
+        claude.native_session_id =
+            signal_flow::NativeSessionId("01a0b22ce24f4452994064490878680f".into());
         herdr_world(&claude_fixture, vec![shown(&claude)], me);
         assert_eq!(
             refused_for(&bound_once(&claude_fixture, claude.clone())),
@@ -3111,7 +3138,7 @@ mod tests {
         );
         let mut reporting = shown(&claude);
         reporting["agent_session"] = serde_json::json!({
-            "source":"herdr:claude","agent":"claude","kind":"id","value":claude.native_session_id
+            "source":"herdr:claude","agent":"claude","kind":"id","value":claude.native_session_id.0
         });
         herdr_world(&claude_fixture, vec![reporting], me);
         assert_eq!(refused_for(&bound_once(&claude_fixture, claude)), None);
@@ -3119,9 +3146,9 @@ mod tests {
         // Nothing refused was stored.
         for refused in ["b001", "b002", "b003", "b004"] {
             assert!(matches!(
-                fixture
-                    .nexus
-                    .dispatch(Query::ResolveRecipient(refused.into())),
+                fixture.nexus.dispatch(Query::ResolveRecipient(
+                    signal_flow::RecipientResolutionRequest(flow_ethos::FlowId(refused.into()))
+                )),
                 Response::RecipientResolutionRejected(
                     signal_flow::RecipientResolutionRejection::UnknownFlow
                 )
@@ -3131,17 +3158,21 @@ mod tests {
 
     fn flow_container(socket: &Path) -> meta_signal_flow::FlowContainer {
         meta_signal_flow::FlowContainer {
-            herdr_session_name: "messaging-build".into(),
-            herdr_server_socket_path: socket.to_string_lossy().into_owned(),
-            herdr_server_process_identity: current_process_identity(),
-            meta_flow_owner_id: "field-owner".into(),
+            herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+            herdr_server_socket_path: meta_signal_flow::HerdrServerSocketPath(
+                socket.to_string_lossy().into_owned(),
+            ),
+            process_identity: current_process_identity(),
+            meta_flow_owner_id: meta_signal_flow::MetaFlowOwnerId(flow_ethos::FlowId(
+                "field-owner".into(),
+            )),
         }
     }
 
     fn adoption_resolver() -> meta_signal_flow::ResolverIdentity {
         meta_signal_flow::ResolverIdentity {
             process_identity: current_process_identity(),
-            flow_id_option: Some("field-owner".into()),
+            flow_id_option: Some(flow_ethos::FlowId("field-owner".into())),
         }
     }
 
@@ -3184,7 +3215,7 @@ mod tests {
                     for node in nodes {
                         let in_pane = matches!(
                             &node.herdr_route_selection,
-                            HerdrRouteSelection::Available(route) if route.herdr_pane_id == pane
+                            HerdrRouteSelection::Available(route) if route.herdr_pane_id.0 == pane
                         );
                         if !in_pane || !node.flow_lifecycle.is_live() {
                             continue;
@@ -3193,7 +3224,7 @@ mod tests {
                             HarnessKind::Claude => SeatSubmission::Prompt(text.prompt_sha256()),
                             HarnessKind::Codex => SeatSubmission::TurnStarted,
                         };
-                        submissions.witness(&node.session_id, submission);
+                        submissions.witness(&node.session_id.0, submission);
                     }
                 }
                 false
@@ -3345,22 +3376,24 @@ mod tests {
 
         fn node(&self) -> FlowNode {
             FlowNode {
-                flow_id: "908786".into(),
-                session_id: "01a0b22c-e24f-7452-9940-64490878680f".into(),
+                flow_id: flow_ethos::FlowId("908786".into()),
+                session_id: signal_flow::SessionId("01a0b22c-e24f-7452-9940-64490878680f".into()),
                 harness_kind: HarnessKind::Codex,
                 endpoint_selection: EndpointSelection::Available(signal_flow::Available_Data {
-                    endpoint_path: "/tmp/native-fallback.sock".into(),
+                    endpoint_path: signal_flow::EndpointPath("/tmp/native-fallback.sock".into()),
                     route_readiness: signal_flow::RouteReadiness::Ready,
                 }),
                 herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
-                    herdr_session_name: "messaging-build".into(),
-                    herdr_agent_name: "psyche-mind-astra".into(),
-                    herdr_pane_id: "w1:p3".into(),
-                    herdr_terminal_id: "term_65bb7f87270cb3".into(),
+                    herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+                    herdr_agent_name: signal_flow::HerdrAgentName("psyche-mind-astra".into()),
+                    herdr_pane_id: signal_flow::HerdrPaneId("w1:p3".into()),
+                    herdr_terminal_id: signal_flow::HerdrTerminalId("term_65bb7f87270cb3".into()),
                 }),
                 origin: Origin::Flow(FlowOrigin {
-                    flow_id: "908786".into(),
-                    session_id: "01a0b22c-e24f-7452-9940-64490878680f".into(),
+                    flow_id: flow_ethos::FlowId("908786".into()),
+                    session_id: signal_flow::SessionId(
+                        "01a0b22c-e24f-7452-9940-64490878680f".into(),
+                    ),
                 }),
                 flow_lifecycle: FlowLifecycle::Active,
             }
@@ -3520,9 +3553,9 @@ mod tests {
             meta_signal_flow::Response::FlowRegistered(node.clone())
         );
         assert_eq!(
-            fixture
-                .nexus
-                .dispatch(Query::ResolveRecipient("908786".into())),
+            fixture.nexus.dispatch(Query::ResolveRecipient(
+                signal_flow::RecipientResolutionRequest(flow_ethos::FlowId("908786".into()))
+            )),
             Response::RecipientResolved(node)
         );
     }
@@ -3555,8 +3588,8 @@ mod tests {
         fn send_to(&self, flow_id: &str, text: &str) -> Sent {
             match self.nexus.dispatch_meta(meta_signal_flow::Query::Deliver(
                 meta_signal_flow::DeliveryRequest {
-                    delivery_id: format!("delivery-{flow_id}-{text}"),
-                    flow_id: flow_id.into(),
+                    delivery_id: meta_signal_flow::DeliveryId(format!("delivery-{flow_id}-{text}")),
+                    flow_id: flow_ethos::FlowId(flow_id.into()),
                     message: middle_abrupt(text),
                 },
             )) {
@@ -3645,8 +3678,10 @@ mod tests {
         assert_eq!(prompts(&operation_log), vec![OBSERVED_PROMPT.to_owned()]);
 
         assert_eq!(
-            fixture.nexus.dispatch(Query::Stop("908786".into())),
-            Response::Stopped("908786".into())
+            fixture
+                .nexus
+                .dispatch(Query::Stop(flow_ethos::FlowId("908786".into()))),
+            Response::Stopped(flow_ethos::FlowId("908786".into()))
         );
         assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Stopped);
         let operations = fs::read_to_string(operation_log).expect("Herdr operation log");
@@ -3689,8 +3724,10 @@ mod tests {
         assert_eq!(fixture.lifecycle("908786"), FlowLifecycle::Pending);
 
         assert_eq!(
-            fixture.nexus.dispatch(Query::Stop("908786".into())),
-            Response::Stopped("908786".into())
+            fixture
+                .nexus
+                .dispatch(Query::Stop(flow_ethos::FlowId("908786".into()))),
+            Response::Stopped(flow_ethos::FlowId("908786".into()))
         );
         assert_eq!(fixture.lifecycle("908786"), FlowLifecycle::Stopped);
         let operations = fs::read_to_string(&operation_log).expect("Herdr operation log");
@@ -3705,7 +3742,9 @@ mod tests {
         launch.bind(&fixture.nexus);
         launch.register_and_acknowledge(&fixture.nexus);
         assert_eq!(
-            fixture.nexus.dispatch(Query::Stop("908786".into())),
+            fixture
+                .nexus
+                .dispatch(Query::Stop(flow_ethos::FlowId("908786".into()))),
             Response::StopRejected(signal_flow::StopRejection::RouteUnavailable)
         );
     }
@@ -3788,7 +3827,7 @@ mod tests {
             "id":"cli:api:snapshot",
             "result":{"snapshot":{
                 "agents":[],
-                "panes":[{"pane_id":launch.pane.herdr_pane_id,"terminal_id":launch.pane.herdr_terminal_id}],
+                "panes":[{"pane_id":launch.pane.herdr_pane_id.0,"terminal_id":launch.pane.herdr_terminal_id.0}],
                 "protocol":20,"version":"0.8.2"},
             "type":"session_snapshot"}
         });
@@ -3833,7 +3872,7 @@ mod tests {
         );
         let operations = fs::read_to_string(&log).expect("Herdr operation log");
         assert!(
-            operations.contains(&format!("pane close {}", launch.pane.herdr_pane_id)),
+            operations.contains(&format!("pane close {}", launch.pane.herdr_pane_id.0)),
             "{operations}"
         );
         assert_eq!(
@@ -4023,10 +4062,11 @@ mod tests {
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
         let container = flow_container(&socket_path);
         let mut accepted = existing_binding("a001", "pane-1");
-        accepted.native_session_id = "01a0b22c-e24f-7452-9940-64490878680f".into();
+        accepted.native_session_id =
+            signal_flow::NativeSessionId("01a0b22c-e24f-7452-9940-64490878680f".into());
         let address = signal_flow::Address {
             aspect: Aspect::Mind,
-            topic: "message".into(),
+            topic: flow_ethos::Topic("message".into()),
             model: Model::Sol,
         };
 
@@ -4048,23 +4088,24 @@ mod tests {
         assert!(matches!(
             &bound.flow_binding_result,
             meta_signal_flow::FlowBindingResult::Bound(binding)
-                if binding.flow_id == "a001"
+                if binding.flow_id.0 == "a001"
                     && binding.flow_lifecycle
                         == meta_signal_flow::FlowLifecycle::AdoptedActive
         ));
 
-        let Response::RecipientResolved(node) = fixture
-            .nexus
-            .dispatch(Query::ResolveRecipient("a001".into()))
-        else {
+        let Response::RecipientResolved(node) = fixture.nexus.dispatch(Query::ResolveRecipient(
+            signal_flow::RecipientResolutionRequest(flow_ethos::FlowId("a001".into())),
+        )) else {
             panic!("accepted existing flow must resolve")
         };
         assert_eq!(node.flow_lifecycle, FlowLifecycle::Active);
         assert_eq!(node.origin, Origin::Unbound);
         assert!(matches!(
-            fixture
-                .nexus
-                .dispatch(Query::ResolveRecipient("field-ambiguous".into())),
+            fixture.nexus.dispatch(Query::ResolveRecipient(
+                signal_flow::RecipientResolutionRequest(flow_ethos::FlowId(
+                    "field-ambiguous".into()
+                ))
+            )),
             Response::RecipientResolutionRejected(
                 signal_flow::RecipientResolutionRejection::UnknownFlow
             )
@@ -4077,7 +4118,8 @@ mod tests {
         let socket_path = fixture.directory.path().join("herdr.sock");
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
         let mut container = flow_container(&socket_path);
-        container.herdr_server_process_identity.process_start_token = "stale".into();
+        container.process_identity.process_start_token =
+            meta_signal_flow::ProcessStartToken("stale".into());
 
         assert_eq!(
             fixture
@@ -4087,7 +4129,7 @@ mod tests {
                         flow_container: container,
                         address: signal_flow::Address {
                             aspect: Aspect::Mind,
-                            topic: "message".into(),
+                            topic: flow_ethos::Topic("message".into()),
                             model: Model::Sol,
                         },
                         flow_binding: existing_binding("a002", "pane-1"),
@@ -4098,9 +4140,9 @@ mod tests {
             )
         );
         assert!(matches!(
-            fixture
-                .nexus
-                .dispatch(Query::ResolveRecipient("a002".into())),
+            fixture.nexus.dispatch(Query::ResolveRecipient(
+                signal_flow::RecipientResolutionRequest(flow_ethos::FlowId("a002".into()))
+            )),
             Response::RecipientResolutionRejected(
                 signal_flow::RecipientResolutionRejection::UnknownFlow
             )
@@ -4115,7 +4157,7 @@ mod tests {
         let binding = existing_binding("a003", "pane-1");
         let address = signal_flow::Address {
             aspect: Aspect::Mind,
-            topic: "message".into(),
+            topic: flow_ethos::Topic("message".into()),
             model: Model::Sol,
         };
         let response = with_bound_world(&fixture, &[&binding], || {
@@ -4127,7 +4169,7 @@ mod tests {
                 }),
                 Some(meta_signal_flow::ResolverIdentity {
                     process_identity: current_process_identity(),
-                    flow_id_option: Some("different-owner".into()),
+                    flow_id_option: Some(flow_ethos::FlowId("different-owner".into())),
                 }),
             )
         });
@@ -4138,9 +4180,9 @@ mod tests {
             )
         );
         assert!(matches!(
-            fixture
-                .nexus
-                .dispatch(Query::ResolveRecipient("a003".into())),
+            fixture.nexus.dispatch(Query::ResolveRecipient(
+                signal_flow::RecipientResolutionRequest(flow_ethos::FlowId("a003".into()))
+            )),
             Response::RecipientResolutionRejected(
                 signal_flow::RecipientResolutionRejection::UnknownFlow
             )
@@ -4165,7 +4207,7 @@ mod tests {
                     flow_container: flow_container(&socket_path),
                     address: signal_flow::Address {
                         aspect: Aspect::Mind,
-                        topic: "core".into(),
+                        topic: flow_ethos::Topic("core".into()),
                         model: Model::Sol,
                     },
                     flow_binding: binding.clone(),
@@ -4188,7 +4230,9 @@ mod tests {
         ));
         let accepted = existing_binding("a009", "pane-2");
         let accepted = meta_signal_flow::FlowBinding {
-            native_session_id: "01a0b22c-e24f-7452-9940-64490878680f".into(),
+            native_session_id: signal_flow::NativeSessionId(
+                "01a0b22c-e24f-7452-9940-64490878680f".into(),
+            ),
             ..accepted
         };
         let response = with_bound_world(&fixture, &[&accepted], || {
@@ -4197,7 +4241,7 @@ mod tests {
                     flow_container: flow_container(&socket_path),
                     address: signal_flow::Address {
                         aspect: Aspect::Mind,
-                        topic: "core".into(),
+                        topic: flow_ethos::Topic("core".into()),
                         model: Model::Sol,
                     },
                     flow_binding: accepted.clone(),
@@ -4221,17 +4265,17 @@ mod tests {
         let fixture = NexusFixture::new();
         let address = signal_flow::Address {
             aspect: Aspect::Mind,
-            topic: "message".into(),
+            topic: flow_ethos::Topic("message".into()),
             model: Model::Sol,
         };
         let mut previous = fixture.node();
-        previous.flow_id = "historical-owner".into();
-        previous.session_id = "historical-session".into();
+        previous.flow_id = flow_ethos::FlowId("historical-owner".into());
+        previous.session_id = signal_flow::SessionId("historical-session".into());
         previous.flow_lifecycle = FlowLifecycle::Active;
-        let previous_role = Caller {
+        let previous_role = CallerIdentity {
             flow_id: previous.flow_id.clone(),
             aspect: Aspect::Mind,
-            model_name: "gpt-sol".into(),
+            model_name: flow_ethos::ModelName("gpt-sol".into()),
         };
         fixture
             .nexus
@@ -4240,21 +4284,21 @@ mod tests {
             .expect("legacy owner row persists without native proof");
         let original = signal_flow::Metaflow {
             address: address.clone(),
-            state: flow_ethos::State::Awake("historical-owner".into()),
-            past: vec![],
-            queue: vec![signal_flow::QueueEntry {
-                logical_delivery_id: "retained-logical-id".into(),
-                request_id: "test".into(),
+            state: flow_ethos::State::Awake(flow_ethos::FlowId("historical-owner".into())),
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![signal_flow::QueueEntry {
+                logical_delivery_id: flow_ethos::LogicalDeliveryId("retained-logical-id".into()),
+                request_id: flow_ethos::RequestId("test".into()),
                 sent_by: signal_flow::SentBy::Sender(signal_flow::Address {
                     aspect: Aspect::Field,
-                    topic: "core".into(),
+                    topic: flow_ethos::Topic("core".into()),
                     model: Model::Luna,
                 }),
                 delivery: flow_ethos::Delivery::Queue,
                 message: signal_flow::Message::Soft(signal_flow::Request::Order(
                     "leave queued".into(),
                 )),
-            }],
+            }]),
         };
         fixture.nexus.store.seed_metaflow(original.clone());
 
@@ -4289,9 +4333,9 @@ mod tests {
             vec![original]
         );
         assert!(matches!(
-            fixture
-                .nexus
-                .dispatch(Query::ResolveRecipient("a004".into())),
+            fixture.nexus.dispatch(Query::ResolveRecipient(
+                signal_flow::RecipientResolutionRequest(flow_ethos::FlowId("a004".into()))
+            )),
             Response::RecipientResolutionRejected(
                 signal_flow::RecipientResolutionRejection::UnknownFlow
             )
@@ -4306,15 +4350,15 @@ mod tests {
         let binding = existing_binding("a001", "pane-1");
         let address = signal_flow::Address {
             aspect: binding.aspect.clone(),
-            topic: "core".into(),
+            topic: flow_ethos::Topic("core".into()),
             model: Model::Sol,
         };
         let original_queue = vec![signal_flow::QueueEntry {
-            logical_delivery_id: "retained-logical-id".into(),
-            request_id: "test".into(),
+            logical_delivery_id: flow_ethos::LogicalDeliveryId("retained-logical-id".into()),
+            request_id: flow_ethos::RequestId("test".into()),
             sent_by: signal_flow::SentBy::Sender(signal_flow::Address {
                 aspect: Aspect::Field,
-                topic: "core".into(),
+                topic: flow_ethos::Topic("core".into()),
                 model: Model::Luna,
             }),
             delivery: flow_ethos::Delivery::Queue,
@@ -4323,8 +4367,8 @@ mod tests {
         fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
             address,
             state: flow_ethos::State::Asleep,
-            past: vec![],
-            queue: original_queue.clone(),
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(original_queue.clone()),
         });
         let first = rebind(&fixture, binding.clone());
         let second = rebind(&fixture, binding);
@@ -4338,7 +4382,7 @@ mod tests {
         );
         assert_eq!(
             fixture.nexus.store.list_metaflows().unwrap()[0].queue,
-            original_queue
+            flow_ethos::Queue(original_queue)
         );
     }
 
@@ -4350,7 +4394,7 @@ mod tests {
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
         let address = signal_flow::Address {
             aspect: Aspect::Mind,
-            topic: "core".into(),
+            topic: flow_ethos::Topic("core".into()),
             model: Model::Sol,
         };
         let incumbent = existing_binding("a005", "pane-incumbent");
@@ -4399,9 +4443,9 @@ mod tests {
         ));
         assert_eq!(fixture.nexus.store.list_metaflows().unwrap(), original);
         assert!(matches!(
-            fixture
-                .nexus
-                .dispatch(Query::ResolveRecipient("a006".into())),
+            fixture.nexus.dispatch(Query::ResolveRecipient(
+                signal_flow::RecipientResolutionRequest(flow_ethos::FlowId("a006".into()))
+            )),
             Response::RecipientResolutionRejected(
                 signal_flow::RecipientResolutionRejection::UnknownFlow
             )
@@ -4420,7 +4464,7 @@ mod tests {
                 "the binding's model is not the one configured for Astra",
                 signal_flow::Address {
                     aspect: Aspect::Mind,
-                    topic: "message".into(),
+                    topic: flow_ethos::Topic("message".into()),
                     model: Model::Astra,
                 },
             ),
@@ -4428,7 +4472,7 @@ mod tests {
                 "the binding's aspect is not the Address's",
                 signal_flow::Address {
                     aspect: Aspect::Field,
-                    topic: "message".into(),
+                    topic: flow_ethos::Topic("message".into()),
                     model: Model::Sol,
                 },
             ),
@@ -4465,9 +4509,9 @@ mod tests {
                 "{case}: {response:?}"
             );
             assert!(matches!(
-                fixture
-                    .nexus
-                    .dispatch(Query::ResolveRecipient("a007".into())),
+                fixture.nexus.dispatch(Query::ResolveRecipient(
+                    signal_flow::RecipientResolutionRequest(flow_ethos::FlowId("a007".into()))
+                )),
                 Response::RecipientResolutionRejected(
                     signal_flow::RecipientResolutionRejection::UnknownFlow
                 )
@@ -4516,10 +4560,9 @@ mod tests {
     }
 
     fn resolved(fixture: &NexusFixture) -> FlowNode {
-        let Response::RecipientResolved(node) = fixture
-            .nexus
-            .dispatch(Query::ResolveRecipient("908786".into()))
-        else {
+        let Response::RecipientResolved(node) = fixture.nexus.dispatch(Query::ResolveRecipient(
+            signal_flow::RecipientResolutionRequest(flow_ethos::FlowId("908786".into())),
+        )) else {
             panic!("an imported flow must resolve")
         };
         node
@@ -4549,10 +4592,10 @@ mod tests {
         assert_eq!(
             node.herdr_route_selection,
             HerdrRouteSelection::Available(HerdrRoute {
-                herdr_session_name: "messaging-build".into(),
-                herdr_agent_name: "agent-w1:p3".into(),
-                herdr_pane_id: "w1:p3".into(),
-                herdr_terminal_id: "terminal-w1:p3".into(),
+                herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+                herdr_agent_name: signal_flow::HerdrAgentName("agent-w1:p3".into()),
+                herdr_pane_id: signal_flow::HerdrPaneId("w1:p3".into()),
+                herdr_terminal_id: signal_flow::HerdrTerminalId("terminal-w1:p3".into()),
             })
         );
         assert_eq!(node.flow_lifecycle, FlowLifecycle::Active);
@@ -4616,7 +4659,7 @@ mod tests {
                         flow_container: flow_container(&socket_path),
                         address: signal_flow::Address {
                             aspect: binding.aspect.clone(),
-                            topic: "core".into(),
+                            topic: flow_ethos::Topic("core".into()),
                             model: signal_flow::Model::Sol,
                         },
                         flow_binding: binding,
@@ -4634,9 +4677,9 @@ mod tests {
     /// Active and roleless, as 5f38bc is live).
     fn binding_of_registered_row(fixture: &NexusFixture) -> meta_signal_flow::FlowBinding {
         let mut binding = existing_binding("908786", "w1:p3");
-        binding.native_session_id = fixture.node().session_id;
-        binding.herdr_terminal_id = "term_65bb7f87270cb3".into();
-        binding.herdr_agent_name = "psyche-mind-astra".into();
+        binding.native_session_id = signal_flow::NativeSessionId(fixture.node().session_id.0);
+        binding.herdr_terminal_id = signal_flow::HerdrTerminalId("term_65bb7f87270cb3".into());
+        binding.herdr_agent_name = signal_flow::HerdrAgentName("psyche-mind-astra".into());
         binding
     }
 
@@ -4658,17 +4701,17 @@ mod tests {
         let before = fixture.nexus.store.flow_nodes().expect("Flow rows read");
         assert_eq!(fixture.nexus.store.role("908786").expect("role read"), None);
 
-        let role = Caller {
-            flow_id: "908786".into(),
+        let role = CallerIdentity {
+            flow_id: flow_ethos::FlowId("908786".into()),
             aspect: Aspect::Mind,
-            model_name: "gpt-sol".into(),
+            model_name: flow_ethos::ModelName("gpt-sol".into()),
         };
         for _ in 0..2 {
             let result = rebind(&fixture, binding_of_registered_row(&fixture));
             assert!(
                 matches!(
                     &result,
-                    meta_signal_flow::FlowBindingResult::Bound(bound) if bound.flow_id == "908786"
+                    meta_signal_flow::FlowBindingResult::Bound(bound) if bound.flow_id.0 == "908786"
                 ),
                 "{result:?}"
             );
@@ -4692,11 +4735,11 @@ mod tests {
         let before = listed(&fixture);
 
         let mut other_terminal = binding_of_registered_row(&fixture);
-        other_terminal.herdr_terminal_id = "term_reused".into();
+        other_terminal.herdr_terminal_id = signal_flow::HerdrTerminalId("term_reused".into());
         let mut other_pane = binding_of_registered_row(&fixture);
-        other_pane.herdr_pane_id = "w1:p4".into();
+        other_pane.herdr_pane_id = signal_flow::HerdrPaneId("w1:p4".into());
         let mut other_thread = binding_of_registered_row(&fixture);
-        other_thread.native_session_id = "another-thread".into();
+        other_thread.native_session_id = signal_flow::NativeSessionId("another-thread".into());
         let mut other_harness = binding_of_registered_row(&fixture);
         other_harness.harness_kind = HarnessKind::Claude;
         for binding in [other_terminal, other_pane, other_thread, other_harness] {
@@ -4715,7 +4758,7 @@ mod tests {
             binding_of_registered_row(&fixture)
         )));
         let mut other_role = binding_of_registered_row(&fixture);
-        other_role.model_name = "gpt-astra".into();
+        other_role.model_name = flow_ethos::ModelName("gpt-astra".into());
         let refused_role = rebind(&fixture, other_role);
         assert!(
             matches!(
@@ -4737,7 +4780,7 @@ mod tests {
                 .role("908786")
                 .expect("role read")
                 .map(|role| role.model_name),
-            Some("gpt-sol".to_owned())
+            Some(flow_ethos::ModelName("gpt-sol".to_owned()))
         );
         assert_eq!(listed(&fixture), before);
     }
@@ -4768,7 +4811,7 @@ mod tests {
         let rows = fixture.nexus.store.flow_nodes().expect("Flow rows read");
         let rows = fixture.nexus.reconciled(rows);
         assert_eq!(rows.len(), 1, "the row and its history stay");
-        assert_eq!(rows[0].flow_id, "908786");
+        assert_eq!(rows[0].flow_id, flow_ethos::FlowId("908786".into()));
         assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Exited);
         assert_ne!(
             rows[0].flow_lifecycle,
@@ -4800,9 +4843,9 @@ mod tests {
             Sent::Refused(meta_signal_flow::DeliveryRejection::FlowExited)
         );
         assert_eq!(
-            fixture
-                .nexus
-                .dispatch(Query::ResolveRecipient("908786".into())),
+            fixture.nexus.dispatch(Query::ResolveRecipient(
+                signal_flow::RecipientResolutionRequest(flow_ethos::FlowId("908786".into()))
+            )),
             Response::RecipientResolutionRejected(
                 signal_flow::RecipientResolutionRejection::FlowUnavailable
             )
@@ -4867,19 +4910,25 @@ mod tests {
         assert_eq!(
             fixture
                 .nexus
-                .perform(Operation::Record(Record_Data::Stopped("unknown".into()))),
+                .perform(Operation::Record(Record_Data::Stopped(flow_ethos::FlowId(
+                    "unknown".into()
+                )))),
             Outcome::Failed(Failed_Data::StoreRefused)
         );
         // Confirming a launch the store never bound does not start it.
         assert_eq!(
-            fixture.nexus.perform(Operation::Confirm("unknown".into())),
+            fixture
+                .nexus
+                .perform(Operation::Confirm(flow_ethos::FlowId("unknown".into()))),
             Outcome::Failed(Failed_Data::Unstarted)
         );
         // A witnessed exit of a live flow is recorded, and the row says so.
         assert_eq!(
             fixture
                 .nexus
-                .perform(Operation::Record(Record_Data::Exited("908786".into()))),
+                .perform(Operation::Record(Record_Data::Exited(flow_ethos::FlowId(
+                    "908786".into()
+                )))),
             Outcome::Recorded
         );
         assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Exited);
@@ -4887,7 +4936,9 @@ mod tests {
         assert_eq!(
             fixture
                 .nexus
-                .perform(Operation::Record(Record_Data::Exited("908786".into()))),
+                .perform(Operation::Record(Record_Data::Exited(flow_ethos::FlowId(
+                    "908786".into()
+                )))),
             Outcome::Failed(Failed_Data::StoreRefused)
         );
     }
@@ -4904,19 +4955,19 @@ mod tests {
         let fixture = NexusFixture::new();
         let sender = signal_flow::Address {
             aspect: Aspect::Field,
-            topic: "core".into(),
+            topic: flow_ethos::Topic("core".into()),
             model: Model::Luna,
         };
         let recipient = signal_flow::Address {
             aspect: Aspect::Mind,
-            topic: "message".into(),
+            topic: flow_ethos::Topic("message".into()),
             model: Model::Sol,
         };
         fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
             address: recipient.clone(),
             state: flow_ethos::State::Asleep,
-            past: vec![],
-            queue: vec![],
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![]),
         });
 
         let nexus = Arc::new(fixture.nexus);
@@ -4960,7 +5011,7 @@ mod tests {
         };
         let resumed = nexus
             .store
-            .read_logical_delivery_snapshots(&sender, Some(initial.delivery_cursor))
+            .read_logical_delivery_snapshots(&sender, Some(initial.delivery_cursor.0))
             .expect("resume reads changes after the last cursor");
         assert_eq!(resumed.delivery_cursor, accepted.delivery_cursor);
         assert_eq!(resumed.delivery_snapshot_vector.len(), 1);
@@ -4983,24 +5034,24 @@ mod tests {
         let fixture = NexusFixture::new();
         let sender = signal_flow::Address {
             aspect: Aspect::Field,
-            topic: "observerA".into(),
+            topic: flow_ethos::Topic("observerA".into()),
             model: Model::Luna,
         };
         let other_sender = signal_flow::Address {
             aspect: Aspect::Field,
-            topic: "observerB".into(),
+            topic: flow_ethos::Topic("observerB".into()),
             model: Model::Luna,
         };
         let recipient = signal_flow::Address {
             aspect: Aspect::Mind,
-            topic: "message".into(),
+            topic: flow_ethos::Topic("message".into()),
             model: Model::Sol,
         };
         fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
             address: recipient.clone(),
             state: flow_ethos::State::Asleep,
-            past: vec![],
-            queue: vec![],
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![]),
         });
         let admit = |sender: &signal_flow::Address, words: &str| {
             let signal_flow::PrivateSendResponse::SendAccepted(accepted) = fixture
@@ -5028,8 +5079,8 @@ mod tests {
                 &archived.logical_delivery_id,
                 signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
                     harness_kind: flow_ethos::HarnessKind::Codex,
-                    native_session_id: "recipient-session".into(),
-                    native_prompt_id: "recipient-prompt".into(),
+                    native_session_id: signal_flow::NativeSessionId("recipient-session".into()),
+                    native_prompt_id: signal_flow::NativePromptId("recipient-prompt".into()),
                 }),
             )
             .expect("request ends");
@@ -5037,7 +5088,7 @@ mod tests {
             fixture
                 .nexus
                 .store
-                .archive_request(&archived.request_id, &sender)
+                .archive_request(&archived.request_id.0, &sender)
                 .expect("archive reads"),
             Ok(())
         );
@@ -5068,8 +5119,8 @@ mod tests {
                 signal_flow::DeliveryState::Queued,
                 signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
                     harness_kind: flow_ethos::HarnessKind::Codex,
-                    native_session_id: "recipient-session".into(),
-                    native_prompt_id: "recipient-prompt".into(),
+                    native_session_id: signal_flow::NativeSessionId("recipient-session".into()),
+                    native_prompt_id: signal_flow::NativePromptId("recipient-prompt".into()),
                 }),
                 signal_flow::DeliveryState::Archived,
             ]
@@ -5109,7 +5160,7 @@ mod tests {
             fixture
                 .nexus
                 .store
-                .read_logical_delivery_snapshots(&sender, Some(history.delivery_cursor))
+                .read_logical_delivery_snapshots(&sender, Some(history.delivery_cursor.0))
                 .expect("caught-up sender reads")
                 .delivery_snapshot_vector
                 .is_empty()
@@ -5120,7 +5171,9 @@ mod tests {
     fn archive_from_an_unidentified_process_is_refused_as_a_caller() {
         let fixture = NexusFixture::new();
         assert!(matches!(
-            fixture.nexus.dispatch(Query::ArchiveRequest("none".into())),
+            fixture
+                .nexus
+                .dispatch(Query::ArchiveRequest(flow_ethos::RequestId("none".into()))),
             Response::ArchiveRejected(signal_flow::ArchiveRejection::Caller(_))
         ));
     }
@@ -5133,7 +5186,7 @@ mod tests {
         fixture.register_with(FlowLifecycle::Active);
         let report = |flow_id: &str, event: Event| {
             fixture.nexus.dispatch(Query::Report(Report_Data {
-                flow_id: flow_id.into(),
+                flow_id: flow_ethos::FlowId(flow_id.into()),
                 event,
             }))
         };
@@ -5141,13 +5194,15 @@ mod tests {
         assert_eq!(
             report("0a0a0a", Event::Started(None)),
             Response::Refused(signal_flow::Refusal::Unknown(
-                signal_flow::Unknown_Data::FlowId("0a0a0a".into())
+                signal_flow::Unknown_Data::FlowId(flow_ethos::FlowId("0a0a0a".into()))
             ))
         );
         assert_eq!(
             fixture
                 .nexus
-                .dispatch_meta(meta_signal_flow::Query::ReadEvents("0a0a0a".into())),
+                .dispatch_meta(meta_signal_flow::Query::ReadEvents(flow_ethos::FlowId(
+                    "0a0a0a".into()
+                ))),
             meta_signal_flow::Response::ReadEventsRejected(
                 meta_signal_flow::ReadEventsRejected_Data::UnknownFlow
             ),
@@ -5159,18 +5214,20 @@ mod tests {
             Response::Reported
         );
         let stop = Event::Stopped(signal_flow::NativeStop {
-            native_session_id_option: Some("other-session".into()),
+            native_session_id_option: Some(signal_flow::NativeSessionId("other-session".into())),
             transcript_path_option: None,
-            last_assistant_message_option: None,
-            background_work: vec![],
+            last_assistant_message_option: signal_flow::LastAssistantMessageOption(None),
+            background_work: signal_flow::BackgroundWork(vec![]),
         });
         assert_eq!(report("908786", stop.clone()), Response::Reported);
         assert_eq!(
             fixture
                 .nexus
-                .dispatch_meta(meta_signal_flow::Query::ReadEvents("908786".into())),
+                .dispatch_meta(meta_signal_flow::Query::ReadEvents(flow_ethos::FlowId(
+                    "908786".into()
+                ))),
             meta_signal_flow::Response::EventsRead(meta_signal_flow::EventsRead_Data {
-                flow_id: "908786".into(),
+                flow_id: flow_ethos::FlowId("908786".into()),
                 event_vector: vec![Event::Started(None), Event::ToolUsed("Bash".into()), stop],
             })
         );
@@ -5189,20 +5246,25 @@ mod tests {
         assert_eq!(
             fixture
                 .nexus
-                .dispatch_meta(meta_signal_flow::Query::Retire("unknown".into())),
+                .dispatch_meta(meta_signal_flow::Query::Retire(flow_ethos::FlowId(
+                    "unknown".into()
+                ))),
             meta_signal_flow::Response::RetireRejected(
                 meta_signal_flow::RetireRejection::UnknownFlow
             )
         );
 
-        let meta_signal_flow::Response::FlowRetired(retired) = fixture
-            .nexus
-            .dispatch_meta(meta_signal_flow::Query::Retire("908786".into()))
+        let meta_signal_flow::Response::FlowRetired(retired) =
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::Retire(flow_ethos::FlowId(
+                    "908786".into(),
+                )))
         else {
             panic!("a live flow is retired")
         };
         assert_eq!(retired.flow_lifecycle, FlowLifecycle::Retired);
-        assert_eq!(retired.flow_id, "908786");
+        assert_eq!(retired.flow_id, flow_ethos::FlowId("908786".into()));
         assert_eq!(retired.session_id, node.session_id, "its history is kept");
         assert_eq!(retired.origin, node.origin);
 
@@ -5210,7 +5272,9 @@ mod tests {
         assert_eq!(
             fixture
                 .nexus
-                .dispatch_meta(meta_signal_flow::Query::Retire("908786".into())),
+                .dispatch_meta(meta_signal_flow::Query::Retire(flow_ethos::FlowId(
+                    "908786".into()
+                ))),
             meta_signal_flow::Response::RetireRejected(
                 meta_signal_flow::RetireRejection::AlreadyGone
             )
@@ -5227,9 +5291,9 @@ mod tests {
             Sent::Refused(meta_signal_flow::DeliveryRejection::FlowRetired)
         );
         assert_eq!(
-            fixture
-                .nexus
-                .dispatch(Query::ResolveRecipient("908786".into())),
+            fixture.nexus.dispatch(Query::ResolveRecipient(
+                signal_flow::RecipientResolutionRequest(flow_ethos::FlowId("908786".into()))
+            )),
             Response::RecipientResolutionRejected(
                 signal_flow::RecipientResolutionRejection::FlowUnavailable
             )
@@ -5258,9 +5322,10 @@ mod tests {
                 _ => unreachable!("closed fixture variants"),
             }
             fixture.set_agents(vec![agent]);
-            let Response::RecipientResolved(resolved) = fixture
-                .nexus
-                .dispatch(Query::ResolveRecipient("908786".into()))
+            let Response::RecipientResolved(resolved) =
+                fixture.nexus.dispatch(Query::ResolveRecipient(
+                    signal_flow::RecipientResolutionRequest(flow_ethos::FlowId("908786".into())),
+                ))
             else {
                 panic!("registered recipient resolves")
             };
@@ -5297,9 +5362,10 @@ mod tests {
         let mut renamed = fixture.current_agent();
         renamed["name"] = "psyche-opus-88475f".into();
         fixture.set_agents(vec![renamed]);
-        let Response::RecipientResolved(resolved) = fixture
-            .nexus
-            .dispatch(Query::ResolveRecipient("908786".into()))
+        let Response::RecipientResolved(resolved) =
+            fixture.nexus.dispatch(Query::ResolveRecipient(
+                signal_flow::RecipientResolutionRequest(flow_ethos::FlowId("908786".into())),
+            ))
         else {
             panic!("registered recipient resolves")
         };
@@ -5309,7 +5375,10 @@ mod tests {
         let HerdrRouteSelection::Available(stored) = &node.herdr_route_selection else {
             panic!("fixture node carries a route")
         };
-        assert_eq!(route.herdr_agent_name, "psyche-opus-88475f");
+        assert_eq!(
+            route.herdr_agent_name,
+            signal_flow::HerdrAgentName("psyche-opus-88475f".into())
+        );
         assert_eq!(route.herdr_session_name, stored.herdr_session_name);
         assert_eq!(route.herdr_pane_id, stored.herdr_pane_id);
         assert_eq!(route.herdr_terminal_id, stored.herdr_terminal_id);
@@ -5344,7 +5413,7 @@ mod tests {
         let HerdrRouteSelection::Available(route) = &mut conflict.herdr_route_selection else {
             panic!("fixture route")
         };
-        route.herdr_terminal_id = "term_conflicting".into();
+        route.herdr_terminal_id = signal_flow::HerdrTerminalId("term_conflicting".into());
         assert_eq!(
             fixture
                 .nexus
@@ -5356,9 +5425,9 @@ mod tests {
 
         fixture.set_agents(vec![fixture.current_agent()]);
         assert_eq!(
-            fixture
-                .nexus
-                .dispatch(Query::ResolveRecipient("908786".into())),
+            fixture.nexus.dispatch(Query::ResolveRecipient(
+                signal_flow::RecipientResolutionRequest(flow_ethos::FlowId("908786".into()))
+            )),
             Response::RecipientResolved(node)
         );
         assert!(fixture.directory.path().join("flow.sema").exists());
@@ -5389,7 +5458,7 @@ mod tests {
                 .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
                     meta_signal_flow::ConfigureModel {
                         model: profile.address.model.clone(),
-                        native: profile.model_name.clone(),
+                        native: meta_signal_flow::Native(profile.model_name.0.clone()),
                     },
                 ]))
                 .expect("model configured");
@@ -5401,25 +5470,32 @@ mod tests {
             predecessor: Option<&str>,
         ) -> StagedLaunch {
             let profile = LaunchProfile {
-                launch_request_id: launch_request_id.into(),
-                system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-                user_modules: vec!["operation-main-flow".into()],
+                launch_request_id: signal_flow::LaunchRequestId(launch_request_id.into()),
+                system_modules: signal_flow::SystemModules(vec![
+                    signal_flow::ModuleIdentity("spirit-core".into()),
+                    signal_flow::ModuleIdentity("intent-flow".into()),
+                ]),
+                user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                    "operation-main-flow".into(),
+                )]),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 // Each staged launch is the seat of its own Address, its
                 // topic the request id with its hyphens taken out.
                 address: signal_flow::Address {
                     aspect: Aspect::Field,
-                    topic: launch_request_id.replace('-', ""),
+                    topic: flow_ethos::Topic(launch_request_id.replace('-', "")),
                     model: signal_flow::Model::Sol,
                 },
-                model_name: "fixture-model".into(),
-                effort: "medium".into(),
-                flow_id_option: predecessor.map(str::to_owned),
-                remembering: signal_flow::Remembering::Predecessors(0),
-                herdr_session_name: "fixture-session".into(),
+                model_name: flow_ethos::ModelName("fixture-model".into()),
+                effort: signal_flow::Effort("medium".into()),
+                flow_id_option: predecessor.map(str::to_owned).map(flow_ethos::FlowId),
+                remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(
+                    0,
+                )),
+                herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
                 leave_outs_option: None,
-                instruction_prompt: "fixture instruction".into(),
+                instruction_prompt: signal_flow::InstructionPrompt("fixture instruction".into()),
             };
             let composed = self
                 .nexus
@@ -5427,7 +5503,7 @@ mod tests {
                 .current()
                 .compose(
                     crate::composition::HarnessedProfile {
-                        remembered_flows: Vec::new(),
+                        remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                         harness_kind: HarnessKind::Codex,
                         launch_profile: profile.clone(),
                     },
@@ -5435,21 +5511,21 @@ mod tests {
                 )
                 .expect("launch composes");
             let pane = HerdrPaneBinding {
-                launch_request_id: launch_request_id.into(),
-                herdr_session_name: "fixture-session".into(),
-                herdr_agent_name: "fixture-agent".into(),
-                herdr_workspace_id: "fixture-workspace".into(),
-                herdr_pane_id: "w1:p1".into(),
-                herdr_terminal_id: "fixture-terminal".into(),
+                launch_request_id: signal_flow::LaunchRequestId(launch_request_id.into()),
+                herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
+                herdr_agent_name: signal_flow::HerdrAgentName("fixture-agent".into()),
+                herdr_workspace_id: signal_flow::HerdrWorkspaceId("fixture-workspace".into()),
+                herdr_pane_id: signal_flow::HerdrPaneId("w1:p1".into()),
+                herdr_terminal_id: signal_flow::HerdrTerminalId("fixture-terminal".into()),
             };
             let transcript_root = self.directory.path().join("native-transcripts/codex");
             fs::create_dir_all(&transcript_root).expect("transcript root");
             self.configure_model_of(&profile);
             StagedLaunch {
                 binding: NativeLaunchBinding {
-                    launch_request_id: launch_request_id.into(),
-                    flow_id: "908786".into(),
-                    native_session_id: STAGED_SESSION.into(),
+                    launch_request_id: signal_flow::LaunchRequestId(launch_request_id.into()),
+                    flow_id: flow_ethos::FlowId("908786".into()),
+                    native_session_id: signal_flow::NativeSessionId(STAGED_SESSION.into()),
                     harness_kind: HarnessKind::Codex,
                     herdr_pane_binding: pane.clone(),
                 },
@@ -5565,7 +5641,7 @@ mod tests {
             )
             .expect("predecessor flow claim");
             let mut node = self.node();
-            node.flow_id = flow_id.into();
+            node.flow_id = flow_ethos::FlowId(flow_id.into());
             assert!(matches!(
                 self.nexus.store.register_flow(node),
                 Ok(crate::store::FlowRegistration::Registered(_))
@@ -5575,7 +5651,9 @@ mod tests {
 
         fn routable(&self, flow_id: &str) -> bool {
             matches!(
-                self.nexus.dispatch(Query::ResolveRecipient(flow_id.into())),
+                self.nexus.dispatch(Query::ResolveRecipient(
+                    signal_flow::RecipientResolutionRequest(flow_ethos::FlowId(flow_id.into()))
+                )),
                 Response::RecipientResolved(_)
             )
         }
@@ -5609,29 +5687,36 @@ mod tests {
                 flow_kind: profile.flow_kind.clone(),
                 tool_set: profile.tool_set.clone(),
                 continuity: meta_signal_flow::Continuity::OnDemand,
-                purpose: String::new(),
-                records: vec![],
+                purpose: meta_signal_flow::Purpose(String::new()),
+                records: meta_signal_flow::Records(vec![]),
             };
         fixture
             .nexus
             .store
             .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
-                declaration(&first, Some(own_root.to_string_lossy().into_owned())),
+                declaration(
+                    &first,
+                    Some(meta_signal_flow::Root(
+                        own_root.to_string_lossy().into_owned(),
+                    )),
+                ),
                 declaration(&second, None),
             ]))
             .unwrap();
         assert_eq!(
-            fixture.nexus.launch_root(&first.address).unwrap(),
+            fixture.nexus.launch_root(&first.address).unwrap().0,
             own_root.to_string_lossy()
         );
         assert_eq!(
             fixture.nexus.launch_root(&second.address).unwrap(),
-            fixture
-                .nexus
-                .store
-                .runtime_configuration()
-                .unwrap()
-                .source_root
+            meta_signal_flow::Root(
+                fixture
+                    .nexus
+                    .store
+                    .runtime_configuration()
+                    .unwrap()
+                    .source_root
+            )
         );
     }
 
@@ -5647,14 +5732,16 @@ mod tests {
             .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
                 meta_signal_flow::ConfigureMetaflow {
                     address: staged.profile.address.clone(),
-                    root_option: Some(invalid.to_string_lossy().into_owned()),
+                    root_option: Some(meta_signal_flow::Root(
+                        invalid.to_string_lossy().into_owned(),
+                    )),
                     system_modules: staged.profile.system_modules.clone(),
                     user_modules: staged.profile.user_modules.clone(),
                     flow_kind: staged.profile.flow_kind.clone(),
                     tool_set: staged.profile.tool_set.clone(),
                     continuity: meta_signal_flow::Continuity::OnDemand,
-                    purpose: String::new(),
-                    records: vec![],
+                    purpose: meta_signal_flow::Purpose(String::new()),
+                    records: meta_signal_flow::Records(vec![]),
                 },
             ]))
             .expect("invalid workspace declaration is stored as configuration");
@@ -5673,7 +5760,7 @@ mod tests {
             fixture
                 .nexus
                 .store
-                .launch_attempt(&staged.profile.launch_request_id)
+                .launch_attempt(&staged.profile.launch_request_id.0)
                 .unwrap(),
             None
         );
@@ -5744,7 +5831,9 @@ mod tests {
                 .register_flow_in_role(
                     FlowNode {
                         flow_id: self.binding.flow_id.clone(),
-                        session_id: self.binding.native_session_id.clone(),
+                        session_id: signal_flow::SessionId(
+                            self.binding.native_session_id.0.clone(),
+                        ),
                         harness_kind: HarnessKind::Codex,
                         endpoint_selection: EndpointSelection::Unavailable,
                         herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
@@ -5756,7 +5845,7 @@ mod tests {
                         origin: self.origin.clone(),
                         flow_lifecycle: FlowLifecycle::Pending,
                     },
-                    signal_flow::Caller {
+                    signal_flow::CallerIdentity {
                         flow_id: self.binding.flow_id.clone(),
                         aspect: self.profile.address.aspect.clone(),
                         model_name: self.profile.model_name.clone(),
@@ -5793,16 +5882,20 @@ mod tests {
                     .iter()
                     .map(|part| part.prompt_sha256.clone())
                     .collect(),
-                parts_submitted: 1,
-                stops_reported: 0,
-                leave_outs: Vec::new(),
+                parts_submitted: signal_flow::PartsSubmitted(1),
+                stops_reported: signal_flow::StopsReported(0),
+                leave_outs: signal_flow::LeaveOuts(Vec::new()),
                 herdr_pane_binding: self.pane.clone(),
                 native_transcript_boundary: NativeTranscriptBoundary::Absent(
                     NativeTranscriptAbsence {
                         native_session_id: self.binding.native_session_id.clone(),
                         harness_kind: HarnessKind::Codex,
-                        transcript_root_device: root_metadata.dev().to_string(),
-                        transcript_root_inode: root_metadata.ino().to_string(),
+                        transcript_root_device: signal_flow::TranscriptRootDevice(
+                            root_metadata.dev().to_string(),
+                        ),
+                        transcript_root_inode: signal_flow::TranscriptRootInode(
+                            root_metadata.ino().to_string(),
+                        ),
                     },
                 ),
             };
@@ -5841,7 +5934,7 @@ mod tests {
             for row in [
                 serde_json::json!({"type":"session_meta","payload":{"id":STAGED_SESSION}}),
                 serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"medium","turn_id":"turn-staged"}}),
-                serde_json::json!({"type":"event_msg","payload":{"thread_id":STAGED_SESSION,"turn_id":"turn-staged","item":{"type":"UserMessage","content":[{"type":"text","text":self.composed.first_prompt_payload.first_prompt_body}]}}}),
+                serde_json::json!({"type":"event_msg","payload":{"thread_id":STAGED_SESSION,"turn_id":"turn-staged","item":{"type":"UserMessage","content":[{"type":"text","text":self.composed.first_prompt_payload.first_prompt_body.0}]}}}),
                 // The flow's first answer: the receipt.
                 serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Beginning."}]}}),
             ] {
@@ -5878,7 +5971,9 @@ mod tests {
         assert_inspection_outcome(
             fixture
                 .nexus
-                .dispatch(Query::LaunchStatus("reap-request".into())),
+                .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
+                    "reap-request".into(),
+                ))),
             "reap-request",
             LaunchStatusOutcome::ReplaceRejected(rejection),
             Some("908786"),
@@ -5887,7 +5982,7 @@ mod tests {
         fixture.herdr_for_replacement(0);
         assert!(matches!(
             fixture.nexus.dispatch(Query::Replace(launch.request())),
-            Response::Replaced(replaced) if replaced.flow_id == "fac697"
+            Response::Replaced(replaced) if replaced.flow_id.0 == "fac697"
         ));
         assert!(!fixture.routable("fac697"));
         assert!(fixture.routable("908786"));
@@ -5920,7 +6015,9 @@ mod tests {
         assert_inspection_outcome(
             fixture
                 .nexus
-                .dispatch(Query::LaunchStatus("unreachable-request".into())),
+                .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
+                    "unreachable-request".into(),
+                ))),
             "unreachable-request",
             LaunchStatusOutcome::ReplaceRejected(rejection),
             Some("908786"),
@@ -5930,7 +6027,7 @@ mod tests {
         let calls = fixture.herdr_for_replacement(0);
         assert!(matches!(
             fixture.nexus.dispatch(Query::Replace(launch.request())),
-            Response::Replaced(replaced) if replaced.flow_id == "fac697"
+            Response::Replaced(replaced) if replaced.flow_id.0 == "fac697"
         ));
         assert!(
             fs::read_to_string(calls)
@@ -5952,7 +6049,7 @@ mod tests {
 
         let replaced = fixture.nexus.dispatch(Query::Replace(launch.request()));
         assert!(
-            matches!(&replaced, Response::Replaced(replaced) if replaced.flow_id == "fac697"),
+            matches!(&replaced, Response::Replaced(replaced) if replaced.flow_id.0 == "fac697"),
             "an absent pane is a completed reap, not ReapRefused: {replaced:?}"
         );
         assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Stopped);
@@ -5961,7 +6058,9 @@ mod tests {
         assert_inspection_outcome(
             fixture
                 .nexus
-                .dispatch(Query::LaunchStatus("exited-request".into())),
+                .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
+                    "exited-request".into(),
+                ))),
             "exited-request",
             LaunchStatusOutcome::Replaced(match replaced {
                 Response::Replaced(replaced) => replaced,
@@ -5998,7 +6097,11 @@ mod tests {
         );
         for request in ["absent-request", "unknown-request", "stopped-request"] {
             assert_eq!(
-                fixture.nexus.dispatch(Query::LaunchStatus(request.into())),
+                fixture
+                    .nexus
+                    .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
+                        request.into()
+                    ))),
                 Response::LaunchStatusRejected(
                     signal_flow::LaunchStatusRejection::UnknownLaunchRequest
                 )
@@ -6017,7 +6120,9 @@ mod tests {
         assert_eq!(
             fixture
                 .nexus
-                .dispatch(Query::LaunchStatus("outcome-without-attempt".into())),
+                .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
+                    "outcome-without-attempt".into()
+                ))),
             Response::LaunchStatusRejected(signal_flow::LaunchStatusRejection::InconsistentRecords)
         );
         assert!(
@@ -6054,7 +6159,9 @@ mod tests {
         );
 
         assert!(matches!(
-            fixture.nexus.dispatch(Query::Stop("908786".into())),
+            fixture
+                .nexus
+                .dispatch(Query::Stop(flow_ethos::FlowId("908786".into()))),
             Response::Stopped(_)
         ));
         assert_eq!(fixture.lifecycle("908786"), FlowLifecycle::Stopped);
@@ -6128,7 +6235,8 @@ mod tests {
                 .store
                 .metaflow(&address)
                 .unwrap()
-                .is_none_or(|metaflow| metaflow.state != flow_ethos::State::Awake("908786".into())),
+                .is_none_or(|metaflow| metaflow.state
+                    != flow_ethos::State::Awake(flow_ethos::FlowId("908786".into()))),
             "the ended flow no longer names the Address"
         );
     }
@@ -6179,7 +6287,10 @@ mod tests {
             .metaflow(&address)
             .unwrap()
             .expect("the acknowledged binding took the Address");
-        assert_eq!(held.state, flow_ethos::State::Awake("908786".into()));
+        assert_eq!(
+            held.state,
+            flow_ethos::State::Awake(flow_ethos::FlowId("908786".into()))
+        );
         assert!(
             fixture
                 .nexus
@@ -6212,9 +6323,13 @@ mod tests {
             metaflow.state,
             flow_ethos::State::Awake(started.flow_id.clone())
         );
-        assert!(metaflow.past.is_empty());
+        assert!(metaflow.past.0.is_empty());
         assert_eq!(
-            fixture.nexus.store.address_hold(&started.flow_id).unwrap(),
+            fixture
+                .nexus
+                .store
+                .address_hold(&started.flow_id.0)
+                .unwrap(),
             None,
             "confirmation keeps the Address and drops the hold"
         );
@@ -6222,7 +6337,7 @@ mod tests {
             fixture
                 .nexus
                 .store
-                .metaflow_awake_as(&started.flow_id)
+                .metaflow_awake_as(&started.flow_id.0)
                 .unwrap(),
             Some(metaflow)
         );
@@ -6246,7 +6361,9 @@ mod tests {
         assert_eq!(
             fixture
                 .nexus
-                .dispatch(Query::LaunchStatus("never-sent".into())),
+                .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
+                    "never-sent".into()
+                ))),
             Response::LaunchStatusRejected(
                 signal_flow::LaunchStatusRejection::UnknownLaunchRequest
             )
@@ -6259,7 +6376,9 @@ mod tests {
         let pending = inspected(
             fixture
                 .nexus
-                .dispatch(Query::LaunchStatus("started-request".into())),
+                .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
+                    "started-request".into(),
+                ))),
             "started-request",
         );
         assert_eq!(
@@ -6275,7 +6394,9 @@ mod tests {
         assert_inspection_outcome(
             fixture
                 .nexus
-                .dispatch(Query::LaunchStatus("started-request".into())),
+                .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
+                    "started-request".into(),
+                ))),
             "started-request",
             LaunchStatusOutcome::Started(outcome),
             Some("908786"),
@@ -6286,14 +6407,16 @@ mod tests {
         fixture.claims_flow_ids();
         fs::remove_file(&fixture.snapshot_program).expect("Herdr withdrawn");
         let mut rejected = fixture.staged_launch("rejected-request", None);
-        rejected.profile.model_name = "claude-fixture".into();
+        rejected.profile.model_name = flow_ethos::ModelName("claude-fixture".into());
         fixture.configure_model_of(&rejected.profile);
         let rejection = fixture.nexus.dispatch(Query::Start(rejected.request()));
         assert_eq!(rejection, Response::StartRejected(pane_unopened()));
         assert_inspection_outcome(
             fixture
                 .nexus
-                .dispatch(Query::LaunchStatus("rejected-request".into())),
+                .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
+                    "rejected-request".into(),
+                ))),
             "rejected-request",
             LaunchStatusOutcome::StartRejected(pane_unopened()),
             None,
@@ -6310,7 +6433,7 @@ mod tests {
         // predecessor keeps receiving.
         fixture.register_predecessor("fac697");
         let mut refused = fixture.staged_launch("refused-request", Some("fac697"));
-        refused.profile.model_name = "claude-fixture".into();
+        refused.profile.model_name = flow_ethos::ModelName("claude-fixture".into());
         fixture.configure_model_of(&refused.profile);
         let rejection = fixture.nexus.dispatch(Query::Replace(refused.request()));
         assert_eq!(
@@ -6322,7 +6445,9 @@ mod tests {
         assert_inspection_outcome(
             fixture
                 .nexus
-                .dispatch(Query::LaunchStatus("refused-request".into())),
+                .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
+                    "refused-request".into(),
+                ))),
             "refused-request",
             LaunchStatusOutcome::ReplaceRejected(signal_flow::ReplaceRejection::LaunchRefused(
                 pane_unopened(),
@@ -6346,7 +6471,7 @@ mod tests {
                     flow_container: flow_container(&socket_path),
                     address: signal_flow::Address {
                         aspect: binding.aspect.clone(),
-                        topic: "core".into(),
+                        topic: flow_ethos::Topic("core".into()),
                         model: signal_flow::Model::Sol,
                     },
                     flow_binding: binding,
@@ -6378,11 +6503,11 @@ mod tests {
         })
     }
 
-    fn mind_live() -> Caller {
-        Caller {
-            flow_id: "a001".into(),
+    fn mind_live() -> CallerIdentity {
+        CallerIdentity {
+            flow_id: flow_ethos::FlowId("a001".into()),
             aspect: Aspect::Mind,
-            model_name: "gpt-sol".into(),
+            model_name: flow_ethos::ModelName("gpt-sol".into()),
         }
     }
 
@@ -6496,7 +6621,7 @@ mod tests {
         assert_eq!(
             fixture
                 .nexus
-                .resolve_caller(pane("pane-1"), Some("a001".into())),
+                .resolve_caller(pane("pane-1"), Some(flow_ethos::FlowId("a001".into()))),
             Response::CallerResolved(mind_live())
         );
     }
@@ -6593,13 +6718,19 @@ mod tests {
         let Err(Response::FrameRefused(refused)) = refused else {
             panic!("an earlier hook's Report decodes as no Query");
         };
-        assert_eq!(refused.flow_id_option.as_deref(), Some("a001"));
+        assert_eq!(
+            refused
+                .flow_id_option
+                .as_ref()
+                .map(|value| value.0.as_str()),
+            Some("a001")
+        );
         assert_eq!(refused.seat_evidence.process, process);
         assert_eq!(
             refused.seat_evidence.seat_pane_option,
             Some(signal_flow::SeatPane {
-                herdr_session_name: "messaging-build".into(),
-                herdr_pane_id: "pane-1".into(),
+                herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+                herdr_pane_id: signal_flow::HerdrPaneId("pane-1".into()),
             })
         );
 
@@ -6624,15 +6755,13 @@ mod tests {
         use crate::sending::SendsRequests;
         use crate::store::ReadsFlowMemory;
         use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
-        use signal_flow::{
-            Address, Message, Metaflow, Model, Recipient, Request, SendRequest, SentBy,
-        };
+        use signal_flow::{Address, Message, Metaflow, Model, Request, SendRequest, SentBy};
         let fixture = NexusFixture::new();
         bind_existing_caller(&fixture, "a001", "pane-1");
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
         let address = |aspect: Aspect, topic: &str, model: Model| Address {
             aspect,
-            topic: topic.into(),
+            topic: flow_ethos::Topic(topic.into()),
             model,
         };
         let sender = address(Aspect::Mind, "core", Model::Sol);
@@ -6640,7 +6769,10 @@ mod tests {
         let field = address(Aspect::Field, "core", Model::Sol);
         let elsewhere = address(Aspect::Psyche, "flow", Model::Sol);
         for (held, state) in [
-            (sender.clone(), flow_ethos::State::Awake("a001".into())),
+            (
+                sender.clone(),
+                flow_ethos::State::Awake(flow_ethos::FlowId("a001".into())),
+            ),
             (sibling.clone(), flow_ethos::State::Asleep),
             (field.clone(), flow_ethos::State::Asleep),
             (elsewhere.clone(), flow_ethos::State::Asleep),
@@ -6652,18 +6784,18 @@ mod tests {
             fixture.nexus.store.seed_metaflow(Metaflow {
                 address: held,
                 state,
-                past: vec![],
-                queue: vec![],
+                past: flow_ethos::Past(vec![]),
+                queue: flow_ethos::Queue(vec![]),
             });
         }
         let caller = MarkedProcess::spawn("sleep", &["30"], "pane-1");
         let peer = FlowStore::process_identity_for_pid(caller.0.id()).expect("caller identity");
-        let send = |recipient: Recipient, request: Request, peer: &signal_flow::Process| {
+        let send = |recipient: Address, request: Request, peer: &signal_flow::Process| {
             fixture
                 .nexus
                 .send_request(
                     SendRequest {
-                        recipient,
+                        address: recipient,
                         sendable_message: sendable_message(Message::Soft(request)),
                     },
                     Some(peer),
@@ -6688,8 +6820,8 @@ mod tests {
                 address(Aspect::Mind, "core", Model::Astra),
                 Request::Result(flow_ethos::ResultPayload::Answered(
                     flow_ethos::ResultPayload_Answered_Data {
-                        logical_delivery_id: String::new(),
-                        request_id: "none".into(),
+                        logical_delivery_id: flow_ethos::LogicalDeliveryId(String::new()),
+                        request_id: flow_ethos::RequestId("none".into()),
                         string: "done".into(),
                     },
                 )),
@@ -6704,17 +6836,18 @@ mod tests {
             .expect("metaflow reads")
             .expect("metaflow held")
             .queue;
-        let [queued] = queue.as_slice() else {
+        let [queued] = queue.0.as_slice() else {
             panic!("one request is queued: {queue:?}")
         };
         assert_eq!(
             queued.logical_delivery_id,
-            "logical-delivery-00000000000000000001"
+            flow_ethos::LogicalDeliveryId("logical-delivery-00000000000000000001".into())
         );
-        assert_eq!(queued.request_id.len(), 4);
+        assert_eq!(queued.request_id.0.len(), 4);
         assert!(
             queued
                 .request_id
+                .0
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
         );
@@ -6746,7 +6879,7 @@ mod tests {
         let fixture = NexusFixture::new();
         let at = |topic: &str| Address {
             aspect: Aspect::Mind,
-            topic: topic.into(),
+            topic: flow_ethos::Topic(topic.into()),
             model: Model::Sol,
         };
         let sender = at("resultSender");
@@ -6756,8 +6889,8 @@ mod tests {
             fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
                 address: address.clone(),
                 state: State::Asleep,
-                past: vec![],
-                queue: vec![],
+                past: flow_ethos::Past(vec![]),
+                queue: flow_ethos::Queue(vec![]),
             });
         }
         let PrivateSendResponse::SendAccepted(accepted) = fixture
@@ -6785,7 +6918,7 @@ mod tests {
         let result = |request_id: String| {
             SendableMessage::Soft(SendableRequest::Result(
                 signal_flow::SendableRequest_Result_Data {
-                    request_id,
+                    request_id: flow_ethos::RequestId(request_id),
                     string: "done".into(),
                 },
             ))
@@ -6794,7 +6927,7 @@ mod tests {
             fixture.nexus.store.resolve_sendable_message(
                 &recipient,
                 &sender,
-                result(accepted.request_id.clone())
+                result(accepted.request_id.clone().0)
             ),
             Ok(Ok(Message::Soft(flow_ethos::Request::Result(
                 ResultPayload::Answered(_)
@@ -6804,7 +6937,7 @@ mod tests {
             fixture
                 .nexus
                 .store
-                .resolve_sendable_message(&stranger, &sender, result(accepted.request_id.clone()))
+                .resolve_sendable_message(&stranger, &sender, result(accepted.request_id.clone().0))
                 .unwrap(),
             Err(Refusal::Unresolved)
         );
@@ -6831,7 +6964,7 @@ mod tests {
         let fixture = NexusFixture::new();
         let at = |topic: &str| Address {
             aspect: Aspect::Mind,
-            topic: topic.into(),
+            topic: flow_ethos::Topic(topic.into()),
             model: Model::Sol,
         };
         let sender = at("archiveOrderSender");
@@ -6840,8 +6973,8 @@ mod tests {
             fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
                 address: address.clone(),
                 state: State::Asleep,
-                past: vec![],
-                queue: vec![],
+                past: flow_ethos::Past(vec![]),
+                queue: flow_ethos::Queue(vec![]),
             });
         }
         let PrivateSendResponse::SendAccepted(order) = fixture
@@ -6865,8 +6998,8 @@ mod tests {
                 &order.logical_delivery_id,
                 signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
                     harness_kind: signal_flow::HarnessKind::Codex,
-                    native_session_id: "archive-order-session".into(),
-                    native_prompt_id: "archive-order-prompt".into(),
+                    native_session_id: signal_flow::NativeSessionId("archive-order-session".into()),
+                    native_prompt_id: signal_flow::NativePromptId("archive-order-prompt".into()),
                 }),
             )
             .expect("order delivered");
@@ -6907,7 +7040,7 @@ mod tests {
             fixture
                 .nexus
                 .store
-                .archive_request(&order.request_id, &sender)
+                .archive_request(&order.request_id.0, &sender)
                 .expect("archive checks answer"),
             Err(ArchiveRejection::NotYet)
         );
@@ -6918,8 +7051,10 @@ mod tests {
                 &answer.logical_delivery_id,
                 signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
                     harness_kind: signal_flow::HarnessKind::Codex,
-                    native_session_id: "archive-answer-session".into(),
-                    native_prompt_id: "archive-answer-prompt".into(),
+                    native_session_id: signal_flow::NativeSessionId(
+                        "archive-answer-session".into(),
+                    ),
+                    native_prompt_id: signal_flow::NativePromptId("archive-answer-prompt".into()),
                 }),
             )
             .expect("answer delivered");
@@ -6927,7 +7062,7 @@ mod tests {
             fixture
                 .nexus
                 .store
-                .archive_request(&answer.request_id, &recipient)
+                .archive_request(&answer.request_id.0, &recipient)
                 .expect("answer archives"),
             Ok(())
         );
@@ -6935,7 +7070,7 @@ mod tests {
             fixture
                 .nexus
                 .store
-                .archive_request(&order.request_id, &sender)
+                .archive_request(&order.request_id.0, &sender)
                 .expect("order archives"),
             Ok(())
         );
@@ -6957,7 +7092,7 @@ mod tests {
         let fixture = NexusFixture::new();
         let at = |topic: &str| Address {
             aspect: Aspect::Mind,
-            topic: topic.into(),
+            topic: flow_ethos::Topic(topic.into()),
             model: Model::Sol,
         };
         let sender = at("taskSender");
@@ -6966,12 +7101,12 @@ mod tests {
             fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
                 address: address.clone(),
                 state: State::Asleep,
-                past: vec![],
-                queue: vec![],
+                past: flow_ethos::Past(vec![]),
+                queue: flow_ethos::Queue(vec![]),
             });
         }
         let task = AnswerableTask {
-            minutes: 5,
+            minutes: flow_ethos::Minutes(5),
             string: "Do it".into(),
         };
         let PrivateSendResponse::SendAccepted(accepted) = fixture
@@ -6995,8 +7130,10 @@ mod tests {
                 &accepted.logical_delivery_id,
                 signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
                     harness_kind: signal_flow::HarnessKind::Codex,
-                    native_session_id: "answerable-task-session".into(),
-                    native_prompt_id: "answerable-task-turn".into(),
+                    native_session_id: signal_flow::NativeSessionId(
+                        "answerable-task-session".into(),
+                    ),
+                    native_prompt_id: signal_flow::NativePromptId("answerable-task-turn".into()),
                 }),
             )
             .expect("task reaches an answerable state");
@@ -7053,7 +7190,7 @@ mod tests {
         let fixture = NexusFixture::new();
         let declared = Address {
             aspect: Aspect::Field,
-            topic: "publisher".into(),
+            topic: flow_ethos::Topic("publisher".into()),
             model: Model::Terra,
         };
         assert!(matches!(
@@ -7063,13 +7200,19 @@ mod tests {
                     ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
                         root_option: None,
                         address: declared.clone(),
-                        system_modules: vec!["spirit-core".into()],
-                        user_modules: vec!["knowledge-flow".into()],
+                        system_modules: signal_flow::SystemModules(vec![
+                            signal_flow::ModuleIdentity("spirit-core".into())
+                        ]),
+                        user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                            "knowledge-flow".into()
+                        )]),
                         flow_kind: signal_flow::FlowKind::Regular,
                         tool_set: signal_flow::ToolSet::Default,
                         continuity: meta_signal_flow::Continuity::OnDemand,
-                        purpose: "Publishes the books.".into(),
-                        records: vec!["flows/a68420/vision/flow.md".into()],
+                        purpose: meta_signal_flow::Purpose("Publishes the books.".into()),
+                        records: meta_signal_flow::Records(vec![meta_signal_flow::RecordPath(
+                            "flows/a68420/vision/flow.md".into()
+                        )]),
                     }])
                 )),
             meta_signal_flow::Response::Configured(_)
@@ -7080,15 +7223,17 @@ mod tests {
                 .dispatch_meta(meta_signal_flow::Query::Configure(
                     ConfigurationChange::Models(vec![ConfigureModel {
                         model: Model::Terra,
-                        native: "gpt-6-luna".into(),
+                        native: meta_signal_flow::Native("gpt-6-luna".into()),
                     }])
                 )),
             meta_signal_flow::Response::Configured(_)
         ));
         let launch = |address: Address| LaunchRequest {
             address,
-            remembering: signal_flow::Remembering::Predecessors(1),
-            instruction_prompt: "Publish the newest edition.".into(),
+            remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(1)),
+            instruction_prompt: signal_flow::InstructionPrompt(
+                "Publish the newest edition.".into(),
+            ),
         };
         let Ok(Query::Start(profile)) = fixture
             .nexus
@@ -7097,24 +7242,35 @@ mod tests {
             panic!("a declared Address launches as a Start");
         };
         assert_eq!(profile.address, declared);
-        assert_eq!(profile.system_modules, vec!["spirit-core".to_owned()]);
-        assert_eq!(profile.user_modules, vec!["knowledge-flow".to_owned()]);
-        assert_eq!(profile.model_name, "gpt-6-luna");
-        assert_eq!(profile.effort, "low");
+        assert_eq!(
+            profile.system_modules.0,
+            vec![signal_flow::ModuleIdentity("spirit-core".to_owned())]
+        );
+        assert_eq!(
+            profile.user_modules.0,
+            vec![signal_flow::ModuleIdentity("knowledge-flow".to_owned())]
+        );
+        assert_eq!(
+            profile.model_name,
+            flow_ethos::ModelName("gpt-6-luna".into())
+        );
+        assert_eq!(profile.effort, signal_flow::Effort("low".into()));
         assert_eq!(profile.flow_id_option, None);
         assert_eq!(
             profile.instruction_prompt,
-            "Publishes the books.\n\nPublish the newest edition."
+            signal_flow::InstructionPrompt(
+                "Publishes the books.\n\nPublish the newest edition.".into()
+            )
         );
         assert_eq!(
             profile.remembering,
-            signal_flow::Remembering::Predecessors(1),
+            signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(1)),
             "the Launch's Remembering is the profile's"
         );
         assert_eq!(
             fixture.nexus.dispatch(Query::Launch(launch(Address {
                 aspect: Aspect::Mind,
-                topic: "nowhere".into(),
+                topic: flow_ethos::Topic("nowhere".into()),
                 model: Model::Sol,
             }))),
             Response::StartRejected(StartRejection::Undeclared)
@@ -7146,7 +7302,7 @@ mod tests {
                 process_id: bound.0.id(),
             })),
             Origin::Flow(FlowOrigin {
-                flow_id: "a001".into(),
+                flow_id: flow_ethos::FlowId("a001".into()),
                 session_id,
             })
         );
@@ -7261,9 +7417,10 @@ mod tests {
         bind_existing_caller(&fixture, "a001", "pane-1");
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
         assert_eq!(
-            fixture
-                .nexus
-                .resolve_caller(pane("pane-1"), Some("field-other".into())),
+            fixture.nexus.resolve_caller(
+                pane("pane-1"),
+                Some(flow_ethos::FlowId("field-other".into()))
+            ),
             Response::CallerResolutionRejected(
                 signal_flow::CallerResolutionRejection::CallerMismatch(mind_live())
             )

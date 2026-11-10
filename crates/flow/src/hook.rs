@@ -195,15 +195,18 @@ impl ReadsBackgroundWork for HarnessHook {
                     field("description"),
                 ) {
                     (Some(id), Some(kind), Some(status), Some(description)) => Ok(BackgroundTask {
-                        background_task_id: id.to_owned(),
+                        background_task_id: signal_flow::BackgroundTaskId(id.to_owned()),
                         background_task_kind: kind.background_task_kind(),
-                        background_task_status: status.to_owned(),
-                        description: description.to_owned(),
+                        background_task_status: signal_flow::BackgroundTaskStatus(
+                            status.to_owned(),
+                        ),
+                        description: signal_flow::Description(description.to_owned()),
                     }),
                     _ => Err(StopRefusal::BackgroundTaskMalformed(place)),
                 }
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()
+            .map(BackgroundWork)
     }
 }
 
@@ -221,7 +224,10 @@ impl ChoosesHookCall for HarnessHook {
             return HookCall::Nothing("no FLOW_ID in the harness environment");
         };
         let event = match self.event_name().as_str() {
-            "SessionStart" => Event::Started(self.optional("session_id")),
+            "SessionStart" => Event::Started(
+                self.optional("session_id")
+                    .map(signal_flow::NativeSessionId),
+            ),
             "PostToolUse" => match self
                 .input
                 .get("tool_name")
@@ -233,9 +239,13 @@ impl ChoosesHookCall for HarnessHook {
             "UserPromptSubmit" => {
                 match self.input.get("prompt").and_then(serde_json::Value::as_str) {
                     Some(prompt) => Event::PromptSubmitted(NativePrompt {
-                        native_session_id_option: self.optional("session_id"),
-                        prompt_id_option: self.optional("prompt_id"),
-                        prompt_sha256: prompt.submitted_claude_text().prompt_sha256(),
+                        native_session_id_option: self
+                            .optional("session_id")
+                            .map(signal_flow::NativeSessionId),
+                        prompt_id_option: self.optional("prompt_id").map(signal_flow::PromptId),
+                        prompt_sha256: signal_flow::PromptSha256(
+                            prompt.submitted_claude_text().prompt_sha256(),
+                        ),
                     }),
                     None => return HookCall::Nothing("UserPromptSubmit without a prompt"),
                 }
@@ -246,16 +256,28 @@ impl ChoosesHookCall for HarnessHook {
                 if self.input.get("reason").and_then(serde_json::Value::as_str)
                     == Some("clear") =>
             {
-                Event::Cleared(self.optional("session_id"))
+                Event::Cleared(
+                    self.optional("session_id")
+                        .map(signal_flow::NativeSessionId),
+                )
             }
             // The session ends: the flow has exited, whether or not
             // anything looks at its pane.
-            "SessionEnd" => Event::Ended(self.optional("session_id")),
+            "SessionEnd" => Event::Ended(
+                self.optional("session_id")
+                    .map(signal_flow::NativeSessionId),
+            ),
             "Stop" => match self.background_work() {
                 Ok(background_work) => Event::Stopped(NativeStop {
-                    native_session_id_option: self.optional("session_id"),
-                    transcript_path_option: self.optional("transcript_path"),
-                    last_assistant_message_option: self.optional("last_assistant_message"),
+                    native_session_id_option: self
+                        .optional("session_id")
+                        .map(signal_flow::NativeSessionId),
+                    transcript_path_option: self
+                        .optional("transcript_path")
+                        .map(signal_flow::TranscriptPath),
+                    last_assistant_message_option: signal_flow::LastAssistantMessageOption(
+                        self.optional("last_assistant_message"),
+                    ),
                     background_work,
                 }),
                 Err(refusal) => return HookCall::Refused(refusal),
@@ -263,7 +285,7 @@ impl ChoosesHookCall for HarnessHook {
             _ => return HookCall::Nothing("no Report for this event"),
         };
         HookCall::Report(Box::new(Query::Report(Report_Data {
-            flow_id: flow_id.clone(),
+            flow_id: signal_flow::FlowId(flow_id.clone()),
             event,
         })))
     }
@@ -345,7 +367,7 @@ mod tests {
             input,
             flow_id: flow_id.map(str::to_owned),
             configuration: Some(flow::HookConfiguration {
-                ordinary_socket_path: "unused".into(),
+                ordinary_socket_path: flow_ethos::OrdinarySocketPath("unused".into()),
             }),
         }
     }
@@ -592,12 +614,14 @@ mod tests {
                 "transcript_path": "/t/a »b».jsonl", "background_tasks": []})
             ),
             signal_flow::Query::Report(signal_flow::Report_Data {
-                flow_id: "5a4d0b".into(),
+                flow_id: signal_flow::FlowId("5a4d0b".into()),
                 event: signal_flow::Event::Stopped(signal_flow::NativeStop {
-                    native_session_id_option: Some("s".into()),
-                    transcript_path_option: Some("/t/a »b».jsonl".into()),
-                    last_assistant_message_option: None,
-                    background_work: vec![],
+                    native_session_id_option: Some(signal_flow::NativeSessionId("s".into())),
+                    transcript_path_option: Some(signal_flow::TranscriptPath(
+                        "/t/a »b».jsonl".into()
+                    )),
+                    last_assistant_message_option: signal_flow::LastAssistantMessageOption(None),
+                    background_work: signal_flow::BackgroundWork(vec![]),
                 }),
             })
         );
@@ -605,12 +629,13 @@ mod tests {
             read(serde_json::json!({"hook_event_name": "UserPromptSubmit",
                 "session_id": "s", "prompt": "abc"})),
             signal_flow::Query::Report(signal_flow::Report_Data {
-                flow_id: "5a4d0b".into(),
+                flow_id: signal_flow::FlowId("5a4d0b".into()),
                 event: signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
-                    native_session_id_option: Some("s".into()),
+                    native_session_id_option: Some(signal_flow::NativeSessionId("s".into())),
                     prompt_id_option: None,
-                    prompt_sha256:
-                        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
+                    prompt_sha256: signal_flow::PromptSha256(
+                        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into()
+                    ),
                 }),
             })
         );
@@ -618,15 +643,15 @@ mod tests {
             read(serde_json::json!({"hook_event_name": "SessionEnd",
                 "session_id": "s1", "reason": "clear"})),
             signal_flow::Query::Report(signal_flow::Report_Data {
-                flow_id: "5a4d0b".into(),
-                event: signal_flow::Event::Cleared(Some("s1".into())),
+                flow_id: signal_flow::FlowId("5a4d0b".into()),
+                event: signal_flow::Event::Cleared(Some(signal_flow::NativeSessionId("s1".into()))),
             })
         );
         assert_eq!(
             read(serde_json::json!({"hook_event_name": "SessionStart", "session_id": "s2"})),
             signal_flow::Query::Report(signal_flow::Report_Data {
-                flow_id: "5a4d0b".into(),
-                event: signal_flow::Event::Started(Some("s2".into())),
+                flow_id: signal_flow::FlowId("5a4d0b".into()),
+                event: signal_flow::Event::Started(Some(signal_flow::NativeSessionId("s2".into()))),
             })
         );
     }
@@ -643,7 +668,7 @@ mod tests {
         assert_eq!(
             *query,
             signal_flow::Query::Report(signal_flow::Report_Data {
-                flow_id: "5a4d0b".into(),
+                flow_id: signal_flow::FlowId("5a4d0b".into()),
                 event: signal_flow::Event::ToolUsed("Bash".into()),
             })
         );

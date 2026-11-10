@@ -31,12 +31,12 @@ impl KeysToolCall for ToolCallKey {
     fn record_key_text(&self) -> String {
         format!(
             "{}:{}{}:{}{}:{}",
-            self.thread_id.len(),
-            self.thread_id,
-            self.turn_id.len(),
-            self.turn_id,
-            self.call_id.len(),
-            self.call_id
+            self.thread_id.0.len(),
+            self.thread_id.0,
+            self.turn_id.0.len(),
+            self.turn_id.0,
+            self.call_id.0.len(),
+            self.call_id.0
         )
     }
 }
@@ -102,7 +102,7 @@ impl KeepsSendCalls for FlowStore {
             .filter(|node| {
                 node.harness_kind == HarnessKind::Codex
                     && !thread_id.is_empty()
-                    && node.session_id == thread_id
+                    && node.session_id.0 == thread_id
             })
             .collect::<Vec<_>>();
         let live = flows
@@ -115,7 +115,7 @@ impl KeepsSendCalls for FlowStore {
             _ => return Err(StoreError::StateInvariant),
         };
         if let Some(flow) = flow
-            && let Some(metaflow) = self.metaflow_awake_as(&flow.flow_id)?
+            && let Some(metaflow) = self.metaflow_awake_as(&flow.flow_id.0)?
         {
             return Ok(Ok(metaflow.address));
         }

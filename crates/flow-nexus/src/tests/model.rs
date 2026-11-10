@@ -16,7 +16,7 @@ pub(super) fn configure(fixture: &NexusFixture, models: &[(Model, &str)]) {
                 .iter()
                 .map(|(model, native)| meta_signal_flow::ConfigureModel {
                     model: model.clone(),
-                    native: (*native).into(),
+                    native: meta_signal_flow::Native((*native).into()),
                 })
                 .collect(),
         ))
@@ -31,17 +31,17 @@ pub(super) fn seat(
     launch_request_id: &str,
 ) -> LaunchProfile {
     LaunchProfile {
-        launch_request_id: launch_request_id.into(),
+        launch_request_id: signal_flow::LaunchRequestId(launch_request_id.into()),
         address: Address {
             aspect,
             // A topic is camelCase: the request id with its hyphens taken out.
-            topic: launch_request_id.replace('-', ""),
+            topic: flow_ethos::Topic(launch_request_id.replace('-', "")),
             model,
         },
-        model_name: native.into(),
+        model_name: flow_ethos::ModelName(native.into()),
         flow_id_option: None,
-        remembering: signal_flow::Remembering::Predecessors(0),
-        herdr_session_name: "fixture-session".into(),
+        remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(0)),
+        herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
         ..crate::composition::tests::fixture_profile()
     }
 }

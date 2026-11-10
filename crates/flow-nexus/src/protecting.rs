@@ -57,7 +57,7 @@ pub trait ChecksAsker {
 impl ChecksAsker for Asker {
     fn may(&self, act: GuardedAct, flow_id: &str) -> bool {
         match self {
-            Asker::Ordinary(Origin::Flow(asking)) => asking.flow_id == flow_id,
+            Asker::Ordinary(Origin::Flow(asking)) => asking.flow_id.0 == flow_id,
             Asker::Ordinary(Origin::Unbound) => false,
             Asker::Owner => matches!(act, GuardedAct::Stop | GuardedAct::Retire),
             Asker::Meta(None) => true,
@@ -121,7 +121,7 @@ impl GuardsProtectedAddresses for RunningNexus {
             Some(Metaflow {
                 state: flow_ethos::State::Awake(flow_id),
                 ..
-            }) => self.admits(&flow_id, asker, GuardedAct::Refresh),
+            }) => self.admits(&flow_id.0, asker, GuardedAct::Refresh),
             _ => Ok(true),
         }
     }

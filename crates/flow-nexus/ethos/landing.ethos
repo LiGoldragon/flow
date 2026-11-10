@@ -39,13 +39,11 @@ Library
   ModuleSources.Vector<ModuleSource>
   Base.String
   ChangedPaths.Vector<ChangedPath>
-  Deploy.Step
-  Retrain.Step
   Retrainings.Vector<Retraining>
-  Implement.Step
   Owners.Vector<Address>
   Reported.Boolean
-  Landing.{ Commit Base Subject ChangedPaths Deploy Retrain Retrainings Implement Owners Reported }
+  ; A landing's three steps: deploy, retrain, then implement.
+  Landing.{ Commit Base Subject ChangedPaths Step Step Retrainings Step Owners Reported }
   Landings.Vector<Landing>
   RefreshCause.[ Landed.Commit ]
   RefreshDue.{ FlowId RefreshCause }

@@ -14,7 +14,7 @@ pub(super) struct StoredLaunchPane {
 
 impl EngineRecord for StoredLaunchPane {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.pane.launch_request_id.clone())
+        RecordKey::new(self.pane.launch_request_id.clone().0)
     }
 }
 
@@ -40,11 +40,13 @@ pub trait ReadsCreatedLaunchPane {
 
 impl RecordsCreatedLaunchPane for FlowStore {
     fn record_created_launch_pane(&self, pane: HerdrPaneBinding) -> Result<bool, StoreError> {
-        let Some(attempt) = self.stored_launch_attempt(&pane.launch_request_id)? else {
+        let Some(attempt) = self.stored_launch_attempt(&pane.launch_request_id.0)? else {
             return Ok(false);
         };
         if attempt.attempt.launch_attempt_phase != LaunchAttemptPhase::NativeLaunchIntentRecorded
-            || self.stored_launch_pane(&pane.launch_request_id)?.is_some()
+            || self
+                .stored_launch_pane(&pane.launch_request_id.0)?
+                .is_some()
         {
             return Ok(false);
         }
@@ -127,7 +129,7 @@ impl StoresCreatedLaunchPane for FlowStore {
     fn mutate_launch_pane(&self, pane: StoredLaunchPane) -> Result<(), StoreError> {
         self.engine.mutate_keyed(KeyedMutation::new(
             self.launch_panes,
-            RecordKey::new(pane.pane.launch_request_id.clone()),
+            RecordKey::new(pane.pane.launch_request_id.clone().0),
             pane,
         ))?;
         Ok(())

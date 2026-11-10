@@ -48,7 +48,7 @@ impl LogsAdmission for Admission<'_> {
         match self.request {
             Request::Task(task) => format!(
                 "flow-nexus: admitted Task minutes {} deadline {} at {at}",
-                task.minutes,
+                task.minutes.0,
                 self.deadline
                     .map_or_else(|| "None".to_owned(), |deadline| deadline.to_string())
             ),

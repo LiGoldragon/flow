@@ -56,7 +56,7 @@ impl DrawsRequestId for SystemRequestIdDrawer {
                 id.push(ALPHABET[(byte[0] % 36) as usize] as char);
             }
         }
-        Ok(id)
+        Ok(flow_ethos::RequestId(id))
     }
 }
 const STORE_IDENTITY_TABLE_NAME: TableName = TableName::new("flow_nexus_store_identity");
@@ -94,7 +94,7 @@ pub(crate) struct RequestIdBinding {
 }
 impl EngineRecord for RequestIdBinding {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.request_id.clone())
+        RecordKey::new(self.request_id.clone().0)
     }
 }
 impl MemoryDefinition for RequestIdBinding {
@@ -181,7 +181,7 @@ pub(crate) trait CorePresentationRoute {
 impl CorePresentationRoute for Address {
     fn is_core_presentation(&self) -> bool {
         self.aspect == signal_flow::Aspect::Psyche
-            && self.topic == "core"
+            && self.topic.0 == "core"
             && self.model == signal_flow::Model::Fable
     }
 }
@@ -231,7 +231,7 @@ pub(crate) struct CurrentLogicalDelivery {
 }
 impl EngineRecord for CurrentLogicalDelivery {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.snapshot.logical_delivery_id.clone())
+        RecordKey::new(self.snapshot.logical_delivery_id.clone().0)
     }
 }
 
@@ -250,7 +250,7 @@ pub(crate) struct LogicalDeliveryEvent {
 }
 impl EngineRecord for LogicalDeliveryEvent {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(format!("{:020}", self.snapshot.delivery_cursor))
+        RecordKey::new(format!("{:020}", self.snapshot.delivery_cursor.0))
     }
 }
 
@@ -520,7 +520,7 @@ impl MintsRequestIds for FlowStore {
     ) -> Result<Option<RequestIdBinding>, StoreError> {
         let rows = self.engine.match_records(QueryPlan::key(
             self.logical_deliveries.request_ids,
-            RecordKey::new(id.clone()),
+            RecordKey::new(id.clone().0),
         ))?;
         Ok(rows.records().first().cloned())
     }
@@ -578,8 +578,9 @@ impl MintsRequestIds for FlowStore {
         let draws = self.request_id_draws()?;
         for _ in 0..draws {
             let id = self.request_id_drawer.draw_request_id()?;
-            if id.len() != 4
+            if id.0.len() != 4
                 || !id
+                    .0
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
             {
@@ -587,7 +588,7 @@ impl MintsRequestIds for FlowStore {
             }
             let exists = self.engine.match_records(QueryPlan::key(
                 self.logical_deliveries.request_ids,
-                RecordKey::new(id.clone()),
+                RecordKey::new(id.clone().0),
             ))?;
             if exists.records().is_empty() {
                 return Ok(Ok(id));
@@ -832,7 +833,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         let Some(snapshot) = self.logical_delivery_snapshot(&binding.logical_delivery_id)? else {
             return Err(StoreError::StateInvariant);
         };
-        let attempts = self.delivery_attempts_for(&binding.logical_delivery_id)?;
+        let attempts = self.delivery_attempts_for(&binding.logical_delivery_id.0)?;
         let receipt = attempts.iter().find_map(|attempt| {
             let recorded: &NativeDeliveryReceipt = match &attempt.phase {
                 QueueDeliveryPhase::ReceiptRecorded(value) | QueueDeliveryPhase::Settled(value) => {
@@ -846,8 +847,8 @@ impl RecordsLogicalDeliveries for FlowStore {
             };
             Some(NativeReceipt {
                 harness_kind: attempt.harness_kind.clone(),
-                native_session_id: attempt.thread_id.clone(),
-                native_prompt_id: recorded.turn_id.clone(),
+                native_session_id: signal_flow::NativeSessionId(attempt.thread_id.clone()),
+                native_prompt_id: signal_flow::NativePromptId(recorded.turn_id.clone()),
             })
         });
         let read_by = match binding.closure {
@@ -856,8 +857,8 @@ impl RecordsLogicalDeliveries for FlowStore {
         };
         Ok(Some(meta_signal_flow::DeliveryDebugged_Data {
             delivery_snapshot: snapshot,
-            receipt,
-            read_by,
+            receipt: meta_signal_flow::Receipt(receipt),
+            read_by: meta_signal_flow::ReadBy(read_by),
         }))
     }
 
@@ -941,7 +942,8 @@ impl RecordsLogicalDeliveries for FlowStore {
             .write_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let Some(binding) = self.request_binding(&request_id.to_owned())? else {
+        let Some(binding) = self.request_binding(&flow_ethos::RequestId(request_id.to_owned()))?
+        else {
             return Ok(Err(ArchiveRejection::UnknownRequest));
         };
         let Some(retained) = self
@@ -959,7 +961,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         }
         use super::queue_delivery::EndsQueueDeliveryPhase;
         if self
-            .delivery_attempts_for(&binding.logical_delivery_id)?
+            .delivery_attempts_for(&binding.logical_delivery_id.0)?
             .iter()
             .any(|attempt| !attempt.phase.is_finished())
         {
@@ -968,11 +970,9 @@ impl RecordsLogicalDeliveries for FlowStore {
         let replies = self
             .engine
             .match_records(QueryPlan::all(self.logical_deliveries.simplified_replies))?;
-        if replies
-            .records()
-            .iter()
-            .any(|reply| !reply.completed && reply.input_delivery_id == binding.logical_delivery_id)
-        {
+        if replies.records().iter().any(|reply| {
+            !reply.completed && reply.input_delivery_id == binding.logical_delivery_id.0
+        }) {
             return Ok(Err(ArchiveRejection::NotYet));
         }
         let mut request_named = false;
@@ -985,12 +985,12 @@ impl RecordsLogicalDeliveries for FlowStore {
                 | Message::MiddleAbrupt(request)
                 | Message::Soft(request) => match request {
                     Request::Result(flow_ethos::ResultPayload::Answered(answer)) => {
-                        answer.request_id == request_id
+                        answer.request_id.0 == request_id
                     }
                     Request::Done(flow_ethos::DonePayload::Answered(answer)) => {
-                        answer.request_id == request_id
+                        answer.request_id.0 == request_id
                     }
-                    Request::Reminder(reminder) => reminder.request_id == request_id,
+                    Request::Reminder(reminder) => reminder.request_id.0 == request_id,
                     _ => false,
                 },
             };
@@ -1058,7 +1058,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         }
         let rows = self.engine.match_records(QueryPlan::key(
             self.logical_deliveries.current,
-            RecordKey::new(binding.logical_delivery_id.clone()),
+            RecordKey::new(binding.logical_delivery_id.clone().0),
         ))?;
         let [current] = rows.records() else {
             return Err(StoreError::StateInvariant);
@@ -1086,7 +1086,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         let task_reminder = if is_task {
             let reminders = self.engine.match_records(QueryPlan::key(
                 self.reminders,
-                RecordKey::new(binding.logical_delivery_id.clone()),
+                RecordKey::new(binding.logical_delivery_id.clone().0),
             ))?;
             match reminders.records() {
                 [] => false,
@@ -1097,9 +1097,9 @@ impl RecordsLogicalDeliveries for FlowStore {
             false
         };
         let mut archived = current.clone();
-        archived.archived = Some(cursor);
+        archived.archived = Some(signal_flow::DeliveryCursor(cursor));
         let mut event = current.snapshot.clone();
-        event.delivery_cursor = cursor;
+        event.delivery_cursor = signal_flow::DeliveryCursor(cursor);
         event.delivery_state = DeliveryState::Archived;
         let next_counter = LogicalDeliveryCounter {
             next_cursor: cursor.checked_add(1).ok_or(StoreError::StateInvariant)?,
@@ -1122,7 +1122,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         let commit = if task_reminder {
             commit.retract(
                 self.reminders,
-                RecordKey::new(binding.logical_delivery_id.clone()),
+                RecordKey::new(binding.logical_delivery_id.clone().0),
             )
         } else {
             commit
@@ -1155,11 +1155,13 @@ impl RecordsLogicalDeliveries for FlowStore {
         }
         let mut store_identity = String::with_capacity(16);
         for _ in 0..4 {
-            store_identity.push_str(&self.request_id_drawer.draw_request_id()?);
+            store_identity.push_str(&self.request_id_drawer.draw_request_id()?.0);
         }
         self.engine.assert(Assertion::new(
             self.logical_deliveries.store_identity,
-            StoredStoreIdentity { store_identity },
+            StoredStoreIdentity {
+                store_identity: signal_flow::StoreIdentity(store_identity),
+            },
         ))?;
         Ok(())
     }
@@ -1176,7 +1178,7 @@ impl RecordsLogicalDeliveries for FlowStore {
     ) -> Result<meta_signal_flow::DebugSnapshot, StoreError> {
         let mut flow_id_vector = Vec::new();
         if let Some(metaflow) = self.metaflow(address)? {
-            flow_id_vector.extend(metaflow.past);
+            flow_id_vector.extend(metaflow.past.0);
             if let flow_ethos::State::Awake(flow_id) = metaflow.state {
                 flow_id_vector.push(flow_id);
             }
@@ -1211,8 +1213,8 @@ impl RecordsLogicalDeliveries for FlowStore {
         let Some(mut stored) = self.stored_metaflow(address)? else {
             return Ok(false);
         };
-        if stored.metaflow.state != flow_ethos::State::Awake(flow_id.to_owned())
-            || !stored.metaflow.queue.starts_with(startup)
+        if stored.metaflow.state != flow_ethos::State::Awake(flow_ethos::FlowId(flow_id.to_owned()))
+            || !stored.metaflow.queue.0.starts_with(startup)
         {
             return Ok(false);
         }
@@ -1225,7 +1227,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         for entry in startup {
             let records = self.engine.match_records(QueryPlan::key(
                 self.logical_deliveries.current,
-                RecordKey::new(entry.logical_delivery_id.clone()),
+                RecordKey::new(entry.logical_delivery_id.clone().0),
             ))?;
             let Some(current) = records.records().first() else {
                 // A legacy queue entry has no logical lifecycle row. Its
@@ -1258,7 +1260,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 return Err(StoreError::StateInvariant);
             }
             let mut snapshot = current.snapshot.clone();
-            snapshot.delivery_cursor = next_cursor;
+            snapshot.delivery_cursor = signal_flow::DeliveryCursor(next_cursor);
             snapshot.delivery_state = delivered;
             next_cursor = next_cursor
                 .checked_add(1)
@@ -1286,7 +1288,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 commit.assert(self.logical_deliveries.counter, counter)
             };
         }
-        stored.metaflow.queue.drain(..startup.len());
+        stored.metaflow.queue.0.drain(..startup.len());
         commit = commit.mutate(self.metaflows, stored);
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
@@ -1388,8 +1390,8 @@ impl RecordsLogicalDeliveries for FlowStore {
             matches!(
                 &record.snapshot.delivery_state,
                 DeliveryState::Delivered(receipt)
-                    if receipt.native_session_id == native_session_id
-                        && receipt.native_prompt_id == native_prompt_id
+                    if receipt.native_session_id.0 == native_session_id
+                        && receipt.native_prompt_id.0 == native_prompt_id
             )
         });
         if !consumed {
@@ -1399,7 +1401,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         let destination = if core_presentation {
             Address {
                 aspect: signal_flow::Aspect::Psyche,
-                topic: "book".into(),
+                topic: signal_flow::Topic("book".into()),
                 model: signal_flow::Model::Sonnet,
             }
         } else {
@@ -1415,8 +1417,8 @@ impl RecordsLogicalDeliveries for FlowStore {
             .map_err(|_| StoreError::StateInvariant)?;
         let id = format!("simplified-result-{flow_id}-{}", binding.input_delivery_id);
         let source = binding.source.clone();
-        target.metaflow.queue.push(QueueEntry {
-            logical_delivery_id: id.clone(),
+        target.metaflow.queue.0.push(QueueEntry {
+            logical_delivery_id: flow_ethos::LogicalDeliveryId(id.clone()),
             request_id: request_id.clone(),
             sent_by: SentBy::Sender(source.clone()),
             delivery: flow_ethos::Delivery::Wake,
@@ -1427,8 +1429,8 @@ impl RecordsLogicalDeliveries for FlowStore {
             }),
         });
         let snapshot = DeliverySnapshot {
-            delivery_cursor: cursor,
-            logical_delivery_id: id,
+            delivery_cursor: signal_flow::DeliveryCursor(cursor),
+            logical_delivery_id: signal_flow::LogicalDeliveryId(id),
             request_id: request_id.clone(),
             sent_by: SentBy::Sender(source),
             address: destination.clone(),
@@ -1448,8 +1450,8 @@ impl RecordsLogicalDeliveries for FlowStore {
             let notice_request_id = self
                 .mint_request_id()?
                 .map_err(|_| StoreError::StateInvariant)?;
-            notification.metaflow.queue.push(QueueEntry {
-                logical_delivery_id: notice_id.clone(),
+            notification.metaflow.queue.0.push(QueueEntry {
+                logical_delivery_id: flow_ethos::LogicalDeliveryId(notice_id.clone()),
                 request_id: notice_request_id.clone(),
                 sent_by: SentBy::Sender(binding.source.clone()),
                 delivery: flow_ethos::Delivery::Wake,
@@ -1458,8 +1460,8 @@ impl RecordsLogicalDeliveries for FlowStore {
                 )),
             });
             let notice_snapshot = DeliverySnapshot {
-                delivery_cursor: next_cursor,
-                logical_delivery_id: notice_id,
+                delivery_cursor: signal_flow::DeliveryCursor(next_cursor),
+                logical_delivery_id: signal_flow::LogicalDeliveryId(notice_id),
                 request_id: notice_request_id.clone(),
                 sent_by: SentBy::Sender(binding.source.clone()),
                 address: binding.recipient.clone(),
@@ -1549,7 +1551,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             .engine
             .match_records(QueryPlan::key(self.send_calls, call_key))?;
         match prior.records() {
-            [record] if record.content_sha256 == content_sha256 => {
+            [record] if record.content_sha256.0 == content_sha256 => {
                 if let ToolSendOutcome::Accepted(accepted) = &record.send_outcome {
                     let logical_id = &accepted.send_acceptance.logical_delivery_id;
                     let binding = self.request_binding(&accepted.send_acceptance.request_id)?;
@@ -1561,7 +1563,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     }
                     let current = self.engine.match_records(QueryPlan::key(
                         self.logical_deliveries.current,
-                        RecordKey::new(logical_id.clone()),
+                        RecordKey::new(logical_id.clone().0),
                     ))?;
                     let [current] = current.records() else {
                         return Err(StoreError::StateInvariant);
@@ -1571,7 +1573,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     }
                     return Ok(ToolSendOutcome::Archived(
                         crate::generated::send_tool::Archived_Data {
-                            sender: accepted.sender.clone(),
+                            address: accepted.address.clone(),
                             target: accepted.target.clone(),
                         },
                     ));
@@ -1584,10 +1586,10 @@ impl RecordsLogicalDeliveries for FlowStore {
         }
         let record = |send_outcome| SendCall {
             tool_call_key: key.clone(),
-            content_sha256: content_sha256.to_owned(),
+            content_sha256: crate::generated::send_tool::ContentSha256(content_sha256.to_owned()),
             send_outcome,
         };
-        let Some(mut stored) = self.stored_metaflow(target)? else {
+        let Some(mut stored) = self.stored_metaflow(&target.0)? else {
             let outcome =
                 ToolSendOutcome::Refused(ToolSendRefusal::UnknownRecipient(target.clone()));
             self.engine
@@ -1595,8 +1597,8 @@ impl RecordsLogicalDeliveries for FlowStore {
             return Ok(outcome);
         };
         if self
-            .stored_metaflow_lock(target)?
-            .is_some_and(|held| held.lock.until > now)
+            .stored_metaflow_lock(&target.0)?
+            .is_some_and(|held| held.lock.until > flow_ethos::generated::library::Until(now))
         {
             let outcome = ToolSendOutcome::Refused(ToolSendRefusal::Held);
             self.engine
@@ -1648,30 +1650,30 @@ impl RecordsLogicalDeliveries for FlowStore {
             flow_ethos::Delivery::Wake
         };
         let entry = QueueEntry {
-            logical_delivery_id: id.clone(),
+            logical_delivery_id: flow_ethos::LogicalDeliveryId(id.clone()),
             request_id: request_id.clone(),
             sent_by: SentBy::Sender(sender.clone()),
             delivery,
             message,
         };
-        stored.metaflow.queue.push(entry.clone());
+        stored.metaflow.queue.0.push(entry.clone());
         let snapshot = DeliverySnapshot {
-            delivery_cursor: cursor,
-            logical_delivery_id: id.clone(),
+            delivery_cursor: signal_flow::DeliveryCursor(cursor),
+            logical_delivery_id: signal_flow::LogicalDeliveryId(id.clone()),
             request_id: request_id.clone(),
             sent_by: SentBy::Sender(sender.clone()),
             address: stored.metaflow.address.clone(),
             delivery_state: DeliveryState::Queued,
         };
         let acceptance = SendAcceptance {
-            logical_delivery_id: id,
+            logical_delivery_id: signal_flow::LogicalDeliveryId(id),
             request_id: request_id.clone(),
-            delivery_cursor: cursor,
+            delivery_cursor: signal_flow::DeliveryCursor(cursor),
             delivery_state: DeliveryState::Queued,
         };
         let accepted_logical_id = acceptance.logical_delivery_id.clone();
         let outcome = ToolSendOutcome::Accepted(Accepted_Data {
-            sender: sender.clone(),
+            address: sender.clone(),
             target: target.clone(),
             send_acceptance: acceptance,
         });
@@ -1689,11 +1691,11 @@ impl RecordsLogicalDeliveries for FlowStore {
         } else {
             commit.mutate(self.logical_deliveries.counter, next_counter)
         };
-        let commit = self.assert_logical_request(target, entry, commit);
+        let commit = self.assert_logical_request(&target.0, entry, commit);
         let commit = if let Some(mut binding) = answered_binding {
             let rows = self.engine.match_records(QueryPlan::key(
                 self.logical_deliveries.current,
-                RecordKey::new(binding.logical_delivery_id.clone()),
+                RecordKey::new(binding.logical_delivery_id.clone().0),
             ))?;
             let [current] = rows.records() else {
                 return Err(StoreError::StateInvariant);
@@ -1706,11 +1708,11 @@ impl RecordsLogicalDeliveries for FlowStore {
             let commit = commit.mutate(self.logical_deliveries.request_ids, binding);
             if answered_uncertain {
                 let mut read = current.clone();
-                read.snapshot.delivery_cursor = cursor + 1;
+                read.snapshot.delivery_cursor = signal_flow::DeliveryCursor(cursor + 1);
                 read.snapshot.delivery_state = DeliveryState::Read;
                 self.read_uncertain_delivery(
-                    &answered_logical_id,
-                    &accepted_logical_id,
+                    &answered_logical_id.0,
+                    &accepted_logical_id.0,
                     &mut stored,
                     commit,
                 )?
@@ -1754,7 +1756,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     self.logical_deliveries.purposes,
                     LogicalDeliveryPurpose {
                         logical_delivery_id: format!("logical-delivery-{cursor:020}"),
-                        address: target.clone(),
+                        address: target.clone().0,
                         purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
                     },
                 )
@@ -1779,9 +1781,9 @@ impl RecordsLogicalDeliveries for FlowStore {
             .map(|attempt| attempt.request_id);
         let mut commit = self.engine.begin_atomic_commit();
         let mut changed = false;
-        for entry in &mut stored.metaflow.queue {
+        for entry in &mut stored.metaflow.queue.0 {
             if entry.delivery == flow_ethos::Delivery::Wake
-                || handed_over.as_deref() == Some(entry.logical_delivery_id.as_str())
+                || handed_over.as_deref() == Some(entry.logical_delivery_id.0.as_str())
             {
                 continue;
             }
@@ -1881,12 +1883,12 @@ impl RecordsLogicalDeliveries for FlowStore {
         let create_counter = !allocation.existing;
         let mut snapshots = Vec::new();
         for metaflow in metaflows.records() {
-            for entry in &metaflow.metaflow.queue {
+            for entry in &metaflow.metaflow.queue.0 {
                 if !present.insert(entry.logical_delivery_id.clone()) {
                     continue;
                 }
                 snapshots.push(DeliverySnapshot {
-                    delivery_cursor: cursor,
+                    delivery_cursor: signal_flow::DeliveryCursor(cursor),
                     logical_delivery_id: entry.logical_delivery_id.clone(),
                     request_id: entry.request_id.clone(),
                     sent_by: entry.sent_by.clone(),
@@ -2033,7 +2035,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             // therefore suppresses the stale warning rather than queueing it.
             if let Some(flow_id) = live.current_flow_id.as_deref()
                 && let Some(threshold) = self.configured_threshold(&expected.model_name)?
-                && self.handover_green(&expected.address, flow_id, threshold.refresh)?
+                && self.handover_green(&expected.address, flow_id, threshold.refresh_threshold.0)?
             {
                 return Ok(stale());
             }
@@ -2054,7 +2056,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             | Message::Soft(request) => request.clone(),
         };
         if let Request::Done(flow_ethos::DonePayload::Answered(done)) = &request
-            && self.reminder(&done.logical_delivery_id)?.is_none()
+            && self.reminder(&done.logical_delivery_id.0)?.is_none()
         {
             return Ok(signal_flow::PrivateSendResponse::Refused(
                 Refusal::Unresolved,
@@ -2070,7 +2072,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         let task_due = match &request {
             Request::Task(task) => {
                 use super::reminder::RulesMinutes;
-                match task.minutes.ruled_interval(now) {
+                match task.minutes.0.ruled_interval(now) {
                     Ok(interval) => Some(now + interval),
                     Err(refusal) => {
                         return Ok(signal_flow::PrivateSendResponse::Refused(
@@ -2093,7 +2095,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     Unknown_Data::Lock(held.lock),
                 )));
             }
-            if held.lock.until <= held.now {
+            if held.lock.until <= flow_ethos::generated::library::Until(held.now) {
                 return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Lapsed));
             }
             Some(held.lock)
@@ -2126,16 +2128,16 @@ impl RecordsLogicalDeliveries for FlowStore {
         let create = !allocation.existing;
         let id = format!("logical-delivery-{next:020}");
         let entry = QueueEntry {
-            logical_delivery_id: id.clone(),
+            logical_delivery_id: flow_ethos::LogicalDeliveryId(id.clone()),
             request_id: request_id.clone(),
             sent_by: sent_by.clone(),
             delivery,
             message,
         };
-        stored.metaflow.queue.push(entry.clone());
+        stored.metaflow.queue.0.push(entry.clone());
         let snapshot = DeliverySnapshot {
-            delivery_cursor: next,
-            logical_delivery_id: id.clone(),
+            delivery_cursor: signal_flow::DeliveryCursor(next),
+            logical_delivery_id: signal_flow::LogicalDeliveryId(id.clone()),
             request_id: request_id.clone(),
             sent_by,
             address: stored.metaflow.address.clone(),
@@ -2182,7 +2184,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 self.logical_deliveries.request_ids,
                 RequestIdBinding {
                     request_id: request_id.clone(),
-                    logical_delivery_id: id.clone(),
+                    logical_delivery_id: signal_flow::LogicalDeliveryId(id.clone()),
                     closure: RequestClosure::Open,
                 },
             );
@@ -2194,9 +2196,9 @@ impl RecordsLogicalDeliveries for FlowStore {
                     sender: call.sender,
                     digest: call.digest,
                     answer: SendAcceptance {
-                        logical_delivery_id: id.clone(),
+                        logical_delivery_id: signal_flow::LogicalDeliveryId(id.clone()),
                         request_id: request_id.clone(),
-                        delivery_cursor: next,
+                        delivery_cursor: signal_flow::DeliveryCursor(next),
                         delivery_state: DeliveryState::Queued,
                     },
                 },
@@ -2208,7 +2210,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         let commit = if let Some(mut binding) = answered_binding {
             let rows = self.engine.match_records(QueryPlan::key(
                 self.logical_deliveries.current,
-                RecordKey::new(binding.logical_delivery_id.clone()),
+                RecordKey::new(binding.logical_delivery_id.clone().0),
             ))?;
             let [current] = rows.records() else {
                 return Err(StoreError::StateInvariant);
@@ -2217,13 +2219,13 @@ impl RecordsLogicalDeliveries for FlowStore {
                 return Err(StoreError::StateInvariant);
             }
             let answered_logical_id = binding.logical_delivery_id.clone();
-            binding.closure = RequestClosure::Answered(id.clone());
+            binding.closure = RequestClosure::Answered(signal_flow::LogicalDeliveryId(id.clone()));
             let commit = commit.mutate(self.logical_deliveries.request_ids, binding);
             if answered_uncertain {
                 let mut read = current.clone();
-                read.snapshot.delivery_cursor = next + 1;
+                read.snapshot.delivery_cursor = signal_flow::DeliveryCursor(next + 1);
                 read.snapshot.delivery_state = DeliveryState::Read;
-                self.read_uncertain_delivery(&answered_logical_id, &id, &mut stored, commit)?
+                self.read_uncertain_delivery(&answered_logical_id.0, &id, &mut stored, commit)?
                     .mutate(self.logical_deliveries.current, read.clone())
                     .assert(
                         self.logical_deliveries.events,
@@ -2250,7 +2252,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                         key: id.clone(),
                         address: reminded,
                         recipient: address.clone(),
-                        minutes: task.minutes,
+                        minutes: task.minutes.0,
                         due,
                         sent: 0,
                     },
@@ -2258,7 +2260,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             }
             Request::Done(flow_ethos::DonePayload::Answered(done)) => commit.retract(
                 self.reminders,
-                RecordKey::new(done.logical_delivery_id.clone()),
+                RecordKey::new(done.logical_delivery_id.clone().0),
             ),
             Request::Done(flow_ethos::DonePayload::Historical(_)) => commit,
             _ => commit,
@@ -2266,7 +2268,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         let commit = if let Some(lock) = lock {
             commit.retract(
                 self.metaflow_locks,
-                RecordKey::new(FlowStore::address_record_key(&lock.address)),
+                RecordKey::new(FlowStore::address_record_key(&lock.second_address)),
             )
         } else {
             commit
@@ -2323,9 +2325,9 @@ impl RecordsLogicalDeliveries for FlowStore {
         self.launch_changes.announce();
         Ok(signal_flow::PrivateSendResponse::SendAccepted(
             SendAcceptance {
-                logical_delivery_id: id,
+                logical_delivery_id: signal_flow::LogicalDeliveryId(id),
                 request_id,
-                delivery_cursor: next,
+                delivery_cursor: signal_flow::DeliveryCursor(next),
                 delivery_state: DeliveryState::Queued,
             },
         ))
@@ -2376,7 +2378,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             .write_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let key = RecordKey::new(id.clone());
+        let key = RecordKey::new(id.clone().0);
         let records = self
             .engine
             .match_records(QueryPlan::key(self.logical_deliveries.current, key))?;
@@ -2408,7 +2410,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         let next = allocation.cursor;
         let create = !allocation.existing;
         let mut snapshot = current.snapshot.clone();
-        snapshot.delivery_cursor = next;
+        snapshot.delivery_cursor = signal_flow::DeliveryCursor(next);
         snapshot.delivery_state = state;
         let counter = LogicalDeliveryCounter {
             next_cursor: next.checked_add(1).ok_or(StoreError::StateInvariant)?,
@@ -2443,7 +2445,7 @@ impl RecordsLogicalDeliveries for FlowStore {
     ) -> Result<Option<DeliverySnapshot>, StoreError> {
         let rows = self.engine.match_records(QueryPlan::key(
             self.logical_deliveries.current,
-            RecordKey::new(id.clone()),
+            RecordKey::new(id.clone().0),
         ))?;
         match rows.records() {
             [] => Ok(None),
@@ -2481,7 +2483,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 .records()
                 .iter()
                 .filter(|r| {
-                    r.snapshot.delivery_cursor > cursor
+                    r.snapshot.delivery_cursor > signal_flow::DeliveryCursor(cursor)
                         && r.snapshot.sent_by == signal_flow::SentBy::Sender(sender.clone())
                 })
                 .map(|r| r.snapshot.clone())
@@ -2500,7 +2502,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         snapshots.sort_by_key(|snapshot| snapshot.delivery_cursor);
         Ok(SendObservation {
             store_identity: self.store_identity()?,
-            delivery_cursor: highwater,
+            delivery_cursor: signal_flow::DeliveryCursor(highwater),
             delivery_snapshot_vector: snapshots,
         })
     }
@@ -2539,7 +2541,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 .records()
                 .iter()
                 .filter(|row| {
-                    row.snapshot.delivery_cursor > cursor
+                    row.snapshot.delivery_cursor > signal_flow::DeliveryCursor(cursor)
                         && admitted.contains(&row.snapshot.logical_delivery_id)
                 })
                 .map(|row| row.snapshot.clone())
@@ -2555,7 +2557,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         snapshots.sort_by_key(|snapshot| snapshot.delivery_cursor);
         Ok(SendObservation {
             store_identity: self.store_identity()?,
-            delivery_cursor: highwater,
+            delivery_cursor: signal_flow::DeliveryCursor(highwater),
             delivery_snapshot_vector: snapshots,
         })
     }

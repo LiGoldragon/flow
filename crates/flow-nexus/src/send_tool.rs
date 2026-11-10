@@ -71,13 +71,13 @@ pub struct SendTool;
 
 impl DeclaresSendTool for SendTool {
     fn tool_name() -> ToolName {
-        "send".into()
+        crate::generated::send_tool::ToolName("send".into())
     }
 
     fn tool_spec() -> serde_json::Value {
         serde_json::json!({
             "type": "function",
-            "name": Self::tool_name(),
+            "name": Self::tool_name().0,
             "description": "Send one request from this flow to the flow at a metaflow Address. Priority determines interruption and whether an asleep recipient wakes. Result answers the request id supplied in request. The answer is a durable logical-delivery outcome or a typed refusal.",
             "inputSchema": {
                 "type": "object",
@@ -152,14 +152,16 @@ impl ReadsToolCall for ToolCall {
         };
         Some(ToolCall {
             tool_call_key: ToolCallKey {
-                thread_id: text("threadId")?,
-                turn_id: text("turnId")?,
-                call_id: text("callId")?,
+                thread_id: crate::generated::send_tool::ThreadId(text("threadId")?),
+                turn_id: crate::generated::send_tool::TurnId(text("turnId")?),
+                call_id: crate::generated::send_tool::CallId(text("callId")?),
             },
-            tool_name: text("tool")?,
+            tool_name: crate::generated::send_tool::ToolName(text("tool")?),
             // Serialized back from the parsed value: the same arguments read
             // the same, however the app-server spaced them.
-            arguments: serde_json::to_string(params.get("arguments")?).ok()?,
+            arguments: crate::generated::send_tool::Arguments(
+                serde_json::to_string(params.get("arguments")?).ok()?,
+            ),
         })
     }
 }
@@ -173,7 +175,9 @@ pub trait DescribesSendInvocation {
 impl DescribesSendInvocation for ToolCall {
     fn send_invocation(&self, outcome: SendOutcome) -> SendInvocation {
         SendInvocation {
-            send_invocation_id: "send-invocation".minted_id(),
+            send_invocation_id: crate::generated::send_tool::SendInvocationId(
+                "send-invocation".minted_id(),
+            ),
             tool_call_key: self.tool_call_key.clone(),
             tool_name: self.tool_name.clone(),
             content_sha256: self.content_sha256(),
@@ -240,7 +244,9 @@ impl ReadsSendFields for ToolCall {
         match value.as_str()? {
             "Order" => Some(SendKind::Order),
             "Question" => Some(SendKind::Question),
-            "Result" => Some(SendKind::Result(request?.as_str()?.to_owned())),
+            "Result" => Some(SendKind::Result(signal_flow::RequestId(
+                request?.as_str()?.to_owned(),
+            ))),
             "Notice" => Some(SendKind::Notice),
             _ => None,
         }
@@ -264,7 +270,7 @@ impl ReadsSendFields for ToolCall {
 
 impl ReadsSendArguments for ToolCall {
     fn send_arguments(&self) -> Option<SendArguments> {
-        let arguments = serde_json::from_str::<serde_json::Value>(&self.arguments).ok()?;
+        let arguments = serde_json::from_str::<serde_json::Value>(&self.arguments.0).ok()?;
         if !Self::only_fields(
             &arguments,
             &["target", "priority", "kind", "body", "request"],
@@ -289,27 +295,29 @@ impl ReadsSendArguments for ToolCall {
             return None;
         }
         Some(SendArguments {
-            target: Address {
+            target: crate::generated::send_tool::Target(Address {
                 aspect: Self::aspect(target.get("aspect")?)?,
-                topic: topic.to_owned(),
+                topic: signal_flow::Topic(topic.to_owned()),
                 model: Self::model(target.get("model")?)?,
-            },
+            }),
             send_priority: Self::priority(arguments.get("priority")?)?,
             send_kind,
-            body: body.to_owned(),
+            body: crate::generated::send_tool::Body(body.to_owned()),
         })
     }
 
-    fn content_sha256(&self) -> String {
+    fn content_sha256(&self) -> crate::generated::send_tool::ContentSha256 {
         let mut digest = Sha256::new();
-        digest.update(self.tool_name.as_bytes());
+        digest.update(self.tool_name.0.as_bytes());
         digest.update([0]);
-        digest.update(self.arguments.as_bytes());
-        digest
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        digest.update(self.arguments.0.as_bytes());
+        crate::generated::send_tool::ContentSha256(
+            digest
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+        )
     }
 }
 
@@ -322,16 +330,16 @@ impl BecomesRequest for SendArguments {
     fn request(&self) -> Request {
         let body = self.body.clone();
         match &self.send_kind {
-            SendKind::Order => Request::Order(body),
-            SendKind::Question => Request::Question(body),
+            SendKind::Order => Request::Order(body.0),
+            SendKind::Question => Request::Question(body.0),
             SendKind::Result(request_id) => Request::Result(flow_ethos::ResultPayload::Answered(
                 flow_ethos::ResultPayload_Answered_Data {
-                    logical_delivery_id: String::new(),
+                    logical_delivery_id: flow_ethos::LogicalDeliveryId(String::new()),
                     request_id: request_id.clone(),
-                    string: body,
+                    string: body.0,
                 },
             )),
-            SendKind::Notice => Request::Notice(body),
+            SendKind::Notice => Request::Notice(body.0),
         }
     }
 }
@@ -383,8 +391,8 @@ impl ProjectsToolOutcome for SendOutcome {
     fn visible_tool_outcome(&self) -> VisibleToolOutcome {
         match self {
             SendOutcome::Accepted(value) => VisibleToolOutcome::Accepted(VisibleToolAccepted {
-                sender: value.sender.clone(),
-                target: value.target.clone(),
+                sender: value.address.clone(),
+                target: value.target.clone().0,
                 visible_send_acceptance: signal_flow::VisibleSendAcceptance {
                     delivery_cursor: value.send_acceptance.delivery_cursor,
                     request_id: value.send_acceptance.request_id.clone(),
@@ -396,14 +404,14 @@ impl ProjectsToolOutcome for SendOutcome {
             }),
             SendOutcome::Archived(value) => {
                 VisibleToolOutcome::Archived(VisibleToolLegacyUnknown {
-                    sender: value.sender.clone(),
-                    target: value.target.clone(),
+                    sender: value.address.clone(),
+                    target: value.target.clone().0,
                 })
             }
             SendOutcome::LegacyUnknown(value) => {
                 VisibleToolOutcome::LegacyUnknown(VisibleToolLegacyUnknown {
-                    sender: value.sender.clone(),
-                    target: value.target.clone(),
+                    sender: value.address.clone(),
+                    target: value.target.clone().0,
                 })
             }
             SendOutcome::Refused(value) => VisibleToolOutcome::Refused(value.clone()),
@@ -473,7 +481,7 @@ impl HandlesSendCallAnswers for RunningNexus {
             && let SendOutcome::Accepted(accepted) = &outcome
             && accepted.send_acceptance.delivery_state == signal_flow::DeliveryState::Queued
         {
-            self.wake_due(accepted.target.clone());
+            self.wake_due(accepted.target.clone().0);
         }
         let outcome = match outcome {
             SendOutcome::Accepted(mut accepted) => {
@@ -519,12 +527,12 @@ impl HandlesSendCall for RunningNexus {
             let store_refused = |error: crate::store::StoreError| {
                 eprintln!(
                     "flow-nexus: send call {} of thread {} refused by the store: {error}",
-                    key.call_id, key.thread_id
+                    key.call_id.0, key.thread_id.0
                 );
                 Self::refused(SendRefusal::Store)
             };
             // The sender is read again for every call, a replayed one included.
-            let root_thread = self.codex_endpoints.current().root_thread(&key.thread_id);
+            let root_thread = self.codex_endpoints.current().root_thread(&key.thread_id.0);
             let sender = match self.store.thread_sender(&root_thread) {
                 Ok(Ok(sender)) => sender,
                 Ok(Err(refusal)) => return Self::refused(refusal),
@@ -545,7 +553,7 @@ impl HandlesSendCall for RunningNexus {
                 let outcome = SendOutcome::Refused(refusal);
                 match self.store.record_send_call(SendCall {
                     tool_call_key: key.clone(),
-                    content_sha256,
+                    content_sha256: crate::generated::send_tool::ContentSha256(content_sha256),
                     send_outcome: outcome.clone(),
                 }) {
                     Ok(()) => outcome,
@@ -553,14 +561,14 @@ impl HandlesSendCall for RunningNexus {
                 }
             };
             let Some(arguments) = call.send_arguments() else {
-                return refused_kept(SendRefusal::Malformed, content_sha256);
+                return refused_kept(SendRefusal::Malformed, content_sha256.0);
             };
             // The target's topic is an uncapitalized camelCase identifier,
             // taken as written: its capitals are never lowered.
-            if !arguments.target.topic.as_str().is_camel_case_topic() {
+            if !arguments.target.0.topic.0.as_str().is_camel_case_topic() {
                 return refused_kept(
-                    SendRefusal::TopicRefused(arguments.target.topic.clone()),
-                    content_sha256,
+                    SendRefusal::TopicRefused(arguments.target.0.topic.clone()),
+                    content_sha256.0,
                 );
             }
             let Some(now) = std::time::SystemTime::now()
@@ -573,7 +581,7 @@ impl HandlesSendCall for RunningNexus {
             let message = arguments.message();
             if let Some(signal_flow::Refusal::Oversized(size)) = message.oversized_refusal(&sender)
             {
-                return refused_kept(SendRefusal::Oversized(size), content_sha256);
+                return refused_kept(SendRefusal::Oversized(size), content_sha256.0);
             }
             let logged = message.clone();
             let admitted_at = std::time::SystemTime::now();
@@ -581,7 +589,7 @@ impl HandlesSendCall for RunningNexus {
                 .store
                 .accept_tool_send(
                     key,
-                    &content_sha256,
+                    &content_sha256.0,
                     sender,
                     &arguments.target,
                     message,
@@ -606,7 +614,7 @@ impl HandlesSendCall for RunningNexus {
                 );
                 // Restore a formerly-awake target only after its logical
                 // delivery and exact tool-call result are durable.
-                self.rest_ended_awake(&arguments.target);
+                self.rest_ended_awake(&arguments.target.0);
             }
             outcome
         })();
@@ -806,7 +814,7 @@ impl RespondsToSendCalls for RunningNexus {
         };
         let answered = subscription.answer(id, answer.outcome.tool_response());
         if let SendOutcome::Accepted(accepted) = answer.outcome {
-            self.wake_due(accepted.target);
+            self.wake_due(accepted.target.0);
         }
         answered
     }
@@ -988,7 +996,7 @@ impl ServesLaunchCalls for RunningNexus {
             .subscription
             .answer(id, answer.outcome.tool_response());
         if let SendOutcome::Accepted(accepted) = answer.outcome {
-            self.defer_wake(accepted.target);
+            self.defer_wake(accepted.target.0);
         }
         answered
     }
@@ -1164,7 +1172,7 @@ impl RefusesInterruptedCalls for RunningNexus {
             return (Self::refused(SendRefusal::ThreadUnowned), false);
         };
         let (outcome, recorded) = if call.tool_name != SendTool::tool_name()
-            || call.tool_call_key.thread_id != thread
+            || call.tool_call_key.thread_id.0 != thread
         {
             (Self::refused(SendRefusal::ThreadUnowned), false)
         } else {
@@ -1177,7 +1185,7 @@ impl RefusesInterruptedCalls for RunningNexus {
                 Err(error) => {
                     eprintln!(
                         "flow-nexus: replayed call {} of thread {thread} refused by the store: {error}",
-                        call.tool_call_key.call_id
+                        call.tool_call_key.call_id.0
                     );
                     (Self::refused(SendRefusal::Store), false)
                 }
@@ -1221,31 +1229,31 @@ impl KeepsSendToolResponders for SendToolResponders {
         for node in nodes {
             if node.harness_kind != HarnessKind::Codex
                 || !node.flow_lifecycle.is_live()
-                || node.session_id.is_empty()
+                || node.session_id.0.is_empty()
             {
                 continue;
             }
             let adapter = nexus
                 .store
-                .role(&node.flow_id)
+                .role(&node.flow_id.0)
                 .ok()
                 .flatten()
                 .and_then(|role| {
                     nexus
                         .codex_endpoints
                         .current()
-                        .adapter_for(&role.model_name)
+                        .adapter_for(&role.model_name.0)
                         .ok()
                 });
             match adapter {
                 Some(adapter) => {
-                    wanted.insert(node.session_id, adapter);
+                    wanted.insert(node.session_id.0, adapter);
                 }
                 None => {
-                    if self.unserved.insert(node.session_id.clone()) {
+                    if self.unserved.insert(node.session_id.0.clone()) {
                         eprintln!(
                             "flow-nexus: send tool has no Codex endpoint for flow {} thread {}",
-                            node.flow_id, node.session_id
+                            node.flow_id.0, node.session_id.0
                         );
                     }
                 }

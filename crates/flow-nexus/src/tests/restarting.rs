@@ -74,7 +74,7 @@ impl SeatsRestartWorld for NexusFixture {
         let seat = launched_claude_ended_by(self, |_| true);
         self.nexus.store.seed_metaflow(metaflow(
             Model::Sol,
-            State::Awake(FLOW.into()),
+            State::Awake(flow_ethos::FlowId(FLOW.into())),
             vec![],
             vec![],
         ));
@@ -100,7 +100,7 @@ impl SeatsRestartWorld for NexusFixture {
             fs::write(
                 fresh.state.join("old-agent"),
                 serde_json::json!({
-                    "name": seat.profile.launch_request_id,
+                    "name": seat.profile.launch_request_id.0,
                     "agent": "claude",
                     "agent_status": "idle",
                     "workspace_id": "w1",
@@ -131,7 +131,7 @@ impl SeatsRestartWorld for NexusFixture {
         RestartWorld {
             fresh,
             seat,
-            old_agent: route.herdr_agent_name,
+            old_agent: route.herdr_agent_name.0,
         }
     }
 
@@ -153,7 +153,7 @@ impl SeatsRestartWorld for NexusFixture {
 /// Whether a process the kernel knew has ended: gone, another process at
 /// its pid, or a zombie its reaper has not yet collected.
 fn ended(process: &Process) -> bool {
-    match fs::read_to_string(format!("/proc/{}/stat", process.pid)) {
+    match fs::read_to_string(format!("/proc/{}/stat", process.pid.0)) {
         Err(_) => true,
         Ok(stat) => stat.contains(") Z") || !FlowStore::process_is_live(process),
     }
@@ -230,7 +230,9 @@ impl RestartWorld {
 }
 
 fn restarted(fixture: &NexusFixture) -> Response {
-    fixture.nexus.dispatch(Query::Restart(FLOW.into()))
+    fixture
+        .nexus
+        .dispatch(Query::Restart(flow_ethos::FlowId(FLOW.into())))
 }
 
 fn record(fixture: &NexusFixture) -> Option<RestartRecord> {
@@ -248,7 +250,7 @@ fn node(fixture: &NexusFixture) -> signal_flow::FlowNode {
 
 fn route_pane(fixture: &NexusFixture) -> String {
     match node(fixture).herdr_route_selection {
-        HerdrRouteSelection::Available(route) => route.herdr_pane_id,
+        HerdrRouteSelection::Available(route) => route.herdr_pane_id.0,
         HerdrRouteSelection::Unavailable => String::new(),
     }
 }
@@ -259,7 +261,7 @@ fn report_from(fixture: &NexusFixture, event: Event, caller: Option<CallerProces
     let acts = fixture.nexus.report_acts(FLOW, caller);
     assert_eq!(
         fixture.nexus.report(Report_Data {
-            flow_id: FLOW.into(),
+            flow_id: flow_ethos::FlowId(FLOW.into()),
             event: event.clone(),
         }),
         Response::Reported
@@ -267,15 +269,15 @@ fn report_from(fixture: &NexusFixture, event: Event, caller: Option<CallerProces
     if acts {
         fixture
             .nexus
-            .after_attributed_report(&FLOW.to_owned(), &event);
+            .after_attributed_report(&flow_ethos::FlowId(FLOW.to_owned().to_owned()), &event);
     }
     acts
 }
 
 fn stop_of(world: &RestartWorld, fixture: &NexusFixture) -> Event {
     Event::Stopped(NativeStop {
-        native_session_id_option: Some(world.seat.session.clone()),
-        transcript_path_option: Some(
+        native_session_id_option: Some(signal_flow::NativeSessionId(world.seat.session.clone())),
+        transcript_path_option: Some(signal_flow::TranscriptPath(
             fixture
                 .directory
                 .path()
@@ -283,16 +285,16 @@ fn stop_of(world: &RestartWorld, fixture: &NexusFixture) -> Event {
                 .join(format!("{}.jsonl", world.seat.session))
                 .to_string_lossy()
                 .into_owned(),
-        ),
-        last_assistant_message_option: None,
-        background_work: vec![],
+        )),
+        last_assistant_message_option: signal_flow::LastAssistantMessageOption(None),
+        background_work: signal_flow::BackgroundWork(vec![]),
     })
 }
 
 fn sender() -> Address {
     Address {
         aspect: Aspect::Psyche,
-        topic: "core".into(),
+        topic: flow_ethos::Topic("core".into()),
         model: Model::Opus,
     }
 }
@@ -335,7 +337,7 @@ fn send(fixture: &NexusFixture, from: &BoundSender, body: &str) -> Response {
     use crate::waking::SleepsAndWakesSeats;
     let answer = fixture.nexus.send_request(
         signal_flow::SendRequest {
-            recipient: address(Model::Sol),
+            address: address(Model::Sol),
             sendable_message: signal_flow::SendableMessage::Soft(
                 signal_flow::SendableRequest::Order(body.into()),
             ),
@@ -363,32 +365,32 @@ fn received(world: &RestartWorld, fixture: &NexusFixture, body: &str) -> usize {
 /// flow was launched in, w1:p3.
 fn spawning_record(world: &RestartWorld, pane: HerdrPaneBinding) -> RestartRecord {
     RestartRecord {
-        flow_id: FLOW.into(),
-        native_session_id: world.seat.session.clone(),
+        flow_id: flow_ethos::FlowId(FLOW.into()),
+        native_session_id: signal_flow::NativeSessionId(world.seat.session.clone()),
         address: address(Model::Sol),
         old_seat: OldSeat {
             herdr_route: HerdrRoute {
-                herdr_session_name: "fixture-session".into(),
-                herdr_agent_name: world.old_agent.clone(),
-                herdr_pane_id: OLD_PANE.into(),
-                herdr_terminal_id: "term-old".into(),
+                herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
+                herdr_agent_name: signal_flow::HerdrAgentName(world.old_agent.clone()),
+                herdr_pane_id: signal_flow::HerdrPaneId(OLD_PANE.into()),
+                herdr_terminal_id: signal_flow::HerdrTerminalId("term-old".into()),
             },
             process_option: None,
         },
         restart_phase: RestartPhase::Spawning(pane),
-        attempts: 1,
+        attempts: meta_signal_flow::Attempts(1),
     }
 }
 
 /// What the fixture Herdr makes as a restart's next pane.
 fn next_pane(agent: &str) -> HerdrPaneBinding {
     HerdrPaneBinding {
-        launch_request_id: "restart-dead-nexus".into(),
-        herdr_session_name: "fixture-session".into(),
-        herdr_agent_name: agent.into(),
-        herdr_workspace_id: "w7".into(),
-        herdr_pane_id: NEW_PANE.into(),
-        herdr_terminal_id: "term-fresh".into(),
+        launch_request_id: signal_flow::LaunchRequestId("restart-dead-nexus".into()),
+        herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
+        herdr_agent_name: signal_flow::HerdrAgentName(agent.into()),
+        herdr_workspace_id: signal_flow::HerdrWorkspaceId("w7".into()),
+        herdr_pane_id: signal_flow::HerdrPaneId(NEW_PANE.into()),
+        herdr_terminal_id: signal_flow::HerdrTerminalId("term-fresh".into()),
     }
 }
 
@@ -435,7 +437,10 @@ fn restart_awake_resting_claude_resumes_same_session() {
     let world = fixture.restart_world(true);
     let old = world.old_harness();
 
-    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        restarted(&fixture),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
 
     let resumes = world.resumes();
     assert_eq!(resumes.len(), 1, "{}", world.fresh.calls());
@@ -488,12 +493,12 @@ fn restart_awake_resting_claude_resumes_same_session() {
     assert!(ended(&old), "the old harness exited");
 
     let after = node(&fixture);
-    assert_eq!(after.session_id, world.seat.session);
+    assert_eq!(after.session_id.0, world.seat.session);
     assert_eq!(after.flow_lifecycle, FlowLifecycle::Active);
     assert_eq!(route_pane(&fixture), NEW_PANE);
     assert_eq!(
         stored(&fixture, Model::Sol).state,
-        State::Awake(FLOW.into())
+        State::Awake(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(record(&fixture), None);
     let birth = fixture
@@ -541,10 +546,13 @@ fn restart_arrival_queued_delivered_once() {
             ),
             "{queued:?}"
         );
-        assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1);
+        assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 1);
         assert!(world.calls_naming("agent prompt").is_empty());
         release_start.release();
-        assert_eq!(restarting.join().unwrap(), Response::Restarted(FLOW.into()));
+        assert_eq!(
+            restarting.join().unwrap(),
+            Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        );
     });
 
     assert_eq!(received(&world, &fixture, "arrived during the restart"), 1);
@@ -556,7 +564,7 @@ fn restart_arrival_queued_delivered_once() {
         "the old seat receives nothing: {}",
         world.fresh.calls()
     );
-    assert!(stored(&fixture, Model::Sol).queue.is_empty());
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
     fixture.nexus.drain_awake(&address(Model::Sol));
     assert_eq!(received(&world, &fixture, "arrived during the restart"), 1);
 }
@@ -572,14 +580,19 @@ fn restart_old_session_end_fenced() {
     maintain(&fixture, address(Model::Sol));
     let old_hook = world.old_hook();
     let old_witness = fixture.nexus.seat_witness(FLOW).expect("witness");
-    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        restarted(&fixture),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
 
     // The old hook outlived its harness, as a SessionEnd hook does.
     assert!(
         FlowStore::process_identity_for_pid(old_hook.process_id).is_some(),
         "the old hook still runs"
     );
-    let ended = Event::Ended(Some(world.seat.session.clone()));
+    let ended = Event::Ended(Some(signal_flow::NativeSessionId(
+        world.seat.session.clone(),
+    )));
     assert!(!report_from(
         &fixture,
         stop_of(&world, &fixture),
@@ -595,7 +608,7 @@ fn restart_old_session_end_fenced() {
     assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
     assert_eq!(
         stored(&fixture, Model::Sol).state,
-        State::Awake(FLOW.into())
+        State::Awake(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(
         fixture
@@ -621,7 +634,10 @@ fn restart_new_seat_real_exit_ends() {
     use crate::observe_agent::RecordsWitnessedExit;
     let mut fixture = NexusFixture::new();
     let world = fixture.restart_world(true);
-    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        restarted(&fixture),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
     let hook = world.new_hook();
     assert_eq!(hook.marked_pane_id(), None, "the hook's own marks are gone");
     assert_eq!(
@@ -633,7 +649,9 @@ fn restart_new_seat_real_exit_ends() {
     );
     assert!(report_from(
         &fixture,
-        Event::Ended(Some(world.seat.session.clone())),
+        Event::Ended(Some(signal_flow::NativeSessionId(
+            world.seat.session.clone()
+        ))),
         Some(hook)
     ));
     assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Exited);
@@ -641,9 +659,12 @@ fn restart_new_seat_real_exit_ends() {
 
     let mut second = NexusFixture::new();
     let _world = second.restart_world(true);
-    assert_eq!(restarted(&second), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        restarted(&second),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
     let witness: SeatWitness = second.nexus.seat_witness(FLOW).expect("witness");
-    assert_eq!(witness.route.herdr_pane_id, NEW_PANE);
+    assert_eq!(witness.route.herdr_pane_id.0, NEW_PANE);
     second.nexus.exited_as_witnessed_by(FLOW, Some(&witness));
     assert_eq!(node(&second).flow_lifecycle, FlowLifecycle::Exited);
 }
@@ -655,18 +676,21 @@ fn restart_new_seat_real_exit_ends() {
 fn restart_resumed_hooks_report_to_live_nexus() {
     let mut fixture = NexusFixture::new();
     let world = fixture.restart_world(true);
-    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        restarted(&fixture),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
     assert!(world.resumes()[0].contains("/fixture/run/flow-next/flow/flow.sock"));
     let mut queued = stored(&fixture, Model::Sol);
-    queued.queue = vec![signal_flow::QueueEntry {
-        logical_delivery_id: "after-restart".into(),
-        request_id: "test".into(),
+    queued.queue = flow_ethos::Queue(vec![signal_flow::QueueEntry {
+        logical_delivery_id: flow_ethos::LogicalDeliveryId("after-restart".into()),
+        request_id: flow_ethos::RequestId("test".into()),
         sent_by: signal_flow::SentBy::Unknown,
         delivery: flow_ethos::Delivery::Wake,
         message: signal_flow::Message::Soft(signal_flow::Request::Order(
             "for the resumed seat".into(),
         )),
-    }];
+    }]);
     fixture.nexus.store.seed_metaflow(queued);
 
     assert!(!report_from(&fixture, stop_of(&world, &fixture), None));
@@ -695,7 +719,9 @@ fn restart_close_refused_flow_unchanged() {
 
     assert_eq!(
         restarted(&fixture),
-        Response::RestartRefused(RestartRefusal::CloseRefused(FLOW.into()))
+        Response::RestartRefused(RestartRefusal::CloseRefused(flow_ethos::FlowId(
+            FLOW.into()
+        )))
     );
     let failed = record(&fixture).expect("record");
     assert_eq!(
@@ -709,7 +735,10 @@ fn restart_close_refused_flow_unchanged() {
     assert!(world.calls_naming("workspace create").is_empty());
 
     fs::remove_file(world.fresh.state.join("close-refused")).unwrap();
-    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        restarted(&fixture),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
     assert_eq!(
         world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
         2,
@@ -730,20 +759,20 @@ fn restart_resume_refused_custody_kept() {
     let mut fixture = NexusFixture::new();
     let world = fixture.restart_world(true);
     let mut queued = stored(&fixture, Model::Sol);
-    queued.queue = vec![signal_flow::QueueEntry {
-        logical_delivery_id: "kept-through-refusal".into(),
-        request_id: "test".into(),
+    queued.queue = flow_ethos::Queue(vec![signal_flow::QueueEntry {
+        logical_delivery_id: flow_ethos::LogicalDeliveryId("kept-through-refusal".into()),
+        request_id: flow_ethos::RequestId("test".into()),
         sent_by: signal_flow::SentBy::Unknown,
         delivery: flow_ethos::Delivery::Wake,
         message: signal_flow::Message::Soft(signal_flow::Request::Order("kept work".into())),
-    }];
+    }]);
     fixture.nexus.store.seed_metaflow(queued);
     fs::write(world.fresh.state.join("refused-after-start"), "").unwrap();
 
     assert_eq!(
         restarted(&fixture),
         Response::RestartRefused(RestartRefusal::ResumeRefused(ResumeRefused_Data {
-            flow_id: FLOW.into(),
+            flow_id: flow_ethos::FlowId(FLOW.into()),
             string: "SpawnRefused".into(),
         }))
     );
@@ -757,24 +786,29 @@ fn restart_resume_refused_custody_kept() {
         world.calls_naming(&format!("pane close {NEW_PANE}")).len(),
         1
     );
-    assert_eq!(node(&fixture).session_id, world.seat.session);
-    assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1);
+    assert_eq!(node(&fixture).session_id.0, world.seat.session);
+    assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 1);
     fixture.nexus.drain_awake(&address(Model::Sol));
     assert_eq!(received(&world, &fixture, "kept work"), 0, "custody kept");
 
     assert_eq!(
-        fixture.nexus.dispatch(Query::Stop(FLOW.into())),
-        Response::Stopped(FLOW.into())
+        fixture
+            .nexus
+            .dispatch(Query::Stop(flow_ethos::FlowId(FLOW.into()))),
+        Response::Stopped(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(
         record(&fixture).map(|record| record.restart_phase),
         Some(RestartPhase::Failed(RestartFailure::Stopped))
     );
     assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
-    assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1);
+    assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 1);
 
     fs::remove_file(world.fresh.state.join("refused-after-start")).unwrap();
-    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        restarted(&fixture),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
     assert_eq!(received(&world, &fixture, "kept work"), 1);
     assert_eq!(record(&fixture), None);
 }
@@ -833,7 +867,10 @@ fn restart_first_old_pane_gone_harness_exited_proceeds() {
     let mut fixture = NexusFixture::new();
     let world = fixture.restart_world(false);
     born_at_route(&fixture, exited_process());
-    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        restarted(&fixture),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
     assert!(
         world.calls_naming("pane close").is_empty(),
         "{}",
@@ -841,7 +878,7 @@ fn restart_first_old_pane_gone_harness_exited_proceeds() {
     );
     assert_eq!(world.resumes().len(), 1);
     assert_eq!(route_pane(&fixture), NEW_PANE);
-    assert_eq!(node(&fixture).session_id, world.seat.session);
+    assert_eq!(node(&fixture).session_id.0, world.seat.session);
     assert_eq!(record(&fixture), None);
 }
 
@@ -852,10 +889,10 @@ fn born_at_route(fixture: &NexusFixture, process: Process) -> SeatBirth {
         panic!("abc123 is routed")
     };
     let pane = HerdrPaneBinding {
-        launch_request_id: "restart-earlier".into(),
+        launch_request_id: signal_flow::LaunchRequestId("restart-earlier".into()),
         herdr_session_name: route.herdr_session_name.clone(),
         herdr_agent_name: route.herdr_agent_name.clone(),
-        herdr_workspace_id: "w1".into(),
+        herdr_workspace_id: signal_flow::HerdrWorkspaceId("w1".into()),
         herdr_pane_id: route.herdr_pane_id.clone(),
         herdr_terminal_id: route.herdr_terminal_id.clone(),
     };
@@ -867,7 +904,7 @@ fn born_at_route(fixture: &NexusFixture, process: Process) -> SeatBirth {
         })
         .unwrap();
     let birth = SeatBirth {
-        flow_id: FLOW.into(),
+        flow_id: flow_ethos::FlowId(FLOW.into()),
         herdr_route: route,
         process,
     };
@@ -883,15 +920,15 @@ fn spawning_record_at(fixture: &NexusFixture) -> RestartRecord {
         panic!("abc123 is routed")
     };
     RestartRecord {
-        flow_id: FLOW.into(),
-        native_session_id: node.session_id,
+        flow_id: flow_ethos::FlowId(FLOW.into()),
+        native_session_id: signal_flow::NativeSessionId(node.session_id.0),
         address: address(Model::Sol),
         old_seat: OldSeat {
             herdr_route: route,
             process_option: None,
         },
         restart_phase: RestartPhase::Closing,
-        attempts: 1,
+        attempts: meta_signal_flow::Attempts(1),
     }
 }
 
@@ -901,8 +938,12 @@ fn restart_unknown_flow() {
     let mut fixture = NexusFixture::new();
     let world = fixture.restart_world(true);
     assert_eq!(
-        fixture.nexus.dispatch(Query::Restart("fade00".into())),
-        Response::RestartRefused(RestartRefusal::UnknownFlow("fade00".into()))
+        fixture
+            .nexus
+            .dispatch(Query::Restart(flow_ethos::FlowId("fade00".into()))),
+        Response::RestartRefused(RestartRefusal::UnknownFlow(flow_ethos::FlowId(
+            "fade00".into()
+        )))
     );
     assert!(world.calls_naming("pane close").is_empty());
     assert_eq!(fixture.nexus.store.restart_records().unwrap(), vec![]);
@@ -915,21 +956,25 @@ fn restart_no_held_session() {
     let mut fixture = NexusFixture::new();
     let world = fixture.restart_world(true);
     let mut unheld = node(&fixture);
-    unheld.flow_id = "5e5510".into();
-    unheld.session_id = String::new();
+    unheld.flow_id = flow_ethos::FlowId("5e5510".into());
+    unheld.session_id = signal_flow::SessionId(String::new());
     unheld.herdr_route_selection = HerdrRouteSelection::Available(HerdrRoute {
-        herdr_session_name: "fixture-session".into(),
-        herdr_agent_name: "unheld".into(),
-        herdr_pane_id: "w2:p9".into(),
-        herdr_terminal_id: "term-unheld".into(),
+        herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
+        herdr_agent_name: signal_flow::HerdrAgentName("unheld".into()),
+        herdr_pane_id: signal_flow::HerdrPaneId("w2:p9".into()),
+        herdr_terminal_id: signal_flow::HerdrTerminalId("term-unheld".into()),
     });
     assert!(matches!(
         fixture.nexus.store.register_flow(unheld).unwrap(),
         crate::store::FlowRegistration::Registered(_)
     ));
     assert_eq!(
-        fixture.nexus.dispatch(Query::Restart("5e5510".into())),
-        Response::RestartRefused(RestartRefusal::NoHeldSession("5e5510".into()))
+        fixture
+            .nexus
+            .dispatch(Query::Restart(flow_ethos::FlowId("5e5510".into()))),
+        Response::RestartRefused(RestartRefusal::NoHeldSession(flow_ethos::FlowId(
+            "5e5510".into()
+        )))
     );
     assert!(world.calls_naming("pane close").is_empty());
     assert_eq!(fixture.nexus.store.restart_records().unwrap(), vec![]);
@@ -951,7 +996,9 @@ fn restart_transcript_absent() {
     .unwrap();
     assert_eq!(
         restarted(&fixture),
-        Response::RestartRefused(RestartRefusal::TranscriptAbsent(FLOW.into()))
+        Response::RestartRefused(RestartRefusal::TranscriptAbsent(flow_ethos::FlowId(
+            FLOW.into()
+        )))
     );
     assert!(world.calls_naming("pane close").is_empty());
     assert_eq!(record(&fixture), None);
@@ -968,7 +1015,7 @@ fn restart_busy() {
         let _wake = fixture.nexus.waking.hold(&address(Model::Sol)).unwrap();
         assert_eq!(
             restarted(&fixture),
-            Response::RestartRefused(RestartRefusal::Busy(FLOW.into()))
+            Response::RestartRefused(RestartRefusal::Busy(flow_ethos::FlowId(FLOW.into())))
         );
     }
     assert_eq!(record(&fixture), None);
@@ -983,7 +1030,7 @@ fn restart_busy() {
         .unwrap();
     assert_eq!(
         restarted(&fixture),
-        Response::RestartRefused(RestartRefusal::Busy(FLOW.into()))
+        Response::RestartRefused(RestartRefusal::Busy(flow_ethos::FlowId(FLOW.into())))
     );
     assert_eq!(record(&fixture), Some(under_way));
     assert!(world.calls_naming("pane close").is_empty());
@@ -1009,12 +1056,12 @@ fn restart_bind_mismatch() {
     assert_eq!(
         restarted(&fixture),
         Response::RestartRefused(RestartRefusal::ResumeRefused(ResumeRefused_Data {
-            flow_id: FLOW.into(),
+            flow_id: flow_ethos::FlowId(FLOW.into()),
             string: "BindMismatch".into(),
         }))
     );
     assert_eq!(
-        record(&fixture).map(|record| (record.restart_phase, record.attempts)),
+        record(&fixture).map(|record| (record.restart_phase, record.attempts.0)),
         Some((RestartPhase::Failed(RestartFailure::BindMismatch), 2))
     );
     assert_eq!(world.resumes().len(), 2);
@@ -1028,7 +1075,7 @@ fn restart_bind_mismatch() {
             .len(),
         1
     );
-    assert_eq!(node(&fixture).session_id, world.seat.session);
+    assert_eq!(node(&fixture).session_id.0, world.seat.session);
     assert_eq!(
         fixture.nexus.store.flow_nodes().unwrap().len(),
         flows_before
@@ -1068,7 +1115,7 @@ fn restart_inspect_shows_record() {
     ] {
         let held = RestartRecord {
             restart_phase: phase,
-            attempts: 3,
+            attempts: meta_signal_flow::Attempts(3),
             ..spawning_record(&world, pane.clone())
         };
         fixture.nexus.store.record_restart(held.clone()).unwrap();
@@ -1110,7 +1157,7 @@ fn restart_nexus_death_each_phase() {
             ..spawning_record(&world, pane.clone())
         };
         if phase == "Failed" {
-            left.attempts = 2;
+            left.attempts = meta_signal_flow::Attempts(2);
         }
         if phase == "Closing" {
             left.old_seat.process_option = Some(world.old_harness());
@@ -1156,7 +1203,7 @@ fn restart_nexus_death_each_phase() {
     assert!(world.calls_naming("agent start").is_empty(), "no respawn");
     assert_eq!(
         restarted(&fixture),
-        Response::RestartRefused(RestartRefusal::Interrupted(FLOW.into()))
+        Response::RestartRefused(RestartRefusal::Interrupted(flow_ethos::FlowId(FLOW.into())))
     );
 
     let (fixture, world) = reopened_at("SpawningLive");
@@ -1191,15 +1238,15 @@ fn restart_crash_around_bind_commit_delivers_once() {
         let world = fixture.restart_world(false);
         let pane = next_pane("restart-agent");
         let mut queued = stored(&fixture, Model::Sol);
-        queued.queue = vec![signal_flow::QueueEntry {
-            logical_delivery_id: "around-the-commit".into(),
-            request_id: "test".into(),
+        queued.queue = flow_ethos::Queue(vec![signal_flow::QueueEntry {
+            logical_delivery_id: flow_ethos::LogicalDeliveryId("around-the-commit".into()),
+            request_id: flow_ethos::RequestId("test".into()),
             sent_by: signal_flow::SentBy::Unknown,
             delivery: flow_ethos::Delivery::Wake,
             message: signal_flow::Message::Soft(signal_flow::Request::Order(
                 "queued around the commit".into(),
             )),
-        }];
+        }]);
         fixture.nexus.store.seed_metaflow(queued);
         left_by_dead_nexus(&fixture, &world, true);
         fixture
@@ -1215,12 +1262,14 @@ fn restart_crash_around_bind_commit_delivers_once() {
                 fixture
                     .nexus
                     .perform(Operation::Record(Record_Data::Rebound(SeatBirth {
-                        flow_id: FLOW.into(),
+                        flow_id: flow_ethos::FlowId(FLOW.into()),
                         herdr_route: HerdrRoute {
-                            herdr_session_name: "fixture-session".into(),
-                            herdr_agent_name: "restart-agent".into(),
-                            herdr_pane_id: NEW_PANE.into(),
-                            herdr_terminal_id: "term-fresh".into(),
+                            herdr_session_name: signal_flow::HerdrSessionName(
+                                "fixture-session".into()
+                            ),
+                            herdr_agent_name: signal_flow::HerdrAgentName("restart-agent".into()),
+                            herdr_pane_id: signal_flow::HerdrPaneId(NEW_PANE.into()),
+                            herdr_terminal_id: signal_flow::HerdrTerminalId("term-fresh".into()),
                         },
                         process,
                     }))),
@@ -1242,7 +1291,7 @@ fn restart_crash_around_bind_commit_delivers_once() {
         fixture.reopen_store();
         fixture.nexus.recover_wakes();
         assert_eq!(received(&world, &fixture, "queued around the commit"), 1);
-        assert!(stored(&fixture, Model::Sol).queue.is_empty());
+        assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
     }
 }
 
@@ -1260,14 +1309,18 @@ fn restart_interrupted_stop_needs_quiesced_spawn() {
     };
     fixture.nexus.store.record_restart(unknown.clone()).unwrap();
     assert_eq!(
-        fixture.nexus.dispatch(Query::Stop(FLOW.into())),
+        fixture
+            .nexus
+            .dispatch(Query::Stop(flow_ethos::FlowId(FLOW.into()))),
         Response::StopRejected(StopRejection::SpawnUnproven)
     );
     assert_eq!(record(&fixture), Some(unknown));
     assert_eq!(
         fixture
             .nexus
-            .dispatch_meta(meta_signal_flow::Query::Retire(FLOW.into())),
+            .dispatch_meta(meta_signal_flow::Query::Retire(flow_ethos::FlowId(
+                FLOW.into()
+            ))),
         meta_signal_flow::Response::RetireRejected(
             meta_signal_flow::RetireRejection::RestartUnresolved
         )
@@ -1275,7 +1328,7 @@ fn restart_interrupted_stop_needs_quiesced_spawn() {
     assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
     assert_eq!(
         restarted(&fixture),
-        Response::RestartRefused(RestartRefusal::Interrupted(FLOW.into()))
+        Response::RestartRefused(RestartRefusal::Interrupted(flow_ethos::FlowId(FLOW.into())))
     );
 
     left_by_dead_nexus(&fixture, &world, true);
@@ -1291,8 +1344,10 @@ fn restart_interrupted_stop_needs_quiesced_spawn() {
     let spawned =
         FlowStore::process_identity_for_pid(pid_in(&world.fresh.state.join("pid"))).unwrap();
     assert_eq!(
-        fixture.nexus.dispatch(Query::Stop(FLOW.into())),
-        Response::Stopped(FLOW.into())
+        fixture
+            .nexus
+            .dispatch(Query::Stop(flow_ethos::FlowId(FLOW.into()))),
+        Response::Stopped(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(
         record(&fixture).map(|record| record.restart_phase),
@@ -1307,7 +1362,10 @@ fn restart_interrupted_stop_needs_quiesced_spawn() {
         ended(&spawned),
         "the interrupted spawn's harness is stopped"
     );
-    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        restarted(&fixture),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
 }
 
 /// abc123's metaflow declared with `system_modules`, the launch's own user
@@ -1318,15 +1376,22 @@ fn declared(fixture: &NexusFixture, system_modules: &[&str], root_option: Option
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
             meta_signal_flow::ConfigureMetaflow {
-                root_option,
+                root_option: root_option.map(meta_signal_flow::Root),
                 address: address(Model::Sol),
-                system_modules: system_modules.iter().map(|&module| module.into()).collect(),
-                user_modules: vec!["operation-main-flow".into()],
+                system_modules: signal_flow::SystemModules(
+                    system_modules
+                        .iter()
+                        .map(|&module| signal_flow::ModuleIdentity(module.into()))
+                        .collect(),
+                ),
+                user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                    "operation-main-flow".into(),
+                )]),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 continuity: meta_signal_flow::Continuity::OnDemand,
-                purpose: String::new(),
-                records: vec![],
+                purpose: meta_signal_flow::Purpose(String::new()),
+                records: meta_signal_flow::Records(vec![]),
             },
         ]))
         .expect("metaflow declared");
@@ -1349,7 +1414,7 @@ fn harness_flags(fixture: &NexusFixture, flags: &str) {
         .configure_change(meta_signal_flow::ConfigurationChange::HarnessFlags(vec![
             meta_signal_flow::ConfigureHarnessFlags {
                 address: address(Model::Sol),
-                harness_flags: flags.into(),
+                harness_flag_text: meta_signal_flow::HarnessFlagText(flags.into()),
             },
         ]))
         .expect("harness flags configured");
@@ -1357,7 +1422,7 @@ fn harness_flags(fixture: &NexusFixture, flags: &str) {
 
 fn resume_refused(category: &str) -> Response {
     Response::RestartRefused(RestartRefusal::ResumeRefused(ResumeRefused_Data {
-        flow_id: FLOW.into(),
+        flow_id: flow_ethos::FlowId(FLOW.into()),
         string: category.into(),
     }))
 }
@@ -1374,9 +1439,12 @@ fn old_seat_untouched(
 ) {
     assert!(FlowStore::process_is_live(old), "the old harness runs on");
     assert_eq!(route_pane(fixture), OLD_PANE);
-    assert_eq!(node(fixture).session_id, world.seat.session);
+    assert_eq!(node(fixture).session_id.0, world.seat.session);
     assert_eq!(node(fixture).flow_lifecycle, FlowLifecycle::Active);
-    assert_eq!(stored(fixture, Model::Sol).state, State::Awake(FLOW.into()));
+    assert_eq!(
+        stored(fixture, Model::Sol).state,
+        State::Awake(flow_ethos::FlowId(FLOW.into()))
+    );
     assert_eq!(record(fixture), kept);
     assert!(
         world
@@ -1464,7 +1532,10 @@ fn restart_precomposed_success_closes_once_resumes_same_session() {
     let old = world.old_harness();
     declared_composable(&fixture);
 
-    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        restarted(&fixture),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
 
     let calls = world.fresh.calls();
     let closes: Vec<usize> = calls
@@ -1500,7 +1571,7 @@ fn restart_precomposed_success_closes_once_resumes_same_session() {
         sockets,
         "the hooks report to this Nexus only: {resume}"
     );
-    assert_eq!(node(&fixture).session_id, world.seat.session);
+    assert_eq!(node(&fixture).session_id.0, world.seat.session);
     assert_eq!(route_pane(&fixture), NEW_PANE);
     assert_eq!(record(&fixture), None);
 }
@@ -1517,7 +1588,10 @@ fn restart_retry_after_composition_refused_restarts() {
     old_seat_untouched(&world, &fixture, &old, None);
 
     declared_composable(&fixture);
-    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        restarted(&fixture),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
     assert_eq!(
         world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
         1
@@ -1581,7 +1655,10 @@ fn restart_crash_after_closing_composition_refused_old_harness_untouched() {
     old_seat_untouched(&world, &fixture, &old, Some(failed));
 
     declared_composable(&fixture);
-    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        restarted(&fixture),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
     assert_eq!(
         world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
         1
@@ -1626,7 +1703,10 @@ fn restart_failed_not_composed_by_0530_retry_resumes_same_session() {
     assert!(world.resumes().is_empty());
 
     declared_composable(&fixture);
-    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        restarted(&fixture),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
     assert_eq!(
         world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
         1,
@@ -1640,7 +1720,7 @@ fn restart_failed_not_composed_by_0530_retry_resumes_same_session() {
         "{}",
         resumes[0]
     );
-    assert_eq!(node(&fixture).session_id, world.seat.session);
+    assert_eq!(node(&fixture).session_id.0, world.seat.session);
     assert_eq!(route_pane(&fixture), NEW_PANE);
     assert_eq!(record(&fixture), None);
 }
@@ -1679,13 +1759,13 @@ fn never_two_live(world: &RestartWorld) {
 /// `body` queued for abc123's Address.
 fn queued_for_seat(fixture: &NexusFixture, body: &str) {
     let mut queued = stored(fixture, Model::Sol);
-    queued.queue = vec![signal_flow::QueueEntry {
-        logical_delivery_id: body.into(),
-        request_id: "test".into(),
+    queued.queue = flow_ethos::Queue(vec![signal_flow::QueueEntry {
+        logical_delivery_id: flow_ethos::LogicalDeliveryId(body.into()),
+        request_id: flow_ethos::RequestId("test".into()),
         sent_by: signal_flow::SentBy::Unknown,
         delivery: flow_ethos::Delivery::Wake,
         message: signal_flow::Message::Soft(signal_flow::Request::Order(body.into())),
-    }];
+    }]);
     fixture.nexus.store.seed_metaflow(queued);
 }
 
@@ -1697,10 +1777,10 @@ const FAILED_PANE: &str = "w6:p1";
 fn failed_seat(process_option: Option<Process>) -> OldSeat {
     OldSeat {
         herdr_route: HerdrRoute {
-            herdr_session_name: "fixture-session".into(),
-            herdr_agent_name: "restart-agent".into(),
-            herdr_pane_id: FAILED_PANE.into(),
-            herdr_terminal_id: "term-failed".into(),
+            herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
+            herdr_agent_name: signal_flow::HerdrAgentName("restart-agent".into()),
+            herdr_pane_id: signal_flow::HerdrPaneId(FAILED_PANE.into()),
+            herdr_terminal_id: signal_flow::HerdrTerminalId("term-failed".into()),
         },
         process_option,
     }
@@ -1728,7 +1808,7 @@ fn failed_at(
 ) -> RestartRecord {
     RestartRecord {
         restart_phase: RestartPhase::Failed(RestartFailure::ResumeRefused("SpawnRefused".into())),
-        attempts,
+        attempts: meta_signal_flow::Attempts(attempts),
         old_seat: failed_seat(process_option),
         ..spawning_record(world, next_pane("restart-agent"))
     }
@@ -1775,7 +1855,7 @@ fn reopened_once(world: &RestartWorld, fixture: &NexusFixture) {
     never_two_live(world);
     assert_eq!(record(fixture), None);
     assert_eq!(route_pane(fixture), REOPENED_PANE);
-    assert_eq!(node(fixture).session_id, world.seat.session);
+    assert_eq!(node(fixture).session_id.0, world.seat.session);
     assert_eq!(node(fixture).flow_lifecycle, FlowLifecycle::Active);
     let birth = fixture
         .nexus
@@ -1802,7 +1882,10 @@ fn restart_spawn_refused_once_reopens_same_session() {
     queued_for_seat(&fixture, "handed over after the reopen");
     fs::write(world.fresh.state.join("refused-after-start-once"), "").unwrap();
 
-    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        restarted(&fixture),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
 
     reopened_once(&world, &fixture);
     assert_eq!(
@@ -1840,7 +1923,10 @@ fn restart_bind_mismatch_once_reopens_same_session() {
     )
     .unwrap();
 
-    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        restarted(&fixture),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
 
     reopened_once(&world, &fixture);
     let pids = resumed_pids(&world);
@@ -1876,14 +1962,18 @@ fn restart_failure_every_time_spends_bound_custody_kept() {
         failed.restart_phase,
         RestartPhase::Failed(RestartFailure::ResumeRefused("SpawnRefused".into()))
     );
-    assert_eq!(failed.attempts, 2, "the restart's run and one reopen");
+    assert_eq!(
+        failed.attempts,
+        meta_signal_flow::Attempts(2),
+        "the restart's run and one reopen"
+    );
     assert_eq!(world.resumes().len(), 2, "one start per run");
     for pane in [NEW_PANE, REOPENED_PANE] {
         assert_eq!(world.calls_naming(&format!("pane close {pane}")).len(), 1);
     }
-    assert_eq!(node(&fixture).session_id, world.seat.session);
+    assert_eq!(node(&fixture).session_id.0, world.seat.session);
     assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
-    assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1);
+    assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 1);
     fixture.nexus.drain_awake(&address(Model::Sol));
     assert_eq!(received(&world, &fixture, "kept through the bound"), 0);
 
@@ -1894,7 +1984,10 @@ fn restart_failure_every_time_spends_bound_custody_kept() {
     assert_eq!(received(&world, &fixture, "kept through the bound"), 0);
 
     fs::remove_file(world.fresh.state.join("refused-after-start")).unwrap();
-    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        restarted(&fixture),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
     let resumes = world.resumes();
     assert_eq!(resumes.len(), 3);
     assert!(resumes[2].contains(&format!("--resume {}", world.seat.session)));
@@ -1902,7 +1995,7 @@ fn restart_failure_every_time_spends_bound_custody_kept() {
     assert_eq!(received(&world, &fixture, "kept through the bound"), 1);
     fixture.nexus.drain_awake(&address(Model::Sol));
     assert_eq!(received(&world, &fixture, "kept through the bound"), 1);
-    assert!(stored(&fixture, Model::Sol).queue.is_empty());
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
     never_two_live(&world);
 }
 
@@ -1919,13 +2012,13 @@ fn restart_start_in_flight_not_respawned() {
 
     assert_eq!(
         restarted(&fixture),
-        Response::RestartRefused(RestartRefusal::Interrupted(FLOW.into()))
+        Response::RestartRefused(RestartRefusal::Interrupted(flow_ethos::FlowId(FLOW.into())))
     );
     let interrupted = record(&fixture).expect("record");
     assert!(
         matches!(
             &interrupted.restart_phase,
-            RestartPhase::Interrupted(Some(pane)) if pane.herdr_pane_id == NEW_PANE
+            RestartPhase::Interrupted(Some(pane)) if pane.herdr_pane_id.0 == NEW_PANE
         ),
         "{interrupted:?}"
     );
@@ -1964,7 +2057,7 @@ fn restart_nexus_crash_after_post_close_failure_recovers() {
     assert!(resumes[0].contains(&format!("--pane {NEW_PANE}")));
     assert_eq!(record(&fixture), None);
     assert_eq!(route_pane(&fixture), NEW_PANE);
-    assert_eq!(node(&fixture).session_id, world.seat.session);
+    assert_eq!(node(&fixture).session_id.0, world.seat.session);
     assert_eq!(received(&world, &fixture, "queued before the crash"), 1);
     fixture.reopen_store();
     fixture.nexus.recover_wakes();
@@ -1984,13 +2077,13 @@ fn restart_nexus_crash_after_post_close_failure_recovers() {
     assert_eq!(world.resumes().len(), 1);
     let spent = record(&fixture).expect("record");
     assert_eq!(
-        (spent.restart_phase.clone(), spent.attempts),
+        (spent.restart_phase.clone(), spent.attempts.0),
         (
             RestartPhase::Failed(RestartFailure::ResumeRefused("SpawnRefused".into())),
             2
         )
     );
-    assert_eq!(spent.old_seat.herdr_route.herdr_pane_id, NEW_PANE);
+    assert_eq!(spent.old_seat.herdr_route.herdr_pane_id.0, NEW_PANE);
     assert_eq!(spent.old_seat.process_option, None, "no harness ran there");
     fixture.reopen_store();
     fixture.nexus.recover_wakes();
@@ -2015,12 +2108,14 @@ fn restart_owner_stop_during_bound() {
         .record_restart(failed_after_close(&world, 1))
         .unwrap();
     assert_eq!(
-        fixture.nexus.dispatch(Query::Stop(FLOW.into())),
-        Response::Stopped(FLOW.into())
+        fixture
+            .nexus
+            .dispatch(Query::Stop(flow_ethos::FlowId(FLOW.into()))),
+        Response::Stopped(flow_ethos::FlowId(FLOW.into()))
     );
     let stopped = record(&fixture).expect("record");
     assert_eq!(
-        (stopped.restart_phase.clone(), stopped.attempts),
+        (stopped.restart_phase.clone(), stopped.attempts.0),
         (RestartPhase::Failed(RestartFailure::Stopped), 1)
     );
     fixture.reopen_store();
@@ -2028,9 +2123,12 @@ fn restart_owner_stop_during_bound() {
     assert_eq!(record(&fixture), Some(stopped), "Stopped is the owner's");
     assert!(world.resumes().is_empty());
     assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
-    assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1);
+    assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 1);
     assert_eq!(received(&world, &fixture, "kept through the Stop"), 0);
-    assert_eq!(restarted(&fixture), Response::Restarted(FLOW.into()));
+    assert_eq!(
+        restarted(&fixture),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
     assert_eq!(world.resumes().len(), 1);
     assert_eq!(record(&fixture), None);
     assert_eq!(received(&world, &fixture, "kept through the Stop"), 1);
@@ -2053,9 +2151,11 @@ fn restart_owner_stop_during_bound() {
             matches!(spawning.restart_phase, RestartPhase::Spawning(_)),
             "{spawning:?}"
         );
-        assert_eq!(spawning.attempts, 2);
+        assert_eq!(spawning.attempts, meta_signal_flow::Attempts(2));
         assert_eq!(
-            fixture.nexus.dispatch(Query::Stop(FLOW.into())),
+            fixture
+                .nexus
+                .dispatch(Query::Stop(flow_ethos::FlowId(FLOW.into()))),
             Response::StopRejected(StopRejection::Restarting)
         );
         assert_eq!(record(&fixture), Some(spawning));
@@ -2141,7 +2241,7 @@ fn live_process() -> LiveProcess {
 fn killed(process: &Process) {
     assert!(
         std::process::Command::new("kill")
-            .arg(process.pid.to_string())
+            .arg(process.pid.0.to_string())
             .status()
             .expect("kill")
             .success()
@@ -2150,7 +2250,7 @@ fn killed(process: &Process) {
     use crate::event_wait::{AwaitsDescriptors, OpensExitDescriptor};
     use std::os::fd::AsFd;
     if !ended(process)
-        && let Ok(pid) = u32::try_from(process.pid)
+        && let Ok(pid) = u32::try_from(process.pid.0)
         && let Ok(exit) = pid.exit_descriptor()
     {
         let _ = [exit.as_fd()].ready(Some(std::time::Instant::now() + Duration::from_secs(10)));
@@ -2182,12 +2282,15 @@ fn orphaned(world: &RestartWorld, fixture: &NexusFixture) -> (Response, Process)
 fn orphan_record(world: &RestartWorld, fixture: &NexusFixture, orphan: &Process) -> RestartRecord {
     let failed = record(fixture).expect("record");
     assert_eq!(
-        (failed.restart_phase.clone(), failed.attempts),
+        (failed.restart_phase.clone(), failed.attempts.0),
         (RestartPhase::Failed(RestartFailure::BindMismatch), 1)
     );
-    assert_eq!(failed.native_session_id, world.seat.session);
-    assert_eq!(failed.old_seat.herdr_route.herdr_pane_id, NEW_PANE);
-    assert_eq!(failed.old_seat.herdr_route.herdr_terminal_id, "term-fresh");
+    assert_eq!(failed.native_session_id.0, world.seat.session);
+    assert_eq!(failed.old_seat.herdr_route.herdr_pane_id.0, NEW_PANE);
+    assert_eq!(
+        failed.old_seat.herdr_route.herdr_terminal_id,
+        signal_flow::HerdrTerminalId("term-fresh".into())
+    );
     assert_eq!(failed.old_seat.process_option.as_ref(), Some(orphan));
     failed
 }
@@ -2197,9 +2300,9 @@ fn orphan_record(world: &RestartWorld, fixture: &NexusFixture, orphan: &Process)
 fn not_reopened(world: &RestartWorld, fixture: &NexusFixture) {
     assert_eq!(world.resumes().len(), 1, "{}", world.fresh.calls());
     assert_eq!(world.calls_naming("workspace create").len(), 1);
-    assert_eq!(node(fixture).session_id, world.seat.session);
+    assert_eq!(node(fixture).session_id.0, world.seat.session);
     assert_eq!(node(fixture).flow_lifecycle, FlowLifecycle::Active);
-    assert_eq!(stored(fixture, Model::Sol).queue.len(), 1);
+    assert_eq!(stored(fixture, Model::Sol).queue.0.len(), 1);
     assert_eq!(received(world, fixture, "held until a reopen is proven"), 0);
 }
 
@@ -2261,13 +2364,13 @@ fn restart_missing_witness_not_reopened_retry_refused() {
     assert_eq!(restarted(&fixture), resume_refused("SpawnRefused"));
     let failed = record(&fixture).expect("record");
     assert_eq!(
-        (failed.restart_phase.clone(), failed.attempts),
+        (failed.restart_phase.clone(), failed.attempts.0),
         (
             RestartPhase::Failed(RestartFailure::ResumeRefused("SpawnRefused".into())),
             1
         )
     );
-    assert_eq!(failed.old_seat.herdr_route.herdr_pane_id, NEW_PANE);
+    assert_eq!(failed.old_seat.herdr_route.herdr_pane_id.0, NEW_PANE);
     assert_eq!(failed.old_seat.process_option, None);
     assert!(resumed_pids(&world).is_empty(), "no harness was seen");
     not_reopened(&world, &fixture);
@@ -2282,8 +2385,10 @@ fn restart_missing_witness_not_reopened_retry_refused() {
     not_reopened(&world, &fixture);
 
     assert_eq!(
-        fixture.nexus.dispatch(Query::Stop(FLOW.into())),
-        Response::Stopped(FLOW.into())
+        fixture
+            .nexus
+            .dispatch(Query::Stop(flow_ethos::FlowId(FLOW.into()))),
+        Response::Stopped(flow_ethos::FlowId(FLOW.into()))
     );
     let stopped = record(&fixture).expect("record");
     assert_eq!(
@@ -2328,7 +2433,7 @@ fn restart_recorded_harness_exited_reopens_same_session() {
     never_two_live(&world);
     assert_eq!(record(&fixture), None);
     assert_eq!(route_pane(&fixture), REOPENED_PANE);
-    assert_eq!(node(&fixture).session_id, world.seat.session);
+    assert_eq!(node(&fixture).session_id.0, world.seat.session);
     assert_eq!(
         fixture
             .nexus
@@ -2357,7 +2462,7 @@ fn restart_pid_reused_exited_by_birth_only() {
         let running = live_process();
         let recorded = Process {
             pid: running.1.pid,
-            started: running.1.started + i64::from(reused),
+            started: flow_ethos::Started(running.1.started.0 + i64::from(reused)),
         };
         let left = failed_at(&world, 1, Some(recorded));
         fixture.nexus.store.record_restart(left.clone()).unwrap();
@@ -2460,15 +2565,21 @@ impl OpensSecondNexus for NexusFixture {
         opened
             .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
                 meta_signal_flow::ConfigureNexus {
-                    source_root: root.to_string_lossy().into_owned(),
-                    stable_codex: settings.stable_codex,
-                    next_codex: settings.next_codex,
-                    harness_profiles: settings.harness_profile_vector,
-                    meta_aspects: settings.meta_aspects,
-                    message_nexus_path_option: Some(settings.message_nexus_path.clone()),
-                    message_nexus_binary_option: Some("/fixture/message-nexus".into()),
-                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                    lease: 30,
+                    source_root: flow_ethos::SourceRoot(root.to_string_lossy().into_owned()),
+                    first_codex_endpoint: settings.stable_codex,
+                    second_codex_endpoint: settings.next_codex,
+                    harness_profiles: flow_ethos::HarnessProfiles(settings.harness_profile_vector),
+                    meta_aspects: flow_ethos::MetaAspects(settings.meta_aspects),
+                    message_nexus_path_option: Some(flow_ethos::MessageNexusPath(
+                        settings.message_nexus_path.clone(),
+                    )),
+                    message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(
+                        "/fixture/message-nexus".into(),
+                    )),
+                    curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+                        "/fixture/curriculum.sock".into(),
+                    ),
+                    lease: flow_ethos::Lease(30),
                     presentation_prompt_option: None,
                 },
             ))
@@ -2477,7 +2588,7 @@ impl OpensSecondNexus for NexusFixture {
             .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
                 meta_signal_flow::ConfigureModel {
                     model: Model::Sol,
-                    native: "claude-fixture".into(),
+                    native: meta_signal_flow::Native("claude-fixture".into()),
                 },
             ]))
             .expect("model configured");
@@ -2486,13 +2597,18 @@ impl OpensSecondNexus for NexusFixture {
                 meta_signal_flow::ConfigureMetaflow {
                     root_option: None,
                     address: address(Model::Sol),
-                    system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-                    user_modules: vec!["operation-main-flow".into()],
+                    system_modules: signal_flow::SystemModules(vec![
+                        signal_flow::ModuleIdentity("spirit-core".into()),
+                        signal_flow::ModuleIdentity("intent-flow".into()),
+                    ]),
+                    user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                        "operation-main-flow".into(),
+                    )]),
                     flow_kind: signal_flow::FlowKind::Regular,
                     tool_set: signal_flow::ToolSet::Default,
                     continuity: meta_signal_flow::Continuity::Maintained,
-                    purpose: String::new(),
-                    records: vec![],
+                    purpose: meta_signal_flow::Purpose(String::new()),
+                    records: meta_signal_flow::Records(vec![]),
                 },
             ]))
             .expect("metaflow declared");
@@ -2554,13 +2670,13 @@ fn reported_to(nexus: &crate::RunningNexus, event: Event, caller: Option<CallerP
     let acts = nexus.report_acts(FLOW, caller);
     assert_eq!(
         nexus.report(Report_Data {
-            flow_id: FLOW.into(),
+            flow_id: flow_ethos::FlowId(FLOW.into()),
             event: event.clone(),
         }),
         Response::Reported
     );
     if acts {
-        nexus.after_attributed_report(&FLOW.to_owned(), &event);
+        nexus.after_attributed_report(&flow_ethos::FlowId(FLOW.to_owned().to_owned()), &event);
     }
     acts
 }
@@ -2605,29 +2721,29 @@ fn restart_cutover_two_nexus() {
         new.adopt(
             signal_flow::Adopt_Data {
                 address: address(Model::Sol),
-                native_session_id: world.seat.session.clone(),
+                native_session_id: signal_flow::NativeSessionId(world.seat.session.clone()),
             },
             Some(&world.old_harness()),
         ),
-        Response::Adopted(FLOW.into())
+        Response::Adopted(flow_ethos::FlowId(FLOW.into()))
     );
-    assert_eq!(new_node(&new).session_id, world.seat.session);
+    assert_eq!(new_node(&new).session_id.0, world.seat.session);
     assert_eq!(
         new.store
             .metaflow(&address(Model::Sol))
             .unwrap()
             .unwrap()
             .state,
-        State::Awake(FLOW.into())
+        State::Awake(flow_ethos::FlowId(FLOW.into()))
     );
     let adopted_witness = new.seat_witness(FLOW).expect("adopted witness");
-    assert_eq!(adopted_witness.route.herdr_pane_id, OLD_PANE);
+    assert_eq!(adopted_witness.route.herdr_pane_id.0, OLD_PANE);
 
     // And restarts it: the same session resumed in w7:p1, its hooks aimed
     // at the new Nexus alone.
     assert_eq!(
-        new.dispatch(Query::Restart(FLOW.into())),
-        Response::Restarted(FLOW.into())
+        new.dispatch(Query::Restart(flow_ethos::FlowId(FLOW.into()))),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     let resumes = world.resumes();
     assert_eq!(resumes.len(), 1, "{}", world.fresh.calls());
@@ -2640,10 +2756,10 @@ fn restart_cutover_two_nexus() {
     assert!(resumes[0].contains(NEW_SOCKET), "{}", resumes[0]);
     assert!(!resumes[0].contains(OLD_SOCKET), "{}", resumes[0]);
     let bound = new_node(&new);
-    assert_eq!(bound.session_id, world.seat.session);
+    assert_eq!(bound.session_id.0, world.seat.session);
     assert_eq!(bound.flow_lifecycle, FlowLifecycle::Active);
     let birth = new.store.seat_birth(FLOW).unwrap().expect("birth");
-    assert_eq!(birth.herdr_route.herdr_pane_id, NEW_PANE);
+    assert_eq!(birth.herdr_route.herdr_pane_id.0, NEW_PANE);
     let new_hook = world.new_hook();
     let resumed =
         FlowStore::process_identity_for_pid(pid_in(&world.fresh.state.join("pid"))).unwrap();
@@ -2652,15 +2768,15 @@ fn restart_cutover_two_nexus() {
     // The resumed seat's hook reaches the new Nexus and acts: its Stop
     // hands the new seat what was queued for it there.
     let mut queued = new.store.metaflow(&address(Model::Sol)).unwrap().unwrap();
-    queued.queue = vec![signal_flow::QueueEntry {
-        logical_delivery_id: "cutover-queued".into(),
-        request_id: "test".into(),
+    queued.queue = flow_ethos::Queue(vec![signal_flow::QueueEntry {
+        logical_delivery_id: flow_ethos::LogicalDeliveryId("cutover-queued".into()),
+        request_id: flow_ethos::RequestId("test".into()),
         sent_by: signal_flow::SentBy::Unknown,
         delivery: flow_ethos::Delivery::Wake,
         message: signal_flow::Message::Soft(signal_flow::Request::Order(
             "for the resumed seat".into(),
         )),
-    }];
+    }]);
     new.store.seed_metaflow(queued);
     assert!(reported_to(&new, stop_of(&world, &fixture), Some(new_hook)));
     assert_eq!(received(&world, &fixture, "for the resumed seat"), 1);
@@ -2668,15 +2784,15 @@ fn restart_cutover_two_nexus() {
     // A message the old Nexus holds for abc123, queued there during the
     // cutover.
     let mut held = stored(&fixture, Model::Sol);
-    held.queue = vec![signal_flow::QueueEntry {
-        logical_delivery_id: "held-by-the-old-nexus".into(),
-        request_id: "test".into(),
+    held.queue = flow_ethos::Queue(vec![signal_flow::QueueEntry {
+        logical_delivery_id: flow_ethos::LogicalDeliveryId("held-by-the-old-nexus".into()),
+        request_id: flow_ethos::RequestId("test".into()),
         sent_by: signal_flow::SentBy::Unknown,
         delivery: flow_ethos::Delivery::Wake,
         message: signal_flow::Message::Soft(signal_flow::Request::Order(
             "queued at the old Nexus".into(),
         )),
-    }];
+    }]);
     fixture.nexus.store.seed_metaflow(held);
 
     // From here every Herdr call is the old side's, or the new Nexus
@@ -2695,7 +2811,9 @@ fn restart_cutover_two_nexus() {
     ));
     assert!(reported_to(
         &fixture.nexus,
-        Event::Ended(Some(world.seat.session.clone())),
+        Event::Ended(Some(signal_flow::NativeSessionId(
+            world.seat.session.clone()
+        ))),
         Some(old_hook)
     ));
     {
@@ -2716,7 +2834,7 @@ fn restart_cutover_two_nexus() {
     // and what it holds stays with it.
     let old_metaflow = stored(&fixture, Model::Sol);
     assert_eq!(old_metaflow.state, State::Asleep);
-    assert_eq!(old_metaflow.queue.len(), 1);
+    assert_eq!(old_metaflow.queue.0.len(), 1);
     assert!(matches!(
         fixture.nexus.store.successor_intent(&address(Model::Sol)),
         Ok(Some(intent)) if intent.predecessor == FLOW
@@ -2726,12 +2844,16 @@ fn restart_cutover_two_nexus() {
     // the seat it adopted: none acts.
     assert!(!reported_to(
         &new,
-        Event::Ended(Some(world.seat.session.clone())),
+        Event::Ended(Some(signal_flow::NativeSessionId(
+            world.seat.session.clone()
+        ))),
         Some(old_hook)
     ));
     assert!(!reported_to(
         &new,
-        Event::Ended(Some(world.seat.session.clone())),
+        Event::Ended(Some(signal_flow::NativeSessionId(
+            world.seat.session.clone()
+        ))),
         None
     ));
     {
@@ -2770,11 +2892,11 @@ fn restart_cutover_two_nexus() {
 
     // The new custody stands, and the new seat's hooks still act there.
     let after = new_node(&new);
-    assert_eq!(after.session_id, world.seat.session);
+    assert_eq!(after.session_id.0, world.seat.session);
     assert_eq!(after.flow_lifecycle, FlowLifecycle::Active);
     assert!(matches!(
         &after.herdr_route_selection,
-        HerdrRouteSelection::Available(route) if route.herdr_pane_id == NEW_PANE
+        HerdrRouteSelection::Available(route) if route.herdr_pane_id.0 == NEW_PANE
     ));
     assert_eq!(
         new.store
@@ -2782,7 +2904,7 @@ fn restart_cutover_two_nexus() {
             .unwrap()
             .unwrap()
             .state,
-        State::Awake(FLOW.into())
+        State::Awake(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(new.store.restart_record(FLOW).unwrap(), None);
     assert_eq!(
@@ -2807,8 +2929,8 @@ fn protect(fixture: &NexusFixture) {
 /// Another flow, as the Nexus derives its origin from its process.
 fn another_flow() -> signal_flow::Origin {
     signal_flow::Origin::Flow(signal_flow::FlowOrigin {
-        flow_id: "0f0e1d".into(),
-        session_id: "another-session".into(),
+        flow_id: flow_ethos::FlowId("0f0e1d".into()),
+        session_id: signal_flow::SessionId("another-session".into()),
     })
 }
 
@@ -2831,10 +2953,11 @@ fn restart_protected_from_outside_refused_no_effect() {
         Asker::Owner,
     ] {
         assert_eq!(
-            fixture
-                .nexus
-                .dispatch_asked(Query::Restart(FLOW.into()), asker.clone()),
-            Response::RestartRefused(RestartRefusal::Protected(FLOW.into())),
+            fixture.nexus.dispatch_asked(
+                Query::Restart(flow_ethos::FlowId(FLOW.into())),
+                asker.clone()
+            ),
+            Response::RestartRefused(RestartRefusal::Protected(flow_ethos::FlowId(FLOW.into()))),
             "{asker:?}"
         );
         assert_eq!(
@@ -2851,7 +2974,7 @@ fn restart_protected_from_outside_refused_no_effect() {
     assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
     assert_eq!(
         stored(&fixture, Model::Sol).state,
-        State::Awake(FLOW.into())
+        State::Awake(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(world.fresh.calls(), calls, "Herdr is not touched");
 }
@@ -2867,14 +2990,14 @@ fn restart_protected_self_accepted() {
     let world = fixture.restart_world(true);
     protect(&fixture);
     let own = Asker::Ordinary(signal_flow::Origin::Flow(signal_flow::FlowOrigin {
-        flow_id: FLOW.into(),
-        session_id: world.seat.session.clone(),
+        flow_id: flow_ethos::FlowId(FLOW.into()),
+        session_id: signal_flow::SessionId(world.seat.session.clone()),
     }));
     assert_eq!(
         fixture
             .nexus
-            .dispatch_asked(Query::Restart(FLOW.into()), own.clone()),
-        Response::RestartRefused(RestartRefusal::Unsupported(FLOW.into()))
+            .dispatch_asked(Query::Restart(flow_ethos::FlowId(FLOW.into())), own.clone()),
+        Response::RestartRefused(RestartRefusal::Unsupported(flow_ethos::FlowId(FLOW.into())))
     );
     assert_eq!(record(&fixture), None);
     assert_eq!(route_pane(&fixture), OLD_PANE);
@@ -2883,7 +3006,7 @@ fn restart_protected_self_accepted() {
         .nexus
         .dispatch_asked(Query::Refresh(address(Model::Sol)), own);
     assert!(
-        matches!(&refreshed, Response::RefreshQueued(queued) if queued.flow_id == FLOW),
+        matches!(&refreshed, Response::RefreshQueued(queued) if queued.flow_id.0 == FLOW),
         "{refreshed:?}"
     );
 }
@@ -2900,13 +3023,15 @@ fn restart_protected_from_meta_accepted() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_meta(meta_signal_flow::Query::Restart(FLOW.into())),
-        meta_signal_flow::Response::Restarted(FLOW.into())
+            .dispatch_meta(meta_signal_flow::Query::Restart(flow_ethos::FlowId(
+                FLOW.into()
+            ))),
+        meta_signal_flow::Response::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(world.resumes().len(), 1, "{}", world.fresh.calls());
     assert!(ended(&old), "the old harness exited");
     assert_eq!(route_pane(&fixture), NEW_PANE);
-    assert_eq!(node(&fixture).session_id, world.seat.session);
+    assert_eq!(node(&fixture).session_id.0, world.seat.session);
     assert_eq!(record(&fixture), None);
 }
 
@@ -2929,17 +3054,18 @@ fn stop_and_retire_protected_from_outside_refused() {
         assert_eq!(
             fixture
                 .nexus
-                .dispatch_asked(Query::Stop(FLOW.into()), asker.clone()),
+                .dispatch_asked(Query::Stop(flow_ethos::FlowId(FLOW.into())), asker.clone()),
             Response::StopRejected(StopRejection::Protected),
             "{asker:?}"
         );
     }
     let mut resolver = super::queue_drain::resolver();
-    resolver.flow_id_option = Some("0f0e1d".into());
+    resolver.flow_id_option = Some(flow_ethos::FlowId("0f0e1d".into()));
     assert_eq!(
-        fixture
-            .nexus
-            .dispatch_meta_from(meta_signal_flow::Query::Retire(FLOW.into()), Some(resolver)),
+        fixture.nexus.dispatch_meta_from(
+            meta_signal_flow::Query::Retire(flow_ethos::FlowId(FLOW.into())),
+            Some(resolver)
+        ),
         meta_signal_flow::Response::RetireRejected(meta_signal_flow::RetireRejection::Protected)
     );
     assert!(FlowStore::process_is_live(&old), "the old harness runs on");
@@ -2950,8 +3076,8 @@ fn stop_and_retire_protected_from_outside_refused() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_asked(Query::Stop(FLOW.into()), Asker::Owner),
-        Response::Stopped(FLOW.into())
+            .dispatch_asked(Query::Stop(flow_ethos::FlowId(FLOW.into())), Asker::Owner),
+        Response::Stopped(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Stopped);
 }
@@ -3062,9 +3188,29 @@ impl SocketCurriculum {
                 Target::Codex => signal_flow::HarnessKind::Codex,
                 _ => signal_flow::HarnessKind::Claude,
             },
-            system_modules: selection.system_modules,
-            user_modules: selection.user_modules,
-            remembered_flows: selection.flow_id_vector,
+            system_modules: signal_flow::SystemModules(
+                selection
+                    .system_modules
+                    .0
+                    .into_iter()
+                    .map(|identity| signal_flow::ModuleIdentity(identity.0))
+                    .collect(),
+            ),
+            user_modules: signal_flow::UserModules(
+                selection
+                    .user_modules
+                    .0
+                    .into_iter()
+                    .map(|identity| signal_flow::ModuleIdentity(identity.0))
+                    .collect(),
+            ),
+            remembered_flows: crate::generated::starter::RememberedFlows(
+                selection
+                    .flow_id_vector
+                    .into_iter()
+                    .map(|flow| flow_ethos::FlowId(flow.0))
+                    .collect(),
+            ),
         };
         let bodies = FixtureComposer::from(
             &[
@@ -3077,7 +3223,7 @@ impl SocketCurriculum {
         match bodies.compose_flow_context(&request) {
             Ok(composition) => Outcome::StartupComposed(composition),
             Err(signal_flow::ContextRefusal::ModuleMissing(Some(identity))) => {
-                Outcome::Rejected(format!("missing module {identity}"))
+                Outcome::Rejected(format!("missing module {identity}", identity = identity.0))
             }
             Err(refusal) => Outcome::Rejected(format!("{refusal:?}")),
         }
@@ -3169,9 +3315,9 @@ fn held_identity(fixture: &NexusFixture, nexus: &crate::RunningNexus) -> HeldIde
         .collect();
     claims.sort();
     HeldIdentity {
-        flow_id: node.flow_id.clone(),
-        session: node.session_id.clone(),
-        model,
+        flow_id: node.flow_id.clone().0,
+        session: node.session_id.clone().0,
+        model: model.map(|value| value.0),
         transcript: nexus.claude_transcript(&node),
         flows: nexus.store.flow_nodes().unwrap().len(),
         claims,
@@ -3197,7 +3343,7 @@ fn reopen_new(fixture: &NexusFixture, nexus: &mut crate::RunningNexus) {
 /// The answer the live restarts got.
 fn not_composed() -> Response {
     Response::RestartRefused(RestartRefusal::ResumeRefused(ResumeRefused_Data {
-        flow_id: FLOW.into(),
+        flow_id: flow_ethos::FlowId(FLOW.into()),
         string: "NotComposed".into(),
     }))
 }
@@ -3232,11 +3378,11 @@ fn adopted_on_new(
         new.adopt(
             signal_flow::Adopt_Data {
                 address: address(Model::Sol),
-                native_session_id: world.seat.session.clone(),
+                native_session_id: signal_flow::NativeSessionId(world.seat.session.clone()),
             },
             Some(&world.old_harness()),
         ),
-        Response::Adopted(FLOW.into())
+        Response::Adopted(flow_ethos::FlowId(FLOW.into()))
     );
     (world, new, curriculum)
 }
@@ -3260,18 +3406,21 @@ fn restart_not_composed_refused_then_recovered() {
     assert_eq!(before.session, world.seat.session);
     assert!(before.model.is_some() && before.transcript.is_some());
     let mut queued = new_metaflow(&new);
-    queued.queue = vec![signal_flow::QueueEntry {
-        logical_delivery_id: "held-through-not-composed".into(),
-        request_id: "test".into(),
+    queued.queue = flow_ethos::Queue(vec![signal_flow::QueueEntry {
+        logical_delivery_id: flow_ethos::LogicalDeliveryId("held-through-not-composed".into()),
+        request_id: flow_ethos::RequestId("test".into()),
         sent_by: signal_flow::SentBy::Unknown,
         delivery: flow_ethos::Delivery::Wake,
         message: signal_flow::Message::Soft(signal_flow::Request::Order(
             "held through NotComposed".into(),
         )),
-    }];
+    }]);
     new.store.seed_metaflow(queued);
 
-    assert_eq!(new.dispatch(Query::Restart(FLOW.into())), not_composed());
+    assert_eq!(
+        new.dispatch(Query::Restart(flow_ethos::FlowId(FLOW.into()))),
+        not_composed()
+    );
     assert_eq!(
         curriculum.callers(),
         vec![["Mind".to_owned(), "flow".to_owned(), "Sol".to_owned()]],
@@ -3304,29 +3453,35 @@ fn restart_not_composed_refused_then_recovered() {
     );
     untouched(&world, &fixture);
     assert_eq!(held_identity(&fixture, &new), before);
-    assert_eq!(new_metaflow(&new).queue.len(), 1);
-    assert_eq!(new_metaflow(&new).state, State::Awake(FLOW.into()));
+    assert_eq!(new_metaflow(&new).queue.0.len(), 1);
+    assert_eq!(
+        new_metaflow(&new).state,
+        State::Awake(flow_ethos::FlowId(FLOW.into()))
+    );
 
     // A Nexus that died here leaves its successor nothing to take up.
     reopen_new(&fixture, &mut new);
     assert_eq!(new.store.restart_record(FLOW).unwrap(), None);
     assert_eq!(held_identity(&fixture, &new), before);
-    assert_eq!(new_metaflow(&new).queue.len(), 1);
+    assert_eq!(new_metaflow(&new).queue.0.len(), 1);
     untouched(&world, &fixture);
 
     // A retry while Curriculum still refuses: refused alike, nothing closed.
-    assert_eq!(new.dispatch(Query::Restart(FLOW.into())), not_composed());
+    assert_eq!(
+        new.dispatch(Query::Restart(flow_ethos::FlowId(FLOW.into()))),
+        not_composed()
+    );
     assert_eq!(new.store.restart_record(FLOW).unwrap(), None);
     untouched(&world, &fixture);
     assert_eq!(held_identity(&fixture, &new), before);
-    assert_eq!(new_metaflow(&new).queue.len(), 1);
+    assert_eq!(new_metaflow(&new).queue.0.len(), 1);
     assert_eq!(curriculum.callers().len(), 2);
 
     // Curriculum takes Model words, as 3f74 and 478c do: the retry resumes.
     curriculum.accept_models();
     assert_eq!(
-        new.dispatch(Query::Restart(FLOW.into())),
-        Response::Restarted(FLOW.into())
+        new.dispatch(Query::Restart(flow_ethos::FlowId(FLOW.into()))),
+        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(
         world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
@@ -3353,7 +3508,7 @@ fn restart_not_composed_refused_then_recovered() {
     assert_eq!(world.calls_naming("agent start").len(), 1);
     assert_eq!(new.store.restart_record(FLOW).unwrap(), None);
     assert_eq!(received(&world, &fixture, "held through NotComposed"), 1);
-    assert!(new_metaflow(&new).queue.is_empty());
+    assert!(new_metaflow(&new).queue.0.is_empty());
     new.drain_awake(&address(Model::Sol));
     assert_eq!(received(&world, &fixture, "held through NotComposed"), 1);
 
@@ -3368,13 +3523,16 @@ fn restart_not_composed_refused_then_recovered() {
     assert_eq!(node.flow_lifecycle, FlowLifecycle::Active);
     assert!(matches!(
         &node.herdr_route_selection,
-        HerdrRouteSelection::Available(route) if route.herdr_pane_id == NEW_PANE
+        HerdrRouteSelection::Available(route) if route.herdr_pane_id.0 == NEW_PANE
     ));
     assert_eq!(
         after.birth.map(|birth| birth.herdr_route.herdr_pane_id),
-        Some(NEW_PANE.to_owned())
+        Some(signal_flow::HerdrPaneId(NEW_PANE.to_owned()))
     );
-    assert_eq!(new_metaflow(&new).state, State::Awake(FLOW.into()));
+    assert_eq!(
+        new_metaflow(&new).state,
+        State::Awake(flow_ethos::FlowId(FLOW.into()))
+    );
 }
 
 /// The owner's Stop after a restart refused NotComposed is an ordinary
@@ -3388,29 +3546,32 @@ fn restart_not_composed_owner_stop() {
     let (world, new, curriculum) = adopted_on_new(&mut fixture);
     let old = world.old_harness();
     let mut queued = new_metaflow(&new);
-    queued.queue = vec![signal_flow::QueueEntry {
-        logical_delivery_id: "kept-through-stop".into(),
-        request_id: "test".into(),
+    queued.queue = flow_ethos::Queue(vec![signal_flow::QueueEntry {
+        logical_delivery_id: flow_ethos::LogicalDeliveryId("kept-through-stop".into()),
+        request_id: flow_ethos::RequestId("test".into()),
         sent_by: signal_flow::SentBy::Unknown,
         delivery: flow_ethos::Delivery::Wake,
         message: signal_flow::Message::Soft(signal_flow::Request::Order(
             "kept through the Stop".into(),
         )),
-    }];
+    }]);
     new.store.seed_metaflow(queued);
-    assert_eq!(new.dispatch(Query::Restart(FLOW.into())), not_composed());
+    assert_eq!(
+        new.dispatch(Query::Restart(flow_ethos::FlowId(FLOW.into()))),
+        not_composed()
+    );
     assert!(world.calls_naming("pane close").is_empty());
     assert_eq!(new.store.restart_record(FLOW).unwrap(), None);
 
     assert_eq!(
-        new.dispatch(Query::Stop(FLOW.into())),
-        Response::Stopped(FLOW.into())
+        new.dispatch(Query::Stop(flow_ethos::FlowId(FLOW.into()))),
+        Response::Stopped(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(new.store.restart_record(FLOW).unwrap(), None);
     let node = new.store.flow_node(FLOW).unwrap().unwrap();
     assert_eq!(node.flow_lifecycle, FlowLifecycle::Stopped);
-    assert_eq!(node.session_id, world.seat.session);
-    assert_eq!(new_metaflow(&new).queue.len(), 1, "the queue is kept");
+    assert_eq!(node.session_id.0, world.seat.session);
+    assert_eq!(new_metaflow(&new).queue.0.len(), 1, "the queue is kept");
     assert_eq!(
         world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
         1
@@ -3422,8 +3583,8 @@ fn restart_not_composed_owner_stop() {
 
     curriculum.accept_models();
     assert_eq!(
-        new.dispatch(Query::Restart(FLOW.into())),
-        Response::RestartRefused(RestartRefusal::Unsupported(FLOW.into()))
+        new.dispatch(Query::Restart(flow_ethos::FlowId(FLOW.into()))),
+        Response::RestartRefused(RestartRefusal::Unsupported(flow_ethos::FlowId(FLOW.into())))
     );
     assert!(world.resumes().is_empty());
 }
@@ -3454,7 +3615,7 @@ fn restart_composition_against_curriculum_socket() {
         ));
     let words = |text: &str| {
         text.split_whitespace()
-            .map(str::to_owned)
+            .map(|word| signal_flow::ModuleIdentity(word.to_owned()))
             .collect::<Vec<_>>()
     };
     let mut composed = 0;
@@ -3465,13 +3626,13 @@ fn restart_composition_against_curriculum_socket() {
         };
         let caller = words(caller);
         let address = Address {
-            aspect: match caller[0].as_str() {
+            aspect: match caller[0].0.as_str() {
                 "Psyche" => Aspect::Psyche,
                 "Mind" => Aspect::Mind,
                 _ => Aspect::Field,
             },
-            topic: caller[1].clone(),
-            model: match caller[2].as_str() {
+            topic: flow_ethos::Topic(caller[1].clone().0),
+            model: match caller[2].0.as_str() {
                 "Fable" => Model::Fable,
                 "Opus" => Model::Opus,
                 "Sonnet" => Model::Sonnet,
@@ -3483,35 +3644,37 @@ fn restart_composition_against_curriculum_socket() {
         };
         // The profile `resumed_launch` builds from a declaration.
         let profile = signal_flow::LaunchProfile {
-            launch_request_id: format!("restart-{flow}-1-proof"),
-            system_modules: words(system),
-            user_modules: words(user),
-            remembering: signal_flow::Remembering::Predecessors(0),
+            launch_request_id: signal_flow::LaunchRequestId(format!("restart-{flow}-1-proof")),
+            system_modules: signal_flow::SystemModules(words(system)),
+            user_modules: signal_flow::UserModules(words(user)),
+            remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(0)),
             address: address.clone(),
-            model_name: native.to_owned(),
-            effort: <crate::RunningNexus as crate::sending::ChoosesEffort>::effort_of(&address)
-                .into(),
+            model_name: flow_ethos::ModelName(native.to_owned()),
+            effort: signal_flow::Effort(
+                <crate::RunningNexus as crate::sending::ChoosesEffort>::effort_of(&address).into(),
+            ),
             flow_id_option: None,
-            herdr_session_name: "default".into(),
+            herdr_session_name: signal_flow::HerdrSessionName("default".into()),
             leave_outs_option: None,
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
-            instruction_prompt: String::new(),
+            instruction_prompt: signal_flow::InstructionPrompt(String::new()),
         };
         let outcome = fixture.nexus.perform(Operation::Compose(profile.clone()));
         // The same selection, sent raw: the frame Curriculum answers.
-        let (system_modules, user_modules): (Vec<String>, Vec<String>) = profile
+        let (system_modules, user_modules): (Vec<_>, Vec<_>) = profile
             .system_modules
+            .0
             .iter()
-            .chain(&profile.user_modules)
+            .chain(profile.user_modules.0.iter())
             .cloned()
-            .partition(|identity| identity.as_str().placed_in_system_prompt());
+            .partition(|identity| identity.0.as_str().placed_in_system_prompt());
         let selection = ContextRequest {
             address: address.clone(),
             harness_kind: signal_flow::HarnessKind::Claude,
-            system_modules,
-            user_modules,
-            remembered_flows: vec![],
+            system_modules: signal_flow::SystemModules(system_modules),
+            user_modules: signal_flow::UserModules(user_modules),
+            remembered_flows: crate::generated::starter::RememberedFlows(vec![]),
         }
         .startup_selection();
         let query = rkyv::to_bytes::<rkyv::rancor::Error>(&CurriculumQuery::ComposeStartup(
@@ -3530,8 +3693,8 @@ fn restart_composition_against_curriculum_socket() {
         let shown = match &outcome {
             Outcome::Composed(launch) => format!(
                 "Composed: system prompt {} bytes, first prompt {} bytes, address {:?}",
-                launch.system_prompt.system_prompt_text.len(),
-                launch.first_prompt_payload.first_prompt_body.len(),
+                launch.system_prompt.system_prompt_text.0.len(),
+                launch.first_prompt_payload.first_prompt_body.0.len(),
                 launch.launch_profile.address
             ),
             other => format!("{other:?}"),
@@ -3574,15 +3737,22 @@ fn restart_composition_against_curriculum_socket() {
                     panic!("seat {flow}: {outcome:?}")
                 };
                 assert_eq!(launch.launch_profile.address, address);
-                for module in profile.system_modules.iter().chain(&profile.user_modules) {
-                    let marker = format!("<!-- module: {module} -->");
+                for module in profile
+                    .system_modules
+                    .0
+                    .iter()
+                    .chain(profile.user_modules.0.iter())
+                {
+                    let marker = format!("<!-- module: {module} -->", module = module.0);
                     assert!(
-                        launch.system_prompt.system_prompt_text.contains(&marker)
+                        launch.system_prompt.system_prompt_text.0.contains(&marker)
                             || launch
                                 .first_prompt_payload
                                 .first_prompt_body
+                                .0
                                 .contains(&marker),
-                        "seat {flow}: {module} composed"
+                        "seat {flow}: {module} composed",
+                        module = module.0
                     );
                 }
                 composed += 1;
@@ -3620,8 +3790,8 @@ const FED_PID_MAX: u32 = 4_194_304;
 
 /// The recorded harness every case asks about: pid 4242, born at tick 777.
 const RECORDED: Process = Process {
-    pid: 4242,
-    started: 777,
+    pid: flow_ethos::Pid(4242),
+    started: flow_ethos::Started(777),
 };
 
 /// A kernel whose stat read answers `stat`.
@@ -3738,7 +3908,10 @@ fn restart_exit_proof_invalid_pid_unproven() {
     let beyond = i64::from(FED_PID_MAX) + 1;
     for pid in [0, -1, -4242, beyond, i64::from(u32::MAX) + 1, i64::MAX] {
         let kernel = fed(Err(std::io::ErrorKind::NotFound));
-        let process = Process { pid, started: 777 };
+        let process = Process {
+            pid: flow_ethos::Pid(pid),
+            started: flow_ethos::Started(777),
+        };
         assert_eq!(
             process.exit_proof(&kernel),
             ExitProof::Unproven(ExitDoubt::InvalidPid),
@@ -3763,8 +3936,8 @@ fn restart_exit_proof_invalid_pid_unproven() {
 fn restart_exit_proof_unparsed_birth_unproven() {
     let kernel = fed(Err(std::io::ErrorKind::NotFound));
     let process = Process {
-        pid: 4242,
-        started: -1,
+        pid: flow_ethos::Pid(4242),
+        started: flow_ethos::Started(-1),
     };
     assert_eq!(
         process.exit_proof(&kernel),

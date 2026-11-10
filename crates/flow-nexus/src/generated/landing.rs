@@ -1,14 +1,29 @@
-#![allow(dead_code, non_camel_case_types, non_snake_case)]
+#![allow(
+    dead_code,
+    non_camel_case_types,
+    non_snake_case,
+    clippy::type_complexity
+)]
 #[rustfmt::skip]
-pub type Commit = String;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Commit(pub String);
 #[rustfmt::skip]
-pub type Subject = String;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Subject(pub String);
 #[rustfmt::skip]
-pub type ChangedPath = String;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ChangedPath(pub String);
 #[rustfmt::skip]
-pub type ChangedLine = String;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ChangedLine(pub String);
 #[rustfmt::skip]
-pub type ChangedLines = std::vec::Vec<ChangedLine>;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ChangedLines(pub std::vec::Vec<ChangedLine>);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
@@ -17,7 +32,9 @@ pub struct ChangedModule {
     pub changed_lines: ChangedLines,
 }
 #[rustfmt::skip]
-pub type ChangedModules = std::vec::Vec<ChangedModule>;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ChangedModules(pub std::vec::Vec<ChangedModule>);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
@@ -50,15 +67,25 @@ pub struct Retraining {
     pub retrained: Retrained,
 }
 #[rustfmt::skip]
-pub type ModuleIdentity = String;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ModuleIdentity(pub String);
 #[rustfmt::skip]
-pub type ModuleIdentities = std::vec::Vec<ModuleIdentity>;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ModuleIdentities(pub std::vec::Vec<ModuleIdentity>);
 #[rustfmt::skip]
-pub type RepositoryName = String;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct RepositoryName(pub String);
 #[rustfmt::skip]
-pub type SourceRevision = String;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct SourceRevision(pub String);
 #[rustfmt::skip]
-pub type SourceRelativePath = String;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct SourceRelativePath(pub String);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
@@ -69,23 +96,29 @@ pub struct ModuleSource {
     pub source_relative_path: SourceRelativePath,
 }
 #[rustfmt::skip]
-pub type ModuleSources = std::vec::Vec<ModuleSource>;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ModuleSources(pub std::vec::Vec<ModuleSource>);
 #[rustfmt::skip]
-pub type Base = String;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Base(pub String);
 #[rustfmt::skip]
-pub type ChangedPaths = std::vec::Vec<ChangedPath>;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ChangedPaths(pub std::vec::Vec<ChangedPath>);
 #[rustfmt::skip]
-pub type Deploy = Step;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Retrainings(pub std::vec::Vec<Retraining>);
 #[rustfmt::skip]
-pub type Retrain = Step;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Owners(pub std::vec::Vec<signal_flow::Address>);
 #[rustfmt::skip]
-pub type Retrainings = std::vec::Vec<Retraining>;
-#[rustfmt::skip]
-pub type Implement = Step;
-#[rustfmt::skip]
-pub type Owners = std::vec::Vec<signal_flow::Address>;
-#[rustfmt::skip]
-pub type Reported = bool;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Reported(pub bool);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
@@ -94,15 +127,17 @@ pub struct Landing {
     pub base: Base,
     pub subject: Subject,
     pub changed_paths: ChangedPaths,
-    pub deploy: Deploy,
-    pub retrain: Retrain,
+    pub first_step: Step,
+    pub second_step: Step,
     pub retrainings: Retrainings,
-    pub implement: Implement,
+    pub third_step: Step,
     pub owners: Owners,
     pub reported: Reported,
 }
 #[rustfmt::skip]
-pub type Landings = std::vec::Vec<Landing>;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Landings(pub std::vec::Vec<Landing>);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
@@ -117,7 +152,9 @@ pub struct RefreshDue {
     pub refresh_cause: RefreshCause,
 }
 #[rustfmt::skip]
-pub type RefreshesDue = std::vec::Vec<RefreshDue>;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct RefreshesDue(pub std::vec::Vec<RefreshDue>);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
@@ -126,7 +163,9 @@ pub struct LandingOrder {
     pub request: signal_flow::Request,
 }
 #[rustfmt::skip]
-pub type LandingOrders = std::vec::Vec<LandingOrder>;
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct LandingOrders(pub std::vec::Vec<LandingOrder>);
 #[rustfmt::skip]
 pub trait CommitNaming {
     fn commit(&self) -> Commit;

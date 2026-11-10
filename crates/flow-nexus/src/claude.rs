@@ -54,18 +54,19 @@ impl ProjectsClaudeReadiness for ClaudeDaemon {
         };
         let short = node
             .session_id
+            .0
             .split('-')
             .next()
-            .unwrap_or(&node.session_id);
+            .unwrap_or(&node.session_id.0);
         let state = self.jobs.join(short).join("state.json").read_json();
         let roster = self.roster.read_json();
         let Some((state, worker)) =
             state.zip(roster.as_ref().and_then(|roster| roster.worker(short)))
         else {
-            return endpoint.endpoint_path.clone().parked();
+            return endpoint.endpoint_path.clone().0.parked();
         };
-        let session_matches = state.string_at("sessionId") == Some(node.session_id.as_str())
-            && worker.string_at("sessionId") == Some(node.session_id.as_str());
+        let session_matches = state.string_at("sessionId") == Some(node.session_id.0.as_str())
+            && worker.string_at("sessionId") == Some(node.session_id.0.as_str());
         let daemon_owned = state.string_at("backend") == Some("daemon");
         let lifecycle = state
             .string_at("state")
@@ -88,7 +89,7 @@ impl ProjectsClaudeReadiness for ClaudeDaemon {
             .is_some_and(|pid| Path::new("/proc").join(pid.to_string()).exists());
         let endpoint_matches = rendezvous
             .and_then(|path| path.parent()?.parent())
-            .map(|daemon| daemon.join("control.sock") == Path::new(&endpoint.endpoint_path))
+            .map(|daemon| daemon.join("control.sock") == Path::new(&endpoint.endpoint_path.0))
             .unwrap_or(false);
         if session_matches
             && daemon_owned
@@ -98,14 +99,14 @@ impl ProjectsClaudeReadiness for ClaudeDaemon {
             && live_pid
             && rendezvous.is_some_and(Path::exists)
             && endpoint_matches
-            && Path::new(&endpoint.endpoint_path).exists()
+            && Path::new(&endpoint.endpoint_path.0).exists()
         {
             EndpointSelection::Available(signal_flow::Available_Data {
                 endpoint_path: endpoint.endpoint_path.clone(),
                 route_readiness: RouteReadiness::Ready,
             })
         } else {
-            endpoint.endpoint_path.clone().parked()
+            endpoint.endpoint_path.clone().0.parked()
         }
     }
 }
@@ -510,7 +511,7 @@ trait ParksEndpoint {
 impl ParksEndpoint for String {
     fn parked(self) -> EndpointSelection {
         EndpointSelection::Available(signal_flow::Available_Data {
-            endpoint_path: self,
+            endpoint_path: signal_flow::EndpointPath(self),
             route_readiness: RouteReadiness::Parked,
         })
     }
@@ -815,17 +816,19 @@ mod tests {
             format!(r#"{{"workers":{{"{short}":{{"sessionId":"da1e3f9d-full","rendezvousSock":"{}","replPid":{}}}}}}}"#, daemon.join("rv").join(format!("{short}.sock")).display(), std::process::id()),
         ).unwrap();
         let node = FlowNode {
-            flow_id: "da1e3f".into(),
-            session_id: "da1e3f9d-full".into(),
+            flow_id: flow_ethos::FlowId("da1e3f".into()),
+            session_id: signal_flow::SessionId("da1e3f9d-full".into()),
             harness_kind: HarnessKind::Claude,
             endpoint_selection: EndpointSelection::Available(Available_Data {
-                endpoint_path: daemon.join("control.sock").display().to_string(),
+                endpoint_path: signal_flow::EndpointPath(
+                    daemon.join("control.sock").display().to_string(),
+                ),
                 route_readiness: RouteReadiness::Ready,
             }),
             herdr_route_selection: signal_flow::HerdrRouteSelection::Unavailable,
             origin: Origin::Flow(FlowOrigin {
-                flow_id: "da1e3f".into(),
-                session_id: "da1e3f9d-full".into(),
+                flow_id: flow_ethos::FlowId("da1e3f".into()),
+                session_id: signal_flow::SessionId("da1e3f9d-full".into()),
             }),
             flow_lifecycle: FlowLifecycle::Active,
         };

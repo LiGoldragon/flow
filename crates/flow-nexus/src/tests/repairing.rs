@@ -36,15 +36,15 @@ fn seat_address() -> Address {
 fn elsewhere() -> Address {
     Address {
         aspect: Aspect::Field,
-        topic: "nowhere".into(),
+        topic: flow_ethos::Topic("nowhere".into()),
         model: Model::Luna,
     }
 }
 
 fn entry(id: &str) -> QueueEntry {
     QueueEntry {
-        logical_delivery_id: id.into(),
-        request_id: "test".into(),
+        logical_delivery_id: flow_ethos::LogicalDeliveryId(id.into()),
+        request_id: flow_ethos::RequestId("test".into()),
         sent_by: SentBy::Unknown,
         delivery: flow_ethos::Delivery::Queue,
         message: Message::Soft(Request::Order(format!("Order {id}."))),
@@ -56,9 +56,9 @@ fn awake_seat(fixture: &NexusFixture, queue: Vec<QueueEntry>) {
     claude_seat(fixture, 40_000);
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: seat_address(),
-        state: State::Awake(CLAUDE_SEAT.into()),
-        past: vec![],
-        queue,
+        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(queue),
     });
 }
 
@@ -116,39 +116,45 @@ fn inspect_answers_the_metaflow_whole() {
     awake_seat(&fixture, vec![entry("inspect-1"), entry("inspect-2")]);
     let sender = Address {
         aspect: Aspect::Psyche,
-        topic: "core".into(),
+        topic: flow_ethos::Topic("core".into()),
         model: Model::Opus,
     };
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: sender.clone(),
-        state: State::Awake("aa034f".into()),
-        past: vec![],
-        queue: vec![],
+        state: State::Awake(flow_ethos::FlowId("aa034f".into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     // A lock lasts the configured lease.
     let root = fixture.directory.path().to_string_lossy().into_owned();
     let endpoint = |name: &str| meta_signal_flow::CodexEndpoint {
-        client_path: format!("{root}/{name}"),
-        home: format!("{root}/{name}-home"),
-        control_socket_path: format!("{root}/{name}.sock"),
-        model_name_vector: vec![format!("{name}-model")],
+        client_path: flow_ethos::ClientPath(format!("{root}/{name}")),
+        home: flow_ethos::Home(format!("{root}/{name}-home")),
+        control_socket_path: flow_ethos::ControlSocketPath(format!("{root}/{name}.sock")),
+        model_name_vector: vec![flow_ethos::ModelName(format!("{name}-model"))],
     };
     fixture
         .nexus
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
             meta_signal_flow::ConfigureNexus {
-                source_root: root.clone(),
-                stable_codex: endpoint("stable"),
-                next_codex: endpoint("next"),
-                harness_profiles: vec![],
-                meta_aspects: vec![Aspect::Psyche],
-                message_nexus_path_option: Some(format!("{root}/message.sock")),
+                source_root: flow_ethos::SourceRoot(root.clone()),
+                first_codex_endpoint: endpoint("stable"),
+                second_codex_endpoint: endpoint("next"),
+                harness_profiles: flow_ethos::HarnessProfiles(vec![]),
+                meta_aspects: flow_ethos::MetaAspects(vec![Aspect::Psyche]),
+                message_nexus_path_option: Some(flow_ethos::MessageNexusPath(format!(
+                    "{root}/message.sock"
+                ))),
 
-                message_nexus_binary_option: Some(format!("{root}/message-nexus")),
+                message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(format!(
+                    "{root}/message-nexus"
+                ))),
 
-                curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                lease: 60,
+                curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+                    "/fixture/curriculum.sock".into(),
+                ),
+                lease: flow_ethos::Lease(60),
                 presentation_prompt_option: None,
             },
         ))
@@ -158,8 +164,8 @@ fn inspect_answers_the_metaflow_whole() {
         .store
         .lock_metaflow(
             Lock_Data {
-                sender,
-                recipient: seat_address(),
+                first_address: sender,
+                second_address: seat_address(),
             },
             1_790_000_000,
         )
@@ -177,12 +183,12 @@ fn inspect_answers_the_metaflow_whole() {
     assert_eq!(inspected.visible_metaflow.address, private.address);
     assert_eq!(
         inspected.visible_metaflow.state,
-        State::Awake(CLAUDE_SEAT.into())
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
     );
-    assert_eq!(inspected.visible_metaflow.flow_id_vector, private.past);
+    assert_eq!(inspected.visible_metaflow.flow_id_vector, private.past.0);
     assert_eq!(
         inspected.visible_metaflow.visible_native_input_vector.len(),
-        private.queue.len()
+        private.queue.0.len()
     );
     assert_eq!(
         inspected.binding.flow_node_option,
@@ -214,14 +220,14 @@ fn inspect_answers_the_metaflow_whole() {
     };
     assert_eq!(
         launching.binding.flow_node_option,
-        fixture.nexus.store.flow_node(launched).unwrap()
+        fixture.nexus.store.flow_node(&launched.0).unwrap()
     );
     assert!(
         matches!(
             launching.visible_attempt_vector.as_slice(),
             [VisibleAttempt::Queued(delivery), VisibleAttempt::Launch(launch)]
                 if delivery.visible_queue_delivery_standing == VisibleQueueDeliveryStanding::Prepared
-                    && launch.launch_request_id == SUCCESSOR_REQUEST
+                    && launch.launch_request_id.0 == SUCCESSOR_REQUEST
         ),
         "{:?}",
         launching.visible_attempt_vector
@@ -230,8 +236,8 @@ fn inspect_answers_the_metaflow_whole() {
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: seat_address(),
         state: State::Asleep,
-        past: vec![CLAUDE_SEAT.into()],
-        queue: vec![],
+        past: flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.into())]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let MetaResponse::Inspected(asleep) = inspect(&fixture, seat_address()) else {
         panic!("an Asleep metaflow is inspected")
@@ -268,17 +274,20 @@ fn rebind_pane_moves_the_current_flow_to_its_new_pane() {
     };
 
     assert_eq!(
-        rebind(Rebinding::Pane("w1:p9".into()), seat_address()),
+        rebind(
+            Rebinding::Pane(signal_flow::HerdrPaneId("w1:p9".into())),
+            seat_address()
+        ),
         MetaResponse::Rebound(seat_address())
     );
     let node = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
     assert_eq!(
         node.herdr_route_selection,
         HerdrRouteSelection::Available(HerdrRoute {
-            herdr_session_name: "messaging-build".into(),
-            herdr_agent_name: "mind-flow-moved".into(),
-            herdr_pane_id: "w1:p9".into(),
-            herdr_terminal_id: "term_moved".into(),
+            herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+            herdr_agent_name: signal_flow::HerdrAgentName("mind-flow-moved".into()),
+            herdr_pane_id: signal_flow::HerdrPaneId("w1:p9".into()),
+            herdr_terminal_id: signal_flow::HerdrTerminalId("term_moved".into()),
         })
     );
     let in_pane = |pane: &str| {
@@ -291,15 +300,21 @@ fn rebind_pane_moves_the_current_flow_to_its_new_pane() {
             .map(|node| node.flow_id)
             .collect::<Vec<_>>()
     };
-    assert!(in_pane("w1:p9").contains(&CLAUDE_SEAT.to_owned()));
-    assert!(!in_pane("w1:p3").contains(&CLAUDE_SEAT.to_owned()));
+    assert!(in_pane("w1:p9").contains(&flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned())));
+    assert!(!in_pane("w1:p3").contains(&flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned())));
 
     assert_eq!(
-        rebind(Rebinding::Pane("w1:p404".into()), seat_address()),
+        rebind(
+            Rebinding::Pane(signal_flow::HerdrPaneId("w1:p404".into())),
+            seat_address()
+        ),
         MetaResponse::RebindRejected(RebindRejected_Data::PaneAbsent)
     );
     assert_eq!(
-        rebind(Rebinding::Pane("w1:p9".into()), elsewhere()),
+        rebind(
+            Rebinding::Pane(signal_flow::HerdrPaneId("w1:p9".into())),
+            elsewhere()
+        ),
         MetaResponse::RebindRejected(RebindRejected_Data::UnknownAddress)
     );
     // Herdr lists its sessions, but the snapshot of the flow's own fails.
@@ -314,14 +329,20 @@ fn rebind_pane_moves_the_current_flow_to_its_new_pane() {
         1,
     ));
     assert_eq!(
-        rebind(Rebinding::Pane("w1:p9".into()), seat_address()),
+        rebind(
+            Rebinding::Pane(signal_flow::HerdrPaneId("w1:p9".into())),
+            seat_address()
+        ),
         MetaResponse::RebindRejected(RebindRejected_Data::HerdrUnavailable)
     );
     let mut asleep = stored(&fixture);
     asleep.state = State::Asleep;
     fixture.nexus.store.seed_metaflow(asleep);
     assert_eq!(
-        rebind(Rebinding::Pane("w1:p9".into()), seat_address()),
+        rebind(
+            Rebinding::Pane(signal_flow::HerdrPaneId("w1:p9".into())),
+            seat_address()
+        ),
         MetaResponse::RebindRejected(RebindRejected_Data::NotAwake)
     );
     assert!(!herdr_closed_anything(&fixture));
@@ -345,7 +366,7 @@ fn rebind_flow_makes_another_flow_current() {
     let rebind = |flow_id: &str| {
         fixture.nexus.dispatch_meta(MetaQuery::Rebind(Rebind_Data {
             address: seat_address(),
-            rebinding: Rebinding::Flow(flow_id.into()),
+            rebinding: Rebinding::Flow(flow_ethos::FlowId(flow_id.into())),
         }))
     };
 
@@ -353,32 +374,44 @@ fn rebind_flow_makes_another_flow_current() {
         rebind("ffffff"),
         MetaResponse::RebindRejected(RebindRejected_Data::FlowUnknown)
     );
-    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(
+        stored(&fixture).state,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
 
     // The other flow is another metaflow's current flow: it is not taken.
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: elsewhere(),
-        state: State::Awake("908786".into()),
-        past: vec![],
-        queue: vec![],
+        state: State::Awake(flow_ethos::FlowId("908786".into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     assert_eq!(
         rebind("908786"),
         MetaResponse::RebindRejected(RebindRejected_Data::FlowTaken(elsewhere()))
     );
-    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(
+        stored(&fixture).state,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: elsewhere(),
         state: State::Asleep,
-        past: vec!["908786".into()],
-        queue: vec![],
+        past: flow_ethos::Past(vec![flow_ethos::FlowId("908786".into())]),
+        queue: flow_ethos::Queue(vec![]),
     });
 
     assert_eq!(rebind("908786"), MetaResponse::Rebound(seat_address()));
     let metaflow = stored(&fixture);
-    assert_eq!(metaflow.state, State::Awake("908786".into()));
-    assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
-    assert_eq!(metaflow.queue, vec![entry("rebind-1")]);
+    assert_eq!(
+        metaflow.state,
+        State::Awake(flow_ethos::FlowId("908786".into()))
+    );
+    assert_eq!(
+        metaflow.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])
+    );
+    assert_eq!(metaflow.queue, flow_ethos::Queue(vec![entry("rebind-1")]));
     assert!(!herdr_closed_anything(&fixture));
     assert!(fixture.typed().is_none());
 
@@ -420,7 +453,7 @@ fn withdraw_takes_one_request_out_and_closes_its_attempt() {
         fixture.nexus.dispatch_meta_serially(
             MetaQuery::Withdraw(Withdraw_Data {
                 address: at,
-                logical_delivery_id: id.into(),
+                logical_delivery_id: flow_ethos::LogicalDeliveryId(id.into()),
             }),
             None,
         )
@@ -434,8 +467,11 @@ fn withdraw_takes_one_request_out_and_closes_its_attempt() {
         .hold(&seat_address())
         .expect("withdrawal test holds background delivery");
 
-    assert_eq!(withdraw(&never, seat_address()), MetaResponse::Withdrawn);
-    assert_eq!(stored(&fixture).queue, vec![entry("withdraw-1")]);
+    assert_eq!(withdraw(&never.0, seat_address()), MetaResponse::Withdrawn);
+    assert_eq!(
+        stored(&fixture).queue,
+        flow_ethos::Queue(vec![entry("withdraw-1")])
+    );
     assert_eq!(
         fixture
             .nexus
@@ -451,7 +487,7 @@ fn withdraw_takes_one_request_out_and_closes_its_attempt() {
         withdraw("withdraw-1", seat_address()),
         MetaResponse::Withdrawn
     );
-    assert_eq!(stored(&fixture).queue, vec![]);
+    assert_eq!(stored(&fixture).queue, flow_ethos::Queue(vec![]));
     assert_eq!(
         fixture
             .nexus

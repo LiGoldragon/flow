@@ -264,7 +264,7 @@ mod tests {
         fn address() -> Address {
             Address {
                 aspect: Aspect::Mind,
-                topic: "retirementQueue".into(),
+                topic: flow_ethos::Topic("retirementQueue".into()),
                 model: Model::Sol,
             }
         }
@@ -272,9 +272,13 @@ mod tests {
         fn key(generation: i64) -> HandoverGenerationKey {
             HandoverGenerationKey {
                 address: Self::address(),
-                handover_generation: generation,
-                predecessor: format!("predecessor-{generation}"),
-                successor: format!("successor-{generation}"),
+                handover_generation: signal_flow::HandoverGeneration(generation),
+                predecessor: signal_flow::Predecessor(flow_ethos::FlowId(format!(
+                    "predecessor-{generation}"
+                ))),
+                successor: signal_flow::Successor(flow_ethos::FlowId(format!(
+                    "successor-{generation}"
+                ))),
             }
         }
     }

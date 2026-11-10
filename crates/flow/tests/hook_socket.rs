@@ -62,12 +62,12 @@ fn the_hook_reports_only_to_its_typed_socket_configuration() {
             .try_recv()
             .expect("the hook reached the launching Nexus"),
         signal_flow::Query::Report(signal_flow::Report_Data {
-            flow_id: "5a4d0b".into(),
+            flow_id: signal_flow::FlowId("5a4d0b".into()),
             event: signal_flow::Event::Stopped(signal_flow::NativeStop {
-                native_session_id_option: Some("s".into()),
-                transcript_path_option: Some("/t/s.jsonl".into()),
-                last_assistant_message_option: None,
-                background_work: vec![],
+                native_session_id_option: Some(signal_flow::NativeSessionId("s".into())),
+                transcript_path_option: Some(signal_flow::TranscriptPath("/t/s.jsonl".into())),
+                last_assistant_message_option: signal_flow::LastAssistantMessageOption(None),
+                background_work: signal_flow::BackgroundWork(vec![]),
             }),
         })
     );

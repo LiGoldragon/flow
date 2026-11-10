@@ -51,7 +51,7 @@ impl ParsesPlace for [String] {
         let place = Potential::<Place>::from(source.clone())
             .actualize(&mut budget)
             .map_err(|error| format!("invalid Flow Place datom: {error:?}"))?;
-        if !Path::new(&place.runtime).is_absolute() || !Path::new(&place.state).is_absolute() {
+        if !Path::new(&place.runtime.0).is_absolute() || !Path::new(&place.state.0).is_absolute() {
             return Err("a place's Runtime and State are absolute directories".into());
         }
         Ok(place)
@@ -95,7 +95,7 @@ fn main() -> ExitCode {
         }
     };
     for directory in [place.runtime_directory(), place.state_directory()] {
-        if let Err(error) = directory.find(&place.place_name) {
+        if let Err(error) = directory.find(&place.place_name.0) {
             eprintln!("flow-nexus: {error}");
             return ExitCode::FAILURE;
         }
@@ -245,9 +245,9 @@ mod tests {
     #[test]
     fn a_nexus_is_started_with_one_place_datom() {
         let expected = Place {
-            place_name: "main".into(),
-            runtime: "/run/user/1001/nexus/main".into(),
-            state: "/home/li/.local/state/nexus/main".into(),
+            place_name: flow_nexus::generated::library::PlaceName("main".into()),
+            runtime: flow_nexus::generated::library::Runtime("/run/user/1001/nexus/main".into()),
+            state: flow_nexus::generated::library::State("/home/li/.local/state/nexus/main".into()),
         };
         for literal in [
             "{ main /run/user/1001/nexus/main /home/li/.local/state/nexus/main }",
@@ -279,8 +279,14 @@ mod tests {
         let spaced = ["{ «main» «/run/o s» «/state/f s» }".to_owned()]
             .parse_place()
             .expect("delimited path strings preserve spaces");
-        assert_eq!(spaced.runtime, "/run/o s");
-        assert_eq!(spaced.state, "/state/f s");
+        assert_eq!(
+            spaced.runtime,
+            flow_nexus::generated::library::Runtime("/run/o s".into())
+        );
+        assert_eq!(
+            spaced.state,
+            flow_nexus::generated::library::State("/state/f s".into())
+        );
     }
 
     #[test]

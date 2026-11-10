@@ -15,36 +15,41 @@ use std::path::{Path, PathBuf};
 /// deployment lays it out: `<runtime>/nexus/<name>`, `<state>/nexus/<name>`.
 fn place(root: &Path, name: &str) -> Place {
     Place {
-        place_name: name.into(),
-        runtime: root
-            .join("run/nexus")
-            .join(name)
-            .to_string_lossy()
-            .into_owned(),
-        state: root
-            .join("state/nexus")
-            .join(name)
-            .to_string_lossy()
-            .into_owned(),
+        place_name: crate::generated::library::PlaceName(name.into()),
+        runtime: crate::generated::library::Runtime(
+            root.join("run/nexus")
+                .join(name)
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        state: crate::generated::library::State(
+            root.join("state/nexus")
+                .join(name)
+                .to_string_lossy()
+                .into_owned(),
+        ),
     }
 }
 
 fn nexus_configuration(root: &Path) -> ConfigureNexus {
     ConfigureNexus {
-        source_root: root.to_string_lossy().into_owned(),
-        stable_codex: endpoint(root, "stable"),
-        next_codex: endpoint(root, "next"),
-        harness_profiles: vec![],
-        meta_aspects: vec![meta_signal_flow::Aspect::Psyche],
-        message_nexus_path_option: Some(root.join("message.sock").to_string_lossy().into_owned()),
-        message_nexus_binary_option: Some(
+        source_root: flow_ethos::SourceRoot(root.to_string_lossy().into_owned()),
+        first_codex_endpoint: endpoint(root, "stable"),
+        second_codex_endpoint: endpoint(root, "next"),
+        harness_profiles: flow_ethos::HarnessProfiles(vec![]),
+        meta_aspects: flow_ethos::MetaAspects(vec![meta_signal_flow::Aspect::Psyche]),
+        message_nexus_path_option: Some(flow_ethos::MessageNexusPath(
+            root.join("message.sock").to_string_lossy().into_owned(),
+        )),
+        message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(
             root.join("message-nexus").to_string_lossy().into_owned(),
+        )),
+        curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+            root.join("run/curriculum/curriculum.sock")
+                .to_string_lossy()
+                .into_owned(),
         ),
-        curriculum_nexus_path: root
-            .join("run/curriculum/curriculum.sock")
-            .to_string_lossy()
-            .into_owned(),
-        lease: 60,
+        lease: flow_ethos::Lease(60),
         presentation_prompt_option: None,
     }
 }
@@ -106,11 +111,13 @@ fn a_launch_receives_the_socket_of_the_place_the_nexus_opened_in() {
 
     // The same memory opened at another place serves that place's socket.
     let elsewhere = Place {
-        runtime: directory
-            .path()
-            .join("run/nexus/next")
-            .to_string_lossy()
-            .into_owned(),
+        runtime: crate::generated::library::Runtime(
+            directory
+                .path()
+                .join("run/nexus/next")
+                .to_string_lossy()
+                .into_owned(),
+        ),
         ..main.clone()
     };
     let reopened = RunningNexus::open(&elsewhere).expect("configured Nexus reopens");
@@ -158,7 +165,9 @@ fn a_configured_harness_hook_takes_effect_in_the_running_nexus_without_a_restart
     let stable = PathBuf::from("/home/someone/.local/bin/flow-nexus-hook");
     assert_eq!(
         nexus.dispatch_meta(meta_signal_flow::Query::Configure(
-            ConfigurationChange::HarnessHook(stable.to_string_lossy().into_owned())
+            ConfigurationChange::HarnessHook(meta_signal_flow::generated::signal::Path(
+                stable.to_string_lossy().into_owned()
+            ))
         )),
         meta_signal_flow::Response::Configured(ConfigureOutcome::Replaced)
     );
@@ -177,15 +186,17 @@ fn a_configured_harness_hook_takes_effect_in_the_running_nexus_without_a_restart
 
 fn endpoint(root: &std::path::Path, name: &str) -> meta_signal_flow::CodexEndpoint {
     meta_signal_flow::CodexEndpoint {
-        client_path: root.join(name).to_string_lossy().into_owned(),
-        home: root
-            .join(format!("{name}-home"))
-            .to_string_lossy()
-            .into_owned(),
-        control_socket_path: root
-            .join(format!("{name}.sock"))
-            .to_string_lossy()
-            .into_owned(),
-        model_name_vector: vec![format!("{name}-model")],
+        client_path: flow_ethos::ClientPath(root.join(name).to_string_lossy().into_owned()),
+        home: flow_ethos::Home(
+            root.join(format!("{name}-home"))
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        control_socket_path: flow_ethos::ControlSocketPath(
+            root.join(format!("{name}.sock"))
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        model_name_vector: vec![flow_ethos::ModelName(format!("{name}-model"))],
     }
 }

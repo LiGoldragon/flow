@@ -65,19 +65,25 @@ impl<T: Profiled + ?Sized> Profiled for &T {
 }
 
 impl LeaveOutListing for [LeaveOut] {
-    fn leave_outs(&self) -> Vec<LeaveOut> {
-        self.to_vec()
+    fn leave_outs(&self) -> signal_flow::LeaveOuts {
+        signal_flow::LeaveOuts(self.to_vec())
     }
 }
 
 impl LeaveOutListing for Vec<LeaveOut> {
-    fn leave_outs(&self) -> Vec<LeaveOut> {
+    fn leave_outs(&self) -> signal_flow::LeaveOuts {
+        signal_flow::LeaveOuts(self.clone())
+    }
+}
+
+impl LeaveOutListing for signal_flow::LeaveOuts {
+    fn leave_outs(&self) -> signal_flow::LeaveOuts {
         self.clone()
     }
 }
 
 impl<T: LeaveOutListing + ?Sized> LeaveOutListing for &T {
-    fn leave_outs(&self) -> Vec<LeaveOut> {
+    fn leave_outs(&self) -> signal_flow::LeaveOuts {
         (**self).leave_outs()
     }
 }

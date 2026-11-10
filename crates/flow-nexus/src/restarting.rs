@@ -274,7 +274,7 @@ impl ProvesExit for Process {
         if !matches!(proof, ExitProof::Running) || wait.is_zero() {
             return proof;
         }
-        let Ok(pid) = u32::try_from(self.pid) else {
+        let Ok(pid) = u32::try_from(self.pid.0) else {
             return proof;
         };
         let Ok(exit) = pid.exit_descriptor() else {
@@ -292,14 +292,14 @@ impl ProvesExit for Process {
     }
 
     fn exit_proof(&self, kernel: &impl ReadsProcessStatus) -> ExitProof {
-        let Some(pid) = u32::try_from(self.pid)
+        let Some(pid) = u32::try_from(self.pid.0)
             .ok()
             .filter(|pid| *pid > 0)
             .filter(|pid| kernel.pid_max().is_some_and(|pid_max| *pid <= pid_max))
         else {
             return ExitProof::Unproven(ExitDoubt::InvalidPid);
         };
-        if self.started < 0 {
+        if self.started < flow_ethos::generated::library::Started(0) {
             return ExitProof::Unproven(ExitDoubt::BirthUnparsed);
         }
         let stat = match kernel.process_stat(pid) {
@@ -324,7 +324,7 @@ impl ProvesExit for Process {
         let Some(started) = fields.nth(18).and_then(|field| field.parse::<u64>().ok()) else {
             return ExitProof::Unproven(ExitDoubt::StartUnparsed);
         };
-        if i64::try_from(started) != Ok(self.started) {
+        if i64::try_from(started) != Ok(self.started.0) {
             ExitProof::Exited(ExitEvidence::Reborn)
         } else if matches!(state, "Z" | "X") {
             ExitProof::Exited(ExitEvidence::Defunct)
@@ -374,10 +374,17 @@ impl FindsSeatProcesses for HerdrCli {
                 })
                 .filter_map(|agent| {
                     Some(HerdrRoute {
-                        herdr_session_name: herdr_session_name.to_owned(),
-                        herdr_agent_name: field(agent, "name").unwrap_or_default(),
-                        herdr_pane_id: field(agent, "pane_id")?,
-                        herdr_terminal_id: field(agent, "terminal_id")?,
+                        herdr_session_name: signal_flow::HerdrSessionName(
+                            herdr_session_name.to_owned(),
+                        ),
+                        herdr_agent_name: signal_flow::HerdrAgentName(
+                            field(agent, "name").unwrap_or_default(),
+                        ),
+                        herdr_pane_id: signal_flow::HerdrPaneId(field(agent, "pane_id")?),
+                        herdr_terminal_id: signal_flow::HerdrTerminalId(field(
+                            agent,
+                            "terminal_id",
+                        )?),
                     })
                 })
                 .collect(),
@@ -393,7 +400,7 @@ trait ShowsCreatedPane {
 
 impl ShowsCreatedPane for HerdrCli {
     fn shows_created(&self, pane: &HerdrPaneBinding) -> Option<bool> {
-        let snapshot = self.session_snapshot(&pane.herdr_session_name)?;
+        let snapshot = self.session_snapshot(&pane.herdr_session_name.0)?;
         let shown = |list: &str| {
             snapshot
                 .pointer(list)
@@ -401,9 +408,9 @@ impl ShowsCreatedPane for HerdrCli {
                 .is_some_and(|entries| {
                     entries.iter().any(|entry| {
                         entry.get("pane_id").and_then(serde_json::Value::as_str)
-                            == Some(pane.herdr_pane_id.as_str())
+                            == Some(pane.herdr_pane_id.0.as_str())
                             && entry.get("terminal_id").and_then(serde_json::Value::as_str)
-                                == Some(pane.herdr_terminal_id.as_str())
+                                == Some(pane.herdr_terminal_id.0.as_str())
                     })
                 })
         };
@@ -422,10 +429,10 @@ impl DiscardsCreatedPane for HerdrCli {
         let closed = std::process::Command::new(&self.executable)
             .args([
                 "--session",
-                pane.herdr_session_name.as_str(),
+                pane.herdr_session_name.0.as_str(),
                 "pane",
                 "close",
-                pane.herdr_pane_id.as_str(),
+                pane.herdr_pane_id.0.as_str(),
             ])
             .output()
             .is_ok_and(|output| output.status.success());
@@ -586,19 +593,19 @@ impl AnswersRestartFailure for RestartFailure {
         let flow_id = flow_id.to_owned();
         Response::RestartRefused(match self {
             RestartFailure::CloseRefused | RestartFailure::CloseUnproven => {
-                RestartRefusal::CloseRefused(flow_id)
+                RestartRefusal::CloseRefused(signal_flow::FlowId(flow_id))
             }
             RestartFailure::ResumeRefused(category) => {
                 RestartRefusal::ResumeRefused(ResumeRefused_Data {
-                    flow_id,
+                    flow_id: signal_flow::FlowId(flow_id),
                     string: category.clone(),
                 })
             }
             RestartFailure::BindMismatch => RestartRefusal::ResumeRefused(ResumeRefused_Data {
-                flow_id,
+                flow_id: signal_flow::FlowId(flow_id),
                 string: "BindMismatch".into(),
             }),
-            RestartFailure::Stopped => RestartRefusal::Busy(flow_id),
+            RestartFailure::Stopped => RestartRefusal::Busy(signal_flow::FlowId(flow_id)),
         })
     }
 }
@@ -622,9 +629,9 @@ impl RestartsInSteps for RunningNexus {
         use crate::store::metaflow::SleepsMetaflows;
         use crate::store::queue_delivery::AccountsQueueDelivery;
         use crate::waking::{HoldsWakingMetaflows, ReadsClaudeDelivery, WakePolicy};
-        let refused = |refusal: fn(String) -> RestartRefusal| {
+        let refused = |refusal: fn(signal_flow::FlowId) -> RestartRefusal| {
             Err(Box::new(Response::RestartRefused(refusal(
-                flow_id.to_owned(),
+                signal_flow::FlowId(flow_id.to_owned()),
             ))))
         };
         let node = match self.store.flow_node(flow_id) {
@@ -641,7 +648,7 @@ impl RestartsInSteps for RunningNexus {
         }
         // A flow asking for its own restart is owed one at its Stop, which
         // this slice does not serve.
-        if matches!(asker.origin(), Origin::Flow(asking) if asking.flow_id == flow_id) {
+        if matches!(asker.origin(), Origin::Flow(asking) if asking.flow_id.0 == flow_id) {
             return refused(RestartRefusal::Unsupported);
         }
         match self.store.restart_record(flow_id) {
@@ -671,7 +678,7 @@ impl RestartsInSteps for RunningNexus {
                         }
                         let retried = RestartRecord {
                             restart_phase: RestartPhase::Closing,
-                            attempts: record.attempts + 1,
+                            attempts: meta_signal_flow::Attempts(record.attempts.0 + 1),
                             ..record
                         };
                         // Refused here, the Failed record stays as it was.
@@ -697,7 +704,7 @@ impl RestartsInSteps for RunningNexus {
         if !node.flow_lifecycle.is_live() || node.harness_kind != HarnessKind::Claude {
             return refused(RestartRefusal::Unsupported);
         }
-        if node.session_id.is_empty() {
+        if node.session_id.0.is_empty() {
             return refused(RestartRefusal::NoHeldSession);
         }
         let HerdrRouteSelection::Available(route) = node.herdr_route_selection.clone() else {
@@ -725,7 +732,7 @@ impl RestartsInSteps for RunningNexus {
             _ => {
                 return Err(Box::new(Response::RestartRefused(
                     RestartRefusal::ResumeRefused(ResumeRefused_Data {
-                        flow_id: flow_id.to_owned(),
+                        flow_id: signal_flow::FlowId(flow_id.to_owned()),
                         string: "ModelDiffers".into(),
                     }),
                 )));
@@ -753,7 +760,7 @@ impl RestartsInSteps for RunningNexus {
         // pane. Refused here, nothing is written and the old state stands.
         let shown = match presence {
             PanePresence::Present | PanePresence::Bare => {
-                self.herdr.harness_process(&route, &node.session_id)
+                self.herdr.harness_process(&route, &node.session_id.0)
             }
             PanePresence::Absent | PanePresence::Unknown => None,
         };
@@ -771,7 +778,7 @@ impl RestartsInSteps for RunningNexus {
             eprintln!(
                 "flow-nexus: restart of flow {flow_id} refused: {:?}: no harness of pane {} is seen or recorded",
                 MissingExit::ExitUnwitnessed,
-                route.herdr_pane_id
+                route.herdr_pane_id.0
             );
             return Err(Box::new(
                 RestartFailure::ResumeRefused(format!("{:?}", MissingExit::ExitUnwitnessed))
@@ -786,8 +793,8 @@ impl RestartsInSteps for RunningNexus {
                 eprintln!(
                     "flow-nexus: restart of flow {flow_id} refused: {:?}: its pane is gone and its harness, pid {} started {}, is {proof:?}",
                     MissingExit::ExitUnproven,
-                    process.pid,
-                    process.started
+                    process.pid.0,
+                    process.started.0
                 );
                 return Err(Box::new(
                     RestartFailure::ResumeRefused(format!("{:?}", MissingExit::ExitUnproven))
@@ -797,15 +804,15 @@ impl RestartsInSteps for RunningNexus {
         }
         let process_option = Some(process);
         let record = RestartRecord {
-            flow_id: flow_id.to_owned(),
-            native_session_id: node.session_id.clone(),
+            flow_id: signal_flow::FlowId(flow_id.to_owned()),
+            native_session_id: signal_flow::NativeSessionId(node.session_id.0.clone()),
             address,
             old_seat: OldSeat {
                 herdr_route: route,
                 process_option,
             },
             restart_phase: RestartPhase::Closing,
-            attempts: 1,
+            attempts: meta_signal_flow::Attempts(1),
         };
         // Refused here, nothing is written and the old harness runs on.
         let resume_launch = self
@@ -953,9 +960,9 @@ impl RestartsInSteps for RunningNexus {
             herdr_pane_binding: pane.clone(),
             flow_id_option: Some(flow_id.clone()),
             native_session_id_option: Some(spawning.native_session_id.clone()),
-            harness_arguments,
+            harness_arguments: crate::generated::operation::HarnessArguments(harness_arguments),
         })) {
-            Outcome::Spawned(_) => self.verified_resume(&spawning, &pane, &model),
+            Outcome::Spawned(_) => self.verified_resume(&spawning, &pane, &model.0),
             Outcome::Failed(Failed_Data::SpawnRefused(_)) => {
                 Err(RestartFailure::ResumeRefused("SpawnRefused".into()))
             }
@@ -967,16 +974,16 @@ impl RestartsInSteps for RunningNexus {
             Ok(_) => None,
             Err(_) => self
                 .herdr
-                .harness_process(&pane.route(), &spawning.native_session_id),
+                .harness_process(&pane.route(), &spawning.native_session_id.0),
         };
-        self.herdr.release_system_prompt(&request);
+        self.herdr.release_system_prompt(&request.0);
         let _turn = self
             .dispatch_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         // No other step writes a phase while this one runs: Stop answers
         // Restarting, and another Restart answers Busy.
-        if !matches!(self.store.restart_record(&flow_id), Ok(Some(current)) if current == spawning)
+        if !matches!(self.store.restart_record(&flow_id.0), Ok(Some(current)) if current == spawning)
         {
             return Resumption::Answered(Box::new(Response::RestartRefused(RestartRefusal::Busy(
                 flow_id,
@@ -998,7 +1005,7 @@ impl RestartsInSteps for RunningNexus {
         let reopens = matches!(
             &failed.restart_phase,
             RestartPhase::Failed(failure) if *failure != RestartFailure::Stopped
-        ) && failed.attempts <= AUTOMATIC_REOPENS;
+        ) && failed.attempts <= meta_signal_flow::Attempts(AUTOMATIC_REOPENS);
         if !reopens {
             return Reopening::Kept;
         }
@@ -1009,10 +1016,15 @@ impl RestartsInSteps for RunningNexus {
             match &failed.old_seat.process_option {
                 Some(process) => eprintln!(
                     "flow-nexus: restart of flow {flow_id} stays Failed: {missing:?}: the harness of pane {pane}, pid {} started {}, is not proven exited",
-                    process.pid, process.started
+                    process.pid.0,
+                    process.started.0,
+                    flow_id = flow_id.0,
+                    pane = pane.0
                 ),
                 None => eprintln!(
-                    "flow-nexus: restart of flow {flow_id} stays Failed: {missing:?}: no harness of pane {pane} was seen running the session"
+                    "flow-nexus: restart of flow {flow_id} stays Failed: {missing:?}: no harness of pane {pane} was seen running the session",
+                    flow_id = flow_id.0,
+                    pane = pane.0
                 ),
             }
             return Reopening::Kept;
@@ -1022,7 +1034,8 @@ impl RestartsInSteps for RunningNexus {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         // A Stop or a retry may have acted meanwhile.
-        if !matches!(self.store.restart_record(&flow_id), Ok(Some(current)) if current == failed) {
+        if !matches!(self.store.restart_record(&flow_id.0), Ok(Some(current)) if current == failed)
+        {
             return Reopening::Kept;
         }
         let herdr_session_name = match &resume_launch {
@@ -1031,17 +1044,18 @@ impl RestartsInSteps for RunningNexus {
                 .launch_profile
                 .herdr_session_name
                 .clone(),
-            None => self.resume_session_name(&failed),
+            None => signal_flow::HerdrSessionName(self.resume_session_name(&failed)),
         };
-        if !self.proven_quiescent(&failed, &herdr_session_name) {
+        if !self.proven_quiescent(&failed, &herdr_session_name.0) {
             eprintln!(
-                "flow-nexus: restart of flow {flow_id} stays Failed: its session is not proven held nowhere"
+                "flow-nexus: restart of flow {flow_id} stays Failed: its session is not proven held nowhere",
+                flow_id = flow_id.0
             );
             return Reopening::Kept;
         }
         let reopening = RestartRecord {
             restart_phase: RestartPhase::Closed,
-            attempts: failed.attempts + 1,
+            attempts: meta_signal_flow::Attempts(failed.attempts.0 + 1),
             ..failed
         };
         let resume_launch = match resume_launch {
@@ -1058,7 +1072,8 @@ impl RestartsInSteps for RunningNexus {
         }
         eprintln!(
             "flow-nexus: restart of flow {flow_id} reopens its session by itself, run {}",
-            reopening.attempts
+            reopening.attempts.0,
+            flow_id = flow_id.0
         );
         Reopening::Reopened(Box::new(PreparedRestart {
             record: reopening,
@@ -1092,29 +1107,31 @@ impl RestartsInSteps for RunningNexus {
     fn seat_sessions(&self, record: &RestartRecord) -> BTreeSet<String> {
         let flows = self
             .store
-            .flow_node(&record.flow_id)
+            .flow_node(&record.flow_id.0)
             .ok()
             .flatten()
             .and_then(|node| match node.herdr_route_selection {
                 HerdrRouteSelection::Available(route) => Some(route.herdr_session_name),
                 HerdrRouteSelection::Unavailable => None,
             });
-        std::iter::once(record.old_seat.herdr_route.herdr_session_name.clone())
-            .chain(flows)
+        std::iter::once(record.old_seat.herdr_route.herdr_session_name.0.clone())
+            .chain(flows.map(|name| name.0))
             .collect()
     }
 
     fn resume_session_name(&self, record: &RestartRecord) -> String {
-        self.last_profile(&record.flow_id)
+        (self
+            .last_profile(&record.flow_id.0)
             .map(|profile| profile.herdr_session_name)
-            .unwrap_or_else(|| record.old_seat.herdr_route.herdr_session_name.clone())
+            .unwrap_or_else(|| record.old_seat.herdr_route.herdr_session_name.clone()))
+        .0
     }
 
     fn resume_launch(&self, record: &RestartRecord) -> Result<ResumeLaunch, RestartFailure> {
         use crate::launching::{ReadsHarnessArguments, ResolvesLaunchRoot};
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
         let refused = |category: &str| RestartFailure::ResumeRefused(category.into());
-        let last = self.last_profile(&record.flow_id);
+        let last = self.last_profile(&record.flow_id.0);
         let declared = self
             .store
             .metaflow_declaration(&record.address)
@@ -1139,26 +1156,31 @@ impl RestartsInSteps for RunningNexus {
                 (None, None) => return Err(refused("Undeclared")),
             };
         let model_name = self
-            .actual_model(&record.flow_id)
+            .actual_model(&record.flow_id.0)
             .ok_or_else(|| refused("ModelUnknown"))?;
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or_default();
         let profile = signal_flow::LaunchProfile {
-            launch_request_id: format!("restart-{}-{}-{nanos}", record.flow_id, record.attempts),
+            launch_request_id: signal_flow::LaunchRequestId(format!(
+                "restart-{}-{}-{nanos}",
+                record.flow_id.0, record.attempts.0
+            )),
             system_modules,
             user_modules,
-            remembering: signal_flow::Remembering::Predecessors(0),
+            remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(0)),
             address: record.address.clone(),
-            model_name,
-            effort: <Self as crate::sending::ChoosesEffort>::effort_of(&record.address).into(),
+            model_name: signal_flow::ModelName(model_name),
+            effort: signal_flow::Effort(
+                <Self as crate::sending::ChoosesEffort>::effort_of(&record.address).into(),
+            ),
             flow_id_option: None,
-            herdr_session_name,
+            herdr_session_name: signal_flow::HerdrSessionName(herdr_session_name),
             leave_outs_option,
             flow_kind,
             tool_set,
-            instruction_prompt: String::new(),
+            instruction_prompt: signal_flow::InstructionPrompt(String::new()),
         };
         let composed_launch = match self.perform(Operation::Compose(profile)) {
             Outcome::Composed(launch) => launch,
@@ -1197,10 +1219,10 @@ impl RestartsInSteps for RunningNexus {
         }
         let title = launch
             .launch_profile
-            .native_title(&record.flow_id)
+            .native_title(&record.flow_id.0)
             .map_err(|_| refused("TitleRefused".into()))?;
         let resources = HarnessCommandResources {
-            herdr_session: launch.launch_profile.herdr_session_name.clone(),
+            herdr_session: launch.launch_profile.herdr_session_name.clone().0,
             agent: launch.launch_agent_name(),
             // The pane is made only once the old harness is closed.
             pane: "<pane>".into(),
@@ -1211,7 +1233,7 @@ impl RestartsInSteps for RunningNexus {
             // The longest path a held system prompt is read by.
             prompt_fd: Some(format!("/proc/{}/fd/{}", std::process::id(), i32::MAX)),
             claude_session: None,
-            claude_resume: Some(record.native_session_id.clone()),
+            claude_resume: Some(record.native_session_id.clone().0),
             codex_title: None,
             thread: None,
         };
@@ -1237,7 +1259,7 @@ impl RestartsInSteps for RunningNexus {
             .map_err(|_| refused("NotReady"))?;
         let snapshot = self
             .herdr
-            .session_snapshot(&pane.herdr_session_name)
+            .session_snapshot(&pane.herdr_session_name.0)
             .ok_or_else(|| refused("HerdrUnreadable"))?;
         let field = |agent: &serde_json::Value, key: &str| {
             agent
@@ -1250,9 +1272,9 @@ impl RestartsInSteps for RunningNexus {
             .and_then(serde_json::Value::as_array)
             .and_then(|agents| {
                 agents.iter().find(|agent| {
-                    field(agent, "pane_id").as_deref() == Some(pane.herdr_pane_id.as_str())
+                    field(agent, "pane_id").as_deref() == Some(pane.herdr_pane_id.0.as_str())
                         && field(agent, "terminal_id").as_deref()
-                            == Some(pane.herdr_terminal_id.as_str())
+                            == Some(pane.herdr_terminal_id.0.as_str())
                         && field(agent, "agent").as_deref() == Some("claude")
                 })
             })
@@ -1261,22 +1283,24 @@ impl RestartsInSteps for RunningNexus {
         if agent
             .pointer("/agent_session/value")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|reported| reported != record.native_session_id)
+            .is_some_and(|reported| reported != record.native_session_id.0)
         {
             return Err(RestartFailure::BindMismatch);
         }
         let route = HerdrRoute {
             herdr_session_name: pane.herdr_session_name.clone(),
-            herdr_agent_name: field(&agent, "name")
-                .unwrap_or_else(|| pane.herdr_agent_name.clone()),
+            herdr_agent_name: signal_flow::HerdrAgentName(
+                field(&agent, "name").unwrap_or_else(|| pane.herdr_agent_name.clone().0),
+            ),
             herdr_pane_id: pane.herdr_pane_id.clone(),
             herdr_terminal_id: pane.herdr_terminal_id.clone(),
         };
         let process = self
             .herdr
-            .harness_process(&route, &record.native_session_id)
+            .harness_process(&route, &record.native_session_id.0)
             .ok_or_else(|| refused("ProcessUnidentified"))?;
-        let process_id = u32::try_from(process.pid).map_err(|_| refused("ProcessUnidentified"))?;
+        let process_id =
+            u32::try_from(process.pid.0).map_err(|_| refused("ProcessUnidentified"))?;
         let process_identity =
             ProcessIdentity::of(process_id).ok_or_else(|| refused("ProcessUnidentified"))?;
         let working_directory = std::fs::canonicalize(format!("/proc/{process_id}/cwd"))
@@ -1286,19 +1310,19 @@ impl RestartsInSteps for RunningNexus {
         let binding = FlowBinding {
             flow_id: record.flow_id.clone(),
             aspect: record.address.aspect.clone(),
-            model_name: model.to_owned(),
+            model_name: signal_flow::ModelName(model.to_owned()),
             harness_kind: HarnessKind::Claude,
             native_session_id: record.native_session_id.clone(),
             herdr_workspace_id: pane.herdr_workspace_id.clone(),
             herdr_pane_id: pane.herdr_pane_id.clone(),
-            herdr_tab_id: field(&agent, "tab_id").unwrap_or_default(),
+            herdr_tab_id: meta_signal_flow::HerdrTabId(field(&agent, "tab_id").unwrap_or_default()),
             herdr_terminal_id: pane.herdr_terminal_id.clone(),
             herdr_agent_name: route.herdr_agent_name.clone(),
             process_identity,
-            working_directory,
+            working_directory: meta_signal_flow::WorkingDirectory(working_directory),
         };
         let node = self
-            .verified_seat_node(&pane.herdr_session_name, &record.address, &binding)
+            .verified_seat_node(&pane.herdr_session_name.0, &record.address, &binding)
             .map_err(|reason| match reason {
                 FlowBindingRefusalReason::SessionMismatch
                 | FlowBindingRefusalReason::NativeIdentityMismatch => RestartFailure::BindMismatch,
@@ -1321,7 +1345,10 @@ impl RestartsInSteps for RunningNexus {
             // The record stays Spawning: the next start binds by observation.
             return StoreError::StateInvariant.refused();
         }
-        eprintln!("flow-nexus: flow {flow_id} restarted as its own session");
+        eprintln!(
+            "flow-nexus: flow {flow_id} restarted as its own session",
+            flow_id = flow_id.0
+        );
         Response::Restarted(flow_id)
     }
 
@@ -1334,7 +1361,10 @@ impl RestartsInSteps for RunningNexus {
         spawned: Option<Process>,
     ) -> Resumption {
         let flow_id = record.flow_id.clone();
-        eprintln!("flow-nexus: restart of flow {flow_id} did not bind: {failure:?}");
+        eprintln!(
+            "flow-nexus: restart of flow {flow_id} did not bind: {failure:?}",
+            flow_id = flow_id.0
+        );
         // The seat to reconcile is now this pane and the harness it showed:
         // the old one was proven exited before Closed was written.
         let record = RestartRecord {
@@ -1357,7 +1387,7 @@ impl RestartsInSteps for RunningNexus {
         Resumption::Failed(Box::new(FailedRun {
             failed,
             resume_launch,
-            response: failure.answer(&flow_id),
+            response: failure.answer(&flow_id.0),
         }))
     }
 
@@ -1375,12 +1405,15 @@ impl RestartsInSteps for RunningNexus {
         if !self.written(&failed) {
             return StoreError::StateInvariant.refused();
         }
-        failure.answer(&flow_id)
+        failure.answer(&flow_id.0)
     }
 
     fn interrupted(&self, record: RestartRecord, pane: Option<HerdrPaneBinding>) -> Response {
         let flow_id = record.flow_id.clone();
-        eprintln!("flow-nexus: restart of flow {flow_id} is interrupted; only a Stop clears it");
+        eprintln!(
+            "flow-nexus: restart of flow {flow_id} is interrupted; only a Stop clears it",
+            flow_id = flow_id.0
+        );
         let interrupted = RestartRecord {
             restart_phase: RestartPhase::Interrupted(pane),
             ..record
@@ -1394,8 +1427,10 @@ impl RestartsInSteps for RunningNexus {
     fn actual_model(&self, flow_id: &str) -> Option<String> {
         use crate::store::ReadsFlowRoles;
         match self.store.role(flow_id) {
-            Ok(Some(role)) => Some(role.model_name),
-            _ => self.last_profile(flow_id).map(|profile| profile.model_name),
+            Ok(Some(role)) => Some(role.model_name.0),
+            _ => self
+                .last_profile(flow_id)
+                .map(|profile| profile.model_name.0),
         }
     }
 
@@ -1414,11 +1449,11 @@ impl RestartsInSteps for RunningNexus {
             return false;
         };
         let mut sessions = self.seat_sessions(record);
-        sessions.extend(pane.map(|pane| pane.herdr_session_name.clone()));
+        sessions.extend(pane.map(|pane| pane.herdr_session_name.0.clone()));
         for herdr_session_name in &sessions {
             let Some(holding) = self
                 .herdr
-                .panes_holding(herdr_session_name, &record.native_session_id)
+                .panes_holding(herdr_session_name, &record.native_session_id.0)
             else {
                 return false;
             };
@@ -1446,9 +1481,9 @@ impl RestartsInSteps for RunningNexus {
     }
 
     fn seat_node(&self, record: &RestartRecord, route: HerdrRoute) -> Option<FlowNode> {
-        let node = self.store.flow_node(&record.flow_id).ok()??;
+        let node = self.store.flow_node(&record.flow_id.0).ok()??;
         Some(FlowNode {
-            session_id: record.native_session_id.clone(),
+            session_id: signal_flow::SessionId(record.native_session_id.0.clone()),
             herdr_route_selection: HerdrRouteSelection::Available(route),
             ..node
         })
@@ -1530,7 +1565,7 @@ impl RestartsFlows for RunningNexus {
                 // The pane was recorded: it binds only to what it shows.
                 RestartPhase::Spawning(pane) => {
                     let verified = self
-                        .actual_model(&flow_id)
+                        .actual_model(&flow_id.0)
                         .ok_or(RestartFailure::ResumeRefused("ModelUnknown".into()))
                         .and_then(|model| self.verified_resume(&record, &pane, &model));
                     let _turn = self
@@ -1552,7 +1587,10 @@ impl RestartsFlows for RunningNexus {
                 },
                 RestartPhase::Interrupted(_) => continue,
             };
-            eprintln!("flow-nexus: restart of flow {flow_id} taken up at start: {response:?}");
+            eprintln!(
+                "flow-nexus: restart of flow {flow_id} taken up at start: {response:?}",
+                flow_id = flow_id.0
+            );
         }
     }
 
@@ -1580,7 +1618,7 @@ impl RestartsFlows for RunningNexus {
                     .and_then(|old_seat| old_seat.process_option.clone());
                 let process_option = self
                     .herdr
-                    .harness_process(&route, &record.native_session_id)
+                    .harness_process(&route, &record.native_session_id.0)
                     .or(recorded);
                 RestartRecord {
                     old_seat: OldSeat {
@@ -1648,8 +1686,8 @@ impl FencesSeatEvents for RunningNexus {
         FlowStore::process_lineage(&process).contains(&birth.process)
             && caller.caller_pane(&self.herdr)
                 == Some(CallerPane {
-                    herdr_session_name: route.herdr_session_name.clone(),
-                    herdr_pane_id: route.herdr_pane_id.clone(),
+                    herdr_session_name: route.herdr_session_name.clone().0,
+                    herdr_pane_id: route.herdr_pane_id.clone().0,
                 })
     }
 

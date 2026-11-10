@@ -287,7 +287,7 @@ impl SettlesRestingCodexSeats for RunningNexus {
                 .count();
             let flow = self.codex_flow_on(thread);
             let seat = flow.as_ref().and_then(|node| {
-                let metaflow = self.store.metaflow_awake_as(&node.flow_id).ok()??;
+                let metaflow = self.store.metaflow_awake_as(&node.flow_id.0).ok()??;
                 self.resting_codex_seat(&metaflow.address)
             });
             (seat, flow.map(|node| (node.flow_id, ended)))
@@ -296,13 +296,13 @@ impl SettlesRestingCodexSeats for RunningNexus {
         // settlement it allows.
         if let Some((flow_id, ended)) = ended {
             for _ in 0..ended {
-                self.turn_ended(&flow_id);
+                self.turn_ended(&flow_id.0);
             }
         }
         // Settled as a Stop is: off the gate, which it takes, reading the
         // thread's turn again under it.
         if let Some(flow_id) = seat {
-            self.settle_stopped(&flow_id);
+            self.settle_stopped(&flow_id.0);
         }
     }
 
@@ -316,16 +316,16 @@ impl SettlesRestingCodexSeats for RunningNexus {
             && let Some(node) = self.codex_flow_on(thread)
         {
             for _ in 0..ended {
-                self.turn_ended(&node.flow_id);
+                self.turn_ended(&node.flow_id.0);
             }
         }
         if self.codex_turns.turn(thread) == ThreadTurn::Resting
             && let Some(node) = self.codex_flow_on(thread)
-            && matches!(self.store.address_hold(&node.flow_id), Ok(None))
-            && matches!(self.store.metaflow_awake_as(&node.flow_id), Ok(Some(_)))
+            && matches!(self.store.address_hold(&node.flow_id.0), Ok(None))
+            && matches!(self.store.metaflow_awake_as(&node.flow_id.0), Ok(Some(_)))
         {
             // An unconfirmed seat is noted by its confirmation instead.
-            self.stopped_at_confirmation.note(&node.flow_id);
+            self.stopped_at_confirmation.note(&node.flow_id.0);
         }
     }
 
@@ -334,7 +334,7 @@ impl SettlesRestingCodexSeats for RunningNexus {
         let mut live = nodes.into_iter().filter(|node| {
             node.harness_kind == HarnessKind::Codex
                 && !thread.is_empty()
-                && node.session_id == thread
+                && node.session_id.0 == thread
                 && node.flow_lifecycle.is_live()
         });
         let node = live.next()?;
@@ -345,8 +345,8 @@ impl SettlesRestingCodexSeats for RunningNexus {
         matches!(
             self.store.flow_node(flow_id),
             Ok(Some(node)) if node.harness_kind == HarnessKind::Codex
-                && !node.session_id.is_empty()
-                && self.codex_turns.turn(&node.session_id) == ThreadTurn::Resting
+                && !node.session_id.0.is_empty()
+                && self.codex_turns.turn(&node.session_id.0) == ThreadTurn::Resting
         )
     }
 
@@ -355,7 +355,7 @@ impl SettlesRestingCodexSeats for RunningNexus {
             self.store.flow_node(flow_id),
             Ok(Some(node)) if node.harness_kind == HarnessKind::Codex
                 && matches!(
-                    self.codex_turns.turn(&node.session_id),
+                    self.codex_turns.turn(&node.session_id.0),
                     ThreadTurn::Running(_) | ThreadTurn::Delivered
                 )
         )
@@ -366,10 +366,10 @@ impl SettlesRestingCodexSeats for RunningNexus {
         let flow_ethos::State::Awake(flow_id) = metaflow.state else {
             return None;
         };
-        (!metaflow.queue.is_empty()
+        (!metaflow.queue.0.is_empty()
             && !self.waking.is_waking(address)
-            && matches!(self.store.address_hold(&flow_id), Ok(None))
-            && self.codex_resting(&flow_id))
+            && matches!(self.store.address_hold(&flow_id.0), Ok(None))
+            && self.codex_resting(&flow_id.0))
         .then_some(flow_id)
     }
 }

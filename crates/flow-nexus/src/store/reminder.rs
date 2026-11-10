@@ -162,7 +162,7 @@ pub trait NamesAddress {
 
 impl NamesAddress for Address {
     fn named(&self) -> String {
-        format!("{:?} {} {:?}", self.aspect, self.topic, self.model)
+        format!("{:?} {} {:?}", self.aspect, self.topic.0, self.model)
     }
 }
 
@@ -250,7 +250,7 @@ mod tests {
     fn address(model: Model) -> Address {
         Address {
             aspect: Aspect::Psyche,
-            topic: "flow".into(),
+            topic: flow_ethos::Topic("flow".into()),
             model,
         }
     }
@@ -262,7 +262,7 @@ mod tests {
             address: address(Model::Sonnet),
             recipient: Address {
                 aspect: Aspect::Field,
-                topic: "core".into(),
+                topic: flow_ethos::Topic("core".into()),
                 model: Model::Sol,
             },
             minutes: 10,

@@ -896,15 +896,15 @@ impl OpensBoundCodexSession for CodexAdapter {
         launch: &ComposedLaunch,
         intent: &PromptDeliveryIntent,
     ) -> Option<serde_json::Value> {
-        let index = usize::try_from(intent.parts_submitted.checked_sub(1)?).ok()?;
+        let index = usize::try_from(intent.parts_submitted.0.checked_sub(1)?).ok()?;
         let part = launch.first_prompt_payload.prompt_part_vector.get(index)?;
         Some(serde_json::json!({
-            "threadId": intent.native_session_id,
-            "effort": intent.effort,
-            "model": intent.model_name,
+            "threadId": intent.native_session_id.0,
+            "effort": intent.effort.0,
+            "model": intent.model_name.0,
             "input": [{
                 "type": "text",
-                "text": part.prompt_part_text,
+                "text": part.prompt_part_text.0,
                 "text_elements": []
             }],
             "turnTrigger": "flow-nexus"
@@ -913,7 +913,7 @@ impl OpensBoundCodexSession for CodexAdapter {
 
     fn exclusion_config(launch: &ComposedLaunch) -> serde_json::Map<String, serde_json::Value> {
         let mut config = serde_json::Map::new();
-        for leave_out in &launch.leave_outs {
+        for leave_out in &launch.leave_outs.0 {
             let (key, value) = match leave_out {
                 signal_flow::LeaveOut::CodexAgentsMd => {
                     ("project_doc_max_bytes", serde_json::json!(0))
@@ -951,7 +951,7 @@ impl OpensBoundCodexSession for CodexAdapter {
         }
         config.insert(
             "model_reasoning_effort".into(),
-            serde_json::json!(launch.launch_profile.effort),
+            serde_json::json!(launch.launch_profile.effort.0),
         );
         config
     }
@@ -988,11 +988,11 @@ impl OpensBoundCodexSession for CodexAdapter {
             )));
         }
         if response.get("model").and_then(serde_json::Value::as_str)
-            != Some(launch.launch_profile.model_name.as_str())
+            != Some(launch.launch_profile.model_name.0.as_str())
             || response
                 .get("reasoningEffort")
                 .and_then(serde_json::Value::as_str)
-                != Some(launch.launch_profile.effort.as_str())
+                != Some(launch.launch_profile.effort.0.as_str())
         {
             return Err(CodexAdapterUnavailable::Protocol(format!(
                 "{method} readback differs from the launch's model or effort"
@@ -1000,6 +1000,7 @@ impl OpensBoundCodexSession for CodexAdapter {
         }
         if launch
             .leave_outs
+            .0
             .contains(&signal_flow::LeaveOut::CodexAgentsMd)
         {
             let sources = response
@@ -1030,24 +1031,24 @@ impl OpensBoundCodexSession for CodexAdapter {
         config.insert(
             "shell_environment_policy".into(),
             serde_json::json!({ "inherit": "core", "set": {
-                "FLOW_ID": intent.flow_id,
-                "FLOW_DIRECTORY": self.flow_directory(&intent.flow_id)
+                "FLOW_ID": intent.flow_id.0,
+                "FLOW_DIRECTORY": self.flow_directory(&intent.flow_id.0)
             }}),
         );
         let response = session.request(
             request_id,
             "thread/resume",
             serde_json::json!({
-                "threadId": intent.native_session_id,
-                "model": intent.model_name,
-                "baseInstructions": launch.system_prompt.system_prompt_text,
+                "threadId": intent.native_session_id.0,
+                "model": intent.model_name.0,
+                "baseInstructions": launch.system_prompt.system_prompt_text.0,
                 "config": config
             }),
             self.timeout,
         )?;
         Self::read_back_thread(
             launch,
-            &intent.native_session_id,
+            &intent.native_session_id.0,
             "thread/resume",
             &response,
         )
@@ -1110,11 +1111,11 @@ impl OpensCodexThread for CodexAdapter {
             2,
             "thread/start",
             serde_json::json!({
-                "model": launch.launch_profile.model_name,
+                "model": launch.launch_profile.model_name.0,
                 "cwd": root,
                 "approvalPolicy": "never",
                 "sandbox": "danger-full-access",
-                "baseInstructions": launch.system_prompt.system_prompt_text,
+                "baseInstructions": launch.system_prompt.system_prompt_text.0,
                 "ephemeral": false,
                 "config": Self::exclusion_config(launch),
                 "dynamicTools": [SendTool::tool_spec()]
@@ -1224,13 +1225,13 @@ impl SubmitsBoundCodexPart for CodexAdapter {
                 3,
                 "thread/inject_items",
                 serde_json::json!({
-                    "threadId": intent.native_session_id,
+                    "threadId": intent.native_session_id.0,
                     "items": [{
                         "type": "message",
                         "role": "developer",
                         "content": [{
                             "type": "input_text",
-                            "text": format!("Flow: {}", intent.flow_id)
+                            "text": format!("Flow: {}", intent.flow_id.0)
                         }]
                     }]
                 }),
@@ -1848,7 +1849,7 @@ pub trait AccountsOpenedThread {
 impl AccountsOpenedThread for CodexAdapter {
     fn account_opened_thread(&self, thread: &str) -> signal_flow::OpenedThread {
         let unread = signal_flow::OpenedThread {
-            native_session_id: thread.to_owned(),
+            native_session_id: signal_flow::NativeSessionId(thread.to_owned()),
             first_turn: signal_flow::FirstTurn::Unread,
             thread_archive: signal_flow::ThreadArchive::ArchiveRefused,
         };
@@ -1911,14 +1912,14 @@ impl ConsumesResetCredit for CodexAdapter {
             let credit_id = match &request.credit_selection {
                 meta_signal_flow::CreditSelection::Next => serde_json::Value::Null,
                 meta_signal_flow::CreditSelection::Specific(value) => {
-                    serde_json::Value::String(value.clone())
+                    serde_json::Value::String(value.clone().0)
                 }
             };
             let response = session.request(
                 2,
                 "account/rateLimitResetCredit/consume",
                 serde_json::json!({
-                    "idempotencyKey": request.idempotency_key,
+                    "idempotencyKey": request.idempotency_key.0,
                     "creditId": credit_id,
                 }),
                 self.timeout,
@@ -2193,73 +2194,81 @@ mod tests {
 
     fn malformed_bound_launch() -> (ComposedLaunch, PromptDeliveryIntent) {
         let pane = signal_flow::HerdrPaneBinding {
-            launch_request_id: "launch-malformed".into(),
-            herdr_session_name: "session".into(),
-            herdr_agent_name: "codex-agent".into(),
-            herdr_workspace_id: "workspace".into(),
-            herdr_pane_id: "pane".into(),
-            herdr_terminal_id: "terminal".into(),
+            launch_request_id: signal_flow::LaunchRequestId("launch-malformed".into()),
+            herdr_session_name: signal_flow::HerdrSessionName("session".into()),
+            herdr_agent_name: signal_flow::HerdrAgentName("codex-agent".into()),
+            herdr_workspace_id: signal_flow::HerdrWorkspaceId("workspace".into()),
+            herdr_pane_id: signal_flow::HerdrPaneId("pane".into()),
+            herdr_terminal_id: signal_flow::HerdrTerminalId("terminal".into()),
         };
         let prompt_sha256 = "230d8358dc8e8890b4c58deeb62912ee2f20357ae92a5cc861b98e68fe31acb5";
         let launch = ComposedLaunch {
             harness_kind: HarnessKind::Codex,
             launch_profile: signal_flow::LaunchProfile {
-                launch_request_id: "launch-malformed".into(),
-                system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-                user_modules: vec![],
+                launch_request_id: signal_flow::LaunchRequestId("launch-malformed".into()),
+                system_modules: signal_flow::SystemModules(vec![
+                    signal_flow::ModuleIdentity("spirit-core".into()),
+                    signal_flow::ModuleIdentity("intent-flow".into()),
+                ]),
+                user_modules: signal_flow::UserModules(vec![]),
                 address: signal_flow::Address {
                     aspect: signal_flow::Aspect::Field,
-                    topic: "flow".into(),
+                    topic: flow_ethos::Topic("flow".into()),
                     model: signal_flow::Model::Sol,
                 },
-                model_name: "gpt-5.6".into(),
-                effort: "medium".into(),
+                model_name: flow_ethos::ModelName("gpt-5.6".into()),
+                effort: signal_flow::Effort("medium".into()),
                 flow_id_option: None,
-                remembering: signal_flow::Remembering::Predecessors(0),
-                herdr_session_name: "session".into(),
+                remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(
+                    0,
+                )),
+                herdr_session_name: signal_flow::HerdrSessionName("session".into()),
                 leave_outs_option: None,
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
-                instruction_prompt: "body".into(),
+                instruction_prompt: signal_flow::InstructionPrompt("body".into()),
             },
             system_prompt: signal_flow::SystemPrompt {
-                system_prompt_text: String::new(),
-                system_prompt_sha256:
+                system_prompt_text: signal_flow::SystemPromptText(String::new()),
+                system_prompt_sha256: signal_flow::SystemPromptSha256(
                     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+                ),
             },
             first_prompt_payload: signal_flow::FirstPromptPayload {
-                first_prompt_body: "body".into(),
-                prompt_sha256: prompt_sha256.into(),
+                first_prompt_body: signal_flow::FirstPromptBody("body".into()),
+                prompt_sha256: signal_flow::PromptSha256(prompt_sha256.into()),
                 prompt_part_vector: vec![signal_flow::PromptPart {
-                    prompt_part_text: "body with a malformed footer".into(),
-                    prompt_sha256: prompt_sha256.into(),
+                    prompt_part_text: signal_flow::PromptPartText(
+                        "body with a malformed footer".into(),
+                    ),
+                    prompt_sha256: signal_flow::PromptSha256(prompt_sha256.into()),
                 }],
             },
             target_receipt_request: signal_flow::TargetReceiptRequest {
-                launch_request_id: "launch-malformed".into(),
-                prompt_sha256: prompt_sha256.into(),
+                launch_request_id: signal_flow::LaunchRequestId("launch-malformed".into()),
+                prompt_sha256: signal_flow::PromptSha256(prompt_sha256.into()),
             },
-            leave_outs: Vec::new(),
+            leave_outs: signal_flow::LeaveOuts(Vec::new()),
         };
         let intent = PromptDeliveryIntent {
-            launch_request_id: "launch-malformed".into(),
-            prompt_sha256: prompt_sha256.into(),
-            flow_id: "123456".into(),
-            native_session_id: "native-thread".into(),
+            launch_request_id: signal_flow::LaunchRequestId("launch-malformed".into()),
+            prompt_sha256: signal_flow::PromptSha256(prompt_sha256.into()),
+            flow_id: flow_ethos::FlowId("123456".into()),
+            native_session_id: signal_flow::NativeSessionId("native-thread".into()),
             harness_kind: HarnessKind::Codex,
-            model_name: "gpt-5.6".into(),
-            effort: "medium".into(),
-            prompt_sha256_vector: vec![prompt_sha256.into()],
-            parts_submitted: 1,
-            stops_reported: 0,
-            leave_outs: Vec::new(),
+            model_name: flow_ethos::ModelName("gpt-5.6".into()),
+            effort: signal_flow::Effort("medium".into()),
+            prompt_sha256_vector: vec![signal_flow::PromptSha256(prompt_sha256.into())],
+            parts_submitted: signal_flow::PartsSubmitted(1),
+            stops_reported: signal_flow::StopsReported(0),
+            leave_outs: signal_flow::LeaveOuts(Vec::new()),
             herdr_pane_binding: pane,
             native_transcript_boundary: signal_flow::NativeTranscriptBoundary::Absent(
                 signal_flow::NativeTranscriptAbsence {
-                    native_session_id: "native-thread".into(),
+                    native_session_id: signal_flow::NativeSessionId("native-thread".into()),
                     harness_kind: HarnessKind::Codex,
-                    transcript_root_device: "1".into(),
-                    transcript_root_inode: "2".into(),
+                    transcript_root_device: signal_flow::TranscriptRootDevice("1".into()),
+                    transcript_root_inode: signal_flow::TranscriptRootInode("2".into()),
                 },
             ),
         };
@@ -2365,7 +2374,7 @@ mod tests {
         let launch = fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile.clone(),
                 },
@@ -2385,7 +2394,9 @@ mod tests {
         assert_eq!(input[0]["type"], "text");
         assert_eq!(
             input[0]["text"],
-            launch.first_prompt_payload.prompt_part_vector[0].prompt_part_text
+            launch.first_prompt_payload.prompt_part_vector[0]
+                .prompt_part_text
+                .0
         );
         let text = input[0]["text"].as_str().unwrap();
         assert!(text.starts_with("These are your skills, given here; do not reload them."));
@@ -2394,7 +2405,7 @@ mod tests {
             "system text stays out of the USER turn"
         );
         assert!(!input.iter().any(|item| item["type"] == "skill"));
-        intent.parts_submitted = 0;
+        intent.parts_submitted = signal_flow::PartsSubmitted(0);
         assert!(CodexAdapter::bound_turn_params(&launch, &intent).is_none());
     }
 
@@ -2462,7 +2473,7 @@ mod tests {
         assert_eq!(
             adapter_at(executable)
                 .consume_reset_credit(&meta_signal_flow::ResetRequest {
-                    idempotency_key: "attempt-1".into(),
+                    idempotency_key: meta_signal_flow::IdempotencyKey("attempt-1".into()),
                     credit_selection: meta_signal_flow::CreditSelection::Next,
                 })
                 .unwrap(),
@@ -2530,7 +2541,7 @@ mod tests {
         fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: fixture_profile(),
                 },
@@ -2545,7 +2556,7 @@ mod tests {
 
     fn lean_adapter_at(executable: PathBuf, launch: &ComposedLaunch) -> CodexAdapter {
         CodexAdapter {
-            model: launch.launch_profile.model_name.clone(),
+            model: launch.launch_profile.model_name.clone().0,
             ..adapter_at(executable)
         }
     }
@@ -2610,7 +2621,7 @@ mod tests {
         assert_eq!(start["cwd"], workspace.path().to_string_lossy().as_ref());
         assert_eq!(
             start["baseInstructions"],
-            launch.system_prompt.system_prompt_text
+            launch.system_prompt.system_prompt_text.0
         );
         assert!(start["baseInstructions"].as_str().unwrap().contains(
             "Metaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
@@ -2787,7 +2798,7 @@ mod tests {
         codex_endpoints.timeout = Duration::from_secs(5);
         codex_endpoints.workspace_root = std::env::current_dir().unwrap();
         let opened = codex_endpoints
-            .adapter_for(&launch.launch_profile.model_name)
+            .adapter_for(&launch.launch_profile.model_name.0)
             .unwrap()
             .open_thread(&launch, &mut |_| Ok(OPENED_TITLE.into()))
             .map(|(thread, _)| thread)
@@ -2825,8 +2836,8 @@ mod tests {
         let binding = herdr
             .observe_attached_codex_binding(&launch, &pane, &opened)
             .expect("the pane binds to the opened thread");
-        assert_eq!(binding.native_session_id, thread);
-        assert_eq!(binding.flow_id, "123456");
+        assert_eq!(binding.native_session_id.0, thread);
+        assert_eq!(binding.flow_id, flow_ethos::FlowId("123456".into()));
         assert_eq!(binding.herdr_pane_binding, pane);
     }
 
@@ -2848,7 +2859,7 @@ mod tests {
         assert_eq!(
             lean_adapter_at(executable, &launch).account_opened_thread("thread-opened"),
             signal_flow::OpenedThread {
-                native_session_id: "thread-opened".into(),
+                native_session_id: signal_flow::NativeSessionId("thread-opened".into()),
                 first_turn: signal_flow::FirstTurn::Answered,
                 thread_archive: signal_flow::ThreadArchive::Archived,
             }
@@ -2912,9 +2923,9 @@ mod tests {
             .collect();
         intent.model_name = launch.launch_profile.model_name.clone();
         intent.effort = launch.launch_profile.effort.clone();
-        intent.native_session_id = "thread-lean".into();
+        intent.native_session_id = signal_flow::NativeSessionId("thread-lean".into());
         intent.leave_outs = launch.leave_outs.clone();
-        intent.parts_submitted = parts_submitted;
+        intent.parts_submitted = signal_flow::PartsSubmitted(parts_submitted);
         intent
     }
 
@@ -2963,26 +2974,28 @@ mod tests {
         assert_eq!(told["items"][0]["role"], "developer");
         assert_eq!(
             told["items"][0]["content"][0]["text"],
-            format!("Flow: {}", intent.flow_id)
+            format!("Flow: {}", intent.flow_id.0)
         );
         let turn = &requests[4]["params"];
         assert_eq!(turn["threadId"], "thread-lean");
         assert_eq!(
             turn["input"][0]["text"],
-            launch.first_prompt_payload.prompt_part_vector[0].prompt_part_text
+            launch.first_prompt_payload.prompt_part_vector[0]
+                .prompt_part_text
+                .0
         );
         assert_eq!(turn["input"].as_array().unwrap().len(), 1);
         let resume = &requests[2]["params"];
         assert_eq!(resume["threadId"], "thread-lean");
         assert_eq!(
             resume["baseInstructions"],
-            launch.system_prompt.system_prompt_text
+            launch.system_prompt.system_prompt_text.0
         );
         assert_eq!(resume["config"]["project_doc_max_bytes"], 0);
         assert_eq!(resume["config"]["skills.include_instructions"], false);
         assert_eq!(
             resume["config"]["shell_environment_policy"]["set"]["FLOW_ID"],
-            intent.flow_id
+            intent.flow_id.0
         );
     }
 

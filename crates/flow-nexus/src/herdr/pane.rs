@@ -214,7 +214,7 @@ impl WritesPane for HerdrCli {
             // gone: its fate is not known, as `pane_presence` holds too.
             let pane_reused = agents.iter().any(|agent| {
                 agent.get("pane_id").and_then(serde_json::Value::as_str)
-                    == Some(route.herdr_pane_id.as_str())
+                    == Some(route.herdr_pane_id.0.as_str())
             });
             return if pane_reused {
                 PaneAgent::Unreadable
@@ -235,10 +235,10 @@ impl WritesPane for HerdrCli {
         let output = Command::new(&self.executable)
             .args([
                 "--session",
-                route.herdr_session_name.as_str(),
+                route.herdr_session_name.0.as_str(),
                 "agent",
                 "read",
-                route.herdr_pane_id.as_str(),
+                route.herdr_pane_id.0.as_str(),
                 "--source",
                 "visible",
                 "--lines",
@@ -261,10 +261,10 @@ impl WritesPane for HerdrCli {
         let mut command = Command::new(&self.executable);
         command.args([
             "--session",
-            route.herdr_session_name.as_str(),
+            route.herdr_session_name.0.as_str(),
             "pane",
             "send-keys",
-            route.herdr_pane_id.as_str(),
+            route.herdr_pane_id.0.as_str(),
         ]);
         command.args(keys);
         // Herdr's reply is read for its status only; it never reaches the
@@ -276,10 +276,10 @@ impl WritesPane for HerdrCli {
         let mut command = Command::new(&self.executable);
         command.args([
             "--session",
-            route.herdr_session_name.as_str(),
+            route.herdr_session_name.0.as_str(),
             "agent",
             "prompt",
-            route.herdr_pane_id.as_str(),
+            route.herdr_pane_id.0.as_str(),
             text,
         ]);
         if observe {
@@ -302,10 +302,10 @@ impl WritesPane for HerdrCli {
         Command::new(&self.executable)
             .args([
                 "--session",
-                route.herdr_session_name.as_str(),
+                route.herdr_session_name.0.as_str(),
                 "agent",
                 "wait",
-                route.herdr_pane_id.as_str(),
+                route.herdr_pane_id.0.as_str(),
                 "--until",
                 "idle",
                 "--until",
@@ -323,10 +323,10 @@ impl WritesPane for HerdrCli {
         Command::new(&self.executable)
             .args([
                 "--session",
-                route.herdr_session_name.as_str(),
+                route.herdr_session_name.0.as_str(),
                 "agent",
                 "wait",
-                route.herdr_pane_id.as_str(),
+                route.herdr_pane_id.0.as_str(),
                 "--until",
                 "idle",
                 "--until",
@@ -513,6 +513,23 @@ impl ReadsStyledLine for StyledLine {
             .collect::<String>()
             .trim()
             .to_owned()
+    }
+}
+
+/// A configured key list as the key names Herdr presses.
+pub trait NamesKeys {
+    fn texts(&self) -> Vec<String>;
+}
+
+impl NamesKeys for flow_ethos::InterruptKeys {
+    fn texts(&self) -> Vec<String> {
+        self.0.iter().map(|key| key.0.clone()).collect()
+    }
+}
+
+impl NamesKeys for flow_ethos::SubmitKeys {
+    fn texts(&self) -> Vec<String> {
+        self.0.iter().map(|key| key.0.clone()).collect()
     }
 }
 

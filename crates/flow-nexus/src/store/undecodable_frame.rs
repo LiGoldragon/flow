@@ -74,7 +74,7 @@ impl RecordsUndecodableFrames for FlowStore {
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or_default();
         let record = UndecodableRecord {
-            key: format!("{refused_at:024}-{:010}", frame.seat_evidence.process.pid),
+            key: format!("{refused_at:024}-{:010}", frame.seat_evidence.process.pid.0),
             frame,
         };
         let commit = self

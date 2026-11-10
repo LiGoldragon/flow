@@ -72,9 +72,11 @@ impl StartedNexus {
 /// lays it out, `<runtime>/nexus/main`, and its State `state`.
 fn place(runtime: &Path, state: &Path) -> Place {
     Place {
-        place_name: "main".into(),
-        runtime: runtime.join("nexus/main").to_string_lossy().into_owned(),
-        state: state.to_string_lossy().into_owned(),
+        place_name: flow_nexus::generated::library::PlaceName("main".into()),
+        runtime: flow_nexus::generated::library::Runtime(
+            runtime.join("nexus/main").to_string_lossy().into_owned(),
+        ),
+        state: flow_nexus::generated::library::State(state.to_string_lossy().into_owned()),
     }
 }
 
@@ -93,7 +95,7 @@ fn declared(runtime: &Path, state: &Path) -> Place {
 fn place_argument(place: &Place) -> String {
     format!(
         "{{ «{}» «{}» «{}» }}",
-        place.place_name, place.runtime, place.state
+        place.place_name.0, place.runtime.0, place.state.0
     )
 }
 
@@ -149,33 +151,41 @@ fn start_ready(home: &Path, place: &Place, environment: &[(&str, &str)]) -> Star
 
 fn endpoint(name: &str, home: &Path) -> meta_signal_flow::CodexEndpoint {
     meta_signal_flow::CodexEndpoint {
-        client_path: format!("/opt/{name}-client"),
-        home: home.join(name).to_string_lossy().into_owned(),
-        control_socket_path: home
-            .join(name)
-            .join("control.sock")
-            .to_string_lossy()
-            .into_owned(),
-        model_name_vector: vec![format!("{name}-model")],
+        client_path: flow_ethos::ClientPath(format!("/opt/{name}-client")),
+        home: flow_ethos::Home(home.join(name).to_string_lossy().into_owned()),
+        control_socket_path: flow_ethos::ControlSocketPath(
+            home.join(name)
+                .join("control.sock")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        model_name_vector: vec![flow_ethos::ModelName(format!("{name}-model"))],
     }
 }
 
 fn configuration(home: &Path) -> meta_signal_flow::ConfigureNexus {
     meta_signal_flow::ConfigureNexus {
-        source_root: home.join("source").to_string_lossy().into_owned(),
-        stable_codex: endpoint("stable", home),
-        next_codex: endpoint("next", home),
-        harness_profiles: vec![meta_signal_flow::HarnessProfile {
+        source_root: flow_ethos::SourceRoot(home.join("source").to_string_lossy().into_owned()),
+        first_codex_endpoint: endpoint("stable", home),
+        second_codex_endpoint: endpoint("next", home),
+        harness_profiles: flow_ethos::HarnessProfiles(vec![meta_signal_flow::HarnessProfile {
             harness_kind: signal_flow::HarnessKind::Codex,
-            command_sigil_vector: vec!["/".into()],
-            interrupt_keys: vec!["esc".into()],
-            submit_keys: Vec::new(),
-        }],
-        meta_aspects: vec![flow_ethos::Aspect::Psyche, flow_ethos::Aspect::Mind],
-        message_nexus_path_option: Some("/run/message.sock".into()),
-        message_nexus_binary_option: Some("/opt/message-nexus".into()),
-        curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-        lease: 60,
+            command_sigil_vector: vec![flow_ethos::CommandSigil("/".into())],
+            interrupt_keys: flow_ethos::InterruptKeys(vec![flow_ethos::KeyName("esc".into())]),
+            submit_keys: flow_ethos::SubmitKeys(Vec::new()),
+        }]),
+        meta_aspects: flow_ethos::MetaAspects(vec![
+            flow_ethos::Aspect::Psyche,
+            flow_ethos::Aspect::Mind,
+        ]),
+        message_nexus_path_option: Some(flow_ethos::MessageNexusPath("/run/message.sock".into())),
+        message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(
+            "/opt/message-nexus".into(),
+        )),
+        curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+            "/fixture/curriculum.sock".into(),
+        ),
+        lease: flow_ethos::Lease(60),
         presentation_prompt_option: None,
     }
 }
@@ -245,11 +255,11 @@ fn two_places_serve_disjoint_sockets_and_memory() {
             other => panic!("the place returns its Configuration, not {other:?}"),
         };
     assert_eq!(
-        configuration_of(&place_a).nexus.source_root,
+        configuration_of(&place_a).configured_nexus.0.source_root.0,
         home_a.path().join("source").to_string_lossy()
     );
     assert_eq!(
-        configuration_of(&place_b).nexus.source_root,
+        configuration_of(&place_b).configured_nexus.0.source_root.0,
         home_b.path().join("source").to_string_lossy()
     );
     assert_eq!(place_a.store(), state_a.path().join("flow.sema"));
@@ -301,11 +311,16 @@ fn a_configure_applied_to_a_running_nexus_takes_effect_without_a_restart() {
     let meta_signal_flow::Response::Configuration(first) = read_meta(&mut subscription) else {
         panic!("the subscription opens with the configuration")
     };
-    assert_eq!(first.nexus, configuration(home.path()));
+    assert_eq!(
+        first.configured_nexus,
+        meta_signal_flow::ConfiguredNexus(configuration(home.path()))
+    );
 
     let mut replaced = configuration(home.path());
-    replaced.source_root = home.path().join("elsewhere").to_string_lossy().into_owned();
-    replaced.stable_codex.model_name_vector = vec!["stable-model-2".into()];
+    replaced.source_root =
+        flow_ethos::SourceRoot(home.path().join("elsewhere").to_string_lossy().into_owned());
+    replaced.first_codex_endpoint.model_name_vector =
+        vec![flow_ethos::ModelName("stable-model-2".into())];
     assert_eq!(
         meta_call(
             &place,
@@ -318,14 +333,14 @@ fn a_configure_applied_to_a_running_nexus_takes_effect_without_a_restart() {
     let meta_signal_flow::Response::Configuration(second) = read_meta(&mut subscription) else {
         panic!("the subscription sees the change")
     };
-    assert_eq!(second.nexus, replaced);
+    assert_eq!(second.configured_nexus.0, replaced);
     // The same Nexus, never restarted, answers with the replaced value.
     let meta_signal_flow::Response::Configuration(now) =
         meta_call(&place, &meta_signal_flow::Query::Configuration)
     else {
         panic!("the running Nexus answers its Configuration")
     };
-    assert_eq!(now.nexus, replaced);
+    assert_eq!(now.configured_nexus.0, replaced);
     drop(subscription);
     assert!(nexus.terminate().success());
 }
@@ -354,10 +369,15 @@ fn environment_overrides_do_not_replace_the_explicit_configuration() {
     else {
         panic!("the running Nexus answers its Configuration")
     };
-    assert_eq!(snapshot.nexus, configuration(home.path()));
     assert_eq!(
-        snapshot.harness_hook,
-        meta_signal_flow::HarnessHookConfiguration::Unconfigured
+        snapshot.configured_nexus,
+        meta_signal_flow::ConfiguredNexus(configuration(home.path()))
+    );
+    assert_eq!(
+        snapshot.configured_harness_hook,
+        meta_signal_flow::ConfiguredHarnessHook(
+            meta_signal_flow::HarnessHookConfiguration::Unconfigured
+        )
     );
     assert!(metaflows_listed(&place));
     assert!(nexus.terminate().success());
@@ -421,7 +441,9 @@ fn a_live_nexus_socket_is_never_taken_over() {
 
     // A second Nexus at the same Runtime, with memory of its own.
     let intruding = Place {
-        state: other_state.path().to_string_lossy().into_owned(),
+        state: flow_nexus::generated::library::State(
+            other_state.path().to_string_lossy().into_owned(),
+        ),
         ..place.clone()
     };
     configured(&intruding, home.path());
@@ -452,7 +474,7 @@ fn a_nexus_whose_place_is_absent_is_refused_and_makes_nothing() {
     let absent_state = state_root.path().join("nexus/main");
     let place = declared(runtime.path(), state.path());
     let place = Place {
-        state: absent_state.to_string_lossy().into_owned(),
+        state: flow_nexus::generated::library::State(absent_state.to_string_lossy().into_owned()),
         ..place
     };
     let (nexus, _notify) = start(home.path(), &place, &[]);

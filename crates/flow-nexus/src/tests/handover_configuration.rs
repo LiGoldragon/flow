@@ -4,10 +4,10 @@ use meta_signal_flow::ConfigurationChange;
 
 fn policy() -> meta_signal_flow::HandoverPolicy {
     meta_signal_flow::HandoverPolicy {
-        model_name: "claude-opus-5-5".into(),
-        warning_share_left: 15,
-        reminder_text: "Continue every five minutes.".into(),
-        every_minutes: 5,
+        model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
+        warning_share_left: meta_signal_flow::WarningShareLeft(15),
+        reminder_text: meta_signal_flow::ReminderText("Continue every five minutes.".into()),
+        every_minutes: meta_signal_flow::EveryMinutes(5),
     }
 }
 
@@ -21,19 +21,25 @@ fn handover_policies_and_archive_persist_across_both_store_kinds_and_reopens() {
         .unwrap();
     configuration
         .configure_change(ConfigurationChange::HandoverArchive(
-            "/srv/handover-archive".into(),
+            meta_signal_flow::generated::signal::Path("/srv/handover-archive".into()),
         ))
         .unwrap();
     drop(configuration);
     let running = crate::store::FlowStore::open_configured(path).unwrap();
     let expected = running.configuration_snapshot().unwrap().unwrap();
     assert_eq!(
-        expected.handover_policies,
-        meta_signal_flow::HandoverPoliciesConfiguration::Configured(vec![policy()])
+        expected.configured_handover_policies,
+        meta_signal_flow::ConfiguredHandoverPolicies(
+            meta_signal_flow::HandoverPoliciesConfiguration::Configured(vec![policy()])
+        )
     );
     assert_eq!(
-        expected.handover_archive,
-        meta_signal_flow::HandoverArchiveConfiguration::Configured("/srv/handover-archive".into())
+        expected.configured_handover_archive,
+        meta_signal_flow::ConfiguredHandoverArchive(
+            meta_signal_flow::HandoverArchiveConfiguration::Configured(
+                meta_signal_flow::generated::signal::Path("/srv/handover-archive".into())
+            )
+        )
     );
     drop(running);
     let reopened = crate::store::ConfigurationOnlyStore::open(path).unwrap();
@@ -43,7 +49,7 @@ fn handover_policies_and_archive_persist_across_both_store_kinds_and_reopens() {
             .unwrap()
             .unwrap()
             .handover_policies,
-        expected.handover_policies
+        expected.configured_handover_policies.0
     );
 }
 
@@ -54,7 +60,7 @@ fn invalid_handover_policy_and_count_are_typed_and_atomic() {
     let configuration = crate::store::ConfigurationOnlyStore::open(path).unwrap();
     let before = configuration.configuration_snapshot().unwrap();
     let mut invalid = policy();
-    invalid.warning_share_left = 101;
+    invalid.warning_share_left = meta_signal_flow::WarningShareLeft(101);
     assert!(matches!(
         configuration
             .configure_change(ConfigurationChange::HandoverPolicies(vec![invalid.clone()])),
@@ -68,7 +74,7 @@ fn invalid_handover_policy_and_count_are_typed_and_atomic() {
             meta_signal_flow::HandoverConfigurationRefusal::NegativeHandoverCount
         ))
     ));
-    invalid.warning_share_left = -1;
+    invalid.warning_share_left = meta_signal_flow::WarningShareLeft(-1);
     assert!(matches!(
         configuration.configure_change(ConfigurationChange::HandoverPolicies(vec![invalid])),
         Err(crate::store::StoreError::HandoverConfigurationRefused(
@@ -84,7 +90,7 @@ fn invalid_interval_and_duplicate_policy_are_typed_and_atomic() {
     let configuration = crate::store::ConfigurationOnlyStore::open(fixture.path()).unwrap();
     let before = configuration.configuration_snapshot().unwrap();
     let mut interval = policy();
-    interval.every_minutes = 0;
+    interval.every_minutes = meta_signal_flow::EveryMinutes(0);
     assert!(matches!(
         configuration.configure_change(ConfigurationChange::HandoverPolicies(vec![interval])),
         Err(crate::store::StoreError::HandoverConfigurationRefused(
@@ -112,7 +118,9 @@ fn runtime_nexus_change_preserves_handover_and_all_sibling_families() {
         .configure_change(ConfigurationChange::HandoverPolicies(vec![policy()]))
         .unwrap();
     configuration
-        .configure_change(ConfigurationChange::HandoverArchive("/srv/archive".into()))
+        .configure_change(ConfigurationChange::HandoverArchive(
+            meta_signal_flow::generated::signal::Path("/srv/archive".into()),
+        ))
         .unwrap();
     configuration
         .configure_change(ConfigurationChange::HandoverCount(0))
@@ -120,24 +128,30 @@ fn runtime_nexus_change_preserves_handover_and_all_sibling_families() {
     drop(configuration);
     let running = crate::store::FlowStore::open_configured(path).unwrap();
     let before = running.configuration_snapshot().unwrap().unwrap();
-    let mut nexus = before.nexus.clone();
-    nexus.curriculum_nexus_path.push_str("-changed");
+    let mut nexus = before.configured_nexus.clone();
+    nexus.0.curriculum_nexus_path.0.push_str("-changed");
     running
-        .configure_change(ConfigurationChange::Nexus(nexus.clone()))
+        .configure_change(ConfigurationChange::Nexus(nexus.clone().0))
         .unwrap();
     let after = running.configuration_snapshot().unwrap().unwrap();
-    assert_eq!(after.nexus, nexus);
+    assert_eq!(after.configured_nexus, nexus);
     let mut normalized = after.clone();
-    normalized.nexus = before.nexus.clone();
+    normalized.configured_nexus = before.configured_nexus.clone();
     assert_eq!(normalized, before);
     drop(running);
     let reopened = crate::store::ConfigurationOnlyStore::open(path).unwrap();
     let persisted = reopened.configuration_snapshot().unwrap().unwrap();
-    assert_eq!(persisted.handover_policies, before.handover_policies);
-    assert_eq!(persisted.handover_archive, before.handover_archive);
-    assert_eq!(persisted.handover_count, before.handover_count);
-    assert_eq!(persisted.models, before.models);
-    assert_eq!(persisted.thresholds, before.thresholds);
+    assert_eq!(
+        persisted.handover_policies,
+        before.configured_handover_policies.0
+    );
+    assert_eq!(
+        persisted.handover_archive,
+        before.configured_handover_archive.0
+    );
+    assert_eq!(persisted.handover_count, before.configured_handover_count.0);
+    assert_eq!(persisted.models, before.configured_models.0);
+    assert_eq!(persisted.thresholds, before.configured_thresholds.0);
 }
 
 #[test]
@@ -149,7 +163,9 @@ fn current_handover_configuration_catalog_reopens_idempotently() {
         .configure_change(ConfigurationChange::HandoverPolicies(vec![policy()]))
         .unwrap();
     configuration
-        .configure_change(ConfigurationChange::HandoverArchive("/srv/legacy".into()))
+        .configure_change(ConfigurationChange::HandoverArchive(
+            meta_signal_flow::generated::signal::Path("/srv/legacy".into()),
+        ))
         .unwrap();
     configuration
         .configure_change(ConfigurationChange::HandoverCount(0))
@@ -164,7 +180,9 @@ fn current_handover_configuration_catalog_reopens_idempotently() {
         );
         assert_eq!(
             snapshot.handover_archive,
-            meta_signal_flow::HandoverArchiveConfiguration::Configured("/srv/legacy".into())
+            meta_signal_flow::HandoverArchiveConfiguration::Configured(
+                meta_signal_flow::generated::signal::Path("/srv/legacy".into())
+            )
         );
         assert_eq!(
             snapshot.handover_count,
@@ -187,8 +205,10 @@ fn handover_count_zero_persists_through_configuration_and_running_reopen() {
     let running = crate::store::FlowStore::open_configured(path).expect("running store reopens");
     let snapshot = running.configuration_snapshot().expect("snapshot").unwrap();
     assert_eq!(
-        snapshot.handover_count,
-        meta_signal_flow::HandoverCountConfiguration::Configured(0)
+        snapshot.configured_handover_count,
+        meta_signal_flow::ConfiguredHandoverCount(
+            meta_signal_flow::HandoverCountConfiguration::Configured(0)
+        )
     );
     drop(running);
     let reopened =
@@ -214,10 +234,12 @@ fn publication_deadline_defaults_positive_and_persists_override() {
             .unwrap()
             .unwrap()
             .publication_deadline,
-        60_000
+        meta_signal_flow::Duration(60_000)
     );
     configuration
-        .configure_change(ConfigurationChange::PublicationDeadline(125))
+        .configure_change(ConfigurationChange::PublicationDeadline(
+            meta_signal_flow::Duration(125),
+        ))
         .unwrap();
     assert_eq!(
         configuration
@@ -225,7 +247,7 @@ fn publication_deadline_defaults_positive_and_persists_override() {
             .unwrap()
             .unwrap()
             .publication_deadline,
-        125
+        meta_signal_flow::Duration(125)
     );
     drop(configuration);
     let reopened = crate::store::ConfigurationOnlyStore::open(path).unwrap();
@@ -235,7 +257,7 @@ fn publication_deadline_defaults_positive_and_persists_override() {
             .unwrap()
             .unwrap()
             .publication_deadline,
-        125
+        meta_signal_flow::Duration(125)
     );
 }
 
@@ -246,7 +268,9 @@ fn publication_deadline_rejects_zero_and_negative_without_mutation() {
     let before = configuration.configuration_snapshot().unwrap();
     for duration in [0, -1] {
         assert!(matches!(
-            configuration.configure_change(ConfigurationChange::PublicationDeadline(duration)),
+            configuration.configure_change(ConfigurationChange::PublicationDeadline(
+                meta_signal_flow::Duration(duration)
+            )),
             Err(crate::store::StoreError::HandoverConfigurationRefused(
                 meta_signal_flow::HandoverConfigurationRefusal::InvalidPublicationDeadline
             ))

@@ -49,7 +49,7 @@ Library
   RoleCallers.[ Any Only.Vector<CallerMetaflow> ]
   RoleDefinition.{ RoleName Surface ModelId Effort Permission DescriptionModule ContextModules RoleTools RoleCallers }
   Roles.{ Vector<RoleDefinition> }
-  RolesDocument.[ Roles.Roles ]
+  RolesDocument.[ Roles ]
   RoleSelection.{ RoleName Surface }
   RoleComposition.{ RoleName Surface ModelId Effort Permission DescriptionText ContextText RoleTools RoleCallers Vector<ContextProvenance> DescriptionPayloadSha256 ContextPayloadSha256 }
   CliRequest.[ ResolveSkills.Vector<ModuleIdentity>

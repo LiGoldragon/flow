@@ -28,11 +28,11 @@ pub trait LaysOutPlace {
 
 impl LaysOutPlace for Place {
     fn runtime_directory(&self) -> &Path {
-        Path::new(&self.runtime)
+        Path::new(&self.runtime.0)
     }
 
     fn state_directory(&self) -> &Path {
-        Path::new(&self.state)
+        Path::new(&self.state.0)
     }
 }
 
@@ -44,9 +44,9 @@ mod tests {
     #[test]
     fn a_place_holds_its_sockets_in_runtime_and_its_memory_in_state() {
         let place = Place {
-            place_name: "main".into(),
-            runtime: "/run/user/1001/nexus/main".into(),
-            state: "/home/li/.local/state/nexus/main".into(),
+            place_name: crate::generated::library::PlaceName("main".into()),
+            runtime: crate::generated::library::Runtime("/run/user/1001/nexus/main".into()),
+            state: crate::generated::library::State("/home/li/.local/state/nexus/main".into()),
         };
         assert_eq!(
             place.ordinary_socket(),

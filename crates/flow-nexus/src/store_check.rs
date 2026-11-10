@@ -77,14 +77,14 @@ impl OpensCopy for Path {
 
 impl ChecksStore for StoreCheckRequest {
     fn check(&self) -> StoreCheck {
-        let store = Path::new(&self.store_path);
+        let store = Path::new(&self.store_path.0);
         if !store.exists() {
             return StoreCheck::Absent(self.store_path.clone());
         }
         let refused = |reason: String| {
             StoreCheck::Refused(StoreRefusal {
-                path: self.store_path.clone(),
-                reason,
+                path: crate::generated::startup::Path(self.store_path.0.clone()),
+                reason: crate::generated::startup::Reason(reason),
             })
         };
         match store.open_copy(1) {
@@ -117,16 +117,22 @@ mod tests {
         config
             .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
                 meta_signal_flow::ConfigureNexus {
-                    source_root: settings.source_root,
-                    stable_codex: settings.stable_codex,
-                    next_codex: settings.next_codex,
-                    harness_profiles: settings.harness_profile_vector,
-                    meta_aspects: settings.meta_aspects,
-                    message_nexus_path_option: Some(settings.message_nexus_path.clone()),
-                    message_nexus_binary_option: Some("/fixture/message-nexus".into()),
+                    source_root: flow_ethos::SourceRoot(settings.source_root),
+                    first_codex_endpoint: settings.stable_codex,
+                    second_codex_endpoint: settings.next_codex,
+                    harness_profiles: flow_ethos::HarnessProfiles(settings.harness_profile_vector),
+                    meta_aspects: flow_ethos::MetaAspects(settings.meta_aspects),
+                    message_nexus_path_option: Some(flow_ethos::MessageNexusPath(
+                        settings.message_nexus_path.clone(),
+                    )),
+                    message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(
+                        "/fixture/message-nexus".into(),
+                    )),
 
-                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                    lease: 60,
+                    curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+                        "/fixture/curriculum.sock".into(),
+                    ),
+                    lease: flow_ethos::Lease(60),
                     presentation_prompt_option: None,
                 },
             ))
@@ -138,7 +144,7 @@ mod tests {
 
     fn request(path: &Path) -> StoreCheckRequest {
         StoreCheckRequest {
-            store_path: path.to_string_lossy().into_owned(),
+            store_path: crate::generated::startup::StorePath(path.to_string_lossy().into_owned()),
         }
     }
 
@@ -149,7 +155,9 @@ mod tests {
         let before = fs::read(&path).unwrap();
         assert_eq!(
             request(&path).check(),
-            StoreCheck::Opens(path.to_string_lossy().into_owned())
+            StoreCheck::Opens(crate::generated::startup::StorePath(
+                path.to_string_lossy().into_owned()
+            ))
         );
         assert_eq!(fs::read(&path).unwrap(), before);
     }
@@ -160,7 +168,9 @@ mod tests {
         let path = directory.path().join("flow.sema");
         assert_eq!(
             request(&path).check(),
-            StoreCheck::Absent(path.to_string_lossy().into_owned())
+            StoreCheck::Absent(crate::generated::startup::StorePath(
+                path.to_string_lossy().into_owned()
+            ))
         );
     }
 
@@ -204,11 +214,11 @@ mod tests {
         let StoreCheck::Refused(refusal) = request(&path).check() else {
             panic!("a later store is refused")
         };
-        assert_eq!(refusal.path, path.to_string_lossy());
+        assert_eq!(refusal.path.0, path.to_string_lossy());
         assert!(
-            refusal.reason.contains("flow_nexus_from_a_later_flow"),
+            refusal.reason.0.contains("flow_nexus_from_a_later_flow"),
             "{}",
-            refusal.reason
+            refusal.reason.0
         );
         assert_eq!(fs::read(&path).unwrap(), before);
     }
@@ -234,11 +244,11 @@ mod tests {
         let StoreCheck::Refused(refusal) = request(&path).check() else {
             panic!("an earlier store is refused")
         };
-        assert_eq!(refusal.path, path.to_string_lossy());
+        assert_eq!(refusal.path.0, path.to_string_lossy());
         assert!(
-            refusal.reason.contains("earlier Flow's Memory v2"),
+            refusal.reason.0.contains("earlier Flow's Memory v2"),
             "{}",
-            refusal.reason
+            refusal.reason.0
         );
         assert_eq!(fs::read(&path).unwrap(), before);
     }

@@ -16,7 +16,7 @@ use signal_flow::{Message, Metaflow, PrivateSendResponse, QueueEntry, SentBy};
 fn at(aspect: Aspect, topic: &str, model: Model) -> Address {
     Address {
         aspect,
-        topic: topic.into(),
+        topic: flow_ethos::Topic(topic.into()),
         model,
     }
 }
@@ -44,8 +44,8 @@ fn a_tasks_last_reminder_sends_its_failure_to_the_tasks_own_sender() {
         fixture.nexus.store.seed_metaflow(Metaflow {
             address: address.clone(),
             state: flow_ethos::State::Asleep,
-            past: vec![],
-            queue: vec![],
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![]),
         });
     }
     let PrivateSendResponse::SendAccepted(acceptance) = fixture
@@ -56,7 +56,7 @@ fn a_tasks_last_reminder_sends_its_failure_to_the_tasks_own_sender() {
             SentBy::Sender(sender.clone()),
             flow_ethos::Delivery::Queue,
             Message::Soft(Request::Task(flow_ethos::AnswerableTask {
-                minutes: 10,
+                minutes: flow_ethos::Minutes(10),
                 string: "Review the fix".into(),
             })),
             None,
@@ -69,7 +69,7 @@ fn a_tasks_last_reminder_sends_its_failure_to_the_tasks_own_sender() {
     let mut reminder = fixture
         .nexus
         .store
-        .reminder(&key)
+        .reminder(&key.0)
         .unwrap()
         .expect("the task holds its reminder");
     assert_eq!(reminder.address, sender, "the sender Flow recorded");
@@ -88,7 +88,7 @@ fn a_tasks_last_reminder_sends_its_failure_to_the_tasks_own_sender() {
         .unwrap()
         .queue;
     assert_eq!(
-        notices(&told),
+        notices(&told.0),
         vec![
             (
                 SentBy::Flow,
@@ -103,16 +103,16 @@ fn a_tasks_last_reminder_sends_its_failure_to_the_tasks_own_sender() {
     let spent = fixture
         .nexus
         .store
-        .reminder(&key)
+        .reminder(&key.0)
         .unwrap()
         .expect("the task stays open");
     assert_eq!((spent.sent, spent.due), (TASK_REMINDERS, None));
-    for entry in &told {
+    for entry in &told.0 {
         assert_eq!(
             fixture
                 .nexus
                 .store
-                .reminder(&entry.logical_delivery_id)
+                .reminder(&entry.logical_delivery_id.0)
                 .unwrap(),
             None,
             "a reminder holds no reminder of its own"
@@ -125,8 +125,8 @@ fn a_tasks_last_reminder_sends_its_failure_to_the_tasks_own_sender() {
         .unwrap()
         .unwrap()
         .queue;
-    assert_eq!(work.len(), 1, "the recipient keeps only the task");
-    assert_eq!(work[0].logical_delivery_id, key);
+    assert_eq!(work.0.len(), 1, "the recipient keeps only the task");
+    assert_eq!(work.0[0].logical_delivery_id, key);
     let held = fixture
         .nexus
         .store
@@ -168,8 +168,8 @@ fn archiving_an_ended_task_retracts_its_reminder_atomically() {
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: recipient.clone(),
         state: flow_ethos::State::Asleep,
-        past: vec![],
-        queue: vec![],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let PrivateSendResponse::SendAccepted(acceptance) = fixture
         .nexus
@@ -179,7 +179,7 @@ fn archiving_an_ended_task_retracts_its_reminder_atomically() {
             SentBy::Sender(sender.clone()),
             flow_ethos::Delivery::Queue,
             Message::Soft(Request::Task(flow_ethos::AnswerableTask {
-                minutes: 10,
+                minutes: flow_ethos::Minutes(10),
                 string: "Archive the completed task".into(),
             })),
             None,
@@ -192,7 +192,7 @@ fn archiving_an_ended_task_retracts_its_reminder_atomically() {
         fixture
             .nexus
             .store
-            .reminder(&acceptance.logical_delivery_id)
+            .reminder(&acceptance.logical_delivery_id.0)
             .unwrap()
             .is_some(),
         "an open Task holds its reminder"
@@ -201,7 +201,7 @@ fn archiving_an_ended_task_retracts_its_reminder_atomically() {
         fixture
             .nexus
             .store
-            .withdraw_queued(&recipient, &acceptance.logical_delivery_id)
+            .withdraw_queued(&recipient, &acceptance.logical_delivery_id.0)
             .unwrap(),
         Ok(())
     );
@@ -209,7 +209,7 @@ fn archiving_an_ended_task_retracts_its_reminder_atomically() {
         fixture
             .nexus
             .store
-            .archive_request(&acceptance.request_id, &sender)
+            .archive_request(&acceptance.request_id.0, &sender)
             .unwrap(),
         Ok(())
     );
@@ -217,7 +217,7 @@ fn archiving_an_ended_task_retracts_its_reminder_atomically() {
         fixture
             .nexus
             .store
-            .reminder(&acceptance.logical_delivery_id)
+            .reminder(&acceptance.logical_delivery_id.0)
             .unwrap()
             .is_none(),
         "the same archive commit retracts the Task reminder"
@@ -233,8 +233,8 @@ fn a_task_a_seat_sent_itself_fails_to_it_once_with_no_loop() {
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: seat.clone(),
         state: flow_ethos::State::Asleep,
-        past: vec![],
-        queue: vec![],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let PrivateSendResponse::SendAccepted(acceptance) = fixture
         .nexus
@@ -244,7 +244,7 @@ fn a_task_a_seat_sent_itself_fails_to_it_once_with_no_loop() {
             SentBy::Sender(seat.clone()),
             flow_ethos::Delivery::Queue,
             Message::Soft(Request::Task(flow_ethos::AnswerableTask {
-                minutes: 5,
+                minutes: flow_ethos::Minutes(5),
                 string: "Close the loop".into(),
             })),
             None,
@@ -254,7 +254,7 @@ fn a_task_a_seat_sent_itself_fails_to_it_once_with_no_loop() {
         panic!("the task is admitted")
     };
     let key = acceptance.logical_delivery_id;
-    let mut reminder = fixture.nexus.store.reminder(&key).unwrap().unwrap();
+    let mut reminder = fixture.nexus.store.reminder(&key.0).unwrap().unwrap();
     reminder.sent = TASK_REMINDERS - 1;
     reminder.due = Some(0);
     fixture.nexus.store.hold_reminder(reminder).unwrap();
@@ -264,12 +264,12 @@ fn a_task_a_seat_sent_itself_fails_to_it_once_with_no_loop() {
 
     let queue = fixture.nexus.store.metaflow(&seat).unwrap().unwrap().queue;
     assert_eq!(
-        queue.len(),
+        queue.0.len(),
         3,
         "the task, its last reminder and its failure"
     );
-    assert_eq!(queue[0].logical_delivery_id, key);
-    let failures = notices(&queue[1..])
+    assert_eq!(queue.0[0].logical_delivery_id, key);
+    let failures = notices(&queue.0[1..])
         .into_iter()
         .filter(|(_, notice)| notice.starts_with("Failure:"))
         .count();
@@ -278,7 +278,7 @@ fn a_task_a_seat_sent_itself_fails_to_it_once_with_no_loop() {
         fixture
             .nexus
             .store
-            .reminder(&key)
+            .reminder(&key.0)
             .unwrap()
             .map(|spent| spent.due),
         Some(None),

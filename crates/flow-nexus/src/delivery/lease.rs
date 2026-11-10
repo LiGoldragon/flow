@@ -21,9 +21,9 @@ pub struct LeasedPane {
 impl From<&HerdrRoute> for LeasedPane {
     fn from(route: &HerdrRoute) -> Self {
         Self {
-            herdr_session_name: route.herdr_session_name.clone(),
-            herdr_pane_id: route.herdr_pane_id.clone(),
-            herdr_terminal_id: route.herdr_terminal_id.clone(),
+            herdr_session_name: route.herdr_session_name.clone().0,
+            herdr_pane_id: route.herdr_pane_id.clone().0,
+            herdr_terminal_id: route.herdr_terminal_id.clone().0,
         }
     }
 }
@@ -83,10 +83,10 @@ mod tests {
 
     fn route(pane: &str) -> HerdrRoute {
         HerdrRoute {
-            herdr_session_name: "fixture".into(),
-            herdr_agent_name: "agent".into(),
-            herdr_pane_id: pane.into(),
-            herdr_terminal_id: format!("terminal-{pane}"),
+            herdr_session_name: signal_flow::HerdrSessionName("fixture".into()),
+            herdr_agent_name: signal_flow::HerdrAgentName("agent".into()),
+            herdr_pane_id: signal_flow::HerdrPaneId(pane.into()),
+            herdr_terminal_id: signal_flow::HerdrTerminalId(format!("terminal-{pane}")),
         }
     }
 

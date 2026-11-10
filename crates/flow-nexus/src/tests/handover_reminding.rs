@@ -11,7 +11,7 @@ use signal_flow::{Address, Aspect, Model};
 fn address() -> Address {
     Address {
         aspect: Aspect::Field,
-        topic: "core".into(),
+        topic: flow_ethos::Topic("core".into()),
         model: Model::Sol,
     }
 }
@@ -116,9 +116,9 @@ fn typed_keep_and_drop_commands_are_shell_single_argument_forms() {
         generation: 1,
     };
     let section = Section {
-        title: "title with ' apostrophe".into(),
-        description: "description with ' apostrophe".into(),
-        body: "body with ' apostrophe".into(),
+        title: signal_flow::Title("title with ' apostrophe".into()),
+        description: signal_flow::Description("description with ' apostrophe".into()),
+        body: signal_flow::Body("body with ' apostrophe".into()),
     };
     let parse = |text: String| {
         assert!(text.starts_with("flow-nexus '") && text.ends_with("'"));
@@ -168,8 +168,8 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Thresholds(vec![
             meta_signal_flow::ConfigureThreshold {
-                model_name: "m".into(),
-                refresh: 101,
+                model_name: flow_ethos::ModelName("m".into()),
+                refresh_threshold: meta_signal_flow::RefreshThreshold(101),
             },
         ]))
         .unwrap();
@@ -178,23 +178,23 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::HandoverPolicies(
             vec![meta_signal_flow::HandoverPolicy {
-                model_name: "m".into(),
-                warning_share_left: 15,
-                reminder_text: "configured".into(),
-                every_minutes: 5,
+                model_name: flow_ethos::ModelName("m".into()),
+                warning_share_left: meta_signal_flow::WarningShareLeft(15),
+                reminder_text: meta_signal_flow::ReminderText("configured".into()),
+                every_minutes: meta_signal_flow::EveryMinutes(5),
             }],
         ))
         .unwrap();
-    fixture.nexus.store.seed_role(signal_flow::Caller {
-        flow_id: "fixture-seat".into(),
+    fixture.nexus.store.seed_role(signal_flow::CallerIdentity {
+        flow_id: flow_ethos::FlowId("fixture-seat".into()),
         aspect: Aspect::Field,
-        model_name: "m".into(),
+        model_name: flow_ethos::ModelName("m".into()),
     });
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address.clone(),
-        state: State::Awake("fixture-seat".into()),
-        past: vec![],
-        queue: vec![],
+        state: State::Awake(flow_ethos::FlowId("fixture-seat".into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     fixture
         .nexus
@@ -230,7 +230,7 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
     assert_eq!(held.sent, 1);
     assert_eq!(held.next_due, 310);
     let metaflow = fixture.nexus.store.metaflow(&address).unwrap().unwrap();
-    assert!(metaflow.queue.iter().any(|entry| matches!(
+    assert!(metaflow.queue.0.iter().any(|entry| matches!(
         &entry.message,
         flow_ethos::Message::HardAbrupt(flow_ethos::Request::Notice(_))
     )));
@@ -268,7 +268,7 @@ fn runtime_tick_drains_due_hard_notice_past_threshold_into_the_pane() {
     use crate::store::queue_delivery::AccountsQueueDelivery;
     use crate::store::{ManagesMetaflowState, SeedsRole};
     use flow_ethos::{Metaflow, State};
-    use signal_flow::Caller;
+    use signal_flow::CallerIdentity;
 
     let fixture = NexusFixture::new();
     let log = fixture.accept_pane_operations(
@@ -278,19 +278,19 @@ fn runtime_tick_drains_due_hard_notice_past_threshold_into_the_pane() {
     claude_seat(&fixture, 200);
     let address = signal_flow::Address {
         aspect: Aspect::Mind,
-        topic: "flow".into(),
+        topic: flow_ethos::Topic("flow".into()),
         model: Model::Sol,
     };
-    fixture.nexus.store.seed_role(Caller {
-        flow_id: CLAUDE_SEAT.into(),
+    fixture.nexus.store.seed_role(CallerIdentity {
+        flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
         aspect: Aspect::Mind,
-        model_name: "claude-opus-5-5".into(),
+        model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
     });
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address.clone(),
-        state: State::Awake(CLAUDE_SEAT.into()),
-        past: vec![],
-        queue: vec![],
+        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     fixture
         .nexus
@@ -302,8 +302,8 @@ fn runtime_tick_drains_due_hard_notice_past_threshold_into_the_pane() {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Thresholds(vec![
             meta_signal_flow::ConfigureThreshold {
-                model_name: "claude-opus-5-5".into(),
-                refresh: 101,
+                model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
+                refresh_threshold: meta_signal_flow::RefreshThreshold(101),
             },
         ]))
         .unwrap();
@@ -312,10 +312,10 @@ fn runtime_tick_drains_due_hard_notice_past_threshold_into_the_pane() {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::HandoverPolicies(
             vec![meta_signal_flow::HandoverPolicy {
-                model_name: "claude-opus-5-5".into(),
-                warning_share_left: 15,
-                reminder_text: "configured".into(),
-                every_minutes: 5,
+                model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
+                warning_share_left: meta_signal_flow::WarningShareLeft(15),
+                reminder_text: meta_signal_flow::ReminderText("configured".into()),
+                every_minutes: meta_signal_flow::EveryMinutes(5),
             }],
         ))
         .unwrap();
@@ -330,7 +330,7 @@ fn runtime_tick_drains_due_hard_notice_past_threshold_into_the_pane() {
 
     let stored = fixture.nexus.store.metaflow(&address).unwrap().unwrap();
     assert!(
-        stored.queue.is_empty(),
+        stored.queue.0.is_empty(),
         "scheduled warning drained, not parked"
     );
     assert_eq!(
@@ -360,9 +360,9 @@ fn reminder_admission_waits_for_handover_gate_before_commit() {
     let address = address();
     fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
         address: address.clone(),
-        state: flow_ethos::State::Awake("fixture-seat".into()),
-        past: vec![],
-        queue: vec![],
+        state: flow_ethos::State::Awake(flow_ethos::FlowId("fixture-seat".into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     fixture
         .nexus
@@ -413,9 +413,9 @@ fn reminder_snapshot_closed_before_admission_creates_no_notice() {
     let address = address();
     fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
         address: address.clone(),
-        state: flow_ethos::State::Awake("predecessor".into()),
-        past: vec![],
-        queue: vec![],
+        state: flow_ethos::State::Awake(flow_ethos::FlowId("predecessor".into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     fixture
         .nexus
@@ -464,6 +464,7 @@ fn reminder_snapshot_closed_before_admission_creates_no_notice() {
             .unwrap()
             .unwrap()
             .queue
+            .0
             .is_empty()
     );
     let memory = fixture
@@ -498,13 +499,13 @@ fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
         append_main_rows(&fixture, &[end_turn("last-turn")]);
         let address = signal_flow::Address {
             aspect: Aspect::Mind,
-            topic: "flow".into(),
+            topic: flow_ethos::Topic("flow".into()),
             model: Model::Sol,
         };
-        fixture.nexus.store.seed_role(signal_flow::Caller {
-            flow_id: CLAUDE_SEAT.into(),
+        fixture.nexus.store.seed_role(signal_flow::CallerIdentity {
+            flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
             aspect: Aspect::Mind,
-            model_name: "claude-opus-5-5".into(),
+            model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
         });
         declare_seat(
             &fixture,
@@ -516,8 +517,8 @@ fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
             .nexus
             .store
             .configure_change(ConfigurationChange::Thresholds(vec![ConfigureThreshold {
-                model_name: "claude-opus-5-5".into(),
-                refresh: 101,
+                model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
+                refresh_threshold: meta_signal_flow::RefreshThreshold(101),
             }]))
             .unwrap();
         fixture
@@ -530,16 +531,17 @@ fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
             .store
             .configure_change(ConfigurationChange::HandoverPolicies(vec![
                 HandoverPolicy {
-                    model_name: "claude-opus-5-5".into(),
-                    warning_share_left: 15,
-                    reminder_text: "continue".into(),
-                    every_minutes: 5,
+                    model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
+                    warning_share_left: meta_signal_flow::WarningShareLeft(15),
+                    reminder_text: meta_signal_flow::ReminderText("continue".into()),
+                    every_minutes: meta_signal_flow::EveryMinutes(5),
                 },
             ]))
             .unwrap();
-        fixture
-            .nexus
-            .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+        fixture.nexus.after_report(
+            &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+            &claude_stop(&fixture),
+        );
         let reminder = fixture.nexus.store.handover_reminder(&address, 0).unwrap();
         if tokens == 85 {
             assert!(reminder.is_none());
@@ -572,24 +574,24 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
     use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
     use crate::store::{ManagesMetaflowState, SeedsRole};
     use meta_signal_flow::{ConfigurationChange, ConfigureThreshold, HandoverPolicy};
-    use signal_flow::{Address, Aspect, Caller, Metaflow, Model};
+    use signal_flow::{Address, Aspect, CallerIdentity, Metaflow, Model};
     let fixture = NexusFixture::new();
     let address = Address {
         aspect: Aspect::Mind,
-        topic: "flow".into(),
+        topic: flow_ethos::Topic("flow".into()),
         model: Model::Sol,
     };
-    fixture.nexus.store.seed_role(Caller {
-        flow_id: CLAUDE_SEAT.into(),
+    fixture.nexus.store.seed_role(CallerIdentity {
+        flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
         aspect: Aspect::Mind,
-        model_name: CLAUDE_MODEL.into(),
+        model_name: flow_ethos::ModelName(CLAUDE_MODEL.into()),
     });
     fixture
         .nexus
         .store
         .configure_change(ConfigurationChange::Thresholds(vec![ConfigureThreshold {
-            model_name: CLAUDE_MODEL.into(),
-            refresh: 101,
+            model_name: flow_ethos::ModelName(CLAUDE_MODEL.into()),
+            refresh_threshold: meta_signal_flow::RefreshThreshold(101),
         }]))
         .unwrap();
     fixture
@@ -597,10 +599,10 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
         .store
         .configure_change(ConfigurationChange::HandoverPolicies(vec![
             HandoverPolicy {
-                model_name: CLAUDE_MODEL.into(),
-                warning_share_left: 15,
-                reminder_text: "fixture".into(),
-                every_minutes: 5,
+                model_name: flow_ethos::ModelName(CLAUDE_MODEL.into()),
+                warning_share_left: meta_signal_flow::WarningShareLeft(15),
+                reminder_text: meta_signal_flow::ReminderText("fixture".into()),
+                every_minutes: meta_signal_flow::EveryMinutes(5),
             },
         ]))
         .unwrap();
@@ -611,9 +613,9 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
         .unwrap();
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address.clone(),
-        state: flow_ethos::State::Awake(CLAUDE_SEAT.into()),
-        past: vec![],
-        queue: vec![],
+        state: flow_ethos::State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     fixture
         .nexus
@@ -643,7 +645,7 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
         .unwrap();
     assert_eq!(row.sent, 1);
     let public = fixture.nexus.store.metaflow(&address).unwrap().unwrap();
-    assert!(public.queue.iter().any(|entry| matches!(
+    assert!(public.queue.0.iter().any(|entry| matches!(
         &entry.message,
         flow_ethos::Message::HardAbrupt(flow_ethos::Request::Notice(_))
     )));
@@ -681,24 +683,24 @@ fn green_keep_cancels_open_warning_timer() {
     use crate::store::metaflow::SeedsMetaflow;
     use crate::store::{ManagesMetaflowState, SeedsRole};
     use meta_signal_flow::{ConfigurationChange, ConfigureThreshold, HandoverPolicy};
-    use signal_flow::{Address, Aspect, Caller, Known_Data, Metaflow, Model, Touch};
+    use signal_flow::{Address, Aspect, CallerIdentity, Known_Data, Metaflow, Model, Touch};
     let fixture = NexusFixture::new();
     let address = Address {
         aspect: Aspect::Mind,
-        topic: "flow".into(),
+        topic: flow_ethos::Topic("flow".into()),
         model: Model::Sol,
     };
-    fixture.nexus.store.seed_role(Caller {
-        flow_id: CLAUDE_SEAT.into(),
+    fixture.nexus.store.seed_role(CallerIdentity {
+        flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
         aspect: Aspect::Mind,
-        model_name: CLAUDE_MODEL.into(),
+        model_name: flow_ethos::ModelName(CLAUDE_MODEL.into()),
     });
     fixture
         .nexus
         .store
         .configure_change(ConfigurationChange::Thresholds(vec![ConfigureThreshold {
-            model_name: CLAUDE_MODEL.into(),
-            refresh: 101,
+            model_name: flow_ethos::ModelName(CLAUDE_MODEL.into()),
+            refresh_threshold: meta_signal_flow::RefreshThreshold(101),
         }]))
         .unwrap();
     fixture
@@ -706,10 +708,10 @@ fn green_keep_cancels_open_warning_timer() {
         .store
         .configure_change(ConfigurationChange::HandoverPolicies(vec![
             HandoverPolicy {
-                model_name: CLAUDE_MODEL.into(),
-                warning_share_left: 15,
-                reminder_text: "fixture".into(),
-                every_minutes: 5,
+                model_name: flow_ethos::ModelName(CLAUDE_MODEL.into()),
+                warning_share_left: meta_signal_flow::WarningShareLeft(15),
+                reminder_text: meta_signal_flow::ReminderText("fixture".into()),
+                every_minutes: meta_signal_flow::EveryMinutes(5),
             },
         ]))
         .unwrap();
@@ -720,9 +722,9 @@ fn green_keep_cancels_open_warning_timer() {
         .unwrap();
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address.clone(),
-        state: flow_ethos::State::Awake(CLAUDE_SEAT.into()),
-        past: vec![],
-        queue: vec![],
+        state: flow_ethos::State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     fixture
         .nexus
@@ -747,14 +749,14 @@ fn green_keep_cancels_open_warning_timer() {
                 flow_id: CLAUDE_SEAT.into(),
             },
             signal_flow::Section {
-                title: "x".into(),
-                description: "d".into(),
-                body: "b".into(),
+                title: signal_flow::Title("x".into()),
+                description: signal_flow::Description("d".into()),
+                body: signal_flow::Body("b".into()),
             },
             Touch::Known(Known_Data {
-                flow_id: CLAUDE_SEAT.into(),
-                tokens: 86,
-                timestamp: 10,
+                flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+                tokens: signal_flow::Tokens(86),
+                timestamp: signal_flow::Timestamp(10),
             }),
         )
         .unwrap();
@@ -782,9 +784,9 @@ fn atomic_same_expected_reminder_state_rejects_duplicate_admission() {
     let address = address();
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address.clone(),
-        state: State::Awake("fixture-seat".into()),
-        past: vec![],
-        queue: vec![],
+        state: State::Awake(flow_ethos::FlowId("fixture-seat".into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     fixture
         .nexus
@@ -828,9 +830,9 @@ fn reminder_state_reopens_with_anchored_due_without_duplicate_initial() {
     use crate::store::metaflow::SeedsMetaflow;
     store.seed_metaflow(flow_ethos::Metaflow {
         address: address.clone(),
-        state: flow_ethos::State::Awake("fixture-seat".into()),
-        past: vec![],
-        queue: vec![],
+        state: flow_ethos::State::Awake(flow_ethos::FlowId("fixture-seat".into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     store
         .ensure_live_handover(&address, "fixture-seat")

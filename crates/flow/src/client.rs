@@ -27,7 +27,7 @@ pub trait TextualizesFlowReply {
 impl CallsFlowNexus for FlowClient {
     fn call(&self, invocation: &Invocation, each: &mut dyn FnMut(Response)) -> Result<(), String> {
         let query = &invocation.query;
-        let mut peer = UnixStream::connect(&invocation.ordinary_socket_path)
+        let mut peer = UnixStream::connect(&invocation.ordinary_socket_path.0)
             .map_err(|error| error.to_string())?;
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(query).map_err(|e| e.to_string())?;
         peer.write_all(&(bytes.len() as u32).to_be_bytes())

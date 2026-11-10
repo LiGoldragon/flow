@@ -39,7 +39,9 @@ use std::fs;
 
 #[test]
 fn a_wake_refusal_notice_keeps_the_missing_module_identity() {
-    let refusal = signal_flow::ContextRefusal::ModuleMissing(Some("vision:absent".into()));
+    let refusal = signal_flow::ContextRefusal::ModuleMissing(Some(signal_flow::ModuleIdentity(
+        "vision:absent".into(),
+    )));
     assert_eq!(
         WakeRefusal::StartRejected(signal_flow::StartRejection::ContextRefused(refusal.clone()))
             .failure(),
@@ -50,7 +52,7 @@ fn a_wake_refusal_notice_keeps_the_missing_module_identity() {
 pub(super) fn address(model: Model) -> Address {
     Address {
         aspect: Aspect::Mind,
-        topic: "flow".into(),
+        topic: flow_ethos::Topic("flow".into()),
         model,
     }
 }
@@ -64,8 +66,12 @@ pub(super) fn metaflow(
     Metaflow {
         address: address(model),
         state,
-        past: past.into_iter().map(String::from).collect(),
-        queue: queue.unsent(),
+        past: flow_ethos::Past(
+            past.into_iter()
+                .map(|flow| flow_ethos::FlowId(flow.into()))
+                .collect(),
+        ),
+        queue: flow_ethos::Queue(queue.unsent()),
     }
 }
 
@@ -86,8 +92,8 @@ impl Unsent for Request {
             sha2::Sha256::digest(format!("{self:?}").as_bytes())
         );
         QueueEntry {
-            request_id: logical_delivery_id[5..9].into(),
-            logical_delivery_id,
+            request_id: flow_ethos::RequestId(logical_delivery_id[5..9].into()),
+            logical_delivery_id: flow_ethos::LogicalDeliveryId(logical_delivery_id),
             sent_by: SentBy::Unknown,
             delivery: flow_ethos::Delivery::Wake,
             message: Message::MiddleAbrupt(self),
@@ -104,14 +110,16 @@ impl Unsent for Vec<Request> {
             .map(|(index, request)| {
                 let mut entry = request.unsent();
                 if !ids.insert(entry.logical_delivery_id.clone()) {
-                    entry.logical_delivery_id.push_str(&format!("-{index}"));
+                    entry.logical_delivery_id.0.push_str(&format!("-{index}"));
                     ids.insert(entry.logical_delivery_id.clone());
                     use sha2::Digest;
-                    entry.request_id = format!(
-                        "{:x}",
-                        sha2::Sha256::digest(entry.logical_delivery_id.as_bytes())
-                    )[..4]
-                        .into();
+                    entry.request_id = flow_ethos::RequestId(
+                        format!(
+                            "{:x}",
+                            sha2::Sha256::digest(entry.logical_delivery_id.0.as_bytes())
+                        )[..4]
+                            .into(),
+                    );
                 }
                 entry
             })
@@ -129,13 +137,18 @@ pub(super) fn maintain(fixture: &NexusFixture, address: Address) {
             meta_signal_flow::ConfigureMetaflow {
                 root_option: None,
                 address,
-                system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-                user_modules: vec!["operation-main-flow".into()],
+                system_modules: signal_flow::SystemModules(vec![
+                    signal_flow::ModuleIdentity("spirit-core".into()),
+                    signal_flow::ModuleIdentity("intent-flow".into()),
+                ]),
+                user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                    "operation-main-flow".into(),
+                )]),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 continuity: meta_signal_flow::Continuity::Maintained,
-                purpose: String::new(),
-                records: vec![],
+                purpose: meta_signal_flow::Purpose(String::new()),
+                records: meta_signal_flow::Records(vec![]),
             },
         ]))
         .expect("metaflow declared Maintained");
@@ -183,8 +196,8 @@ fn quiet_agent(fixture: &NexusFixture) -> serde_json::Value {
 
 pub(super) fn claude_seat(fixture: &NexusFixture, tokens: i64) {
     let mut node = fixture.node();
-    node.flow_id = CLAUDE_SEAT.into();
-    node.session_id = CLAUDE_SESSION.into();
+    node.flow_id = flow_ethos::FlowId(CLAUDE_SEAT.into());
+    node.session_id = signal_flow::SessionId(CLAUDE_SESSION.into());
     node.harness_kind = HarnessKind::Claude;
     node.endpoint_selection = EndpointSelection::Unavailable;
     fixture
@@ -236,10 +249,12 @@ pub(super) fn claude_stop_with(
     background_work: Vec<signal_flow::BackgroundTask>,
 ) -> signal_flow::Event {
     signal_flow::Event::Stopped(signal_flow::NativeStop {
-        native_session_id_option: Some(CLAUDE_SESSION.into()),
-        transcript_path_option: Some(claude_transcript(fixture).to_string_lossy().into_owned()),
-        last_assistant_message_option: None,
-        background_work,
+        native_session_id_option: Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into())),
+        transcript_path_option: Some(signal_flow::TranscriptPath(
+            claude_transcript(fixture).to_string_lossy().into_owned(),
+        )),
+        last_assistant_message_option: signal_flow::LastAssistantMessageOption(None),
+        background_work: signal_flow::BackgroundWork(background_work),
     })
 }
 
@@ -251,12 +266,15 @@ pub(super) fn report_claude_stop(
     let stop = claude_stop_with(fixture, background_work);
     assert_eq!(
         fixture.nexus.report(signal_flow::Report_Data {
-            flow_id: CLAUDE_SEAT.into(),
+            flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
             event: stop.clone(),
         }),
         signal_flow::Response::Reported
     );
-    fixture.nexus.after_report(&CLAUDE_SEAT.to_owned(), &stop);
+    fixture.nexus.after_report(
+        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+        &stop,
+    );
 }
 
 /// `flow_id`'s own Stop with nothing in flight, recorded as its last turn
@@ -280,10 +298,14 @@ pub(super) fn rested_at_stop(fixture: &NexusFixture, flow_id: &str) {
         .record_event(
             flow_id,
             signal_flow::Event::Stopped(signal_flow::NativeStop {
-                native_session_id_option: Some(node.session_id.clone()),
-                transcript_path_option: Some(transcript.to_string_lossy().into_owned()),
-                last_assistant_message_option: None,
-                background_work: vec![],
+                native_session_id_option: Some(signal_flow::NativeSessionId(
+                    node.session_id.0.clone(),
+                )),
+                transcript_path_option: Some(signal_flow::TranscriptPath(
+                    transcript.to_string_lossy().into_owned(),
+                )),
+                last_assistant_message_option: signal_flow::LastAssistantMessageOption(None),
+                background_work: signal_flow::BackgroundWork(vec![]),
             }),
         )
         .expect("the flow's rest recorded");
@@ -299,9 +321,9 @@ pub(super) fn claude_prompt_taken(fixture: &NexusFixture) {
         .record_event(
             CLAUDE_SEAT,
             signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
-                native_session_id_option: Some(CLAUDE_SESSION.into()),
+                native_session_id_option: Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into())),
                 prompt_id_option: None,
-                prompt_sha256: "0".repeat(64),
+                prompt_sha256: signal_flow::PromptSha256("0".repeat(64)),
             }),
         )
         .expect("the seat's prompt recorded");
@@ -313,10 +335,10 @@ pub(super) fn background_task(
     kind: signal_flow::BackgroundTaskKind,
 ) -> signal_flow::BackgroundTask {
     signal_flow::BackgroundTask {
-        background_task_id: id.into(),
+        background_task_id: signal_flow::BackgroundTaskId(id.into()),
         background_task_kind: kind,
-        background_task_status: "running".into(),
-        description: format!("task {id}"),
+        background_task_status: signal_flow::BackgroundTaskStatus("running".into()),
+        description: signal_flow::Description(format!("task {id}")),
     }
 }
 
@@ -333,10 +355,12 @@ pub(super) fn claude_transcript(fixture: &NexusFixture) -> std::path::PathBuf {
 /// session's transcript.
 pub(super) fn claude_stop(fixture: &NexusFixture) -> signal_flow::Event {
     signal_flow::Event::Stopped(signal_flow::NativeStop {
-        native_session_id_option: Some(CLAUDE_SESSION.into()),
-        transcript_path_option: Some(claude_transcript(fixture).to_string_lossy().into_owned()),
-        last_assistant_message_option: None,
-        background_work: vec![],
+        native_session_id_option: Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into())),
+        transcript_path_option: Some(signal_flow::TranscriptPath(
+            claude_transcript(fixture).to_string_lossy().into_owned(),
+        )),
+        last_assistant_message_option: signal_flow::LastAssistantMessageOption(None),
+        background_work: signal_flow::BackgroundWork(vec![]),
     })
 }
 
@@ -355,15 +379,16 @@ fn an_idle_maintained_claude_flow_keeps_its_pane_and_stays_awake() {
         claude_seat(&fixture, 151_000);
         fixture.nexus.store.seed_metaflow(metaflow(
             model.clone(),
-            State::Awake(CLAUDE_SEAT.into()),
+            State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
             vec![],
             vec![],
         ));
         maintain(&fixture, address(model.clone()));
 
-        fixture
-            .nexus
-            .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+        fixture.nexus.after_report(
+            &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+            &claude_stop(&fixture),
+        );
         assert_eq!(fixture.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
 
         assert_eq!(
@@ -373,8 +398,11 @@ fn an_idle_maintained_claude_flow_keeps_its_pane_and_stays_awake() {
         );
         assert!(!closes(&fixture), "{model:?}: the idle seat keeps its pane");
         let kept = stored(&fixture, model.clone());
-        assert_eq!(kept.state, State::Awake(CLAUDE_SEAT.into()));
-        assert!(kept.past.is_empty());
+        assert_eq!(
+            kept.state,
+            State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+        );
+        assert!(kept.past.0.is_empty());
         let node = fixture
             .nexus
             .store
@@ -399,7 +427,7 @@ fn an_idle_maintained_codex_flow_keeps_its_pane_and_stays_awake() {
     fixture.register_with(FlowLifecycle::Active);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake("908786".into()),
+        State::Awake(flow_ethos::FlowId("908786".into())),
         vec![],
         vec![],
     ));
@@ -412,12 +440,15 @@ fn an_idle_maintained_codex_flow_keeps_its_pane_and_stays_awake() {
     let thread = fixture.node().session_id;
     fixture
         .nexus
-        .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]);
+        .codex_events(&thread.0, vec![TurnEvent::Status(ThreadStatus::Idle)]);
     assert_eq!(fixture.nexus.settle_stopped("908786"), AtStop::Idle);
     assert!(!closes(&fixture), "the idle seat keeps its pane");
     let kept = stored(&fixture, Model::Sol);
-    assert_eq!(kept.state, State::Awake("908786".into()));
-    assert!(kept.past.is_empty());
+    assert_eq!(
+        kept.state,
+        State::Awake(flow_ethos::FlowId("908786".into()))
+    );
+    assert!(kept.past.0.is_empty());
     let node = fixture
         .nexus
         .store
@@ -448,7 +479,7 @@ fn an_idle_on_demand_claude_flow_closes_its_harness_and_keeps_its_address() {
     );
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake(CLAUDE_SEAT.into()),
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         vec![],
         vec![],
     ));
@@ -461,7 +492,10 @@ fn an_idle_on_demand_claude_flow_closes_its_harness_and_keeps_its_address() {
     assert!(fixture.typed().is_none(), "nothing is typed");
     let slept = stored(&fixture, Model::Sol);
     assert_eq!(slept.state, State::Asleep);
-    assert_eq!(slept.past, vec![CLAUDE_SEAT.to_owned()]);
+    assert_eq!(
+        slept.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])
+    );
     let node = fixture
         .nexus
         .store
@@ -470,7 +504,7 @@ fn an_idle_on_demand_claude_flow_closes_its_harness_and_keeps_its_address() {
         .expect("the flow's row is kept");
     assert_eq!(node.flow_lifecycle, FlowLifecycle::Stopped);
     assert_eq!(
-        node.session_id, CLAUDE_SESSION,
+        node.session_id.0, CLAUDE_SESSION,
         "its transcript stays named"
     );
     assert!(claude_transcript(&fixture).exists(), "its transcript stays");
@@ -495,14 +529,14 @@ fn an_idle_on_demand_codex_flow_closes_its_harness() {
     );
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake("908786".into()),
+        State::Awake(flow_ethos::FlowId("908786".into())),
         vec![],
         vec![],
     ));
     let thread = fixture.node().session_id;
     fixture
         .nexus
-        .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]);
+        .codex_events(&thread.0, vec![TurnEvent::Status(ThreadStatus::Idle)]);
     // The thread's rest may already have settled the seat; either way it
     // sleeps.
     let at_stop = fixture.nexus.settle_stopped("908786");
@@ -516,7 +550,10 @@ fn an_idle_on_demand_codex_flow_closes_its_harness() {
     assert!(closes(&fixture), "the idle seat's harness is closed");
     let slept = stored(&fixture, Model::Sol);
     assert_eq!(slept.state, State::Asleep);
-    assert_eq!(slept.past, vec!["908786".to_owned()]);
+    assert_eq!(
+        slept.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId("908786".to_owned())])
+    );
 }
 
 /// An Order queued for an idle Awake Claude flow is handed into its live
@@ -533,7 +570,7 @@ fn a_request_to_an_idle_awake_claude_flow_is_delivered_into_its_pane() {
     append_main_rows(&fixture, &[end_turn("idle-turn")]);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake(CLAUDE_SEAT.into()),
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         vec![],
         vec![],
     ));
@@ -543,6 +580,7 @@ fn a_request_to_an_idle_awake_claude_flow_is_delivered_into_its_pane() {
 
     let mut idle = stored(&fixture, Model::Sol);
     idle.queue
+        .0
         .push(Request::Order("Read the new ruling.".into()).unsent());
     fixture.nexus.store.seed_metaflow(idle);
     fixture.nexus.wake_due(address(Model::Sol));
@@ -552,7 +590,7 @@ fn a_request_to_an_idle_awake_claude_flow_is_delivered_into_its_pane() {
     assert!(!closes(&fixture));
     assert_eq!(
         stored(&fixture, Model::Sol).state,
-        State::Awake(CLAUDE_SEAT.into()),
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         "the same flow, still Awake"
     );
 }
@@ -569,7 +607,7 @@ pub(super) fn soft_recipient(
     claude_seat(fixture, 40_000);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake(CLAUDE_SEAT.into()),
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         vec![],
         vec![],
     ));
@@ -608,7 +646,7 @@ pub(super) fn send_soft(
     use crate::sending::SendsRequests;
     let answer = fixture.nexus.send_request(
         signal_flow::SendRequest {
-            recipient: address(Model::Sol),
+            address: address(Model::Sol),
             sendable_message: super::sendable_message(Message::Soft(Request::Order(body.into()))),
         },
         Some(peer),
@@ -631,19 +669,20 @@ fn a_held_soft_is_delivered_at_its_recipients_idle_event() {
         "{response:?}"
     );
     assert!(fixture.typed().is_none(), "nothing typed during the turn");
-    assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1, "held");
+    assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 1, "held");
 
     soft_recipient_shows(&fixture, true);
-    fixture
-        .nexus
-        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+    fixture.nexus.after_report(
+        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+        &claude_stop(&fixture),
+    );
 
     let typed = fixture.typed().expect("typed at the Stop");
     assert!(typed.contains("Read the ruling when you rest."), "{typed}");
-    assert!(stored(&fixture, Model::Sol).queue.is_empty());
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
     assert_eq!(
         stored(&fixture, Model::Sol).state,
-        State::Awake(CLAUDE_SEAT.into())
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
     );
 }
 
@@ -661,12 +700,13 @@ fn several_held_soft_messages_are_delivered_in_order_at_one_idle_event() {
         );
     }
     assert!(fixture.typed().is_none(), "nothing typed during the turn");
-    assert_eq!(stored(&fixture, Model::Sol).queue.len(), 3, "all held");
+    assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 3, "all held");
 
     soft_recipient_shows(&fixture, true);
-    fixture
-        .nexus
-        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+    fixture.nexus.after_report(
+        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+        &claude_stop(&fixture),
+    );
 
     let typed = fixture.typed().expect("typed at the Stop");
     let at = |body: &str| {
@@ -683,7 +723,7 @@ fn several_held_soft_messages_are_delivered_in_order_at_one_idle_event() {
         1,
         "one idle event, one hand-over"
     );
-    assert!(stored(&fixture, Model::Sol).queue.is_empty());
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
 }
 
 /// A hand-over types every queued message as its own NativeInput under
@@ -703,7 +743,7 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
     append_main_rows(&fixture, &[end_turn("idle-turn")]);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake(CLAUDE_SEAT.into()),
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         vec![],
         vec![],
     ));
@@ -713,23 +753,25 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
     let from = |aspect: Aspect, model: Model| {
         SentBy::Sender(Address {
             aspect,
-            topic: "flow".into(),
+            topic: flow_ethos::Topic("flow".into()),
             model,
         })
     };
     let task = QueueEntry {
-        logical_delivery_id: "logical-delivery-00000000000000000001".into(),
-        request_id: "t001".into(),
+        logical_delivery_id: flow_ethos::LogicalDeliveryId(
+            "logical-delivery-00000000000000000001".into(),
+        ),
+        request_id: flow_ethos::RequestId("t001".into()),
         sent_by: from(Aspect::Psyche, Model::Astra),
         delivery: flow_ethos::Delivery::Wake,
         message: Message::MiddleAbrupt(Request::Task(flow_ethos::AnswerableTask {
-            minutes: 30,
+            minutes: flow_ethos::Minutes(30),
             string: "Draft the proposal.".into(),
         })),
     };
     let reminder = QueueEntry {
-        logical_delivery_id: "logical-delivery-00000000000000000002".into(),
-        request_id: "t002".into(),
+        logical_delivery_id: flow_ethos::LogicalDeliveryId("logical-delivery-00000000000000000002".into()),
+        request_id: flow_ethos::RequestId("t002".into()),
         sent_by: SentBy::Flow,
         delivery: flow_ethos::Delivery::Wake,
         message: Message::Soft(Request::Notice(
@@ -738,20 +780,24 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
         )),
     };
     let done = QueueEntry {
-        logical_delivery_id: "logical-delivery-00000000000000000003".into(),
-        request_id: "t003".into(),
+        logical_delivery_id: flow_ethos::LogicalDeliveryId(
+            "logical-delivery-00000000000000000003".into(),
+        ),
+        request_id: flow_ethos::RequestId("t003".into()),
         sent_by: from(Aspect::Mind, Model::Sol),
         delivery: flow_ethos::Delivery::Wake,
         message: Message::Soft(Request::Done(flow_ethos::DonePayload::Historical(
             flow_ethos::Historical_Data {
-                logical_delivery_id: "logical-delivery-00000000000000000000".into(),
+                logical_delivery_id: flow_ethos::LogicalDeliveryId(
+                    "logical-delivery-00000000000000000000".into(),
+                ),
                 string: "Proposal drafted.".into(),
             },
         ))),
     };
     let cohort = vec![task, reminder, done];
     let mut idle = stored(&fixture, Model::Sol);
-    idle.queue = cohort.clone();
+    idle.queue = flow_ethos::Queue(cohort.clone());
     fixture.nexus.store.seed_metaflow(idle);
     fixture.nexus.wake_due(address(Model::Sol));
 
@@ -788,7 +834,7 @@ fn a_flow_whose_pane_is_gone_is_asleep_and_wakes_fresh() {
     let at = address(Model::Sol);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake("abc123".into()),
+        State::Awake(flow_ethos::FlowId("abc123".into())),
         vec![],
         vec![],
     ));
@@ -796,15 +842,21 @@ fn a_flow_whose_pane_is_gone_is_asleep_and_wakes_fresh() {
     // gone.
     let seat = launched_claude_ended_by(&fixture, |_| true);
     let mut awake = stored(&fixture, Model::Sol);
-    assert_eq!(awake.state, State::Awake("abc123".into()));
+    assert_eq!(
+        awake.state,
+        State::Awake(flow_ethos::FlowId("abc123".into()))
+    );
     let queue = vec![Request::Order("Carry on.".into())];
-    awake.queue = queue.clone().unsent();
+    awake.queue = flow_ethos::Queue(queue.clone().unsent());
     fixture.nexus.store.seed_metaflow(awake);
 
     fixture.nexus.drain_awake(&at);
     let asleep = stored(&fixture, Model::Sol);
     assert_eq!(asleep.state, State::Asleep);
-    assert_eq!(asleep.past, vec!["abc123".to_owned()]);
+    assert_eq!(
+        asleep.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId("abc123".to_owned())])
+    );
     assert_eq!(
         fixture
             .nexus
@@ -823,11 +875,11 @@ fn a_flow_whose_pane_is_gone_is_asleep_and_wakes_fresh() {
     let State::Awake(flow_id) = &woken.state else {
         panic!("woken fresh: {woken:?}; Herdr calls: {}", world.calls());
     };
-    assert_ne!(flow_id, "abc123", "a new flow");
+    assert_ne!(flow_id.0, "abc123", "a new flow");
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
     assert_ne!(world.session(), seat.session, "a new native session");
     assert!(
-        woken.queue.is_empty(),
+        woken.queue.0.is_empty(),
         "the accepted first prompt took the queue"
     );
 }
@@ -859,7 +911,7 @@ fn an_order_wakes_an_asleep_primary_fresh() {
         .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
             meta_signal_flow::ConfigureModel {
                 model: Model::Astra,
-                native: "claude-fixture".into(),
+                native: meta_signal_flow::Native("claude-fixture".into()),
             },
         ]))
         .expect("the Primary's model configured");
@@ -874,15 +926,15 @@ fn an_order_wakes_an_asleep_primary_fresh() {
             world.calls()
         );
     };
-    assert_ne!(flow_id, "abc123");
+    assert_ne!(flow_id.0, "abc123");
     assert!(
-        woken.queue.is_empty(),
+        woken.queue.0.is_empty(),
         "the accepted first prompt took the queue"
     );
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
     assert_ne!(world.session(), seat.session);
-    let node = fixture.nexus.store.flow_node(flow_id).unwrap().unwrap();
-    assert_eq!(node.session_id, world.session());
+    let node = fixture.nexus.store.flow_node(&flow_id.0).unwrap().unwrap();
+    assert_eq!(node.session_id, signal_flow::SessionId(world.session()));
 }
 
 /// A seat that goes idle with work queued hands over its whole ordered
@@ -903,9 +955,9 @@ fn a_resting_seat_with_work_queued_is_handed_the_oldest_request_and_stays_awake(
     let expected_prompt = queued.clone().prompt_text(&address(Model::Sol));
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address(Model::Sol),
-        state: State::Awake(CLAUDE_SEAT.into()),
-        past: vec![],
-        queue: queued,
+        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(queued),
     });
 
     assert!(matches!(
@@ -913,9 +965,12 @@ fn a_resting_seat_with_work_queued_is_handed_the_oldest_request_and_stays_awake(
         AtStop::Drained(_)
     ));
     let kept = stored(&fixture, Model::Sol);
-    assert_eq!(kept.state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(
+        kept.state,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
     assert!(
-        kept.queue.is_empty(),
+        kept.queue.0.is_empty(),
         "the exact receipt settles the cohort"
     );
     assert!(!closes(&fixture), "it keeps its pane");
@@ -940,16 +995,16 @@ fn explicit_delivery_hands_over_every_queued_request_in_order() {
     let second = Request::Result(flow_ethos::ResultPayload::Historical("second".into())).unsent();
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address(Model::Sol),
-        state: State::Awake(CLAUDE_SEAT.into()),
-        past: vec![],
-        queue: vec![first.clone(), second.clone()],
+        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![first.clone(), second.clone()]),
     });
 
     assert_eq!(
         fixture.nexus.drain_all(address(Model::Sol)),
         Outcome::Drained(vec![first, second])
     );
-    assert!(stored(&fixture, Model::Sol).queue.is_empty());
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
 }
 
 /// A Claude agent Herdr shows Working, as its screen reads while its main
@@ -991,7 +1046,7 @@ fn a_flow_that_stopped_while_working_or_awaited_is_kept() {
     claude_seat(&working, 40_000);
     working.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake(CLAUDE_SEAT.into()),
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         vec![],
         vec![],
     ));
@@ -1026,7 +1081,7 @@ fn a_flow_that_stopped_while_working_or_awaited_is_kept() {
     assert_eq!(working.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
     assert_eq!(
         stored(&working, Model::Sol).state,
-        State::Awake(CLAUDE_SEAT.into())
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
     );
     assert!(!closes(&working));
 
@@ -1039,7 +1094,7 @@ fn a_flow_that_stopped_while_working_or_awaited_is_kept() {
     waking.register_with(FlowLifecycle::Active);
     waking.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake("908786".into()),
+        State::Awake(flow_ethos::FlowId("908786".into())),
         vec![],
         vec![],
     ));
@@ -1079,7 +1134,7 @@ fn the_store_sleeps_and_awakens_removing_only_the_confirmed_startup_batch() {
     let at = address(Model::Luna);
     store.seed_metaflow(metaflow(
         Model::Luna,
-        State::Awake("aaaaaa".into()),
+        State::Awake(flow_ethos::FlowId("aaaaaa".into())),
         vec![],
         vec![],
     ));
@@ -1093,12 +1148,14 @@ fn the_store_sleeps_and_awakens_removing_only_the_confirmed_startup_batch() {
         "already Asleep"
     );
     let mut asleep = store.metaflow(&at).unwrap().unwrap();
-    asleep.queue = vec![
-        Request::Order("A".into()),
-        Request::Order("B".into()),
-        Request::Order("C".into()),
-    ]
-    .unsent();
+    asleep.queue = flow_ethos::Queue(
+        vec![
+            Request::Order("A".into()),
+            Request::Order("B".into()),
+            Request::Order("C".into()),
+        ]
+        .unsent(),
+    );
     store.seed_metaflow(asleep);
     assert!(
         !store.awaken_metaflow(&at, "aaaaaa", 4).unwrap(),
@@ -1106,11 +1163,11 @@ fn the_store_sleeps_and_awakens_removing_only_the_confirmed_startup_batch() {
     );
     assert!(!store.awaken_metaflow(&at, "bbbbbb", 2).unwrap());
     assert!(store.awaken_metaflow(&at, "bbbbbb", 0).unwrap());
-    let startup = store.metaflow(&at).unwrap().unwrap().queue[..2].to_vec();
+    let startup = store.metaflow(&at).unwrap().unwrap().queue.0[..2].to_vec();
     let receipt = signal_flow::NativeReceipt {
         harness_kind: HarnessKind::Claude,
-        native_session_id: "legacy-session-receipt".into(),
-        native_prompt_id: "legacy-prompt-receipt".into(),
+        native_session_id: signal_flow::NativeSessionId("legacy-session-receipt".into()),
+        native_prompt_id: signal_flow::NativePromptId("legacy-prompt-receipt".into()),
     };
     assert!(
         store
@@ -1118,15 +1175,18 @@ fn the_store_sleeps_and_awakens_removing_only_the_confirmed_startup_batch() {
             .unwrap()
     );
     let woken = store.metaflow(&at).unwrap().unwrap();
-    assert_eq!(woken.state, State::Awake("bbbbbb".into()));
+    assert_eq!(
+        woken.state,
+        State::Awake(flow_ethos::FlowId("bbbbbb".into()))
+    );
     assert_eq!(
         woken.past,
-        vec!["aaaaaa".to_owned()],
+        flow_ethos::Past(vec![flow_ethos::FlowId("aaaaaa".to_owned())]),
         "the flow that slept stays in Past; the woken flow is current"
     );
     assert_eq!(
         woken.queue,
-        vec![Request::Order("C".into())].unsent(),
+        flow_ethos::Queue(vec![Request::Order("C".into())].unsent()),
         "the later arrival remains behind the confirmed startup batch"
     );
     for entry in startup {
@@ -1144,7 +1204,7 @@ fn the_store_sleeps_and_awakens_removing_only_the_confirmed_startup_batch() {
             .remove_oldest_queued(&at, &Request::Order("C".into()).unsent())
             .unwrap()
     );
-    assert!(store.metaflow(&at).unwrap().unwrap().queue.is_empty());
+    assert!(store.metaflow(&at).unwrap().unwrap().queue.0.is_empty());
     assert_eq!(
         store.metaflow_awake_as("bbbbbb").unwrap().unwrap().address,
         at
@@ -1158,7 +1218,7 @@ fn a_wake_receipt_settles_its_logical_prefix_atomically_and_preserves_the_suffix
     let at = address(Model::Luna);
     store.seed_metaflow(metaflow(
         Model::Luna,
-        State::Awake("bbbbbb".into()),
+        State::Awake(flow_ethos::FlowId("bbbbbb".into())),
         vec![],
         vec![],
     ));
@@ -1179,12 +1239,12 @@ fn a_wake_receipt_settles_its_logical_prefix_atomically_and_preserves_the_suffix
         ));
     }
     let queued = store.metaflow(&at).unwrap().unwrap().queue;
-    let startup = queued[..2].to_vec();
-    let later = queued[2].clone();
+    let startup = queued.0[..2].to_vec();
+    let later = queued.0[2].clone();
     let receipt = signal_flow::NativeReceipt {
         harness_kind: HarnessKind::Claude,
-        native_session_id: "session-receipt".into(),
-        native_prompt_id: "prompt-receipt".into(),
+        native_session_id: signal_flow::NativeSessionId("session-receipt".into()),
+        native_prompt_id: signal_flow::NativePromptId("prompt-receipt".into()),
     };
 
     assert!(
@@ -1219,8 +1279,8 @@ fn a_wake_receipt_settles_its_logical_prefix_atomically_and_preserves_the_suffix
         .unwrap();
     let conflicting = signal_flow::NativeReceipt {
         harness_kind: HarnessKind::Claude,
-        native_session_id: "other-session".into(),
-        native_prompt_id: "other-prompt".into(),
+        native_session_id: signal_flow::NativeSessionId("other-session".into()),
+        native_prompt_id: signal_flow::NativePromptId("other-prompt".into()),
     };
     assert!(
         store
@@ -1243,7 +1303,7 @@ fn a_wake_receipt_settles_its_logical_prefix_atomically_and_preserves_the_suffix
             .unwrap()
     );
     let settled = store.metaflow(&at).unwrap().unwrap();
-    assert_eq!(settled.queue, vec![later.clone()]);
+    assert_eq!(settled.queue, flow_ethos::Queue(vec![later.clone()]));
     for entry in &startup {
         assert!(matches!(
             store
@@ -1268,7 +1328,10 @@ fn a_wake_receipt_settles_its_logical_prefix_atomically_and_preserves_the_suffix
     let path = directory.path().join("flow.sema");
     drop(nexus);
     let reopened = crate::store::FlowStore::open(&path).unwrap();
-    assert_eq!(reopened.metaflow(&at).unwrap().unwrap().queue, vec![later]);
+    assert_eq!(
+        reopened.metaflow(&at).unwrap().unwrap().queue,
+        flow_ethos::Queue(vec![later])
+    );
     for entry in startup {
         assert!(matches!(
             reopened
@@ -1286,13 +1349,18 @@ fn a_wake_receipt_settles_its_logical_prefix_atomically_and_preserves_the_suffix
 /// that flow's end.
 fn last_launch_context() -> WakePlan {
     WakePlan::Fresh(FreshContext {
-        herdr_session_name: "fixture-session".into(),
-        system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-        user_modules: vec!["operation-main-flow".into()],
+        herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
+        system_modules: signal_flow::SystemModules(vec![
+            signal_flow::ModuleIdentity("spirit-core".into()),
+            signal_flow::ModuleIdentity("intent-flow".into()),
+        ]),
+        user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+            "operation-main-flow".into(),
+        )]),
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
         leave_outs_option: None,
-        purpose: String::new(),
+        purpose: crate::generated::starter::Purpose(String::new()),
     })
 }
 
@@ -1332,14 +1400,20 @@ fn a_fresh_wake_composes_modules_and_queued_work_in_the_first_prompt() {
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
         herdr_session_name: "fixture-session".into(),
-        system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-        user_modules: vec!["operation-main-flow".into(), "knowledge-flow".into()],
+        system_modules: signal_flow::SystemModules(vec![
+            signal_flow::ModuleIdentity("spirit-core".into()),
+            signal_flow::ModuleIdentity("intent-flow".into()),
+        ]),
+        user_modules: signal_flow::UserModules(vec![
+            signal_flow::ModuleIdentity("operation-main-flow".into()),
+            signal_flow::ModuleIdentity("knowledge-flow".into()),
+        ]),
         leave_outs_option: None,
         prompt: text.clone(),
     };
     let profile = seat.fresh_profile();
     assert_eq!(profile.address, address(Model::Sol));
-    assert_eq!(profile.instruction_prompt, text);
+    assert_eq!(profile.instruction_prompt.0, text);
     assert_eq!(profile.user_modules, seat.user_modules);
     let composed = fixture
         .nexus
@@ -1347,7 +1421,7 @@ fn a_fresh_wake_composes_modules_and_queued_work_in_the_first_prompt() {
         .current()
         .compose(
             crate::composition::HarnessedProfile {
-                remembered_flows: Vec::new(),
+                remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                 harness_kind: HarnessKind::Claude,
                 launch_profile: profile.clone(),
             },
@@ -1357,16 +1431,20 @@ fn a_fresh_wake_composes_modules_and_queued_work_in_the_first_prompt() {
     // The same full module text a Start of these identities carries, with
     // the fixed queue batch in that first prompt.
     let body = composed.first_prompt_payload.first_prompt_body;
-    assert!(body.starts_with("These are your skills, given here; do not reload them."));
-    assert!(body.contains("Main flow body.") && body.contains("Knowledge body."));
+    assert!(
+        body.0
+            .starts_with("These are your skills, given here; do not reload them.")
+    );
+    assert!(body.0.contains("Main flow body.") && body.0.contains("Knowledge body."));
     assert!(
         composed
             .system_prompt
             .system_prompt_text
+            .0
             .contains("Spirit body.")
     );
-    assert!(body.contains(&text));
-    assert!(!body.contains("seat"));
+    assert!(body.0.contains(&text));
+    assert!(!body.0.contains("seat"));
 }
 
 #[test]
@@ -1409,12 +1487,14 @@ impl BoundPeer {
         let stat = fs::read_to_string(format!("/proc/{pid}/stat")).expect("peer stat");
         let (_, fields) = stat.rsplit_once(") ").expect("stat fields");
         signal_flow::Process {
-            pid: i64::from(pid),
-            started: fields
-                .split_whitespace()
-                .nth(19)
-                .and_then(|field| field.parse().ok())
-                .expect("start time"),
+            pid: flow_ethos::Pid(i64::from(pid)),
+            started: flow_ethos::Started(
+                fields
+                    .split_whitespace()
+                    .nth(19)
+                    .and_then(|field| field.parse().ok())
+                    .expect("start time"),
+            ),
         }
     }
 
@@ -1481,7 +1561,7 @@ fn an_ended_binding_holding_work_rests_asleep() {
         .metaflow(&address(Model::Sol))
         .unwrap()
         .expect("bound metaflow");
-    bound.queue = vec![Request::Order("Kept.".into()).unsent()];
+    bound.queue = flow_ethos::Queue(vec![Request::Order("Kept.".into()).unsent()]);
     fixture.nexus.store.seed_metaflow(bound);
     peer.end();
     assert_eq!(
@@ -1494,7 +1574,10 @@ fn an_ended_binding_holding_work_rests_asleep() {
         .metaflow(&address(Model::Sol))
         .unwrap()
         .expect("rested metaflow");
-    assert_eq!(rested.queue, vec![Request::Order("Kept.".into()).unsent()]);
+    assert_eq!(
+        rested.queue,
+        flow_ethos::Queue(vec![Request::Order("Kept.".into()).unsent()])
+    );
 }
 
 /// The Claude flow `abc123` Flow launched at the Mind flow Secondary, its
@@ -1542,9 +1625,14 @@ fn launched_claude_ended_by_with(
     end: impl FnOnce(&crate::store::FlowStore) -> bool,
 ) -> LaunchedClaude {
     let profile = LaunchProfile {
-        launch_request_id: "launched-request".into(),
-        system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-        user_modules: vec!["operation-main-flow".into()],
+        launch_request_id: signal_flow::LaunchRequestId("launched-request".into()),
+        system_modules: signal_flow::SystemModules(vec![
+            signal_flow::ModuleIdentity("spirit-core".into()),
+            signal_flow::ModuleIdentity("intent-flow".into()),
+        ]),
+        user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+            "operation-main-flow".into(),
+        )]),
         flow_kind: flow_kind.clone(),
         tool_set: if flow_kind == signal_flow::FlowKind::Simplified {
             signal_flow::ToolSet::Explicit(Vec::new())
@@ -1553,16 +1641,16 @@ fn launched_claude_ended_by_with(
         },
         address: signal_flow::Address {
             aspect: Aspect::Mind,
-            topic: "flow".into(),
+            topic: flow_ethos::Topic("flow".into()),
             model: signal_flow::Model::Sol,
         },
-        model_name: "claude-fixture".into(),
-        effort: "medium".into(),
+        model_name: flow_ethos::ModelName("claude-fixture".into()),
+        effort: signal_flow::Effort("medium".into()),
         flow_id_option: None,
-        remembering: signal_flow::Remembering::Predecessors(0),
-        herdr_session_name: "fixture-session".into(),
+        remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(0)),
+        herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
         leave_outs_option: None,
-        instruction_prompt: instruction_prompt.into(),
+        instruction_prompt: signal_flow::InstructionPrompt(instruction_prompt.into()),
     };
     // The launch that bound abc123.
     let composed = fixture
@@ -1571,7 +1659,7 @@ fn launched_claude_ended_by_with(
         .current()
         .compose(
             crate::composition::HarnessedProfile {
-                remembered_flows: Vec::new(),
+                remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                 harness_kind: HarnessKind::Claude,
                 launch_profile: profile.clone(),
             },
@@ -1584,8 +1672,8 @@ fn launched_claude_ended_by_with(
         .reserved_native_session_id(&composed)
         .expect("a Claude launch has a Flow-chosen session");
     let origin = Origin::Flow(FlowOrigin {
-        flow_id: "caller".into(),
-        session_id: "caller-session".into(),
+        flow_id: flow_ethos::FlowId("caller".into()),
+        session_id: signal_flow::SessionId("caller-session".into()),
     });
     fixture
         .nexus
@@ -1614,11 +1702,11 @@ fn launched_claude_ended_by_with(
     );
     let old_pane = signal_flow::HerdrPaneBinding {
         launch_request_id: profile.launch_request_id.clone(),
-        herdr_session_name: "fixture-session".into(),
-        herdr_agent_name: composed.launch_agent_name(),
-        herdr_workspace_id: "w1".into(),
-        herdr_pane_id: "w1:p3".into(),
-        herdr_terminal_id: "term-old".into(),
+        herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
+        herdr_agent_name: signal_flow::HerdrAgentName(composed.launch_agent_name()),
+        herdr_workspace_id: signal_flow::HerdrWorkspaceId("w1".into()),
+        herdr_pane_id: signal_flow::HerdrPaneId("w1:p3".into()),
+        herdr_terminal_id: signal_flow::HerdrTerminalId("term-old".into()),
     };
     assert!(
         fixture
@@ -1626,8 +1714,8 @@ fn launched_claude_ended_by_with(
             .store
             .record_native_launch_binding(NativeLaunchBinding {
                 launch_request_id: profile.launch_request_id.clone(),
-                flow_id: "abc123".into(),
-                native_session_id: session.clone(),
+                flow_id: flow_ethos::FlowId("abc123".into()),
+                native_session_id: signal_flow::NativeSessionId(session.clone()),
                 harness_kind: HarnessKind::Claude,
                 herdr_pane_binding: old_pane,
             })
@@ -1637,15 +1725,15 @@ fn launched_claude_ended_by_with(
         .nexus
         .store
         .register_flow(FlowNode {
-            flow_id: "abc123".into(),
-            session_id: session.clone(),
+            flow_id: flow_ethos::FlowId("abc123".into()),
+            session_id: signal_flow::SessionId(session.clone()),
             harness_kind: HarnessKind::Claude,
             endpoint_selection: EndpointSelection::Unavailable,
             herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
-                herdr_session_name: "fixture-session".into(),
-                herdr_agent_name: composed.launch_agent_name(),
-                herdr_pane_id: "w1:p3".into(),
-                herdr_terminal_id: "term-old".into(),
+                herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
+                herdr_agent_name: signal_flow::HerdrAgentName(composed.launch_agent_name()),
+                herdr_pane_id: signal_flow::HerdrPaneId("w1:p3".into()),
+                herdr_terminal_id: signal_flow::HerdrTerminalId("term-old".into()),
             }),
             origin,
             flow_lifecycle: FlowLifecycle::Active,
@@ -1791,14 +1879,14 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
             world.calls()
         );
     };
-    assert_ne!(flow_id, "abc123", "a new flow, never the one that slept");
+    assert_ne!(flow_id.0, "abc123", "a new flow, never the one that slept");
     // D arrives while the wake holds the metaflow.
     let mut woken = stored(&fixture, Model::Sol);
     assert!(
-        woken.queue.is_empty(),
+        woken.queue.0.is_empty(),
         "the startup batch left on acceptance"
     );
-    woken.queue.push(Request::Order("D".into()).unsent());
+    woken.queue.0.push(Request::Order("D".into()).unsent());
     fixture.nexus.store.seed_metaflow(woken);
     fixture.nexus.drain_woken(&at, lease);
     assert!(!fixture.nexus.waking.is_waking(&at), "the hold is released");
@@ -1816,9 +1904,12 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
     assert!(!world.calls().contains(&seat.session), "{}", world.calls());
     let woken = stored(&fixture, Model::Sol);
     assert_eq!(woken.state, State::Awake(flow_id.clone()));
-    assert_eq!(woken.past, vec!["abc123".to_owned()]);
+    assert_eq!(
+        woken.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId("abc123".to_owned())])
+    );
     assert!(
-        woken.queue.is_empty(),
+        woken.queue.0.is_empty(),
         "the later arrival is delivered immediately"
     );
     let turns = world.user_turns(&fixture);
@@ -1840,11 +1931,11 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
         turns[1].contains("Order.{") && turns[1].contains(" D }"),
         "the later prompt carries D: {turns:?}"
     );
-    let node = fixture.nexus.store.flow_node(&flow_id).unwrap().unwrap();
-    assert_eq!(node.session_id, new_session);
+    let node = fixture.nexus.store.flow_node(&flow_id.0).unwrap().unwrap();
+    assert_eq!(node.session_id.0, new_session);
     assert_eq!(node.harness_kind, HarnessKind::Claude);
     let old = fixture.nexus.store.flow_node("abc123").unwrap().unwrap();
-    assert_eq!(old.session_id, seat.session);
+    assert_eq!(old.session_id.0, seat.session);
     assert_eq!(old.flow_lifecycle, FlowLifecycle::Stopped);
 }
 
@@ -1867,7 +1958,7 @@ fn a_simplified_wake_sends_the_first_abrupt_request_without_an_empty_turn() {
     let at = address(Model::Sol);
     let sender = Address {
         aspect: Aspect::Psyche,
-        topic: "core".into(),
+        topic: flow_ethos::Topic("core".into()),
         model: Model::Opus,
     };
     fixture
@@ -1877,8 +1968,8 @@ fn a_simplified_wake_sends_the_first_abrupt_request_without_an_empty_turn() {
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: sender.clone(),
         state: State::Asleep,
-        past: vec![],
-        queue: vec![],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let signal_flow::PrivateSendResponse::SendAccepted(input) = fixture
         .nexus
@@ -1903,12 +1994,12 @@ fn a_simplified_wake_sends_the_first_abrupt_request_without_an_empty_turn() {
     let woken = stored(&fixture, Model::Sol);
     let flow_id = match &woken.state {
         State::Awake(flow_id) => flow_id.clone(),
-        State::Asleep => match woken.past.last() {
-            Some(flow_id) if flow_id != "abc123" => flow_id.clone(),
+        State::Asleep => match woken.past.0.last() {
+            Some(flow_id) if flow_id.0 != "abc123" => flow_id.clone(),
             _ => panic!("simplified flow was woken: {woken:?}; {}", world.calls()),
         },
     };
-    assert!(woken.queue.is_empty(), "the first request was submitted");
+    assert!(woken.queue.0.is_empty(), "the first request was submitted");
     let turns = world.user_turns(&fixture);
     assert_eq!(turns.len(), 1, "no synthetic empty startup turn: {turns:?}");
     assert!(
@@ -1919,14 +2010,17 @@ fn a_simplified_wake_sends_the_first_abrupt_request_without_an_empty_turn() {
         fixture
             .nexus
             .store
-            .simplified_reply_receipt(&flow_id)
+            .simplified_reply_receipt(&flow_id.0)
             .unwrap()
     else {
         panic!("the exact first input receipt binds its sender")
     };
-    assert_eq!(binding.input_delivery_id, input.logical_delivery_id);
+    assert_eq!(binding.input_delivery_id, input.logical_delivery_id.0);
     assert_eq!(binding.recipient, sender);
-    assert_eq!(receipt.native_session_id, world.session());
+    assert_eq!(
+        receipt.native_session_id,
+        signal_flow::NativeSessionId(world.session())
+    );
 }
 
 /// A Simplified startup has one reply binding, so its fixed first-prompt
@@ -1938,7 +2032,7 @@ fn a_simplified_startup_leaves_its_second_request_ordered() {
     let at = address(Model::Sol);
     let sender = Address {
         aspect: Aspect::Psyche,
-        topic: "core".into(),
+        topic: flow_ethos::Topic("core".into()),
         model: Model::Opus,
     };
     fixture
@@ -1948,8 +2042,8 @@ fn a_simplified_startup_leaves_its_second_request_ordered() {
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: sender.clone(),
         state: State::Asleep,
-        past: vec![],
-        queue: vec![],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let accept = |body: &str| {
         let signal_flow::PrivateSendResponse::SendAccepted(accepted) = fixture
@@ -1980,10 +2074,11 @@ fn a_simplified_startup_leaves_its_second_request_ordered() {
     };
     assert_eq!(
         seat.queue
+            .0
             .iter()
-            .map(|entry| entry.logical_delivery_id.as_str())
+            .map(|entry| entry.logical_delivery_id.0.as_str())
             .collect::<Vec<_>>(),
-        vec![second.logical_delivery_id.as_str()],
+        vec![second.logical_delivery_id.0.as_str()],
         "only the request with the startup reply binding is submitted"
     );
     let turns = world.user_turns(&fixture);
@@ -1993,12 +2088,12 @@ fn a_simplified_startup_leaves_its_second_request_ordered() {
     let crate::store::logical_delivery::SimplifiedReplyStanding::Received(binding, _) = fixture
         .nexus
         .store
-        .simplified_reply_receipt(&flow_id)
+        .simplified_reply_receipt(&flow_id.0)
         .unwrap()
     else {
         panic!("the first input alone owns the reply binding")
     };
-    assert_eq!(binding.input_delivery_id, first.logical_delivery_id);
+    assert_eq!(binding.input_delivery_id, first.logical_delivery_id.0);
 }
 
 /// A Simplified flow already owes one reply. Further ordinary Sends are
@@ -2017,9 +2112,9 @@ fn a_simplified_reply_wait_returns_each_durable_acceptance_without_native_input(
     let at = address(Model::Sol);
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: at.clone(),
-        state: State::Awake("abc123".into()),
-        past: vec![],
-        queue: vec![],
+        state: State::Awake(flow_ethos::FlowId("abc123".into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let mut recipient_agent = fixture.settled_agent();
     recipient_agent["agent"] = serde_json::Value::String("claude".into());
@@ -2043,7 +2138,7 @@ fn a_simplified_reply_wait_returns_each_durable_acceptance_without_native_input(
             source: at.clone(),
             recipient: Address {
                 aspect: Aspect::Mind,
-                topic: "core".into(),
+                topic: flow_ethos::Topic("core".into()),
                 model: Model::Sol,
             },
             completed: false,
@@ -2054,7 +2149,7 @@ fn a_simplified_reply_wait_returns_each_durable_acceptance_without_native_input(
     let send = |body: &str| {
         fixture.nexus.send_request(
             SendRequest {
-                recipient: at.clone(),
+                address: at.clone(),
                 sendable_message: super::sendable_message(Message::Soft(Request::Order(
                     body.into(),
                 ))),
@@ -2086,10 +2181,11 @@ fn a_simplified_reply_wait_returns_each_durable_acceptance_without_native_input(
     let queued = fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue;
     assert_eq!(
         queued
+            .0
             .iter()
-            .map(|entry| entry.logical_delivery_id.as_str())
+            .map(|entry| entry.logical_delivery_id.0.as_str())
             .collect::<Vec<_>>(),
-        accepted.iter().map(String::as_str).collect::<Vec<_>>()
+        accepted.iter().map(|id| id.0.as_str()).collect::<Vec<_>>()
     );
     assert!(
         fixture.typed().unwrap_or_default().is_empty(),
@@ -2111,17 +2207,17 @@ fn a_held_address_accepts_while_an_independent_recipient_dispatches() {
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: held.clone(),
         state: State::Asleep,
-        past: vec![],
-        queue: vec![],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let mut independent = address(Model::Sol);
-    independent.topic = "independent".into();
+    independent.topic = flow_ethos::Topic("independent".into());
     claude_seat(&fixture, 40_000);
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: independent.clone(),
-        state: State::Awake(CLAUDE_SEAT.into()),
-        past: vec![],
-        queue: vec![],
+        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     fixture.accept_pane_operations(
         vec![
@@ -2135,7 +2231,7 @@ fn a_held_address_accepts_while_an_independent_recipient_dispatches() {
     let lease = fixture.nexus.waking.hold(&held).expect("address held");
     let first = fixture.nexus.send_request(
         SendRequest {
-            recipient: held.clone(),
+            address: held.clone(),
             sendable_message: super::sendable_message(Message::MiddleAbrupt(Request::Order(
                 "held admission".into(),
             ))),
@@ -2148,7 +2244,7 @@ fn a_held_address_accepts_while_an_independent_recipient_dispatches() {
         first.response
     );
     assert!(first.pending.is_some());
-    assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1);
+    assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 1);
     fixture
         .nexus
         .store
@@ -2189,7 +2285,7 @@ fn a_wake_that_cannot_start_puts_the_work_back_and_stays_asleep() {
     ));
     let asleep = stored(&fixture, Model::Sol);
     assert_eq!(asleep.state, State::Asleep);
-    assert_eq!(asleep.queue, queue.clone().unsent());
+    assert_eq!(asleep.queue, flow_ethos::Queue(queue.clone().unsent()));
 }
 
 /// A wake the last Nexus did not finish left its work queued: the next
@@ -2237,16 +2333,19 @@ fn a_nexus_start_wakes_a_seat_whose_wake_did_not_finish() {
     let State::Awake(flow_id) = &woken.state else {
         panic!("the seat wakes: {woken:?}; Herdr calls: {}", world.calls());
     };
-    assert_ne!(flow_id, "abc123");
+    assert_ne!(flow_id.0, "abc123");
     assert!(
-        woken.queue.is_empty(),
+        woken.queue.0.is_empty(),
         "the recovered wake's batch was accepted"
     );
     assert_eq!(world.claude_starts(), 1, "woken once: {}", world.calls());
     assert_eq!(stored(&fixture, Model::Luna).state, State::Asleep);
     let primary = stored(&fixture, Model::Astra);
     assert_eq!(primary.state, State::Asleep);
-    assert_eq!(primary.queue, vec![Request::Order("p".into())].unsent());
+    assert_eq!(
+        primary.queue,
+        flow_ethos::Queue(vec![Request::Order("p".into())].unsent())
+    );
 }
 
 /// A wake is refused while a pane already runs the sleeping flow's native
@@ -2280,7 +2379,7 @@ fn a_wake_is_refused_while_a_pane_already_runs_the_session() {
     );
     let asleep = stored(&fixture, Model::Sol);
     assert_eq!(asleep.state, State::Asleep);
-    assert_eq!(asleep.queue, queue.clone().unsent());
+    assert_eq!(asleep.queue, flow_ethos::Queue(queue.clone().unsent()));
 }
 
 /// A Codex flow left in its recorded pane by a remote-resumed TUI: Herdr
@@ -2321,7 +2420,10 @@ fn a_wake_is_refused_while_a_remote_resumed_codex_tui_runs_the_thread() {
     );
     let asleep = stored(&fixture, Model::Sol);
     assert_eq!(asleep.state, State::Asleep);
-    assert_eq!(asleep.queue, vec![Request::Order("A".into())].unsent());
+    assert_eq!(
+        asleep.queue,
+        flow_ethos::Queue(vec![Request::Order("A".into())].unsent())
+    );
 }
 
 /// A session Herdr does report for the recorded pane must be the flow's
@@ -2370,7 +2472,7 @@ fn the_wake_pane_check_binds_a_codex_flow_by_pane_agent_and_thread() {
     let mut elsewhere = quiet_agent(&fixture);
     elsewhere["pane_id"] = serde_json::Value::String("w1:p9".into());
     elsewhere["terminal_id"] = serde_json::Value::String("term-elsewhere".into());
-    let mut elsewhere_reporting = reporting(&node.session_id);
+    let mut elsewhere_reporting = reporting(&node.session_id.0);
     elsewhere_reporting["pane_id"] = serde_json::Value::String("w1:p9".into());
     elsewhere_reporting["terminal_id"] = serde_json::Value::String("term-elsewhere".into());
 
@@ -2379,7 +2481,11 @@ fn the_wake_pane_check_binds_a_codex_flow_by_pane_agent_and_thread() {
         Some(true)
     );
     assert_eq!(
-        held(vec![reporting(&node.session_id)], &node, "messaging-build"),
+        held(
+            vec![reporting(&node.session_id.0)],
+            &node,
+            "messaging-build"
+        ),
         Some(true)
     );
     assert_eq!(
@@ -2434,14 +2540,20 @@ fn a_launch_takes_its_address_by_binds_rules() {
     assert!(store.awaken_metaflow(&at, "aaaaaa", 0).unwrap());
     assert_eq!(
         stored(&fixture, Model::Luna).state,
-        State::Awake("aaaaaa".into())
+        State::Awake(flow_ethos::FlowId("aaaaaa".into()))
     );
 
     // Awake as a flow with no live row: taken over, the old flow Past.
     assert!(store.awaken_metaflow(&at, "bbbbbb", 0).unwrap());
     let over = stored(&fixture, Model::Luna);
-    assert_eq!(over.state, State::Awake("bbbbbb".into()));
-    assert_eq!(over.past, vec!["aaaaaa".to_owned()]);
+    assert_eq!(
+        over.state,
+        State::Awake(flow_ethos::FlowId("bbbbbb".into()))
+    );
+    assert_eq!(
+        over.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId("aaaaaa".to_owned())])
+    );
 
     // Awake as a live flow: refused, but not to its successor.
     store
@@ -2449,7 +2561,7 @@ fn a_launch_takes_its_address_by_binds_rules() {
         .expect("live flow registered");
     store.seed_metaflow(metaflow(
         Model::Luna,
-        State::Awake("908786".into()),
+        State::Awake(flow_ethos::FlowId("908786".into())),
         vec![],
         vec![],
     ));
@@ -2472,9 +2584,15 @@ fn a_launch_takes_its_address_by_binds_rules() {
     assert!(!store.awaken_metaflow(&at, "dddddd", 1).unwrap());
     assert!(store.awaken_metaflow(&at, "dddddd", 0).unwrap());
     let taken_by = stored(&fixture, Model::Luna);
-    assert_eq!(taken_by.state, State::Awake("dddddd".into()));
-    assert!(taken_by.past.is_empty());
-    assert_eq!(taken_by.queue, vec![Request::Order("A".into())].unsent());
+    assert_eq!(
+        taken_by.state,
+        State::Awake(flow_ethos::FlowId("dddddd".into()))
+    );
+    assert!(taken_by.past.0.is_empty());
+    assert_eq!(
+        taken_by.queue,
+        flow_ethos::Queue(vec![Request::Order("A".into())].unsent())
+    );
 }
 
 /// A seat Flow launched sends through Message: Message names the sending
@@ -2505,15 +2623,23 @@ pub(super) fn message_peer(fixture: &NexusFixture) -> (super::MarkedProcess, sig
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
             meta_signal_flow::ConfigureNexus {
-                source_root: fixture.directory.path().to_string_lossy().into_owned(),
-                stable_codex: settings.stable_codex,
-                next_codex: settings.next_codex,
-                harness_profiles: settings.harness_profile_vector,
-                meta_aspects: settings.meta_aspects,
-                message_nexus_path_option: Some(settings.message_nexus_path.clone()),
-                message_nexus_binary_option: Some(message_executable),
-                curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                lease: 30,
+                source_root: flow_ethos::SourceRoot(
+                    fixture.directory.path().to_string_lossy().into_owned(),
+                ),
+                first_codex_endpoint: settings.stable_codex,
+                second_codex_endpoint: settings.next_codex,
+                harness_profiles: flow_ethos::HarnessProfiles(settings.harness_profile_vector),
+                meta_aspects: flow_ethos::MetaAspects(settings.meta_aspects),
+                message_nexus_path_option: Some(flow_ethos::MessageNexusPath(
+                    settings.message_nexus_path.clone(),
+                )),
+                message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(
+                    message_executable,
+                )),
+                curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+                    "/fixture/curriculum.sock".into(),
+                ),
+                lease: flow_ethos::Lease(30),
                 presentation_prompt_option: None,
             },
         ))
@@ -2521,7 +2647,7 @@ pub(super) fn message_peer(fixture: &NexusFixture) -> (super::MarkedProcess, sig
     let message = FlowStore::process_identity_for_pid(message_child.0.id()).unwrap();
     let message_address = Address {
         aspect: Aspect::Field,
-        topic: "message".into(),
+        topic: flow_ethos::Topic("message".into()),
         model: Model::Astra,
     };
     assert!(matches!(
@@ -2551,7 +2677,7 @@ fn a_launched_seat_identifies_through_its_pane_and_its_order_wakes_an_asleep_sea
 /// and wakes it, as a fresh flow.
 #[test]
 fn a_metaflow_left_awake_as_an_ended_flow_is_woken_by_an_order() {
-    identifies_and_wakes_by_an_order(State::Awake("abc123".into()));
+    identifies_and_wakes_by_an_order(State::Awake(flow_ethos::FlowId("abc123".into())));
 }
 
 fn identifies_and_wakes_by_an_order(recipient: State) {
@@ -2571,35 +2697,35 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     // having taken the Address Field flow Quaternary.
     let sender_address = Address {
         aspect: Aspect::Field,
-        topic: "flow".into(),
+        topic: flow_ethos::Topic("flow".into()),
         model: Model::Terra,
     };
     let sender_route = HerdrRoute {
-        herdr_session_name: "messaging-build".into(),
-        herdr_agent_name: "sender-agent".into(),
-        herdr_pane_id: "w5:p1".into(),
-        herdr_terminal_id: "term-sender".into(),
+        herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+        herdr_agent_name: signal_flow::HerdrAgentName("sender-agent".into()),
+        herdr_pane_id: signal_flow::HerdrPaneId("w5:p1".into()),
+        herdr_terminal_id: signal_flow::HerdrTerminalId("term-sender".into()),
     };
     fixture
         .nexus
         .store
         .register_flow_in_role(
             FlowNode {
-                flow_id: "5e4de7".into(),
-                session_id: "5e4de700-0000-4000-8000-000000000001".into(),
+                flow_id: flow_ethos::FlowId("5e4de7".into()),
+                session_id: signal_flow::SessionId("5e4de700-0000-4000-8000-000000000001".into()),
                 harness_kind: HarnessKind::Claude,
                 endpoint_selection: EndpointSelection::Unavailable,
                 herdr_route_selection: HerdrRouteSelection::Available(sender_route),
                 origin: Origin::Flow(FlowOrigin {
-                    flow_id: "da2038".into(),
-                    session_id: "field-session".into(),
+                    flow_id: flow_ethos::FlowId("da2038".into()),
+                    session_id: signal_flow::SessionId("field-session".into()),
                 }),
                 flow_lifecycle: FlowLifecycle::Active,
             },
-            signal_flow::Caller {
-                flow_id: "5e4de7".into(),
+            signal_flow::CallerIdentity {
+                flow_id: flow_ethos::FlowId("5e4de7".into()),
                 aspect: Aspect::Field,
-                model_name: "haiku".into(),
+                model_name: flow_ethos::ModelName("haiku".into()),
             },
         )
         .expect("sender registered");
@@ -2669,8 +2795,8 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         .nexus
         .dispatch_metaflow_peer(
             signal_flow::Query::Lock(Lock_Data {
-                sender: sender_address.clone(),
-                recipient: at.clone(),
+                first_address: sender_address.clone(),
+                second_address: at.clone(),
             }),
             Some(&message),
         )
@@ -2682,8 +2808,8 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     let expected_size = oversized.native_prompt_bytes(&sender_address);
     let refusal = Response::SendRefused(signal_flow::VisibleRefusal::Oversized(
         signal_flow::SendPayloadSize {
-            actual_bytes: expected_size as i64,
-            maximum_bytes: crate::sending::MAX_SEND_PAYLOAD_BYTES as i64,
+            actual_bytes: signal_flow::ActualBytes(expected_size as i64),
+            maximum_bytes: signal_flow::MaximumBytes(crate::sending::MAX_SEND_PAYLOAD_BYTES as i64),
         },
     ));
     assert_eq!(
@@ -2708,6 +2834,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
             .unwrap()
             .unwrap()
             .queue
+            .0
             .is_empty()
     );
     assert!(
@@ -2726,15 +2853,15 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
                 actual_bytes,
                 maximum_bytes,
             })
-        )) if *actual_bytes == expected_size as i64
-            && *maximum_bytes == crate::sending::MAX_SEND_PAYLOAD_BYTES as i64
+        )) if *actual_bytes == signal_flow::ActualBytes(expected_size as i64)
+            && *maximum_bytes == signal_flow::MaximumBytes(crate::sending::MAX_SEND_PAYLOAD_BYTES as i64)
     ));
     let Response::Locked(lock) = fixture
         .nexus
         .dispatch_metaflow_peer(
             signal_flow::Query::Lock(Lock_Data {
-                sender: sender_address.clone(),
-                recipient: at.clone(),
+                first_address: sender_address.clone(),
+                second_address: at.clone(),
             }),
             Some(&message),
         )
@@ -2857,7 +2984,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
             world.calls()
         );
     };
-    assert_ne!(flow_id, "abc123", "a fresh flow");
+    assert_ne!(flow_id.0, "abc123", "a fresh flow");
     // The woken flow's accepted first prompt carries the Order with the
     // Sender its Lock named.
     let sent = QueueEntry {
@@ -2867,7 +2994,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         delivery: flow_ethos::Delivery::Wake,
         message: Message::MiddleAbrupt(order.clone()),
     };
-    assert!(woken.queue.is_empty());
+    assert!(woken.queue.0.is_empty());
     let turns = world.user_turns(&fixture);
     assert!(
         turns
@@ -2883,7 +3010,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         fixture
             .nexus
             .store
-            .archive_request(&accepted.request_id, &sender_address)
+            .archive_request(&accepted.request_id.0, &sender_address)
             .expect("archive reads while the Deliver answer is held"),
         Err(signal_flow::ArchiveRejection::NotYet),
         "the replayed Deliver answer holds archive after Acknowledge removed its key"
@@ -2893,7 +3020,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         fixture
             .nexus
             .store
-            .archive_request(&accepted.request_id, &sender_address)
+            .archive_request(&accepted.request_id.0, &sender_address)
             .expect("archive reads after the Deliver answer is released"),
         Ok(())
     );
@@ -2906,43 +3033,43 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
     use crate::store::metaflow::TakesLaunchAddress;
     use crate::store::{FlowStore, ReadsFlowMemory};
     use signal_flow::{
-        Caller, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
-        HerdrRouteSelection, Origin, Response,
+        CallerIdentity, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
+        HerdrRoute, HerdrRouteSelection, Origin, Response,
     };
 
     let fixture = NexusFixture::new();
     let (_message_child, message) = message_peer(&fixture);
     let sender_address = Address {
         aspect: Aspect::Field,
-        topic: "flow".into(),
+        topic: flow_ethos::Topic("flow".into()),
         model: Model::Terra,
     };
     let route = HerdrRoute {
-        herdr_session_name: "messaging-build".into(),
-        herdr_agent_name: "sender-agent".into(),
-        herdr_pane_id: "w5:p1".into(),
-        herdr_terminal_id: "term-sender".into(),
+        herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+        herdr_agent_name: signal_flow::HerdrAgentName("sender-agent".into()),
+        herdr_pane_id: signal_flow::HerdrPaneId("w5:p1".into()),
+        herdr_terminal_id: signal_flow::HerdrTerminalId("term-sender".into()),
     };
     fixture
         .nexus
         .store
         .register_flow_in_role(
             FlowNode {
-                flow_id: "deliver-all-sender".into(),
-                session_id: "deliver-all-sender-session".into(),
+                flow_id: flow_ethos::FlowId("deliver-all-sender".into()),
+                session_id: signal_flow::SessionId("deliver-all-sender-session".into()),
                 harness_kind: HarnessKind::Claude,
                 endpoint_selection: EndpointSelection::Unavailable,
                 herdr_route_selection: HerdrRouteSelection::Available(route),
                 origin: Origin::Flow(FlowOrigin {
-                    flow_id: "parent".into(),
-                    session_id: "parent-session".into(),
+                    flow_id: flow_ethos::FlowId("parent".into()),
+                    session_id: signal_flow::SessionId("parent-session".into()),
                 }),
                 flow_lifecycle: FlowLifecycle::Active,
             },
-            Caller {
-                flow_id: "deliver-all-sender".into(),
+            CallerIdentity {
+                flow_id: flow_ethos::FlowId("deliver-all-sender".into()),
                 aspect: Aspect::Field,
-                model_name: "haiku".into(),
+                model_name: flow_ethos::ModelName("haiku".into()),
             },
         )
         .expect("sender registered");
@@ -3019,7 +3146,7 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
             .unwrap()
             .unwrap()
             .queue,
-        vec![request.clone().unsent()],
+        flow_ethos::Queue(vec![request.clone().unsent()]),
     );
 }
 
@@ -3077,7 +3204,7 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
             .dispatch_metaflow_peer(
                 signal_flow::Query::IdentifyThread(IdentifyThread_Data {
                     process: process.clone(),
-                    native_session_id: thread.into(),
+                    native_session_id: signal_flow::NativeSessionId(thread.into()),
                 }),
                 Some(peer),
             )
@@ -3114,8 +3241,12 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
             .store
             .configure_change(meta_signal_flow::ConfigurationChange::SendServers(vec![
                 meta_signal_flow::ConfigureSendServer {
-                    codex_app_server_binary: app_server_executable,
-                    mcp_send_server_binary: send_server_executable,
+                    codex_app_server_binary: meta_signal_flow::CodexAppServerBinary(
+                        app_server_executable
+                    ),
+                    mcp_send_server_binary: meta_signal_flow::McpSendServerBinary(
+                        send_server_executable
+                    ),
                 },
             ]))
             .unwrap(),
@@ -3126,7 +3257,7 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
     // TUI runs in a pane; the send server runs under the app-server, in none.
     let sender_address = Address {
         aspect: Aspect::Mind,
-        topic: "flow".into(),
+        topic: flow_ethos::Topic("flow".into()),
         model: Model::Luna,
     };
     let registration = fixture
@@ -3134,23 +3265,23 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
         .store
         .register_flow_in_role(
             FlowNode {
-                flow_id: "41fa34".into(),
-                session_id: thread.into(),
+                flow_id: flow_ethos::FlowId("41fa34".into()),
+                session_id: signal_flow::SessionId(thread.into()),
                 harness_kind: HarnessKind::Codex,
                 endpoint_selection: EndpointSelection::Unavailable,
                 herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
-                    herdr_session_name: "messaging-build".into(),
-                    herdr_agent_name: "codex-agent".into(),
-                    herdr_pane_id: "w6:p1".into(),
-                    herdr_terminal_id: "term-codex".into(),
+                    herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+                    herdr_agent_name: signal_flow::HerdrAgentName("codex-agent".into()),
+                    herdr_pane_id: signal_flow::HerdrPaneId("w6:p1".into()),
+                    herdr_terminal_id: signal_flow::HerdrTerminalId("term-codex".into()),
                 }),
                 origin: Origin::Unbound,
                 flow_lifecycle: FlowLifecycle::Active,
             },
-            signal_flow::Caller {
-                flow_id: "41fa34".into(),
+            signal_flow::CallerIdentity {
+                flow_id: flow_ethos::FlowId("41fa34".into()),
                 aspect: Aspect::Mind,
-                model_name: "gpt-6.1-luna".into(),
+                model_name: flow_ethos::ModelName("gpt-6.1-luna".into()),
             },
         )
         .unwrap();
@@ -3250,10 +3381,10 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
 /// of its yet recorded.
 fn launched_unanswered(fixture: &NexusFixture, launch_request_id: &str) -> super::StagedLaunch {
     let mut launch = fixture.staged_launch(launch_request_id, None);
-    launch.pane.herdr_session_name = "messaging-build".into();
-    launch.pane.herdr_pane_id = "w5:p1".into();
-    launch.pane.herdr_agent_name = "sender-agent".into();
-    launch.pane.herdr_terminal_id = "term-sender".into();
+    launch.pane.herdr_session_name = signal_flow::HerdrSessionName("messaging-build".into());
+    launch.pane.herdr_pane_id = signal_flow::HerdrPaneId("w5:p1".into());
+    launch.pane.herdr_agent_name = signal_flow::HerdrAgentName("sender-agent".into());
+    launch.pane.herdr_terminal_id = signal_flow::HerdrTerminalId("term-sender".into());
     launch.binding.herdr_pane_binding = launch.pane.clone();
     launch.stage_to_ambiguity(&fixture.nexus);
     fixture.set_agents(vec![serde_json::json!({
@@ -3300,7 +3431,7 @@ fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
     let at = address(Model::Sol);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake("abc123".into()),
+        State::Awake(flow_ethos::FlowId("abc123".into())),
         vec![],
         vec![],
     ));
@@ -3308,8 +3439,8 @@ fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
         .nexus
         .dispatch_metaflow_peer(
             signal_flow::Query::Lock(Lock_Data {
-                sender: sender_address.clone(),
-                recipient: at.clone(),
+                first_address: sender_address.clone(),
+                second_address: at.clone(),
             }),
             Some(&message),
         )
@@ -3330,7 +3461,7 @@ fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
         panic!("the identified sender's message is admitted")
     };
     let metaflow = stored(&fixture, Model::Sol);
-    let [entry] = metaflow.queue.as_slice() else {
+    let [entry] = metaflow.queue.0.as_slice() else {
         panic!("one logical entry is retained")
     };
     assert_eq!(entry.logical_delivery_id, accepted.logical_delivery_id);
@@ -3361,10 +3492,16 @@ fn an_unconfirmed_launch_that_fails_or_ends_leaves_no_awake_registration() {
     ));
     asleep.stage_to_ambiguity(&fixture.nexus);
     let held = stored(&fixture, Model::Sol);
-    assert_eq!(held.state, State::Awake("908786".into()));
-    assert_eq!(held.past, vec!["abc123".to_owned()]);
+    assert_eq!(
+        held.state,
+        State::Awake(flow_ethos::FlowId("908786".into()))
+    );
+    assert_eq!(
+        held.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId("abc123".to_owned())])
+    );
     let mut queued = held.clone();
-    queued.queue.push(Request::Notice("B".into()).unsent());
+    queued.queue.0.push(Request::Notice("B".into()).unsent());
     fixture.nexus.store.seed_metaflow(queued);
 
     assert_eq!(
@@ -3454,7 +3591,7 @@ fn a_seat_herdr_shows_working_at_its_stop_is_idle_once_herdr_shows_it_done() {
     claude_seat(&fixture, 40_000);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake(CLAUDE_SEAT.into()),
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         vec![],
         vec![],
     ));
@@ -3463,7 +3600,7 @@ fn a_seat_herdr_shows_working_at_its_stop_is_idle_once_herdr_shows_it_done() {
     assert_eq!(fixture.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
     assert_eq!(
         stored(&fixture, Model::Sol).state,
-        State::Awake(CLAUDE_SEAT.into())
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
     );
     let calls = fs::read_to_string(log).unwrap();
     assert!(
@@ -3493,7 +3630,7 @@ fn a_stop_that_leaves_its_seat_names_why() {
     );
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake(CLAUDE_SEAT.into()),
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         vec![],
         vec![],
     ));
@@ -3506,7 +3643,7 @@ fn a_stop_that_leaves_its_seat_names_why() {
     ));
     assert_eq!(
         stored(&fixture, Model::Sol).state,
-        State::Awake(CLAUDE_SEAT.into())
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
     );
 }
 
@@ -3528,7 +3665,7 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
     claude_seat(fixture, 40_000);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake(CLAUDE_SEAT.into()),
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         vec![],
         vec![],
     ));
@@ -3546,7 +3683,7 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
     let mut hook = UnixStream::connect(&socket).expect("ordinary socket listens");
     hook.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     hook.write_query(&signal_flow::Query::Report(signal_flow::Report_Data {
-        flow_id: CLAUDE_SEAT.into(),
+        flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
         event: claude_stop(fixture),
     }))
     .unwrap();
@@ -3589,17 +3726,20 @@ fn the_stop_of_a_confirmed_seat_leaves_its_metaflow_asleep_to_wake_fresh() {
     let fixture = NexusFixture::new();
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake("abc123".into()),
+        State::Awake(flow_ethos::FlowId("abc123".into())),
         vec![],
         vec![],
     ));
     let launched = ended_claude(&fixture);
     let slept = stored(&fixture, Model::Sol);
     assert_eq!(slept.state, State::Asleep);
-    assert_eq!(slept.past, vec!["abc123".to_owned()]);
+    assert_eq!(
+        slept.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId("abc123".to_owned())])
+    );
     assert_eq!(fixture.nexus.wake_plan(&slept), last_launch_context());
     let mut fresh = launched.profile.clone();
-    fresh.launch_request_id = "fresh-after-stop".into();
+    fresh.launch_request_id = signal_flow::LaunchRequestId("fresh-after-stop".into());
     assert_eq!(
         fixture.nexus.store.launch_address_refusal(&fresh).unwrap(),
         None,
@@ -3614,7 +3754,7 @@ fn a_retired_seat_sleeps_its_metaflow_and_its_order_wakes_it_fresh() {
     let fixture = NexusFixture::new();
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake("abc123".into()),
+        State::Awake(flow_ethos::FlowId("abc123".into())),
         vec![],
         vec![],
     ));
@@ -3623,9 +3763,13 @@ fn a_retired_seat_sleeps_its_metaflow_and_its_order_wakes_it_fresh() {
     });
     let mut retired = stored(&fixture, Model::Sol);
     assert_eq!(retired.state, State::Asleep);
-    assert_eq!(retired.past, vec!["abc123".to_owned()]);
+    assert_eq!(
+        retired.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId("abc123".to_owned())])
+    );
     retired
         .queue
+        .0
         .push(Request::Order("Carry on.".into()).unsent());
     fixture.nexus.store.seed_metaflow(retired.clone());
     assert!(fixture.nexus.wake_is_due(&retired));
@@ -3641,23 +3785,26 @@ fn a_nexus_start_puts_every_metaflow_left_awake_as_an_ended_flow_to_sleep() {
     ended_claude(&fixture);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake("abc123".into()),
+        State::Awake(flow_ethos::FlowId("abc123".into())),
         vec![],
         vec![],
     ));
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Luna,
-        State::Awake("flow-0000000000000001".into()),
+        State::Awake(flow_ethos::FlowId("flow-0000000000000001".into())),
         vec![],
         vec![],
     ));
     fixture.nexus.recover_wakes();
     let rested = stored(&fixture, Model::Sol);
     assert_eq!(rested.state, State::Asleep);
-    assert_eq!(rested.past, vec!["abc123".to_owned()]);
+    assert_eq!(
+        rested.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId("abc123".to_owned())])
+    );
     assert_eq!(
         stored(&fixture, Model::Luna).state,
-        State::Awake("flow-0000000000000001".into())
+        State::Awake(flow_ethos::FlowId("flow-0000000000000001".into()))
     );
 }
 
@@ -4013,16 +4160,24 @@ fn configure_secondary_model(fixture: &NexusFixture, native: &str) {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
             meta_signal_flow::ConfigureNexus {
-                source_root: fixture.directory.path().to_string_lossy().into_owned(),
-                stable_codex: settings.stable_codex,
-                next_codex: settings.next_codex,
-                harness_profiles: settings.harness_profile_vector,
-                meta_aspects: settings.meta_aspects,
-                message_nexus_path_option: Some(settings.message_nexus_path.clone()),
-                message_nexus_binary_option: Some("/fixture/message-nexus".into()),
+                source_root: flow_ethos::SourceRoot(
+                    fixture.directory.path().to_string_lossy().into_owned(),
+                ),
+                first_codex_endpoint: settings.stable_codex,
+                second_codex_endpoint: settings.next_codex,
+                harness_profiles: flow_ethos::HarnessProfiles(settings.harness_profile_vector),
+                meta_aspects: flow_ethos::MetaAspects(settings.meta_aspects),
+                message_nexus_path_option: Some(flow_ethos::MessageNexusPath(
+                    settings.message_nexus_path.clone(),
+                )),
+                message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(
+                    "/fixture/message-nexus".into(),
+                )),
 
-                curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                lease: 30,
+                curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+                    "/fixture/curriculum.sock".into(),
+                ),
+                lease: flow_ethos::Lease(30),
                 presentation_prompt_option: None,
             },
         ))
@@ -4033,7 +4188,7 @@ fn configure_secondary_model(fixture: &NexusFixture, native: &str) {
         .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
             meta_signal_flow::ConfigureModel {
                 model: Model::Sol,
-                native: native.into(),
+                native: meta_signal_flow::Native(native.into()),
             },
         ]))
         .expect("model configured");
@@ -4052,21 +4207,26 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
     let mut fixture = NexusFixture::new();
     // The old Codex flow 908786 on thread OLD, Stopped, its launch of record.
     let old = fixture.node();
-    let old_thread = old.session_id.clone();
+    let old_thread = old.session_id.0.clone();
     let profile = LaunchProfile {
-        launch_request_id: "old-codex-request".into(),
-        system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-        user_modules: vec!["operation-main-flow".into()],
+        launch_request_id: signal_flow::LaunchRequestId("old-codex-request".into()),
+        system_modules: signal_flow::SystemModules(vec![
+            signal_flow::ModuleIdentity("spirit-core".into()),
+            signal_flow::ModuleIdentity("intent-flow".into()),
+        ]),
+        user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+            "operation-main-flow".into(),
+        )]),
         address: address(Model::Sol),
-        model_name: "fixture-model".into(),
-        effort: "medium".into(),
+        model_name: flow_ethos::ModelName("fixture-model".into()),
+        effort: signal_flow::Effort("medium".into()),
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
         flow_id_option: None,
-        remembering: signal_flow::Remembering::Predecessors(0),
-        herdr_session_name: "fixture-session".into(),
+        remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(0)),
+        herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
         leave_outs_option: None,
-        instruction_prompt: "fixture instruction".into(),
+        instruction_prompt: signal_flow::InstructionPrompt("fixture instruction".into()),
     };
     let composed = fixture
         .nexus
@@ -4074,7 +4234,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         .current()
         .compose(
             crate::composition::HarnessedProfile {
-                remembered_flows: Vec::new(),
+                remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                 harness_kind: HarnessKind::Codex,
                 launch_profile: profile.clone(),
             },
@@ -4108,28 +4268,28 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
             .record_native_launch_binding(NativeLaunchBinding {
                 launch_request_id: profile.launch_request_id.clone(),
                 flow_id: old.flow_id.clone(),
-                native_session_id: old_thread.clone(),
+                native_session_id: signal_flow::NativeSessionId(old_thread.clone()),
                 harness_kind: HarnessKind::Codex,
                 herdr_pane_binding: signal_flow::HerdrPaneBinding {
                     launch_request_id: profile.launch_request_id.clone(),
-                    herdr_session_name: "fixture-session".into(),
-                    herdr_agent_name: composed.launch_agent_name(),
-                    herdr_workspace_id: "w1".into(),
-                    herdr_pane_id: "w1:p3".into(),
-                    herdr_terminal_id: "term-old".into(),
+                    herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
+                    herdr_agent_name: signal_flow::HerdrAgentName(composed.launch_agent_name()),
+                    herdr_workspace_id: signal_flow::HerdrWorkspaceId("w1".into()),
+                    herdr_pane_id: signal_flow::HerdrPaneId("w1:p3".into()),
+                    herdr_terminal_id: signal_flow::HerdrTerminalId("term-old".into()),
                 },
             })
             .unwrap()
     );
     let mut old_node = old.clone();
     old_node.herdr_route_selection = HerdrRouteSelection::Available(HerdrRoute {
-        herdr_session_name: "fixture-session".into(),
-        herdr_agent_name: composed.launch_agent_name(),
-        herdr_pane_id: "w1:p3".into(),
-        herdr_terminal_id: "term-old".into(),
+        herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
+        herdr_agent_name: signal_flow::HerdrAgentName(composed.launch_agent_name()),
+        herdr_pane_id: signal_flow::HerdrPaneId("w1:p3".into()),
+        herdr_terminal_id: signal_flow::HerdrTerminalId("term-old".into()),
     });
     fixture.nexus.store.register_flow(old_node).unwrap();
-    assert!(fixture.nexus.store.record_stopped(&old.flow_id).unwrap());
+    assert!(fixture.nexus.store.record_stopped(&old.flow_id.0).unwrap());
     let rollouts = fixture.directory.path().join("native-transcripts/codex");
     fs::create_dir_all(&rollouts).unwrap();
     let old_rollout = rollouts.join(format!("rollout-{old_thread}.jsonl"));
@@ -4146,7 +4306,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
         State::Asleep,
-        vec![old.flow_id.as_str()],
+        vec![old.flow_id.0.as_str()],
         queue.clone(),
     ));
     configure_secondary_model(&fixture, "fixture-model");
@@ -4175,7 +4335,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         .current()
         .compose(
             crate::composition::HarnessedProfile {
-                remembered_flows: Vec::new(),
+                remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                 harness_kind: HarnessKind::Codex,
                 launch_profile: fresh,
             },
@@ -4190,7 +4350,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
     let rows = [
         serde_json::json!({"type":"session_meta","payload":{"id":FRESH_THREAD}}),
         serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"medium","turn_id":"turn-fresh"}}),
-        serde_json::json!({"type":"event_msg","payload":{"thread_id":FRESH_THREAD,"turn_id":"turn-fresh","item":{"type":"UserMessage","content":[{"type":"text","text":first_part}]}}}),
+        serde_json::json!({"type":"event_msg","payload":{"thread_id":FRESH_THREAD,"turn_id":"turn-fresh","item":{"type":"UserMessage","content":[{"type":"text","text":first_part.0}]}}}),
         serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Woken."}]}}),
     ];
     fs::write(
@@ -4212,32 +4372,35 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
     let outcome = fixture.nexus.perform(Operation::Wake(at.clone()));
     assert_eq!(
         outcome,
-        Outcome::Woken(FRESH_CODEX_FLOW.into()),
+        Outcome::Woken(flow_ethos::FlowId(FRESH_CODEX_FLOW.into())),
         "Herdr calls: {}; app-server invocations: {:?}",
         fs::read_to_string(world.state.join("calls")).unwrap_or_default(),
         fs::read_to_string(&world.codex_invocations).ok()
     );
 
     let woken = stored(&fixture, Model::Sol);
-    assert_eq!(woken.state, State::Awake(FRESH_CODEX_FLOW.into()));
-    assert!(woken.queue.is_empty());
-    assert_eq!(woken.past, vec![old.flow_id.clone()]);
+    assert_eq!(
+        woken.state,
+        State::Awake(flow_ethos::FlowId(FRESH_CODEX_FLOW.into()))
+    );
+    assert!(woken.queue.0.is_empty());
+    assert_eq!(woken.past, flow_ethos::Past(vec![old.flow_id.clone()]));
     let new_node = fixture
         .nexus
         .store
         .flow_node(FRESH_CODEX_FLOW)
         .unwrap()
         .unwrap();
-    assert_eq!(new_node.session_id, FRESH_THREAD);
+    assert_eq!(new_node.session_id.0, FRESH_THREAD);
     assert_eq!(new_node.harness_kind, HarnessKind::Codex);
     assert_eq!(new_node.flow_lifecycle, FlowLifecycle::Active);
     let old_after = fixture
         .nexus
         .store
-        .flow_node(&old.flow_id)
+        .flow_node(&old.flow_id.0)
         .unwrap()
         .unwrap();
-    assert_eq!(old_after.session_id, old_thread);
+    assert_eq!(old_after.session_id.0, old_thread);
     assert_eq!(old_after.flow_lifecycle, FlowLifecycle::Stopped);
     assert_eq!(fs::read(&old_rollout).unwrap(), old_bytes);
     // Exactly the probe, the opening, the naming and the readback reached
@@ -4276,18 +4439,18 @@ fn a_sleeping_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it() {
             fs::read_to_string(world.state.join("calls")).unwrap_or_default()
         );
     };
-    assert_ne!(flow_id, "abc123");
+    assert_ne!(flow_id.0, "abc123");
     let woken = stored(&fixture, Model::Sol);
     assert_eq!(woken.state, State::Awake(flow_id.clone()));
-    assert!(woken.queue.is_empty());
-    let new_node = fixture.nexus.store.flow_node(&flow_id).unwrap().unwrap();
+    assert!(woken.queue.0.is_empty());
+    let new_node = fixture.nexus.store.flow_node(&flow_id.0).unwrap().unwrap();
     let new_session = fs::read_to_string(world.state.join("session")).unwrap();
-    assert_eq!(new_node.session_id, new_session);
+    assert_eq!(new_node.session_id.0, new_session);
     assert_ne!(new_session, seat.session);
     assert_eq!(new_node.harness_kind, HarnessKind::Claude);
     assert_eq!(new_node.flow_lifecycle, FlowLifecycle::Active);
     let old_after = fixture.nexus.store.flow_node("abc123").unwrap().unwrap();
-    assert_eq!(old_after.session_id, seat.session);
+    assert_eq!(old_after.session_id.0, seat.session);
     assert_eq!(old_after.flow_lifecycle, FlowLifecycle::Stopped);
     let calls = fs::read_to_string(world.state.join("calls")).unwrap();
     assert!(
@@ -4327,8 +4490,11 @@ fn a_fresh_wake_from_a_claude_alias_opens_nothing_and_keeps_its_work() {
     );
     let asleep = stored(&fixture, Model::Sol);
     assert_eq!(asleep.state, State::Asleep);
-    assert_eq!(asleep.past, vec!["abc123".to_owned()]);
-    assert_eq!(asleep.queue.len(), 1);
+    assert_eq!(
+        asleep.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId("abc123".to_owned())])
+    );
+    assert_eq!(asleep.queue.0.len(), 1);
     let calls = fs::read_to_string(world.state.join("calls")).unwrap_or_default();
     assert!(!calls.contains("--session-id"), "{calls}");
 
@@ -4341,7 +4507,7 @@ fn a_fresh_wake_from_a_claude_alias_opens_nothing_and_keeps_its_work() {
     };
     let woken = stored(&fixture, Model::Sol);
     assert_eq!(woken.state, State::Awake(flow_id));
-    assert!(woken.queue.is_empty());
+    assert!(woken.queue.0.is_empty());
 }
 
 /// A wake whose start is refused keeps every request queued, never lost,
@@ -4361,7 +4527,7 @@ fn a_refused_wake_keeps_its_queue_and_each_delivery_names_why() {
     let at = address(Model::Sol);
     let sender = Address {
         aspect: Aspect::Psyche,
-        topic: "core".into(),
+        topic: flow_ethos::Topic("core".into()),
         model: Model::Opus,
     };
     let accepted: Vec<_> = ["A", "B"]
@@ -4401,6 +4567,7 @@ fn a_refused_wake_keeps_its_queue_and_each_delivery_names_why() {
     assert_eq!(
         asleep
             .queue
+            .0
             .iter()
             .map(|entry| entry.logical_delivery_id.clone())
             .collect::<Vec<_>>(),
@@ -4445,7 +4612,7 @@ fn a_refused_wake_keeps_its_queue_and_each_delivery_names_why() {
     let woken = stored(&fixture, Model::Sol);
     assert_eq!(woken.state, State::Awake(flow_id));
     assert!(
-        woken.queue.is_empty(),
+        woken.queue.0.is_empty(),
         "the first prompt takes the same queue"
     );
 }
@@ -4468,19 +4635,21 @@ fn a_missing_module_wake_keeps_its_identity_in_the_caller_outcome_and_queue_stat
             meta_signal_flow::ConfigureMetaflow {
                 root_option: None,
                 address: at.clone(),
-                system_modules: vec!["vision:absent".into()],
-                user_modules: vec![],
+                system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
+                    "vision:absent".into(),
+                )]),
+                user_modules: signal_flow::UserModules(vec![]),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 continuity: meta_signal_flow::Continuity::Maintained,
-                purpose: String::new(),
-                records: vec![],
+                purpose: meta_signal_flow::Purpose(String::new()),
+                records: meta_signal_flow::Records(vec![]),
             },
         ]))
         .expect("the missing module is a valid declaration");
     let sender = Address {
         aspect: Aspect::Psyche,
-        topic: "core".into(),
+        topic: flow_ethos::Topic("core".into()),
         model: Model::Opus,
     };
     let signal_flow::PrivateSendResponse::SendAccepted(accepted) = fixture
@@ -4497,7 +4666,9 @@ fn a_missing_module_wake_keeps_its_identity_in_the_caller_outcome_and_queue_stat
     else {
         panic!("the request is accepted")
     };
-    let refusal = signal_flow::ContextRefusal::ModuleMissing(Some("vision:absent".into()));
+    let refusal = signal_flow::ContextRefusal::ModuleMissing(Some(signal_flow::ModuleIdentity(
+        "vision:absent".into(),
+    )));
 
     assert_eq!(
         fixture.nexus.perform(Operation::Wake(at)),
@@ -4546,7 +4717,7 @@ fn a_fresh_wake_takes_the_model_of_its_layer_and_aspect() {
                     .iter()
                     .map(|(model, native)| meta_signal_flow::ConfigureModel {
                         model: model.clone(),
-                        native: (*native).into(),
+                        native: meta_signal_flow::Native((*native).into()),
                     })
                     .collect(),
             ))
@@ -4567,7 +4738,7 @@ fn a_fresh_wake_takes_the_model_of_its_layer_and_aspect() {
     );
     let asleep = stored(&fixture, Model::Sol);
     assert_eq!(asleep.state, State::Asleep);
-    assert_eq!(asleep.queue.len(), 1);
+    assert_eq!(asleep.queue.0.len(), 1);
     let calls = fs::read_to_string(world.state.join("calls")).unwrap_or_default();
     assert!(!calls.contains("--session-id"), "{calls}");
 
@@ -4586,11 +4757,11 @@ fn a_fresh_wake_takes_the_model_of_its_layer_and_aspect() {
     };
     let woken = stored(&fixture, Model::Sol);
     assert_eq!(woken.state, State::Awake(flow_id.clone()));
-    assert!(woken.queue.is_empty());
+    assert!(woken.queue.0.is_empty());
     let launched = fixture
         .nexus
         .store
-        .launch_requests_bound_to(&flow_id)
+        .launch_requests_bound_to(&flow_id.0)
         .expect("launches read");
     let attempt = fixture
         .nexus
@@ -4598,7 +4769,10 @@ fn a_fresh_wake_takes_the_model_of_its_layer_and_aspect() {
         .launch_attempt(launched.last().expect("the wake's launch"))
         .expect("attempt reads")
         .expect("attempt");
-    assert_eq!(attempt.launch_profile.model_name, "claude-fixture");
+    assert_eq!(
+        attempt.launch_profile.model_name,
+        flow_ethos::ModelName("claude-fixture".into())
+    );
 }
 
 /// The first-turn send of a fresh Codex launch, against the fresh world: a
@@ -4616,9 +4790,9 @@ const FIRST_CALL_BODY: &str = "Wake and reply.";
 
 fn first_call_key() -> crate::generated::send_tool::ToolCallKey {
     crate::generated::send_tool::ToolCallKey {
-        thread_id: FRESH_THREAD.into(),
-        turn_id: "turn-fresh".into(),
-        call_id: "call-first".into(),
+        thread_id: crate::generated::send_tool::ThreadId(FRESH_THREAD.into()),
+        turn_id: crate::generated::send_tool::TurnId("turn-fresh".into()),
+        call_id: crate::generated::send_tool::CallId("call-first".into()),
     }
 }
 
@@ -4635,23 +4809,28 @@ impl SetsUpFirstTurnSend for NexusFixture {
         use crate::store::SeedsConfiguration;
         use crate::title::{ShowsNativeTitle, TitlesFlow};
         let sender = LaunchProfile {
-            launch_request_id: "first-turn-send".into(),
-            system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-            user_modules: vec!["operation-main-flow".into()],
+            launch_request_id: signal_flow::LaunchRequestId("first-turn-send".into()),
+            system_modules: signal_flow::SystemModules(vec![
+                signal_flow::ModuleIdentity("spirit-core".into()),
+                signal_flow::ModuleIdentity("intent-flow".into()),
+            ]),
+            user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                "operation-main-flow".into(),
+            )]),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             address: Address {
                 aspect: Aspect::Field,
-                topic: "sendProof".into(),
+                topic: flow_ethos::Topic("sendProof".into()),
                 model: Model::Luna,
             },
-            model_name: "fixture-model".into(),
-            effort: "medium".into(),
+            model_name: flow_ethos::ModelName("fixture-model".into()),
+            effort: signal_flow::Effort("medium".into()),
             flow_id_option: None,
-            remembering: signal_flow::Remembering::Predecessors(0),
-            herdr_session_name: "fixture-session".into(),
+            remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(0)),
+            herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
             leave_outs_option: None,
-            instruction_prompt: "Call the send tool once.".into(),
+            instruction_prompt: signal_flow::InstructionPrompt("Call the send tool once.".into()),
         };
         let settings = crate::store::DefaultConfiguration {
             home: self.directory.path().join("home"),
@@ -4662,16 +4841,24 @@ impl SetsUpFirstTurnSend for NexusFixture {
             .store
             .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
                 meta_signal_flow::ConfigureNexus {
-                    source_root: self.directory.path().to_string_lossy().into_owned(),
-                    stable_codex: settings.stable_codex,
-                    next_codex: settings.next_codex,
-                    harness_profiles: settings.harness_profile_vector,
-                    meta_aspects: settings.meta_aspects,
-                    message_nexus_path_option: Some(settings.message_nexus_path.clone()),
-                    message_nexus_binary_option: Some("/fixture/message-nexus".into()),
+                    source_root: flow_ethos::SourceRoot(
+                        self.directory.path().to_string_lossy().into_owned(),
+                    ),
+                    first_codex_endpoint: settings.stable_codex,
+                    second_codex_endpoint: settings.next_codex,
+                    harness_profiles: flow_ethos::HarnessProfiles(settings.harness_profile_vector),
+                    meta_aspects: flow_ethos::MetaAspects(settings.meta_aspects),
+                    message_nexus_path_option: Some(flow_ethos::MessageNexusPath(
+                        settings.message_nexus_path.clone(),
+                    )),
+                    message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(
+                        "/fixture/message-nexus".into(),
+                    )),
 
-                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                    lease: 30,
+                    curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+                        "/fixture/curriculum.sock".into(),
+                    ),
+                    lease: flow_ethos::Lease(30),
                     presentation_prompt_option: None,
                 },
             ))
@@ -4681,11 +4868,11 @@ impl SetsUpFirstTurnSend for NexusFixture {
             .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
                 meta_signal_flow::ConfigureModel {
                     model: Model::Sol,
-                    native: "claude-fixture".into(),
+                    native: meta_signal_flow::Native("claude-fixture".into()),
                 },
                 meta_signal_flow::ConfigureModel {
                     model: Model::Luna,
-                    native: "fixture-model".into(),
+                    native: meta_signal_flow::Native("fixture-model".into()),
                 },
             ]))
             .expect("models configured");
@@ -4695,7 +4882,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
             .current()
             .compose(
                 crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: sender.clone(),
                 },
@@ -4722,7 +4909,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
                 "arguments": {
                     "target": {
                         "aspect": "Mind",
-                        "topic": recipient.topic,
+                        "topic": recipient.topic.0,
                         "model": format!("{:?}", recipient.model)
                     },
                     "priority": "MiddleAbrupt",
@@ -4741,7 +4928,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
         let rows = [
             serde_json::json!({"type":"session_meta","payload":{"id":FRESH_THREAD}}),
             serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"medium","turn_id":"turn-fresh"}}),
-            serde_json::json!({"type":"event_msg","payload":{"thread_id":FRESH_THREAD,"turn_id":"turn-fresh","item":{"type":"UserMessage","content":[{"type":"text","text":first_part}]}}}),
+            serde_json::json!({"type":"event_msg","payload":{"thread_id":FRESH_THREAD,"turn_id":"turn-fresh","item":{"type":"UserMessage","content":[{"type":"text","text":first_part.0}]}}}),
             serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Queued."}]}}),
         ];
         fs::write(
@@ -4903,7 +5090,7 @@ fn a_codex_first_turn_starts_after_the_tui_attached_and_a_long_turn_refuses_noth
     let signal_flow::Response::Started(started_flow) = &response else {
         panic!("the launch completes: {response:?}; Herdr calls: {calls}");
     };
-    assert_eq!(started_flow.flow_id, FRESH_CODEX_FLOW);
+    assert_eq!(started_flow.flow_id.0, FRESH_CODEX_FLOW);
     setup.shows_thread_start_then_agent_start_then_turn_start(started.join().unwrap());
 }
 
@@ -4940,7 +5127,7 @@ fn a_refused_codex_start_archives_its_idle_thread_and_starts_no_turn() {
     assert_eq!(
         refusal.opened_thread_option,
         Some(signal_flow::OpenedThread {
-            native_session_id: FRESH_THREAD.into(),
+            native_session_id: signal_flow::NativeSessionId(FRESH_THREAD.into()),
             first_turn: signal_flow::FirstTurn::Unread,
             thread_archive: signal_flow::ThreadArchive::Archived,
         })
@@ -4969,7 +5156,7 @@ fn a_refused_codex_start_archives_its_idle_thread_and_starts_no_turn() {
         fixture.nexus.store.send_call(&first_call_key()).unwrap(),
         None
     );
-    assert!(stored(&fixture, Model::Astra).queue.is_empty());
+    assert!(stored(&fixture, Model::Astra).queue.0.is_empty());
     // After the refusal the thread is no launch's: a call now is refused.
     assert_eq!(
         fixture.nexus.store.thread_sender(FRESH_THREAD).unwrap(),
@@ -4996,7 +5183,7 @@ fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
         .current()
         .compose(
             crate::composition::HarnessedProfile {
-                remembered_flows: Vec::new(),
+                remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                 harness_kind: HarnessKind::Codex,
                 launch_profile: setup.sender.clone(),
             },
@@ -5029,11 +5216,11 @@ fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
             .store
             .record_created_launch_pane(signal_flow::HerdrPaneBinding {
                 launch_request_id: setup.sender.launch_request_id.clone(),
-                herdr_session_name: "fixture-session".into(),
-                herdr_agent_name: composed.launch_agent_name(),
-                herdr_workspace_id: "w7".into(),
-                herdr_pane_id: "w7:p1".into(),
-                herdr_terminal_id: "term-fresh".into(),
+                herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
+                herdr_agent_name: signal_flow::HerdrAgentName(composed.launch_agent_name()),
+                herdr_workspace_id: signal_flow::HerdrWorkspaceId("w7".into()),
+                herdr_pane_id: signal_flow::HerdrPaneId("w7:p1".into()),
+                herdr_terminal_id: signal_flow::HerdrTerminalId("term-fresh".into()),
             })
             .unwrap()
     );
@@ -5041,7 +5228,7 @@ fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
         fixture
             .nexus
             .store
-            .record_opened_thread(&setup.sender.launch_request_id, FRESH_THREAD)
+            .record_opened_thread(&setup.sender.launch_request_id.0, FRESH_THREAD)
             .unwrap()
     );
     // The app-server the restarted Nexus meets: the send-tool probe; the
@@ -5139,7 +5326,7 @@ fn every_call_replayed_before_the_resume_barrier_is_answered_once() {
             "arguments": {
                 "target": {
                     "aspect": "Mind",
-                    "topic": setup.recipient.topic,
+                    "topic": setup.recipient.topic.0,
                     "model": format!("{:?}", setup.recipient.model)
                 },
                 "priority": "Soft",
@@ -5189,7 +5376,7 @@ fn every_call_replayed_before_the_resume_barrier_is_answered_once() {
         );
         assert!(answer.to_string().contains("ThreadUnowned"), "{answer}");
     }
-    assert!(stored(&fixture, Model::Sol).queue.is_empty());
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
 }
 
 /// A Nexus restarted after a Codex launch had durably opened its thread
@@ -5228,7 +5415,7 @@ fn a_launch_interrupted_with_its_first_call_pending_is_refused_archived_and_sett
         }),
         "{archived:?}"
     );
-    assert!(stored(&fixture, Model::Sol).queue.is_empty());
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
     assert_eq!(
         fixture.nexus.store.send_call(&first_call_key()).unwrap(),
         None
@@ -5242,7 +5429,7 @@ fn a_launch_interrupted_with_its_first_call_pending_is_refused_archived_and_sett
         fixture
             .nexus
             .store
-            .launch_outcome(&setup.sender.launch_request_id)
+            .launch_outcome(&setup.sender.launch_request_id.0)
             .unwrap(),
         Some(crate::store::LaunchOutcome::StartRejected(refused.clone()))
     );
@@ -5288,8 +5475,8 @@ fn a_launch_whose_address_another_flow_holds_sends_nothing() {
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: setup.sender.address.clone(),
         state: State::Awake(owner.flow_id.clone()),
-        past: vec![],
-        queue: vec![],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     assert_eq!(
         fixture.nexus.store.thread_sender(FRESH_THREAD).unwrap(),
@@ -5302,7 +5489,7 @@ fn a_launch_whose_address_another_flow_holds_sends_nothing() {
         .nexus
         .store
         .record_launch_outcome(
-            &setup.sender.launch_request_id,
+            &setup.sender.launch_request_id.0,
             crate::store::LaunchOutcome::StartRejected(
                 signal_flow::StartRejection::LaunchPersistenceRefused,
             ),
@@ -5405,13 +5592,17 @@ fn an_interrupted_launch_pane_running_a_replacement_session_is_never_closed() {
     let mut fixture = NexusFixture::new();
     let setup = interrupted_launch(&mut fixture);
     let launch = setup.sender.launch_request_id.clone();
-    fixture.nexus.store.request_harness_start(&launch).unwrap();
+    fixture
+        .nexus
+        .store
+        .request_harness_start(&launch.0)
+        .unwrap();
     let herdr = launch_pane_herdr(&fixture);
     let cleanup = |fixture: &NexusFixture| -> LaunchCleanup {
         fixture
             .nexus
             .store
-            .launch_cleanup(&launch)
+            .launch_cleanup(&launch.0)
             .unwrap()
             .expect("the cleanup is recorded")
     };
@@ -5429,7 +5620,7 @@ fn an_interrupted_launch_pane_running_a_replacement_session_is_never_closed() {
         fixture
             .nexus
             .store
-            .launch_outcome(&launch)
+            .launch_outcome(&launch.0)
             .unwrap()
             .is_some(),
         "the launch is settled whatever its cleanup came to"
@@ -5440,7 +5631,7 @@ fn an_interrupted_launch_pane_running_a_replacement_session_is_never_closed() {
         fixture
             .nexus
             .store
-            .recoverable_launch_pane(&launch)
+            .recoverable_launch_pane(&launch.0)
             .unwrap()
             .is_some()
     );
@@ -5472,7 +5663,7 @@ fn an_interrupted_launch_pane_running_a_replacement_session_is_never_closed() {
         fixture
             .nexus
             .store
-            .recoverable_launch_pane(&launch)
+            .recoverable_launch_pane(&launch.0)
             .unwrap(),
         None
     );
@@ -5498,7 +5689,11 @@ fn an_interrupted_launch_whose_cleanup_fails_is_settled_and_its_cleanup_resumed(
     let setup = interrupted_launch(&mut fixture);
     let state = setup.world.state.clone();
     let launch = setup.sender.launch_request_id.clone();
-    fixture.nexus.store.request_harness_start(&launch).unwrap();
+    fixture
+        .nexus
+        .store
+        .request_harness_start(&launch.0)
+        .unwrap();
     fs::write(state.join("archive-refused"), "").unwrap();
     FixtureExecutable {
         path: fixture.snapshot_program.clone(),
@@ -5507,12 +5702,12 @@ fn an_interrupted_launch_whose_cleanup_fails_is_settled_and_its_cleanup_resumed(
 
     fixture.nexus.reconcile_interrupted_launches();
 
-    let settled = fixture.nexus.store.launch_outcome(&launch).unwrap();
+    let settled = fixture.nexus.store.launch_outcome(&launch.0).unwrap();
     assert!(settled.is_some(), "the launch is settled");
     let cleanup = fixture
         .nexus
         .store
-        .launch_cleanup(&launch)
+        .launch_cleanup(&launch.0)
         .unwrap()
         .unwrap();
     assert_eq!(cleanup.thread_step, CleanupStep::Pending, "archive refused");
@@ -5522,7 +5717,7 @@ fn an_interrupted_launch_whose_cleanup_fails_is_settled_and_its_cleanup_resumed(
         fixture
             .nexus
             .store
-            .recoverable_launch_pane(&launch)
+            .recoverable_launch_pane(&launch.0)
             .unwrap()
             .is_some()
     );
@@ -5540,7 +5735,7 @@ fn an_interrupted_launch_whose_cleanup_fails_is_settled_and_its_cleanup_resumed(
     fixture.nexus.reconcile_interrupted_launches();
 
     assert_eq!(
-        fixture.nexus.store.launch_outcome(&launch).unwrap(),
+        fixture.nexus.store.launch_outcome(&launch.0).unwrap(),
         settled
     );
     let replayed = resumed_connection(&state, "restart-record-5");
@@ -5550,7 +5745,7 @@ fn an_interrupted_launch_whose_cleanup_fails_is_settled_and_its_cleanup_resumed(
             .any(|message| message.to_string().contains("ThreadUnowned")),
         "{replayed:?}"
     );
-    assert!(stored(&fixture, Model::Sol).queue.is_empty());
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
     let archived = state.join("restart-record-6").client_messages();
     assert!(
         archived.iter().any(|message| {
@@ -5561,7 +5756,7 @@ fn an_interrupted_launch_whose_cleanup_fails_is_settled_and_its_cleanup_resumed(
     let cleanup = fixture
         .nexus
         .store
-        .launch_cleanup(&launch)
+        .launch_cleanup(&launch.0)
         .unwrap()
         .unwrap();
     assert!(cleanup.is_complete(), "{cleanup:?}");
@@ -5569,7 +5764,7 @@ fn an_interrupted_launch_whose_cleanup_fails_is_settled_and_its_cleanup_resumed(
         fixture
             .nexus
             .store
-            .recoverable_launch_pane(&launch)
+            .recoverable_launch_pane(&launch.0)
             .unwrap(),
         None
     );
@@ -5601,7 +5796,7 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
         "arguments": {
             "target": {
                 "aspect": "Mind",
-                "topic": recipient.topic,
+                "topic": recipient.topic.0,
             "model": format!("{:?}", recipient.model)
             },
             "priority": "MiddleAbrupt",
@@ -5620,9 +5815,9 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
     let SendOutcome::Accepted(accepted) = &committed else {
         panic!("the call is committed with a logical identity: {committed:?}")
     };
-    assert_eq!(accepted.sender, setup.sender.address);
+    assert_eq!(accepted.address, setup.sender.address);
     let logical_delivery_id = accepted.send_acceptance.logical_delivery_id.clone();
-    assert_eq!(stored(&fixture, Model::Sol).queue.len(), 1);
+    assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 1);
 
     // The Nexus exits: the store as it lies on disk opens in a new one.
     let app_server = fixture
@@ -5660,15 +5855,15 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
         Some(committed.clone())
     );
     let target = stored(&restarted, Model::Sol);
-    assert_eq!(target.queue.len(), 1, "exactly one enqueue");
+    assert_eq!(target.queue.0.len(), 1, "exactly one enqueue");
     assert_eq!(
-        target.queue[0].sent_by,
+        target.queue.0[0].sent_by,
         SentBy::Sender(setup.sender.address.clone()),
         "its sender is kept"
     );
-    assert_eq!(target.queue[0].logical_delivery_id, logical_delivery_id);
+    assert_eq!(target.queue.0[0].logical_delivery_id, logical_delivery_id);
     assert_eq!(
-        target.queue[0].message,
+        target.queue.0[0].message,
         Message::MiddleAbrupt(Request::Order(FIRST_CALL_BODY.into()))
     );
     assert!(
@@ -5692,16 +5887,24 @@ fn sender_holding_a_lock(fixture: &NexusFixture) -> Address {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
             meta_signal_flow::ConfigureNexus {
-                source_root: fixture.directory.path().to_string_lossy().into_owned(),
-                stable_codex: settings.stable_codex,
-                next_codex: settings.next_codex,
-                harness_profiles: settings.harness_profile_vector,
-                meta_aspects: settings.meta_aspects,
-                message_nexus_path_option: Some(settings.message_nexus_path.clone()),
-                message_nexus_binary_option: Some("/fixture/bin/message-nexus".into()),
+                source_root: flow_ethos::SourceRoot(
+                    fixture.directory.path().to_string_lossy().into_owned(),
+                ),
+                first_codex_endpoint: settings.stable_codex,
+                second_codex_endpoint: settings.next_codex,
+                harness_profiles: flow_ethos::HarnessProfiles(settings.harness_profile_vector),
+                meta_aspects: flow_ethos::MetaAspects(settings.meta_aspects),
+                message_nexus_path_option: Some(flow_ethos::MessageNexusPath(
+                    settings.message_nexus_path.clone(),
+                )),
+                message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(
+                    "/fixture/bin/message-nexus".into(),
+                )),
 
-                curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                lease: 30,
+                curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+                    "/fixture/curriculum.sock".into(),
+                ),
+                lease: flow_ethos::Lease(30),
                 presentation_prompt_option: None,
             },
         ))
@@ -5709,7 +5912,7 @@ fn sender_holding_a_lock(fixture: &NexusFixture) -> Address {
     claude_seat(fixture, 40_000);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake(CLAUDE_SEAT.into()),
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         vec![],
         vec![],
     ));
@@ -5727,8 +5930,8 @@ fn sender_holding_a_lock(fixture: &NexusFixture) -> Address {
         .store
         .lock_metaflow(
             signal_flow::Lock_Data {
-                sender: address(Model::Sol),
-                recipient: recipient.clone(),
+                first_address: address(Model::Sol),
+                second_address: recipient.clone(),
             },
             now,
         )
@@ -5755,9 +5958,9 @@ fn sender_holding_a_lock(fixture: &NexusFixture) -> Address {
 fn a_terminal_sender_retracts_its_locks() {
     use crate::generated::operation::Record_Data;
     for end in [
-        Record_Data::Stopped(CLAUDE_SEAT.into()),
-        Record_Data::Exited(CLAUDE_SEAT.into()),
-        Record_Data::Retired(CLAUDE_SEAT.into()),
+        Record_Data::Stopped(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        Record_Data::Exited(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        Record_Data::Retired(flow_ethos::FlowId(CLAUDE_SEAT.into())),
     ] {
         let fixture = NexusFixture::new();
         let recipient = sender_holding_a_lock(&fixture);
@@ -5791,7 +5994,7 @@ fn a_sender_observe_reports_gone_is_exited_and_its_lock_released() {
     assert_eq!(
         fixture.nexus.agent_observation(CLAUDE_SEAT),
         signal_flow::Response::AgentObserved(signal_flow::AgentObservation {
-            flow_id: CLAUDE_SEAT.into(),
+            flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
             agent_state: signal_flow::AgentState::Gone,
         })
     );
@@ -5819,7 +6022,7 @@ fn a_maintained_metaflow_ended_by_an_exit_is_owed_a_successor() {
         claude_seat(&fixture, 40_000);
         fixture.nexus.store.seed_metaflow(metaflow(
             Model::Sol,
-            State::Awake(CLAUDE_SEAT.into()),
+            State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
             vec![],
             vec![],
         ));
@@ -5829,7 +6032,9 @@ fn a_maintained_metaflow_ended_by_an_exit_is_owed_a_successor() {
         assert_eq!(
             fixture
                 .nexus
-                .perform(Operation::Record(Record_Data::Exited(CLAUDE_SEAT.into()))),
+                .perform(Operation::Record(Record_Data::Exited(flow_ethos::FlowId(
+                    CLAUDE_SEAT.into()
+                )))),
             Outcome::Recorded
         );
         let intent = fixture
@@ -5864,14 +6069,14 @@ fn a_maintained_metaflow_stopped_deliberately_is_owed_no_successor() {
     claude_seat(&fixture, 40_000);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake(CLAUDE_SEAT.into()),
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         vec![],
         vec![],
     ));
     maintain(&fixture, address(Model::Sol));
     for end in [
-        Record_Data::Stopped(CLAUDE_SEAT.into()),
-        Record_Data::Retired(CLAUDE_SEAT.into()),
+        Record_Data::Stopped(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        Record_Data::Retired(flow_ethos::FlowId(CLAUDE_SEAT.into())),
     ] {
         let _ = fixture.nexus.perform(Operation::Record(end));
     }
@@ -5895,26 +6100,38 @@ fn a_launch_remembers_its_metaflow_s_last_flows_to_its_depth_or_those_it_names()
     let fixture = NexusFixture::new();
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake("c3c3c3".into()),
+        State::Awake(flow_ethos::FlowId("c3c3c3".into())),
         vec!["a1a1a1", "b2b2b2"],
         vec![],
     ));
     let mut profile = crate::composition::tests::fixture_profile();
     profile.address = address(Model::Sol);
-    profile.launch_request_id = "remember-request".into();
+    profile.launch_request_id = signal_flow::LaunchRequestId("remember-request".into());
     for (remembering, expected) in [
-        (Remembering::Predecessors(0), vec![]),
-        (Remembering::Predecessors(2), vec!["b2b2b2", "c3c3c3"]),
         (
-            Remembering::Predecessors(5),
+            Remembering::Predecessors(signal_flow::RememberingDepth(0)),
+            vec![],
+        ),
+        (
+            Remembering::Predecessors(signal_flow::RememberingDepth(2)),
+            vec!["b2b2b2", "c3c3c3"],
+        ),
+        (
+            Remembering::Predecessors(signal_flow::RememberingDepth(5)),
             vec!["a1a1a1", "b2b2b2", "c3c3c3"],
         ),
-        (Remembering::Custom(vec!["36b71b".into()]), vec!["36b71b"]),
+        (
+            Remembering::Custom(vec![flow_ethos::FlowId("36b71b".into())]),
+            vec!["36b71b"],
+        ),
     ] {
         profile.remembering = remembering.clone();
         assert_eq!(
             fixture.nexus.store.remembered_flows(&profile).unwrap(),
-            expected.into_iter().map(String::from).collect::<Vec<_>>(),
+            expected
+                .into_iter()
+                .map(|flow| flow_ethos::FlowId(flow.into()))
+                .collect::<Vec<_>>(),
             "{remembering:?}"
         );
     }
@@ -5930,7 +6147,7 @@ fn a_nexus_start_forgets_a_successor_already_given_and_wakes_one_owed() {
     claude_seat(&fixture, 40_000);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake(CLAUDE_SEAT.into()),
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         vec!["abc123"],
         vec![],
     ));
@@ -6000,21 +6217,26 @@ fn a_start_starts_no_other_models_seat_first() {
             meta_signal_flow::ConfigureMetaflow {
                 root_option: None,
                 address: address(Model::Sol),
-                system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-                user_modules: vec!["operation-main-flow".into()],
+                system_modules: signal_flow::SystemModules(vec![
+                    signal_flow::ModuleIdentity("spirit-core".into()),
+                    signal_flow::ModuleIdentity("intent-flow".into()),
+                ]),
+                user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                    "operation-main-flow".into(),
+                )]),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 continuity: meta_signal_flow::Continuity::OnDemand,
-                purpose: String::new(),
-                records: vec![],
+                purpose: meta_signal_flow::Purpose(String::new()),
+                records: meta_signal_flow::Records(vec![]),
             },
         ]))
         .expect("the Sol metaflow is declared");
     let mut primary = crate::composition::tests::fixture_profile();
-    primary.launch_request_id = "primary-request".into();
+    primary.launch_request_id = signal_flow::LaunchRequestId("primary-request".into());
     primary.address = address(Model::Astra);
     primary.flow_id_option = None;
-    primary.remembering = signal_flow::Remembering::Predecessors(0);
+    primary.remembering = signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(0));
 
     let response = fixture.nexus.dispatch(signal_flow::Query::Start(primary));
 
@@ -6048,15 +6270,15 @@ fn a_reported_session_end_exits_the_flow_and_owes_a_maintained_successor() {
         claude_seat(&fixture, 40_000);
         fixture.nexus.store.seed_metaflow(metaflow(
             Model::Sol,
-            State::Awake(CLAUDE_SEAT.into()),
+            State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
             vec![],
             vec![],
         ));
         maintain(&fixture, address(Model::Sol));
 
         fixture.nexus.after_report(
-            &CLAUDE_SEAT.to_owned(),
-            &signal_flow::Event::Ended(Some(session.into())),
+            &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+            &signal_flow::Event::Ended(Some(signal_flow::NativeSessionId(session.into()))),
         );
 
         let node = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
@@ -6161,7 +6383,7 @@ fn reported_session_end_starts_a_maintained_successor() {
     let seat = launched_claude_ended_by(&fixture, |_| true);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake("abc123".into()),
+        State::Awake(flow_ethos::FlowId("abc123".into())),
         vec![],
         vec![],
     ));
@@ -6169,15 +6391,15 @@ fn reported_session_end_starts_a_maintained_successor() {
     let world = fixture.fresh_claude_world();
 
     fixture.nexus.after_report(
-        &"abc123".to_owned(),
-        &signal_flow::Event::Ended(Some(seat.session.clone())),
+        &signal_flow::FlowId("abc123".to_owned()),
+        &signal_flow::Event::Ended(Some(signal_flow::NativeSessionId(seat.session.clone()))),
     );
 
     let woken = stored(&fixture, Model::Sol);
     let State::Awake(flow_id) = &woken.state else {
         panic!("the successor starts: {woken:?}; {}", world.calls());
     };
-    assert_ne!(flow_id, "abc123", "a fresh flow");
+    assert_ne!(flow_id.0, "abc123", "a fresh flow");
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
     assert_eq!(
         fixture

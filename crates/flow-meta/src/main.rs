@@ -73,9 +73,11 @@ impl ParsesMetaCommand for FlowMetaClient {
             .actualize(&mut budget)
             .map_err(|error| format!("invalid Flow meta Query: {error:?}"))?;
         Ok(Invocation {
-            meta_socket_path: PlaceSockets::meta_in(&runtime)
-                .to_string_lossy()
-                .into_owned(),
+            meta_socket_path: flow_ethos::MetaSocketPath(
+                PlaceSockets::meta_in(&runtime)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             query,
         })
     }
@@ -83,8 +85,8 @@ impl ParsesMetaCommand for FlowMetaClient {
 
 impl CallsMetaNexus for FlowMetaClient {
     fn call(&self, invocation: &Invocation, each: &mut dyn FnMut(Response)) -> Result<(), String> {
-        let mut peer =
-            UnixStream::connect(&invocation.meta_socket_path).map_err(|error| error.to_string())?;
+        let mut peer = UnixStream::connect(&invocation.meta_socket_path.0)
+            .map_err(|error| error.to_string())?;
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&invocation.query)
             .map_err(|error| error.to_string())?;
         peer.write_all(&(bytes.len() as u32).to_be_bytes())
@@ -178,23 +180,29 @@ mod tests {
     #[test]
     fn configuration_uses_the_current_typed_nexus_change() {
         let endpoint = || meta_signal_flow::CodexEndpoint {
-            client_path: "/opt/codex".into(),
-            home: "/tmp/codex".into(),
-            control_socket_path: "/tmp/codex.sock".into(),
-            model_name_vector: vec!["fixture".into()],
+            client_path: flow_ethos::ClientPath("/opt/codex".into()),
+            home: flow_ethos::Home("/tmp/codex".into()),
+            control_socket_path: flow_ethos::ControlSocketPath("/tmp/codex.sock".into()),
+            model_name_vector: vec![flow_ethos::ModelName("fixture".into())],
         };
         let nexus = ConfigureNexus {
-            source_root: "/source".into(),
-            stable_codex: endpoint(),
-            next_codex: endpoint(),
-            harness_profiles: vec![],
-            meta_aspects: vec![meta_signal_flow::Aspect::Psyche],
-            message_nexus_path_option: Some("/run/message.sock".into()),
+            source_root: flow_ethos::SourceRoot("/source".into()),
+            first_codex_endpoint: endpoint(),
+            second_codex_endpoint: endpoint(),
+            harness_profiles: flow_ethos::HarnessProfiles(vec![]),
+            meta_aspects: flow_ethos::MetaAspects(vec![meta_signal_flow::Aspect::Psyche]),
+            message_nexus_path_option: Some(flow_ethos::MessageNexusPath(
+                "/run/message.sock".into(),
+            )),
 
-            message_nexus_binary_option: Some("/opt/message-nexus".into()),
+            message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(
+                "/opt/message-nexus".into(),
+            )),
 
-            curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-            lease: 60,
+            curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+                "/fixture/curriculum.sock".into(),
+            ),
+            lease: flow_ethos::Lease(60),
             presentation_prompt_option: None,
         };
         let query = Query::Configure(ConfigurationChange::Nexus(nexus.clone()));
@@ -266,7 +274,7 @@ mod tests {
                 .expect("Refresh parses"),
             Query::Refresh(signal_flow::Address {
                 aspect: signal_flow::Aspect::Mind,
-                topic: "flow".into(),
+                topic: flow_ethos::Topic("flow".into()),
                 model: signal_flow::Model::Sol,
             })
         );
@@ -274,7 +282,7 @@ mod tests {
             client
                 .parse_query(["Restart.c1a0de".to_owned()].into_iter())
                 .expect("Restart parses"),
-            Query::Restart("c1a0de".into())
+            Query::Restart(flow_ethos::FlowId("c1a0de".into()))
         );
     }
 
@@ -290,8 +298,11 @@ mod tests {
         else {
             panic!("Deliver datom must stay a Deliver query")
         };
-        assert_eq!(request.delivery_id, "m-7f3a2c:7d41e0:0");
-        assert_eq!(request.flow_id, "7d41e0");
+        assert_eq!(
+            request.delivery_id,
+            meta_signal_flow::DeliveryId("m-7f3a2c:7d41e0:0".into())
+        );
+        assert_eq!(request.flow_id, flow_ethos::FlowId("7d41e0".into()));
         assert!(matches!(
             request.message,
             meta_signal_flow::Message::Soft(_)
@@ -304,21 +315,23 @@ mod tests {
         use meta_signal_flow::{ConfigurationSnapshot, ConfigureMetaflow, Response};
         use signal_flow::{Address, Aspect, FlowKind, Model, ToolSet};
         let endpoint = || meta_signal_flow::CodexEndpoint {
-            client_path: "/opt/codex".into(),
-            home: "/tmp/codex".into(),
-            control_socket_path: "/tmp/codex.sock".into(),
-            model_name_vector: vec!["fixture".into()],
+            client_path: flow_ethos::ClientPath("/opt/codex".into()),
+            home: flow_ethos::Home("/tmp/codex".into()),
+            control_socket_path: flow_ethos::ControlSocketPath("/tmp/codex.sock".into()),
+            model_name_vector: vec![flow_ethos::ModelName("fixture".into())],
         };
         let rows: Vec<_> = (0..31)
             .map(|index| ConfigureMetaflow {
                 root_option: None,
                 address: Address {
                     aspect: Aspect::Mind,
-                    topic: format!("printer{index}"),
+                    topic: flow_ethos::Topic(format!("printer{index}")),
                     model: Model::Sol,
                 },
-                system_modules: vec!["spirit-core".into()],
-                user_modules: vec![],
+                system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
+                    "spirit-core".into(),
+                )]),
+                user_modules: signal_flow::UserModules(vec![]),
                 flow_kind: FlowKind::Regular,
                 tool_set: match index % 3 {
                     0 => ToolSet::Default,
@@ -326,47 +339,71 @@ mod tests {
                     _ => ToolSet::Explicit(vec!["Bash".into(), "ToolSearch".into()]),
                 },
                 continuity: meta_signal_flow::Continuity::OnDemand,
-                purpose: format!("Prints page {index}."),
-                records: vec![],
+                purpose: meta_signal_flow::Purpose(format!("Prints page {index}.")),
+                records: meta_signal_flow::Records(vec![]),
             })
             .collect();
         let snapshot = ConfigurationSnapshot {
-            nexus: ConfigureNexus {
-                source_root: "/source".into(),
-                stable_codex: endpoint(),
-                next_codex: endpoint(),
-                harness_profiles: vec![],
-                meta_aspects: vec![Aspect::Psyche],
-                message_nexus_path_option: Some("/run/message.sock".into()),
+            configured_nexus: meta_signal_flow::ConfiguredNexus(ConfigureNexus {
+                source_root: flow_ethos::SourceRoot("/source".into()),
+                first_codex_endpoint: endpoint(),
+                second_codex_endpoint: endpoint(),
+                harness_profiles: flow_ethos::HarnessProfiles(vec![]),
+                meta_aspects: flow_ethos::MetaAspects(vec![Aspect::Psyche]),
+                message_nexus_path_option: Some(flow_ethos::MessageNexusPath(
+                    "/run/message.sock".into(),
+                )),
 
-                message_nexus_binary_option: Some("/opt/message-nexus".into()),
+                message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(
+                    "/opt/message-nexus".into(),
+                )),
 
-                curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                lease: 60,
+                curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+                    "/fixture/curriculum.sock".into(),
+                ),
+                lease: flow_ethos::Lease(60),
                 presentation_prompt_option: None,
-            },
-            models: vec![],
-            thresholds: vec![],
-            default_leave_outs: vec![],
-            send_servers: vec![],
-            metaflows: rows.clone(),
-            configured_harness_flags: vec![],
-            investigation: None,
-            default_minutes: 30,
-            heartbeat: None,
-            protected_addresses: vec![],
-            handover_policies: meta_signal_flow::HandoverPoliciesConfiguration::Unconfigured,
-            handover_archive: meta_signal_flow::HandoverArchiveConfiguration::Unconfigured,
-            handover_count: meta_signal_flow::HandoverCountConfiguration::Unconfigured,
-            publication_deadline: 60_000,
-            counters: meta_signal_flow::ConfigureCounters {
-                logical_delivery: 1,
-                queue_attempt: 3,
-                send_outcome: 1,
-            },
-            request_id_draws: 64,
-            announcement_tries: 3,
-            harness_hook: meta_signal_flow::HarnessHookConfiguration::Unconfigured,
+            }),
+            configured_models: meta_signal_flow::ConfiguredModels(vec![]),
+            configured_thresholds: meta_signal_flow::ConfiguredThresholds(vec![]),
+            default_leave_outs: meta_signal_flow::DefaultLeaveOuts(vec![]),
+            configured_send_servers: meta_signal_flow::ConfiguredSendServers(vec![]),
+            configured_metaflows: meta_signal_flow::ConfiguredMetaflows(rows.clone()),
+            configured_harness_flags: meta_signal_flow::ConfiguredHarnessFlags(vec![]),
+            configured_investigation: meta_signal_flow::ConfiguredInvestigation(None),
+            configured_default_minutes: meta_signal_flow::ConfiguredDefaultMinutes(
+                flow_ethos::Minutes(30),
+            ),
+            configured_heartbeat: meta_signal_flow::ConfiguredHeartbeat(None),
+            configured_protected_addresses: meta_signal_flow::ConfiguredProtectedAddresses(vec![]),
+            configured_handover_policies: meta_signal_flow::ConfiguredHandoverPolicies(
+                meta_signal_flow::HandoverPoliciesConfiguration::Unconfigured,
+            ),
+            configured_handover_archive: meta_signal_flow::ConfiguredHandoverArchive(
+                meta_signal_flow::HandoverArchiveConfiguration::Unconfigured,
+            ),
+            configured_handover_count: meta_signal_flow::ConfiguredHandoverCount(
+                meta_signal_flow::HandoverCountConfiguration::Unconfigured,
+            ),
+            configured_publication_deadline: meta_signal_flow::ConfiguredPublicationDeadline(
+                meta_signal_flow::Duration(60_000),
+            ),
+            configured_counters: meta_signal_flow::ConfiguredCounters(
+                meta_signal_flow::ConfigureCounters {
+                    logical_delivery: meta_signal_flow::LogicalDelivery(1),
+                    queue_attempt: meta_signal_flow::QueueAttempt(3),
+                    send_outcome: meta_signal_flow::SendOutcome(1),
+                },
+            ),
+            configured_request_id_draws: meta_signal_flow::ConfiguredRequestIdDraws(
+                meta_signal_flow::DrawBound(64),
+            ),
+            configured_announcement_tries: meta_signal_flow::ConfiguredAnnouncementTries(
+                meta_signal_flow::TryBound(3),
+            ),
+            configured_harness_hook: meta_signal_flow::ConfiguredHarnessHook(
+                meta_signal_flow::HarnessHookConfiguration::Unconfigured,
+            ),
         };
         let printed = Response::Configuration(snapshot)
             .datomize(vec![])
@@ -378,7 +415,9 @@ mod tests {
         else {
             panic!("wrong response")
         };
-        let query = Query::Configure(ConfigurationChange::Metaflows(parsed.metaflows));
+        let query = Query::Configure(ConfigurationChange::Metaflows(
+            parsed.configured_metaflows.0,
+        ));
         let text = query.datomize(vec![]).protosize().compact();
         let client = FlowMetaClient;
         let Query::Configure(ConfigurationChange::Metaflows(actual)) =

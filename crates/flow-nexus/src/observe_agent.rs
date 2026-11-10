@@ -85,8 +85,9 @@ impl RecordsWitnessedExit for RunningNexus {
                 .ok()
                 .flatten()
                 .map(|metaflow| metaflow.address);
-            if self.perform(Operation::Record(Record_Data::Exited(flow_id.to_owned())))
-                != Outcome::Recorded
+            if self.perform(Operation::Record(Record_Data::Exited(signal_flow::FlowId(
+                flow_id.to_owned(),
+            )))) != Outcome::Recorded
             {
                 eprintln!("flow-nexus: flow {flow_id} seen gone but not recorded Exited");
                 return;
@@ -107,7 +108,7 @@ trait ReportsAgentState {
 impl ReportsAgentState for AgentState {
     fn observed_of(self, flow_id: &str) -> Response {
         Response::AgentObserved(AgentObservation {
-            flow_id: flow_id.to_owned(),
+            flow_id: signal_flow::FlowId(flow_id.to_owned()),
             agent_state: self,
         })
     }
@@ -175,9 +176,9 @@ impl ObservesAgent for RunningNexus {
         };
         let socket = self
             .herdr
-            .session_socket(&route.herdr_session_name)
+            .session_socket(&route.herdr_session_name.0)
             .ok_or("Herdr session socket not found")?;
-        let mut events = PaneEvents::subscribe(&socket, &route.herdr_pane_id)?;
+        let mut events = PaneEvents::subscribe(&socket, &route.herdr_pane_id.0)?;
         loop {
             let Some(event) = events.next_event(&self.stopping)? else {
                 // Herdr closed the subscription: the session is gone. The

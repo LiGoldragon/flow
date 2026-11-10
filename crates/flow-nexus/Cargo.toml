@@ -10,6 +10,7 @@ path = "src/main.rs"
 default = ["datom"]
 datom = []
 executable-default-configuration = []
+message-joint = []
 [dependencies]
 flow = { path = "../flow" }
 flow-defaults = { path = "../flow-defaults" }
@@ -23,8 +24,8 @@ base64 = "0.22"
 # pane (F6: Flow textualizes the letter so its Priority head comes first).
 # That one exception is why the Nexus compiles its meta contract with datom.
 meta-signal-flow = { workspace = true, features = ["datom"] }
-datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "eabead4" }
-protos = { git = "https://github.com/LiGoldragon/protos", rev = "3c7ade3" }
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09a0526" }
+protos = { git = "https://github.com/LiGoldragon/protos", rev = "c93b598" }
 notify = "8"
 libc = "0.2"
 rustix = { version = "1", features = ["fs", "net", "time"] }
@@ -43,7 +44,12 @@ getrandom = "0.3"
 thiserror.workspace = true
 tungstenite = "0.28"
 [build-dependencies]
-ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "07714b0171802787bea1eefe4caa2d826d9c4030" }
-[dev-dependencies]
-message-nexus = { git = "https://github.com/LiGoldragon/message", rev = "f46b38e0a9996e1593095f4154cd0597ff3ebe69" }
-signal-message = { git = "https://github.com/LiGoldragon/signal-message", rev = "998c824c98a1e2f5e32f9e3a69bf09d3a29aff6b" }
+ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "1976e45" }
+# The message-joint test (src/store/message_joint.rs) is compiled only with
+# the message-joint feature. Message f46b38e and signal-message 998c824 pin
+# signal 10, whose `links = "signal"` conflicts with signal 11 here, so
+# their entries leave the graph, kept verbatim below, until both pin
+# signal-flow 6881724.
+# [dev-dependencies]
+# message-nexus = { git = "https://github.com/LiGoldragon/message", rev = "f46b38e0a9996e1593095f4154cd0597ff3ebe69" }
+# signal-message = { git = "https://github.com/LiGoldragon/signal-message", rev = "998c824c98a1e2f5e32f9e3a69bf09d3a29aff6b" }

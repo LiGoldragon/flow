@@ -16,7 +16,7 @@ impl HeartbeatFixture for NexusFixture {
     fn recipient(topic: &str) -> Address {
         Address {
             aspect: Aspect::Field,
-            topic: topic.into(),
+            topic: flow_ethos::Topic(topic.into()),
             model: Model::Sol,
         }
     }
@@ -25,8 +25,8 @@ impl HeartbeatFixture for NexusFixture {
         self.nexus.store.seed_metaflow(Metaflow {
             address: address.clone(),
             state,
-            past: Vec::new(),
-            queue: Vec::new(),
+            past: flow_ethos::Past(Vec::new()),
+            queue: flow_ethos::Queue(Vec::new()),
         });
     }
 
@@ -45,7 +45,7 @@ impl HeartbeatFixture for NexusFixture {
         else {
             panic!("ordinary delivery accepted")
         };
-        accepted.logical_delivery_id
+        accepted.logical_delivery_id.0
     }
 
     fn standing(&self, address: &Address) -> StoredHeartbeatStanding {
@@ -65,7 +65,10 @@ fn durable_worker_path_is_quiet_coalesces_and_excludes_its_own_traffic() {
     let awake = NexusFixture::recipient("heartbeatAwake");
     let sleeping = NexusFixture::recipient("heartbeatSleeping");
     let unknown = NexusFixture::recipient("heartbeatUnknown");
-    fixture.seed(&awake, flow_ethos::State::Awake("awake-flow".into()));
+    fixture.seed(
+        &awake,
+        flow_ethos::State::Awake(flow_ethos::FlowId("awake-flow".into())),
+    );
     fixture.seed(&sleeping, flow_ethos::State::Asleep);
 
     let evidence = fixture
@@ -91,6 +94,7 @@ fn durable_worker_path_is_quiet_coalesces_and_excludes_its_own_traffic() {
             .unwrap()
             .unwrap()
             .queue
+            .0
             .is_empty()
     );
     fixture.nexus.heartbeat_tick(std::slice::from_ref(&awake));
@@ -138,7 +142,7 @@ fn durable_worker_path_is_quiet_coalesces_and_excludes_its_own_traffic() {
         .nexus
         .store
         .transition_logical_delivery(
-            &first_heartbeat,
+            &flow_ethos::LogicalDeliveryId(first_heartbeat.to_owned()),
             DeliveryState::Failed(signal_flow::Refusal::Direct("terminal fixture".into())),
         )
         .unwrap();
@@ -151,7 +155,7 @@ fn durable_worker_path_is_quiet_coalesces_and_excludes_its_own_traffic() {
         .nexus
         .store
         .transition_logical_delivery(
-            &followup,
+            &flow_ethos::LogicalDeliveryId(followup.to_owned()),
             DeliveryState::Failed(signal_flow::Refusal::Direct("terminal fixture".into())),
         )
         .unwrap();
@@ -214,7 +218,10 @@ fn refused_heartbeat_admission_retains_its_durable_baseline() {
 fn configuration_churn_preserves_an_unknown_outstanding_delivery() {
     let fixture = NexusFixture::new();
     let awake = NexusFixture::recipient("heartbeatReselected");
-    fixture.seed(&awake, flow_ethos::State::Awake("awake-flow".into()));
+    fixture.seed(
+        &awake,
+        flow_ethos::State::Awake(flow_ethos::FlowId("awake-flow".into())),
+    );
     fixture.nexus.sync_heartbeat(std::slice::from_ref(&awake));
     let mut standing = fixture.standing(&awake);
     standing.outstanding = Some("unknown-heartbeat".into());

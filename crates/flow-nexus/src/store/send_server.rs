@@ -33,7 +33,7 @@ pub(crate) struct StoredMetaSendServerConfiguration {
 
 impl EngineRecord for StoredMetaSendServerConfiguration {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.send_server.codex_app_server_binary.clone())
+        RecordKey::new(self.send_server.codex_app_server_binary.clone().0)
     }
 }
 
@@ -82,10 +82,10 @@ impl TrustsSendServers for FlowStore {
         if send_servers.is_empty() {
             return Ok(SendServerTrust::Unconfigured);
         }
-        let Some((parent_pid, started)) = FlowStore::process_start(process.pid) else {
+        let Some((parent_pid, started)) = FlowStore::process_start(process.pid.0) else {
             return Ok(SendServerTrust::Untrusted);
         };
-        if started != process.started {
+        if started != process.started.0 {
             return Ok(SendServerTrust::Untrusted);
         }
         let Some(executable) = FlowStore::process_executable(process) else {
@@ -101,15 +101,15 @@ impl TrustsSendServers for FlowStore {
             return Ok(SendServerTrust::Untrusted);
         };
         // Still the same process under the same parent once both are read.
-        if FlowStore::process_start(process.pid) != Some((parent_pid, started)) {
+        if FlowStore::process_start(process.pid.0) != Some((parent_pid, started)) {
             return Ok(SendServerTrust::Untrusted);
         }
         let trusted = send_servers.iter().any(|send_server| {
-            fs::canonicalize(&send_server.mcp_send_server_binary)
+            fs::canonicalize(&send_server.mcp_send_server_binary.0)
                 .ok()
                 .as_ref()
                 == Some(&executable)
-                && fs::canonicalize(&send_server.codex_app_server_binary)
+                && fs::canonicalize(&send_server.codex_app_server_binary.0)
                     .ok()
                     .as_ref()
                     == Some(&parent_executable)
@@ -140,13 +140,13 @@ impl NamesThreadMetaflow for FlowStore {
             .into_iter()
             .filter(|node| {
                 node.harness_kind == HarnessKind::Codex
-                    && node.session_id == thread_id
+                    && node.session_id.0 == thread_id
                     && node.flow_lifecycle.is_live()
             })
             .collect::<Vec<_>>();
         match live.as_slice() {
             [] => Ok(None),
-            [flow] => self.metaflow_awake_as(&flow.flow_id),
+            [flow] => self.metaflow_awake_as(&flow.flow_id.0),
             _ => Err(StoreError::StateInvariant),
         }
     }

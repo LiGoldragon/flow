@@ -10,8 +10,8 @@ use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::{Dispatches, peer::AdmitsMetaPeer};
 use meta_signal_flow::{
     BodyRefusal, CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Content, Delivery,
-    DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommand, InterruptWitness, Letter,
-    Message, Query as MetaQuery, Response as MetaResponse,
+    DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommandKind, InterruptWitness,
+    Letter, Message, Query as MetaQuery, Response as MetaResponse,
 };
 use signal_flow::{AgentObservation, AgentState, FlowLifecycle, ObserveSelection, Query, Response};
 use std::fs;
@@ -31,8 +31,8 @@ impl NexusFixture {
     fn deliver_to(&self, flow_id: &str, delivery_id: &str, message: Message) -> MetaResponse {
         self.nexus
             .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
-                delivery_id: delivery_id.into(),
-                flow_id: flow_id.into(),
+                delivery_id: meta_signal_flow::DeliveryId(delivery_id.into()),
+                flow_id: flow_ethos::FlowId(flow_id.into()),
                 message,
             }))
     }
@@ -91,36 +91,36 @@ impl NexusFixture {
         use crate::store::ManagesMetaflowState as _;
         use crate::store::SeedsRole as _;
         use crate::store::metaflow::SeedsMetaflow as _;
-        self.nexus.store.seed_role(signal_flow::Caller {
-            flow_id: "908786".into(),
+        self.nexus.store.seed_role(signal_flow::CallerIdentity {
+            flow_id: flow_ethos::FlowId("908786".into()),
             aspect: signal_flow::Aspect::Psyche,
-            model_name: "claude-opus-5-5".into(),
+            model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
         });
         self.nexus.store.seed_metaflow(signal_flow::Metaflow {
             address: signal_flow::Address {
                 aspect: signal_flow::Aspect::Psyche,
-                topic: "flow".into(),
+                topic: flow_ethos::Topic("flow".into()),
                 model: signal_flow::Model::Opus,
             },
-            state: flow_ethos::State::Awake("908786".into()),
-            past: vec![],
-            queue: vec![],
+            state: flow_ethos::State::Awake(flow_ethos::FlowId("908786".into())),
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![]),
         });
         self.nexus
             .store
             .configure_change(meta_signal_flow::ConfigurationChange::Thresholds(vec![
                 meta_signal_flow::ConfigureThreshold {
-                    model_name: "claude-opus-5-5".into(),
-                    refresh,
+                    model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
+                    refresh_threshold: meta_signal_flow::RefreshThreshold(refresh),
                 },
             ]))
             .expect("threshold configured");
     }
 
-    fn command(&self, harness_command: HarnessCommand) -> MetaResponse {
+    fn command(&self, harness_command: HarnessCommandKind) -> MetaResponse {
         self.nexus.dispatch_meta(MetaQuery::Command(CommandRequest {
-            flow_id: "908786".into(),
-            harness_command,
+            flow_id: flow_ethos::FlowId("908786".into()),
+            harness_command_kind: harness_command,
         }))
     }
 }
@@ -142,12 +142,12 @@ fn soft_waits_for_an_idle_recipient() {
     assert!(prompts(&fixture.directory.path().join("herdr-operations.log")).is_empty());
     assert_eq!(fixture.typed(), None);
     assert_eq!(
-        stored(&fixture, signal_flow::Model::Sol).queue.len(),
+        stored(&fixture, signal_flow::Model::Sol).queue.0.len(),
         1,
         "held for the idle event"
     );
     assert_eq!(
-        stored(&fixture, signal_flow::Model::Sol).queue[0].message,
+        stored(&fixture, signal_flow::Model::Sol).queue.0[0].message,
         signal_flow::Message::Soft(signal_flow::Request::Order("when you rest".into()))
     );
 
@@ -161,7 +161,7 @@ fn soft_waits_for_an_idle_recipient() {
         "no interrupt: {}",
         fixture.operations()
     );
-    assert!(stored(&fixture, signal_flow::Model::Sol).queue.is_empty());
+    assert!(stored(&fixture, signal_flow::Model::Sol).queue.0.is_empty());
 }
 
 /// Both native harnesses use one pane delivery path at every priority and
@@ -397,15 +397,25 @@ fn a_resting_recipient_is_not_interrupted() {
 #[test]
 fn bodies_carrying_commands_or_keys_are_refused_and_nothing_is_typed() {
     for (text, refusal) in [
-        ("/compact", BodyRefusal::HarnessCommand("/compact".into())),
-        ("!ls -la", BodyRefusal::HarnessCommand("!ls -la".into())),
+        (
+            "/compact",
+            BodyRefusal::HarnessCommand(meta_signal_flow::CommandLine("/compact".into())),
+        ),
+        (
+            "!ls -la",
+            BodyRefusal::HarnessCommand(meta_signal_flow::CommandLine("!ls -la".into())),
+        ),
         (
             "end \u{1b}[201~ of paste",
-            BodyRefusal::ControlCharacter("MiddleAbrupt.{ Notification Text.«end ".len() as i64),
+            BodyRefusal::ControlCharacter(meta_signal_flow::ByteOffset(
+                "MiddleAbrupt.{ Notification Text.«end ".len() as i64,
+            )),
         ),
         (
             "one\rtwo",
-            BodyRefusal::ControlCharacter("MiddleAbrupt.{ Notification Text.«one".len() as i64),
+            BodyRefusal::ControlCharacter(meta_signal_flow::ByteOffset(
+                "MiddleAbrupt.{ Notification Text.«one".len() as i64,
+            )),
         ),
         ("   ", BodyRefusal::EmptyBody),
     ] {
@@ -422,8 +432,8 @@ fn bodies_carrying_commands_or_keys_are_refused_and_nothing_is_typed() {
         );
         assert_eq!(
             fixture.nexus.dispatch_meta(MetaQuery::Vet(DeliveryRequest {
-                delivery_id: "vet".into(),
-                flow_id: "908786".into(),
+                delivery_id: meta_signal_flow::DeliveryId("vet".into()),
+                flow_id: flow_ethos::FlowId("908786".into()),
                 message: middle_abrupt(text),
             })),
             MetaResponse::DeliveryRejected(DeliveryRejection::BodyRefused(refusal)),
@@ -444,8 +454,8 @@ fn a_path_and_a_later_command_line_are_ordinary_text() {
         fixture.register_with(FlowLifecycle::Active);
         assert_eq!(
             fixture.nexus.dispatch_meta(MetaQuery::Vet(DeliveryRequest {
-                delivery_id: "vet".into(),
-                flow_id: "908786".into(),
+                delivery_id: meta_signal_flow::DeliveryId("vet".into()),
+                flow_id: flow_ethos::FlowId("908786".into()),
                 message: middle_abrupt(text),
             })),
             MetaResponse::Vetted
@@ -489,7 +499,7 @@ fn a_recorded_delivery_answers_while_refresh_custody_is_held_without_input() {
     assert!(matches!(first, MetaResponse::Delivered(_)));
     let address = Address {
         aspect: Aspect::Psyche,
-        topic: "flow".into(),
+        topic: flow_ethos::Topic("flow".into()),
         model: Model::Opus,
     };
     let lease = fixture
@@ -513,7 +523,7 @@ fn a_delivery_a_crash_left_under_its_lease_settles_uncertain_and_is_never_retrie
         let store = FlowStore::open(&path).expect("store");
         store
             .record_lease_step(PaneLease {
-                delivery_id: "crashed".into(),
+                delivery_id: meta_signal_flow::DeliveryId("crashed".into()),
                 flow_id: "908786".into(),
                 herdr_pane_id: "w1:p3".into(),
                 lease_step: LeaseStep::Placed,
@@ -524,8 +534,8 @@ fn a_delivery_a_crash_left_under_its_lease_settles_uncertain_and_is_never_retrie
     assert_eq!(
         store.delivery("crashed").expect("delivery read"),
         Some(Delivery {
-            delivery_id: "crashed".into(),
-            flow_id: "908786".into(),
+            delivery_id: meta_signal_flow::DeliveryId("crashed".into()),
+            flow_id: flow_ethos::FlowId("908786".into()),
             interrupt_witness: InterruptWitness::Unobserved,
             delivery_grade: DeliveryGrade::Uncertain,
         })
@@ -616,12 +626,12 @@ fn commands_interrupt_a_working_agent_and_compact_through_the_writer() {
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Command(CommandRequest {
-                flow_id: "908786".into(),
-                harness_command: HarnessCommand::Interrupt,
+                flow_id: flow_ethos::FlowId("908786".into()),
+                harness_command_kind: HarnessCommandKind::Interrupt,
             })),
         MetaResponse::Commanded(CommandOutcome {
-            flow_id: "908786".into(),
-            harness_command: HarnessCommand::Interrupt,
+            flow_id: flow_ethos::FlowId("908786".into()),
+            harness_command_kind: HarnessCommandKind::Interrupt,
             command_grade: CommandGrade::Observed,
         })
     );
@@ -629,12 +639,12 @@ fn commands_interrupt_a_working_agent_and_compact_through_the_writer() {
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Command(CommandRequest {
-                flow_id: "908786".into(),
-                harness_command: HarnessCommand::Compact,
+                flow_id: flow_ethos::FlowId("908786".into()),
+                harness_command_kind: HarnessCommandKind::Compact,
             })),
         MetaResponse::Commanded(CommandOutcome {
-            flow_id: "908786".into(),
-            harness_command: HarnessCommand::Compact,
+            flow_id: flow_ethos::FlowId("908786".into()),
+            harness_command_kind: HarnessCommandKind::Compact,
             command_grade: CommandGrade::Transported,
         })
     );
@@ -653,8 +663,8 @@ fn commands_interrupt_a_working_agent_and_compact_through_the_writer() {
         resting
             .nexus
             .dispatch_meta(MetaQuery::Command(CommandRequest {
-                flow_id: "908786".into(),
-                harness_command: HarnessCommand::Interrupt,
+                flow_id: flow_ethos::FlowId("908786".into()),
+                harness_command_kind: HarnessCommandKind::Interrupt,
             })),
         MetaResponse::CommandRejected(CommandRejection::NotDelivered),
         "nothing to interrupt, and no Escape into a resting agent"
@@ -680,12 +690,12 @@ fn compact_is_refused_below_the_refresh_threshold_and_placed_at_it() {
 
     // Flow knows no model for the flow.
     assert_eq!(
-        fixture.command(HarnessCommand::Compact),
+        fixture.command(HarnessCommandKind::Compact),
         refused(CompactionRefusal::NoThreshold)
     );
     fixture.at_secondary_refreshing_at(200_000);
     assert_eq!(
-        fixture.command(HarnessCommand::Compact),
+        fixture.command(HarnessCommandKind::Compact),
         refused(CompactionRefusal::Unmeasured),
         "no Stop has recorded the flow's context"
     );
@@ -695,10 +705,10 @@ fn compact_is_refused_below_the_refresh_threshold_and_placed_at_it() {
         .record_context_size("908786", 199_999)
         .expect("context size recorded");
     assert_eq!(
-        fixture.command(HarnessCommand::Compact),
+        fixture.command(HarnessCommandKind::Compact),
         refused(CompactionRefusal::BelowThreshold(ContextBelowThreshold {
-            context_tokens: 199_999,
-            refresh_tokens: 200_000,
+            context_tokens: meta_signal_flow::ContextTokens(199_999),
+            refresh_tokens: meta_signal_flow::RefreshTokens(200_000),
         }))
     );
     assert!(prompts(&log).is_empty(), "nothing reached the pane");
@@ -710,10 +720,10 @@ fn compact_is_refused_below_the_refresh_threshold_and_placed_at_it() {
         .record_context_size("908786", 200_000)
         .expect("context size recorded");
     assert_eq!(
-        fixture.command(HarnessCommand::Compact),
+        fixture.command(HarnessCommandKind::Compact),
         MetaResponse::Commanded(CommandOutcome {
-            flow_id: "908786".into(),
-            harness_command: HarnessCommand::Compact,
+            flow_id: flow_ethos::FlowId("908786".into()),
+            harness_command_kind: HarnessCommandKind::Compact,
             command_grade: CommandGrade::Observed,
         })
     );
@@ -737,18 +747,22 @@ fn observe_agent_opens_on_the_state_herdr_shows() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Observe(ObserveSelection::Agent("908786".into()))),
+            .dispatch(Query::Observe(ObserveSelection::Agent(flow_ethos::FlowId(
+                "908786".into()
+            )))),
         Response::AgentObserved(AgentObservation {
-            flow_id: "908786".into(),
+            flow_id: flow_ethos::FlowId("908786".into()),
             agent_state: AgentState::Working,
         })
     );
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Observe(ObserveSelection::Agent("unheld".into()))),
+            .dispatch(Query::Observe(ObserveSelection::Agent(flow_ethos::FlowId(
+                "unheld".into()
+            )))),
         Response::AgentObserved(AgentObservation {
-            flow_id: "unheld".into(),
+            flow_id: flow_ethos::FlowId("unheld".into()),
             agent_state: AgentState::Gone,
         })
     );
@@ -854,8 +868,8 @@ fn a_deliver_into_a_flow_past_its_threshold_reaches_the_pane() {
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Deliver(meta_signal_flow::DeliveryRequest {
-                delivery_id: "delivery-past".into(),
-                flow_id: "908786".into(),
+                delivery_id: meta_signal_flow::DeliveryId("delivery-past".into()),
+                flow_id: flow_ethos::FlowId("908786".into()),
                 message: middle_abrupt("one more thing"),
             })),
         MetaResponse::Delivered(_)
@@ -865,8 +879,8 @@ fn a_deliver_into_a_flow_past_its_threshold_reaches_the_pane() {
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Deliver(meta_signal_flow::DeliveryRequest {
-                delivery_id: "warning-past".into(),
-                flow_id: "908786".into(),
+                delivery_id: meta_signal_flow::DeliveryId("warning-past".into()),
+                flow_id: flow_ethos::FlowId("908786".into()),
                 message: Message::HardAbrupt(letter("warning")),
             })),
         MetaResponse::Delivered(_)
@@ -891,7 +905,7 @@ fn direct_delivery_is_refused_while_refresh_owns_address() {
     fixture.at_secondary_refreshing_at(200_000);
     let address = Address {
         aspect: Aspect::Psyche,
-        topic: "flow".into(),
+        topic: flow_ethos::Topic("flow".into()),
         model: Model::Opus,
     };
     let lease = fixture
@@ -954,7 +968,7 @@ fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
 
     let address = signal_flow::Address {
         aspect: signal_flow::Aspect::Psyche,
-        topic: "flow".into(),
+        topic: flow_ethos::Topic("flow".into()),
         model: signal_flow::Model::Opus,
     };
     let (delivery, refresh) = std::thread::scope(|scope| {
@@ -1006,11 +1020,12 @@ fn public_direct_delivery_finishes_before_a_concurrent_existing_bind() {
 
     let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
     let mut binding = existing_binding("908786", "w1:p3");
-    binding.native_session_id = "01a0b22c-e24f-7452-9940-64490878680f".into();
-    binding.herdr_workspace_id = "w1".into();
-    binding.herdr_tab_id = "w1:t1".into();
-    binding.herdr_terminal_id = "term_65bb7f87270cb3".into();
-    binding.herdr_agent_name = "psyche-mind-astra".into();
+    binding.native_session_id =
+        signal_flow::NativeSessionId("01a0b22c-e24f-7452-9940-64490878680f".into());
+    binding.herdr_workspace_id = signal_flow::HerdrWorkspaceId("w1".into());
+    binding.herdr_tab_id = meta_signal_flow::HerdrTabId("w1:t1".into());
+    binding.herdr_terminal_id = signal_flow::HerdrTerminalId("term_65bb7f87270cb3".into());
+    binding.herdr_agent_name = signal_flow::HerdrAgentName("psyche-mind-astra".into());
     let socket_path = fixture.directory.path().join("serial-bind.sock");
     let _listener = UnixListener::bind(&socket_path).expect("live fixture container");
     let reached = fixture.directory.path().join("serial-deliver-reached");
@@ -1052,8 +1067,8 @@ fn public_direct_delivery_finishes_before_a_concurrent_existing_bind() {
             let delivering = scope.spawn(move || {
                 let response = delivery_fixture.nexus.dispatch_meta_serially(
                     MetaQuery::Deliver(DeliveryRequest {
-                        delivery_id: "public-serial-delivery".into(),
-                        flow_id: "908786".into(),
+                        delivery_id: meta_signal_flow::DeliveryId("public-serial-delivery".into()),
+                        flow_id: flow_ethos::FlowId("908786".into()),
                         message: middle_abrupt("serialized delivery"),
                     }),
                     None,
@@ -1079,7 +1094,7 @@ fn public_direct_delivery_finishes_before_a_concurrent_existing_bind() {
                         flow_container: flow_container(&socket_for_thread),
                         address: signal_flow::Address {
                             aspect: signal_flow::Aspect::Mind,
-                            topic: "core".into(),
+                            topic: flow_ethos::Topic("core".into()),
                             model: signal_flow::Model::Sol,
                         },
                         flow_binding: binding_for_thread,

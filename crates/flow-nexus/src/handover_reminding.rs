@@ -34,9 +34,9 @@ impl RendersHandoverCommands for HandoverReminderNotice {
         use datom_codec::Datomizable;
         use protos::{Compactable, Protosizable};
         let section = sections.first().cloned().unwrap_or(Section {
-            title: String::new(),
-            description: String::new(),
-            body: String::new(),
+            title: signal_flow::Title(String::new()),
+            description: signal_flow::Description(String::new()),
+            body: signal_flow::Body(String::new()),
         });
         let query = Query::Keep(Keep_Data {
             address: self.address.clone(),
@@ -54,7 +54,7 @@ impl RendersHandoverCommands for HandoverReminderNotice {
     fn notice_text(&self, sections: &[Section]) -> String {
         let mut commands = vec![self.keep_commands(sections)];
         if sections.is_empty() {
-            commands.push(self.drop_command(signal_flow::Title::from("")));
+            commands.push(self.drop_command(signal_flow::Title(String::new())));
         } else {
             for section in sections {
                 commands.push(self.drop_command(section.title.clone()));
@@ -168,26 +168,30 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             let flow_ethos::State::Awake(flow_id) = metaflow.state else {
                 continue;
             };
-            let Ok(Some(model_name)) = self.store.flow_model(&flow_id) else {
+            let Ok(Some(model_name)) = self.store.flow_model(&flow_id.0) else {
                 continue;
             };
-            let Some(policy) = policies.iter().find(|p| p.model_name == model_name) else {
+            let Some(policy) = policies.iter().find(|p| p.model_name.0 == model_name) else {
                 continue;
             };
             let Ok(Some(refresh)) = self.store.configured_threshold(&model_name) else {
                 continue;
             };
-            let Ok(Some(tokens)) = self.store.context_size(&flow_id) else {
+            let Ok(Some(tokens)) = self.store.context_size(&flow_id.0) else {
                 continue;
             };
-            let Ok(live) = self.store.ensure_live_handover(&metaflow.address, &flow_id) else {
+            let Ok(live) = self
+                .store
+                .ensure_live_handover(&metaflow.address, &flow_id.0)
+            else {
                 continue;
             };
             let generation = live.generation;
-            let Ok(green) = self
-                .store
-                .handover_green(&metaflow.address, &flow_id, refresh.refresh)
-            else {
+            let Ok(green) = self.store.handover_green(
+                &metaflow.address,
+                &flow_id.0,
+                refresh.refresh_threshold.0,
+            ) else {
                 continue;
             };
             let existing = self
@@ -203,7 +207,11 @@ impl RemindsHandoverCallers for crate::RunningNexus {
                 }
                 continue;
             }
-            if !HandoverReminder::warning_open(refresh.refresh, policy.warning_share_left, tokens) {
+            if !HandoverReminder::warning_open(
+                refresh.refresh_threshold.0,
+                policy.warning_share_left.0,
+                tokens,
+            ) {
                 if existing.is_some() {
                     let _ = self
                         .store
@@ -217,8 +225,8 @@ impl RemindsHandoverCallers for crate::RunningNexus {
                     generation,
                     model_name,
                     now,
-                    policy.every_minutes,
-                    policy.reminder_text.clone(),
+                    policy.every_minutes.0,
+                    policy.reminder_text.0.clone(),
                 ) else {
                     continue;
                 };
@@ -255,7 +263,7 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             };
             let Some(policy) = policies
                 .iter()
-                .find(|policy| policy.model_name == model_name)
+                .find(|policy| policy.model_name.0 == model_name)
             else {
                 continue;
             };
@@ -265,7 +273,11 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             let Ok(Some(tokens)) = self.store.context_size(flow_id) else {
                 continue;
             };
-            if !HandoverReminder::warning_open(refresh.refresh, policy.warning_share_left, tokens) {
+            if !HandoverReminder::warning_open(
+                refresh.refresh_threshold.0,
+                policy.warning_share_left.0,
+                tokens,
+            ) {
                 continue;
             }
             // Admission is deliberately ordinary. In particular this does

@@ -26,41 +26,43 @@ impl RehearsalFixture for Fixture {
             HarnessKind::Codex => "gpt-6.1-sol",
         };
         let profile = LaunchProfile {
-            launch_request_id: "request-fixture".into(),
-            system_modules: vec!["spirit:core".into()],
-            user_modules: vec![],
-            remembering: Remembering::Predecessors(0),
+            launch_request_id: signal_flow::LaunchRequestId("request-fixture".into()),
+            system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
+                "spirit:core".into(),
+            )]),
+            user_modules: signal_flow::UserModules(vec![]),
+            remembering: Remembering::Predecessors(signal_flow::RememberingDepth(0)),
             address: Address {
                 aspect: Aspect::Mind,
-                topic: "core".into(),
+                topic: flow_ethos::Topic("core".into()),
                 model: Model::Sol,
             },
-            model_name: model.into(),
-            effort: "medium".into(),
+            model_name: flow_ethos::ModelName(model.into()),
+            effort: signal_flow::Effort("medium".into()),
             flow_id_option: None,
-            herdr_session_name: "actual-session".into(),
+            herdr_session_name: signal_flow::HerdrSessionName("actual-session".into()),
             leave_outs_option: None,
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: ToolSet::Default,
-            instruction_prompt: "Begin.".into(),
+            instruction_prompt: signal_flow::InstructionPrompt("Begin.".into()),
         };
         ComposedLaunch {
             launch_profile: profile,
             harness_kind: harness,
             system_prompt: SystemPrompt {
-                system_prompt_text: "system".into(),
-                system_prompt_sha256: "system-sha".into(),
+                system_prompt_text: signal_flow::SystemPromptText("system".into()),
+                system_prompt_sha256: signal_flow::SystemPromptSha256("system-sha".into()),
             },
             first_prompt_payload: FirstPromptPayload {
-                first_prompt_body: "Begin.".into(),
-                prompt_sha256: "prompt-sha".into(),
+                first_prompt_body: signal_flow::FirstPromptBody("Begin.".into()),
+                prompt_sha256: signal_flow::PromptSha256("prompt-sha".into()),
                 prompt_part_vector: vec![],
             },
             target_receipt_request: TargetReceiptRequest {
-                launch_request_id: "request-fixture".into(),
-                prompt_sha256: "prompt-sha".into(),
+                launch_request_id: signal_flow::LaunchRequestId("request-fixture".into()),
+                prompt_sha256: signal_flow::PromptSha256("prompt-sha".into()),
             },
-            leave_outs: vec![],
+            leave_outs: signal_flow::LeaveOuts(vec![]),
         }
     }
 
@@ -212,30 +214,36 @@ fn production_rehearse_success_and_refusal_create_nothing() {
     let fixture = NexusFixture::new();
     let address = Address {
         aspect: Aspect::Field,
-        topic: "rehearseTest".into(),
+        topic: flow_ethos::Topic("rehearseTest".into()),
         model: Model::Sol,
     };
     let declaration = meta_signal_flow::ConfigureMetaflow {
         address: address.clone(),
         root_option: None,
-        system_modules: vec!["spirit-core".into()],
-        user_modules: vec!["operation-main-flow".into()],
+        system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
+            "spirit-core".into(),
+        )]),
+        user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+            "operation-main-flow".into(),
+        )]),
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: ToolSet::Default,
         continuity: meta_signal_flow::Continuity::OnDemand,
-        purpose: String::new(),
-        records: vec![],
+        purpose: meta_signal_flow::Purpose(String::new()),
+        records: meta_signal_flow::Records(vec![]),
     };
     for change in [
         meta_signal_flow::ConfigurationChange::Metaflows(vec![declaration]),
         meta_signal_flow::ConfigurationChange::Models(vec![meta_signal_flow::ConfigureModel {
             model: Model::Sol,
-            native: "fixture-model".into(),
+            native: meta_signal_flow::Native("fixture-model".into()),
         }]),
         meta_signal_flow::ConfigurationChange::HarnessFlags(vec![
             meta_signal_flow::ConfigureHarnessFlags {
                 address: address.clone(),
-                harness_flags: "--literal 'Artifact*'".into(),
+                harness_flag_text: meta_signal_flow::HarnessFlagText(
+                    "--literal 'Artifact*'".into(),
+                ),
             },
         ]),
     ] {
@@ -243,8 +251,8 @@ fn production_rehearse_success_and_refusal_create_nothing() {
     }
     let request = signal_flow::LaunchRequest {
         address: address.clone(),
-        remembering: Remembering::Predecessors(0),
-        instruction_prompt: "Rehearse only.".into(),
+        remembering: Remembering::Predecessors(signal_flow::RememberingDepth(0)),
+        instruction_prompt: signal_flow::InstructionPrompt("Rehearse only.".into()),
     };
     let before_configuration = fixture.nexus.store.configuration_snapshot().unwrap();
     let before_flows = fixture.nexus.store.flow_nodes().unwrap();
@@ -270,9 +278,9 @@ fn production_rehearse_success_and_refusal_create_nothing() {
     else {
         panic!("valid rehearsal answers its command")
     };
-    assert!(command.contains("'<pane>'"));
-    assert!(command.contains("'<thread>'"));
-    assert!(command.ends_with("'resume' '<thread>'"));
+    assert!(command.0.contains("'<pane>'"));
+    assert!(command.0.contains("'<thread>'"));
+    assert!(command.0.ends_with("'resume' '<thread>'"));
     assert_eq!(
         fixture.nexus.store.configuration_snapshot().unwrap(),
         before_configuration
@@ -303,7 +311,7 @@ fn production_rehearse_success_and_refusal_create_nothing() {
         .configure_change(meta_signal_flow::ConfigurationChange::HarnessFlags(vec![
             meta_signal_flow::ConfigureHarnessFlags {
                 address,
-                harness_flags: "'unfinished".into(),
+                harness_flag_text: meta_signal_flow::HarnessFlagText("'unfinished".into()),
             },
         ]))
         .unwrap();

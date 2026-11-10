@@ -1,3 +1,33 @@
+# Flow 0.54.0: one revision of each contract crate
+
+Pins protos `c93b598`, datom-codec and datom-codec-derive `09a0526`,
+ethos-zero `1976e45`, signal 11.0.0 (`6d4eb74`), signal-flow 58.0.1
+(`6881724`) and meta-signal-flow 73.0.1 (`a90a889`), each by the string its
+other consumers write, so the lock holds one source of each. The flake's
+base is build-base `404cf8d`.
+
+- ethos-zero 22 makes a head over one type a newtype (`FlowId(String)`,
+  `RequestId(String)`, `Path(String)`, …) and refuses a head over a named
+  type. The Rust follows: `.0` where the inner value is read, the
+  constructor where one is made. Flow's own ethos follows ethos-zero 22:
+  `send_tool.ethos`'s outcomes carry the sender as `Address`
+  (`Sender.Address` is gone), `operation.ethos` registers a
+  `CallerIdentity`, its Awoken count is `DeliveredCount`, `landing.ethos`'s
+  Landing holds three bare `Step` positions (deploy, retrain, implement),
+  and `curriculum.ethos` writes `RolesDocument.[ Roles ]`. No stored format
+  and no datom form changes: a struct's datom is positional and a newtype
+  archives as its inner value.
+- The snapshot crates `*-before-request-ids` take signal 11 and datom-codec
+  `09a0526`; they use only signal's ByteViewable, Restorable, Signal and
+  Signalizable.
+- The workspace takes flow-ethos without default features, as signal-flow
+  and meta-signal-flow do, so one flow-ethos build serves them all.
+- The message-joint test is compiled only with the `message-joint` feature:
+  Message `f46b38e` and signal-message `998c824` pin signal 10, whose
+  `links = "signal"` cannot share a lock with signal 11. Their
+  dev-dependency entries stand commented in `crates/flow-nexus/Cargo.toml`
+  until both pin signal-flow `6881724`.
+
 # Flow 0.53.4: a successor is given its permaflow's open requests
 
 A request is open from its delivery until the Result or Done that answers

@@ -13,9 +13,10 @@
 //!
 //! The production composer is the Curriculum Nexus, asked over the socket
 //! the Nexus's configuration names (`CurriculumNexusPath`),
-//! with `ComposeStartup` from its schema, copied byte for byte into
+//! with `ComposeStartup` from its schema, copied into
 //! `ethos/curriculum.ethos` from Curriculum 478cbc5 (schema SHA-256
-//! 26011a94…48e28), whose selection names the flows a launch remembers
+//! 26011a94…48e28) but for `RolesDocument.[ Roles ]`, the bare variant
+//! ethos-zero 22 requires, which keeps every form; its selection names the flows a launch remembers
 //! and whose composition carries their raw records. Its Outcome has five
 //! variants, the fifth `Rejected` with Curriculum's own text, which Flow
 //! keeps whole in `ContextRefusal::ComposerRejected`, but for a remembered
@@ -103,16 +104,37 @@ impl SelectsStartup for ContextRequest {
                     Aspect::Field => "Field",
                 }
                 .into(),
-                second_string: self.address.topic.clone(),
+                second_string: self.address.topic.clone().0,
                 third_string: self.address.model.name().into(),
             },
             target: match self.harness_kind {
                 HarnessKind::Claude => Target::Claude,
                 HarnessKind::Codex => Target::Codex,
             },
-            system_modules: self.system_modules.clone(),
-            user_modules: self.user_modules.clone(),
-            flow_id_vector: self.remembered_flows.clone(),
+            system_modules: crate::generated::curriculum::SystemModules(
+                self.system_modules
+                    .0
+                    .iter()
+                    .map(|identity| {
+                        crate::generated::curriculum::ModuleIdentity(identity.0.clone())
+                    })
+                    .collect(),
+            ),
+            user_modules: crate::generated::curriculum::UserModules(
+                self.user_modules
+                    .0
+                    .iter()
+                    .map(|identity| {
+                        crate::generated::curriculum::ModuleIdentity(identity.0.clone())
+                    })
+                    .collect(),
+            ),
+            flow_id_vector: self
+                .remembered_flows
+                .0
+                .iter()
+                .map(|flow| crate::generated::curriculum::FlowId(flow.0.clone()))
+                .collect(),
         }
     }
 }
@@ -208,7 +230,7 @@ impl CutsRenderedText for str {
             "{}\n\nModule IDs: {}\n",
             CONTEXT_OPENING,
             rows.iter()
-                .map(|row| row.module_identity.as_str())
+                .map(|row| row.module_identity.0.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -216,18 +238,19 @@ impl CutsRenderedText for str {
         let mut segments = Vec::new();
         for (index, row) in rows.iter().enumerate() {
             let identity = &row.module_identity;
-            let open = format!("\n<!-- module: {identity} -->\n");
-            let close = format!("\n<!-- end-module: {identity} -->\n");
+            let open = format!("\n<!-- module: {identity} -->\n", identity = identity.0);
+            let close = format!("\n<!-- end-module: {identity} -->\n", identity = identity.0);
             let after_open = rest.strip_prefix(&open)?;
             let body_end = match rows.get(index + 1) {
                 Some(next) => {
-                    let next_open = format!("{close}\n<!-- module: {} -->\n", next.module_identity);
+                    let next_open =
+                        format!("{close}\n<!-- module: {} -->\n", next.module_identity.0);
                     after_open.find(&next_open)?
                 }
                 None => after_open.strip_suffix(&close)?.len(),
             };
             let body = &after_open[..body_end];
-            if format!("{:x}", Sha256::digest(body.as_bytes())) != row.rendered_sha256 {
+            if format!("{:x}", Sha256::digest(body.as_bytes())) != row.rendered_sha256.0 {
                 return None;
             }
             let segment = format!("{open}{body}{close}");
@@ -250,14 +273,14 @@ impl VerifiesContext for VerifiedContext {
         let request = input_0.context_request();
         let composition = input_1.composition();
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
-        if digest(&composition.system_text) != composition.system_payload_sha256
-            || digest(&composition.user_text) != composition.user_payload_sha256
-            || digest(&composition.records_text) != composition.records_payload_sha256
+        if digest(&composition.system_text.0) != composition.system_payload_sha256.0
+            || digest(&composition.user_text.0) != composition.user_payload_sha256.0
+            || digest(&composition.records_text.0) != composition.records_payload_sha256.0
         {
             return Err(ContextRefusal::PayloadMismatch);
         }
         // Records are composed only for a launch that remembers flows.
-        if request.remembered_flows.is_empty() && !composition.records_text.is_empty() {
+        if request.remembered_flows.0.is_empty() && !composition.records_text.0.is_empty() {
             return Err(ContextRefusal::PayloadMismatch);
         }
         let rows = &composition.context_provenance_vector;
@@ -271,16 +294,18 @@ impl VerifiesContext for VerifiedContext {
         let user_rows = placed(StartupPlacement::User);
         let missing = request
             .system_modules
+            .0
             .iter()
             .zip(std::iter::repeat(&system_rows))
             .chain(
                 request
                     .user_modules
+                    .0
                     .iter()
                     .zip(std::iter::repeat(&user_rows)),
             )
             .find_map(|(identity, placed)| {
-                (!placed.iter().any(|row| &row.module_identity == identity))
+                (!placed.iter().any(|row| row.module_identity.0 == identity.0))
                     .then(|| identity.clone())
             });
         if let Some(identity) = missing {
@@ -297,6 +322,7 @@ impl VerifiesContext for VerifiedContext {
         }
         if composition
             .system_text
+            .0
             .rendered_segments(&system_rows)
             .is_none()
         {
@@ -304,13 +330,14 @@ impl VerifiesContext for VerifiedContext {
         }
         let user_segments = composition
             .user_text
+            .0
             .rendered_segments(&user_rows)
             .ok_or(ContextRefusal::PayloadMismatch)?;
         Ok(Self {
             address: request.address.clone(),
-            system_text: composition.system_text,
+            system_text: composition.system_text.0,
             user_segments,
-            records_text: composition.records_text,
+            records_text: composition.records_text.0,
         })
     }
 }
@@ -376,22 +403,28 @@ impl ComposesFlowContext for FixtureComposer {
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
         let mut rows = Vec::new();
         for (identities, placement) in [
-            (&request.system_modules, StartupPlacement::System),
-            (&request.user_modules, StartupPlacement::User),
+            (&request.system_modules.0, StartupPlacement::System),
+            (&request.user_modules.0, StartupPlacement::User),
         ] {
             for (ordinal, identity) in identities.iter().enumerate() {
                 let body = self
                     .bodies
-                    .get(identity)
+                    .get(&identity.0)
                     .ok_or_else(|| ContextRefusal::ModuleMissing(Some(identity.clone())))?;
                 rows.push(ContextProvenance {
-                    module_identity: identity.clone(),
-                    repository_name: "fixture-context".into(),
-                    source_revision: "0".repeat(40),
-                    source_relative_path: format!("{identity}.md"),
-                    source_sha256: digest(body),
-                    body_sha256: digest(body),
-                    rendered_sha256: digest(body),
+                    module_identity: crate::generated::curriculum::ModuleIdentity(
+                        identity.0.clone(),
+                    ),
+                    repository_name: crate::generated::curriculum::RepositoryName(
+                        "fixture-context".into(),
+                    ),
+                    source_revision: crate::generated::curriculum::SourceRevision("0".repeat(40)),
+                    source_relative_path: crate::generated::curriculum::SourceRelativePath(
+                        format!("{identity}.md", identity = identity.0),
+                    ),
+                    source_sha256: crate::generated::curriculum::SourceSha256(digest(body)),
+                    body_sha256: crate::generated::curriculum::BodySha256(digest(body)),
+                    rendered_sha256: crate::generated::curriculum::RenderedSha256(digest(body)),
                     startup_placement: placement.clone(),
                     integer: ordinal as i64,
                 });
@@ -415,22 +448,35 @@ impl ComposesFlowContext for FixtureComposer {
             }
             text
         };
-        let system_text = rendered(&request.system_modules);
-        let user_text = rendered(&request.user_modules);
+        let texts = |identities: &[signal_flow::ModuleIdentity]| {
+            identities
+                .iter()
+                .map(|identity| identity.0.clone())
+                .collect::<Vec<_>>()
+        };
+        let system_text = rendered(&texts(&request.system_modules.0));
+        let user_text = rendered(&texts(&request.user_modules.0));
         // A remembered flow that logged no record composes nothing.
         let records_text = request
             .remembered_flows
+            .0
             .iter()
-            .filter_map(|flow_id| self.records.get(flow_id))
+            .filter_map(|flow_id| self.records.get(&flow_id.0))
             .cloned()
             .collect::<String>();
         Ok(StartupComposition {
-            system_payload_sha256: digest(&system_text),
-            user_payload_sha256: digest(&user_text),
-            records_payload_sha256: digest(&records_text),
-            system_text,
-            user_text,
-            records_text,
+            system_payload_sha256: crate::generated::curriculum::SystemPayloadSha256(digest(
+                &system_text,
+            )),
+            user_payload_sha256: crate::generated::curriculum::UserPayloadSha256(digest(
+                &user_text,
+            )),
+            records_payload_sha256: crate::generated::curriculum::RecordsPayloadSha256(digest(
+                &records_text,
+            )),
+            system_text: crate::generated::curriculum::SystemText(system_text),
+            user_text: crate::generated::curriculum::UserText(user_text),
+            records_text: crate::generated::curriculum::RecordsText(records_text),
             context_provenance_vector: rows,
         })
     }
@@ -451,17 +497,23 @@ mod tests {
         use sha2::{Digest, Sha256};
         let composer = fixture();
         let mut composition = composer.compose_flow_context(request()).unwrap();
-        composition.records_text = "## an unasked record\n".into();
+        composition.records_text =
+            crate::generated::curriculum::RecordsText("## an unasked record\n".into());
         composition.records_payload_sha256 =
-            format!("{:x}", Sha256::digest(composition.records_text.as_bytes()));
+            crate::generated::curriculum::RecordsPayloadSha256(format!(
+                "{:x}",
+                Sha256::digest(composition.records_text.0.as_bytes())
+            ));
         assert_eq!(
             VerifiedContext::verified(request(), composition.clone()),
             Err(ContextRefusal::PayloadMismatch)
         );
         let mut remembering = request();
-        remembering.remembered_flows = vec!["36b71b".into()];
+        remembering.remembered_flows =
+            crate::generated::starter::RememberedFlows(vec![flow_ethos::FlowId("36b71b".into())]);
         assert!(VerifiedContext::verified(&remembering, composition.clone()).is_ok());
-        composition.records_payload_sha256 = "0".repeat(64);
+        composition.records_payload_sha256 =
+            crate::generated::curriculum::RecordsPayloadSha256("0".repeat(64));
         assert_eq!(
             VerifiedContext::verified(&remembering, composition),
             Err(ContextRefusal::PayloadMismatch)
@@ -472,13 +524,27 @@ mod tests {
         ContextRequest {
             address: Address {
                 aspect: Aspect::Field,
-                topic: "flow".into(),
+                topic: flow_ethos::Topic("flow".into()),
                 model: Model::Sol,
             },
             harness_kind: HarnessKind::Claude,
-            system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-            user_modules: vec!["operation-main-flow".into(), "knowledge-flow".into()],
-            remembered_flows: vec![],
+            system_modules: signal_flow::SystemModules(vec![
+                signal_flow::ModuleIdentity(
+                    crate::generated::curriculum::ModuleIdentity("spirit-core".into()).0,
+                ),
+                signal_flow::ModuleIdentity(
+                    crate::generated::curriculum::ModuleIdentity("intent-flow".into()).0,
+                ),
+            ]),
+            user_modules: signal_flow::UserModules(vec![
+                signal_flow::ModuleIdentity(
+                    crate::generated::curriculum::ModuleIdentity("operation-main-flow".into()).0,
+                ),
+                signal_flow::ModuleIdentity(
+                    crate::generated::curriculum::ModuleIdentity("knowledge-flow".into()).0,
+                ),
+            ]),
+            remembered_flows: crate::generated::starter::RememberedFlows(vec![]),
         }
     }
 
@@ -503,7 +569,7 @@ mod tests {
         let user_text = composition.user_text.clone();
         let verified = VerifiedContext::verified(&request, composition).unwrap();
         assert_eq!(verified.user_segments().len(), 2);
-        assert_eq!(verified.user_segments().concat(), user_text);
+        assert_eq!(verified.user_segments().concat(), user_text.0);
         assert!(verified.user_segments()[0].starts_with(CONTEXT_OPENING));
         assert!(verified.user_segments()[1].starts_with("\n<!-- module: knowledge-flow -->\n"));
         assert!(verified.system_text().contains("Spirit body."));
@@ -514,7 +580,7 @@ mod tests {
     fn a_payload_that_differs_from_its_hash_is_refused() {
         let request = request();
         let mut composition = fixture().compose_flow_context(&request).unwrap();
-        composition.user_text.push('x');
+        composition.user_text.0.push('x');
         assert_eq!(
             VerifiedContext::verified(&request, composition),
             Err(ContextRefusal::PayloadMismatch)
@@ -525,7 +591,8 @@ mod tests {
     fn a_module_body_that_differs_from_its_rendered_hash_is_refused() {
         let request = request();
         let mut composition = fixture().compose_flow_context(&request).unwrap();
-        composition.context_provenance_vector[2].rendered_sha256 = "0".repeat(64);
+        composition.context_provenance_vector[2].rendered_sha256 =
+            crate::generated::curriculum::RenderedSha256("0".repeat(64));
         assert_eq!(
             VerifiedContext::verified(&request, composition),
             Err(ContextRefusal::PayloadMismatch)
@@ -538,20 +605,27 @@ mod tests {
         let mut composition = fixture().compose_flow_context(&request).unwrap();
         composition
             .context_provenance_vector
-            .retain(|row| row.module_identity != "knowledge-flow");
+            .retain(|row| row.module_identity.0 != "knowledge-flow");
         assert_eq!(
             VerifiedContext::verified(&request, composition),
-            Err(ContextRefusal::ModuleMissing(Some("knowledge-flow".into())))
+            Err(ContextRefusal::ModuleMissing(Some(
+                signal_flow::ModuleIdentity("knowledge-flow".into())
+            )))
         );
     }
 
     #[test]
     fn an_identity_the_composer_does_not_hold_is_rejected() {
         let mut request = request();
-        request.user_modules.push("unknown-module".into());
+        request
+            .user_modules
+            .0
+            .push(signal_flow::ModuleIdentity("unknown-module".into()));
         assert_eq!(
             fixture().compose_flow_context(&request),
-            Err(ContextRefusal::ModuleMissing(Some("unknown-module".into())))
+            Err(ContextRefusal::ModuleMissing(Some(
+                signal_flow::ModuleIdentity("unknown-module".into())
+            )))
         );
     }
 }

@@ -35,17 +35,17 @@ fn two_seats(fixture: &NexusFixture) {
     claude_seat(fixture, 40_000);
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address(Model::Sol),
-        state: State::Awake(CLAUDE_SEAT.into()),
-        past: vec![],
-        queue: vec![],
+        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let mut codex = fixture.node();
-    assert_eq!(codex.flow_id, CODEX_SEAT);
-    assert_eq!(codex.session_id, CODEX_THREAD);
+    assert_eq!(codex.flow_id.0, CODEX_SEAT);
+    assert_eq!(codex.session_id.0, CODEX_THREAD);
     assert_eq!(codex.harness_kind, HarnessKind::Codex);
     if let HerdrRouteSelection::Available(route) = &mut codex.herdr_route_selection {
-        route.herdr_pane_id = "w1:p4".into();
-        route.herdr_terminal_id = "terminal-codex".into();
+        route.herdr_pane_id = signal_flow::HerdrPaneId("w1:p4".into());
+        route.herdr_terminal_id = signal_flow::HerdrTerminalId("terminal-codex".into());
     }
     assert!(matches!(
         fixture.nexus.store.register_flow(codex),
@@ -53,9 +53,9 @@ fn two_seats(fixture: &NexusFixture) {
     ));
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address(Model::Luna),
-        state: State::Awake(CODEX_SEAT.into()),
-        past: vec![],
-        queue: vec![],
+        state: State::Awake(flow_ethos::FlowId(CODEX_SEAT.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
 }
 
@@ -64,12 +64,15 @@ fn two_seats(fixture: &NexusFixture) {
 fn report(fixture: &NexusFixture, event: Event) {
     assert_eq!(
         fixture.nexus.report(Report_Data {
-            flow_id: CLAUDE_SEAT.into(),
+            flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
             event: event.clone(),
         }),
         Response::Reported
     );
-    fixture.nexus.after_report(&CLAUDE_SEAT.to_owned(), &event);
+    fixture.nexus.after_report(
+        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+        &event,
+    );
 }
 
 fn codex(fixture: &NexusFixture, events: Vec<TurnEvent>) {
@@ -82,10 +85,10 @@ fn turn_end(frame: Response, flow_id: &str, model: Model, harness: HarnessKind) 
     let Response::TurnEnded(turn_end) = frame else {
         panic!("a turn end is sent as TurnEnded, not {frame:?}");
     };
-    assert_eq!(turn_end.flow_id, flow_id);
+    assert_eq!(turn_end.flow_id.0, flow_id);
     assert_eq!(turn_end.address, address(model));
     assert_eq!(turn_end.harness_kind, harness);
-    assert!(turn_end.observed_at > 0);
+    assert!(turn_end.observed_at > signal_flow::ObservedAt(0));
     turn_end
 }
 
@@ -156,10 +159,14 @@ fn a_turn_end_subscriber_receives_the_state_on_open_then_each_turn_end_and_nothi
         report(
             &fixture,
             Event::Stopped(NativeStop {
-                native_session_id_option: Some("0ther000-0000-4000-8000-000000000009".into()),
-                transcript_path_option: Some("/elsewhere/other.jsonl".into()),
-                last_assistant_message_option: None,
-                background_work: vec![],
+                native_session_id_option: Some(signal_flow::NativeSessionId(
+                    "0ther000-0000-4000-8000-000000000009".into(),
+                )),
+                transcript_path_option: Some(signal_flow::TranscriptPath(
+                    "/elsewhere/other.jsonl".into(),
+                )),
+                last_assistant_message_option: signal_flow::LastAssistantMessageOption(None),
+                background_work: signal_flow::BackgroundWork(vec![]),
             }),
         );
         codex(&fixture, vec![TurnEvent::Started("turn-1".into())]);
@@ -224,7 +231,7 @@ fn the_state_a_turn_end_subscription_opens_on_outlives_a_reopened_store() {
         panic!("the opening frame is TurnEndsObserved");
     };
     assert_eq!(before.len(), 1);
-    assert_eq!(before[0].flow_id, CLAUDE_SEAT);
+    assert_eq!(before[0].flow_id.0, CLAUDE_SEAT);
 
     let placeholder = FlowStore::open(&fixture.directory.path().join("placeholder.sema"))
         .expect("placeholder store");

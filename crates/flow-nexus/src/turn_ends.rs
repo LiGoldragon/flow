@@ -158,7 +158,7 @@ impl RecordsTurnEnd for RunningNexus {
             address: metaflow.address,
             harness_kind: node.harness_kind,
             flow_id: node.flow_id,
-            observed_at,
+            observed_at: signal_flow::ObservedAt(observed_at),
         };
         if let Err(error) = self.turn_ends.publish(&self.store, turn_end) {
             eprintln!(

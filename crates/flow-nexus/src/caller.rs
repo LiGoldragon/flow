@@ -36,8 +36,8 @@ use crate::store::{
     StoreError,
 };
 use signal_flow::{
-    Address, Caller, CallerResolutionRejection, FlowId, FlowNode, FlowOrigin, HarnessKind, Process,
-    Response,
+    Address, CallerIdentity, CallerResolutionRejection, FlowId, FlowNode, FlowOrigin, HarnessKind,
+    Process, Response,
 };
 use std::collections::BTreeSet;
 use std::{fs, os::unix::net::UnixStream, path::PathBuf};
@@ -486,7 +486,7 @@ impl ResolvesProcessAuthorityEvidence for RunningNexus {
     fn bound_address(&self, origin: &FlowOrigin) -> Result<Option<Address>, StoreError> {
         Ok(self
             .store
-            .metaflow_awake_as(&origin.flow_id)?
+            .metaflow_awake_as(&origin.flow_id.0)?
             .map(|metaflow| metaflow.address))
     }
 
@@ -515,7 +515,7 @@ impl AuthenticatesProcessAuthority for RunningNexus {
         if !FlowStore::process_is_live(peer) {
             return Ok(ProcessAuthority::Rejected);
         }
-        let Some(process_id) = u32::try_from(peer.pid).ok() else {
+        let Some(process_id) = u32::try_from(peer.pid.0).ok() else {
             return Ok(ProcessAuthority::Rejected);
         };
         let process = CallerProcess { process_id };
@@ -531,7 +531,7 @@ impl AuthenticatesProcessAuthority for RunningNexus {
         }
         match process.caller_pane(&self.herdr) {
             Some(pane) if self.pane_holds_flow(&pane) => match self.bound_caller(&pane) {
-                Ok(caller) => match self.authority_for_flow(&caller.flow_id)? {
+                Ok(caller) => match self.authority_for_flow(&caller.flow_id.0)? {
                     ProcessAuthority::Bound(origin) => bound.push(origin),
                     _ => rejected = true,
                 },
@@ -558,12 +558,12 @@ impl AuthenticatesProcessAuthority for RunningNexus {
                         .into_iter()
                         .filter(|node| {
                             node.harness_kind == HarnessKind::Codex
-                                && node.session_id == root_thread
+                                && node.session_id.0 == root_thread
                                 && node.flow_lifecycle.is_live()
                         })
                         .collect::<Vec<_>>();
                     match live.as_slice() {
-                        [node] => match self.authority_for_flow(&node.flow_id)? {
+                        [node] => match self.authority_for_flow(&node.flow_id.0)? {
                             ProcessAuthority::Bound(origin) => bound.push(origin),
                             _ => rejected = true,
                         },
@@ -642,7 +642,7 @@ impl DerivesOrigin for RunningNexus {
             .caller_process()
             .and_then(|process| process.caller_pane(&self.herdr))
             .and_then(|pane| self.bound_caller(&pane).ok())
-            .and_then(|caller| self.store.flow_node(&caller.flow_id).ok().flatten())
+            .and_then(|caller| self.store.flow_node(&caller.flow_id.0).ok().flatten())
             .map(|node| {
                 signal_flow::Origin::Flow(signal_flow::FlowOrigin {
                     flow_id: node.flow_id,
@@ -655,11 +655,11 @@ impl DerivesOrigin for RunningNexus {
 
 /// The one flow a pane holds, with its role.
 pub(crate) trait BindsCallerPane {
-    fn bound_caller(&self, pane: &CallerPane) -> Result<Caller, CallerResolutionRejection>;
+    fn bound_caller(&self, pane: &CallerPane) -> Result<CallerIdentity, CallerResolutionRejection>;
 }
 
 impl BindsCallerPane for RunningNexus {
-    fn bound_caller(&self, pane: &CallerPane) -> Result<Caller, CallerResolutionRejection> {
+    fn bound_caller(&self, pane: &CallerPane) -> Result<CallerIdentity, CallerResolutionRejection> {
         let unknown = |_: StoreError| CallerResolutionRejection::CallerUnknown;
         let mut present = self
             .store
@@ -672,7 +672,7 @@ impl BindsCallerPane for RunningNexus {
             return Err(CallerResolutionRejection::CallerUnknown);
         };
         self.store
-            .role(&node.flow_id)
+            .role(&node.flow_id.0)
             .map_err(unknown)?
             .ok_or(CallerResolutionRejection::CallerUnknown)
     }

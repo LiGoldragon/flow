@@ -66,7 +66,7 @@ impl RemindsCallers for RunningNexus {
             };
             for reminder in due {
                 let Some(task_words) = retained.iter().find_map(|request| {
-                    if request.entry.logical_delivery_id != reminder.key {
+                    if request.entry.logical_delivery_id.0 != reminder.key {
                         return None;
                     }
                     let request = match &request.entry.message {
@@ -194,7 +194,7 @@ impl ArchivesHandoverOnTick for RunningNexus {
             eprintln!("flow-nexus: publication deadline configuration unreadable");
             return;
         };
-        let Ok(deadline_ms) = u64::try_from(deadline_ms) else {
+        let Ok(deadline_ms) = u64::try_from(deadline_ms.0) else {
             eprintln!(
                 "flow-nexus: publication deadline is unrepresentable; closed generations retained"
             );
@@ -206,8 +206,8 @@ impl ArchivesHandoverOnTick for RunningNexus {
             );
             return;
         }
-        let publisher =
-            ExistingGitHandoverArchive::new(path).with_deadline(Duration::from_millis(deadline_ms));
+        let publisher = ExistingGitHandoverArchive::new(path.0)
+            .with_deadline(Duration::from_millis(deadline_ms));
         for address in addresses {
             if let Err(error) =
                 self.retire_handover_generations(&address, count as usize, &publisher)

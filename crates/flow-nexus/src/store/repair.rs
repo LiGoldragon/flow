@@ -50,7 +50,7 @@ impl RepairsMetaflows for FlowStore {
         };
         let metaflow = stored.metaflow;
         let flow_node_option = match &metaflow.state {
-            MetaflowState::Awake(flow_id) => self.flow_node(flow_id)?,
+            MetaflowState::Awake(flow_id) => self.flow_node(&flow_id.0)?,
             MetaflowState::Asleep => None,
         };
         let lock_vector = self
@@ -126,7 +126,7 @@ impl RepairsMetaflows for FlowStore {
         if self.flow(flow_id)?.is_none() {
             return Ok(Err(RebindRejected_Data::FlowUnknown));
         }
-        if current == flow_id {
+        if current.0 == flow_id {
             return Ok(Ok(()));
         }
         if let Some(other) = self.metaflow_awake_as(flow_id)? {
@@ -138,9 +138,10 @@ impl RepairsMetaflows for FlowStore {
         stored
             .metaflow
             .past
-            .retain(|past| past != &current && past != flow_id);
-        stored.metaflow.past.push(current);
-        stored.metaflow.state = MetaflowState::Awake(flow_id.to_owned());
+            .0
+            .retain(|past| past != &current && past.0 != flow_id);
+        stored.metaflow.past.0.push(current);
+        stored.metaflow.state = MetaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned()));
         self.engine.commit_atomic(
             self.engine
                 .begin_atomic_commit()

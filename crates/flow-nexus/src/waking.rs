@@ -277,7 +277,7 @@ impl RestsEndedAwake for RunningNexus {
         let flow_ethos::State::Awake(flow_id) = metaflow.state else {
             return false;
         };
-        let ended = match self.store.flow_node(&flow_id) {
+        let ended = match self.store.flow_node(&flow_id.0) {
             Ok(Some(node)) => !node.flow_lifecycle.is_live(),
             // Awake as no flow: a process binding. Its process gone, an
             // Address held only through bindings is forgotten; one holding
@@ -285,10 +285,16 @@ impl RestsEndedAwake for RunningNexus {
             Ok(None) => {
                 use crate::store::metaflow::ForgetsEndedBindings;
                 use crate::store::{FlowStore, ReadsFlowMemory};
-                if matches!(self.store.forget_ended_binding(address, &flow_id), Ok(true)) {
+                if matches!(
+                    self.store.forget_ended_binding(address, &flow_id.0),
+                    Ok(true)
+                ) {
                     eprintln!(
                         "flow-nexus: {:?} {} {:?} held only through ended binding {flow_id} is forgotten",
-                        address.aspect, address.topic, address.model
+                        address.aspect,
+                        address.topic.0,
+                        address.model,
+                        flow_id = flow_id.0
                     );
                     return true;
                 }
@@ -299,7 +305,7 @@ impl RestsEndedAwake for RunningNexus {
             }
             Err(_) => false,
         };
-        if !ended || !matches!(self.store.address_hold(&flow_id), Ok(None)) {
+        if !ended || !matches!(self.store.address_hold(&flow_id.0), Ok(None)) {
             return false;
         }
         match self.perform(Operation::Record(Record_Data::Asleep(
@@ -309,7 +315,10 @@ impl RestsEndedAwake for RunningNexus {
             },
         ))) {
             Outcome::Recorded => {
-                eprintln!("flow-nexus: metaflow Awake as ended flow {flow_id} was recorded Asleep");
+                eprintln!(
+                    "flow-nexus: metaflow Awake as ended flow {flow_id} was recorded Asleep",
+                    flow_id = flow_id.0
+                );
                 true
             }
             _ => false,
@@ -347,8 +356,8 @@ impl NotesStopsAtConfirmation for StoppedAtConfirmation {
             .flows
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !flows.iter().any(|noted| noted == flow_id) {
-            flows.push(flow_id.to_owned());
+        if !flows.iter().any(|noted| noted.0 == flow_id) {
+            flows.push(signal_flow::FlowId(flow_id.to_owned()));
         }
     }
 
@@ -391,7 +400,7 @@ impl SettlesStopsAtConfirmation for RunningNexus {
 
     fn settle_stops_at_confirmation(&self) {
         for flow_id in self.stopped_at_confirmation.take() {
-            self.settle_stopped(&flow_id);
+            self.settle_stopped(&flow_id.0);
         }
     }
 }
@@ -507,7 +516,7 @@ impl JudgesSuccessorRefusal for KeptAtStop {
 /// stands.
 #[derive(Debug, Default)]
 pub struct RefreshRefusals {
-    flows: Mutex<HashSet<FlowId>>,
+    flows: Mutex<HashSet<String>>,
 }
 
 pub trait NotesRefreshRefusals {
@@ -689,7 +698,7 @@ impl StartsUnbound for RunningNexus {
             // The Nexus starts this flow itself: no calling flow is its
             // origin.
             let response = self.start(profile, Origin::Unbound);
-            self.settle(&launch_request_id, response)
+            self.settle(&launch_request_id.0, response)
         };
         // A send tool call made by the flow's first turn cannot wake its
         // target while this launch holds the dispatch gate. The gate is
@@ -806,15 +815,15 @@ impl ReadsClaudeDelivery for RunningNexus {
         if node.harness_kind != HarnessKind::Claude
             || node.flow_lifecycle != signal_flow::FlowLifecycle::Active
             || !self
-                .last_launch_profile(&node.flow_id)
+                .last_launch_profile(&node.flow_id.0)
                 .is_some_and(|profile| {
                     profile.flow_kind == signal_flow::FlowKind::Simplified
-                        && profile.instruction_prompt.trim().is_empty()
+                        && profile.instruction_prompt.0.trim().is_empty()
                 })
         {
             return false;
         }
-        let Ok(events) = self.store.events(&node.flow_id) else {
+        let Ok(events) = self.store.events(&node.flow_id.0) else {
             return false;
         };
         if events
@@ -825,14 +834,14 @@ impl ReadsClaudeDelivery for RunningNexus {
             return false;
         }
         self.claude_transcript(node)
-            .is_none_or(|path| path.main_turn_unstarted(&node.session_id))
+            .is_none_or(|path| path.main_turn_unstarted(&node.session_id.0))
     }
 
     fn claude_transcript(&self, node: &FlowNode) -> Option<std::path::PathBuf> {
         self.herdr
             .native_transcript_root(&HarnessKind::Claude, "")
             .ok()?
-            .session_transcript(&node.session_id)
+            .session_transcript(&node.session_id.0)
     }
 
     fn claude_main_turn_ended(&self, node: &FlowNode) -> bool {
@@ -840,7 +849,7 @@ impl ReadsClaudeDelivery for RunningNexus {
             && (self.simplified_first_input_ready(node)
                 || self
                     .claude_transcript(node)
-                    .is_some_and(|transcript| transcript.main_turn_ended(&node.session_id)))
+                    .is_some_and(|transcript| transcript.main_turn_ended(&node.session_id.0)))
     }
 
     fn claude_delivery_cursor(&self, node: &FlowNode) -> Option<NativeTranscriptCursor> {
@@ -871,7 +880,7 @@ impl ReadsClaudeDelivery for RunningNexus {
         let node = match self.store.flow_node(&attempt.flow_id) {
             Ok(Some(node))
                 if node.harness_kind == HarnessKind::Claude
-                    && node.session_id == attempt.thread_id =>
+                    && node.session_id.0 == attempt.thread_id =>
             {
                 node
             }
@@ -881,7 +890,7 @@ impl ReadsClaudeDelivery for RunningNexus {
             return ClaudeQueuedHistory::Unreadable;
         };
         transcript.queued_history_after(
-            &node.session_id,
+            &node.session_id.0,
             &ClaudeTranscriptCursor {
                 device: cursor.device,
                 inode: cursor.inode,
@@ -943,12 +952,14 @@ impl QueuesSimplifiedAnswers for RunningNexus {
             .flatten()
             .filter(|node| {
                 node.harness_kind == HarnessKind::Claude
-                    && node.session_id == receipt.native_session_id
+                    && node.session_id.0 == receipt.native_session_id.0
             })
             .and_then(|node| self.claude_transcript(&node))
             .and_then(|transcript| {
-                transcript
-                    .assistant_answer_after(&receipt.native_session_id, &receipt.native_prompt_id)
+                transcript.assistant_answer_after(
+                    &receipt.native_session_id.0,
+                    &receipt.native_prompt_id.0,
+                )
             });
         let Some(answer) = answer else {
             return SimplifiedAnswer::TurnUnanswered { input };
@@ -956,8 +967,8 @@ impl QueuesSimplifiedAnswers for RunningNexus {
         match self.store.deliver_simplified_reply(
             flow_id,
             &input,
-            &receipt.native_session_id,
-            &receipt.native_prompt_id,
+            &receipt.native_session_id.0,
+            &receipt.native_prompt_id.0,
             &answer,
         ) {
             Ok(Some(recipient)) => {
@@ -998,14 +1009,18 @@ impl CorrelatesNativeEvents for RunningNexus {
             return false;
         };
         let (Some(session), Some(reported)) = (
-            stop.native_session_id_option.as_deref(),
-            stop.transcript_path_option.as_deref(),
+            stop.native_session_id_option
+                .as_ref()
+                .map(|value| value.0.as_str()),
+            stop.transcript_path_option
+                .as_ref()
+                .map(|value| value.0.as_str()),
         ) else {
             return false;
         };
         let Some(transcript) = (node.harness_kind == HarnessKind::Claude
-            && !node.session_id.is_empty()
-            && session == node.session_id)
+            && !node.session_id.0.is_empty()
+            && session == node.session_id.0)
             .then(|| self.claude_transcript(&node))
             .flatten()
         else {
@@ -1023,8 +1038,8 @@ impl CorrelatesNativeEvents for RunningNexus {
         matches!(
             self.store.flow_node(flow_id),
             Ok(Some(node)) if node.harness_kind == HarnessKind::Claude
-                && !node.session_id.is_empty()
-                && prompt.native_session_id_option.as_deref() == Some(node.session_id.as_str())
+                && !node.session_id.0.is_empty()
+                && prompt.native_session_id_option.as_ref().map(|value| value.0.as_str()) == Some(node.session_id.0.as_str())
         )
     }
 
@@ -1070,7 +1085,7 @@ pub(crate) trait JudgesClosingRest {
 impl JudgesClosingRest for RunningNexus {
     fn background_settled(&self, flow_id: &str) -> bool {
         self.last_turn_end(flow_id)
-            .is_some_and(|stop| stop.background_work.is_empty())
+            .is_some_and(|stop| stop.background_work.0.is_empty())
     }
 
     fn rests_for_closing(&self, flow_id: &str) -> bool {
@@ -1251,7 +1266,11 @@ impl ReconcilesQueueDelivery for RunningNexus {
         let attempt = attempts.into_iter().find(|attempt| {
             attempt.flow_id == flow_id
                 && attempt.harness_kind == HarnessKind::Claude
-                && prompt.native_session_id_option.as_deref() == Some(attempt.thread_id.as_str())
+                && prompt
+                    .native_session_id_option
+                    .as_ref()
+                    .map(|value| value.0.as_str())
+                    == Some(attempt.thread_id.as_str())
                 && matches!(
                     attempt.phase,
                     QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
@@ -1259,7 +1278,7 @@ impl ReconcilesQueueDelivery for RunningNexus {
                 && self
                     .cohort_runs(attempt)
                     .iter()
-                    .any(|(_, text)| text.prompt_sha256() == prompt.prompt_sha256)
+                    .any(|(_, text)| text.prompt_sha256() == prompt.prompt_sha256.0)
         });
         let Some(attempt) = attempt else {
             // The correlated hook is durable launch evidence. The logical
@@ -1330,19 +1349,19 @@ impl ReconcilesQueueDelivery for RunningNexus {
                 .list_metaflows()
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|metaflow| !metaflow.queue.is_empty())
+                .filter(|metaflow| !metaflow.queue.0.is_empty())
                 .filter_map(|metaflow| match metaflow.state {
                     flow_ethos::State::Awake(flow_id) => Some(flow_id),
                     _ => None,
                 })
                 .filter(|flow_id| {
-                    matches!(self.store.address_hold(flow_id), Ok(None))
-                        && self.turn_end_recorded(flow_id)
+                    matches!(self.store.address_hold(&flow_id.0), Ok(None))
+                        && self.turn_end_recorded(&flow_id.0)
                 })
                 .collect::<Vec<_>>()
         };
         for flow_id in seats {
-            self.settle_stopped(&flow_id);
+            self.settle_stopped(&flow_id.0);
         }
     }
 }
@@ -1420,17 +1439,20 @@ impl SleepsAndWakesSeats for RunningNexus {
             let flow_ethos::State::Awake(flow_id) = metaflow.state else {
                 return;
             };
-            if metaflow.queue.is_empty()
+            if metaflow.queue.0.is_empty()
                 || self.waking.is_waking(address)
-                || !matches!(self.store.address_hold(&flow_id), Ok(None))
+                || !matches!(self.store.address_hold(&flow_id.0), Ok(None))
                 || !matches!(
-                    crate::store::restart::RecordsRestarts::restart_record(&*self.store, &flow_id),
+                    crate::store::restart::RecordsRestarts::restart_record(
+                        &*self.store,
+                        &flow_id.0
+                    ),
                     Ok(None)
                 )
             {
                 return;
             }
-            let Ok(Some(node)) = self.store.flow_node(&flow_id) else {
+            let Ok(Some(node)) = self.store.flow_node(&flow_id.0) else {
                 return;
             };
             if matches!(
@@ -1443,7 +1465,7 @@ impl SleepsAndWakesSeats for RunningNexus {
             // Pressing work is handed over now, the Soft work queued before
             // it included; the delivery engine interrupts only for
             // HardAbrupt. Soft work alone waits for the seat's idle event.
-            if self.waits_for_idle(&metaflow.queue, &flow_id) {
+            if self.waits_for_idle(&metaflow.queue.0, &flow_id.0) {
                 return;
             }
             if let Some(lease) = self.waking.hold(address) {
@@ -1510,21 +1532,22 @@ impl SleepsAndWakesSeats for RunningNexus {
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
         let last = metaflow
             .past
+            .0
             .last()
-            .and_then(|flow_id| self.last_launch_profile(flow_id));
+            .and_then(|flow_id| self.last_launch_profile(&flow_id.0));
         // A declared metaflow wakes with the modules it is bound to; one
         // never declared, with those its last launch named.
         match (self.store.metaflow_declaration(&metaflow.address), last) {
             (Ok(Some(declared)), last) => WakePlan::Fresh(FreshContext {
                 herdr_session_name: last
                     .map(|profile| profile.herdr_session_name)
-                    .unwrap_or_else(|| "default".to_owned()),
+                    .unwrap_or_else(|| signal_flow::HerdrSessionName("default".to_owned())),
                 flow_kind: declared.flow_kind.clone(),
                 tool_set: declared.tool_set.clone(),
                 system_modules: declared.system_modules,
                 user_modules: declared.user_modules,
                 leave_outs_option: None,
-                purpose: declared.purpose,
+                purpose: crate::generated::starter::Purpose(declared.purpose.0),
             }),
             (_, Some(profile)) => WakePlan::Fresh(FreshContext {
                 herdr_session_name: profile.herdr_session_name,
@@ -1533,7 +1556,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 system_modules: profile.system_modules,
                 user_modules: profile.user_modules,
                 leave_outs_option: profile.leave_outs_option,
-                purpose: String::new(),
+                purpose: crate::generated::starter::Purpose(String::new()),
             }),
             (_, None) => WakePlan::Unplaceable,
         }
@@ -1543,6 +1566,7 @@ impl SleepsAndWakesSeats for RunningNexus {
         metaflow.state == flow_ethos::State::Asleep
             && (metaflow
                 .queue
+                .0
                 .iter()
                 .any(|entry| !matches!(entry.message, signal_flow::Message::Soft(_)))
                 || matches!(self.store.successor_intent(&metaflow.address), Ok(Some(_))))
@@ -1565,7 +1589,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|metaflow| {
-                    !metaflow.queue.is_empty()
+                    !metaflow.queue.0.is_empty()
                         && matches!(metaflow.state, flow_ethos::State::Awake(_))
                 })
                 .map(|metaflow| metaflow.address)
@@ -1593,7 +1617,7 @@ impl SleepsAndWakesSeats for RunningNexus {
             for intent in self.store.successor_intents().unwrap_or_default() {
                 match self.store.metaflow(&intent.address) {
                     Ok(Some(metaflow)) => match metaflow.state {
-                        flow_ethos::State::Awake(current) if current == intent.predecessor => {
+                        flow_ethos::State::Awake(current) if current.0 == intent.predecessor => {
                             match intent.cause {
                                 SuccessionCause::Refresh | SuccessionCause::Exit => {
                                     refreshes.push(current);
@@ -1604,7 +1628,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                             }
                         }
                         flow_ethos::State::Awake(current) => {
-                            if !matches!(self.store.address_hold(&current), Ok(Some(_))) {
+                            if !matches!(self.store.address_hold(&current.0), Ok(Some(_))) {
                                 let _ = self.store.forget_successor(&intent.address);
                             }
                         }
@@ -1619,7 +1643,7 @@ impl SleepsAndWakesSeats for RunningNexus {
             (refreshes, owed)
         };
         for flow_id in refreshes {
-            self.settle_stopped(&flow_id);
+            self.settle_stopped(&flow_id.0);
         }
         for intent in owed {
             let predecessor = intent.predecessor.clone();
@@ -1727,7 +1751,7 @@ impl RefreshesMetaflows for RunningNexus {
         // A restart holds the flow's Address as a refresh would.
         if let flow_ethos::State::Awake(current) = &metaflow.state
             && !matches!(
-                crate::store::restart::RecordsRestarts::restart_record(&*self.store, current),
+                crate::store::restart::RecordsRestarts::restart_record(&*self.store, &current.0),
                 Ok(None)
             )
         {
@@ -1739,7 +1763,7 @@ impl RefreshesMetaflows for RunningNexus {
         // A flow whose launch is not yet confirmed only holds its Address:
         // the launch that holds it is the owed successor's, still pending
         // or ambiguous, or a waking still running.
-        match self.store.address_hold(&flow_id) {
+        match self.store.address_hold(&flow_id.0) {
             Ok(None) => {}
             Ok(Some(_)) => {
                 return Response::RefreshRejected(match self.store.successor_intent(address) {
@@ -1750,7 +1774,7 @@ impl RefreshesMetaflows for RunningNexus {
             }
             Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
         }
-        let node = match self.store.flow_node(&flow_id) {
+        let node = match self.store.flow_node(&flow_id.0) {
             Ok(Some(node)) => node,
             Ok(None) => {
                 return Response::Refused(Refusal::Unknown(Unknown_Data::FlowId(flow_id)));
@@ -1774,8 +1798,8 @@ impl RefreshesMetaflows for RunningNexus {
         let node = self.herdr.refresh_route(node);
         // A refresh never closes a working flow, whoever asks: one that does
         // not rest now is refreshed at its idle event.
-        if !self.rests_for_closing(&flow_id) {
-            return self.queue_refresh(address, &flow_id);
+        if !self.rests_for_closing(&flow_id.0) {
+            return self.queue_refresh(address, &flow_id.0);
         }
         self.refresh_held(address, metaflow, flow_id, node, turn, lock)
     }
@@ -1804,8 +1828,8 @@ impl RefreshesMetaflows for RunningNexus {
                     self.store.metaflow(&address),
                     Ok(Some(metaflow)) if metaflow.state == flow_ethos::State::Awake(predecessor.clone())
                 )
-                && !self.launch_known(&profile.launch_request_id)
-                && !self.rests_for_closing(&predecessor)
+                && !self.launch_known(&profile.launch_request_id.0)
+                && !self.rests_for_closing(&predecessor.0)
             {
                 return self.queue_replacement(profile, origin, predecessor);
             }
@@ -1900,6 +1924,7 @@ impl WaitsForRestToReplace for RunningNexus {
         };
         let wakes = metaflow
             .queue
+            .0
             .iter()
             .any(|entry| !matches!(entry.message, signal_flow::Message::Soft(_)));
         let refreshed = Response::Refreshed(Refreshed {
@@ -1914,14 +1939,17 @@ impl WaitsForRestToReplace for RunningNexus {
             // wake, drain or delivery of the metaflow out meanwhile.
             drop(turn);
             let replaced =
-                self.refresh_successor_first(&flow_id, &metaflow, SuccessionCause::Ordered);
+                self.refresh_successor_first(&flow_id.0, &metaflow, SuccessionCause::Ordered);
             drop(lock);
             self.wake_deferred();
             return match replaced {
                 AtStop::Refreshed(_) => {
                     eprintln!(
                         "flow-nexus: flow {flow_id} refreshed; {:?} {} {:?} runs its successor",
-                        address.aspect, address.topic, address.model
+                        address.aspect,
+                        address.topic.0,
+                        address.model,
+                        flow_id = flow_id.0
                     );
                     // What queued while the lock stood is handed to the
                     // successor, oldest first.
@@ -1951,7 +1979,7 @@ impl WaitsForRestToReplace for RunningNexus {
                 _ => Response::RefreshRejected(RefreshRejection::PersistenceRefused),
             };
         }
-        if let Err(outcome) = self.close_at_rest(&flow_id, &node) {
+        if let Err(outcome) = self.close_at_rest(&flow_id.0, &node) {
             return Response::RefreshRejected(match *outcome {
                 Outcome::Failed(Failed_Data::HerdrRefused) => RefreshRejection::CloseRefused,
                 _ => RefreshRejection::PersistenceRefused,
@@ -1964,7 +1992,10 @@ impl WaitsForRestToReplace for RunningNexus {
         drop(turn);
         eprintln!(
             "flow-nexus: flow {flow_id} refreshed; {:?} {} {:?} sleeps until a waking request",
-            address.aspect, address.topic, address.model
+            address.aspect,
+            address.topic.0,
+            address.model,
+            flow_id = flow_id.0
         );
         refreshed
     }
@@ -1976,7 +2007,7 @@ impl WaitsForRestToReplace for RunningNexus {
                 return match order.order {
                     ReplacementOrder::Refresh => Response::RefreshQueued(RefreshQueued {
                         address: address.clone(),
-                        flow_id: flow_id.to_owned(),
+                        flow_id: signal_flow::FlowId(flow_id.to_owned()),
                     }),
                     ReplacementOrder::Launch(_) => {
                         Response::RefreshRejected(RefreshRejection::Locked)
@@ -1996,7 +2027,7 @@ impl WaitsForRestToReplace for RunningNexus {
         eprintln!("flow-nexus: flow {flow_id} works; its refresh waits for its rest");
         Response::RefreshQueued(RefreshQueued {
             address: address.clone(),
-            flow_id: flow_id.to_owned(),
+            flow_id: signal_flow::FlowId(flow_id.to_owned()),
         })
     }
 
@@ -2016,11 +2047,11 @@ impl WaitsForRestToReplace for RunningNexus {
         let address = profile.address.clone();
         // The model the Replace launches with, as it will at the rest.
         match self.store.configured_model(&address) {
-            Ok(Some(model)) => profile.model_name = model,
+            Ok(Some(model)) => profile.model_name = signal_flow::ModelName(model),
             Ok(None) | Err(_) => return persistence(),
         }
         match self.store.ordered_replacement(&address) {
-            Ok(Some(order)) if order.predecessor == predecessor => {
+            Ok(Some(order)) if order.predecessor == predecessor.0 => {
                 return match order.ordered_launch() {
                     Some(launch) if launch.launch_profile == profile && launch.origin == origin => {
                         Response::LaunchPending(launch.waiting_attempt())
@@ -2033,7 +2064,8 @@ impl WaitsForRestToReplace for RunningNexus {
         }
         // A successor that cannot compose is refused now, not at the rest.
         let mut composing = profile.clone();
-        composing.launch_request_id = crate::sending::MintsId::minted_id("compose");
+        composing.launch_request_id =
+            signal_flow::LaunchRequestId(crate::sending::MintsId::minted_id("compose"));
         let prompt_sha256 = match self.perform(Operation::Compose(composing)) {
             Outcome::Composed(launch) => launch.first_prompt_payload.prompt_sha256,
             refused => return Self::as_replacement(Self::composition_refused(refused)),
@@ -2041,20 +2073,23 @@ impl WaitsForRestToReplace for RunningNexus {
         let launch = OrderedLaunch {
             launch_profile: profile,
             origin,
-            prompt_sha256,
+            prompt_sha256: prompt_sha256.0,
         };
         if self
             .store
             .order_replacement(OrderedReplacement {
                 address,
-                predecessor: predecessor.clone(),
+                predecessor: predecessor.clone().0,
                 order: ReplacementOrder::Launch(Box::new(launch.clone())),
             })
             .is_err()
         {
             return persistence();
         }
-        eprintln!("flow-nexus: flow {predecessor} works; its replacement waits for its rest");
+        eprintln!(
+            "flow-nexus: flow {predecessor} works; its replacement waits for its rest",
+            predecessor = predecessor.0
+        );
         Response::LaunchPending(launch.waiting_attempt())
     }
 
@@ -2072,9 +2107,9 @@ impl WaitsForRestToReplace for RunningNexus {
                 .store
                 .owe_successor(SuccessorIntent {
                     address: address.clone(),
-                    predecessor,
+                    predecessor: predecessor.0,
                     cause: SuccessionCause::Replace,
-                    launch_request_id: profile.launch_request_id.clone(),
+                    launch_request_id: profile.launch_request_id.clone().0,
                 })
                 .is_err()
         {
@@ -2110,9 +2145,14 @@ impl WaitsForRestToReplace for RunningNexus {
             order.predecessor
         );
         let response = match order.order {
-            ReplacementOrder::Refresh => {
-                self.refresh_held(&address, metaflow, order.predecessor, node, turn, lock)
-            }
+            ReplacementOrder::Refresh => self.refresh_held(
+                &address,
+                metaflow,
+                signal_flow::FlowId(order.predecessor),
+                node,
+                turn,
+                lock,
+            ),
             ReplacementOrder::Launch(launch) => {
                 drop(turn);
                 let OrderedLaunch {
@@ -2175,7 +2215,7 @@ impl WaitsForRestToReplace for RunningNexus {
         profile.flow_id_option = None;
         let launch_request_id = profile.launch_request_id.clone();
         let response = self.start(profile, launch.origin);
-        let response = self.settle(&launch_request_id, response);
+        let response = self.settle(&launch_request_id.0, response);
         let _ = self.store.forget_ordered_replacement(&order.address);
         eprintln!(
             "flow-nexus: flow {} ended before it rested; the Launch ordered for it starts: {response:?}",
@@ -2195,7 +2235,7 @@ impl WaitsForRestToReplace for RunningNexus {
             for order in self.store.ordered_replacements().unwrap_or_default() {
                 match self.store.metaflow(&order.address) {
                     Ok(Some(metaflow)) => match metaflow.state {
-                        flow_ethos::State::Awake(current) if current == order.predecessor => {
+                        flow_ethos::State::Awake(current) if current.0 == order.predecessor => {
                             resting.push(current);
                         }
                         flow_ethos::State::Asleep => orphans.push(order.address),
@@ -2214,8 +2254,8 @@ impl WaitsForRestToReplace for RunningNexus {
         // A flow that rests now has had its idle event; one that works is
         // kept for its next.
         for flow_id in resting {
-            if self.rests_for_closing(&flow_id) {
-                self.settle_stopped(&flow_id);
+            if self.rests_for_closing(&flow_id.0) {
+                self.settle_stopped(&flow_id.0);
             }
         }
         for address in orphans {
@@ -2231,7 +2271,7 @@ impl PerformsWakeAndDrain for RunningNexus {
             Err(refusal) => {
                 eprintln!(
                     "flow-nexus: wake of {:?} {} {:?} refused: {refusal:?}",
-                    address.aspect, address.topic, address.model
+                    address.aspect, address.topic.0, address.model
                 );
                 // Nothing was taken: the work is still queued, oldest first.
                 Outcome::Failed(refusal.failure())
@@ -2269,7 +2309,7 @@ impl DrainsHeldSeats for RunningNexus {
             Ok(_) => return Outcome::Failed(Failed_Data::NotAwake),
             Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
         };
-        let node = match self.store.flow_node(&flow_id) {
+        let node = match self.store.flow_node(&flow_id.0) {
             Ok(Some(node)) => node,
             _ => return Outcome::Failed(Failed_Data::StoreRefused),
         };
@@ -2282,15 +2322,15 @@ impl DrainsHeldSeats for RunningNexus {
             Ok(Some(attempt)) => match self.reconcile_delivery(&attempt) {
                 Reconciled::Settled(queued, SeatAfter::Resting) => drained.push(queued),
                 Reconciled::Settled(queued, SeatAfter::InItsTurn) => {
-                    if attempt.flow_id == flow_id
-                        && attempt.thread_id == node.session_id
+                    if attempt.flow_id == flow_id.0
+                        && attempt.thread_id == node.session_id.0
                         && node.harness_kind == HarnessKind::Codex
                     {
                         // Only this bound seat's turn can hold its work.
                         // A predecessor's receipt never marks its successor busy.
                         // The settled turn may still run: what follows waits
                         // for its end.
-                        self.codex_turns.delivered(&node.session_id);
+                        self.codex_turns.delivered(&node.session_id.0);
                         return Outcome::Drained(vec![queued]);
                     }
                     drained.push(queued);
@@ -2339,12 +2379,12 @@ impl DrainsHeldSeats for RunningNexus {
         // bound to is queued once its transcript shows it, so the binding
         // is free for the request now oldest.
         self.reconcile_typed(&address);
-        self.queue_simplified_answer(&flow_id);
+        self.queue_simplified_answer(&flow_id.0);
         let queue = match self.store.metaflow(&address) {
             Ok(Some(metaflow)) => metaflow.queue,
             _ => return Outcome::Failed(Failed_Data::StoreRefused),
         };
-        let Some(oldest) = queue.first().cloned() else {
+        let Some(oldest) = queue.0.first().cloned() else {
             return Outcome::Drained(drained);
         };
         let response_request = matches!(
@@ -2371,13 +2411,13 @@ impl DrainsHeldSeats for RunningNexus {
         );
         if response_request
             && self
-                .last_launch_profile(&flow_id)
+                .last_launch_profile(&flow_id.0)
                 .is_some_and(|profile| profile.flow_kind == signal_flow::FlowKind::Simplified)
             && let signal_flow::SentBy::Sender(recipient) = &oldest.sent_by
         {
             let binding = SimplifiedReplyBinding {
-                flow_id: flow_id.clone(),
-                input_delivery_id: oldest.logical_delivery_id.clone(),
+                flow_id: flow_id.clone().0,
+                input_delivery_id: oldest.logical_delivery_id.clone().0,
                 source: address.clone(),
                 recipient: recipient.clone(),
                 completed: false,
@@ -2390,12 +2430,12 @@ impl DrainsHeldSeats for RunningNexus {
         // triggering one and all held behind it. A Simplified seat binds its
         // reply to one input, so it takes its oldest alone.
         let simplified = self
-            .last_launch_profile(&flow_id)
+            .last_launch_profile(&flow_id.0)
             .is_some_and(|profile| profile.flow_kind == signal_flow::FlowKind::Simplified);
         let cohort: Vec<QueueEntry> = if simplified {
             vec![oldest.clone()]
         } else {
-            queue
+            queue.0
         };
         let refused = |drained: Vec<QueueEntry>, failure| {
             if drained.is_empty() {
@@ -2411,15 +2451,15 @@ impl DrainsHeldSeats for RunningNexus {
                 None => return refused(drained, Failed_Data::HerdrRefused),
             },
             HarnessKind::Codex => {
-                let model = match self.store.role(&flow_id) {
+                let model = match self.store.role(&flow_id.0) {
                     Ok(Some(role)) => role.model_name,
                     _ => return refused(drained, Failed_Data::StoreRefused),
                 };
-                let adapter = match self.codex_endpoints.current().adapter_for(&model) {
+                let adapter = match self.codex_endpoints.current().adapter_for(&model.0) {
                     Ok(adapter) => adapter,
                     Err(_) => return refused(drained, Failed_Data::CodexRefused),
                 };
-                match adapter.newest_turn(&node.session_id) {
+                match adapter.newest_turn(&node.session_id.0) {
                     Ok(newest) => NativeHistoryAnchor::CodexTurns(newest),
                     Err(_) => return refused(drained, Failed_Data::CodexRefused),
                 }
@@ -2427,8 +2467,8 @@ impl DrainsHeldSeats for RunningNexus {
         };
         let attempt = match self.store.prepare_oldest_delivery(
             &address,
-            &flow_id,
-            &node.session_id,
+            &flow_id.0,
+            &node.session_id.0,
             node.harness_kind.clone(),
             anchor,
         ) {
@@ -2477,7 +2517,7 @@ impl DrainsHeldSeats for RunningNexus {
         };
         let result = self.deliver_while_waking(
             meta_signal_flow::DeliveryRequest {
-                delivery_id: attempt.attempt_id.clone(),
+                delivery_id: meta_signal_flow::DeliveryId(attempt.attempt_id.clone()),
                 flow_id: flow_id.clone(),
                 message,
             },
@@ -2505,7 +2545,7 @@ impl DrainsHeldSeats for RunningNexus {
         if let Reconciled::Settled(..) = self.reconcile_delivery(&attempt)
             && node.harness_kind == HarnessKind::Codex
         {
-            self.codex_turns.delivered(&node.session_id);
+            self.codex_turns.delivered(&node.session_id.0);
         }
         drained.extend(typed);
         Outcome::Drained(drained)
@@ -2529,10 +2569,10 @@ impl DrainsHeldSeats for RunningNexus {
                 _ => {}
             }
             let remaining = match self.store.metaflow(&address) {
-                Ok(Some(metaflow)) => metaflow.queue.len(),
+                Ok(Some(metaflow)) => metaflow.queue.0.len(),
                 _ => return Outcome::Failed(Failed_Data::StoreRefused),
             };
-            let now_removed = queued.len().saturating_sub(remaining);
+            let now_removed = queued.0.len().saturating_sub(remaining);
             if now_removed == removed || remaining == 0 {
                 return Outcome::Drained(delivered);
             }
@@ -2662,7 +2702,7 @@ impl ParksCohort for RunningNexus {
                         .and_then(|role| {
                             self.codex_endpoints
                                 .current()
-                                .adapter_for(&role.model_name)
+                                .adapter_for(&role.model_name.0)
                                 .ok()
                         })
                         .and_then(|adapter| {
@@ -2791,7 +2831,7 @@ impl ParksCohort for RunningNexus {
         else {
             return;
         };
-        let latest = self.typed(address, &flow_id).into_iter().last();
+        let latest = self.typed(address, &flow_id.0).into_iter().last();
         if let Some(attempt) = latest
             && let Ok((run, turn_id, native_receipt, seat_after)) = self.find_receipt(&attempt)
         {
@@ -2809,7 +2849,7 @@ impl ParksCohort for RunningNexus {
                 _ => continue,
             };
             let mut covered = HashSet::new();
-            for attempt in self.typed(address, &flow_id) {
+            for attempt in self.typed(address, &flow_id.0) {
                 if !covered.insert(attempt.native_request_id) {
                     continue;
                 }
@@ -2883,7 +2923,7 @@ impl WakesInParts for RunningNexus {
                 Some(signal_flow::NativeReceipt {
                     harness_kind: harness_kind_for_attempt.clone()?,
                     native_session_id: observed.native_session_id,
-                    native_prompt_id: observed.native_turn_id,
+                    native_prompt_id: signal_flow::NativePromptId(observed.native_turn_id.0),
                 })
             })
             .or_else(|| {
@@ -2903,7 +2943,7 @@ impl WakesInParts for RunningNexus {
                 Some(signal_flow::NativeReceipt {
                     harness_kind: harness_kind_for_attempt.clone()?,
                     native_session_id: observed.native_session_id,
-                    native_prompt_id: observed.native_turn_id,
+                    native_prompt_id: signal_flow::NativePromptId(observed.native_turn_id.0),
                 })
             })
             .or_else(|| {
@@ -2917,7 +2957,9 @@ impl WakesInParts for RunningNexus {
                         Event::PromptSubmitted(prompt) => Some(signal_flow::NativeReceipt {
                             harness_kind: harness_kind.clone()?,
                             native_session_id: prompt.native_session_id_option?,
-                            native_prompt_id: prompt.prompt_id_option?,
+                            native_prompt_id: signal_flow::NativePromptId(
+                                prompt.prompt_id_option?.0,
+                            ),
                         }),
                         _ => None,
                     })
@@ -2941,7 +2983,7 @@ impl WakesInParts for RunningNexus {
         {
             let binding = SimplifiedReplyBinding {
                 flow_id: flow_id.to_owned(),
-                input_delivery_id: oldest.logical_delivery_id.clone(),
+                input_delivery_id: oldest.logical_delivery_id.clone().0,
                 source: address.clone(),
                 recipient: recipient.clone(),
                 completed: false,
@@ -2970,7 +3012,7 @@ impl WakesInParts for RunningNexus {
         };
         // A metaflow owed a successor wakes with nothing queued.
         let owed = matches!(self.store.successor_intent(address), Ok(Some(_)));
-        if metaflow.queue.is_empty() && !owed {
+        if metaflow.queue.0.is_empty() && !owed {
             return Err(WakeRefusal::NothingQueued);
         }
         let plan = self.wake_plan(&metaflow);
@@ -2984,26 +3026,27 @@ impl WakesInParts for RunningNexus {
         // one sender, so its whole selected batch is its oldest request;
         // the rest remains ordered for the next turn.
         let startup = if simplified {
-            metaflow.queue.first().cloned().into_iter().collect()
+            flow_ethos::Queue(metaflow.queue.0.first().cloned().into_iter().collect())
         } else {
             metaflow.queue.clone()
         };
-        let startup_text = startup.prompt_text(&metaflow.address);
+        let startup_text = startup.0.prompt_text(&metaflow.address);
         // The last flow's session must not be running still: a seat that
         // flow's harness keeps, as one started by hand would, is never
         // joined by a second flow of the same metaflow.
         if let Some(node) = metaflow
             .past
+            .0
             .last()
-            .and_then(|flow_id| self.store.flow_node(flow_id).ok().flatten())
-            .filter(|node| !node.session_id.is_empty())
+            .and_then(|flow_id| self.store.flow_node(&flow_id.0).ok().flatten())
+            .filter(|node| !node.session_id.0.is_empty())
         {
             let mut sessions = Vec::new();
             if let WakePlan::Fresh(fresh) = &plan {
-                sessions.push(fresh.herdr_session_name.clone());
+                sessions.push(fresh.herdr_session_name.0.clone());
             }
             if let HerdrRouteSelection::Available(route) = &node.herdr_route_selection {
-                sessions.push(route.herdr_session_name.clone());
+                sessions.push(route.herdr_session_name.0.clone());
             }
             self.refuse_live_session(&node, &sessions)?;
         }
@@ -3028,23 +3071,23 @@ impl WakesInParts for RunningNexus {
                     _ => metaflow.queue.clone(),
                 };
                 if let Err(error) = self.store.mark_queue_retryable(
-                    &queue,
+                    &queue.0,
                     signal_flow::RetryCause::WakeRefused(rejection.clone()),
                 ) {
                     eprintln!(
                         "flow-nexus: the queue of {:?} {} {:?} is not marked WakeRefused: {error}",
-                        address.aspect, address.topic, address.model
+                        address.aspect, address.topic.0, address.model
                     );
                 }
                 return Err(WakeRefusal::StartRejected(rejection));
             }
         };
         let flow_id = started.flow_id;
-        if let Some(predecessor) = metaflow.past.last() {
+        if let Some(predecessor) = metaflow.past.0.last() {
             use crate::store::handover::HoldsHandovers;
             if self
                 .store
-                .close_handover_for_successor(address, predecessor, &flow_id)
+                .close_handover_for_successor(address, &predecessor.0, &flow_id.0)
                 .is_err()
             {
                 return Err(WakeRefusal::StoreUnreadable);
@@ -3064,22 +3107,25 @@ impl WakesInParts for RunningNexus {
                 // If a response is lost, recovery counts it delivered only
                 // when the seat is up and its transcript shows this batch;
                 // otherwise the queue and its uncertainty stay preserved.
-                delivered: 0,
+                delivered_count: crate::generated::operation::DeliveredCount(0),
             },
         ))) {
             Outcome::Recorded
                 if self.settle_startup(
                     address,
-                    &flow_id,
+                    &flow_id.0,
                     &started.launch_request_id,
-                    &startup,
+                    &startup.0,
                     simplified,
                 ) =>
             {
                 Ok(flow_id)
             }
             _ => {
-                eprintln!("flow-nexus: flow {flow_id} woke but is not recorded Awake");
+                eprintln!(
+                    "flow-nexus: flow {flow_id} woke but is not recorded Awake",
+                    flow_id = flow_id.0
+                );
                 Err(WakeRefusal::AwakeNotRecorded)
             }
         }
@@ -3106,7 +3152,7 @@ impl WakesInParts for RunningNexus {
         };
         let launch_request_id = format!(
             "wake-{}-{}",
-            metaflow.past.len(),
+            metaflow.past.0.len(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|elapsed| elapsed.as_nanos())
@@ -3117,19 +3163,19 @@ impl WakesInParts for RunningNexus {
             launch_request_id: launch_request_id.clone(),
             model_name: model,
             effort: <Self as crate::sending::ChoosesEffort>::effort_of(address).into(),
-            herdr_session_name: fresh.herdr_session_name,
+            herdr_session_name: fresh.herdr_session_name.0,
             system_modules: fresh.system_modules,
             user_modules: fresh.user_modules,
-            leave_outs_option: fresh.leave_outs_option,
+            leave_outs_option: fresh.leave_outs_option.map(|value| value.0),
             flow_kind: fresh.flow_kind,
             tool_set: fresh.tool_set,
-            prompt: text.with_purpose(&fresh.purpose),
+            prompt: text.with_purpose(&fresh.purpose.0),
         };
         // The metaflow's last flow is the predecessor this wake succeeds, and
         // its handover is given to the new flow. The metaflow is Asleep, so
         // the predecessor takes no part in taking its Address.
         let mut profile = seat.fresh_profile();
-        profile.flow_id_option = metaflow.past.last().cloned();
+        profile.flow_id_option = metaflow.past.0.last().cloned();
         self.start_unbound(profile).map(|flow_id| FreshStarted {
             flow_id,
             launch_request_id,
@@ -3160,8 +3206,8 @@ impl WakesInParts for RunningNexus {
         };
         if self.perform(Operation::Record(Record_Data::Context(
             Record_Data_Context_Data {
-                flow_id: flow_id.to_owned(),
-                tokens,
+                flow_id: signal_flow::FlowId(flow_id.to_owned()),
+                tokens: crate::generated::operation::Tokens(tokens),
             },
         ))) != Outcome::Recorded
         {
@@ -3180,7 +3226,7 @@ impl WakesInParts for RunningNexus {
                 Some(true) => {
                     eprintln!(
                         "flow-nexus: flow {} is already running; not woken again",
-                        node.flow_id
+                        node.flow_id.0
                     );
                     return Err(WakeRefusal::SessionLive);
                 }
@@ -3201,7 +3247,9 @@ impl WakesInParts for RunningNexus {
         if closed != Outcome::Closed {
             return Err(Box::new(closed));
         }
-        let recorded = self.perform(Operation::Record(Record_Data::Stopped(flow_id.to_owned())));
+        let recorded = self.perform(Operation::Record(Record_Data::Stopped(
+            signal_flow::FlowId(flow_id.to_owned()),
+        )));
         if recorded != Outcome::Recorded {
             return Err(Box::new(recorded));
         }
@@ -3263,7 +3311,7 @@ impl WakesInParts for RunningNexus {
             }
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
-        profile.launch_request_id = launch_request_id;
+        profile.launch_request_id = signal_flow::LaunchRequestId(launch_request_id);
         let response = {
             let _turn = self
                 .dispatch_gate
@@ -3292,8 +3340,8 @@ impl WakesInParts for RunningNexus {
         // The successor's context is the metaflow's declaration, else what
         // the predecessor's own launch named.
         let mut lineage = metaflow.clone();
-        lineage.past.retain(|past| past != flow_id);
-        lineage.past.push(flow_id.to_owned());
+        lineage.past.0.retain(|past| past.0 != flow_id);
+        lineage.past.0.push(flow_ethos::FlowId(flow_id.to_owned()));
         let WakePlan::Fresh(fresh) = self.wake_plan(&lineage) else {
             return None;
         };
@@ -3303,16 +3351,16 @@ impl WakesInParts for RunningNexus {
             launch_request_id,
             model_name: model,
             effort: <Self as crate::sending::ChoosesEffort>::effort_of(&address).into(),
-            herdr_session_name: fresh.herdr_session_name,
+            herdr_session_name: fresh.herdr_session_name.0,
             system_modules: fresh.system_modules,
             user_modules: fresh.user_modules,
-            leave_outs_option: fresh.leave_outs_option,
+            leave_outs_option: fresh.leave_outs_option.map(|value| value.0),
             flow_kind: fresh.flow_kind,
             tool_set: fresh.tool_set,
-            prompt: "".with_purpose(&fresh.purpose),
+            prompt: "".with_purpose(&fresh.purpose.0),
         };
         let mut profile = seat.fresh_profile();
-        profile.flow_id_option = Some(flow_id.to_owned());
+        profile.flow_id_option = Some(signal_flow::FlowId(flow_id.to_owned()));
         Some(profile)
     }
 
@@ -3345,7 +3393,7 @@ impl WakesInParts for RunningNexus {
         self.reconcile_typed(&address);
         if matches!(
             self.store.metaflow(&address),
-            Ok(Some(metaflow)) if !metaflow.queue.is_empty()
+            Ok(Some(metaflow)) if !metaflow.queue.0.is_empty()
         ) {
             let _ = self.perform(Operation::Drain(address));
         }
@@ -3381,7 +3429,8 @@ impl WakesInParts for RunningNexus {
         // gate, and the lock keeps every wake and refresh out since.
         let metaflow = match self.store.metaflow(&address) {
             Ok(Some(metaflow))
-                if metaflow.state == flow_ethos::State::Awake(intent.predecessor.clone()) =>
+                if metaflow.state
+                    == flow_ethos::State::Awake(flow_ethos::FlowId(intent.predecessor.clone())) =>
             {
                 metaflow
             }
@@ -3402,11 +3451,12 @@ impl WakesInParts for RunningNexus {
                 };
                 let mut profile = attempt.launch_profile;
                 if self.launch_refused(&intent.launch_request_id) {
-                    profile.launch_request_id = crate::sending::MintsId::minted_id("replace");
+                    profile.launch_request_id =
+                        signal_flow::LaunchRequestId(crate::sending::MintsId::minted_id("replace"));
                     if self
                         .store
                         .owe_successor(SuccessorIntent {
-                            launch_request_id: profile.launch_request_id.clone(),
+                            launch_request_id: profile.launch_request_id.clone().0,
                             ..intent
                         })
                         .is_err()
@@ -3563,6 +3613,7 @@ impl WakesInParts for RunningNexus {
         if refresh_due {
             let wakes = metaflow
                 .queue
+                .0
                 .iter()
                 .any(|entry| !matches!(entry.message, signal_flow::Message::Soft(_)));
             // A Maintained metaflow, or one holding work that wakes it, is
@@ -3597,7 +3648,7 @@ impl WakesInParts for RunningNexus {
         // A simplified seat's answer is queued before the seat is handed
         // more or sleeps.
         self.queue_simplified_answer(flow_id);
-        if !metaflow.queue.is_empty() {
+        if !metaflow.queue.0.is_empty() {
             return match self.perform(Operation::Drain(address)) {
                 Outcome::Drained(mut typed) if !typed.is_empty() => {
                     AtStop::Drained(typed.remove(0))

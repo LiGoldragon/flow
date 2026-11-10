@@ -43,18 +43,24 @@ impl ReadsOrdinaryFrames for RunningNexus {
         let flow = pane
             .as_ref()
             .and_then(|pane| self.bound_caller(pane).ok())
-            .and_then(|bound| self.store.flow_node(&bound.flow_id).ok().flatten());
+            .and_then(|bound| self.store.flow_node(&bound.flow_id.0).ok().flatten());
         let native_session = flow
             .as_ref()
             .map(|node| node.session_id.clone())
-            .filter(|session| !session.is_empty());
+            .filter(|session| !session.0.is_empty());
         let process = process.cloned().unwrap_or(Process {
-            pid: caller.map_or(0, |caller| i64::from(caller.process_id)),
-            started: 0,
+            pid: flow_ethos::generated::library::Pid(
+                caller.map_or(flow_ethos::generated::library::Pid(0).0, |caller| {
+                    i64::from(caller.process_id)
+                }),
+            ),
+            started: flow_ethos::generated::library::Started(0),
         });
         let refused = UndecodableFrame {
             flow_id_option: flow.map(|node| node.flow_id),
-            seat_evidence: self.seat_evidence(pane, native_session).typed(process),
+            seat_evidence: self
+                .seat_evidence(pane, native_session.map(|value| value.0))
+                .typed(process),
         };
         eprintln!(
             "flow-nexus: an ordinary frame decoded as no Query ({error}); refused: {refused:?}"

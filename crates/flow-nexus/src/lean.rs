@@ -56,7 +56,7 @@ impl BelongsToHarness for LeaveOut {
 
 impl RendersLeanStart for LeanStart {
     fn refusal(&self) -> Option<LeaveOutRefusal> {
-        for leave_out in &self.leave_outs {
+        for leave_out in &self.leave_outs.0 {
             if matches!(leave_out, LeaveOut::UserSettings) {
                 return Some(LeaveOutRefusal::Indispensable(leave_out.clone()));
             }
@@ -64,7 +64,7 @@ impl RendersLeanStart for LeanStart {
                 return Some(LeaveOutRefusal::NotForHarness(leave_out.clone()));
             }
             if matches!(leave_out, LeaveOut::SkillTool | LeaveOut::BundledSkills)
-                && !self.leave_outs.contains(&LeaveOut::WorkflowTool)
+                && !self.leave_outs.0.contains(&LeaveOut::WorkflowTool)
             {
                 return Some(LeaveOutRefusal::NeedsWorkflowLeftOut(leave_out.clone()));
             }
@@ -74,7 +74,7 @@ impl RendersLeanStart for LeanStart {
 
     fn arguments(&self) -> Vec<String> {
         let mut arguments = Vec::new();
-        for leave_out in &self.leave_outs {
+        for leave_out in &self.leave_outs.0 {
             let switches: &[&str] = match leave_out {
                 LeaveOut::ConfiguredMcpServers => &["--strict-mcp-config"],
                 LeaveOut::SkillTool => &["--disable-slash-commands"],
@@ -120,7 +120,7 @@ impl RendersLeanStart for LeanStart {
 
     fn environment(&self) -> Vec<String> {
         let mut environment = Vec::new();
-        for leave_out in &self.leave_outs {
+        for leave_out in &self.leave_outs.0 {
             let variable = match leave_out {
                 LeaveOut::ClaudeAiConnectors => "ENABLE_CLAUDEAI_MCP_SERVERS=false",
                 LeaveOut::ExplorePlanAgents => "CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS=1",
@@ -140,7 +140,7 @@ impl RendersLeanStart for LeanStart {
 
     fn disallowed_tools(&self) -> Vec<String> {
         let mut tools: Vec<String> = Vec::new();
-        for leave_out in &self.leave_outs {
+        for leave_out in &self.leave_outs.0 {
             let named: &[&str] = match leave_out {
                 LeaveOut::BashTool => &["Bash"],
                 LeaveOut::ToolSearch => &["ToolSearch"],
@@ -165,11 +165,11 @@ impl RendersLeanStart for LeanStart {
     }
 
     fn attribution_off(&self) -> bool {
-        self.leave_outs.contains(&LeaveOut::AttributionReminder)
+        self.leave_outs.0.contains(&LeaveOut::AttributionReminder)
     }
 
     fn skill_listing_off(&self) -> bool {
-        self.leave_outs.contains(&LeaveOut::SkillTool)
+        self.leave_outs.0.contains(&LeaveOut::SkillTool)
     }
 }
 
@@ -181,7 +181,7 @@ mod tests {
     fn lean(harness_kind: HarnessKind, leave_outs: &[LeaveOut]) -> LeanStart {
         LeanStart {
             harness_kind,
-            leave_outs: leave_outs.to_vec(),
+            leave_outs: signal_flow::LeaveOuts(leave_outs.to_vec()),
             tool_set: ToolSet::Default,
         }
     }
@@ -190,7 +190,7 @@ mod tests {
     fn explicit_empty_claude_tool_set_is_passed_to_harness() {
         let launch = LeanStart {
             harness_kind: HarnessKind::Claude,
-            leave_outs: Vec::new(),
+            leave_outs: signal_flow::LeaveOuts(Vec::new()),
             tool_set: ToolSet::Explicit(Vec::new()),
         };
         assert!(launch.refusal().is_none());
@@ -227,7 +227,7 @@ mod tests {
         ] {
             let launch = LeanStart {
                 harness_kind: HarnessKind::Claude,
-                leave_outs: Vec::new(),
+                leave_outs: signal_flow::LeaveOuts(Vec::new()),
                 tool_set: tool_set.clone(),
             };
             let arguments = launch.arguments();

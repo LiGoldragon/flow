@@ -80,7 +80,7 @@ trait ComposesPresentationRole {
 impl ComposesPresentationRole for LaunchComposer {
     fn presentation_prompt(&self, address: &Address) -> Result<Option<String>, CompositionError> {
         if address.aspect != Aspect::Psyche
-            || address.topic != "core"
+            || address.topic.0 != "core"
             || address.model != Model::Fable
         {
             return Ok(None);
@@ -123,8 +123,8 @@ impl ComposesPresentationRole for LaunchComposer {
         }
         let system_prompt_sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
         SystemPrompt {
-            system_prompt_text: text,
-            system_prompt_sha256,
+            system_prompt_text: signal_flow::SystemPromptText(text),
+            system_prompt_sha256: signal_flow::SystemPromptSha256(system_prompt_sha256),
         }
     }
 }
@@ -199,7 +199,11 @@ impl ReadsHandover for LaunchComposer {
         profile: &LaunchProfile,
         launch_root: HandoverRoot<'_>,
     ) -> Result<Option<String>, CompositionError> {
-        let Some(predecessor) = profile.flow_id_option.as_deref() else {
+        let Some(predecessor) = profile
+            .flow_id_option
+            .as_ref()
+            .map(|value| value.0.as_str())
+        else {
             return Ok(None);
         };
         let refused = |fault| CompositionError::HandoverUnreadable {
@@ -237,19 +241,26 @@ impl RendersLaunchSection for LaunchProfile {
         let address = self.address.datomize(Vec::new()).protosize().compact();
         let mut section = format!(
             "Metaflow: {address}\nModel: {}\nEffort: {}\nFlow ID: {}\nNative binding: pending\n",
-            self.model_name,
-            self.effort,
+            self.model_name.0,
+            self.effort.0,
             flow_id.unwrap_or("pending"),
         );
         if let Some(predecessor) = &self.flow_id_option {
-            section.push_str(&format!("Predecessor: {predecessor}\n"));
+            section.push_str(&format!(
+                "Predecessor: {predecessor}\n",
+                predecessor = predecessor.0
+            ));
         }
         match &self.remembering {
-            signal_flow::Remembering::Predecessors(0) => {}
+            signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(0)) => {}
             signal_flow::Remembering::Predecessors(depth) => {
-                section.push_str(&format!("Remembering: predecessors, {depth} deep\n"));
+                section.push_str(&format!(
+                    "Remembering: predecessors, {depth} deep\n",
+                    depth = depth.0
+                ));
             }
             signal_flow::Remembering::Custom(flows) => {
+                let flows: Vec<&str> = flows.iter().map(|flow| flow.0.as_str()).collect();
                 section.push_str(&format!("Remembering: {}\n", flows.join(", ")));
             }
         }
@@ -368,8 +379,8 @@ trait ValidatesLaunchProfile {
 impl ValidatesLaunchProfile for LaunchProfile {
     fn validate(&self) -> Result<(), CompositionError> {
         let profile = self;
-        if profile.launch_request_id.is_empty()
-            || !profile.launch_request_id.bytes().all(|byte| {
+        if profile.launch_request_id.0.is_empty()
+            || !profile.launch_request_id.0.bytes().all(|byte| {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
             })
         {
@@ -377,24 +388,24 @@ impl ValidatesLaunchProfile for LaunchProfile {
                 CompositionRefusal::InvalidLaunchRequestId,
             ));
         }
-        if profile.model_name.is_empty() || profile.model_name.contains(['\r', '\n']) {
+        if profile.model_name.0.is_empty() || profile.model_name.0.contains(['\r', '\n']) {
             return Err(CompositionError::InvalidProfileField(
                 CompositionRefusal::InvalidModelName,
             ));
         }
-        if profile.effort.is_empty() || profile.effort.contains(['\r', '\n']) {
+        if profile.effort.0.is_empty() || profile.effort.0.contains(['\r', '\n']) {
             return Err(CompositionError::InvalidProfileField(
                 CompositionRefusal::InvalidEffort,
             ));
         }
-        if profile.herdr_session_name.is_empty()
-            || profile.herdr_session_name.contains(['\r', '\n'])
+        if profile.herdr_session_name.0.is_empty()
+            || profile.herdr_session_name.0.contains(['\r', '\n'])
         {
             return Err(CompositionError::InvalidProfileField(
                 CompositionRefusal::InvalidHerdrSessionName,
             ));
         }
-        let identities_valid = |identities: &[String]| {
+        let identities_valid = |identities: &[signal_flow::ModuleIdentity]| {
             let mut seen = HashSet::new();
             // An identity is `type:subject`, or a hyphenated name not yet
             // in that form: lowercase letters, digits and hyphens on each
@@ -406,32 +417,35 @@ impl ValidatesLaunchProfile for LaunchProfile {
                     })
             };
             identities.iter().all(|identity| {
-                let well_formed = match identity.split_once(':') {
+                let well_formed = match identity.0.split_once(':') {
                     Some((kind, subject)) => part(kind) && part(subject),
-                    None => part(identity),
+                    None => part(&identity.0),
                 };
                 well_formed && seen.insert(identity)
             })
         };
-        if profile.system_modules.is_empty() || !identities_valid(&profile.system_modules) {
+        if profile.system_modules.0.is_empty() || !identities_valid(&profile.system_modules.0) {
             return Err(CompositionError::InvalidProfileField(
                 CompositionRefusal::InvalidSystemModules,
             ));
         }
-        if !identities_valid(&profile.user_modules)
+        if !identities_valid(&profile.user_modules.0)
             || profile
                 .user_modules
+                .0
                 .iter()
-                .any(|identity| profile.system_modules.contains(identity))
+                .any(|identity| profile.system_modules.0.contains(identity))
         {
             return Err(CompositionError::InvalidProfileField(
                 CompositionRefusal::InvalidUserModules,
             ));
         }
         let remembering_valid = match &profile.remembering {
-            signal_flow::Remembering::Predecessors(depth) => *depth >= 0,
+            signal_flow::Remembering::Predecessors(depth) => {
+                *depth >= signal_flow::RememberingDepth(0)
+            }
             signal_flow::Remembering::Custom(flows) => {
-                !flows.is_empty() && flows.iter().all(|flow| !flow.is_empty())
+                !flows.is_empty() && flows.iter().all(|flow| !flow.0.is_empty())
             }
         };
         if !remembering_valid {
@@ -451,11 +465,11 @@ impl RendersBrief for HarnessedProfile {
         let profile = &self.launch_profile;
         let instruction = profile.instruction_prompt.clone();
         if self.harness_kind == HarnessKind::Claude {
-            return instruction;
+            return instruction.0;
         }
         format!(
             "# Flow launch\n\nHarness: Codex\nHerdr session: {}\nRemote control: app-server endpoint\n\n{}",
-            profile.herdr_session_name, instruction,
+            profile.herdr_session_name.0, instruction.0,
         )
     }
 }
@@ -466,7 +480,7 @@ impl ResolvesLeaveOuts for HarnessedProfile {
     fn effective_leave_outs<N: LeaveOutListing>(
         &self,
         input: N,
-    ) -> Result<Vec<LeaveOut>, CompositionError> {
+    ) -> std::result::Result<signal_flow::LeaveOuts, CompositionError> {
         let leave_outs = self
             .launch_profile
             .leave_outs_option
@@ -494,17 +508,18 @@ impl ComposesVerifiedContext for LaunchComposer {
         // A module is placed by its kind: spirit and intent in the system
         // prompt, every other kind in the first message, whichever list of
         // the launch names it; each keeps its order.
-        let (system_modules, user_modules): (Vec<String>, Vec<String>) = profile
+        let (system_modules, user_modules): (Vec<_>, Vec<_>) = profile
             .system_modules
+            .0
             .iter()
-            .chain(profile.user_modules.iter())
+            .chain(profile.user_modules.0.iter())
             .cloned()
-            .partition(|identity| identity.as_str().placed_in_system_prompt());
+            .partition(|identity| identity.0.as_str().placed_in_system_prompt());
         let request = ContextRequest {
             address: profile.address.clone(),
             harness_kind: input.harness_kind(),
-            system_modules,
-            user_modules,
+            system_modules: signal_flow::SystemModules(system_modules),
+            user_modules: signal_flow::UserModules(user_modules),
             remembered_flows: input.remembered_flows(),
         };
         let composition = self.context.compose_flow_context(&request)?;
@@ -536,21 +551,25 @@ impl CarriesFlowId for ComposedLaunch {
             .launch_profile
             .launch_section(Some(input.text().as_str()));
         let mut text = self.system_prompt.system_prompt_text.clone();
-        match text.rfind(previous_section.as_str()) {
+        match text.0.rfind(previous_section.as_str()) {
             Some(start) => {
-                text.replace_range(start..start + previous_section.len(), &section);
+                text.0
+                    .replace_range(start..start + previous_section.len(), &section);
             }
             None => {
-                if !text.is_empty() && !text.ends_with('\n') {
-                    text.push('\n');
+                if !text.0.is_empty() && !text.0.ends_with('\n') {
+                    text.0.push('\n');
                 }
-                text.push('\n');
-                text.push_str(&section);
+                text.0.push('\n');
+                text.0.push_str(&section);
             }
         }
         let mut launch = self.clone();
         launch.system_prompt = SystemPrompt {
-            system_prompt_sha256: format!("{:x}", Sha256::digest(text.as_bytes())),
+            system_prompt_sha256: signal_flow::SystemPromptSha256(format!(
+                "{:x}",
+                Sha256::digest(text.0.as_bytes())
+            )),
             system_prompt_text: text,
         };
         launch
@@ -582,20 +601,20 @@ impl AssemblesComposedLaunch for LaunchComposer {
         ComposedLaunch {
             target_receipt_request: TargetReceiptRequest {
                 launch_request_id: profile.launch_request_id.clone(),
-                prompt_sha256: prompt_sha256.clone(),
+                prompt_sha256: signal_flow::PromptSha256(prompt_sha256.clone()),
             },
             launch_profile: profile,
             harness_kind: input_0.harness_kind(),
             system_prompt: input_1.system_prompt(),
             first_prompt_payload: FirstPromptPayload {
-                first_prompt_body: body,
-                prompt_sha256,
+                first_prompt_body: signal_flow::FirstPromptBody(body),
+                prompt_sha256: signal_flow::PromptSha256(prompt_sha256),
                 prompt_part_vector: input_3
                     .segments()
                     .into_iter()
                     .map(|text| PromptPart {
-                        prompt_sha256: digest(&text),
-                        prompt_part_text: text,
+                        prompt_sha256: signal_flow::PromptSha256(digest(&text)),
+                        prompt_part_text: signal_flow::PromptPartText(text),
                     })
                     .collect(),
             },
@@ -681,7 +700,7 @@ impl ComposesInRoot for LaunchComposer {
         let leave_outs = harnessed.effective_leave_outs(input_1)?;
         let verified = self.verified_context(&harnessed)?;
         let brief = if harnessed.launch_profile.flow_kind == signal_flow::FlowKind::Simplified {
-            harnessed.launch_profile.instruction_prompt.clone()
+            harnessed.launch_profile.instruction_prompt.0.clone()
         } else {
             harnessed.brief()
         };
@@ -791,8 +810,8 @@ pub struct FreshSeat {
     pub model_name: String,
     pub effort: String,
     pub herdr_session_name: String,
-    pub system_modules: Vec<String>,
-    pub user_modules: Vec<String>,
+    pub system_modules: signal_flow::SystemModules,
+    pub user_modules: signal_flow::UserModules,
     pub leave_outs_option: Option<Vec<LeaveOut>>,
     pub flow_kind: signal_flow::FlowKind,
     pub tool_set: signal_flow::ToolSet,
@@ -841,19 +860,19 @@ impl JoinsPurpose for str {
 impl ProfilesFreshSeat for FreshSeat {
     fn fresh_profile(&self) -> LaunchProfile {
         LaunchProfile {
-            launch_request_id: self.launch_request_id.clone(),
+            launch_request_id: signal_flow::LaunchRequestId(self.launch_request_id.clone()),
             system_modules: self.system_modules.clone(),
             user_modules: self.user_modules.clone(),
             address: self.address.clone(),
-            model_name: self.model_name.clone(),
-            effort: self.effort.clone(),
+            model_name: signal_flow::ModelName(self.model_name.clone()),
+            effort: signal_flow::Effort(self.effort.clone()),
             flow_id_option: None,
-            remembering: signal_flow::Remembering::Predecessors(1),
-            herdr_session_name: self.herdr_session_name.clone(),
-            leave_outs_option: self.leave_outs_option.clone(),
+            remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(1)),
+            herdr_session_name: signal_flow::HerdrSessionName(self.herdr_session_name.clone()),
+            leave_outs_option: self.leave_outs_option.clone().map(signal_flow::LeaveOuts),
             flow_kind: self.flow_kind.clone(),
             tool_set: self.tool_set.clone(),
-            instruction_prompt: self.prompt.clone(),
+            instruction_prompt: signal_flow::InstructionPrompt(self.prompt.clone()),
         }
     }
 }
@@ -874,23 +893,29 @@ pub(crate) mod tests {
     /// A launch profile and a composer holding its modules, for tests.
     pub(crate) fn fixture_profile() -> LaunchProfile {
         LaunchProfile {
-            launch_request_id: "launch-42".into(),
-            system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-            user_modules: vec!["operation-main-flow".into(), "knowledge-flow".into()],
+            launch_request_id: signal_flow::LaunchRequestId("launch-42".into()),
+            system_modules: signal_flow::SystemModules(vec![
+                signal_flow::ModuleIdentity("spirit-core".into()),
+                signal_flow::ModuleIdentity("intent-flow".into()),
+            ]),
+            user_modules: signal_flow::UserModules(vec![
+                signal_flow::ModuleIdentity("operation-main-flow".into()),
+                signal_flow::ModuleIdentity("knowledge-flow".into()),
+            ]),
             address: Address {
                 aspect: Aspect::Field,
-                topic: "flow".into(),
+                topic: flow_ethos::Topic("flow".into()),
                 model: Model::Sol,
             },
-            model_name: "gpt-6-astra".into(),
-            effort: "medium".into(),
-            flow_id_option: Some("1b8ac0".into()),
-            remembering: Remembering::Custom(vec!["836818".into()]),
-            herdr_session_name: "messaging-build".into(),
+            model_name: flow_ethos::ModelName("gpt-6-astra".into()),
+            effort: signal_flow::Effort("medium".into()),
+            flow_id_option: Some(flow_ethos::FlowId("1b8ac0".into())),
+            remembering: Remembering::Custom(vec![flow_ethos::FlowId("836818".into())]),
+            herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
             leave_outs_option: None,
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
-            instruction_prompt: "Carry the bounded task.".into(),
+            instruction_prompt: signal_flow::InstructionPrompt("Carry the bounded task.".into()),
         }
     }
 
@@ -948,7 +973,10 @@ pub(crate) mod tests {
         let composed = composer
             .compose(
                 HarnessedProfile {
-                    remembered_flows: vec!["36b71b".into(), "e3c8c1".into()],
+                    remembered_flows: crate::generated::starter::RememberedFlows(vec![
+                        flow_ethos::FlowId("36b71b".into()),
+                        flow_ethos::FlowId("e3c8c1".into()),
+                    ]),
                     harness_kind: HarnessKind::Claude,
                     launch_profile: fixture_profile(),
                 },
@@ -956,17 +984,22 @@ pub(crate) mod tests {
             )
             .unwrap();
         let body = &composed.first_prompt_payload.first_prompt_body;
-        let user = body.find("Knowledge body.").expect("USER modules");
+        let user = body.0.find("Knowledge body.").expect("USER modules");
         let first = body
+            .0
             .find("You can't leave me without a primary.")
             .expect("the first remembered flow's records");
-        let second = body.find("A crazy idea.").expect("the second's records");
-        let brief = body.find("Carry the bounded task.").expect("the brief");
-        assert!(user < first && first < second && second < brief, "{body}");
+        let second = body.0.find("A crazy idea.").expect("the second's records");
+        let brief = body.0.find("Carry the bounded task.").expect("the brief");
+        assert!(
+            user < first && first < second && second < brief,
+            "{body}",
+            body = body.0
+        );
         let forgetting = composer
             .compose(
                 HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: HarnessKind::Claude,
                     launch_profile: fixture_profile(),
                 },
@@ -977,6 +1010,7 @@ pub(crate) mod tests {
             !forgetting
                 .first_prompt_payload
                 .first_prompt_body
+                .0
                 .contains("A crazy idea.")
         );
     }
@@ -1000,17 +1034,25 @@ pub(crate) mod tests {
         let role = "Presentation-maker role\nsecond line\n";
         let composer = fixture_composer();
         let profile = HarnessedProfile {
-            remembered_flows: Vec::new(),
+            remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
             harness_kind: HarnessKind::Claude,
             launch_profile: fixture_profile(),
         };
         let verified = composer.verified_context(&profile).unwrap();
         let segments = verified.user_segments();
         let prompt = composer.compose_system_prompt(&profile, &verified, &segments, Some(role));
-        assert!(prompt.system_prompt_text.ends_with(&format!("\n\n{role}")));
+        assert!(
+            prompt
+                .system_prompt_text
+                .0
+                .ends_with(&format!("\n\n{role}"))
+        );
         assert_eq!(
             prompt.system_prompt_sha256,
-            format!("{:x}", Sha256::digest(prompt.system_prompt_text.as_bytes()))
+            signal_flow::SystemPromptSha256(format!(
+                "{:x}",
+                Sha256::digest(prompt.system_prompt_text.0.as_bytes())
+            ))
         );
     }
 
@@ -1018,7 +1060,7 @@ pub(crate) mod tests {
     fn configured_presentation_prompt_preserves_exact_text_and_omits_blank_text() {
         let address = Address {
             aspect: Aspect::Psyche,
-            topic: "core".into(),
+            topic: flow_ethos::Topic("core".into()),
             model: Model::Fable,
         };
         let exact = "  Exact role line\nsecond line\n  ".to_owned();
@@ -1045,7 +1087,7 @@ pub(crate) mod tests {
             composer
                 .presentation_prompt(&Address {
                     aspect: Aspect::Field,
-                    topic: "core".into(),
+                    topic: flow_ethos::Topic("core".into()),
                     model: Model::Astra,
                 })
                 .unwrap(),
@@ -1055,7 +1097,7 @@ pub(crate) mod tests {
             composer
                 .presentation_prompt(&Address {
                     aspect: Aspect::Psyche,
-                    topic: "core".into(),
+                    topic: flow_ethos::Topic("core".into()),
                     model: Model::Fable,
                 })
                 .unwrap(),
@@ -1099,7 +1141,7 @@ pub(crate) mod tests {
         let composed = fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: harness.clone(),
                     launch_profile: profile.clone(),
                 },
@@ -1107,17 +1149,22 @@ pub(crate) mod tests {
             )
             .unwrap();
         let body = &composed.first_prompt_payload.first_prompt_body;
-        assert!(body.starts_with("These are your skills, given here; do not reload them.\n\nModule IDs: operation-main-flow, knowledge-flow\n"));
-        assert!(body.contains("\n<!-- module: knowledge-flow -->\nKnowledge body.\n<!-- end-module: knowledge-flow -->\n"));
-        assert!(body.ends_with("<!-- end-module: knowledge-flow -->\n\nCarry the bounded task."));
-        assert_eq!(body.matches("Main flow body.").count(), 1);
-        assert!(!body.contains("Spirit body."));
+        assert!(body.0.starts_with("These are your skills, given here; do not reload them.\n\nModule IDs: operation-main-flow, knowledge-flow\n"));
+        assert!(body.0.contains("\n<!-- module: knowledge-flow -->\nKnowledge body.\n<!-- end-module: knowledge-flow -->\n"));
+        assert!(
+            body.0
+                .ends_with("<!-- end-module: knowledge-flow -->\n\nCarry the bounded task.")
+        );
+        assert_eq!(body.0.matches("Main flow body.").count(), 1);
+        assert!(!body.0.contains("Spirit body."));
         assert_eq!(composed.first_prompt_payload.prompt_part_vector.len(), 1);
         assert_eq!(
-            &composed.first_prompt_payload.prompt_part_vector[0].prompt_part_text,
-            body
+            composed.first_prompt_payload.prompt_part_vector[0]
+                .prompt_part_text
+                .0,
+            body.0
         );
-        assert!(!body.contains("Skill tool") && !body.contains("/operation-main-flow"));
+        assert!(!body.0.contains("Skill tool") && !body.0.contains("/operation-main-flow"));
     }
 
     #[test]
@@ -1125,7 +1172,7 @@ pub(crate) mod tests {
         let composed = fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: fixture_profile().clone(),
                 },
@@ -1133,13 +1180,17 @@ pub(crate) mod tests {
             )
             .unwrap();
         let system = &composed.system_prompt.system_prompt_text;
-        assert!(system.contains("<!-- module: spirit-core -->\nSpirit body.\n"));
-        assert!(system.ends_with(
+        assert!(
+            system
+                .0
+                .contains("<!-- module: spirit-core -->\nSpirit body.\n")
+        );
+        assert!(system.0.ends_with(
             "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
         ));
-        assert!(!system.contains("Knowledge body."));
+        assert!(!system.0.contains("Knowledge body."));
         let body = &composed.first_prompt_payload.first_prompt_body;
-        assert!(!body.contains("Predecessor") && !body.contains("Remembered"));
+        assert!(!body.0.contains("Predecessor") && !body.0.contains("Remembered"));
     }
 
     #[test]
@@ -1148,7 +1199,7 @@ pub(crate) mod tests {
         let composed = fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: HarnessKind::Claude,
                     launch_profile: fixture_profile().clone(),
                 },
@@ -1157,18 +1208,18 @@ pub(crate) mod tests {
             .unwrap();
         let carried = composed.carrying_flow_id("a1b2c3");
         let system = &carried.system_prompt.system_prompt_text;
-        assert!(system.ends_with(
+        assert!(system.0.ends_with(
             "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
         ));
         assert_eq!(carried.first_prompt_payload, composed.first_prompt_payload);
         // A launch with no predecessor and no memory gains the section.
         let mut profile = fixture_profile();
         profile.flow_id_option = None;
-        profile.remembering = Remembering::Predecessors(0);
+        profile.remembering = Remembering::Predecessors(signal_flow::RememberingDepth(0));
         let bare = fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: HarnessKind::Claude,
                     launch_profile: profile,
                 },
@@ -1179,9 +1230,9 @@ pub(crate) mod tests {
         assert!(
             bare.system_prompt
                 .system_prompt_text
-                .ends_with("<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\n")
+                .0.ends_with("<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\n")
         );
-        assert!(!system.contains("This flow belongs to metaflow"));
+        assert!(!system.0.contains("This flow belongs to metaflow"));
     }
 
     #[test]
@@ -1190,7 +1241,7 @@ pub(crate) mod tests {
         let mut composed = fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: HarnessKind::Claude,
                     launch_profile: fixture_profile(),
                 },
@@ -1200,7 +1251,7 @@ pub(crate) mod tests {
         let role = "Presentation-maker role, unchanged\n";
         let composer = fixture_composer();
         let profile = HarnessedProfile {
-            remembered_flows: Vec::new(),
+            remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
             harness_kind: HarnessKind::Claude,
             launch_profile: composed.launch_profile.clone(),
         };
@@ -1210,19 +1261,20 @@ pub(crate) mod tests {
             composer.compose_system_prompt(&profile, &verified, &segments, Some(role));
         let carried = composed.carrying_flow_id("a1b2c3");
         use sha2::{Digest, Sha256};
-        assert!(carried.system_prompt.system_prompt_text.ends_with(role));
+        assert!(carried.system_prompt.system_prompt_text.0.ends_with(role));
         assert!(
             carried
                 .system_prompt
                 .system_prompt_text
+                .0
                 .contains("Flow ID: a1b2c3\n")
         );
         assert_eq!(
             carried.system_prompt.system_prompt_sha256,
-            format!(
+            signal_flow::SystemPromptSha256(format!(
                 "{:x}",
-                Sha256::digest(carried.system_prompt.system_prompt_text.as_bytes())
-            )
+                Sha256::digest(carried.system_prompt.system_prompt_text.0.as_bytes())
+            ))
         );
     }
 
@@ -1231,7 +1283,7 @@ pub(crate) mod tests {
         let composed = fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: fixture_profile().clone(),
                 },
@@ -1239,18 +1291,18 @@ pub(crate) mod tests {
             )
             .unwrap();
         let body = &composed.first_prompt_payload.first_prompt_body;
-        assert!(body.starts_with("These are your skills"));
-        assert!(body.ends_with(concat!(
+        assert!(body.0.starts_with("These are your skills"));
+        assert!(body.0.ends_with(concat!(
             "<!-- end-module: knowledge-flow -->\n\n# Flow launch\n\n",
             "Harness: Codex\n",
             "Herdr session: messaging-build\nRemote control: app-server endpoint\n\n",
             "Carry the bounded task."
         )));
-        assert!(composed.system_prompt.system_prompt_text.contains(
+        assert!(composed.system_prompt.system_prompt_text.0.contains(
             "Metaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
         ));
-        assert!(!body.contains("Role: Field Medium"));
-        assert!(!body.contains('$'));
+        assert!(!body.0.contains("Role: Field Medium"));
+        assert!(!body.0.contains('$'));
     }
 
     #[test]
@@ -1274,13 +1326,15 @@ pub(crate) mod tests {
                     let mut profile = fixture_profile();
                     profile.address = Address {
                         aspect: aspect.clone(),
-                        topic: "coreTopic".into(),
+                        topic: flow_ethos::Topic("coreTopic".into()),
                         model: model.clone(),
                     };
                     let composed = fixture_composer()
                         .compose(
                             HarnessedProfile {
-                                remembered_flows: Vec::new(),
+                                remembered_flows: crate::generated::starter::RememberedFlows(
+                                    Vec::new(),
+                                ),
                                 harness_kind,
                                 launch_profile: profile,
                             },
@@ -1294,13 +1348,21 @@ pub(crate) mod tests {
                         composed
                             .system_prompt
                             .system_prompt_text
+                            .0
                             .contains(&identity)
                     );
-                    assert!(!composed.system_prompt.system_prompt_text.contains("Role:"));
+                    assert!(
+                        !composed
+                            .system_prompt
+                            .system_prompt_text
+                            .0
+                            .contains("Role:")
+                    );
                     assert!(
                         !composed
                             .first_prompt_payload
                             .first_prompt_body
+                            .0
                             .contains("Role:")
                     );
                 }
@@ -1316,12 +1378,18 @@ pub(crate) mod tests {
         let size = 400_000;
         let (composer, names) = large(&[size, size, size]);
         let mut profile = fixture_profile();
-        profile.user_modules = names.clone();
+        profile.user_modules = signal_flow::UserModules(
+            names
+                .iter()
+                .cloned()
+                .map(signal_flow::ModuleIdentity)
+                .collect(),
+        );
         for harness in [HarnessKind::Claude, HarnessKind::Codex] {
             let composed = composer
                 .compose(
                     crate::composition::HarnessedProfile {
-                        remembered_flows: Vec::new(),
+                        remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                         harness_kind: harness.clone(),
                         launch_profile: profile.clone(),
                     },
@@ -1332,8 +1400,8 @@ pub(crate) mod tests {
             let parts = &composed.first_prompt_payload.prompt_part_vector;
             assert!(parts.len() > 1, "{harness:?}: sent in parts");
             for (index, part) in parts.iter().enumerate() {
-                assert!(harness.fits_one_message(&part.prompt_part_text));
-                assert!(part.prompt_part_text.starts_with(&format!(
+                assert!(harness.fits_one_message(&part.prompt_part_text.0));
+                assert!(part.prompt_part_text.0.starts_with(&format!(
                     "Startup message, part {} of {}",
                     index + 1,
                     parts.len()
@@ -1344,18 +1412,19 @@ pub(crate) mod tests {
                     .last()
                     .unwrap()
                     .prompt_part_text
+                    .0
                     .ends_with("Carry the bounded task.")
             );
             for name in &names {
                 let marker = format!("<!-- module: {name} -->");
                 assert!(
-                    !system.contains(&marker),
+                    !system.0.contains(&marker),
                     "{name} is not in the system prompt"
                 );
                 assert_eq!(
                     parts
                         .iter()
-                        .filter(|part| part.prompt_part_text.contains(&marker))
+                        .filter(|part| part.prompt_part_text.0.contains(&marker))
                         .count(),
                     1,
                     "{name} is sent once"
@@ -1371,11 +1440,11 @@ pub(crate) mod tests {
         let mut profile = fixture_profile();
         profile.flow_kind = signal_flow::FlowKind::Simplified;
         profile.tool_set = signal_flow::ToolSet::Default;
-        profile.instruction_prompt.clear();
+        profile.instruction_prompt.0.clear();
         let composed = fixture_composer()
             .compose(
                 HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: HarnessKind::Claude,
                     launch_profile: profile,
                 },
@@ -1383,9 +1452,9 @@ pub(crate) mod tests {
             )
             .unwrap();
         let system = &composed.system_prompt.system_prompt_text;
-        assert!(system.contains("<!-- module: operation-main-flow -->"));
-        assert!(system.contains("<!-- module: knowledge-flow -->"));
-        assert!(composed.first_prompt_payload.first_prompt_body.is_empty());
+        assert!(system.0.contains("<!-- module: operation-main-flow -->"));
+        assert!(system.0.contains("<!-- module: knowledge-flow -->"));
+        assert!(composed.first_prompt_payload.first_prompt_body.0.is_empty());
         assert!(composed.first_prompt_payload.prompt_part_vector.is_empty());
     }
 
@@ -1397,7 +1466,7 @@ pub(crate) mod tests {
         let composed = fixture_composer()
             .compose(
                 HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: HarnessKind::Claude,
                     launch_profile: profile,
                 },
@@ -1406,7 +1475,7 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(
             composed.first_prompt_payload.first_prompt_body,
-            "Carry the bounded task."
+            signal_flow::FirstPromptBody("Carry the bounded task.".into())
         );
     }
 
@@ -1415,18 +1484,18 @@ pub(crate) mod tests {
         let mut profile = fixture_profile();
         profile.flow_kind = signal_flow::FlowKind::Simplified;
         profile.tool_set = signal_flow::ToolSet::Explicit(Vec::new());
-        profile.instruction_prompt.clear();
+        profile.instruction_prompt.0.clear();
         let composed = fixture_composer()
             .compose(
                 HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile,
                 },
                 Vec::<LeaveOut>::new(),
             )
             .unwrap();
-        assert!(composed.first_prompt_payload.first_prompt_body.is_empty());
+        assert!(composed.first_prompt_payload.first_prompt_body.0.is_empty());
         assert!(composed.first_prompt_payload.prompt_part_vector.is_empty());
     }
 
@@ -1436,11 +1505,12 @@ pub(crate) mod tests {
     fn a_module_too_large_for_one_message_refuses_the_launch() {
         let (composer, names) = large(&[1_100_000]);
         let mut profile = fixture_profile();
-        profile.user_modules = names;
+        profile.user_modules =
+            signal_flow::UserModules(names.into_iter().map(signal_flow::ModuleIdentity).collect());
         assert_eq!(
             composer.compose(
                 crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile.clone(),
                 },
@@ -1453,11 +1523,11 @@ pub(crate) mod tests {
     #[test]
     fn a_brief_too_large_for_one_message_refuses_the_launch() {
         let mut profile = fixture_profile();
-        profile.instruction_prompt = "x".repeat(1_100_000);
+        profile.instruction_prompt = signal_flow::InstructionPrompt("x".repeat(1_100_000));
         assert_eq!(
             fixture_composer().compose(
                 crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile.clone()
                 },
@@ -1489,22 +1559,22 @@ pub(crate) mod tests {
             std::sync::Arc::new(context),
         ));
         let mut profile = fixture_profile();
-        profile.system_modules = vec![
-            "spirit:core".into(),
-            "vision:flow".into(),
-            "spirit-legacy".into(),
-        ];
-        profile.user_modules = vec![
-            "intent:flow".into(),
-            "knowledge:flow".into(),
-            "compensation:truth".into(),
-            "inquiry:flow".into(),
-            "operation-main-flow".into(),
-        ];
+        profile.system_modules = signal_flow::SystemModules(vec![
+            signal_flow::ModuleIdentity("spirit:core".into()),
+            signal_flow::ModuleIdentity("vision:flow".into()),
+            signal_flow::ModuleIdentity("spirit-legacy".into()),
+        ]);
+        profile.user_modules = signal_flow::UserModules(vec![
+            signal_flow::ModuleIdentity("intent:flow".into()),
+            signal_flow::ModuleIdentity("knowledge:flow".into()),
+            signal_flow::ModuleIdentity("compensation:truth".into()),
+            signal_flow::ModuleIdentity("inquiry:flow".into()),
+            signal_flow::ModuleIdentity("operation-main-flow".into()),
+        ]);
         let composed = composer
             .compose(
                 HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: HarnessKind::Claude,
                     launch_profile: profile,
                 },
@@ -1514,8 +1584,8 @@ pub(crate) mod tests {
         let system = &composed.system_prompt.system_prompt_text;
         let first = &composed.first_prompt_payload.first_prompt_body;
         for body in ["Spirit body.", "Intent body.", "Legacy spirit body."] {
-            assert!(system.contains(body), "{body} in the system prompt");
-            assert!(!first.contains(body), "{body} not in the first message");
+            assert!(system.0.contains(body), "{body} in the system prompt");
+            assert!(!first.0.contains(body), "{body} not in the first message");
         }
         for body in [
             "Vision body.",
@@ -1524,8 +1594,8 @@ pub(crate) mod tests {
             "Inquiry body.",
             "Main flow body.",
         ] {
-            assert!(first.contains(body), "{body} in the first message");
-            assert!(!system.contains(body), "{body} not in the system prompt");
+            assert!(first.0.contains(body), "{body} in the first message");
+            assert!(!system.0.contains(body), "{body} not in the system prompt");
         }
     }
 
@@ -1542,19 +1612,23 @@ pub(crate) mod tests {
             )),
         ));
         let mut profile = fixture_profile();
-        profile.system_modules = vec!["spirit-core".into(), "intent-large".into()];
-        profile.user_modules = vec!["knowledge-small".into()];
+        profile.system_modules = signal_flow::SystemModules(vec![
+            signal_flow::ModuleIdentity("spirit-core".into()),
+            signal_flow::ModuleIdentity("intent-large".into()),
+        ]);
+        profile.user_modules =
+            signal_flow::UserModules(vec![signal_flow::ModuleIdentity("knowledge-small".into())]);
         let composed = composer
             .compose(
                 crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile.clone(),
                 },
                 Vec::<signal_flow::LeaveOut>::new(),
             )
             .unwrap();
-        assert!(composed.system_prompt.system_prompt_text.len() > 140_000);
+        assert!(composed.system_prompt.system_prompt_text.0.len() > 140_000);
     }
 
     #[test]
@@ -1562,8 +1636,10 @@ pub(crate) mod tests {
         use super::RendersQueuedWork;
         use signal_flow::{QueueEntry, Request, SentBy};
         let order = QueueEntry {
-            logical_delivery_id: "logical-delivery-0000000000000001".into(),
-            request_id: "test".into(),
+            logical_delivery_id: flow_ethos::LogicalDeliveryId(
+                "logical-delivery-0000000000000001".into(),
+            ),
+            request_id: flow_ethos::RequestId("test".into()),
             sent_by: SentBy::Flow,
             delivery: flow_ethos::Delivery::Queue,
             message: signal_flow::Message::Soft(Request::Order("investigate".into())),
@@ -1571,7 +1647,7 @@ pub(crate) mod tests {
         assert_eq!(
             [order].prompt_text(&signal_flow::Address {
                 aspect: signal_flow::Aspect::Psyche,
-                topic: "flow".into(),
+                topic: flow_ethos::Topic("flow".into()),
                 model: signal_flow::Model::Opus
             }),
             "[ { Notification Soft.Order.{ test investigate } } ]"
@@ -1584,26 +1660,35 @@ pub(crate) mod tests {
         type ProfileChange = fn(&mut LaunchProfile);
         let cases: [(CompositionRefusal, ProfileChange); 7] = [
             (CompositionRefusal::InvalidSystemModules, |profile| {
-                profile.system_modules.clear()
+                profile.system_modules.0.clear()
             }),
             (CompositionRefusal::InvalidSystemModules, |profile| {
-                profile.system_modules.push("/abs/path.md".into())
+                profile
+                    .system_modules
+                    .0
+                    .push(signal_flow::ModuleIdentity("/abs/path.md".into()))
             }),
             (CompositionRefusal::InvalidUserModules, |profile| {
-                profile.user_modules.push("knowledge-flow".into())
+                profile
+                    .user_modules
+                    .0
+                    .push(signal_flow::ModuleIdentity("knowledge-flow".into()))
             }),
             (CompositionRefusal::InvalidUserModules, |profile| {
-                profile.user_modules.push("spirit-core".into())
+                profile
+                    .user_modules
+                    .0
+                    .push(signal_flow::ModuleIdentity("spirit-core".into()))
             }),
             // A Remembering of no flows names the field it refuses.
             (CompositionRefusal::InvalidRemembering, |profile| {
                 profile.remembering = Remembering::Custom(vec![])
             }),
             (CompositionRefusal::InvalidRemembering, |profile| {
-                profile.remembering = Remembering::Custom(vec![String::new()])
+                profile.remembering = Remembering::Custom(vec![flow_ethos::FlowId(String::new())])
             }),
             (CompositionRefusal::InvalidRemembering, |profile| {
-                profile.remembering = Remembering::Predecessors(-1)
+                profile.remembering = Remembering::Predecessors(signal_flow::RememberingDepth(-1))
             }),
         ];
         for (field, change) in cases {
@@ -1612,7 +1697,7 @@ pub(crate) mod tests {
             assert_eq!(
                 composer.compose(
                     crate::composition::HarnessedProfile {
-                        remembered_flows: Vec::new(),
+                        remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                         harness_kind: HarnessKind::Codex,
                         launch_profile: profile.clone()
                     },
@@ -1626,18 +1711,21 @@ pub(crate) mod tests {
     #[test]
     fn a_missing_identity_refuses_the_launch_with_its_identity() {
         let mut profile = fixture_profile();
-        profile.user_modules.push("unknown-module".into());
+        profile
+            .user_modules
+            .0
+            .push(signal_flow::ModuleIdentity("unknown-module".into()));
         assert_eq!(
             fixture_composer().compose(
                 crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile.clone()
                 },
                 Vec::<signal_flow::LeaveOut>::new(),
             ),
             Err(CompositionError::Context(ContextRefusal::ModuleMissing(
-                Some("unknown-module".into())
+                Some(signal_flow::ModuleIdentity("unknown-module".into()))
             )))
         );
     }
@@ -1652,33 +1740,33 @@ pub(crate) mod tests {
         let composed = composer
             .compose(
                 crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: harness.clone(),
                     launch_profile: profile.clone(),
                 },
                 default.clone(),
             )
             .unwrap();
-        assert_eq!(composed.leave_outs, default);
+        assert_eq!(composed.leave_outs.0, default);
         // A Start's own vector replaces it, even an empty one.
-        profile.leave_outs_option = Some(vec![LeaveOut::GitInstructions]);
+        profile.leave_outs_option = Some(signal_flow::LeaveOuts(vec![LeaveOut::GitInstructions]));
         let composed = composer
             .compose(
                 crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                     harness_kind: harness.clone(),
                     launch_profile: profile.clone(),
                 },
                 default.clone(),
             )
             .unwrap();
-        assert_eq!(composed.leave_outs, [LeaveOut::GitInstructions]);
-        profile.leave_outs_option = Some(Vec::new());
+        assert_eq!(composed.leave_outs.0, [LeaveOut::GitInstructions]);
+        profile.leave_outs_option = Some(signal_flow::LeaveOuts(Vec::new()));
         assert!(
             composer
                 .compose(
                     crate::composition::HarnessedProfile {
-                        remembered_flows: Vec::new(),
+                        remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                         harness_kind: harness.clone(),
                         launch_profile: profile.clone()
                     },
@@ -1686,15 +1774,16 @@ pub(crate) mod tests {
                 )
                 .unwrap()
                 .leave_outs
+                .0
                 .is_empty()
         );
         // A Start may leave out ToolSearch while other tools remain.
-        profile.leave_outs_option = Some(vec![LeaveOut::ToolSearch]);
+        profile.leave_outs_option = Some(signal_flow::LeaveOuts(vec![LeaveOut::ToolSearch]));
         assert!(
             composer
                 .compose(
                     crate::composition::HarnessedProfile {
-                        remembered_flows: Vec::new(),
+                        remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                         harness_kind: harness.clone(),
                         launch_profile: profile.clone()
                     },

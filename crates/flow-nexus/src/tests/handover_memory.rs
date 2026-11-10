@@ -9,24 +9,24 @@ use signal_flow::{
 fn address(topic: &str) -> Address {
     Address {
         aspect: Aspect::Mind,
-        topic: topic.into(),
+        topic: flow_ethos::Topic(topic.into()),
         model: Model::Sol,
     }
 }
 
 fn section(title: &str, description: &str, body: &str) -> Section {
     Section {
-        title: title.into(),
-        description: description.into(),
-        body: body.into(),
+        title: signal_flow::Title(title.into()),
+        description: signal_flow::Description(description.into()),
+        body: signal_flow::Body(body.into()),
     }
 }
 
 fn archive_identity() -> HandoverArchiveIdentity {
     HandoverArchiveIdentity {
-        git_commit: "commit".into(),
-        archive_document_path: "Mind/topic/Sol/pred.md".into(),
-        git_blob: "blob".into(),
+        git_commit: signal_flow::GitCommit("commit".into()),
+        archive_document_path: signal_flow::ArchiveDocumentPath("Mind/topic/Sol/pred.md".into()),
+        git_blob: signal_flow::GitBlob("blob".into()),
     }
 }
 
@@ -82,7 +82,7 @@ fn missing_drop_is_atomic_for_content_and_touch() {
         .unwrap();
     let before = store.handover_memory(&address).unwrap();
     assert_eq!(
-        store.drop_handover(&address, &address, Title::from("missing"), Touch::Unknown),
+        store.drop_handover(&address, &address, Title("missing".into()), Touch::Unknown),
         Err(signal_flow::HandoverRefusal::MissingTitle)
     );
     assert_eq!(store.handover_memory(&address).unwrap(), before);
@@ -98,7 +98,7 @@ fn authenticated_drop_before_first_keep_is_missing_title_and_stays_absent() {
         flow_id: "current-flow".into(),
     };
     assert_eq!(
-        store.drop_handover_for_flow(&writer, Title::from("missing"), Touch::Unknown),
+        store.drop_handover_for_flow(&writer, Title("missing".into()), Touch::Unknown),
         Err(signal_flow::HandoverRefusal::MissingTitle)
     );
     assert!(store.handover_memory(&address).unwrap().is_none());
@@ -212,7 +212,7 @@ fn only_owner_edits_but_read_apis_cross_addresses() {
         Err(signal_flow::HandoverRefusal::NotOwner)
     );
     assert_eq!(
-        store.drop_handover(&owner, &other, Title::from("one"), Touch::Unknown),
+        store.drop_handover(&owner, &other, Title("one".into()), Touch::Unknown),
         Err(signal_flow::HandoverRefusal::NotOwner)
     );
     assert_eq!(store.handover_memory(&owner).unwrap(), before);
@@ -222,7 +222,7 @@ fn only_owner_edits_but_read_apis_cross_addresses() {
     );
     assert_eq!(
         store.handover_headings(&owner).unwrap()[0].title,
-        Title::from("one")
+        Title("one".into())
     );
 }
 
@@ -481,14 +481,17 @@ fn concurrent_attach_and_close_places_the_generation_exactly_once_in_snapshot_or
         .snapshot
         .handover_generation_key_vector
         .iter()
-        .filter(|key| key.predecessor == "pred" && key.successor == "succ")
+        .filter(|key| {
+            key.predecessor.0.0 == "pred"
+                && key.successor == signal_flow::Successor(flow_ethos::FlowId("succ".into()))
+        })
         .count();
     assert_eq!(in_snapshot + subscription.queued_change_count(), 1);
     if in_snapshot == 0 {
         assert!(matches!(
             subscription.next_response().unwrap(),
             Response::RetirementChanged(RetirementChange::GenerationClosed(key))
-                if key.predecessor == "pred" && key.successor == "succ"
+                if key.predecessor.0.0 == "pred" && key.successor == signal_flow::Successor(flow_ethos::FlowId("succ".into()))
         ));
     }
 }
@@ -509,9 +512,9 @@ fn two_closes_are_observed_in_their_durable_mutation_order() {
         assert!(matches!(
             subscription.next_response().unwrap(),
             Response::RetirementChanged(RetirementChange::GenerationClosed(key))
-                if key.handover_generation == generation
-                    && key.predecessor == predecessor
-                    && key.successor == successor
+                if key.handover_generation == signal_flow::HandoverGeneration(generation)
+                    && key.predecessor.0.0 == predecessor
+                    && key.successor.0.0 == successor
         ));
     }
 }

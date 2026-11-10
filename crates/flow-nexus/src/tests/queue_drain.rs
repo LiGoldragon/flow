@@ -47,7 +47,7 @@ fn from_core(body: &str) -> TestRequest {
         logical_delivery_id: format!("test-{:x}", sha2::Sha256::digest(body.as_bytes())),
         sent_by: SentBy::Sender(Address {
             aspect: Aspect::Psyche,
-            topic: "core".into(),
+            topic: flow_ethos::Topic("core".into()),
             model: Model::Opus,
         }),
         request: Request::Order(body.into()),
@@ -66,8 +66,8 @@ fn queue_payload(requests: &[TestRequest]) -> String {
 
 fn queue_entry(request: &TestRequest) -> QueueEntry {
     QueueEntry {
-        logical_delivery_id: request.logical_delivery_id.clone(),
-        request_id: request.logical_delivery_id[5..9].into(),
+        logical_delivery_id: flow_ethos::LogicalDeliveryId(request.logical_delivery_id.clone()),
+        request_id: flow_ethos::RequestId(request.logical_delivery_id[5..9].into()),
         sent_by: request.sent_by.clone(),
         delivery: request.delivery.clone(),
         message: Message::Soft(request.request.clone()),
@@ -79,18 +79,20 @@ fn seat(fixture: &NexusFixture, queue: Vec<TestRequest>) {
     claude_seat(fixture, 40_000);
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address(Model::Sol),
-        state: State::Awake(CLAUDE_SEAT.into()),
-        past: vec![],
-        queue: queue
-            .into_iter()
-            .map(|request| QueueEntry {
-                request_id: request.logical_delivery_id[5..9].into(),
-                logical_delivery_id: request.logical_delivery_id,
-                sent_by: request.sent_by,
-                delivery: request.delivery,
-                message: Message::Soft(request.request),
-            })
-            .collect(),
+        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(
+            queue
+                .into_iter()
+                .map(|request| QueueEntry {
+                    request_id: flow_ethos::RequestId(request.logical_delivery_id[5..9].into()),
+                    logical_delivery_id: flow_ethos::LogicalDeliveryId(request.logical_delivery_id),
+                    sent_by: request.sent_by,
+                    delivery: request.delivery,
+                    message: Message::Soft(request.request),
+                })
+                .collect(),
+        ),
     });
 }
 
@@ -98,37 +100,43 @@ fn seat(fixture: &NexusFixture, queue: Vec<TestRequest>) {
 fn report(fixture: &NexusFixture, event: Event) {
     assert_eq!(
         fixture.nexus.report(Report_Data {
-            flow_id: CLAUDE_SEAT.into(),
+            flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
             event: event.clone(),
         }),
         Response::Reported
     );
-    fixture.nexus.after_report(&CLAUDE_SEAT.to_owned(), &event);
+    fixture.nexus.after_report(
+        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+        &event,
+    );
 }
 
 fn foreign_stop() -> Event {
     Event::Stopped(NativeStop {
-        native_session_id_option: Some("0ther000-0000-4000-8000-000000000009".into()),
-        transcript_path_option: Some("/elsewhere/other.jsonl".into()),
-        last_assistant_message_option: None,
-        background_work: vec![],
+        native_session_id_option: Some(signal_flow::NativeSessionId(
+            "0ther000-0000-4000-8000-000000000009".into(),
+        )),
+        transcript_path_option: Some(signal_flow::TranscriptPath("/elsewhere/other.jsonl".into())),
+        last_assistant_message_option: signal_flow::LastAssistantMessageOption(None),
+        background_work: signal_flow::BackgroundWork(vec![]),
     })
 }
 
 fn submitted(session: &str, prompt_id: &str, text: &str) -> Event {
     Event::PromptSubmitted(NativePrompt {
-        native_session_id_option: Some(session.into()),
-        prompt_id_option: Some(prompt_id.into()),
-        prompt_sha256: text.prompt_sha256(),
+        native_session_id_option: Some(signal_flow::NativeSessionId(session.into())),
+        prompt_id_option: Some(signal_flow::PromptId(prompt_id.into())),
+        prompt_sha256: signal_flow::PromptSha256(text.prompt_sha256()),
     })
 }
 
 fn queue(fixture: &NexusFixture) -> Vec<TestRequest> {
     stored(fixture, Model::Sol)
         .queue
+        .0
         .into_iter()
         .map(|entry| TestRequest {
-            logical_delivery_id: entry.logical_delivery_id,
+            logical_delivery_id: entry.logical_delivery_id.0,
             sent_by: entry.sent_by,
             delivery: entry.delivery,
             request: match entry.message {
@@ -166,17 +174,17 @@ fn logical_delivery_snapshots_are_sender_filtered_replayable_and_idempotent() {
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: target.clone(),
         state: State::Asleep,
-        past: vec![],
-        queue: vec![],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let sender = Address {
         aspect: Aspect::Psyche,
-        topic: "core".into(),
+        topic: flow_ethos::Topic("core".into()),
         model: Model::Opus,
     };
     let other_sender = Address {
         aspect: Aspect::Mind,
-        topic: "core".into(),
+        topic: flow_ethos::Topic("core".into()),
         model: Model::Sol,
     };
     let signal_flow::PrivateSendResponse::SendAccepted(accepted) = fixture
@@ -223,7 +231,7 @@ fn logical_delivery_snapshots_are_sender_filtered_replayable_and_idempotent() {
     let replay = fixture
         .nexus
         .store
-        .read_logical_delivery_snapshots(&sender, Some(accepted.delivery_cursor))
+        .read_logical_delivery_snapshots(&sender, Some(accepted.delivery_cursor.0))
         .unwrap();
     assert_eq!(replay.delivery_cursor, first.delivery_cursor);
     assert_eq!(replay.delivery_snapshot_vector, vec![first]);
@@ -278,7 +286,7 @@ fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
     assert_eq!(queue(&fixture), vec![], "both in one payload");
     assert_eq!(
         stored(&fixture, Model::Sol).state,
-        State::Awake(CLAUDE_SEAT.into())
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
     );
 }
 
@@ -346,7 +354,7 @@ fn two_queued_claude_requests_go_in_one_payload_and_settle_on_its_receipt() {
         .unwrap();
     for request in [&first, &second] {
         assert!(settled.delivery_snapshot_vector.iter().any(|snapshot| {
-            snapshot.logical_delivery_id == request.logical_delivery_id
+            snapshot.logical_delivery_id.0 == request.logical_delivery_id
                 && matches!(
                     &snapshot.delivery_state,
                     signal_flow::DeliveryState::Delivered(_)
@@ -542,8 +550,8 @@ fn a_claude_turn_end_recorded_before_confirmation_is_honoured_at_it() {
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address(Model::Sol),
         state: State::Asleep,
-        past: vec![],
-        queue: vec![queue_entry(&first)],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![queue_entry(&first)]),
     });
     append_main_rows(&fixture, &[end_turn("first-turn")]);
     report(&fixture, claude_stop(&fixture));
@@ -553,9 +561,9 @@ fn a_claude_turn_end_recorded_before_confirmation_is_honoured_at_it() {
     // Confirmation records it Awake and notes its recorded turn end.
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address(Model::Sol),
-        state: State::Awake(CLAUDE_SEAT.into()),
-        past: vec![],
-        queue: vec![queue_entry(&first)],
+        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![queue_entry(&first)]),
     });
     {
         let _gate = fixture.nexus.dispatch_gate.lock().unwrap();
@@ -582,9 +590,9 @@ fn a_foreign_stop_before_confirmation_is_not_a_turn_end() {
     super::waking::claude_prompt_taken(&fixture);
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address(Model::Sol),
-        state: State::Awake(CLAUDE_SEAT.into()),
-        past: vec![],
-        queue: vec![queue_entry(&first)],
+        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![queue_entry(&first)]),
     });
     append_main_rows(
         &fixture,
@@ -595,7 +603,7 @@ fn a_foreign_stop_before_confirmation_is_not_a_turn_end() {
     );
     assert_eq!(
         fixture.nexus.report(Report_Data {
-            flow_id: CLAUDE_SEAT.into(),
+            flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
             event: foreign_stop(),
         }),
         Response::Reported
@@ -612,11 +620,11 @@ fn a_foreign_stop_before_confirmation_is_not_a_turn_end() {
 pub(super) fn resolver() -> ResolverIdentity {
     ResolverIdentity {
         process_identity: ProcessIdentity {
-            process_id: 4242,
-            process_user_id: 1001,
-            process_start_token: "777".into(),
+            process_id: meta_signal_flow::ProcessId(4242),
+            process_user_id: meta_signal_flow::ProcessUserId(1001),
+            process_start_token: meta_signal_flow::ProcessStartToken("777".into()),
         },
-        flow_id_option: Some("aa034f".into()),
+        flow_id_option: Some(flow_ethos::FlowId("aa034f".into())),
     }
 }
 
@@ -636,9 +644,9 @@ fn resolve(
 ) -> MetaResponse {
     fixture.nexus.dispatch_meta_from(
         MetaQuery::ResolveQueueDelivery(QueueDeliveryResolution {
-            queue_attempt_id: attempt.into(),
+            queue_attempt_id: meta_signal_flow::QueueAttemptId(attempt.into()),
             queue_resolution_outcome: outcome,
-            queue_resolution_reason: reason.into(),
+            queue_resolution_reason: meta_signal_flow::QueueResolutionReason(reason.into()),
         }),
         Some(resolver()),
     )
@@ -654,9 +662,11 @@ fn resolve_served(
     use crate::DispatchesSerially;
     fixture.nexus.dispatch_meta_serially(
         MetaQuery::ResolveQueueDelivery(QueueDeliveryResolution {
-            queue_attempt_id: attempt.into(),
+            queue_attempt_id: meta_signal_flow::QueueAttemptId(attempt.into()),
             queue_resolution_outcome: outcome,
-            queue_resolution_reason: "the owner looked".into(),
+            queue_resolution_reason: meta_signal_flow::QueueResolutionReason(
+                "the owner looked".into(),
+            ),
         }),
         Some(resolver()),
     )
@@ -787,9 +797,9 @@ fn a_resolution_is_refused_without_a_peer_for_an_unknown_or_non_uncertain_attemp
         fixture
             .nexus
             .dispatch_meta(MetaQuery::ResolveQueueDelivery(QueueDeliveryResolution {
-                queue_attempt_id: attempt.clone(),
+                queue_attempt_id: meta_signal_flow::QueueAttemptId(attempt.clone()),
                 queue_resolution_outcome: QueueResolutionOutcome::Delivered,
-                queue_resolution_reason: "x".into(),
+                queue_resolution_reason: meta_signal_flow::QueueResolutionReason("x".into()),
             })),
         MetaResponse::MetaRefused(meta_signal_flow::MetaRefusal::PeerUnknown)
     );

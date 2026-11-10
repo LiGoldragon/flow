@@ -44,7 +44,7 @@ impl UpgradeFrom<StoredHandoverConfigurationV1> for StoredHandoverConfiguration 
             policies: predecessor.policies,
             archive: predecessor.archive,
             count: predecessor.count,
-            publication_deadline: 60_000,
+            publication_deadline: meta_signal_flow::Duration(60_000),
         })
     }
 }
@@ -84,7 +84,7 @@ impl DefaultsToUnconfigured for StoredHandoverConfiguration {
             policies: HandoverPoliciesConfiguration::Unconfigured,
             archive: HandoverArchiveConfiguration::Unconfigured,
             count: HandoverCountConfiguration::Unconfigured,
-            publication_deadline: 60_000,
+            publication_deadline: meta_signal_flow::Duration(60_000),
         }
     }
 }
@@ -157,7 +157,7 @@ impl ReadsHandoverConfiguration for super::FlowStore {
         Ok(rows
             .first()
             .map(|row| row.publication_deadline)
-            .unwrap_or(60_000))
+            .unwrap_or(meta_signal_flow::Duration(60_000)))
     }
 }
 
@@ -199,16 +199,23 @@ mod tests {
     fn v1_upgrade_preserves_archive_policy_and_count_and_seeds_default_deadline() {
         let old = StoredHandoverConfigurationV1 {
             policies: HandoverPoliciesConfiguration::Configured(vec![]),
-            archive: HandoverArchiveConfiguration::Configured("/archive".into()),
+            archive: HandoverArchiveConfiguration::Configured(
+                meta_signal_flow::generated::signal::Path("/archive".into()),
+            ),
             count: HandoverCountConfiguration::Configured(3),
         };
         let Decision::Ready(current) = StoredHandoverConfiguration::upgrade_from(old);
         assert_eq!(
             current.archive,
-            HandoverArchiveConfiguration::Configured("/archive".into())
+            HandoverArchiveConfiguration::Configured(meta_signal_flow::generated::signal::Path(
+                "/archive".into()
+            ))
         );
         assert_eq!(current.count, HandoverCountConfiguration::Configured(3));
-        assert_eq!(current.publication_deadline, 60_000);
+        assert_eq!(
+            current.publication_deadline,
+            meta_signal_flow::Duration(60_000)
+        );
     }
 
     #[test]
@@ -224,26 +231,30 @@ mod tests {
         let predecessor = StoredHandoverConfigurationV1 {
             policies: HandoverPoliciesConfiguration::Configured(vec![
                 meta_signal_flow::HandoverPolicy {
-                    model_name: "claude-opus-5-5".into(),
-                    warning_share_left: 15,
-                    reminder_text: "Continue every five minutes.".into(),
-                    every_minutes: 5,
+                    model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
+                    warning_share_left: meta_signal_flow::WarningShareLeft(15),
+                    reminder_text: meta_signal_flow::ReminderText(
+                        "Continue every five minutes.".into(),
+                    ),
+                    every_minutes: meta_signal_flow::EveryMinutes(5),
                 },
             ]),
-            archive: HandoverArchiveConfiguration::Configured("/archive/v1".into()),
+            archive: HandoverArchiveConfiguration::Configured(
+                meta_signal_flow::generated::signal::Path("/archive/v1".into()),
+            ),
             count: HandoverCountConfiguration::Configured(3),
         };
         let address = Address {
             aspect: Aspect::Mind,
-            topic: "upgradeSibling".into(),
+            topic: flow_ethos::Topic("upgradeSibling".into()),
             model: Model::Sol,
         };
         let sibling = HandoverMemory {
             address: address.clone(),
             current: vec![Section {
-                title: "Live".into(),
-                description: "current generation".into(),
-                body: "live bytes".into(),
+                title: signal_flow::Title("Live".into()),
+                description: signal_flow::Description("current generation".into()),
+                body: signal_flow::Body("live bytes".into()),
             }],
             touch: Some(Touch::Unknown),
             generation: 8,
@@ -253,9 +264,9 @@ mod tests {
                 predecessor: "predecessor".into(),
                 successor: "successor".into(),
                 sections: vec![Section {
-                    title: "Closed".into(),
-                    description: "archived generation".into(),
-                    body: "closed bytes".into(),
+                    title: signal_flow::Title("Closed".into()),
+                    description: signal_flow::Description("archived generation".into()),
+                    body: signal_flow::Body("closed bytes".into()),
                 }],
                 touch: Some(Touch::Unknown),
             }],
@@ -284,7 +295,10 @@ mod tests {
                 assert_eq!(current.policies, predecessor.policies);
                 assert_eq!(current.archive, predecessor.archive);
                 assert_eq!(current.count, predecessor.count);
-                assert_eq!(current.publication_deadline, 60_000);
+                assert_eq!(
+                    current.publication_deadline,
+                    meta_signal_flow::Duration(60_000)
+                );
                 assert_eq!(
                     engine
                         .match_records(QueryPlan::key(handovers, sibling.record_key()))

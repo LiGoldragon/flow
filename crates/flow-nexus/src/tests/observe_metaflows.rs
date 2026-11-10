@@ -16,7 +16,7 @@ use std::sync::mpsc;
 fn undeclared(topic: &str) -> Address {
     Address {
         aspect: Aspect::Psyche,
-        topic: topic.into(),
+        topic: flow_ethos::Topic(topic.into()),
         model: Model::Haiku,
     }
 }
@@ -24,9 +24,9 @@ fn undeclared(topic: &str) -> Address {
 fn awake(address: &Address, flow_id: &str) -> Metaflow {
     Metaflow {
         address: address.clone(),
-        state: State::Awake(flow_id.into()),
-        past: vec![],
-        queue: vec![],
+        state: State::Awake(flow_ethos::FlowId(flow_id.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     }
 }
 

@@ -47,9 +47,11 @@ pub(crate) trait ConfiguresCounters {
 impl ConfiguresCounters for FlowStore {
     fn counters(&self) -> Result<ConfigureCounters, StoreError> {
         Ok(ConfigureCounters {
-            logical_delivery: LogicalDeliveryIds(self).id_counter()?.next,
-            queue_attempt: QueueAttemptIds(self).id_counter()?.next,
-            send_outcome: SendOutcomeIds(self).id_counter()?.next,
+            logical_delivery: meta_signal_flow::LogicalDelivery(
+                LogicalDeliveryIds(self).id_counter()?.next,
+            ),
+            queue_attempt: meta_signal_flow::QueueAttempt(QueueAttemptIds(self).id_counter()?.next),
+            send_outcome: meta_signal_flow::SendOutcome(SendOutcomeIds(self).id_counter()?.next),
         })
     }
 
@@ -70,9 +72,9 @@ impl ConfiguresCounters for FlowStore {
         let queue_counter = queue.id_counter()?;
         let sent_counter = sent.id_counter()?;
         let standing = ConfigureCounters {
-            logical_delivery: logical_counter.next,
-            queue_attempt: queue_counter.next,
-            send_outcome: sent_counter.next,
+            logical_delivery: meta_signal_flow::LogicalDelivery(logical_counter.next),
+            queue_attempt: meta_signal_flow::QueueAttempt(queue_counter.next),
+            send_outcome: meta_signal_flow::SendOutcome(sent_counter.next),
         };
         if declared.logical_delivery < standing.logical_delivery
             || declared.queue_attempt < standing.queue_attempt
@@ -87,9 +89,9 @@ impl ConfiguresCounters for FlowStore {
         }
         let commit = self.engine.begin_atomic_commit();
         let commit =
-            logical.declare_next_id(commit, &logical_counter, declared.logical_delivery)?;
-        let commit = queue.declare_next_id(commit, &queue_counter, declared.queue_attempt)?;
-        let commit = sent.declare_next_id(commit, &sent_counter, declared.send_outcome)?;
+            logical.declare_next_id(commit, &logical_counter, declared.logical_delivery.0)?;
+        let commit = queue.declare_next_id(commit, &queue_counter, declared.queue_attempt.0)?;
+        let commit = sent.declare_next_id(commit, &sent_counter, declared.send_outcome.0)?;
         self.engine.commit_atomic(commit)?;
         Ok(ConfigureOutcome::Replaced)
     }

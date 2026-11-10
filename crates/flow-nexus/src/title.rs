@@ -60,7 +60,7 @@ impl TitlesFlow for LaunchProfile {
         }
         let seat = TitledSeat {
             aspect: self.address.aspect.display_spelling(),
-            topic: self.address.topic.clone(),
+            topic: self.address.topic.clone().0,
             model: self.address.model.display_spelling(),
             flow_id: flow_id.into(),
         };
@@ -86,23 +86,28 @@ mod tests {
 
     fn profile(aspect: Aspect, model: Model, native: &str) -> LaunchProfile {
         LaunchProfile {
-            launch_request_id: "launch-title".into(),
-            system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-            user_modules: vec!["operation-main-flow".into()],
+            launch_request_id: signal_flow::LaunchRequestId("launch-title".into()),
+            system_modules: signal_flow::SystemModules(vec![
+                signal_flow::ModuleIdentity("spirit-core".into()),
+                signal_flow::ModuleIdentity("intent-flow".into()),
+            ]),
+            user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                "operation-main-flow".into(),
+            )]),
             address: signal_flow::Address {
                 aspect,
-                topic: "flow".into(),
+                topic: flow_ethos::Topic("flow".into()),
                 model,
             },
-            model_name: native.into(),
-            effort: "high".into(),
+            model_name: flow_ethos::ModelName(native.into()),
+            effort: signal_flow::Effort("high".into()),
             flow_id_option: None,
-            remembering: signal_flow::Remembering::Predecessors(0),
-            herdr_session_name: "session".into(),
+            remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(0)),
+            herdr_session_name: signal_flow::HerdrSessionName("session".into()),
             leave_outs_option: None,
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
-            instruction_prompt: "work".into(),
+            instruction_prompt: signal_flow::InstructionPrompt("work".into()),
         }
     }
 
@@ -135,7 +140,7 @@ mod tests {
     fn the_topic_is_shown_exactly_as_the_address_holds_it() {
         for topic in ["flowNexus", "PrimaryCommitting", "Flow"] {
             let mut launch = profile(Aspect::Mind, Model::Astra, "haiku");
-            launch.address.topic = topic.into();
+            launch.address.topic = flow_ethos::Topic(topic.into());
             assert_eq!(
                 launch.native_title("2712d3").unwrap().as_str(),
                 format!("{{ Mind {topic} Astra 2712d3 }}")

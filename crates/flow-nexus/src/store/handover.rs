@@ -62,9 +62,9 @@ impl IdentifiesClosedHandover for ClosedHandover {
     fn generation_key(&self, address: &Address) -> HandoverGenerationKey {
         HandoverGenerationKey {
             address: address.clone(),
-            handover_generation: self.generation,
-            predecessor: self.predecessor.clone(),
-            successor: self.successor.clone(),
+            handover_generation: signal_flow::HandoverGeneration(self.generation),
+            predecessor: signal_flow::Predecessor(flow_ethos::FlowId(self.predecessor.clone())),
+            successor: signal_flow::Successor(flow_ethos::FlowId(self.successor.clone())),
         }
     }
 }
@@ -459,7 +459,7 @@ impl HoldsHandovers for FlowStore {
         };
         let Some(policy) = policies
             .into_iter()
-            .find(|policy| policy.model_name == model_name)
+            .find(|policy| policy.model_name.0 == model_name)
         else {
             return Ok(false);
         };
@@ -469,11 +469,11 @@ impl HoldsHandovers for FlowStore {
         let Some(signal_flow::Touch::Known(touch)) = row.touch else {
             return Ok(false);
         };
-        if touch.flow_id != flow_id {
+        if touch.flow_id.0 != flow_id {
             return Ok(false);
         }
-        let left = i128::from(100 - policy.warning_share_left);
-        Ok(i128::from(touch.tokens) * 100 >= i128::from(refresh) * left)
+        let left = i128::from(100 - policy.warning_share_left.0);
+        Ok(i128::from(touch.tokens.0) * 100 >= i128::from(refresh) * left)
     }
 
     fn handover_headings(

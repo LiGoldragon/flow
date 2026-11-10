@@ -102,7 +102,7 @@ impl RunsHeartbeat for crate::RunningNexus {
             else {
                 continue;
             };
-            if endpoint.endpoint_path != self.codex_endpoints.current().next.socket {
+            if endpoint.endpoint_path.0 != self.codex_endpoints.current().next.socket {
                 continue;
             }
             match &node.herdr_route_selection {
@@ -120,7 +120,7 @@ impl RunsHeartbeat for crate::RunningNexus {
         for (session, pane) in panes {
             let snapshot = snapshots
                 .entry(session.clone())
-                .or_insert_with(|| self.herdr.session_snapshot(&session));
+                .or_insert_with(|| self.herdr.session_snapshot(&session.0));
             let Some(agents) = snapshot
                 .as_ref()
                 .and_then(|value| value.pointer("/result/snapshot/agents"))
@@ -130,7 +130,7 @@ impl RunsHeartbeat for crate::RunningNexus {
                 continue;
             };
             let Some(agent) = agents.iter().find(|agent| {
-                agent.get("pane_id").and_then(serde_json::Value::as_str) == Some(pane.as_str())
+                agent.get("pane_id").and_then(serde_json::Value::as_str) == Some(pane.0.as_str())
             }) else {
                 coverage_complete = false;
                 continue;
@@ -155,10 +155,11 @@ impl RunsHeartbeat for crate::RunningNexus {
                 }
                 let ordinary_queue_length = metaflow
                     .queue
+                    .0
                     .iter()
                     .filter(|entry| {
                         !purposes.iter().any(|row| {
-                            row.logical_delivery_id == entry.logical_delivery_id
+                            row.logical_delivery_id == entry.logical_delivery_id.0
                                 && row.purpose == DeliveryPurpose::Heartbeat
                         })
                     })
@@ -258,7 +259,7 @@ impl RunsHeartbeat for crate::RunningNexus {
             if let Some(outstanding) = standing.outstanding.as_ref()
                 && self
                     .store
-                    .logical_delivery_snapshot(outstanding)
+                    .logical_delivery_snapshot(&flow_ethos::LogicalDeliveryId(outstanding.clone()))
                     .ok()
                     .flatten()
                     .is_some_and(|snapshot| {
@@ -333,21 +334,21 @@ impl RunsHeartbeat for crate::RunningNexus {
                 .configuration_snapshot()
                 .ok()
                 .flatten()
-                .and_then(|snapshot| snapshot.heartbeat);
+                .and_then(|snapshot| snapshot.configured_heartbeat.0);
             if configured != active {
                 active = configured;
                 next_beat = active
                     .as_ref()
                     .map(|config| std::time::Instant::now() + config.period());
                 if let Some(config) = active.as_ref() {
-                    self.sync_heartbeat(&config.heartbeat_recipients);
+                    self.sync_heartbeat(&config.heartbeat_recipients.0);
                 }
             }
             match (active.as_ref(), next_beat) {
                 (Some(config), Some(beat)) => {
                     if !self.configuration_changes.until(seen, beat) {
                         next_beat = Some(beat + config.period());
-                        self.heartbeat_tick(&config.heartbeat_recipients);
+                        self.heartbeat_tick(&config.heartbeat_recipients.0);
                     }
                 }
                 _ => {
@@ -366,6 +367,6 @@ trait HasHeartbeatPeriod {
 
 impl HasHeartbeatPeriod for meta_signal_flow::HeartbeatConfig {
     fn period(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(self.heartbeat_period_seconds.max(1) as u64)
+        std::time::Duration::from_secs(self.heartbeat_period_seconds.0.max(1) as u64)
     }
 }

@@ -42,9 +42,11 @@ pub trait IdentifiesHandoverArchivePublication {
 impl IdentifiesHandoverArchivePublication for HandoverArchivePublication {
     fn identity(&self) -> HandoverArchiveIdentity {
         HandoverArchiveIdentity {
-            git_commit: self.commit.clone(),
-            archive_document_path: self.path.to_string_lossy().into_owned(),
-            git_blob: self.blob.clone(),
+            git_commit: signal_flow::GitCommit(self.commit.clone()),
+            archive_document_path: signal_flow::ArchiveDocumentPath(
+                self.path.to_string_lossy().into_owned(),
+            ),
+            git_blob: signal_flow::GitBlob(self.blob.clone()),
         }
     }
 }
@@ -229,11 +231,11 @@ impl PublishesHandoverArchive for ExistingGitHandoverArchive {
         let deadline = Instant::now() + self.deadline;
         self.ensure_repository(deadline)?;
         request.flow_id.validate_component()?;
-        request.address.topic.validate_component()?;
+        request.address.topic.0.validate_component()?;
         let aspect = request.address.aspect.aspect_name();
         let model = request.address.model.name();
         let relative = PathBuf::from(aspect)
-            .join(&request.address.topic)
+            .join(&request.address.topic.0)
             .join(model)
             .join(format!("{}.md", request.flow_id));
         let target = self.repository.join(&relative);
@@ -787,7 +789,7 @@ mod tests {
         let result = publisher.publish(HandoverArchiveRequest {
             address: Address {
                 aspect: Aspect::Mind,
-                topic: "testTopic".into(),
+                topic: flow_ethos::Topic("testTopic".into()),
                 model: Model::Sol,
             },
             flow_id: "flow-test".into(),
@@ -830,7 +832,7 @@ mod tests {
             .publish(HandoverArchiveRequest {
                 address: Address {
                     aspect: Aspect::Mind,
-                    topic: "descendantPipes".into(),
+                    topic: flow_ethos::Topic("descendantPipes".into()),
                     model: Model::Sol,
                 },
                 flow_id: "flow-descendant".into(),
@@ -889,7 +891,7 @@ mod tests {
             .publish(HandoverArchiveRequest {
                 address: Address {
                     aspect: Aspect::Mind,
-                    topic: "testTopic".into(),
+                    topic: flow_ethos::Topic("testTopic".into()),
                     model: Model::Sol,
                 },
                 flow_id: "flow-output-bound".into(),

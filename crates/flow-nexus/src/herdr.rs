@@ -245,7 +245,7 @@ impl ChoosesHarnessHook for HookChoice {
         Self {
             stable: match hook {
                 meta_signal_flow::HarnessHookConfiguration::Configured(path) => {
-                    Some(PathBuf::from(path))
+                    Some(PathBuf::from(&path.0))
                 }
                 meta_signal_flow::HarnessHookConfiguration::Unconfigured => None,
             },
@@ -287,7 +287,7 @@ impl ReadsHerdrRoster for HerdrCli {
         }
         let herdr_agent_name = snapshot.live_agent_name(route, &node.harness_kind)?;
         Some(HerdrRoute {
-            herdr_agent_name,
+            herdr_agent_name: signal_flow::HerdrAgentName(herdr_agent_name),
             ..route.clone()
         })
     }
@@ -312,10 +312,10 @@ impl OperatesHerdrPane for HerdrCli {
         Command::new(&self.executable)
             .args([
                 "--session",
-                route.herdr_session_name.as_str(),
+                route.herdr_session_name.0.as_str(),
                 "pane",
                 "close",
-                route.herdr_pane_id.as_str(),
+                route.herdr_pane_id.0.as_str(),
             ])
             .output()
             .is_ok_and(|output| output.status.success())
@@ -390,11 +390,11 @@ impl ReadsPromptReply for PromptReply {
                     && reply
                         .pointer("/result/agent/pane_id")
                         .and_then(serde_json::Value::as_str)
-                        == Some(route.herdr_pane_id.as_str())
+                        == Some(route.herdr_pane_id.0.as_str())
                     && reply
                         .pointer("/result/agent/terminal_id")
                         .and_then(serde_json::Value::as_str)
-                        == Some(route.herdr_terminal_id.as_str())
+                        == Some(route.herdr_terminal_id.0.as_str())
             })
     }
 }
@@ -604,7 +604,7 @@ impl ReadsHerdrPanes for HerdrCli {
         }
         if agents.iter().any(|agent| {
             agent.get("pane_id").and_then(serde_json::Value::as_str)
-                == Some(route.herdr_pane_id.as_str())
+                == Some(route.herdr_pane_id.0.as_str())
         }) {
             return PanePresence::Unknown;
         }
@@ -614,9 +614,9 @@ impl ReadsHerdrPanes for HerdrCli {
             .is_some_and(|panes| {
                 panes.iter().any(|pane| {
                     pane.get("pane_id").and_then(serde_json::Value::as_str)
-                        == Some(route.herdr_pane_id.as_str())
+                        == Some(route.herdr_pane_id.0.as_str())
                         && pane.get("terminal_id").and_then(serde_json::Value::as_str)
-                            == Some(route.herdr_terminal_id.as_str())
+                            == Some(route.herdr_terminal_id.0.as_str())
                 })
             });
         if shown {
@@ -629,7 +629,7 @@ impl ReadsHerdrPanes for HerdrCli {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
             return PaneOwnership::Absent;
         };
-        if node.session_id.is_empty() {
+        if node.session_id.0.is_empty() {
             return PaneOwnership::Unidentified;
         }
         let Some(snapshot) = self.snapshot(route) else {
@@ -651,10 +651,10 @@ impl ReadsHerdrPanes for HerdrCli {
                     .and_then(serde_json::Value::as_str),
                 &node.harness_kind,
             ) {
-                (Some(session), _) if session == node.session_id => PaneOwnership::Owned,
+                (Some(session), _) if session == node.session_id.0 => PaneOwnership::Owned,
                 (Some(_), _) => PaneOwnership::Foreign,
                 (None, HarnessKind::Codex) => {
-                    match self.foreground_resumes(route, &node.session_id) {
+                    match self.foreground_resumes(route, &node.session_id.0) {
                         Some(true) => PaneOwnership::Owned,
                         Some(false) => PaneOwnership::Unproven,
                         None => PaneOwnership::Unknown,
@@ -665,7 +665,7 @@ impl ReadsHerdrPanes for HerdrCli {
         }
         if agents.iter().any(|agent| {
             agent.get("pane_id").and_then(serde_json::Value::as_str)
-                == Some(route.herdr_pane_id.as_str())
+                == Some(route.herdr_pane_id.0.as_str())
         }) {
             return PaneOwnership::Foreign;
         }
@@ -712,18 +712,18 @@ impl ReadsHerdrPanes for HerdrCli {
         let processes = self
             .run_json(&[
                 "--session".into(),
-                route.herdr_session_name.clone(),
+                route.herdr_session_name.clone().0,
                 "pane".into(),
                 "process-info".into(),
                 "--pane".into(),
-                route.herdr_pane_id.clone(),
+                route.herdr_pane_id.clone().0,
             ])
             .ok()?;
         let information = processes.pointer("/result/process_info")?;
         if information
             .get("pane_id")
             .and_then(serde_json::Value::as_str)
-            != Some(route.herdr_pane_id.as_str())
+            != Some(route.herdr_pane_id.0.as_str())
         {
             return None;
         }
@@ -772,7 +772,7 @@ impl ReadsHerdrPanes for HerdrCli {
     }
 
     fn snapshot(&self, route: &HerdrRoute) -> Option<serde_json::Value> {
-        self.session_snapshot(&route.herdr_session_name)
+        self.session_snapshot(&route.herdr_session_name.0)
     }
 
     fn holds_native_session(&self, herdr_session_name: &str, node: &FlowNode) -> Option<bool> {
@@ -784,8 +784,8 @@ impl ReadsHerdrPanes for HerdrCli {
         // this Herdr session.
         let recorded = match (&node.harness_kind, &node.herdr_route_selection) {
             (HarnessKind::Codex, HerdrRouteSelection::Available(route))
-                if route.herdr_session_name == herdr_session_name
-                    && !node.session_id.is_empty() =>
+                if route.herdr_session_name.0 == herdr_session_name
+                    && !node.session_id.0.is_empty() =>
             {
                 Some(route)
             }
@@ -796,7 +796,7 @@ impl ReadsHerdrPanes for HerdrCli {
                 .pointer("/agent_session/value")
                 .and_then(serde_json::Value::as_str)
             {
-                Some(session) => session == node.session_id,
+                Some(session) => session == node.session_id.0,
                 None => {
                     recorded.is_some_and(|route| agent.matches_binding(route, &node.harness_kind))
                 }
@@ -837,14 +837,16 @@ impl ReadsHerdrPanes for HerdrCli {
             return PaneRoute::NotShown;
         };
         PaneRoute::Shown(HerdrRoute {
-            herdr_session_name: herdr_session_name.to_owned(),
-            herdr_agent_name: agent
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            herdr_pane_id: herdr_pane_id.to_owned(),
-            herdr_terminal_id: herdr_terminal_id.to_owned(),
+            herdr_session_name: signal_flow::HerdrSessionName(herdr_session_name.to_owned()),
+            herdr_agent_name: signal_flow::HerdrAgentName(
+                agent
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            ),
+            herdr_pane_id: signal_flow::HerdrPaneId(herdr_pane_id.to_owned()),
+            herdr_terminal_id: signal_flow::HerdrTerminalId(herdr_terminal_id.to_owned()),
         })
     }
 
@@ -957,9 +959,9 @@ impl ReadsHerdrAgent for serde_json::Value {
             HarnessKind::Claude => "claude",
         };
         self.get("pane_id").and_then(serde_json::Value::as_str)
-            == Some(route.herdr_pane_id.as_str())
+            == Some(route.herdr_pane_id.0.as_str())
             && self.get("terminal_id").and_then(serde_json::Value::as_str)
-                == Some(route.herdr_terminal_id.as_str())
+                == Some(route.herdr_terminal_id.0.as_str())
             && self.get("agent").and_then(serde_json::Value::as_str) == Some(expected_harness)
     }
 
@@ -973,9 +975,10 @@ impl ReadsHerdrAgent for serde_json::Value {
 
 impl VerifiesFlowClaim for HerdrCli {
     fn identity_is_claimed(&self, node: &FlowNode) -> bool {
-        if node.flow_id.is_empty()
+        if node.flow_id.0.is_empty()
             || !node
                 .flow_id
+                .0
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         {
@@ -984,7 +987,7 @@ impl VerifiesFlowClaim for HerdrCli {
         let marker_path = self
             .flows_root
             .current()
-            .join(format!(".{}.flow-id", node.flow_id));
+            .join(format!(".{}.flow-id", node.flow_id.0));
         let Ok(metadata) = fs::symlink_metadata(&marker_path) else {
             return false;
         };
@@ -995,7 +998,7 @@ impl VerifiesFlowClaim for HerdrCli {
             return false;
         };
         FlowClaim::decode(&marker).is_some_and(|claim| {
-            claim.alias == node.flow_id && claim.harness_kind == node.harness_kind
+            claim.alias == node.flow_id.0 && claim.harness_kind == node.harness_kind
         })
     }
 }
@@ -1083,10 +1086,10 @@ mod tests {
 
     fn route() -> HerdrRoute {
         HerdrRoute {
-            herdr_session_name: "messaging-build".into(),
-            herdr_agent_name: "recipient".into(),
-            herdr_pane_id: "w1:p2".into(),
-            herdr_terminal_id: "term-current".into(),
+            herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+            herdr_agent_name: signal_flow::HerdrAgentName("recipient".into()),
+            herdr_pane_id: signal_flow::HerdrPaneId("w1:p2".into()),
+            herdr_terminal_id: signal_flow::HerdrTerminalId("term-current".into()),
         }
     }
 
@@ -1131,10 +1134,10 @@ mod tests {
 
     fn codex_route() -> HerdrRoute {
         HerdrRoute {
-            herdr_session_name: "messaging-build".into(),
-            herdr_agent_name: "field-sol-b7da5d".into(),
-            herdr_pane_id: "wQ:pT".into(),
-            herdr_terminal_id: "term_65c41aac961f978".into(),
+            herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+            herdr_agent_name: signal_flow::HerdrAgentName("field-sol-b7da5d".into()),
+            herdr_pane_id: signal_flow::HerdrPaneId("wQ:pT".into()),
+            herdr_terminal_id: signal_flow::HerdrTerminalId("term_65c41aac961f978".into()),
         }
     }
 
@@ -1201,14 +1204,14 @@ mod tests {
     fn imported_native_session_uses_the_existing_harness_claim_marker() {
         let flows = tempfile::tempdir().expect("temporary flows root");
         let mut node = FlowNode {
-            flow_id: "1ac573".into(),
-            session_id: "f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into(),
+            flow_id: flow_ethos::FlowId("1ac573".into()),
+            session_id: signal_flow::SessionId("f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into()),
             harness_kind: HarnessKind::Claude,
             endpoint_selection: EndpointSelection::Unavailable,
             herdr_route_selection: HerdrRouteSelection::Available(route()),
             origin: Origin::Flow(FlowOrigin {
-                flow_id: "1ac573".into(),
-                session_id: "f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into(),
+                flow_id: flow_ethos::FlowId("1ac573".into()),
+                session_id: signal_flow::SessionId("f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into()),
             }),
             flow_lifecycle: FlowLifecycle::Active,
         };
@@ -1219,7 +1222,7 @@ mod tests {
         .expect("claim marker");
         let herdr = HerdrCli::at(PathBuf::from("herdr"), flows.path().into());
         assert!(herdr.identity_is_claimed(&node));
-        node.flow_id = "unknown".into();
+        node.flow_id = flow_ethos::FlowId("unknown".into());
         assert!(!herdr.identity_is_claimed(&node));
     }
 
@@ -1230,17 +1233,17 @@ mod tests {
             PathBuf::from("/missing-flows-fixture"),
         );
         let mut node = FlowNode {
-            flow_id: "1ac573".into(),
-            session_id: "f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into(),
+            flow_id: flow_ethos::FlowId("1ac573".into()),
+            session_id: signal_flow::SessionId("f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into()),
             harness_kind: HarnessKind::Claude,
             endpoint_selection: EndpointSelection::Available(signal_flow::Available_Data {
-                endpoint_path: "/tmp/native-fallback.sock".into(),
+                endpoint_path: signal_flow::EndpointPath("/tmp/native-fallback.sock".into()),
                 route_readiness: signal_flow::RouteReadiness::Ready,
             }),
             herdr_route_selection: HerdrRouteSelection::Available(route()),
             origin: Origin::Flow(FlowOrigin {
-                flow_id: "1ac573".into(),
-                session_id: "f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into(),
+                flow_id: flow_ethos::FlowId("1ac573".into()),
+                session_id: signal_flow::SessionId("f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into()),
             }),
             flow_lifecycle: FlowLifecycle::Active,
         };

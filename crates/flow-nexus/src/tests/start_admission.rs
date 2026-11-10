@@ -34,7 +34,7 @@ fn a_start_waits_for_no_other_models_seat() {
     let _ = fs::remove_file(&fixture.snapshot_program);
     configure(&fixture, &[(Model::Astra, "gpt-6-sol")]);
     let mut astra = seat(Aspect::Mind, Model::Astra, "gpt-6-sol", "astra-request");
-    astra.address.topic = "topics".into();
+    astra.address.topic = flow_ethos::Topic("topics".into());
     assert_eq!(
         fixture.nexus.dispatch(Query::Start(astra.clone())),
         Response::StartRejected(pane_unopened())
@@ -54,7 +54,7 @@ fn a_start_waits_for_no_other_models_seat() {
             .store
             .metaflow(&signal_flow::Address {
                 aspect: Aspect::Mind,
-                topic: "topics".into(),
+                topic: flow_ethos::Topic("topics".into()),
                 model: Model::Sol,
             })
             .unwrap(),
@@ -82,10 +82,12 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
         "9lives",
     ] {
         let mut start = seat(Aspect::Mind, Model::Sol, "gpt-6-sol", "topic-request");
-        start.address.topic = topic.into();
+        start.address.topic = flow_ethos::Topic(topic.into());
         assert_eq!(
             fixture.nexus.dispatch(Query::Start(start)),
-            Response::StartRejected(StartRejection::TopicRefused(topic.into())),
+            Response::StartRejected(StartRejection::TopicRefused(flow_ethos::Topic(
+                topic.into()
+            ))),
             "{topic:?}"
         );
         assert_eq!(
@@ -96,16 +98,18 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
             root_option: None,
             address: signal_flow::Address {
                 aspect: Aspect::Mind,
-                topic: topic.into(),
+                topic: flow_ethos::Topic(topic.into()),
                 model: Model::Sol,
             },
-            system_modules: vec!["spirit-core".into()],
-            user_modules: vec![],
+            system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
+                "spirit-core".into(),
+            )]),
+            user_modules: signal_flow::UserModules(vec![]),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             continuity: meta_signal_flow::Continuity::OnDemand,
-            purpose: String::new(),
-            records: vec![],
+            purpose: meta_signal_flow::Purpose(String::new()),
+            records: meta_signal_flow::Records(vec![]),
         };
         assert_eq!(
             fixture
@@ -114,13 +118,13 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
                     meta_signal_flow::ConfigurationChange::Metaflows(vec![declared])
                 )),
             meta_signal_flow::Response::ConfigureRejected(
-                meta_signal_flow::ConfigureRejection::TopicRefused(topic.into())
+                meta_signal_flow::ConfigureRejection::TopicRefused(flow_ethos::Topic(topic.into()))
             ),
             "{topic:?}"
         );
     }
     let mut kept = seat(Aspect::Mind, Model::Sol, "gpt-6-sol", "kept-request");
-    kept.address.topic = "primaryCommitting".into();
+    kept.address.topic = flow_ethos::Topic("primaryCommitting".into());
     assert_eq!(
         fixture.nexus.dispatch(Query::Start(kept)),
         Response::StartRejected(pane_unopened())
@@ -131,7 +135,10 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
         .launch_attempt("kept-request")
         .unwrap()
         .expect("a camelCase topic is admitted");
-    assert_eq!(attempt.launch_profile.address.topic, "primaryCommitting");
+    assert_eq!(
+        attempt.launch_profile.address.topic,
+        flow_ethos::Topic("primaryCommitting".into())
+    );
 }
 
 /// A Send whose recipient Address has a topic that is not camelCase is
@@ -146,12 +153,12 @@ fn a_send_to_a_bad_topic_is_topic_refused() {
     for topic in ["PrimaryCommitting", "primary-committing", "", "9lives"] {
         let recipient = Address {
             aspect: Aspect::Mind,
-            topic: topic.into(),
+            topic: flow_ethos::Topic(topic.into()),
             model: Model::Sol,
         };
         let sent = fixture.nexus.send_request(
             SendRequest {
-                recipient: recipient.clone(),
+                address: recipient.clone(),
                 sendable_message: signal_flow::SendableMessage::Soft(
                     signal_flow::SendableRequest::Order("Never queued.".into()),
                 ),
@@ -160,14 +167,16 @@ fn a_send_to_a_bad_topic_is_topic_refused() {
         );
         assert_eq!(
             sent.response,
-            Response::SendRefused(signal_flow::VisibleRefusal::TopicRefused(topic.into())),
+            Response::SendRefused(signal_flow::VisibleRefusal::TopicRefused(
+                flow_ethos::Topic(topic.into())
+            )),
             "{topic:?}"
         );
         assert!(sent.pending.is_none());
         assert_eq!(fixture.nexus.store.metaflow(&recipient).unwrap(), None);
         let abrupt = fixture.nexus.send_request(
             SendRequest {
-                recipient,
+                address: recipient,
                 sendable_message: signal_flow::SendableMessage::HardAbrupt(
                     signal_flow::SendableRequest::Order("Never typed.".into()),
                 ),
@@ -178,7 +187,7 @@ fn a_send_to_a_bad_topic_is_topic_refused() {
             abrupt.response,
             Response::Failed(signal_flow::VisibleSendFailure::Unadmitted(
                 signal_flow::VisibleSendFailureReason::Refused(
-                    signal_flow::VisibleRefusal::TopicRefused(topic.into())
+                    signal_flow::VisibleRefusal::TopicRefused(flow_ethos::Topic(topic.into()))
                 )
             )),
             "{topic:?}"
@@ -199,14 +208,16 @@ fn launch_with_a_bad_topic_is_topic_refused() {
     let response = fixture.nexus.dispatch(Query::Launch(LaunchRequest {
         address: Address {
             aspect: Aspect::Mind,
-            topic: "PrimaryCommitting".into(),
+            topic: flow_ethos::Topic("PrimaryCommitting".into()),
             model: Model::Sol,
         },
-        remembering: Remembering::Predecessors(0),
-        instruction_prompt: String::new(),
+        remembering: Remembering::Predecessors(signal_flow::RememberingDepth(0)),
+        instruction_prompt: signal_flow::InstructionPrompt(String::new()),
     }));
     assert_eq!(
         response,
-        Response::StartRejected(StartRejection::TopicRefused("PrimaryCommitting".into())),
+        Response::StartRejected(StartRejection::TopicRefused(flow_ethos::Topic(
+            "PrimaryCommitting".into()
+        ))),
     );
 }

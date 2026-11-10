@@ -126,7 +126,9 @@ impl ProjectsSendResponse for signal_flow::PrivateSendResponse {
                 })
             }
             PrivateSendResponse::Refused(value) => Response::SendRefused(value.visible_refusal()),
-            PrivateSendResponse::Sent(value) => Response::Sent(value.request_id.clone()),
+            PrivateSendResponse::Sent(value) => {
+                Response::Sent(signal_flow::VisibleSendReceipt(value.request_id.clone()))
+            }
             PrivateSendResponse::Failed(value) => Response::Failed(value.visible_send_failure()),
         }
     }
@@ -344,7 +346,7 @@ impl ProjectsQueueResolutionRecord for meta_signal_flow::QueueResolutionRecord {
         let value = self;
         meta_signal_flow::VisibleQueueResolutionRecord {
             queue_resolution_outcome: value.queue_resolution_outcome.clone(),
-            visible_resolver_identity: value.resolver_identity.process_identity.clone(),
+            process_identity: value.resolver_identity.process_identity.clone(),
             queue_resolution_reason: value.queue_resolution_reason.clone(),
             unix_seconds: value.unix_seconds,
         }
@@ -476,9 +478,10 @@ impl ProjectsMetaflow for flow_ethos::Metaflow {
         meta_signal_flow::VisibleMetaflow {
             address: value.address.clone(),
             state: value.state.clone(),
-            flow_id_vector: value.past.clone(),
+            flow_id_vector: value.past.clone().0,
             visible_native_input_vector: value
                 .queue
+                .0
                 .iter()
                 .map(|entry| entry.visible_input(&value.address))
                 .collect(),
@@ -549,7 +552,9 @@ impl ProjectsSendOutcomeRecord for meta_signal_flow::SendOutcomeRecord {
             }),
             Private::Refused(value) => Visible::Refused(value.visible_refusal()),
             Private::PriorAdmission(value) => Visible::PriorAdmission(value.clone()),
-            Private::Sent(value) => Visible::Sent(value.request_id.clone()),
+            // STAND-IN, not for landing: meta-signal-flow a90a889 asks a
+            // NativeReceipt where Flow holds a SendReceipt.
+            Private::Sent(value) => todo!("meta-signal-flow a90a889 Sent of {value:?}"),
             Private::Failed(value) => Visible::Failed(value.visible_send_failure()),
         };
         meta_signal_flow::VisibleSendOutcomeRecord {
@@ -571,8 +576,8 @@ mod tests {
     fn visible_delivered_state_omits_native_receipt() {
         let private = DeliveryState::Delivered(NativeReceipt {
             harness_kind: HarnessKind::Codex,
-            native_session_id: "private-session".into(),
-            native_prompt_id: "private-prompt".into(),
+            native_session_id: signal_flow::NativeSessionId("private-session".into()),
+            native_prompt_id: signal_flow::NativePromptId("private-prompt".into()),
         });
         assert_eq!(
             private.visible_delivery_state(),

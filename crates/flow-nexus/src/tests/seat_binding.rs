@@ -34,8 +34,10 @@ impl NexusFixture {
             .store
             .configure_change(meta_signal_flow::ConfigurationChange::SendServers(vec![
                 meta_signal_flow::ConfigureSendServer {
-                    codex_app_server_binary: app_server,
-                    mcp_send_server_binary: "/fixture/send-server".into(),
+                    codex_app_server_binary: meta_signal_flow::CodexAppServerBinary(app_server),
+                    mcp_send_server_binary: meta_signal_flow::McpSendServerBinary(
+                        "/fixture/send-server".into(),
+                    ),
                 },
             ]))
             .unwrap();
@@ -126,11 +128,11 @@ impl CodexCliWorld {
             .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
                 meta_signal_flow::ConfigureModel {
                     model: Model::Terra,
-                    native: "gpt-6-sol".into(),
+                    native: meta_signal_flow::Native("gpt-6-sol".into()),
                 },
                 meta_signal_flow::ConfigureModel {
                     model: Model::Luna,
-                    native: "gpt-6-luna".into(),
+                    native: meta_signal_flow::Native("gpt-6-luna".into()),
                 },
             ]))
             .unwrap();
@@ -347,7 +349,7 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
         .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
             meta_signal_flow::ConfigureModel {
                 model: Model::Sol,
-                native: "gpt-6-sol".into(),
+                native: meta_signal_flow::Native("gpt-6-sol".into()),
             },
         ]))
         .unwrap();
@@ -367,7 +369,7 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
     fixture.rollout(ORPHAN, "01a15580-0000-7000-8000-0000000000ff");
     let address = Address {
         aspect: Aspect::Mind,
-        topic: "context".into(),
+        topic: flow_ethos::Topic("context".into()),
         model: Model::Sol,
     };
     // The TUI in the seat's pane resumes the root thread.
@@ -403,7 +405,7 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
     let before_adoption = fixture.nexus.store.launch_changes.current();
     assert_eq!(
         fixture.nexus.bind_seat(address.clone(), Some(&subagent)),
-        Response::Bound("877549".into())
+        Response::Bound(flow_ethos::FlowId("877549".into()))
     );
     assert!(
         fixture.nexus.store.launch_changes.current() > before_adoption,
@@ -469,7 +471,7 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
         .flow_node("877549")
         .unwrap()
         .expect("BindSeat registered the live Codex seat");
-    assert_eq!(node.session_id, ROOT);
+    assert_eq!(node.session_id.0, ROOT);
     assert_eq!(node.harness_kind, signal_flow::HarnessKind::Codex);
     assert_eq!(
         configured.fixture.nexus.live_awake_flow(&terra).as_deref(),
@@ -487,7 +489,7 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
             vec![],
         ));
     let send_query = Query::Send(SendRequest {
-        recipient: luna.clone(),
+        address: luna.clone(),
         sendable_message: super::sendable_message(Message::Soft(Request::Notice(
             "caller attribution diagnostic".into(),
         ))),
@@ -508,9 +510,9 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
         Query::Keep(signal_flow::Keep_Data {
             address,
             section: Section {
-                title: "diagnostic".into(),
-                description: "caller attribution".into(),
-                body: "test only".into(),
+                title: signal_flow::Title("diagnostic".into()),
+                description: signal_flow::Description("caller attribution".into()),
+                body: signal_flow::Body("test only".into()),
             },
         })
     };
@@ -518,9 +520,9 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
         Query::Keep(signal_flow::Keep_Data {
             address: terra.clone(),
             section: Section {
-                title: "prior".into(),
-                description: "must remain".into(),
-                body: "existing handover".into(),
+                title: signal_flow::Title("prior".into()),
+                description: signal_flow::Description("must remain".into()),
+                body: signal_flow::Body("existing handover".into()),
             },
         }),
         Some(ROOT),
@@ -540,7 +542,7 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
     let drop_call = configured.call(
         Query::Drop(signal_flow::Drop_Data {
             address: terra.clone(),
-            title: "diagnostic".into(),
+            title: signal_flow::Title("diagnostic".into()),
         }),
         Some(ROOT),
     );
@@ -558,7 +560,7 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
             .handover_headings(&terra)
             .unwrap()
             .into_iter()
-            .map(|heading| heading.title)
+            .map(|heading| heading.title.0)
             .collect::<Vec<_>>(),
         vec!["prior"]
     );
@@ -589,7 +591,7 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
         ));
     let unconfigured_send = unconfigured.call(
         Query::Send(SendRequest {
-            recipient: luna.clone(),
+            address: luna.clone(),
             sendable_message: super::sendable_message(Message::Soft(Request::Notice(
                 "unconfigured authority diagnostic".into(),
             ))),
@@ -631,7 +633,7 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
     let mismatch = mismatched.call(
         Query::Adopt(signal_flow::Adopt_Data {
             address: terra.clone(),
-            native_session_id: "different-native-session".into(),
+            native_session_id: signal_flow::NativeSessionId("different-native-session".into()),
         }),
         Some(ROOT),
     );
@@ -664,7 +666,7 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
     let luna_drop = wrong_seat.call(
         Query::Drop(signal_flow::Drop_Data {
             address: terra.clone(),
-            title: "diagnostic".into(),
+            title: signal_flow::Title("diagnostic".into()),
         }),
         Some(ROOT),
     );
@@ -689,7 +691,7 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
     let unbound_drop = unbound.call(
         Query::Drop(signal_flow::Drop_Data {
             address: terra.clone(),
-            title: "diagnostic".into(),
+            title: signal_flow::Title("diagnostic".into()),
         }),
         None,
     );
@@ -742,17 +744,17 @@ fn a_registered_address_process_never_inherits_its_successor_flow() {
     assert_eq!(fixture.nexus.sending_address(&peer).unwrap(), address);
 
     let mut successor = fixture.node();
-    successor.flow_id = "successor".into();
-    successor.session_id = "successor-native-session".into();
+    successor.flow_id = flow_ethos::FlowId("successor".into());
+    successor.session_id = signal_flow::SessionId("successor-native-session".into());
     successor.harness_kind = HarnessKind::Codex;
     successor.origin = Origin::Unbound;
     successor.flow_lifecycle = FlowLifecycle::Active;
     fixture.nexus.store.register_flow(successor).unwrap();
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address.clone(),
-        state: State::Awake("successor".into()),
-        past: vec![],
-        queue: vec![],
+        state: State::Awake(flow_ethos::FlowId("successor".into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     fixture
         .nexus
@@ -777,9 +779,9 @@ fn a_registered_address_process_never_inherits_its_successor_flow() {
             Query::Keep(signal_flow::Keep_Data {
                 address: address.clone(),
                 section: Section {
-                    title: "forbidden".into(),
-                    description: "old binder".into(),
-                    body: "must not land".into(),
+                    title: signal_flow::Title("forbidden".into()),
+                    description: signal_flow::Description("old binder".into()),
+                    body: signal_flow::Body("must not land".into()),
                 },
             }),
             asker.clone(),
@@ -789,7 +791,7 @@ fn a_registered_address_process_never_inherits_its_successor_flow() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_asked(Query::Stop("successor".into()), asker),
+            .dispatch_asked(Query::Stop(flow_ethos::FlowId("successor".into())), asker),
         Response::StopRejected(signal_flow::StopRejection::Protected)
     );
     assert!(
@@ -844,7 +846,7 @@ fn failed_process_authority_evidence_never_becomes_owner() {
     );
 
     let mut stale = unknown;
-    stale.started += 1;
+    stale.started.0 += 1;
     assert_eq!(
         configured.nexus.process_authority(&stale).unwrap(),
         ProcessAuthority::Rejected
@@ -874,7 +876,7 @@ fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
     let fixture = NexusFixture::new();
     claude_seat(&fixture, 100);
     let mut role = super::mind_live();
-    role.flow_id = CLAUDE_SEAT.into();
+    role.flow_id = flow_ethos::FlowId(CLAUDE_SEAT.into());
     let node = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
     fixture
         .nexus
@@ -884,13 +886,13 @@ fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
     fixture.set_agents(vec![claude_agent(&fixture)]);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        flow_ethos::State::Awake(CLAUDE_SEAT.into()),
+        flow_ethos::State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         vec![],
         vec![],
     ));
     let address = Address {
         aspect: Aspect::Mind,
-        topic: "flow".into(),
+        topic: flow_ethos::Topic("flow".into()),
         model: Model::Sol,
     };
     let child_file = fixture.directory.path().join("claude-command-child");
@@ -914,10 +916,10 @@ fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
         let peer = FlowStore::process_identity_for_pid(pid).unwrap();
         assert_eq!(
             fixture.nexus.bind_seat(address.clone(), Some(&peer)),
-            Response::Bound(CLAUDE_SEAT.into())
+            Response::Bound(flow_ethos::FlowId(CLAUDE_SEAT.into()))
         );
         let mut forged = peer;
-        forged.started += 1;
+        forged.started.0 += 1;
         assert!(matches!(
             fixture.nexus.bind_seat(address.clone(), Some(&forged)),
             Response::Refused(Refusal::Unidentified(_))
@@ -970,7 +972,7 @@ impl NexusFixture {
         fs::write(
             sessions.join(format!("{process_id}.json")),
             serde_json::json!({
-                "pid": process_id, "sessionId": session, "procStart": started.to_string(),
+                "pid": process_id, "sessionId": session, "procStart": started.0.to_string(),
                 "cwd": "/home/li/primary", "kind": "interactive", "entrypoint": "cli"
             })
             .to_string(),
@@ -1005,7 +1007,7 @@ impl NexusFixture {
             .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
                 meta_signal_flow::ConfigureModel {
                     model: Model::Opus,
-                    native: "claude-opus-5-5".into(),
+                    native: meta_signal_flow::Native("claude-opus-5-5".into()),
                 },
             ]))
             .unwrap();
@@ -1031,7 +1033,7 @@ fn claude_in_pane(session: Option<&str>) -> serde_json::Value {
 fn psyche_flow_secondary() -> Address {
     Address {
         aspect: Aspect::Psyche,
-        topic: "flow".into(),
+        topic: flow_ethos::Topic("flow".into()),
         model: Model::Opus,
     }
 }
@@ -1071,7 +1073,7 @@ fn a_claude_seat_binds_on_an_empty_store_under_its_sessions_flow_id() {
         let peer = FlowStore::process_identity_for_pid(claude.0.id()).unwrap();
         assert_eq!(
             fixture.nexus.bind_seat(address.clone(), Some(&peer)),
-            Response::Bound(HARNESS_FLOW_ID.into()),
+            Response::Bound(flow_ethos::FlowId(HARNESS_FLOW_ID.into())),
             "{reported:?}: the Claude seat binds under its session's Flow ID"
         );
         assert_eq!(fixture.nexus.sending_address(&peer).unwrap(), address);
@@ -1081,7 +1083,7 @@ fn a_claude_seat_binds_on_an_empty_store_under_its_sessions_flow_id() {
             .flow_node(HARNESS_FLOW_ID)
             .unwrap()
             .expect("the seat's flow is registered");
-        assert_eq!(node.session_id, HARNESS_SESSION);
+        assert_eq!(node.session_id.0, HARNESS_SESSION);
         assert_eq!(node.harness_kind, signal_flow::HarnessKind::Claude);
         assert_eq!(
             fixture.nexus.live_awake_flow(&address).as_deref(),
@@ -1111,7 +1113,7 @@ fn an_unbound_claude_seat_adopts_only_its_authenticated_session() {
     let peer = FlowStore::process_identity_for_pid(claude.0.id()).unwrap();
     let request = |session: &str| signal_flow::Adopt_Data {
         address: address.clone(),
-        native_session_id: session.into(),
+        native_session_id: signal_flow::NativeSessionId(session.into()),
     };
 
     assert!(matches!(
@@ -1125,7 +1127,7 @@ fn an_unbound_claude_seat_adopts_only_its_authenticated_session() {
     for _ in 0..2 {
         assert_eq!(
             fixture.nexus.adopt(request(HARNESS_SESSION), Some(&peer)),
-            Response::Adopted(HARNESS_FLOW_ID.into())
+            Response::Adopted(flow_ethos::FlowId(HARNESS_FLOW_ID.into()))
         );
     }
     assert!(matches!(
@@ -1196,10 +1198,10 @@ fn a_pane_with_no_agent_record_refuses_with_its_evidence() {
         refused,
         signal_flow::SeatEvidence {
             seat_pane_option: Some(signal_flow::SeatPane {
-                herdr_session_name: "messaging-build".into(),
-                herdr_pane_id: "w1:p9".into(),
+                herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+                herdr_pane_id: signal_flow::HerdrPaneId("w1:p9".into()),
             }),
-            pane_label_option: Some("zsh".into()),
+            pane_label_option: Some(signal_flow::PaneLabel("zsh".into())),
             native_session_id_option: None,
             observed_at: refused.observed_at,
             process: peer.clone(),
@@ -1207,7 +1209,7 @@ fn a_pane_with_no_agent_record_refuses_with_its_evidence() {
     );
     assert!(
         (i64::try_from(before).unwrap()..=i64::try_from(after).unwrap())
-            .contains(&refused.observed_at)
+            .contains(&refused.observed_at.0)
     );
     use crate::store::ReadsFlowRows;
     assert_eq!(

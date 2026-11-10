@@ -440,9 +440,9 @@ impl PromptsThroughHerdrSocket for HerdrCli {
         let pane = input_0.pane();
         let text = input_1.text();
         let request = serde_json::json!({
-            "id": format!("flow:prompt:{}", pane.launch_request_id),
+            "id": format!("flow:prompt:{}", pane.launch_request_id.0),
             "method": "agent.prompt",
-            "params": { "target": pane.herdr_agent_name, "text": text }
+            "params": { "target": pane.herdr_agent_name.0, "text": text }
         });
         let mut line = serde_json::to_string(&request)
             .map_err(|error| format!("Herdr prompt request not encoded: {error}"))?;
@@ -450,7 +450,7 @@ impl PromptsThroughHerdrSocket for HerdrCli {
         if line.len() > HERDR_REQUEST_LINE_LIMIT {
             return Err("Herdr prompt request exceeds its line limit".into());
         }
-        let socket = self.herdr_session_socket(&pane.herdr_session_name)?;
+        let socket = self.herdr_session_socket(&pane.herdr_session_name.0)?;
         let mut stream = UnixStream::connect(&socket)
             .map_err(|error| format!("Herdr socket unreachable: {error}"))?;
         stream
@@ -527,7 +527,9 @@ pub(crate) trait PreparesClaudePane {
 impl PreparesClaudePane for HerdrCli {
     fn claude_flag_settings(&self, lean: &LeanStart) -> String {
         let configuration = HookConfiguration {
-            ordinary_socket_path: self.ordinary_socket.to_string_lossy().into_owned(),
+            ordinary_socket_path: flow_ethos::OrdinarySocketPath(
+                self.ordinary_socket.to_string_lossy().into_owned(),
+            ),
         }
         .datomize(DatomPath::new())
         .protosize()
@@ -577,7 +579,7 @@ impl PreparesClaudePane for HerdrCli {
             Sha256::digest(
                 format!(
                     "flow-claude-environment-v1\0{}",
-                    launch.launch_profile.launch_request_id
+                    launch.launch_profile.launch_request_id.0
                 )
                 .as_bytes()
             )
@@ -585,19 +587,19 @@ impl PreparesClaudePane for HerdrCli {
         let marker = format!("FLOW_CLAUDE_ENV_READY_{marker_suffix}");
         self.run_status(&[
             "--session".into(),
-            pane.herdr_session_name.clone(),
+            pane.herdr_session_name.clone().0,
             "pane".into(),
             "run".into(),
-            pane.herdr_pane_id.clone(),
+            pane.herdr_pane_id.clone().0,
             marker_suffix
                 .claude_environment_preparation(reserved, &launch.lean_start().environment()),
         ])?;
         let response = self.run_json(&[
             "--session".into(),
-            pane.herdr_session_name.clone(),
+            pane.herdr_session_name.clone().0,
             "pane".into(),
             "wait-output".into(),
-            pane.herdr_pane_id.clone(),
+            pane.herdr_pane_id.clone().0,
             "--match".into(),
             marker.clone(),
             "--source".into(),
@@ -613,7 +615,7 @@ impl PreparesClaudePane for HerdrCli {
         let matched_line = response
             .pointer("/result/matched_line")
             .and_then(serde_json::Value::as_str);
-        if observed_pane != Some(pane.herdr_pane_id.as_str())
+        if observed_pane != Some(pane.herdr_pane_id.0.as_str())
             || matched_line != Some(marker.as_str())
         {
             return Err(
@@ -785,10 +787,10 @@ impl ClaimsNativeIdentity for HerdrCli {
         let response = self
             .run_json(&[
                 "--session".into(),
-                pane.herdr_session_name.clone(),
+                pane.herdr_session_name.clone().0,
                 "agent".into(),
                 "get".into(),
-                pane.herdr_pane_id.clone(),
+                pane.herdr_pane_id.clone().0,
             ])
             .map_err(NativeTargetRefusal::HerdrUnreadable)?;
         let agent = response.pointer("/result/agent").ok_or_else(|| {
@@ -799,11 +801,11 @@ impl ClaimsNativeIdentity for HerdrCli {
         if agent
             .get("workspace_id")
             .and_then(serde_json::Value::as_str)
-            != Some(pane.herdr_workspace_id.as_str())
+            != Some(pane.herdr_workspace_id.0.as_str())
             || agent.get("pane_id").and_then(serde_json::Value::as_str)
-                != Some(pane.herdr_pane_id.as_str())
+                != Some(pane.herdr_pane_id.0.as_str())
             || agent.get("terminal_id").and_then(serde_json::Value::as_str)
-                != Some(pane.herdr_terminal_id.as_str())
+                != Some(pane.herdr_terminal_id.0.as_str())
         {
             return Err(NativeTargetRefusal::PaneMismatch);
         }
@@ -908,7 +910,7 @@ impl CapturesTranscripts for HerdrCli {
     ) -> Result<NativeTranscriptBoundary, String> {
         let (root, root_metadata, found) = self.transcript_candidates(
             &binding.herdr_pane_binding,
-            &binding.native_session_id,
+            &binding.native_session_id.0,
             &binding.harness_kind,
             Some(model_name),
         )?;
@@ -916,8 +918,12 @@ impl CapturesTranscripts for HerdrCli {
             return Ok(NativeTranscriptBoundary::Absent(NativeTranscriptAbsence {
                 native_session_id: binding.native_session_id.clone(),
                 harness_kind: binding.harness_kind.clone(),
-                transcript_root_device: root_metadata.dev().to_string(),
-                transcript_root_inode: root_metadata.ino().to_string(),
+                transcript_root_device: signal_flow::TranscriptRootDevice(
+                    root_metadata.dev().to_string(),
+                ),
+                transcript_root_inode: signal_flow::TranscriptRootInode(
+                    root_metadata.ino().to_string(),
+                ),
             }));
         }
         let transcript = root.one_resolved_transcript(found)?;
@@ -943,11 +949,13 @@ impl CapturesTranscripts for HerdrCli {
         Ok(NativeTranscriptBoundary::Existing(NativeTranscriptCursor {
             native_session_id: binding.native_session_id.clone(),
             harness_kind: binding.harness_kind.clone(),
-            transcript_device: metadata.dev().to_string(),
-            transcript_inode: metadata.ino().to_string(),
-            transcript_byte_offset: i64::try_from(byte_offset)
-                .map_err(|_| "native transcript boundary exceeds i64".to_owned())?,
-            transcript_prefix_sha256: prefix_sha256,
+            transcript_device: signal_flow::TranscriptDevice(metadata.dev().to_string()),
+            transcript_inode: signal_flow::TranscriptInode(metadata.ino().to_string()),
+            transcript_byte_offset: signal_flow::TranscriptByteOffset(
+                i64::try_from(byte_offset)
+                    .map_err(|_| "native transcript boundary exceeds i64".to_owned())?,
+            ),
+            transcript_prefix_sha256: signal_flow::TranscriptPrefixSha256(prefix_sha256),
         }))
     }
 
@@ -958,7 +966,7 @@ impl CapturesTranscripts for HerdrCli {
     ) -> Result<NativeTranscriptBoundary, String> {
         let (root, _, found) = self.transcript_candidates(
             &binding.herdr_pane_binding,
-            &binding.native_session_id,
+            &binding.native_session_id.0,
             &binding.harness_kind,
             Some(model_name),
         )?;
@@ -971,10 +979,13 @@ impl CapturesTranscripts for HerdrCli {
         Ok(NativeTranscriptBoundary::Existing(NativeTranscriptCursor {
             native_session_id: binding.native_session_id.clone(),
             harness_kind: binding.harness_kind.clone(),
-            transcript_device: metadata.dev().to_string(),
-            transcript_inode: metadata.ino().to_string(),
-            transcript_byte_offset: 0,
-            transcript_prefix_sha256: format!("{:x}", Sha256::digest([])),
+            transcript_device: signal_flow::TranscriptDevice(metadata.dev().to_string()),
+            transcript_inode: signal_flow::TranscriptInode(metadata.ino().to_string()),
+            transcript_byte_offset: signal_flow::TranscriptByteOffset(0),
+            transcript_prefix_sha256: signal_flow::TranscriptPrefixSha256(format!(
+                "{:x}",
+                Sha256::digest([])
+            )),
         }))
     }
 
@@ -987,17 +998,19 @@ impl CapturesTranscripts for HerdrCli {
         }
         let (root, root_metadata, found) = self.transcript_candidates(
             &intent.herdr_pane_binding,
-            &intent.native_session_id,
+            &intent.native_session_id.0,
             &intent.harness_kind,
-            Some(&intent.model_name),
+            Some(&intent.model_name.0),
         )?;
         match &intent.native_transcript_boundary {
             NativeTranscriptBoundary::Absent(absence) => {
                 let expected_device = absence
                     .transcript_root_device
+                    .0
                     .decimal_identity("root device")?;
                 let expected_inode = absence
                     .transcript_root_inode
+                    .0
                     .decimal_identity("root inode")?;
                 if root_metadata.dev() != expected_device || root_metadata.ino() != expected_inode {
                     return Err("configured native transcript root was replaced"
@@ -1019,9 +1032,9 @@ impl CapturesTranscripts for HerdrCli {
                 let metadata = file
                     .metadata()
                     .map_err(|error| format!("native transcript metadata failed: {error}"))?;
-                let expected_device = cursor.transcript_device.decimal_identity("device")?;
-                let expected_inode = cursor.transcript_inode.decimal_identity("inode")?;
-                let byte_offset = u64::try_from(cursor.transcript_byte_offset)
+                let expected_device = cursor.transcript_device.0.decimal_identity("device")?;
+                let expected_inode = cursor.transcript_inode.0.decimal_identity("inode")?;
+                let byte_offset = u64::try_from(cursor.transcript_byte_offset.0)
                     .map_err(|_| "native transcript boundary is negative".to_owned())?;
                 if metadata.dev() != expected_device || metadata.ino() != expected_inode {
                     return Err("native transcript file was replaced".to_owned().into());
@@ -1030,7 +1043,7 @@ impl CapturesTranscripts for HerdrCli {
                     return Err("native transcript file was truncated".to_owned().into());
                 }
                 let (prefix_sha256, _) = file.hash_prefix(byte_offset)?;
-                if prefix_sha256 != cursor.transcript_prefix_sha256 {
+                if prefix_sha256 != cursor.transcript_prefix_sha256.0 {
                     return Err("native transcript prefix changed after intent persistence"
                         .to_owned()
                         .into());
@@ -1107,7 +1120,7 @@ impl NamesHerdrHarness for HarnessKind {
 pub(crate) trait ChecksComposedLaunch {
     fn launch_agent_name(&self) -> String;
     /// The SHA-256 of every part of the first USER message, in order.
-    fn part_hashes(&self) -> Vec<String>;
+    fn part_hashes(&self) -> Vec<signal_flow::PromptSha256>;
     /// The launch's harness and its effective leave-outs.
     fn lean_start(&self) -> LeanStart;
     fn binding_matches_launch(&self, pane: &HerdrPaneBinding) -> Result<(), String>;
@@ -1122,7 +1135,7 @@ impl ChecksComposedLaunch for ComposedLaunch {
             Sha256::digest(
                 format!(
                     "flow-herdr-agent-v1\0{}",
-                    launch.launch_profile.launch_request_id
+                    launch.launch_profile.launch_request_id.0
                 )
                 .as_bytes()
             )
@@ -1138,7 +1151,7 @@ impl ChecksComposedLaunch for ComposedLaunch {
         }
     }
 
-    fn part_hashes(&self) -> Vec<String> {
+    fn part_hashes(&self) -> Vec<signal_flow::PromptSha256> {
         self.first_prompt_payload
             .prompt_part_vector
             .iter()
@@ -1150,7 +1163,7 @@ impl ChecksComposedLaunch for ComposedLaunch {
         let launch = self;
         if pane.launch_request_id != launch.launch_profile.launch_request_id
             || pane.herdr_session_name != launch.launch_profile.herdr_session_name
-            || pane.herdr_agent_name != launch.launch_agent_name()
+            || pane.herdr_agent_name.0 != launch.launch_agent_name()
         {
             return Err("Herdr pane binding does not belong to this launch request".into());
         }
@@ -1167,7 +1180,7 @@ impl ChecksComposedLaunch for ComposedLaunch {
             || intent.effort != launch.launch_profile.effort
             || intent.prompt_sha256_vector != launch.part_hashes()
             || intent.leave_outs != launch.leave_outs
-            || !usize::try_from(intent.parts_submitted).is_ok_and(|parts| {
+            || !usize::try_from(intent.parts_submitted.0).is_ok_and(|parts| {
                 (intent.prompt_sha256_vector.is_empty() && parts == 0)
                     || (1..=intent.prompt_sha256_vector.len()).contains(&parts)
             })
@@ -1593,14 +1606,14 @@ impl TitlesClaudeSession for HerdrCli {
     fn title_cues(&self, pane: &HerdrPaneBinding) -> TitleCues {
         let deadline = std::time::Instant::now() + self.title_wait();
         let events = self
-            .herdr_session_socket(&pane.herdr_session_name)
+            .herdr_session_socket(&pane.herdr_session_name.0)
             .and_then(|socket| {
                 HerdrEvents::subscribe(
                     Path::new(&socket),
                     "flow-nexus:title",
                     serde_json::json!([
                         {"type": "pane.updated"},
-                        {"type": "pane.agent_status_changed", "pane_id": pane.herdr_pane_id},
+                        {"type": "pane.agent_status_changed", "pane_id": pane.herdr_pane_id.0},
                         {"type": "pane.agent_detected"},
                         {"type": "pane.closed"},
                         {"type": "pane.exited"}
@@ -1611,12 +1624,12 @@ impl TitlesClaudeSession for HerdrCli {
             .inspect_err(|error| {
                 eprintln!(
                     "flow-nexus: the title of pane {} is read once: Herdr's events are not open: {error}",
-                    pane.herdr_pane_id
+                    pane.herdr_pane_id.0
                 );
             })
             .ok();
         TitleCues {
-            pane_id: pane.herdr_pane_id.clone(),
+            pane_id: pane.herdr_pane_id.clone().0,
             events,
             deadline,
         }
@@ -1663,7 +1676,7 @@ impl TitlesClaudeSession for HerdrCli {
         loop {
             let last = match self.verify_native_target(
                 pane,
-                &binding.native_session_id,
+                &binding.native_session_id.0,
                 &HarnessKind::Claude,
             ) {
                 Ok(agent)
@@ -1696,13 +1709,16 @@ impl TitlesClaudeSession for HerdrCli {
         let mut cues = self.title_cues(pane);
         self.await_claude_title_readiness(binding, &mut cues)?;
         loop {
-            let agent =
-                self.verify_native_target(pane, &binding.native_session_id, &HarnessKind::Claude)?;
+            let agent = self.verify_native_target(
+                pane,
+                &binding.native_session_id.0,
+                &HarnessKind::Claude,
+            )?;
             let terminal = agent
                 .get("terminal_title_stripped")
                 .and_then(serde_json::Value::as_str);
             let recorded = self
-                .claude_transcript_titles(pane, &binding.native_session_id)
+                .claude_transcript_titles(pane, &binding.native_session_id.0)
                 .map_err(|_| TitleRefusal::TranscriptUnreadable)?;
             let record_agrees = recorded
                 .last()
@@ -1719,10 +1735,10 @@ impl TitlesClaudeSession for HerdrCli {
     fn label_herdr_pane(&self, pane: &HerdrPaneBinding, title: &NativeTitle) -> Result<(), String> {
         self.run_json(&[
             "--session".into(),
-            pane.herdr_session_name.clone(),
+            pane.herdr_session_name.clone().0,
             "pane".into(),
             "rename".into(),
-            pane.herdr_pane_id.clone(),
+            pane.herdr_pane_id.clone().0,
             title.as_str().into(),
         ])?;
         // Herdr shows a pane's agent by its reported display agent, else by
@@ -1731,10 +1747,10 @@ impl TitlesClaudeSession for HerdrCli {
         // Herdr answers report-metadata with no output: run it for its status.
         self.run_status(&[
             "--session".into(),
-            pane.herdr_session_name.clone(),
+            pane.herdr_session_name.clone().0,
             "pane".into(),
             "report-metadata".into(),
-            pane.herdr_pane_id.clone(),
+            pane.herdr_pane_id.clone().0,
             "--source".into(),
             Self::DISPLAY_SOURCE.into(),
             "--display-agent".into(),
@@ -1742,18 +1758,18 @@ impl TitlesClaudeSession for HerdrCli {
         ])?;
         let response = self.run_json(&[
             "--session".into(),
-            pane.herdr_session_name.clone(),
+            pane.herdr_session_name.clone().0,
             "pane".into(),
             "get".into(),
-            pane.herdr_pane_id.clone(),
+            pane.herdr_pane_id.clone().0,
         ])?;
         let read = response
             .pointer("/result/pane")
             .ok_or_else(|| "Herdr pane get returned no pane".to_owned())?;
         if read.get("pane_id").and_then(serde_json::Value::as_str)
-            != Some(pane.herdr_pane_id.as_str())
+            != Some(pane.herdr_pane_id.0.as_str())
             || read.get("terminal_id").and_then(serde_json::Value::as_str)
-                != Some(pane.herdr_terminal_id.as_str())
+                != Some(pane.herdr_terminal_id.0.as_str())
             || read.get("label").and_then(serde_json::Value::as_str) != Some(title.as_str())
             || read
                 .get("display_agent")
@@ -1772,19 +1788,19 @@ impl TitlesClaudeSession for HerdrCli {
     ) -> Result<(), String> {
         self.run_json(&[
             "--session".into(),
-            pane.herdr_session_name.clone(),
+            pane.herdr_session_name.clone().0,
             "workspace".into(),
             "rename".into(),
-            pane.herdr_workspace_id.clone(),
+            pane.herdr_workspace_id.clone().0,
             title.as_str().into(),
         ])?;
         // Herdr answers report-metadata with no output: run it for its status.
         self.run_status(&[
             "--session".into(),
-            pane.herdr_session_name.clone(),
+            pane.herdr_session_name.clone().0,
             "pane".into(),
             "report-metadata".into(),
-            pane.herdr_pane_id.clone(),
+            pane.herdr_pane_id.clone().0,
             "--source".into(),
             Self::DISPLAY_SOURCE.into(),
             "--display-agent".into(),
@@ -1800,24 +1816,24 @@ impl TitlesClaudeSession for HerdrCli {
     ) -> Result<(), String> {
         self.run_json(&[
             "--session".into(),
-            pane.herdr_session_name.clone(),
+            pane.herdr_session_name.clone().0,
             "workspace".into(),
             "rename".into(),
-            pane.herdr_workspace_id.clone(),
+            pane.herdr_workspace_id.clone().0,
             title.as_str().into(),
         ])?;
         let response = self.run_json(&[
             "--session".into(),
-            pane.herdr_session_name.clone(),
+            pane.herdr_session_name.clone().0,
             "workspace".into(),
             "get".into(),
-            pane.herdr_workspace_id.clone(),
+            pane.herdr_workspace_id.clone().0,
         ])?;
         let read = response
             .pointer("/result/workspace")
             .ok_or_else(|| "Herdr workspace get returned no workspace".to_owned())?;
         if read.get("workspace_id").and_then(serde_json::Value::as_str)
-            != Some(pane.herdr_workspace_id.as_str())
+            != Some(pane.herdr_workspace_id.0.as_str())
             || read.get("label").and_then(serde_json::Value::as_str) != Some(title.as_str())
         {
             return Err("Herdr workspace label readback differs from the title".into());
@@ -1840,15 +1856,15 @@ impl TitlesNativeFlow for HerdrCli {
         {
             return Err(TitleRefusal::ForeignBinding);
         }
-        let title = launch.launch_profile.native_title(&binding.flow_id)?;
+        let title = launch.launch_profile.native_title(&binding.flow_id.0)?;
         match binding.harness_kind {
             HarnessKind::Claude => self.title_claude_session(binding, &title)?,
             HarnessKind::Codex => self
                 .codex_endpoints
                 .current()
-                .adapter_for(&launch.launch_profile.model_name)
+                .adapter_for(&launch.launch_profile.model_name.0)
                 .and_then(|adapter| {
-                    adapter.name_bound_thread(&binding.native_session_id, title.as_str())
+                    adapter.name_bound_thread(&binding.native_session_id.0, title.as_str())
                 })
                 .map_err(|_| TitleRefusal::CodexNamingRefused)?,
         }
@@ -1877,7 +1893,7 @@ impl CreatesHerdrLaunchPane for HerdrCli {
         let agent_name = launch.launch_agent_name();
         let response = self.run_json(&[
             "--session".into(),
-            launch.launch_profile.herdr_session_name.clone(),
+            launch.launch_profile.herdr_session_name.clone().0,
             "workspace".into(),
             "create".into(),
             "--cwd".into(),
@@ -1889,7 +1905,7 @@ impl CreatesHerdrLaunchPane for HerdrCli {
             "--env".into(),
             format!(
                 "FLOW_LAUNCH_REQUEST_ID={}",
-                launch.launch_profile.launch_request_id
+                launch.launch_profile.launch_request_id.0
             ),
             "--no-focus".into(),
         ])?;
@@ -1908,10 +1924,10 @@ impl CreatesHerdrLaunchPane for HerdrCli {
         Ok(HerdrPaneBinding {
             launch_request_id: launch.launch_profile.launch_request_id.clone(),
             herdr_session_name: launch.launch_profile.herdr_session_name.clone(),
-            herdr_agent_name: agent_name,
-            herdr_workspace_id: workspace.into(),
-            herdr_pane_id: pane.into(),
-            herdr_terminal_id: terminal.into(),
+            herdr_agent_name: signal_flow::HerdrAgentName(agent_name),
+            herdr_workspace_id: signal_flow::HerdrWorkspaceId(workspace.into()),
+            herdr_pane_id: signal_flow::HerdrPaneId(pane.into()),
+            herdr_terminal_id: signal_flow::HerdrTerminalId(terminal.into()),
         })
     }
 }
@@ -2061,17 +2077,17 @@ impl ConstructsHarnessCommand for HerdrCli {
             }
         }
         arguments.push("--model".into());
-        arguments.push(launch.launch_profile.model_name.clone());
+        arguments.push(launch.launch_profile.model_name.clone().0);
         match launch.harness_kind {
             HarnessKind::Claude => {
                 arguments.push("--effort".into());
-                arguments.push(launch.launch_profile.effort.clone());
+                arguments.push(launch.launch_profile.effort.clone().0);
             }
             HarnessKind::Codex => {
                 arguments.push("-c".into());
                 arguments.push(format!(
                     "model_reasoning_effort={}",
-                    launch.launch_profile.effort
+                    launch.launch_profile.effort.0
                 ));
                 arguments.push("-c".into());
                 arguments.push(resources.codex_title.ok_or_else(|| {
@@ -2144,7 +2160,7 @@ impl SpawnsNativeHarness for HerdrCli {
         let codex_endpoints = self.codex_endpoints.current();
         let codex_endpoint = if launch.harness_kind == HarnessKind::Codex {
             let endpoint = codex_endpoints
-                .endpoint_for(&launch.launch_profile.model_name)
+                .endpoint_for(&launch.launch_profile.model_name.0)
                 .map_err(|error| error.to_string())?;
             if !endpoint.client_path.is_absolute() || !Path::new(&endpoint.socket).is_absolute() {
                 return Err("configured Codex client and socket must be absolute"
@@ -2166,9 +2182,9 @@ impl SpawnsNativeHarness for HerdrCli {
             None
         };
         let resources = HarnessCommandResources {
-            herdr_session: pane.herdr_session_name.clone(),
-            agent: pane.herdr_agent_name.clone(),
-            pane: pane.herdr_pane_id.clone(),
+            herdr_session: pane.herdr_session_name.clone().0,
+            agent: pane.herdr_agent_name.clone().0,
+            pane: pane.herdr_pane_id.clone().0,
             program,
             codex_socket: codex_endpoint.map(|endpoint| endpoint.socket.clone()),
             claude_settings: (launch.harness_kind == HarnessKind::Claude)
@@ -2199,11 +2215,11 @@ impl SpawnsNativeHarness for HerdrCli {
         let command = self
             .harness_command(launch, resources, harness_arguments)
             .inspect_err(|_| {
-                self.release_system_prompt(&launch.launch_profile.launch_request_id)
+                self.release_system_prompt(&launch.launch_profile.launch_request_id.0)
             })?;
         // No positional prompt: the first USER message is typed after.
         self.run_agent_start(&command[1..])
-            .inspect_err(|_| self.release_system_prompt(&launch.launch_profile.launch_request_id))
+            .inspect_err(|_| self.release_system_prompt(&launch.launch_profile.launch_request_id.0))
     }
 }
 
@@ -2314,13 +2330,13 @@ impl HoldsSystemPrompt for HerdrCli {
             rustix::fs::memfd_create("flow-system-prompt", rustix::fs::MemfdFlags::CLOEXEC)
                 .map_err(|error| format!("cannot create the in-memory system prompt: {error}"))?;
         let mut file = File::from(descriptor);
-        file.write_all(launch.system_prompt.system_prompt_text.as_bytes())
+        file.write_all(launch.system_prompt.system_prompt_text.0.as_bytes())
             .map_err(|error| format!("cannot write the in-memory system prompt: {error}"))?;
         let path = format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd());
         self.held_system_prompts
             .lock()
             .map_err(|_| "the held system prompts are unreadable".to_owned())?
-            .insert(launch.launch_profile.launch_request_id.clone(), file);
+            .insert(launch.launch_profile.launch_request_id.clone().0, file);
         Ok(path)
     }
 
@@ -2390,12 +2406,12 @@ impl ReadsHerdrRefusal for signal_flow::HerdrRefusal {
             .and_then(serde_json::Value::as_str);
         match (code, message) {
             (Some(code), Some(message)) => Self {
-                herdr_error_code_option: Some(code.to_owned()),
-                herdr_error_message: message.to_owned(),
+                herdr_error_code_option: Some(signal_flow::HerdrErrorCode(code.to_owned())),
+                herdr_error_message: signal_flow::HerdrErrorMessage(message.to_owned()),
             },
             _ => Self {
                 herdr_error_code_option: None,
-                herdr_error_message: text,
+                herdr_error_message: signal_flow::HerdrErrorMessage(text),
             },
         }
     }
@@ -2422,10 +2438,10 @@ impl WaitsForPaneRest for HerdrCli {
     fn await_pane_rest(&self, pane: &HerdrPaneBinding) -> Result<(), String> {
         self.run_status(&[
             "--session".into(),
-            pane.herdr_session_name.clone(),
+            pane.herdr_session_name.clone().0,
             "agent".into(),
             "wait".into(),
-            pane.herdr_pane_id.clone(),
+            pane.herdr_pane_id.clone().0,
             "--until".into(),
             "idle".into(),
             "--until".into(),
@@ -2448,7 +2464,7 @@ impl ObservesNativeLaunchBinding for HerdrCli {
         reserved: Option<&str>,
     ) -> Result<NativeLaunchBinding, String> {
         let observed = self.observe_bound_pane(launch, pane, reserved, None);
-        self.release_system_prompt(&launch.launch_profile.launch_request_id);
+        self.release_system_prompt(&launch.launch_profile.launch_request_id.0);
         observed
     }
 
@@ -2474,7 +2490,7 @@ impl ObservesNativeLaunchBinding for HerdrCli {
             return Err("an attached Codex harness needs its opened thread".into());
         }
         let observed = self.observe_bound_pane(launch, pane, None, Some(thread));
-        self.release_system_prompt(&launch.launch_profile.launch_request_id);
+        self.release_system_prompt(&launch.launch_profile.launch_request_id.0);
         observed
     }
 }
@@ -2507,25 +2523,25 @@ impl ObservesBoundPane for HerdrCli {
         self.await_pane_rest(pane)?;
         let response = self.run_json(&[
             "--session".into(),
-            pane.herdr_session_name.clone(),
+            pane.herdr_session_name.clone().0,
             "agent".into(),
             "get".into(),
-            pane.herdr_agent_name.clone(),
+            pane.herdr_agent_name.clone().0,
         ])?;
         let agent = response
             .pointer("/result/agent")
             .ok_or_else(|| "Herdr agent get returned no agent record".to_owned())?;
         let exact_pane = agent.get("name").and_then(serde_json::Value::as_str)
-            == Some(pane.herdr_agent_name.as_str())
+            == Some(pane.herdr_agent_name.0.as_str())
             && agent.get("agent").and_then(serde_json::Value::as_str) == Some(expected_harness)
             && agent
                 .get("workspace_id")
                 .and_then(serde_json::Value::as_str)
-                == Some(pane.herdr_workspace_id.as_str())
+                == Some(pane.herdr_workspace_id.0.as_str())
             && agent.get("pane_id").and_then(serde_json::Value::as_str)
-                == Some(pane.herdr_pane_id.as_str())
+                == Some(pane.herdr_pane_id.0.as_str())
             && agent.get("terminal_id").and_then(serde_json::Value::as_str)
-                == Some(pane.herdr_terminal_id.as_str())
+                == Some(pane.herdr_terminal_id.0.as_str())
             && agent
                 .get("interactive_ready")
                 .and_then(serde_json::Value::as_bool)
@@ -2605,8 +2621,8 @@ impl ObservesBoundPane for HerdrCli {
         }
         Ok(NativeLaunchBinding {
             launch_request_id: launch.launch_profile.launch_request_id.clone(),
-            flow_id,
-            native_session_id,
+            flow_id: signal_flow::FlowId(flow_id),
+            native_session_id: signal_flow::NativeSessionId(native_session_id),
             harness_kind: launch.harness_kind.clone(),
             herdr_pane_binding: pane.clone(),
         })
@@ -2635,17 +2651,17 @@ impl AcceptsLaunchRegistration for HerdrCli {
         // stage is named before the transcript is read.
         self.verify_native_target(
             &binding.herdr_pane_binding,
-            &binding.native_session_id,
+            &binding.native_session_id.0,
             &binding.harness_kind,
         )?;
         // A Codex thread's rollout exists from its naming at open, before
         // its TUI attached; its receipt is read from the thread's start.
         let native_transcript_boundary = match self
-            .capture_transcript_boundary(binding, &launch.launch_profile.model_name)
+            .capture_transcript_boundary(binding, &launch.launch_profile.model_name.0)
             .map_err(RegistrationRefusal::TranscriptBoundary)?
         {
             NativeTranscriptBoundary::Existing(_) if binding.harness_kind == HarnessKind::Codex => {
-                self.capture_transcript_start_boundary(binding, &launch.launch_profile.model_name)
+                self.capture_transcript_start_boundary(binding, &launch.launch_profile.model_name.0)
                     .map_err(RegistrationRefusal::TranscriptBoundary)?
             }
             boundary => boundary,
@@ -2663,9 +2679,9 @@ impl AcceptsLaunchRegistration for HerdrCli {
             let (root, _, found) = self
                 .transcript_candidates(
                     &binding.herdr_pane_binding,
-                    &binding.native_session_id,
+                    &binding.native_session_id.0,
                     &binding.harness_kind,
-                    Some(&launch.launch_profile.model_name),
+                    Some(&launch.launch_profile.model_name.0),
                 )
                 .map_err(|refusal| RegistrationRefusal::TranscriptBoundary(refusal.to_string()))?;
             let transcript = root
@@ -2684,7 +2700,7 @@ impl AcceptsLaunchRegistration for HerdrCli {
                 ))
             })?;
             if !serde_json::from_str::<serde_json::Value>(&first)
-                .is_ok_and(|row| row.names_thread(&binding.native_session_id))
+                .is_ok_and(|row| row.names_thread(&binding.native_session_id.0))
             {
                 return Err(RegistrationRefusal::ThreadNotNamed);
             }
@@ -2702,11 +2718,11 @@ impl AcceptsLaunchRegistration for HerdrCli {
             // The first part is the one about to be submitted. An empty
             // startup has no native user turn; queued work is its first one.
             parts_submitted: if launch.first_prompt_payload.prompt_part_vector.is_empty() {
-                0
+                signal_flow::PartsSubmitted(0)
             } else {
-                1
+                signal_flow::PartsSubmitted(1)
             },
-            stops_reported: 0,
+            stops_reported: signal_flow::StopsReported(0),
             leave_outs: launch.leave_outs.clone(),
             native_transcript_boundary,
         })
@@ -2723,13 +2739,13 @@ impl SubmitsStartupPart for HerdrCli {
         if durable_intent.harness_kind != HarnessKind::Claude {
             return Err("a Codex part is submitted through its app-server".into());
         }
-        let index = usize::try_from(durable_intent.parts_submitted - 1)
+        let index = usize::try_from(durable_intent.parts_submitted.0 - 1)
             .map_err(|_| "no part is counted as submitted".to_owned())?;
         let part = &launch.first_prompt_payload.prompt_part_vector[index];
         // The started harness (for the first part) or the answer to the
         // part before has come to rest; nothing is typed when it has not.
         self.await_pane_rest(&durable_intent.herdr_pane_binding)?;
-        self.prompt_through_socket(&durable_intent.herdr_pane_binding, &part.prompt_part_text)?;
+        self.prompt_through_socket(&durable_intent.herdr_pane_binding, &part.prompt_part_text.0)?;
         Ok(PromptDeliveryResult::Ambiguous(durable_intent.clone()))
     }
 }
@@ -2775,14 +2791,14 @@ impl ReadsStartupRecord for StartupReading {
     ) -> Result<i64, NativeLaunchFailure> {
         let text = input_0.text();
         let intent = input_1.intent();
-        let expected = usize::try_from(self.seen_parts)
+        let expected = usize::try_from(self.seen_parts.0)
             .ok()
             .and_then(|seen| intent.prompt_sha256_vector.get(seen))
-            .filter(|_| self.seen_parts < intent.parts_submitted);
-        if expected.is_some_and(|hash| &text.text_sha256() == hash) {
-            self.seen_parts += 1;
-            self.last_part_answered = false;
-            return Ok(self.seen_parts);
+            .filter(|_| self.seen_parts.0 < intent.parts_submitted.0);
+        if expected.is_some_and(|hash| text.text_sha256() == hash.0) {
+            self.seen_parts.0 += 1;
+            self.last_part_answered = crate::generated::starter::LastPartAnswered(false);
+            return Ok(self.seen_parts.0);
         }
         Err(NativeLaunchFailure::PartDiffers)
     }
@@ -2795,7 +2811,7 @@ impl ReadsStartupRecord for StartupReading {
         let row = &input_0.row();
         let intent = &input_1.intent();
         let every_part =
-            usize::try_from(self.seen_parts).ok() == Some(intent.prompt_sha256_vector.len());
+            usize::try_from(self.seen_parts.0).ok() == Some(intent.prompt_sha256_vector.len());
         let kind = row.get("type").and_then(serde_json::Value::as_str);
         match intent.harness_kind {
             HarnessKind::Claude => {
@@ -2803,7 +2819,7 @@ impl ReadsStartupRecord for StartupReading {
                     .get("sessionId")
                     .or_else(|| row.get("session_id"))
                     .and_then(serde_json::Value::as_str)
-                    == Some(intent.native_session_id.as_str());
+                    == Some(intent.native_session_id.0.as_str());
                 if !exact_session {
                     return Ok(None);
                 }
@@ -2841,27 +2857,29 @@ impl ReadsStartupRecord for StartupReading {
                     && !every_part
                     && let Some(text) = row.claude_typed_text()
                 {
-                    let original = usize::try_from(self.seen_parts)
+                    let original = usize::try_from(self.seen_parts.0)
                         .ok()
                         .and_then(|seen| intent.prompt_sha256_vector.get(seen))
-                        .and_then(|part_sha256| text.claude_pasted_part(part_sha256))
+                        .and_then(|part_sha256| text.claude_pasted_part(&part_sha256.0))
                         .unwrap_or(text);
                     self.read_part(&original, intent)?;
                     return Ok(None);
                 }
-                if kind == Some("assistant") && self.seen_parts > 0 {
+                if kind == Some("assistant")
+                    && self.seen_parts > crate::generated::starter::SeenParts(0)
+                {
                     if every_part {
                         if row
                             .pointer("/message/model")
                             .and_then(serde_json::Value::as_str)
-                            != Some(intent.model_name.as_str())
-                            || !row.claude_effort_matches(intent.effort.as_str())
+                            != Some(intent.model_name.0.as_str())
+                            || !row.claude_effort_matches(intent.effort.0.as_str())
                         {
                             return Err(NativeLaunchFailure::ModelOrEffortDiffers);
                         }
-                        return Ok(row.assistant_turn(&intent.native_session_id));
+                        return Ok(row.assistant_turn(&intent.native_session_id.0));
                     }
-                    self.last_part_answered = true;
+                    self.last_part_answered = crate::generated::starter::LastPartAnswered(true);
                 }
                 Ok(None)
             }
@@ -2889,7 +2907,7 @@ impl ReadsStartupRecord for StartupReading {
                         .filter_map(|item| item.get("text").and_then(serde_json::Value::as_str));
                     for text in texts {
                         if CODEX_LEFT_OUT_OPENINGS.iter().any(|(leave_out, opening)| {
-                            intent.leave_outs.contains(leave_out) && text.starts_with(opening)
+                            intent.leave_outs.0.contains(leave_out) && text.starts_with(opening)
                         }) {
                             return Err(NativeLaunchFailure::LeaveOutShown);
                         }
@@ -2898,23 +2916,24 @@ impl ReadsStartupRecord for StartupReading {
                 if kind == Some("turn_context") {
                     let payload = payload.ok_or(NativeLaunchFailure::TranscriptUnreadable)?;
                     if payload.get("model").and_then(serde_json::Value::as_str)
-                        != Some(intent.model_name.as_str())
+                        != Some(intent.model_name.0.as_str())
                         || payload.get("effort").and_then(serde_json::Value::as_str)
-                            != Some(intent.effort.as_str())
+                            != Some(intent.effort.0.as_str())
                     {
                         return Err(NativeLaunchFailure::ModelOrEffortDiffers);
                     }
-                    self.native_turn_option = payload
+                    self.native_turn_option = (payload
                         .get("turn_id")
                         .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned);
+                        .map(str::to_owned))
+                    .map(crate::generated::starter::NativeTurn);
                     return Ok(None);
                 }
                 if kind == Some("event_msg")
                     && row
                         .pointer("/payload/thread_id")
                         .and_then(serde_json::Value::as_str)
-                        == Some(intent.native_session_id.as_str())
+                        == Some(intent.native_session_id.0.as_str())
                     && row
                         .pointer("/payload/item/type")
                         .and_then(serde_json::Value::as_str)
@@ -2937,22 +2956,31 @@ impl ReadsStartupRecord for StartupReading {
                         _ => None,
                     }
                     .ok_or(NativeLaunchFailure::PartDiffers)?;
-                    if every_part || turn.is_none() || turn != self.native_turn_option.as_deref() {
+                    if every_part
+                        || turn.is_none()
+                        || turn
+                            != self
+                                .native_turn_option
+                                .as_ref()
+                                .map(|value| value.0.as_str())
+                    {
                         return Err(NativeLaunchFailure::PartDiffers);
                     }
                     self.read_part(text, intent)?;
-                    self.part_turn_option = turn.map(str::to_owned);
+                    self.part_turn_option = turn
+                        .map(str::to_owned)
+                        .map(crate::generated::starter::PartTurn);
                     return Ok(None);
                 }
                 if kind == Some("event_msg")
                     && payload_kind == Some("task_complete")
-                    && self.seen_parts > 0
+                    && self.seen_parts > crate::generated::starter::SeenParts(0)
                     && row
                         .pointer("/payload/turn_id")
                         .and_then(serde_json::Value::as_str)
-                        == self.part_turn_option.as_deref()
+                        == self.part_turn_option.as_ref().map(|value| value.0.as_str())
                 {
-                    self.last_part_answered = true;
+                    self.last_part_answered = crate::generated::starter::LastPartAnswered(true);
                     return Ok(None);
                 }
                 // The flow's first answer: the first model output of the
@@ -2966,7 +2994,7 @@ impl ReadsStartupRecord for StartupReading {
                         Some("user" | "developer" | "system")
                     )
                 {
-                    return Ok(self.part_turn_option.clone());
+                    return Ok(self.part_turn_option.clone().map(|value| value.0));
                 }
                 Ok(None)
             }
@@ -2983,8 +3011,8 @@ impl ObservesNativeTargetReceipt for HerdrCli {
             return Ok(StartupProgress::Waiting(durable_intent.clone()));
         };
         let mut reading = StartupReading {
-            seen_parts: 0,
-            last_part_answered: false,
+            seen_parts: crate::generated::starter::SeenParts(0),
+            last_part_answered: crate::generated::starter::LastPartAnswered(false),
             native_turn_option: None,
             part_turn_option: None,
         };
@@ -2995,7 +3023,9 @@ impl ObservesNativeTargetReceipt for HerdrCli {
         let mut thread_unnamed = durable_intent.harness_kind == HarnessKind::Codex
             && match &durable_intent.native_transcript_boundary {
                 NativeTranscriptBoundary::Absent(_) => true,
-                NativeTranscriptBoundary::Existing(cursor) => cursor.transcript_byte_offset == 0,
+                NativeTranscriptBoundary::Existing(cursor) => {
+                    cursor.transcript_byte_offset == signal_flow::TranscriptByteOffset(0)
+                }
             };
         loop {
             let mut record = Vec::new();
@@ -3009,7 +3039,7 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                 continue;
             };
             if thread_unnamed {
-                if !row.names_thread(&durable_intent.native_session_id) {
+                if !row.names_thread(&durable_intent.native_session_id.0) {
                     return Err(NativeLaunchFailure::ThreadNotNamed.into());
                 }
                 thread_unnamed = false;
@@ -3025,8 +3055,8 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                 prompt_sha256: durable_intent.prompt_sha256.clone(),
                 flow_id: durable_intent.flow_id.clone(),
                 native_session_id: durable_intent.native_session_id.clone(),
-                native_turn_id,
-                receipt_sha256,
+                native_turn_id: signal_flow::NativeTurnId(native_turn_id),
+                receipt_sha256: signal_flow::ReceiptSha256(receipt_sha256),
                 model_name: durable_intent.model_name.clone(),
                 effort: durable_intent.effort.clone(),
                 prompt_sha256_vector: durable_intent.prompt_sha256_vector.clone(),
@@ -3045,7 +3075,7 @@ impl ObservesNativeTargetReceipt for HerdrCli {
             // reconciliation. Advancing to EOF here would discard parts
             // emitted before the receipt.
             let boundary =
-                self.capture_transcript_start_boundary(&binding, &durable_intent.model_name)?;
+                self.capture_transcript_start_boundary(&binding, &durable_intent.model_name.0)?;
             if !matches!(boundary, NativeTranscriptBoundary::Existing(_)) {
                 return Err("new native transcript disappeared during adoption"
                     .to_owned()
@@ -3055,9 +3085,9 @@ impl ObservesNativeTargetReceipt for HerdrCli {
             // The adopted cursor is recorded before any part advances.
             return Ok(StartupProgress::Waiting(intent));
         }
-        if reading.seen_parts == durable_intent.parts_submitted
-            && reading.last_part_answered
-            && usize::try_from(durable_intent.parts_submitted)
+        if reading.seen_parts.0 == durable_intent.parts_submitted.0
+            && reading.last_part_answered.0
+            && usize::try_from(durable_intent.parts_submitted.0)
                 .is_ok_and(|submitted| submitted < durable_intent.prompt_sha256_vector.len())
         {
             return Ok(StartupProgress::PartAnswered(intent));
@@ -3113,41 +3143,48 @@ pub(crate) mod tests {
         ComposedLaunch {
             harness_kind,
             launch_profile: LaunchProfile {
-                launch_request_id: "launch-42".into(),
-                system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-                user_modules: vec!["operation-main-flow".into()],
+                launch_request_id: signal_flow::LaunchRequestId("launch-42".into()),
+                system_modules: signal_flow::SystemModules(vec![
+                    signal_flow::ModuleIdentity("spirit-core".into()),
+                    signal_flow::ModuleIdentity("intent-flow".into()),
+                ]),
+                user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                    "operation-main-flow".into(),
+                )]),
                 address: signal_flow::Address {
                     aspect: Aspect::Field,
-                    topic: "flow".into(),
+                    topic: flow_ethos::Topic("flow".into()),
                     model: signal_flow::Model::Sol,
                 },
-                model_name: ModelName::from("model-current"),
-                effort: Effort::from("high"),
+                model_name: ModelName("model-current".into()),
+                effort: Effort("high".into()),
                 flow_id_option: None,
-                remembering: signal_flow::Remembering::Predecessors(0),
-                herdr_session_name: "flowlaunch42".into(),
+                remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(
+                    0,
+                )),
+                herdr_session_name: signal_flow::HerdrSessionName("flowlaunch42".into()),
                 leave_outs_option: None,
-                instruction_prompt: "do the work".into(),
+                instruction_prompt: signal_flow::InstructionPrompt("do the work".into()),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
             },
             system_prompt: SystemPrompt {
-                system_prompt_text: SYSTEM_TEXT.into(),
-                system_prompt_sha256: digest(SYSTEM_TEXT),
+                system_prompt_text: signal_flow::SystemPromptText(SYSTEM_TEXT.into()),
+                system_prompt_sha256: signal_flow::SystemPromptSha256(digest(SYSTEM_TEXT)),
             },
             first_prompt_payload: FirstPromptPayload {
-                first_prompt_body: "composed body".into(),
-                prompt_sha256: PROMPT_HASH.into(),
+                first_prompt_body: signal_flow::FirstPromptBody("composed body".into()),
+                prompt_sha256: signal_flow::PromptSha256(PROMPT_HASH.into()),
                 prompt_part_vector: vec![PromptPart {
-                    prompt_part_text: "composed body".into(),
-                    prompt_sha256: PROMPT_HASH.into(),
+                    prompt_part_text: signal_flow::PromptPartText("composed body".into()),
+                    prompt_sha256: signal_flow::PromptSha256(PROMPT_HASH.into()),
                 }],
             },
             target_receipt_request: TargetReceiptRequest {
-                launch_request_id: "launch-42".into(),
-                prompt_sha256: PROMPT_HASH.into(),
+                launch_request_id: signal_flow::LaunchRequestId("launch-42".into()),
+                prompt_sha256: signal_flow::PromptSha256(PROMPT_HASH.into()),
             },
-            leave_outs: Vec::new(),
+            leave_outs: signal_flow::LeaveOuts(Vec::new()),
         }
     }
 
@@ -3156,17 +3193,17 @@ pub(crate) mod tests {
         let chunks = ["first module text\n", "second module text\n\ndo the work"];
         let mut launch = launch(harness_kind);
         let body = chunks.concat();
-        launch.first_prompt_payload.prompt_sha256 = digest(&body);
-        launch.target_receipt_request.prompt_sha256 = digest(&body);
-        launch.first_prompt_payload.first_prompt_body = body;
+        launch.first_prompt_payload.prompt_sha256 = signal_flow::PromptSha256(digest(&body));
+        launch.target_receipt_request.prompt_sha256 = signal_flow::PromptSha256(digest(&body));
+        launch.first_prompt_payload.first_prompt_body = signal_flow::FirstPromptBody(body);
         launch.first_prompt_payload.prompt_part_vector = chunks
             .iter()
             .enumerate()
             .map(|(index, chunk)| {
                 let text = format!("{}{chunk}", HarnessKind::part_header((index + 1, 2)));
                 PromptPart {
-                    prompt_sha256: digest(&text),
-                    prompt_part_text: text,
+                    prompt_sha256: signal_flow::PromptSha256(digest(&text)),
+                    prompt_part_text: signal_flow::PromptPartText(text),
                 }
             })
             .collect();
@@ -3347,8 +3384,8 @@ printf '%s\n' "$alias"
     ) -> Result<PromptDeliveryIntent, super::RegistrationRefusal> {
         let binding = NativeLaunchBinding {
             launch_request_id: launch.launch_profile.launch_request_id.clone(),
-            flow_id: "123456".into(),
-            native_session_id: native_session.into(),
+            flow_id: flow_ethos::FlowId("123456".into()),
+            native_session_id: signal_flow::NativeSessionId(native_session.into()),
             harness_kind: launch.harness_kind.clone(),
             herdr_pane_binding: pane.clone(),
         };
@@ -3428,8 +3465,8 @@ printf '%s\n' "$alias"
     fn a_multiline_claude_system_prompt_is_read_whole_from_the_held_file() {
         let mut launch = launch(HarnessKind::Claude);
         let text = "First line.\n\tIndented 'quoted' line.\n\nLast line with \"quotes\".\n";
-        launch.system_prompt.system_prompt_text = text.into();
-        launch.system_prompt.system_prompt_sha256 = digest(text);
+        launch.system_prompt.system_prompt_text = signal_flow::SystemPromptText(text.into());
+        launch.system_prompt.system_prompt_sha256 = signal_flow::SystemPromptSha256(digest(text));
         let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
@@ -3459,7 +3496,7 @@ printf '%s\n' "$alias"
     #[test]
     fn an_argument_with_a_control_character_is_refused_before_herdr() {
         let mut launch = launch(HarnessKind::Claude);
-        launch.launch_profile.effort = "high\nmedium".into();
+        launch.launch_profile.effort = signal_flow::Effort("high\nmedium".into());
         let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
@@ -3477,7 +3514,7 @@ printf '%s\n' "$alias"
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
         assert!(!calls.contains("agent start"), "Herdr was not called");
         assert_eq!(
-            adapter.held_system_prompt_path(&launch.launch_profile.launch_request_id),
+            adapter.held_system_prompt_path(&launch.launch_profile.launch_request_id.0),
             None
         );
     }
@@ -3487,7 +3524,7 @@ printf '%s\n' "$alias"
     #[test]
     fn a_typed_command_longer_than_one_terminal_line_is_refused_before_herdr() {
         let mut launch = launch(HarnessKind::Claude);
-        launch.launch_profile.effort = "e".repeat(4096);
+        launch.launch_profile.effort = signal_flow::Effort("e".repeat(4096));
         let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
@@ -3549,14 +3586,17 @@ printf '%s\n' "$alias"
             adapter.start_native_harness(&launch, &pane, Some("123456")),
             Err(SpawnFailure::Refused(
                 signal_flow::SpawnRefusalCause::Herdr(signal_flow::HerdrRefusal {
-                    herdr_error_code_option: Some("invalid_agent_argument".into()),
-                    herdr_error_message:
-                        "agent arguments cannot be encoded safely for the target shell".into(),
+                    herdr_error_code_option: Some(signal_flow::HerdrErrorCode(
+                        "invalid_agent_argument".into()
+                    )),
+                    herdr_error_message: signal_flow::HerdrErrorMessage(
+                        "agent arguments cannot be encoded safely for the target shell".into()
+                    ),
                 })
             ))
         );
         assert_eq!(
-            adapter.held_system_prompt_path(&launch.launch_profile.launch_request_id),
+            adapter.held_system_prompt_path(&launch.launch_profile.launch_request_id.0),
             None,
             "a refused start closes the held system prompt"
         );
@@ -3570,7 +3610,9 @@ printf '%s\n' "$alias"
             Err(SpawnFailure::Refused(
                 signal_flow::SpawnRefusalCause::Herdr(signal_flow::HerdrRefusal {
                     herdr_error_code_option: None,
-                    herdr_error_message: "missing value for --kind".into(),
+                    herdr_error_message: signal_flow::HerdrErrorMessage(
+                        "missing value for --kind".into()
+                    ),
                 })
             ))
         );
@@ -3580,12 +3622,12 @@ printf '%s\n' "$alias"
     fn a_claude_start_carries_its_leave_outs_as_flags_environment_and_settings() {
         use signal_flow::LeaveOut;
         let mut launch = launch(HarnessKind::Claude);
-        launch.leave_outs = vec![
+        launch.leave_outs = signal_flow::LeaveOuts(vec![
             LeaveOut::SkillTool,
             LeaveOut::WorkflowTool,
             LeaveOut::GitInstructions,
             LeaveOut::AttributionReminder,
-        ];
+        ]);
         let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
@@ -3639,7 +3681,8 @@ printf '%s\n' "$alias"
         use signal_flow::LeaveOut;
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let mut launch = launch(HarnessKind::Claude);
-        launch.leave_outs = vec![LeaveOut::SkillTool, LeaveOut::WorkflowTool];
+        launch.leave_outs =
+            signal_flow::LeaveOuts(vec![LeaveOut::SkillTool, LeaveOut::WorkflowTool]);
         let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
@@ -3656,7 +3699,7 @@ printf '%s\n' "$alias"
         let intent = registered_intent(&adapter, &launch, pane, native_session);
         assert_eq!(intent.leave_outs, launch.leave_outs);
         let user = serde_json::json!({"type":"user","sessionId":native_session,
-            "message":{"role":"user","content":launch.first_prompt_payload.first_prompt_body}});
+            "message":{"role":"user","content":launch.first_prompt_payload.first_prompt_body.0}});
         let skill_call = serde_json::json!({"type":"assistant","sessionId":native_session,
             "uuid":"turn-skill","effort":"high","message":{"model":"model-current",
             "content":[{"type":"tool_use","id":"t1","name":"Skill","input":{"skill":"x"}}]}});
@@ -3763,7 +3806,7 @@ printf '%s\n' "$alias"
                 .observe_native_binding(&launch, &pane, Some("123456"))
                 .expect("bound as reserved")
                 .flow_id,
-            "123456"
+            flow_ethos::FlowId("123456".into())
         );
         assert!(
             adapter
@@ -3796,12 +3839,12 @@ printf '%s\n' "$alias"
         let binding = adapter
             .observe_native_binding(&launch, &pane, Some("123456"))
             .expect("selected session binds without Herdr session");
-        assert_eq!(binding.native_session_id, session);
+        assert_eq!(binding.native_session_id.0, session);
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
         assert!(calls.contains(&format!(" --session-id {session} ")));
 
         let mut wrong_pane = pane.clone();
-        wrong_pane.herdr_pane_id = "w7:p9".into();
+        wrong_pane.herdr_pane_id = signal_flow::HerdrPaneId("w7:p9".into());
         assert!(
             adapter
                 .observe_native_binding(&launch, &wrong_pane, Some("123456"))
@@ -3879,7 +3922,7 @@ printf '%s\n' "$alias"
             .reserved_native_session_id(&launch)
             .expect("a Claude launch chooses its session");
         let system_prompt_file = adapter
-            .held_system_prompt_path(&launch.launch_profile.launch_request_id)
+            .held_system_prompt_path(&launch.launch_profile.launch_request_id.0)
             .expect("the system prompt is held until the session binds");
         assert!(system_prompt_file.starts_with(&format!("/proc/{}/fd/", std::process::id())));
         assert_eq!(
@@ -3956,9 +3999,9 @@ printf '%s\n' "$alias"
         let binding = adapter
             .observe_native_binding(&launch, &pane, None)
             .expect("official native binding");
-        assert_eq!(binding.flow_id, "123456");
+        assert_eq!(binding.flow_id, flow_ethos::FlowId("123456".into()));
         assert_eq!(
-            adapter.held_system_prompt_path(&launch.launch_profile.launch_request_id),
+            adapter.held_system_prompt_path(&launch.launch_profile.launch_request_id.0),
             None,
             "the held system prompt is closed once the session has bound"
         );
@@ -3982,8 +4025,11 @@ printf '%s\n' "$alias"
             &intent.native_transcript_boundary,
             NativeTranscriptBoundary::Existing(_)
         ));
-        assert_eq!(intent.prompt_sha256_vector, [PROMPT_HASH]);
-        assert_eq!(intent.parts_submitted, 1);
+        assert_eq!(
+            intent.prompt_sha256_vector,
+            [signal_flow::PromptSha256(PROMPT_HASH.into())]
+        );
+        assert_eq!(intent.parts_submitted, signal_flow::PartsSubmitted(1));
         assert_eq!(
             adapter
                 .submit_startup_part(&launch, &intent)
@@ -4028,7 +4074,7 @@ printf '%s\n' "$alias"
             let binding = adapter
                 .observe_native_binding(&launch, &pane, None)
                 .unwrap();
-            assert_eq!(binding.native_session_id, native_session);
+            assert_eq!(binding.native_session_id.0, native_session);
         }
         for (native, claim, reason) in [
             (
@@ -4140,13 +4186,16 @@ printf '%s\n' "$alias"
             "turn_id":"turn-first","model":"model-current","effort":"high"}});
         let input = serde_json::json!({"type":"event_msg","payload":{
             "thread_id":native_session,"turn_id":"turn-first",
-            "item":{"type":"UserMessage","content":[{"type":"text","text":launch.first_prompt_payload.first_prompt_body}]}}});
+            "item":{"type":"UserMessage","content":[{"type":"text","text":launch.first_prompt_payload.first_prompt_body.0}]}}});
         fs::write(&transcript, format!("{meta}\n")).expect("named thread");
         let intent = registered_intent(&adapter, &launch, pane, native_session);
         let NativeTranscriptBoundary::Existing(cursor) = &intent.native_transcript_boundary else {
             panic!("the thread's transcript exists");
         };
-        assert_eq!(cursor.transcript_byte_offset, 0);
+        assert_eq!(
+            cursor.transcript_byte_offset,
+            signal_flow::TranscriptByteOffset(0)
+        );
         use std::io::Write;
         let mut append = fs::OpenOptions::new()
             .append(true)
@@ -4167,7 +4216,10 @@ printf '%s\n' "$alias"
         else {
             panic!("receipt remained ambiguous");
         };
-        assert_eq!(native_turn_id, "turn-first");
+        assert_eq!(
+            native_turn_id,
+            signal_flow::NativeTurnId("turn-first".into())
+        );
     }
 
     /// A request that carried a block the launch left out refuses the
@@ -4221,13 +4273,13 @@ printf '%s\n' "$alias"
             let meta = serde_json::json!({"type":"session_meta","payload":{"id":native_session}});
             fs::write(&transcript, format!("{meta}\n{block}\n{context}\n")).expect("first request");
             // Left in, the block is the launch's own choice.
-            launch.leave_outs = vec![kept];
+            launch.leave_outs = signal_flow::LeaveOuts(vec![kept]);
             let intent = registered_intent(&adapter, &launch, pane.clone(), native_session);
             assert_eq!(
                 adapter.observe_native_target_receipt(&intent).unwrap(),
                 StartupProgress::Waiting(intent.clone())
             );
-            launch.leave_outs = vec![leave_out.clone()];
+            launch.leave_outs = signal_flow::LeaveOuts(vec![leave_out.clone()]);
             let intent = registered_intent(&adapter, &launch, pane, native_session);
             let refusal = adapter.observe_native_target_receipt(&intent).unwrap_err();
             assert_eq!(
@@ -4266,7 +4318,7 @@ printf '%s\n' "$alias"
         let binding = adapter
             .observe_attached_codex_binding(&launch, &pane, native_session)
             .expect("the opened thread binds");
-        assert_eq!(binding.native_session_id, native_session);
+        assert_eq!(binding.native_session_id.0, native_session);
         assert!(
             adapter
                 .observe_attached_codex_binding(
@@ -4308,8 +4360,8 @@ printf '%s\n' "$alias"
         let binding = adapter
             .observe_attached_codex_binding(&launch, &pane, native_session)
             .expect("the opened thread binds without a Herdr session");
-        assert_eq!(binding.native_session_id, native_session);
-        assert_eq!(binding.flow_id, "123456");
+        assert_eq!(binding.native_session_id.0, native_session);
+        assert_eq!(binding.flow_id, flow_ethos::FlowId("123456".into()));
         assert_eq!(binding.harness_kind, HarnessKind::Codex);
         // Without Herdr's own report, the attached thread is still required.
         assert!(
@@ -4560,7 +4612,7 @@ printf '%s\n' "$alias"
             .join("native-transcripts/claude")
             .join(format!("{native_session}.jsonl"));
         let first_input = serde_json::json!({"type":"user","sessionId":native_session,
-            "message":{"role":"user","content":launch.first_prompt_payload.first_prompt_body}});
+            "message":{"role":"user","content":launch.first_prompt_payload.first_prompt_body.0}});
         fs::write(&transcript, format!("{first_input}\n")).expect("empty receipt transcript");
         let StartupProgress::Waiting(adopted_intent) = adapter
             .observe_native_target_receipt(&intent)
@@ -4587,13 +4639,16 @@ printf '%s\n' "$alias"
         else {
             panic!("the first answer after the authenticated turn is the receipt");
         };
-        assert_eq!(observed.native_turn_id, "turn-claude");
+        assert_eq!(
+            observed.native_turn_id,
+            signal_flow::NativeTurnId("turn-claude".into())
+        );
         assert_eq!(
             observed.receipt_sha256,
-            format!(
+            signal_flow::ReceiptSha256(format!(
                 "{:x}",
                 <sha2::Sha256 as sha2::Digest>::digest(format!("{row}\n").as_bytes())
-            )
+            ))
         );
     }
 
@@ -4619,7 +4674,7 @@ printf '%s\n' "$alias"
             .join("native-transcripts/claude")
             .join(format!("{native_session}.jsonl"));
         let first_input = serde_json::json!({"type":"user","sessionId":native_session,
-            "message":{"role":"user","content":launch.first_prompt_payload.first_prompt_body}});
+            "message":{"role":"user","content":launch.first_prompt_payload.first_prompt_body.0}});
         let receipt = |effort: serde_json::Value| {
             let mut row = serde_json::json!({"type":"assistant","sessionId":native_session,
                 "session_id":native_session,"uuid":"turn-claude","perTurnEffort":null,
@@ -4643,8 +4698,11 @@ printf '%s\n' "$alias"
         else {
             panic!("a model without effort never reaches Observed");
         };
-        assert_eq!(observed.native_turn_id, "turn-claude");
-        assert_eq!(observed.effort, Effort::from("high"));
+        assert_eq!(
+            observed.native_turn_id,
+            signal_flow::NativeTurnId("turn-claude".into())
+        );
+        assert_eq!(observed.effort, Effort("high".into()));
 
         fs::write(
             &transcript,
@@ -4681,7 +4739,7 @@ printf '%s\n' "$alias"
             .join("native-transcripts/claude")
             .join(format!("{native_session}.jsonl"));
         let first_input = serde_json::json!({"type":"user","sessionId":native_session,
-            "message":{"role":"user","content":launch.first_prompt_payload.first_prompt_body}});
+            "message":{"role":"user","content":launch.first_prompt_payload.first_prompt_body.0}});
         let receipt = |model: &str, effort: &str| {
             serde_json::json!({"type":"assistant","sessionId":native_session,
                 "session_id":native_session,"uuid":"turn-claude",
@@ -4697,7 +4755,7 @@ printf '%s\n' "$alias"
             .expect("receipt written");
             adapter.observe_native_target_receipt(&intent)
         };
-        assert_eq!(intent.model_name, ModelName::from("model-current"));
+        assert_eq!(intent.model_name, ModelName("model-current".into()));
         assert!(matches!(
             observed("model-current", "high"),
             Ok(StartupProgress::Received(_))
@@ -4810,7 +4868,7 @@ printf '%s\n' "$alias"
         let pasted = serde_json::json!({"type":"user","sessionId":native_session,
             "message":{"role":"user","content":format!(
                 "\n\n<pasted_content id=\"04ee\">\n{}\n</pasted_content id=\"04ee\">\n",
-                launch.first_prompt_payload.first_prompt_body)}});
+                launch.first_prompt_payload.first_prompt_body.0)}});
         let answer = serde_json::json!({"type":"assistant","sessionId":native_session,
             "uuid":"turn-pasted","effort":"high","message":{"model":"model-current",
             "content":[{"type":"text","text":"Beginning."}]}});
@@ -4824,8 +4882,14 @@ printf '%s\n' "$alias"
         else {
             panic!("the pasted part and its answer are the receipt");
         };
-        assert_eq!(receipt.native_turn_id, "turn-pasted");
-        assert_eq!(receipt.prompt_sha256_vector, [PROMPT_HASH]);
+        assert_eq!(
+            receipt.native_turn_id,
+            signal_flow::NativeTurnId("turn-pasted".into())
+        );
+        assert_eq!(
+            receipt.prompt_sha256_vector,
+            [signal_flow::PromptSha256(PROMPT_HASH.into())]
+        );
     }
 
     /// Claude Code 2.1.294's paste escape, as its own expression
@@ -4918,11 +4982,16 @@ printf '%s\n' "$alias"
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         let mut intent = registered_intent(&adapter, &launch, pane, native_session);
-        intent.prompt_sha256_vector = parts.iter().copied().map(digest).collect();
-        intent.parts_submitted = i64::try_from(parts.len()).unwrap();
+        intent.prompt_sha256_vector = parts
+            .iter()
+            .copied()
+            .map(digest)
+            .map(signal_flow::PromptSha256)
+            .collect();
+        intent.parts_submitted = signal_flow::PartsSubmitted(i64::try_from(parts.len()).unwrap());
         let mut reading = StartupReading {
-            seen_parts: 0,
-            last_part_answered: false,
+            seen_parts: crate::generated::starter::SeenParts(0),
+            last_part_answered: crate::generated::starter::LastPartAnswered(false),
             native_turn_option: None,
             part_turn_option: None,
         };
@@ -5075,7 +5144,7 @@ printf '%s\n' "$alias"
         let pasted = serde_json::json!({"type":"user","sessionId":native_session,
             "message":{"role":"user","content":format!(
                 "\n\n<pasted_content id=\"04ee\">\n{} \n</pasted_content id=\"04ee\">\n",
-                launch.first_prompt_payload.first_prompt_body)}});
+                launch.first_prompt_payload.first_prompt_body.0)}});
         let mut append = fs::OpenOptions::new()
             .append(true)
             .open(&transcript)
@@ -5092,7 +5161,7 @@ printf '%s\n' "$alias"
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = two_part_launch(HarnessKind::Claude);
         assert!(
-            HarnessKind::Claude.fits_one_message(&launch.first_prompt_payload.first_prompt_body)
+            HarnessKind::Claude.fits_one_message(&launch.first_prompt_payload.first_prompt_body.0)
         );
         let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
@@ -5110,7 +5179,7 @@ printf '%s\n' "$alias"
         let intent = registered_intent(&adapter, &launch, pane, native_session);
         let parts = &launch.first_prompt_payload.prompt_part_vector;
         assert_eq!(intent.prompt_sha256_vector.len(), 2);
-        assert_eq!(intent.parts_submitted, 1);
+        assert_eq!(intent.parts_submitted, signal_flow::PartsSubmitted(1));
         let user = |text: &str| {
             serde_json::json!({"type":"user","sessionId":native_session,
                 "message":{"role":"user","content":text}})
@@ -5124,7 +5193,7 @@ printf '%s\n' "$alias"
             .append(true)
             .open(&transcript)
             .unwrap();
-        writeln!(append, "{}", user(&parts[0].prompt_part_text)).unwrap();
+        writeln!(append, "{}", user(&parts[0].prompt_part_text.0)).unwrap();
         assert_eq!(
             adapter.observe_native_target_receipt(&intent).unwrap(),
             StartupProgress::Waiting(intent.clone()),
@@ -5137,19 +5206,22 @@ printf '%s\n' "$alias"
             "the first part answered cues the second"
         );
         let mut next = intent.clone();
-        next.parts_submitted = 2;
+        next.parts_submitted = signal_flow::PartsSubmitted(2);
         assert_eq!(
             adapter.observe_native_target_receipt(&next).unwrap(),
             StartupProgress::Waiting(next.clone())
         );
-        writeln!(append, "{}", user(&parts[1].prompt_part_text)).unwrap();
+        writeln!(append, "{}", user(&parts[1].prompt_part_text.0)).unwrap();
         writeln!(append, "{}", answer("turn-brief")).unwrap();
         let StartupProgress::Received(receipt) =
             adapter.observe_native_target_receipt(&next).unwrap()
         else {
             panic!("every part, then the answer after the last, is the receipt");
         };
-        assert_eq!(receipt.native_turn_id, "turn-brief");
+        assert_eq!(
+            receipt.native_turn_id,
+            signal_flow::NativeTurnId("turn-brief".into())
+        );
         assert_eq!(receipt.prompt_sha256_vector, next.prompt_sha256_vector);
 
         // The second part before the first is not the message sent.
@@ -5157,7 +5229,7 @@ printf '%s\n' "$alias"
             &transcript,
             format!(
                 "{{\"type\":\"session_meta\"}}\n{}\n",
-                user(&parts[1].prompt_part_text)
+                user(&parts[1].prompt_part_text.0)
             ),
         )
         .unwrap();
@@ -5206,7 +5278,7 @@ printf '%s\n' "$alias"
             .append(true)
             .open(&transcript)
             .unwrap();
-        for row in turn("turn-1", &parts[0].prompt_part_text) {
+        for row in turn("turn-1", &parts[0].prompt_part_text.0) {
             writeln!(append, "{row}").unwrap();
         }
         assert_eq!(
@@ -5224,8 +5296,8 @@ printf '%s\n' "$alias"
             StartupProgress::PartAnswered(intent.clone())
         );
         let mut next = intent.clone();
-        next.parts_submitted = 2;
-        for row in turn("turn-2", &parts[1].prompt_part_text) {
+        next.parts_submitted = signal_flow::PartsSubmitted(2);
+        for row in turn("turn-2", &parts[1].prompt_part_text.0) {
             writeln!(append, "{row}").unwrap();
         }
         writeln!(
@@ -5239,7 +5311,10 @@ printf '%s\n' "$alias"
         else {
             panic!("the last part's turn answering is the receipt");
         };
-        assert_eq!(receipt.native_turn_id, "turn-2");
+        assert_eq!(
+            receipt.native_turn_id,
+            signal_flow::NativeTurnId("turn-2".into())
+        );
     }
 
     /// The next part is typed through the socket only once it is counted as
@@ -5259,18 +5334,18 @@ printf '%s\n' "$alias"
         let intent = registered_intent(&adapter, &launch, pane, native_session);
         adapter.submit_startup_part(&launch, &intent).unwrap();
         let mut next = intent.clone();
-        next.parts_submitted = 2;
+        next.parts_submitted = signal_flow::PartsSubmitted(2);
         adapter.submit_startup_part(&launch, &next).unwrap();
         let prompts = socket_prompts(&root);
         assert_eq!(prompts.len(), 2);
         let parts = &launch.first_prompt_payload.prompt_part_vector;
         assert_eq!(
             prompts[0]["params"]["text"],
-            parts[0].prompt_part_text.as_str()
+            parts[0].prompt_part_text.0.as_str()
         );
         assert_eq!(
             prompts[1]["params"]["text"],
-            parts[1].prompt_part_text.as_str()
+            parts[1].prompt_part_text.0.as_str()
         );
         assert!(
             prompts[0]["params"]["text"]
@@ -5278,7 +5353,7 @@ printf '%s\n' "$alias"
                 .unwrap()
                 .starts_with("Startup message, part 1 of 2.")
         );
-        next.parts_submitted = 3;
+        next.parts_submitted = signal_flow::PartsSubmitted(3);
         assert!(adapter.submit_startup_part(&launch, &next).is_err());
         assert_eq!(socket_prompts(&root).len(), 2);
     }
@@ -5309,8 +5384,8 @@ printf '%s\n' "$alias"
         let mut launch = launch(HarnessKind::Claude);
         launch.launch_profile.address.aspect = Aspect::Psyche;
         launch.launch_profile.address.model = signal_flow::Model::Opus;
-        launch.launch_profile.model_name = "claude-fable-5-1".into();
-        launch.leave_outs = vec![signal_flow::LeaveOut::SkillTool];
+        launch.launch_profile.model_name = ModelName("claude-fable-5-1".into());
+        launch.leave_outs = signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::SkillTool]);
         let (root, adapter, session, pane) = reserved_claude(&launch);
         adapter
             .start_native_harness(&launch, &pane, Some("123456"))
@@ -5366,7 +5441,7 @@ printf '%s\n' "$alias"
     fn claude_title_readback_that_differs_refuses_before_the_label() {
         let mut launch = launch(HarnessKind::Claude);
         launch.launch_profile.address.aspect = Aspect::Psyche;
-        launch.launch_profile.model_name = "claude-fable-5-1".into();
+        launch.launch_profile.model_name = ModelName("claude-fable-5-1".into());
         let (root, adapter, _, pane) = reserved_claude(&launch);
         // The session shows a title another Flow left behind.
         fs::write(
@@ -5499,7 +5574,7 @@ printf '%s\n' "$alias"
     #[test]
     fn a_model_alias_is_titled_from_the_address() {
         let mut launch = launch(HarnessKind::Claude);
-        launch.launch_profile.model_name = "haiku".into();
+        launch.launch_profile.model_name = ModelName("haiku".into());
         launch.launch_profile.address.model = signal_flow::Model::Haiku;
         let (root, adapter, _, pane) = reserved_claude(&launch);
         adapter
@@ -5576,7 +5651,8 @@ printf '%s\n' "$alias"
         // The wait answers, but Herdr shows another native session there.
         fs::remove_file(root.path().join("agent-wait-refused")).unwrap();
         let mut stale = binding.clone();
-        stale.native_session_id = "12345678-1234-4abc-8def-000000000000".into();
+        stale.native_session_id =
+            signal_flow::NativeSessionId("12345678-1234-4abc-8def-000000000000".into());
         assert_eq!(
             adapter.title_native_flow(&launch, &stale).unwrap_err(),
             TitleRefusal::Target(NativeTargetRefusal::IdentityInexact)
@@ -5660,7 +5736,7 @@ printf '%s\n' "$alias"
         let acknowledgement = RegistrationAcknowledgement {
             launch_request_id: binding.launch_request_id.clone(),
             flow_id: binding.flow_id.clone(),
-            native_session_id: native_session.into(),
+            native_session_id: signal_flow::NativeSessionId(native_session.into()),
             herdr_pane_binding: binding.herdr_pane_binding.clone(),
         };
         adapter
@@ -5712,7 +5788,7 @@ printf '%s\n' "$alias"
     fn codex_title_is_set_through_the_app_server_and_read_back() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let mut launch = launch(HarnessKind::Codex);
-        launch.launch_profile.model_name = "gpt-6-astra".into();
+        launch.launch_profile.model_name = ModelName("gpt-6-astra".into());
         let agent_name = launch.launch_agent_name();
         let (root, mut adapter) = fixture_herdr(
             "codex",
@@ -5809,7 +5885,7 @@ printf '%s\n' "$alias"
                 return (root, agent_name, title.as_str().to_owned());
             }
             HarnessKind::Codex => {
-                launch.launch_profile.model_name = "gpt-6-astra".into();
+                launch.launch_profile.model_name = ModelName("gpt-6-astra".into());
                 launch.launch_profile.native_title(alias).unwrap()
             }
         };

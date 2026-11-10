@@ -73,13 +73,18 @@ fn declare(fixture: &NexusFixture, at: Address) {
         .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
             root_option: None,
             address: at,
-            system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-            user_modules: vec!["operation-main-flow".into()],
+            system_modules: signal_flow::SystemModules(vec![
+                signal_flow::ModuleIdentity("spirit-core".into()),
+                signal_flow::ModuleIdentity("intent-flow".into()),
+            ]),
+            user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                "operation-main-flow".into(),
+            )]),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             continuity: Continuity::OnDemand,
-            purpose: String::new(),
-            records: vec![],
+            purpose: meta_signal_flow::Purpose(String::new()),
+            records: meta_signal_flow::Records(vec![]),
         }]))
         .expect("metaflow declared");
 }
@@ -90,19 +95,23 @@ fn awake_seat(fixture: &NexusFixture, queue: Vec<Request>) {
     claude_seat(fixture, 40_000);
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: seat_address(),
-        state: State::Awake(CLAUDE_SEAT.into()),
-        past: vec![],
-        queue: queue
-            .into_iter()
-            .enumerate()
-            .map(|(index, request)| signal_flow::QueueEntry {
-                logical_delivery_id: format!("refreshing-test-{index}"),
-                request_id: "test".into(),
-                sent_by: SentBy::Unknown,
-                delivery: flow_ethos::Delivery::Queue,
-                message: Message::Soft(request),
-            })
-            .collect(),
+        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(
+            queue
+                .into_iter()
+                .enumerate()
+                .map(|(index, request)| signal_flow::QueueEntry {
+                    logical_delivery_id: flow_ethos::LogicalDeliveryId(format!(
+                        "refreshing-test-{index}"
+                    )),
+                    request_id: flow_ethos::RequestId("test".into()),
+                    sent_by: SentBy::Unknown,
+                    delivery: flow_ethos::Delivery::Queue,
+                    message: Message::Soft(request),
+                })
+                .collect(),
+        ),
     });
 }
 
@@ -134,6 +143,7 @@ fn lifecycle(fixture: &NexusFixture) -> FlowLifecycle {
 fn requests(metaflow: &Metaflow) -> Vec<Request> {
     metaflow
         .queue
+        .0
         .iter()
         .map(|entry| match &entry.message {
             Message::HardAbrupt(request)
@@ -165,7 +175,7 @@ fn a_refresh_ends_the_awake_flow_without_a_turn_and_leaves_the_metaflow_asleep()
             .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound.into()),
         Response::Refreshed(Refreshed {
             address: seat_address(),
-            flow_id: CLAUDE_SEAT.into(),
+            flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
         })
     );
     assert!(closed(&fixture), "the flow's pane is closed");
@@ -176,7 +186,10 @@ fn a_refresh_ends_the_awake_flow_without_a_turn_and_leaves_the_metaflow_asleep()
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
     let metaflow = stored(&fixture);
     assert_eq!(metaflow.state, State::Asleep, "no successor is started");
-    assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
+    assert_eq!(
+        metaflow.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])
+    );
     assert_eq!(
         requests(&metaflow),
         vec![Request::Order("Kept for the next flow.".into())],
@@ -202,8 +215,8 @@ fn a_refresh_of_a_metaflow_not_awake_is_refused_not_awake() {
     let asleep = Metaflow {
         address: seat_address(),
         state: State::Asleep,
-        past: vec![CLAUDE_SEAT.into()],
-        queue: vec![],
+        past: flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.into())]),
+        queue: flow_ethos::Queue(vec![]),
     };
     fixture.nexus.store.seed_metaflow(asleep.clone());
     assert_eq!(
@@ -250,7 +263,10 @@ fn a_refresh_is_refused_locked_while_another_holds_the_metaflow() {
         Response::RefreshRejected(RefreshRejection::Locked)
     );
     assert!(!closed(&fixture), "nothing is closed while the hold stands");
-    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(
+        stored(&fixture).state,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
 
     drop(held);
@@ -277,9 +293,9 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
     super::waking::rested_at_stop(&fixture, ENDING);
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: seat_address(),
-        state: State::Awake(ENDING.into()),
-        past: vec![],
-        queue: vec![],
+        state: State::Awake(flow_ethos::FlowId(ENDING.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let ending = fixture.nexus.store.flow_node(ENDING).unwrap().unwrap();
     let HerdrRouteSelection::Available(route) = &ending.herdr_route_selection else {
@@ -300,7 +316,7 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
     // leaves the recipient's Claude model declaration untouched.
     let sender_address = Address {
         aspect: signal_flow::Aspect::Mind,
-        topic: "sender".into(),
+        topic: flow_ethos::Topic("sender".into()),
         model: Model::Sol,
     };
     let peer = FlowStore::process_identity_for_pid(std::process::id()).unwrap();
@@ -314,20 +330,20 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
                     process: peer.clone(),
                 },
                 &peer,
-                Some("a001".into()),
+                Some(flow_ethos::FlowId("a001".into())),
             )
             .unwrap(),
-        Response::Bound("a001".into())
+        Response::Bound(flow_ethos::FlowId("a001".into()))
     );
     let log = fixture.accept_pane_operations(
         vec![
             caller_agent,
             serde_json::json!({
-                "agent":"claude", "agent_status":"idle", "name":route.herdr_agent_name,
-                "workspace_id":"w1", "pane_id":route.herdr_pane_id,
-                "terminal_id":route.herdr_terminal_id,
+                "agent":"claude", "agent_status":"idle", "name":route.herdr_agent_name.0,
+                "workspace_id":"w1", "pane_id":route.herdr_pane_id.0,
+                "terminal_id":route.herdr_terminal_id.0,
                 "agent_session":{"source":"herdr:claude","agent":"claude","kind":"id",
-                    "value":ending.session_id},
+                    "value":ending.session_id.0},
             }),
         ],
         PromptFixture::Prompted("w1:p3"),
@@ -382,13 +398,16 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
         );
         // The refresh holds the metaflow and its flow is still Awake.
         assert!(fixture.nexus.waking.is_waking(&seat_address()));
-        assert_eq!(stored(&fixture).state, State::Awake(ENDING.into()));
+        assert_eq!(
+            stored(&fixture).state,
+            State::Awake(flow_ethos::FlowId(ENDING.into()))
+        );
         let (answered, answer) = std::sync::mpsc::channel();
         let (nexus, peer, request) = (&fixture.nexus, &peer, &request);
         let sending = scope.spawn(move || {
             let answer = nexus.send_request(
                 SendRequest {
-                    recipient: seat_address(),
+                    address: seat_address(),
                     sendable_message: super::sendable_message(Message::MiddleAbrupt(
                         request.clone(),
                     )),
@@ -421,7 +440,7 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
         refreshed,
         Response::Refreshed(Refreshed {
             address: seat_address(),
-            flow_id: ENDING.into(),
+            flow_id: flow_ethos::FlowId(ENDING.into()),
         })
     );
     assert!(
@@ -446,9 +465,15 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
     let State::Awake(successor) = woken.state.clone() else {
         panic!("the successor is woken; Herdr calls: {}", world.calls());
     };
-    assert_ne!(successor, ENDING, "a fresh flow, never the one that ended");
+    assert_ne!(
+        successor.0, ENDING,
+        "a fresh flow, never the one that ended"
+    );
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
-    assert_eq!(woken.past, vec![ENDING.to_owned()]);
+    assert_eq!(
+        woken.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId(ENDING.to_owned())])
+    );
     assert!(
         requests(&woken).is_empty(),
         "the successor's accepted first prompt settles its fixed queue batch"
@@ -506,7 +531,10 @@ fn a_refused_close_or_an_unreadable_herdr_answers_refresh_s_own_rejection() {
         fixture.nexus.dispatch(Query::Refresh(seat_address())),
         Response::RefreshRejected(RefreshRejection::CloseRefused)
     );
-    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(
+        stored(&fixture).state,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
     assert!(!fixture.nexus.waking.is_waking(&seat_address()));
 
@@ -526,7 +554,10 @@ fn a_refused_close_or_an_unreadable_herdr_answers_refresh_s_own_rejection() {
         fixture.nexus.dispatch(Query::Refresh(seat_address())),
         Response::RefreshRejected(RefreshRejection::HerdrUnavailable)
     );
-    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(
+        stored(&fixture).state,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
     assert!(!fixture.nexus.waking.is_waking(&seat_address()));
 }
@@ -578,11 +609,11 @@ fn refreshable_with_staged_successor(
     );
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: seat_address(),
-        state: State::Awake(CLAUDE_SEAT.into()),
-        past: vec![],
-        queue: vec![signal_flow::QueueEntry {
-            logical_delivery_id: "refreshing-successor-0".into(),
-            request_id: "test".into(),
+        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![signal_flow::QueueEntry {
+            logical_delivery_id: flow_ethos::LogicalDeliveryId("refreshing-successor-0".into()),
+            request_id: flow_ethos::RequestId("test".into()),
             sent_by: SentBy::Unknown,
             delivery: delivery.clone(),
             message: match &delivery {
@@ -593,7 +624,7 @@ fn refreshable_with_staged_successor(
                     "For the successor.".into(),
                 )),
             },
-        }],
+        }]),
     });
     owe_staged_successor(&fixture);
     fixture.herdr_for_replacement_showing(0, vec![claude_agent(&fixture)]);
@@ -616,17 +647,20 @@ fn a_refresh_owed_a_successor_starts_it_before_the_ending_flow_is_reaped() {
             fixture.nexus.dispatch(Query::Refresh(seat_address())),
             Response::Refreshed(Refreshed {
                 address: seat_address(),
-                flow_id: CLAUDE_SEAT.into(),
+                flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
             }),
             "{continuity:?} {delivery:?}"
         );
         let metaflow = stored(&fixture);
         assert_eq!(
             metaflow.state,
-            State::Awake("908786".into()),
+            State::Awake(flow_ethos::FlowId("908786".into())),
             "the successor is Awake: {continuity:?} {delivery:?}"
         );
-        assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
+        assert_eq!(
+            metaflow.past,
+            flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])
+        );
         assert_eq!(
             requests(&metaflow),
             vec![Request::Order("For the successor.".into())],
@@ -668,7 +702,10 @@ fn a_refresh_whose_successor_stays_unconfirmed_answers_successor_unconfirmed() {
         fixture.nexus.dispatch(Query::Refresh(seat_address())),
         Response::RefreshRejected(RefreshRejection::SuccessorUnconfirmed)
     );
-    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(
+        stored(&fixture).state,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
     assert!(
         !fs::read_to_string(fixture.directory.path().join("herdr-calls.log"))
@@ -716,7 +753,7 @@ fn an_abrupt_send_to_a_held_metaflow_is_queued_never_refused_busy() {
         .expect("the holder takes the metaflow");
     let sent = fixture.nexus.send_request(
         SendRequest {
-            recipient: seat_address(),
+            address: seat_address(),
             sendable_message: super::sendable_message(Message::HardAbrupt(request.clone())),
         },
         Some(&peer),
@@ -729,7 +766,10 @@ fn an_abrupt_send_to_a_held_metaflow_is_queued_never_refused_busy() {
     let pending = sent.pending.expect("the queued Send asks for a wake");
     let metaflow = stored(&fixture);
     assert_eq!(requests(&metaflow), vec![request]);
-    assert!(matches!(metaflow.queue[0].message, Message::HardAbrupt(_)));
+    assert!(matches!(
+        metaflow.queue.0[0].message,
+        Message::HardAbrupt(_)
+    ));
     assert!(fixture.typed().is_none(), "nothing is typed under the hold");
     // The holder's own drain finds the metaflow held: nothing is typed.
     fixture.nexus.wake_due(pending.address);
@@ -818,12 +858,12 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
                     assert!(fixture.nexus.store.past_threshold(CLAUDE_SEAT).unwrap());
                 }
             }
-            let queued_before = stored(&fixture).queue.len();
+            let queued_before = stored(&fixture).queue.0.len();
             let caller = MarkedProcess::spawn("sleep", &["30"], "pane-1");
             let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
             let sent = fixture.nexus.send_request(
                 SendRequest {
-                    recipient: seat_address(),
+                    address: seat_address(),
                     sendable_message: super::sendable_message(abrupt(Request::Order(
                         "Arrived while busy.".into(),
                     ))),
@@ -838,7 +878,7 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
                         sent.response
                     );
                     assert!(
-                        stored(&fixture).queue.is_empty(),
+                        stored(&fixture).queue.0.is_empty(),
                         "the exact receipt settles all"
                     );
                 }
@@ -851,7 +891,11 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
                         signal_flow::VisibleDeliveryState::Queued,
                         "{busy:?}"
                     );
-                    assert_eq!(stored(&fixture).queue.len(), queued_before + 1, "{busy:?}");
+                    assert_eq!(
+                        stored(&fixture).queue.0.len(),
+                        queued_before + 1,
+                        "{busy:?}"
+                    );
                 }
                 Busy::PastThreshold => {
                     let Response::Sent(_) = &sent.response else {
@@ -861,18 +905,20 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
                     else {
                         panic!("{busy:?}: {:?}", sent.private_response)
                     };
-                    assert!(stored(&fixture).queue.is_empty(), "{busy:?}");
+                    assert!(stored(&fixture).queue.0.is_empty(), "{busy:?}");
                     let typed = fixture.typed().expect("post-threshold cohort reached pane");
                     assert!(typed.contains("Already waiting."), "{typed}");
                     assert!(typed.contains("Arrived while busy."), "{typed}");
                     for logical_id in [
                         "refreshing-test-0".to_owned(),
-                        receipt.logical_delivery_id.clone(),
+                        receipt.logical_delivery_id.clone().0,
                     ] {
                         let snapshot = fixture
                             .nexus
                             .store
-                            .logical_delivery_snapshot(&logical_id)
+                            .logical_delivery_snapshot(&flow_ethos::LogicalDeliveryId(
+                                logical_id.to_owned(),
+                            ))
                             .unwrap()
                             .unwrap();
                         assert!(matches!(
@@ -894,15 +940,15 @@ fn a_send_to_a_primary_is_accepted_from_a_primary_and_from_a_secondary() {
     let fixture = NexusFixture::new();
     let primary = |topic: &str| Address {
         aspect: signal_flow::Aspect::Mind,
-        topic: topic.into(),
+        topic: flow_ethos::Topic(topic.into()),
         model: Model::Astra,
     };
     let target = primary("flow");
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: target.clone(),
         state: State::Asleep,
-        past: vec![],
-        queue: vec![],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     for sender in [primary("other"), seat_address()] {
         for request in [
@@ -944,16 +990,22 @@ fn a_launch_to_an_awake_metaflow_names_the_replace_of_its_flow() {
     let Ok(Query::Replace(profile)) = fixture.nexus.declared_launch(
         signal_flow::LaunchRequest {
             address: seat_address(),
-            remembering: signal_flow::Remembering::Predecessors(1),
-            instruction_prompt: "Take up the work.".into(),
+            remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(1)),
+            instruction_prompt: signal_flow::InstructionPrompt("Take up the work.".into()),
         },
         None,
     ) else {
         panic!("a Launch to an Awake metaflow is a Replace");
     };
-    assert_eq!(profile.flow_id_option, Some(CLAUDE_SEAT.to_owned()));
+    assert_eq!(
+        profile.flow_id_option,
+        Some(flow_ethos::FlowId(CLAUDE_SEAT.to_owned()))
+    );
     assert_eq!(profile.address, seat_address());
-    assert_eq!(profile.instruction_prompt, "Take up the work.");
+    assert_eq!(
+        profile.instruction_prompt,
+        signal_flow::InstructionPrompt("Take up the work.".into())
+    );
 }
 
 /// A Replace of an Awake metaflow's flow, as a Launch names it, runs under
@@ -1016,12 +1068,15 @@ fn a_launch_ordered_replace_holds_the_metaflow_and_types_nothing_into_its_predec
     });
 
     assert!(
-        matches!(&replaced, Response::Replaced(replaced) if replaced.flow_id == CLAUDE_SEAT),
+        matches!(&replaced, Response::Replaced(replaced) if replaced.flow_id.0 == CLAUDE_SEAT),
         "{replaced:?}"
     );
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
     let metaflow = stored(&fixture);
-    assert_eq!(metaflow.state, State::Awake("908786".into()));
+    assert_eq!(
+        metaflow.state,
+        State::Awake(flow_ethos::FlowId("908786".into()))
+    );
     assert_eq!(
         requests(&metaflow),
         vec![Request::Order("For the successor.".into())]
@@ -1048,6 +1103,7 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
         refreshable_with_successor(Continuity::OnDemand, flow_ethos::Delivery::Queue);
     let fixture_only_startup = stored(&fixture)
         .queue
+        .0
         .into_iter()
         .next()
         .expect("replacement fixture startup entry");
@@ -1058,17 +1114,17 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
             .remove_oldest_queued(&seat_address(), &fixture_only_startup)
             .unwrap()
     );
-    fixture.nexus.store.seed_role(signal_flow::Caller {
-        flow_id: CLAUDE_SEAT.into(),
+    fixture.nexus.store.seed_role(signal_flow::CallerIdentity {
+        flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
         aspect: signal_flow::Aspect::Mind,
-        model_name: "fixture-model".into(),
+        model_name: flow_ethos::ModelName("fixture-model".into()),
     });
     fixture
         .nexus
         .store
         .configure_change(ConfigurationChange::Thresholds(vec![ConfigureThreshold {
-            model_name: "fixture-model".into(),
-            refresh: 100,
+            model_name: flow_ethos::ModelName("fixture-model".into()),
+            refresh_threshold: meta_signal_flow::RefreshThreshold(100),
         }]))
         .unwrap();
     fixture
@@ -1076,10 +1132,12 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
         .store
         .configure_change(ConfigurationChange::HandoverPolicies(vec![
             HandoverPolicy {
-                model_name: "fixture-model".into(),
-                warning_share_left: 20,
-                reminder_text: "flow Keep.{ WhatIAmStillTryingToDo «…» }".into(),
-                every_minutes: 5,
+                model_name: flow_ethos::ModelName("fixture-model".into()),
+                warning_share_left: meta_signal_flow::WarningShareLeft(20),
+                reminder_text: meta_signal_flow::ReminderText(
+                    "flow Keep.{ WhatIAmStillTryingToDo «…» }".into(),
+                ),
+                every_minutes: meta_signal_flow::EveryMinutes(5),
             },
         ]))
         .unwrap();
@@ -1104,6 +1162,7 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
     assert_eq!((first.sent, first.next_due), (1, 310));
     let first_warning_id = stored(&fixture)
         .queue
+        .0
         .iter()
         .find(|entry| {
             matches!(&entry.message, Message::HardAbrupt(Request::Notice(text))
@@ -1147,6 +1206,7 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
         let admitted = || {
             stored(&fixture)
                 .queue
+                .0
                 .iter()
                 .find(|entry| {
                     entry.logical_delivery_id != first_warning_id
@@ -1191,9 +1251,9 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
     let Response::Replaced(replaced) = replaced else {
         panic!("replacement answered: {replaced:?}")
     };
-    assert_eq!(replaced.flow_id, CLAUDE_SEAT);
+    assert_eq!(replaced.flow_id.0, CLAUDE_SEAT);
     let successor_flow_id = replaced.launched.flow_id;
-    assert_ne!(successor_flow_id, CLAUDE_SEAT);
+    assert_ne!(successor_flow_id.0, CLAUDE_SEAT);
     assert_eq!(
         stored(&fixture).state,
         State::Awake(successor_flow_id.clone())
@@ -1202,33 +1262,33 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
     let successor = fixture
         .nexus
         .store
-        .flow_node(&successor_flow_id)
+        .flow_node(&successor_flow_id.0)
         .unwrap()
         .expect("replacement successor registered");
     let HerdrRouteSelection::Available(successor_route) = successor.herdr_route_selection.clone()
     else {
         panic!("replacement successor has no Herdr route: {successor:?}")
     };
-    let codex = accepting_codex_endpoint(&mut fixture, "fixture-model", &successor.session_id);
+    let codex = accepting_codex_endpoint(&mut fixture, "fixture-model", &successor.session_id.0);
     let successor_agent = serde_json::json!({
         "agent":"codex",
         "agent_status":"working",
         "interactive_ready":true,
-        "name":successor_route.herdr_agent_name.clone(),
-        "pane_id":successor_route.herdr_pane_id.clone(),
-        "terminal_id":successor_route.herdr_terminal_id.clone(),
+        "name":successor_route.herdr_agent_name.0.clone(),
+        "pane_id":successor_route.herdr_pane_id.0.clone(),
+        "terminal_id":successor_route.herdr_terminal_id.0.clone(),
         "agent_session":{
             "source":"herdr:codex", "agent":"codex", "kind":"id",
-            "value":successor.session_id.clone()
+            "value":successor.session_id.0.clone()
         }
     });
     let successor_operations = fixture.accept_pane_operations(
         vec![successor_agent],
-        PromptFixture::Prompted(&successor_route.herdr_pane_id),
+        PromptFixture::Prompted(&successor_route.herdr_pane_id.0),
     );
     let successor_prompt = format!(
         "--session {} agent prompt {}",
-        successor_route.herdr_session_name, successor_route.herdr_pane_id
+        successor_route.herdr_session_name.0, successor_route.herdr_pane_id.0
     );
     let successor_input_count = || {
         fs::read_to_string(&successor_operations)
@@ -1240,6 +1300,7 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
     let queued_cohort = stored(&fixture).queue;
     assert_eq!(
         queued_cohort
+            .0
             .iter()
             .map(|entry| entry.logical_delivery_id.clone())
             .collect::<Vec<_>>(),
@@ -1247,6 +1308,7 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
         "the scheduler's two distinct warnings remain oldest first"
     );
     let expected_inputs = queued_cohort
+        .0
         .iter()
         .map(|entry| entry.visible_input(&seat_address()))
         .collect::<Vec<_>>();
@@ -1257,7 +1319,7 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
         panic!("warning cohort did not drain: {drained:?}")
     };
     assert_eq!(
-        drained_cohort, queued_cohort,
+        drained_cohort, queued_cohort.0,
         "the one drain parks both distinct logical IDs in queue order"
     );
     let cohort_input = fixture.typed().expect("warning cohort typed to successor");
@@ -1297,7 +1359,7 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
     );
     drop(codex);
     assert!(
-        stored(&fixture).queue.is_empty(),
+        stored(&fixture).queue.0.is_empty(),
         "both correlated warning IDs leave the queue together"
     );
 }
@@ -1316,15 +1378,15 @@ fn a_successor_that_cannot_start_answers_refresh_s_own_rejection() {
     );
     awake_seat(&fixture, vec![]);
     let mut waking = stored(&fixture);
-    waking.queue = vec![signal_flow::QueueEntry {
-        logical_delivery_id: "refreshing-wake-0".into(),
-        request_id: "test".into(),
+    waking.queue = flow_ethos::Queue(vec![signal_flow::QueueEntry {
+        logical_delivery_id: flow_ethos::LogicalDeliveryId("refreshing-wake-0".into()),
+        request_id: flow_ethos::RequestId("test".into()),
         sent_by: SentBy::Unknown,
         delivery: flow_ethos::Delivery::Wake,
         message: signal_flow::Message::MiddleAbrupt(signal_flow::Request::Order(
             "Wake the successor.".into(),
         )),
-    }];
+    }]);
     fixture.nexus.store.seed_metaflow(waking);
     // Declared, with no model configured for its model and aspect.
     declare(&fixture, seat_address());
@@ -1332,7 +1394,10 @@ fn a_successor_that_cannot_start_answers_refresh_s_own_rejection() {
         fixture.nexus.dispatch(Query::Refresh(seat_address())),
         Response::RefreshRejected(RefreshRejection::Undeclared)
     );
-    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(
+        stored(&fixture).state,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
     assert!(!closed(&fixture));
     assert!(!fixture.nexus.waking.is_waking(&seat_address()));
@@ -1354,7 +1419,10 @@ fn a_successor_that_cannot_start_answers_refresh_s_own_rejection() {
         ),
         "{refused:?}"
     );
-    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(
+        stored(&fixture).state,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
     assert!(!closed(&fixture));
     assert_eq!(
@@ -1382,7 +1450,7 @@ fn a_launch_ordered_replace_owes_its_successor_until_it_is_confirmed() {
         .unwrap();
     let replaced = fixture.nexus.dispatch(Query::Replace(profile));
     assert!(
-        matches!(&replaced, Response::Replaced(replaced) if replaced.flow_id == CLAUDE_SEAT),
+        matches!(&replaced, Response::Replaced(replaced) if replaced.flow_id.0 == CLAUDE_SEAT),
         "{replaced:?}"
     );
     assert_eq!(
@@ -1426,10 +1494,14 @@ fn a_nexus_start_starts_a_successor_owed_after_a_refresh_or_a_replace() {
         let metaflow = stored(&fixture);
         assert_eq!(
             metaflow.state,
-            State::Awake("908786".into()),
+            State::Awake(flow_ethos::FlowId("908786".into())),
             "the successor is Awake: {cause:?}"
         );
-        assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()], "{cause:?}");
+        assert_eq!(
+            metaflow.past,
+            flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())]),
+            "{cause:?}"
+        );
         assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped, "{cause:?}");
         assert!(
             fs::read_to_string(fixture.directory.path().join("herdr-calls.log"))
@@ -1459,8 +1531,8 @@ fn a_nexus_start_starts_a_successor_owed_after_a_refresh_or_a_replace() {
 /// The seat's own Address, as the Secondary's own seat asks.
 fn own_seat() -> crate::protecting::Asker {
     crate::protecting::Asker::Ordinary(Origin::Flow(signal_flow::FlowOrigin {
-        flow_id: CLAUDE_SEAT.into(),
-        session_id: super::waking::CLAUDE_SESSION.into(),
+        flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+        session_id: signal_flow::SessionId(super::waking::CLAUDE_SESSION.into()),
     }))
 }
 
@@ -1487,12 +1559,15 @@ fn a_self_refresh_of_a_working_seat_waits_for_its_idle_event_and_answers_refresh
             .dispatch_asked(Query::Refresh(seat_address()), own_seat()),
         Response::RefreshQueued(signal_flow::RefreshQueued {
             address: seat_address(),
-            flow_id: CLAUDE_SEAT.into(),
+            flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
         })
     );
     assert!(!closed(&fixture), "the working flow's pane stays open");
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
-    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(
+        stored(&fixture).state,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
     assert!(
         fixture
             .nexus
@@ -1514,7 +1589,10 @@ fn a_self_refresh_of_a_working_seat_waits_for_its_idle_event_and_answers_refresh
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
     let metaflow = stored(&fixture);
     assert_eq!(metaflow.state, State::Asleep);
-    assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
+    assert_eq!(
+        metaflow.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])
+    );
     assert_eq!(
         fixture
             .nexus
@@ -1551,20 +1629,21 @@ fn a_replacing_launch_of_a_working_seat_answers_launch_pending_and_waits() {
         .nexus
         .dispatch(Query::Launch(signal_flow::LaunchRequest {
             address: seat_address(),
-            remembering: signal_flow::Remembering::Predecessors(1),
-            instruction_prompt: "Take up the work.".into(),
+            remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(1)),
+            instruction_prompt: signal_flow::InstructionPrompt("Take up the work.".into()),
         }));
     let Response::LaunchPending(attempt) = pending else {
         panic!("a Launch of a working flow waits: {pending:?}");
     };
     assert_eq!(
         attempt.launch_profile.flow_id_option,
-        Some(CLAUDE_SEAT.to_owned())
+        Some(flow_ethos::FlowId(CLAUDE_SEAT.to_owned()))
     );
     assert!(
         attempt
             .launch_profile
             .instruction_prompt
+            .0
             .contains("Take up the work.")
     );
     assert_eq!(
@@ -1594,12 +1673,15 @@ fn a_replacing_launch_of_a_working_seat_answers_launch_pending_and_waits() {
 
     assert!(!closed(&fixture), "a monitor in flight is work in flight");
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
-    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(
+        stored(&fixture).state,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
     assert!(
         fixture
             .nexus
             .store
-            .ordered_launch_request(&attempt.launch_request_id)
+            .ordered_launch_request(&attempt.launch_request_id.0)
             .unwrap()
             .is_some(),
         "the Launch still waits"

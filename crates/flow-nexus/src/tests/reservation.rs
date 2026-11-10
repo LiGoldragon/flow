@@ -61,7 +61,7 @@ printf '%s\n' "$alias"
 
     fn report(&self, flow_id: &str, event: Event) -> Response {
         self.nexus.dispatch(Query::Report(Report_Data {
-            flow_id: flow_id.into(),
+            flow_id: flow_ethos::FlowId(flow_id.into()),
             event,
         }))
     }
@@ -75,7 +75,7 @@ fn a_claude_launch_refused_after_reserve_gives_back_its_flow_and_claim() {
     // before any harness exists.
     let _ = fs::remove_file(&fixture.snapshot_program);
     let mut launch = fixture.staged_launch("reserved-request", None);
-    launch.profile.model_name = "claude-fixture".into();
+    launch.profile.model_name = flow_ethos::ModelName("claude-fixture".into());
     fixture.configure_model_of(&launch.profile);
     assert_eq!(
         fixture.nexus.dispatch(Query::Start(launch.request())),
@@ -106,13 +106,13 @@ fn a_claude_launch_refused_after_reserve_gives_back_its_flow_and_claim() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_meta(MetaQuery::ReadEvents(flow_id.clone())),
+            .dispatch_meta(MetaQuery::ReadEvents(flow_ethos::FlowId(flow_id.clone()))),
         MetaResponse::ReadEventsRejected(meta_signal_flow::ReadEventsRejected_Data::UnknownFlow)
     );
     assert_eq!(
         fixture.report(&flow_id, Event::Started(None)),
         Response::Refused(signal_flow::Refusal::Unknown(
-            signal_flow::Unknown_Data::FlowId(flow_id.clone())
+            signal_flow::Unknown_Data::FlowId(flow_ethos::FlowId(flow_id.clone()))
         ))
     );
     assert!(!flows_root.join(format!(".{flow_id}.flow-id")).exists());
@@ -136,7 +136,7 @@ fn a_claude_launch_whose_flow_id_cannot_be_claimed_is_refused_before_any_pane() 
     let fixture = NexusFixture::new();
     // No flow-id helper: the claim at Reserve fails.
     let mut launch = fixture.staged_launch("unclaimed-request", None);
-    launch.profile.model_name = "claude-fixture".into();
+    launch.profile.model_name = flow_ethos::ModelName("claude-fixture".into());
     fixture.configure_model_of(&launch.profile);
     let log = fixture.herdr_logging_every_call();
     assert_eq!(
@@ -194,13 +194,16 @@ esac
         marker = marker.display(),
     ));
     let mut launch = fixture.staged_launch("herdr-refused-request", None);
-    launch.profile.model_name = "claude-fixture".into();
+    launch.profile.model_name = flow_ethos::ModelName("claude-fixture".into());
     fixture.configure_model_of(&launch.profile);
     let expected = StartRejection::HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal {
         spawn_refusal_cause: signal_flow::SpawnRefusalCause::Herdr(signal_flow::HerdrRefusal {
-            herdr_error_code_option: Some("invalid_agent_argument".into()),
-            herdr_error_message: "agent arguments cannot be encoded safely for the target shell"
-                .into(),
+            herdr_error_code_option: Some(signal_flow::HerdrErrorCode(
+                "invalid_agent_argument".into(),
+            )),
+            herdr_error_message: signal_flow::HerdrErrorMessage(
+                "agent arguments cannot be encoded safely for the target shell".into(),
+            ),
         }),
         opened_thread_option: None,
     });
@@ -208,9 +211,12 @@ esac
         fixture.nexus.dispatch(Query::Start(launch.request())),
         Response::StartRejected(expected.clone())
     );
-    let Response::LaunchInspected(inspection) = fixture
-        .nexus
-        .dispatch(Query::LaunchStatus("herdr-refused-request".into()))
+    let Response::LaunchInspected(inspection) =
+        fixture
+            .nexus
+            .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
+                "herdr-refused-request".into(),
+            )))
     else {
         panic!("the refused launch is inspected");
     };
@@ -238,7 +244,8 @@ impl NexusFixture {
         use crate::store::RecordsCreatedLaunchPane;
         let mut launch = self.staged_launch(launch_request_id, None);
         // The pane Open created carries the launch's own agent name.
-        launch.pane.herdr_agent_name = launch.composed.launch_agent_name();
+        launch.pane.herdr_agent_name =
+            signal_flow::HerdrAgentName(launch.composed.launch_agent_name());
         launch.reserve(&self.nexus);
         launch.record_native_intent(&self.nexus);
         assert!(
@@ -255,7 +262,7 @@ impl NexusFixture {
                 .is_some()
         );
         let agent = serde_json::json!({"result":{"agent":{
-            "name":launch.pane.herdr_agent_name,
+            "name":launch.pane.herdr_agent_name.0,
             "agent":"codex",
             "workspace_id":"fixture-workspace",
             "pane_id":"w1:p1",
@@ -307,8 +314,8 @@ fn a_codex_launch_recovered_after_its_start_binds_to_the_recorded_thread() {
     let binding = attempt
         .native_launch_binding_option
         .expect("the recovered binding is recorded");
-    assert_eq!(binding.native_session_id, super::STAGED_SESSION);
-    assert_eq!(binding.flow_id, "908786");
+    assert_eq!(binding.native_session_id.0, super::STAGED_SESSION);
+    assert_eq!(binding.flow_id, flow_ethos::FlowId("908786".into()));
 }
 
 /// With no thread recorded, the same recovery has only Herdr's report,
@@ -326,9 +333,12 @@ fn a_codex_launch_recovered_without_its_thread_is_refused_at_bind_on_the_wire() 
         fixture.nexus.dispatch(Query::Start(launch.request())),
         Response::StartRejected(expected.clone())
     );
-    let Response::LaunchInspected(inspection) = fixture
-        .nexus
-        .dispatch(Query::LaunchStatus("unrecorded-request".into()))
+    let Response::LaunchInspected(inspection) =
+        fixture
+            .nexus
+            .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
+                "unrecorded-request".into(),
+            )))
     else {
         panic!("the refused launch is inspected");
     };
@@ -362,9 +372,12 @@ fn a_refused_registration_is_reported_with_its_stage() {
         ),
         Response::StartRejected(expected.clone())
     );
-    let Response::LaunchInspected(inspection) = fixture
-        .nexus
-        .dispatch(Query::LaunchStatus("registration-request".into()))
+    let Response::LaunchInspected(inspection) =
+        fixture
+            .nexus
+            .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
+                "registration-request".into(),
+            )))
     else {
         panic!("the refused launch is inspected");
     };
@@ -383,7 +396,9 @@ fn a_codex_start_naming_a_claude_leave_out_is_refused_before_reserve_or_open() {
     fixture.claims_flow_ids();
     let log = fixture.herdr_logging_every_call();
     let mut launch = fixture.staged_launch("codex-claude-leave-out", None);
-    launch.profile.leave_outs_option = Some(vec![signal_flow::LeaveOut::ClaudeMd]);
+    launch.profile.leave_outs_option = Some(signal_flow::LeaveOuts(vec![
+        signal_flow::LeaveOut::ClaudeMd,
+    ]));
     assert_eq!(
         fixture.nexus.dispatch(Query::Start(launch.request())),
         Response::StartRejected(StartRejection::LeaveOutRefused(

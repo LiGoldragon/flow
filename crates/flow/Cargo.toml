@@ -13,14 +13,14 @@ path = "src/main.rs"
 name = "flow-nexus-hook"
 path = "src/hook.rs"
 [dependencies]
-flow-ethos = { path = "../flow-ethos", features = ["datom"] }
+flow-ethos = { path = "../flow-ethos", default-features = false, features = ["datom"] }
 flow-native = { path = "../flow-native" }
-datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "eabead4" }
-protos = { git = "https://github.com/LiGoldragon/protos", rev = "3c7ade3" }
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09a0526" }
+protos = { git = "https://github.com/LiGoldragon/protos", rev = "c93b598" }
 rkyv.workspace = true
 serde_json.workspace = true
 signal-flow = { workspace = true, features = ["datom"] }
 [dev-dependencies]
 tempfile = "3"
 [build-dependencies]
-ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "07714b0171802787bea1eefe4caa2d826d9c4030" }
+ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "1976e45" }

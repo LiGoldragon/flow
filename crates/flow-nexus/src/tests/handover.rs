@@ -100,7 +100,7 @@ fn unreadable() -> Vec<(Left<'static>, Fault)> {
 /// The refusal a launch naming `predecessor` is composed into.
 fn refused_for(predecessor: &str, fault: HandoverFault) -> CompositionRefusal {
     CompositionRefusal::HandoverUnreadable(HandoverUnreadable_Data {
-        flow_id: predecessor.into(),
+        flow_id: flow_ethos::FlowId(predecessor.into()),
         handover_fault: fault,
     })
 }
@@ -163,6 +163,7 @@ fn assert_asleep_with_its_queue(
     assert_eq!(
         metaflow
             .queue
+            .0
             .iter()
             .map(|entry| entry.message.clone())
             .collect::<Vec<_>>(),
@@ -181,15 +182,20 @@ fn declare(fixture: &NexusFixture, root_option: Option<String>) {
         .nexus
         .store
         .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
-            root_option,
+            root_option: root_option.map(meta_signal_flow::Root),
             address: address(Model::Sol),
-            system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-            user_modules: vec!["operation-main-flow".into()],
+            system_modules: signal_flow::SystemModules(vec![
+                signal_flow::ModuleIdentity("spirit-core".into()),
+                signal_flow::ModuleIdentity("intent-flow".into()),
+            ]),
+            user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                "operation-main-flow".into(),
+            )]),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             continuity: Continuity::Maintained,
-            purpose: String::new(),
-            records: vec![],
+            purpose: meta_signal_flow::Purpose(String::new()),
+            records: meta_signal_flow::Records(vec![]),
         }]))
         .expect("metaflow declared");
 }
@@ -208,10 +214,10 @@ fn refreshed(left: Left<'_>, root_option: Option<String>) -> (NexusFixture, Fres
         .nexus
         .store
         .record_launch_outcome(
-            &seat.profile.launch_request_id,
+            &seat.profile.launch_request_id.0,
             crate::store::LaunchOutcome::Started(crate::LaunchedRecord {
-                flow_id: "abc123".into(),
-                session_id: seat.session.clone(),
+                flow_id: flow_ethos::FlowId("abc123".into()),
+                session_id: signal_flow::SessionId(seat.session.clone()),
                 origin: signal_flow::Origin::Unbound,
             }),
         )
@@ -223,7 +229,7 @@ fn refreshed(left: Left<'_>, root_option: Option<String>) -> (NexusFixture, Fres
     fs::write(
         world.state.join("old-agent"),
         serde_json::json!({
-            "name": seat.profile.launch_request_id,
+            "name": seat.profile.launch_request_id.0,
             "agent": "claude",
             "agent_status": "idle",
             "workspace_id": "w1",
@@ -242,7 +248,7 @@ fn refreshed(left: Left<'_>, root_option: Option<String>) -> (NexusFixture, Fres
     declare(&fixture, root_option);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake("abc123".into()),
+        State::Awake(flow_ethos::FlowId("abc123".into())),
         vec![],
         vec![],
     ));
@@ -259,7 +265,7 @@ fn refreshed_first_turn(left: Left<'_>) -> String {
         response,
         Response::Refreshed(Refreshed {
             address: address(Model::Sol),
-            flow_id: "abc123".into(),
+            flow_id: flow_ethos::FlowId("abc123".into()),
         }),
         "Herdr calls: {}",
         world.calls()
@@ -292,7 +298,10 @@ fn assert_predecessor_kept(
         .metaflow(&at)
         .unwrap()
         .expect("metaflow");
-    assert_eq!(metaflow.state, State::Awake("abc123".into()));
+    assert_eq!(
+        metaflow.state,
+        State::Awake(flow_ethos::FlowId("abc123".into()))
+    );
     assert_eq!(
         fixture
             .nexus
@@ -351,7 +360,7 @@ fn a_waking_whose_handover_cannot_be_read_is_refused_asleep_with_its_queue() {
     for (left, fault) in unreadable() {
         assert_asleep_with_its_queue(
             woken(left, vec!["abc123"], false),
-            |refused| matches!(refused, CompositionRefusal::HandoverUnreadable(HandoverUnreadable_Data { flow_id, handover_fault }) if flow_id == "abc123" && fault(handover_fault)),
+            |refused| matches!(refused, CompositionRefusal::HandoverUnreadable(HandoverUnreadable_Data { flow_id, handover_fault }) if flow_id.0 == "abc123" && fault(handover_fault)),
         );
     }
 }
@@ -361,7 +370,7 @@ fn a_refresh_whose_handover_cannot_be_read_keeps_its_predecessor() {
     for (left, fault) in unreadable() {
         assert_predecessor_kept(
             refreshed(left, None),
-            |rejection| matches!(rejection, signal_flow::StartRejection::CompositionRefused(CompositionRefusal::HandoverUnreadable(HandoverUnreadable_Data { flow_id, handover_fault })) if flow_id == "abc123" && fault(handover_fault)),
+            |rejection| matches!(rejection, signal_flow::StartRejection::CompositionRefused(CompositionRefusal::HandoverUnreadable(HandoverUnreadable_Data { flow_id, handover_fault })) if flow_id.0 == "abc123" && fault(handover_fault)),
         );
     }
 }
@@ -386,20 +395,20 @@ fn a_launch_whose_root_cannot_be_resolved_is_refused_naming_its_predecessor() {
     let mut profile = fixture
         .staged_launch("handover-compose", Some("abc123"))
         .profile;
-    profile.model_name = "claude-fixture".into();
+    profile.model_name = flow_ethos::ModelName("claude-fixture".into());
     fixture
         .nexus
         .store
         .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
-            root_option: Some(root.clone()),
+            root_option: Some(meta_signal_flow::Root(root.clone())),
             address: profile.address.clone(),
             system_modules: profile.system_modules.clone(),
             user_modules: profile.user_modules.clone(),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             continuity: Continuity::Maintained,
-            purpose: String::new(),
-            records: vec![],
+            purpose: meta_signal_flow::Purpose(String::new()),
+            records: meta_signal_flow::Records(vec![]),
         }]))
         .expect("metaflow declared");
     assert_eq!(
@@ -435,7 +444,7 @@ fn composed(
     let mut profile = fixture
         .staged_launch("handover-compose", predecessor)
         .profile;
-    profile.model_name = model_name.into();
+    profile.model_name = flow_ethos::ModelName(model_name.into());
     change(&mut profile);
     match fixture.nexus.perform(Operation::Compose(profile)) {
         Outcome::Composed(launch) => launch,
@@ -456,11 +465,16 @@ fn the_handover_is_the_last_bytes_of_the_first_prompt_on_either_harness() {
         let with = composed(&fixture, model, Some("abc123"), |_| {});
         let before = &without.first_prompt_payload.first_prompt_body;
         let body = &with.first_prompt_payload.first_prompt_body;
-        assert!(body.ends_with(TEXT), "{model}: {body}");
-        assert_eq!(body, &format!("{before}\n\n{TEXT}"), "{model}");
+        assert!(body.0.ends_with(TEXT), "{model}: {body}", body = body.0);
+        assert_eq!(
+            body.0,
+            format!("{before}\n\n{TEXT}", before = before.0),
+            "{model}"
+        );
         assert!(
-            before.contains("fixture instruction"),
-            "the brief precedes the handover: {before}"
+            before.0.contains("fixture instruction"),
+            "the brief precedes the handover: {before}",
+            before = before.0
         );
         // The hash is of the whole message, handover included.
         assert_ne!(
@@ -487,16 +501,18 @@ fn a_launch_naming_no_predecessor_is_given_no_handover() {
         Left::Text(TEXT.as_bytes()),
     );
     let launch = composed(&fixture, "claude-fixture", None, |profile| {
-        profile.instruction_prompt = String::new();
-        profile.remembering = signal_flow::Remembering::Predecessors(0);
+        profile.instruction_prompt = signal_flow::InstructionPrompt(String::new());
+        profile.remembering =
+            signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(0));
     });
     assert!(
         !launch
             .first_prompt_payload
             .first_prompt_body
+            .0
             .contains("État"),
         "{}",
-        launch.first_prompt_payload.first_prompt_body
+        launch.first_prompt_payload.first_prompt_body.0
     );
 }
 
@@ -514,18 +530,22 @@ fn a_handover_larger_than_the_rest_of_the_message_is_the_last_whole_part() {
     // A brief of its own size, so the rest is more than the margin the
     // handover leaves under one message.
     let launch = composed(&fixture, "claude-fixture", Some("abc123"), |profile| {
-        profile.instruction_prompt = "y".repeat(2_000);
+        profile.instruction_prompt = signal_flow::InstructionPrompt("y".repeat(2_000));
     });
     let parts = &launch.first_prompt_payload.prompt_part_vector;
     assert_eq!(parts.len(), 2, "the message is sent in two parts");
     let last = &parts[1].prompt_part_text;
-    assert!(last.starts_with("Startup message, part 2 of 2, the last."));
-    assert!(last.ends_with(&handover));
-    assert!(!parts[0].prompt_part_text.contains("xxxxxxxx"));
+    assert!(
+        last.0
+            .starts_with("Startup message, part 2 of 2, the last.")
+    );
+    assert!(last.0.ends_with(&handover));
+    assert!(!parts[0].prompt_part_text.0.contains("xxxxxxxx"));
     assert!(
         launch
             .first_prompt_payload
             .first_prompt_body
+            .0
             .ends_with(&handover)
     );
 }
@@ -542,7 +562,7 @@ fn a_simplified_flow_is_given_the_handover_after_its_first_message_only() {
         move |profile: &mut signal_flow::LaunchProfile| {
             profile.flow_kind = signal_flow::FlowKind::Simplified;
             profile.tool_set = signal_flow::ToolSet::Explicit(Vec::new());
-            profile.instruction_prompt = instruction.into();
+            profile.instruction_prompt = signal_flow::InstructionPrompt(instruction.into());
         }
     };
     let launch = composed(
@@ -553,11 +573,11 @@ fn a_simplified_flow_is_given_the_handover_after_its_first_message_only() {
     );
     assert_eq!(
         launch.first_prompt_payload.first_prompt_body,
-        format!("Judge this.\n\n{TEXT}")
+        signal_flow::FirstPromptBody(format!("Judge this.\n\n{TEXT}"))
     );
     // No first message, no turn to add it to.
     let launch = composed(&fixture, "claude-fixture", Some("abc123"), simplify(""));
-    assert!(launch.first_prompt_payload.first_prompt_body.is_empty());
+    assert!(launch.first_prompt_payload.first_prompt_body.0.is_empty());
     assert!(launch.first_prompt_payload.prompt_part_vector.is_empty());
 }
 
@@ -664,9 +684,9 @@ fn an_installed_memory_source_reads_the_live_store_and_ignores_the_file() {
             &at,
             &at,
             signal_flow::Section {
-                title: "live".into(),
-                description: "from memory".into(),
-                body: "same live store".into(),
+                title: signal_flow::Title("live".into()),
+                description: signal_flow::Description("from memory".into()),
+                body: signal_flow::Body("same live store".into()),
             },
             signal_flow::Touch::Unknown,
         )
@@ -676,9 +696,13 @@ fn an_installed_memory_source_reads_the_live_store_and_ignores_the_file() {
     });
     let body = &launch.first_prompt_payload.first_prompt_body;
     let handover = "## live\nfrom memory\nsame live store";
-    assert!(body.trim_end().ends_with(handover), "{body}");
-    assert_eq!(body.matches(handover).count(), 1, "{body}");
-    assert!(!body.contains("file text"), "{body}");
+    assert!(
+        body.0.trim_end().ends_with(handover),
+        "{body}",
+        body = body.0
+    );
+    assert_eq!(body.0.matches(handover).count(), 1, "{body}", body = body.0);
+    assert!(!body.0.contains("file text"), "{body}", body = body.0);
 }
 
 #[test]
@@ -697,9 +721,9 @@ fn memory_source_reads_only_the_last_closed_generation_and_ignores_root() {
             &at,
             &at,
             signal_flow::Section {
-                title: "old".into(),
-                description: "d".into(),
-                body: "one".into(),
+                title: signal_flow::Title("old".into()),
+                description: signal_flow::Description("d".into()),
+                body: signal_flow::Body("one".into()),
             },
             signal_flow::Touch::Unknown,
         )
@@ -716,9 +740,9 @@ fn memory_source_reads_only_the_last_closed_generation_and_ignores_root() {
             &at,
             &at,
             signal_flow::Section {
-                title: "new".into(),
-                description: "d".into(),
-                body: "two".into(),
+                title: signal_flow::Title("new".into()),
+                description: signal_flow::Description("d".into()),
+                body: signal_flow::Body("two".into()),
             },
             signal_flow::Touch::Unknown,
         )
@@ -781,15 +805,20 @@ fn an_on_demand_seat_whose_successor_is_refused_its_handover_is_not_closed() {
                 .nexus
                 .store
                 .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
-                    root_option: Some(root),
+                    root_option: Some(meta_signal_flow::Root(root)),
                     address: address(Model::Sol),
-                    system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-                    user_modules: vec!["operation-main-flow".into()],
+                    system_modules: signal_flow::SystemModules(vec![
+                        signal_flow::ModuleIdentity("spirit-core".into()),
+                        signal_flow::ModuleIdentity("intent-flow".into()),
+                    ]),
+                    user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                        "operation-main-flow".into(),
+                    )]),
                     flow_kind: signal_flow::FlowKind::Regular,
                     tool_set: signal_flow::ToolSet::Default,
                     continuity: Continuity::OnDemand,
-                    purpose: String::new(),
-                    records: vec![],
+                    purpose: meta_signal_flow::Purpose(String::new()),
+                    records: meta_signal_flow::Records(vec![]),
                 }]))
                 .expect("metaflow declared");
             HandoverFault::RootUnresolved
@@ -803,7 +832,7 @@ fn an_on_demand_seat_whose_successor_is_refused_its_handover_is_not_closed() {
         };
         fixture.nexus.store.seed_metaflow(metaflow(
             Model::Sol,
-            State::Awake(CLAUDE_SEAT.into()),
+            State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
             vec![],
             vec![],
         ));
@@ -823,7 +852,10 @@ fn an_on_demand_seat_whose_successor_is_refused_its_handover_is_not_closed() {
             .metaflow(&address(Model::Sol))
             .unwrap()
             .expect("metaflow");
-        assert_eq!(metaflow.state, State::Awake(CLAUDE_SEAT.into()));
+        assert_eq!(
+            metaflow.state,
+            State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+        );
         for name in ["herdr-operations.log", "herdr-calls.log"] {
             let calls = fs::read_to_string(fixture.directory.path().join(name)).unwrap_or_default();
             assert!(!calls.contains("pane close"), "{name}: {calls}");

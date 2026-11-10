@@ -36,7 +36,7 @@ const HANDOVER: &str = "# Handover\n\nThe build-base move is half done.";
 fn psyche_core() -> Address {
     Address {
         aspect: Aspect::Psyche,
-        topic: "core".into(),
+        topic: flow_ethos::Topic("core".into()),
         model: Model::Opus,
     }
 }
@@ -147,7 +147,7 @@ impl DeliversRequests for FlowStore {
 fn result(request_id: &str) -> SendableMessage {
     SendableMessage::Soft(SendableRequest::Result(
         signal_flow::SendableRequest_Result_Data {
-            request_id: request_id.into(),
+            request_id: flow_ethos::RequestId(request_id.into()),
             string: "Landed.".into(),
         },
     ))
@@ -156,7 +156,7 @@ fn result(request_id: &str) -> SendableMessage {
 fn done(request_id: &str) -> SendableMessage {
     SendableMessage::Soft(SendableRequest::Done(
         signal_flow::SendableRequest_Done_Data {
-            request_id: request_id.into(),
+            request_id: flow_ethos::RequestId(request_id.into()),
             string: "Moved.".into(),
         },
     ))
@@ -188,10 +188,10 @@ fn resting_seat() -> (NexusFixture, FreshWorld) {
         .nexus
         .store
         .record_launch_outcome(
-            &seat.profile.launch_request_id,
+            &seat.profile.launch_request_id.0,
             crate::store::LaunchOutcome::Started(crate::LaunchedRecord {
-                flow_id: "abc123".into(),
-                session_id: seat.session.clone(),
+                flow_id: flow_ethos::FlowId("abc123".into()),
+                session_id: signal_flow::SessionId(seat.session.clone()),
                 origin: signal_flow::Origin::Unbound,
             }),
         )
@@ -202,7 +202,7 @@ fn resting_seat() -> (NexusFixture, FreshWorld) {
     fs::write(
         world.state.join("old-agent"),
         serde_json::json!({
-            "name": seat.profile.launch_request_id,
+            "name": seat.profile.launch_request_id.0,
             "agent": "claude",
             "agent_status": "idle",
             "workspace_id": "w1",
@@ -221,15 +221,15 @@ fn resting_seat() -> (NexusFixture, FreshWorld) {
     maintain(&fixture, address(Model::Sol));
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        State::Awake("abc123".into()),
+        State::Awake(flow_ethos::FlowId("abc123".into())),
         vec![],
         vec![],
     ));
     fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
         address: psyche_core(),
         state: State::Asleep,
-        past: vec![],
-        queue: vec![],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     (fixture, world)
 }
@@ -251,7 +251,7 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
     let open_order = store.admitted(&at, &sender, order.clone());
     store.delivered(&at, "abc123");
     let task = Request::Task(AnswerableTask {
-        minutes: 240,
+        minutes: flow_ethos::Minutes(240),
         string: "Move every active Rust repository onto build-base.".into(),
     });
     let open_task = store.admitted(&at, &sender, task.clone());
@@ -259,7 +259,7 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
     let answered = store.admitted(&at, &sender, Request::Order("Answered already.".into()));
     store.delivered(&at, "abc123");
     store
-        .answered(&at, &sender, result(&answered.request_id))
+        .answered(&at, &sender, result(&answered.request_id.0))
         .expect("abc123 answers its Order");
     let open = vec![
         entry(&open_order, &sender, order),
@@ -267,7 +267,7 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
     ];
     assert_eq!(store.open_requests(&at).unwrap(), open);
     let deadline = store
-        .reminder(&open_task.logical_delivery_id)
+        .reminder(&open_task.logical_delivery_id.0)
         .unwrap()
         .expect("the Task's reminder is held");
     assert!(deadline.due.is_some(), "{deadline:?}");
@@ -276,7 +276,7 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
         fixture.nexus.dispatch(Query::Refresh(at.clone())),
         Response::Refreshed(Refreshed {
             address: at.clone(),
-            flow_id: "abc123".into(),
+            flow_id: flow_ethos::FlowId("abc123".into()),
         }),
         "Herdr calls: {}",
         world.calls()
@@ -286,7 +286,7 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
         State::Awake(flow_id) => flow_id,
         State::Asleep => panic!("the successor is Awake"),
     };
-    assert_ne!(successor, "abc123");
+    assert_ne!(successor.0, "abc123");
     let first = world
         .user_turns(&fixture)
         .into_iter()
@@ -299,9 +299,9 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
     let task_at = delivered.find("Soft.Task.{").expect("the Task");
     assert!(order_at < task_at, "oldest first: {delivered}");
     assert!(
-        delivered[task_at..].contains(&open_task.request_id)
+        delivered[task_at..].contains(&open_task.request_id.0)
             && delivered[task_at..].contains(" 240 ")
-            && delivered[order_at..task_at].contains(&open_order.request_id),
+            && delivered[order_at..task_at].contains(&open_order.request_id.0),
         "{delivered}"
     );
     assert!(
@@ -312,24 +312,24 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
     // The deadline is the Task's: the refresh neither restarted nor
     // extended it.
     assert_eq!(
-        store.reminder(&open_task.logical_delivery_id).unwrap(),
+        store.reminder(&open_task.logical_delivery_id.0).unwrap(),
         Some(deadline)
     );
     // Only a flow of the Address answers: the successor, by the same id.
     assert_eq!(
-        store.answered(&sender, &sender, done(&open_task.request_id)),
+        store.answered(&sender, &sender, done(&open_task.request_id.0)),
         Err(Refusal::Unresolved)
     );
     store
-        .answered(&at, &sender, done(&open_task.request_id))
+        .answered(&at, &sender, done(&open_task.request_id.0))
         .expect("the successor's Done is admitted");
     assert_eq!(
-        store.answered(&at, &sender, done(&open_task.request_id)),
+        store.answered(&at, &sender, done(&open_task.request_id.0)),
         Err(Refusal::Unresolved),
         "a second Done finds the Task closed"
     );
     assert_eq!(
-        store.reminder(&open_task.logical_delivery_id).unwrap(),
+        store.reminder(&open_task.logical_delivery_id.0).unwrap(),
         None,
         "the Done closed the Task's reminders"
     );
@@ -347,18 +347,18 @@ fn a_flow_s_result_to_its_own_order_writes_its_metaflow_once() {
     let store = &fixture.nexus.store;
     let at = Address {
         aspect: Aspect::Mind,
-        topic: "flowNexus".into(),
+        topic: flow_ethos::Topic("flowNexus".into()),
         model: Model::Opus,
     };
     store.seed_metaflow(signal_flow::Metaflow {
         address: at.clone(),
-        state: State::Awake("a11ce5".into()),
-        past: vec![],
-        queue: vec![],
+        state: State::Awake(flow_ethos::FlowId("a11ce5".into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let order = store.admitted(&at, &at, Request::Order("Land the fix.".into()));
     assert_eq!(
-        store.answered(&at, &at, result(&order.request_id)),
+        store.answered(&at, &at, result(&order.request_id.0)),
         Err(Refusal::Unresolved),
         "a queued Order is not yet answerable"
     );
@@ -366,11 +366,12 @@ fn a_flow_s_result_to_its_own_order_writes_its_metaflow_once() {
     let attempt = store.handed_over(&at, "a11ce5");
     assert!(store.mark_delivery_uncertain(&attempt.attempt_id).unwrap());
     let answer = store
-        .answered(&at, &at, result(&order.request_id))
+        .answered(&at, &at, result(&order.request_id.0))
         .expect("the Result to its own uncertain Order is admitted");
     let queue = store.metaflow(&at).unwrap().expect("metaflow").queue;
     assert_eq!(
         queue
+            .0
             .iter()
             .map(|entry| entry.logical_delivery_id.clone())
             .collect::<Vec<_>>(),
@@ -386,7 +387,7 @@ fn a_flow_s_result_to_its_own_order_writes_its_metaflow_once() {
         DeliveryState::Read
     );
     assert_eq!(
-        store.answered(&at, &at, result(&order.request_id)),
+        store.answered(&at, &at, result(&order.request_id.0)),
         Err(Refusal::Unresolved)
     );
 }

@@ -28,7 +28,7 @@ use std::{
 fn migration_sender() -> signal_flow::Address {
     signal_flow::Address {
         aspect: signal_flow::Aspect::Mind,
-        topic: "migrationSender".into(),
+        topic: flow_ethos::Topic("migrationSender".into()),
         model: signal_flow::Model::Sol,
     }
 }
@@ -36,7 +36,7 @@ fn migration_sender() -> signal_flow::Address {
 fn migration_recipient() -> signal_flow::Address {
     signal_flow::Address {
         aspect: signal_flow::Aspect::Field,
-        topic: "migrationRecipient".into(),
+        topic: flow_ethos::Topic("migrationRecipient".into()),
         model: signal_flow::Model::Sol,
     }
 }
@@ -44,7 +44,7 @@ fn migration_recipient() -> signal_flow::Address {
 fn migration_message() -> signal_flow::Address {
     signal_flow::Address {
         aspect: signal_flow::Aspect::Field,
-        topic: "message".into(),
+        topic: flow_ethos::Topic("message".into()),
         model: signal_flow::Model::Astra,
     }
 }
@@ -53,12 +53,14 @@ fn own_process() -> signal_flow::Process {
     let stat = std::fs::read_to_string("/proc/self/stat").expect("own process stat reads");
     let (_, fields) = stat.rsplit_once(") ").expect("own process stat fields");
     signal_flow::Process {
-        pid: i64::from(std::process::id()),
-        started: fields
-            .split_whitespace()
-            .nth(19)
-            .and_then(|field| field.parse().ok())
-            .expect("own process start time reads"),
+        pid: flow_ethos::Pid(i64::from(std::process::id())),
+        started: flow_ethos::Started(
+            fields
+                .split_whitespace()
+                .nth(19)
+                .and_then(|field| field.parse().ok())
+                .expect("own process start time reads"),
+        ),
     }
 }
 
@@ -94,7 +96,7 @@ fn current_socket_client_serves_request_operations() {
             let order = socket_query(
                 &socket,
                 signal_flow::Query::Send(signal_flow::SendRequest {
-                    recipient: migration_recipient(),
+                    address: migration_recipient(),
                     sendable_message: signal_flow::SendableMessage::Soft(
                         signal_flow::SendableRequest::Order("socket order".into()),
                     ),
@@ -106,10 +108,10 @@ fn current_socket_client_serves_request_operations() {
             let task = socket_query(
                 &socket,
                 signal_flow::Query::Send(signal_flow::SendRequest {
-                    recipient: migration_recipient(),
+                    address: migration_recipient(),
                     sendable_message: signal_flow::SendableMessage::Soft(
                         signal_flow::SendableRequest::Task(signal_flow::AnswerableTask {
-                            minutes: 5,
+                            minutes: flow_ethos::Minutes(5),
                             string: "socket task".into(),
                         }),
                     ),
@@ -122,7 +124,7 @@ fn current_socket_client_serves_request_operations() {
                 socket_query(
                     &socket,
                     signal_flow::Query::Send(signal_flow::SendRequest {
-                        recipient: migration_recipient(),
+                        address: migration_recipient(),
                         sendable_message: signal_flow::SendableMessage::Soft(
                             signal_flow::SendableRequest::Notice("socket notice".into()),
                         ),
@@ -130,17 +132,19 @@ fn current_socket_client_serves_request_operations() {
                 ),
                 signal_flow::Response::SendAccepted(_)
             ));
-            println!("SOCKET_ORDER={}", order.request_id);
-            println!("SOCKET_TASK={}", task.request_id);
+            println!("SOCKET_ORDER={}", order.request_id.0);
+            println!("SOCKET_TASK={}", task.request_id.0);
         }
         "recipient" => {
             bind_socket(&socket, migration_recipient());
-            let order: flow_ethos::RequestId = std::env::var("FLOW_MIGRATION_ORDER").unwrap();
-            let task: flow_ethos::RequestId = std::env::var("FLOW_MIGRATION_TASK").unwrap();
+            let order: flow_ethos::RequestId =
+                flow_ethos::RequestId(std::env::var("FLOW_MIGRATION_ORDER").unwrap());
+            let task: flow_ethos::RequestId =
+                flow_ethos::RequestId(std::env::var("FLOW_MIGRATION_TASK").unwrap());
             let result = socket_query(
                 &socket,
                 signal_flow::Query::Send(signal_flow::SendRequest {
-                    recipient: migration_sender(),
+                    address: migration_sender(),
                     sendable_message: signal_flow::SendableMessage::Soft(
                         signal_flow::SendableRequest::Result(
                             signal_flow::SendableRequest_Result_Data {
@@ -157,7 +161,7 @@ fn current_socket_client_serves_request_operations() {
             let done = socket_query(
                 &socket,
                 signal_flow::Query::Send(signal_flow::SendRequest {
-                    recipient: migration_sender(),
+                    address: migration_sender(),
                     sendable_message: signal_flow::SendableMessage::Soft(
                         signal_flow::SendableRequest::Done(
                             signal_flow::SendableRequest_Done_Data {
@@ -171,13 +175,13 @@ fn current_socket_client_serves_request_operations() {
             let signal_flow::Response::SendAccepted(done) = done else {
                 panic!("socket Done is admitted: {done:?}")
             };
-            println!("SOCKET_RESULT={}", result.request_id);
-            println!("SOCKET_DONE={}", done.request_id);
+            println!("SOCKET_RESULT={}", result.request_id.0);
+            println!("SOCKET_DONE={}", done.request_id.0);
         }
         "archive" => {
             bind_socket(&socket, migration_sender());
             let archived: flow_ethos::RequestId =
-                std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap();
+                flow_ethos::RequestId(std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap());
             assert_eq!(
                 socket_query(
                     &socket,
@@ -190,7 +194,10 @@ fn current_socket_client_serves_request_operations() {
             bind_socket(&socket, migration_recipient());
             let archived = std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap();
             assert_eq!(
-                socket_query(&socket, signal_flow::Query::ArchiveRequest(archived)),
+                socket_query(
+                    &socket,
+                    signal_flow::Query::ArchiveRequest(flow_ethos::RequestId(archived))
+                ),
                 signal_flow::Response::ArchiveRejected(
                     signal_flow::ArchiveRejection::UnknownRequest
                 )
@@ -199,7 +206,10 @@ fn current_socket_client_serves_request_operations() {
         "archive-unbound" => {
             let archived = std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap();
             assert!(matches!(
-                socket_query(&socket, signal_flow::Query::ArchiveRequest(archived)),
+                socket_query(
+                    &socket,
+                    signal_flow::Query::ArchiveRequest(flow_ethos::RequestId(archived))
+                ),
                 signal_flow::Response::Refused(signal_flow::Refusal::Unidentified(_))
             ));
         }
@@ -207,7 +217,10 @@ fn current_socket_client_serves_request_operations() {
             bind_socket(&socket, migration_message());
             let archived = std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap();
             assert_eq!(
-                socket_query(&socket, signal_flow::Query::ArchiveRequest(archived)),
+                socket_query(
+                    &socket,
+                    signal_flow::Query::ArchiveRequest(flow_ethos::RequestId(archived))
+                ),
                 signal_flow::Response::ArchiveRejected(
                     signal_flow::ArchiveRejection::UnknownRequest
                 )
@@ -218,7 +231,9 @@ fn current_socket_client_serves_request_operations() {
             assert_eq!(
                 socket_query(
                     &socket,
-                    signal_flow::Query::ArchiveRequest("unknown-request-id".into()),
+                    signal_flow::Query::ArchiveRequest(flow_ethos::RequestId(
+                        "unknown-request-id".into()
+                    )),
                 ),
                 signal_flow::Response::ArchiveRejected(
                     signal_flow::ArchiveRejection::UnknownRequest
@@ -229,7 +244,10 @@ fn current_socket_client_serves_request_operations() {
             bind_socket(&socket, migration_sender());
             let archived = std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap();
             assert_eq!(
-                socket_query(&socket, signal_flow::Query::ArchiveRequest(archived)),
+                socket_query(
+                    &socket,
+                    signal_flow::Query::ArchiveRequest(flow_ethos::RequestId(archived))
+                ),
                 signal_flow::Response::ArchiveRejected(
                     signal_flow::ArchiveRejection::UnknownRequest
                 )
@@ -323,7 +341,7 @@ fn request_binding_for(store: &FlowStore, logical_id: &str) -> RequestIdBinding 
         .expect("request bindings read");
     rows.records()
         .iter()
-        .find(|binding| binding.logical_delivery_id == logical_id)
+        .find(|binding| binding.logical_delivery_id.0 == logical_id)
         .cloned()
         .unwrap_or_else(|| panic!("request binding for {logical_id}"))
 }
@@ -349,7 +367,7 @@ fn deliver_oldest_migrated(
     let meta_signal_flow::QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
         panic!("the migrated request retains its logical queue evidence")
     };
-    assert_eq!(entry.logical_delivery_id, expected_logical_id);
+    assert_eq!(entry.logical_delivery_id.0, expected_logical_id);
     assert!(
         store
             .record_delivery_receipt(
@@ -417,7 +435,7 @@ fn deliver_through_migrated(
                 .settle_recorded_delivery(&attempt.attempt_id)
                 .expect("migrated delivered prefix leaves its queue")
         );
-        if delivered_logical_id == expected_logical_id {
+        if delivered_logical_id.0 == expected_logical_id {
             return;
         }
     }
@@ -537,8 +555,8 @@ fn inject_malformed_request_policy(store_path: &Path) {
         &store.engine,
         store.meta_configuration_tables.request_policy,
         vec![StoredMetaRequestPolicyConfiguration {
-            request_id_draws: 0,
-            announcement_tries: 3,
+            request_id_draws: meta_signal_flow::DrawBound(0),
+            announcement_tries: meta_signal_flow::TryBound(3),
         }],
     )
     .expect("test seam writes the malformed policy row");
@@ -620,27 +638,35 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         .configuration_snapshot()
         .expect("configuration reads")
         .expect("predecessor seeded configuration");
-    assert_eq!(configuration.request_id_draws, 64);
-    assert_eq!(configuration.announcement_tries, 3);
+    assert_eq!(
+        configuration.configured_request_id_draws,
+        meta_signal_flow::ConfiguredRequestIdDraws(meta_signal_flow::DrawBound(64))
+    );
+    assert_eq!(
+        configuration.configured_announcement_tries,
+        meta_signal_flow::ConfiguredAnnouncementTries(meta_signal_flow::TryBound(3))
+    );
     let sender = signal_flow::Address {
         aspect: signal_flow::Aspect::Mind,
-        topic: "migrationSender".into(),
+        topic: flow_ethos::Topic("migrationSender".into()),
         model: signal_flow::Model::Sol,
     };
     let recipient = signal_flow::Address {
         aspect: signal_flow::Aspect::Field,
-        topic: "migrationRecipient".into(),
+        topic: flow_ethos::Topic("migrationRecipient".into()),
         model: signal_flow::Model::Sol,
     };
     let singleton_recipient = signal_flow::Address {
         aspect: signal_flow::Aspect::Field,
-        topic: "migrationSingletonRecipient".into(),
+        topic: flow_ethos::Topic("migrationSingletonRecipient".into()),
         model: signal_flow::Model::Sol,
     };
     let singleton = request_binding_for(&store, &ids["uncertain_order"]);
     assert_eq!(
         singleton.closure,
-        RequestClosure::Answered(ids["historical_result"].clone()),
+        RequestClosure::Answered(flow_ethos::LogicalDeliveryId(
+            ids["historical_result"].clone()
+        )),
         "the singleton historical Result closes its uncertain Order"
     );
     let before_duplicate = std::fs::read(&store_path).expect("Memory reads before duplicate");
@@ -675,7 +701,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     );
     assert!(
         store
-            .logical_delivery_snapshot(&ids["heartbeat"])
+            .logical_delivery_snapshot(&flow_ethos::LogicalDeliveryId(ids["heartbeat"].clone()))
             .expect("current heartbeat index reads")
             .is_none(),
         "the terminal predecessor heartbeat is absent from current delivery indexes"
@@ -743,7 +769,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         panic!("current Send accepted")
     };
     let after_acceptance = store
-        .read_logical_delivery_snapshots(&sender, Some(notice.delivery_cursor))
+        .read_logical_delivery_snapshots(&sender, Some(notice.delivery_cursor.0))
         .expect("cursor resume reads");
     assert!(after_acceptance.delivery_cursor >= notice.delivery_cursor);
     drop(store);
@@ -762,8 +788,8 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         &current_socket,
         "recipient",
         &[
-            ("FLOW_MIGRATION_ORDER", open_order.request_id.as_str()),
-            ("FLOW_MIGRATION_TASK", open_task.request_id.as_str()),
+            ("FLOW_MIGRATION_ORDER", open_order.request_id.0.as_str()),
+            ("FLOW_MIGRATION_TASK", open_task.request_id.0.as_str()),
         ],
     );
     current_process.stop();
@@ -779,13 +805,13 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         ("SOCKET_DONE", "socket-done"),
     ] {
         let binding = between_processes
-            .request_binding(&answered[name])
+            .request_binding(&flow_ethos::RequestId(answered[name].clone()))
             .unwrap()
             .expect("socket answer retains its request binding");
         deliver_through_migrated(
             &between_processes,
             &sender,
-            &binding.logical_delivery_id,
+            &binding.logical_delivery_id.0,
             label,
         );
     }
@@ -793,16 +819,16 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         .configuration_snapshot()
         .expect("configuration reads for Message peer negative")
         .expect("configuration remains complete")
-        .nexus;
-    nexus_configuration.message_nexus_binary_option = Some(
+        .configured_nexus;
+    nexus_configuration.0.message_nexus_binary_option = Some(flow_ethos::MessageNexusBinary(
         std::fs::canonicalize(std::env::current_exe().expect("test executable resolves"))
             .expect("test executable canonicalizes")
             .to_string_lossy()
             .into_owned(),
-    );
+    ));
     between_processes
         .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
-            nexus_configuration,
+            nexus_configuration.0,
         ))
         .expect("test Message peer executable configures");
     drop(between_processes);
@@ -821,7 +847,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
             mode,
             &[(
                 "FLOW_MIGRATION_ARCHIVE_REQUEST",
-                open_order.request_id.as_str(),
+                open_order.request_id.0.as_str(),
             )],
         );
     }
@@ -830,7 +856,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         "archive",
         &[(
             "FLOW_MIGRATION_ARCHIVE_REQUEST",
-            open_order.request_id.as_str(),
+            open_order.request_id.0.as_str(),
         )],
     );
     // The heartbeat the current process admits at its first beat (one
@@ -848,7 +874,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     );
     for answered_request in [&answered["SOCKET_RESULT"], &answered["SOCKET_DONE"]] {
         let binding = reopened
-            .request_binding(answered_request)
+            .request_binding(&flow_ethos::RequestId(answered_request.to_owned()))
             .unwrap()
             .expect("socket answer retains its request binding");
         assert!(
@@ -888,7 +914,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         .retained_logical_requests()
         .expect("fresh heartbeat request reopens")
         .into_iter()
-        .find(|retained| retained.entry.logical_delivery_id == fresh_heartbeat)
+        .find(|retained| retained.entry.logical_delivery_id.0 == fresh_heartbeat)
         .expect("fresh heartbeat request is retained");
     let flow_ethos::Message::Soft(flow_ethos::Request::Notice(reminder)) =
         fresh_request.entry.message
@@ -924,7 +950,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         "archive-flow-owned",
         &[(
             "FLOW_MIGRATION_ARCHIVE_REQUEST",
-            fresh_heartbeat_request_id.as_str(),
+            fresh_heartbeat_request_id.0.as_str(),
         )],
     );
     flow_owned_process.stop();
@@ -932,7 +958,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         FlowStore::open_configured(&store_path).expect("Flow-owned archive refusal reopens");
     assert!(
         after_flow_owned
-            .logical_delivery_snapshot(&fresh_heartbeat)
+            .logical_delivery_snapshot(&flow_ethos::LogicalDeliveryId(fresh_heartbeat.to_owned()))
             .expect("Flow-owned heartbeat snapshot reads")
             .is_some()
     );
@@ -946,8 +972,8 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
 
     inject_malformed_request_policy(&store_path);
     let malformed = vec![StoredMetaRequestPolicyConfiguration {
-        request_id_draws: 0,
-        announcement_tries: 3,
+        request_id_draws: meta_signal_flow::DrawBound(0),
+        announcement_tries: meta_signal_flow::TryBound(3),
     }];
     assert_eq!(request_policy_rows(&store_path), malformed);
     let refused_runtime = tempfile::tempdir().expect("refused runtime");

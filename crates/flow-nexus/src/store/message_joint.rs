@@ -75,9 +75,10 @@ fn process() -> Process {
         .split_whitespace()
         .nth(19)
         .and_then(|field| field.parse().ok())
+        .map(flow_ethos::Started)
         .expect("start time");
     Process {
-        pid: i64::from(std::process::id()),
+        pid: flow_ethos::Pid(i64::from(std::process::id())),
         started,
     }
 }
@@ -86,16 +87,18 @@ fn process() -> Process {
 /// configuration looks for Flow, and its memory in `state`.
 fn place(runtime: &Path, state: &Path) -> crate::place::Place {
     crate::place::Place {
-        place_name: "main".into(),
-        runtime: runtime.join("flow").to_string_lossy().into_owned(),
-        state: state.to_string_lossy().into_owned(),
+        place_name: crate::generated::library::PlaceName("main".into()),
+        runtime: crate::generated::library::Runtime(
+            runtime.join("flow").to_string_lossy().into_owned(),
+        ),
+        state: crate::generated::library::State(state.to_string_lossy().into_owned()),
     }
 }
 
 fn place_argument(place: &crate::place::Place) -> String {
     format!(
         "{{ «{}» «{}» «{}» }}",
-        place.place_name, place.runtime, place.state
+        place.place_name.0, place.runtime.0, place.state.0
     )
 }
 
@@ -178,14 +181,15 @@ impl SocketArrival {
 
 fn endpoint(name: &str, home: &Path) -> meta_signal_flow::CodexEndpoint {
     meta_signal_flow::CodexEndpoint {
-        client_path: format!("/fixture/{name}-client"),
-        home: home.join(name).to_string_lossy().into_owned(),
-        control_socket_path: home
-            .join(name)
-            .join("control.sock")
-            .to_string_lossy()
-            .into_owned(),
-        model_name_vector: vec![format!("{name}-model")],
+        client_path: flow_ethos::ClientPath(format!("/fixture/{name}-client")),
+        home: flow_ethos::Home(home.join(name).to_string_lossy().into_owned()),
+        control_socket_path: flow_ethos::ControlSocketPath(
+            home.join(name)
+                .join("control.sock")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        model_name_vector: vec![flow_ethos::ModelName(format!("{name}-model"))],
     }
 }
 
@@ -199,28 +203,35 @@ fn configure_flow(message_binary: &Path, home: &Path, runtime: &Path, place: &cr
     std::fs::create_dir_all(place.state_directory()).expect("Flow state");
     std::fs::create_dir_all(place.runtime_directory()).expect("Flow runtime");
     let change = meta_signal_flow::ConfigurationChange::Nexus(meta_signal_flow::ConfigureNexus {
-        source_root: home.join("source").to_string_lossy().into_owned(),
-        stable_codex: endpoint("stable", home),
-        next_codex: endpoint("next", home),
-        harness_profiles: vec![meta_signal_flow::HarnessProfile {
+        source_root: flow_ethos::SourceRoot(home.join("source").to_string_lossy().into_owned()),
+        first_codex_endpoint: endpoint("stable", home),
+        second_codex_endpoint: endpoint("next", home),
+        harness_profiles: flow_ethos::HarnessProfiles(vec![meta_signal_flow::HarnessProfile {
             harness_kind: signal_flow::HarnessKind::Codex,
-            command_sigil_vector: vec!["/".into()],
-            interrupt_keys: vec!["esc".into()],
-            submit_keys: Vec::new(),
-        }],
-        meta_aspects: vec![flow_ethos::Aspect::Psyche, flow_ethos::Aspect::Mind],
-        message_nexus_path_option: Some(
+            command_sigil_vector: vec![flow_ethos::CommandSigil("/".into())],
+            interrupt_keys: flow_ethos::InterruptKeys(vec![flow_ethos::KeyName("esc".into())]),
+            submit_keys: flow_ethos::SubmitKeys(Vec::new()),
+        }]),
+        meta_aspects: flow_ethos::MetaAspects(vec![
+            flow_ethos::Aspect::Psyche,
+            flow_ethos::Aspect::Mind,
+        ]),
+        message_nexus_path_option: Some(flow_ethos::MessageNexusPath(
             runtime
                 .join("message/message.sock")
                 .to_string_lossy()
                 .into_owned(),
+        )),
+        message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(
+            message_binary.to_string_lossy().into_owned(),
+        )),
+        curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+            runtime
+                .join("curriculum.sock")
+                .to_string_lossy()
+                .into_owned(),
         ),
-        message_nexus_binary_option: Some(message_binary.to_string_lossy().into_owned()),
-        curriculum_nexus_path: runtime
-            .join("curriculum.sock")
-            .to_string_lossy()
-            .into_owned(),
-        lease: 60,
+        lease: flow_ethos::Lease(60),
         presentation_prompt_option: None,
     });
     assert_eq!(
@@ -253,7 +264,7 @@ fn send_through_message(
     FramedStream::write_frame(
         &mut peer,
         &signal_message::Query::Send(SendRequest {
-            recipient,
+            address: recipient,
             sendable_message: SendableMessage::Soft(SendableRequest::Notice(
                 "joint durable delivery".into(),
             )),
@@ -323,7 +334,7 @@ fn real_flow_and_message_share_the_durable_delivery_ledger() {
     let flow = spawn_flow(&flow_binary, home.path(), runtime.path(), &place);
     let sender = Address {
         aspect: Aspect::Mind,
-        topic: "jointSender".into(),
+        topic: flow_ethos::Topic("jointSender".into()),
         model: Model::Sol,
     };
     bind_sender(flow_socket, &sender);
@@ -332,7 +343,7 @@ fn real_flow_and_message_share_the_durable_delivery_ledger() {
     arrival.awaited();
     let message_address = Address {
         aspect: Aspect::Field,
-        topic: "message".into(),
+        topic: flow_ethos::Topic("message".into()),
         model: Model::Astra,
     };
     let acceptance = send_through_message(&message_socket, message_address);

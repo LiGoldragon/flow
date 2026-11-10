@@ -29,8 +29,8 @@ impl PreparesDeclaredMetaflow for FlowStore {
             metaflow: Metaflow {
                 address: address.clone(),
                 state: MetaflowState::Asleep,
-                past: vec![],
-                queue: vec![],
+                past: flow_ethos::Past(vec![]),
+                queue: flow_ethos::Queue(vec![]),
             },
         };
         self.engine.commit_atomic(
@@ -94,7 +94,7 @@ impl MutatesMetaflows for FlowStore {
     fn message_peer(&self, peer: &Process) -> Result<bool, StoreError> {
         let address = Address {
             aspect: Aspect::Field,
-            topic: "message".into(),
+            topic: signal_flow::Topic("message".into()),
             model: Model::Astra,
         };
         Ok(
@@ -116,7 +116,7 @@ impl MutatesMetaflows for FlowStore {
         if address
             == (Address {
                 aspect: Aspect::Field,
-                topic: "message".into(),
+                topic: signal_flow::Topic("message".into()),
                 model: Model::Astra,
             })
         {
@@ -124,10 +124,11 @@ impl MutatesMetaflows for FlowStore {
                 return Ok(Response::Refused(Refusal::NotConfigured));
             };
             let expected = configuration
-                .nexus
+                .configured_nexus
+                .0
                 .message_nexus_binary_option
                 .as_ref()
-                .and_then(|binary| fs::canonicalize(binary).ok());
+                .and_then(|binary| fs::canonicalize(&binary.0).ok());
             if expected.is_none() || FlowStore::process_executable(peer) != expected {
                 return Ok(Response::Refused(Refusal::NotMessage));
             }
@@ -159,19 +160,20 @@ impl MutatesMetaflows for FlowStore {
         let Some(next) = state.next_flow_number.checked_add(1) else {
             return Err(StoreError::StateInvariant);
         };
-        let flow_id = launched.unwrap_or_else(|| format!("flow-{:016x}", state.next_flow_number));
+        let flow_id =
+            launched.unwrap_or_else(|| FlowId(format!("flow-{:016x}", state.next_flow_number)));
         let new_metaflow = existing.is_none();
         let new_binding = self.bound_process(&address)?.is_none();
         let mut metaflow = existing.map(|row| row.metaflow).unwrap_or(Metaflow {
             address: address.clone(),
             state: MetaflowState::Asleep,
-            past: vec![],
-            queue: vec![],
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![]),
         });
         if let MetaflowState::Awake(previous) = metaflow.state
             && previous != flow_id
         {
-            metaflow.past.push(previous);
+            metaflow.past.0.push(previous);
         }
         metaflow.state = MetaflowState::Awake(flow_id.clone());
         let commit = self.engine.begin_atomic_commit().mutate(
@@ -199,23 +201,23 @@ impl MutatesMetaflows for FlowStore {
     }
 
     fn lock_metaflow(&self, request: Lock_Data, now: i64) -> Result<Response, StoreError> {
-        let Some(sender) = self.stored_metaflow(&request.sender)? else {
+        let Some(sender) = self.stored_metaflow(&request.first_address)? else {
             return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
-                request.sender,
+                request.first_address,
             ))));
         };
         match sender.metaflow.state {
             MetaflowState::Asleep => return Ok(Response::Refused(Refusal::Asleep)),
             MetaflowState::Awake(_) => {}
         }
-        let address = request.recipient;
+        let address = request.second_address;
         if !self.prepare_declared_metaflow(&address)? {
             return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
                 address,
             ))));
         }
         if let Some(held) = self.stored_metaflow_lock(&address)?
-            && held.lock.until > now
+            && held.lock.until > flow_ethos::generated::library::Until(now)
         {
             return Ok(Response::Refused(Refusal::Held(held.lock)));
         }
@@ -223,7 +225,7 @@ impl MutatesMetaflows for FlowStore {
             return Ok(Response::Refused(Refusal::NotConfigured));
         };
         let Some(until) = now
-            .checked_add(configuration.nexus.lease)
+            .checked_add(configuration.configured_nexus.0.lease.0)
             .filter(|until| *until > now)
         else {
             return Ok(Response::Refused(Refusal::Store(
@@ -231,13 +233,13 @@ impl MutatesMetaflows for FlowStore {
             )));
         };
         let lock = Lock {
-            sender: request.sender,
-            address,
-            until,
+            first_address: request.first_address,
+            second_address: address,
+            until: flow_ethos::generated::library::Until(until),
         };
         let row = StoredMetaflowLock { lock: lock.clone() };
         let commit = self.engine.begin_atomic_commit();
-        let commit = if self.stored_metaflow_lock(&lock.address)?.is_some() {
+        let commit = if self.stored_metaflow_lock(&lock.second_address)?.is_some() {
             commit.mutate(self.metaflow_locks, row)
         } else {
             commit.assert(self.metaflow_locks, row)
@@ -257,14 +259,14 @@ impl MutatesMetaflows for FlowStore {
         let digest_text = request.datomize(Vec::new()).protosize().compact();
         let digest = format!("{:x}", sha2::Sha256::digest(digest_text.as_bytes()));
         let message = match self.resolve_sendable_message(
-            &request.lock.sender,
-            &request.lock.address,
+            &request.lock.first_address,
+            &request.lock.second_address,
             request.sendable_message.clone(),
         )? {
             Ok(message) => message,
             Err(refusal) => return Ok(signal_flow::PrivateSendResponse::Refused(refusal)),
         };
-        let Some(held) = self.stored_metaflow_lock(&request.lock.address)? else {
+        let Some(held) = self.stored_metaflow_lock(&request.lock.second_address)? else {
             return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
                 Unknown_Data::Lock(request.lock),
             )));
@@ -274,15 +276,15 @@ impl MutatesMetaflows for FlowStore {
                 Unknown_Data::Lock(request.lock),
             )));
         }
-        if held.lock.until <= now {
+        if held.lock.until <= flow_ethos::generated::library::Until(now) {
             return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Lapsed));
         }
-        let Some(_) = self.stored_metaflow(&request.lock.address)? else {
+        let Some(_) = self.stored_metaflow(&request.lock.second_address)? else {
             return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
-                Unknown_Data::Address(request.lock.address),
+                Unknown_Data::Address(request.lock.second_address),
             )));
         };
-        if let Some(refusal) = message.oversized_refusal(&request.lock.sender) {
+        if let Some(refusal) = message.oversized_refusal(&request.lock.first_address) {
             let released = self.release_metaflow_lock(request.lock.clone(), now)?;
             if released != Response::Released {
                 return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Store(
@@ -297,8 +299,8 @@ impl MutatesMetaflows for FlowStore {
             flow_ethos::Delivery::Wake
         };
         self.accept_deliver_call(
-            &request.lock.address,
-            request.lock.sender.clone(),
+            &request.lock.second_address,
+            request.lock.first_address.clone(),
             delivery,
             message,
             VerifiedDeliveryLock {
@@ -307,7 +309,7 @@ impl MutatesMetaflows for FlowStore {
             },
             super::logical_delivery::DeliverCallSpec {
                 key: request.deliver_key,
-                sender: request.lock.sender,
+                sender: request.lock.first_address,
                 digest,
             },
         )
@@ -319,11 +321,15 @@ impl SleepsMetaflows for FlowStore {
         let Some(mut stored) = self.stored_metaflow(address)? else {
             return Ok(false);
         };
-        if stored.metaflow.state != MetaflowState::Awake(flow_id.to_owned()) {
+        if stored.metaflow.state != MetaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned())) {
             return Ok(false);
         }
         stored.metaflow.state = MetaflowState::Asleep;
-        stored.metaflow.past.push(flow_id.to_owned());
+        stored
+            .metaflow
+            .past
+            .0
+            .push(flow_ethos::FlowId(flow_id.to_owned()));
         // The ended flow's locks as a sender go in the same write.
         use super::address_hold::HoldsLaunchAddress;
         let commit = self
@@ -364,10 +370,10 @@ impl SleepsMetaflows for FlowStore {
         let Some(mut stored) = self.stored_metaflow(address)? else {
             return Ok(false);
         };
-        if stored.metaflow.queue.first() != Some(typed) {
+        if stored.metaflow.queue.0.first() != Some(typed) {
             return Ok(false);
         }
-        stored.metaflow.queue.remove(0);
+        stored.metaflow.queue.0.remove(0);
         let commit = self
             .engine
             .begin_atomic_commit()
@@ -377,7 +383,7 @@ impl SleepsMetaflows for FlowStore {
     }
 
     fn metaflow_awake_as(&self, flow_id: &str) -> Result<Option<Metaflow>, StoreError> {
-        let awake = MetaflowState::Awake(flow_id.to_owned());
+        let awake = MetaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned()));
         Ok(self
             .engine
             .match_records(QueryPlan::all(self.metaflows))?
@@ -450,19 +456,19 @@ impl TakesLaunchAddress for FlowStore {
             None => Metaflow {
                 address: address.clone(),
                 state: MetaflowState::Asleep,
-                past: vec![],
-                queue: vec![],
+                past: flow_ethos::Past(vec![]),
+                queue: flow_ethos::Queue(vec![]),
             },
         };
         match &metaflow.state {
-            MetaflowState::Awake(current) if current == flow_id => {}
+            MetaflowState::Awake(current) if current.0 == flow_id => {}
             MetaflowState::Awake(current) => {
-                if Some(current.as_str()) != predecessor
-                    && (live_binding || self.flow_is_live(current)?)
+                if Some(current.0.as_str()) != predecessor
+                    && (live_binding || self.flow_is_live(&current.0)?)
                 {
                     return Ok(AddressTaking::Refused(StartRejection::AddressAwake));
                 }
-                metaflow.past.push(current.clone());
+                metaflow.past.0.push(current.clone());
             }
             MetaflowState::Asleep if live_binding => {
                 return Ok(AddressTaking::Refused(StartRejection::AddressAwake));
@@ -474,8 +480,8 @@ impl TakesLaunchAddress for FlowStore {
                 StartRejection::LaunchPersistenceRefused,
             ));
         }
-        metaflow.past.retain(|past| past != flow_id);
-        metaflow.state = MetaflowState::Awake(flow_id.to_owned());
+        metaflow.past.0.retain(|past| past.0 != flow_id);
+        metaflow.state = MetaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned()));
         Ok(AddressTaking::Takes(TakenAddress {
             metaflow: StoredMetaflow { metaflow },
             new: existing.is_none(),
@@ -487,11 +493,14 @@ impl TakesLaunchAddress for FlowStore {
         &self,
         profile: &LaunchProfile,
     ) -> Result<Option<StartRejection>, StoreError> {
-        let predecessor = profile.flow_id_option.as_deref();
+        let predecessor = profile
+            .flow_id_option
+            .as_ref()
+            .map(|value| value.0.as_str());
         let refused = match self.stored_metaflow(&profile.address)? {
             Some(stored) => match &stored.metaflow.state {
-                MetaflowState::Awake(current) => (Some(current.as_str()) != predecessor
-                    && (self.flow_is_live(current)?
+                MetaflowState::Awake(current) => (Some(current.0.as_str()) != predecessor
+                    && (self.flow_is_live(&current.0)?
                         || self
                             .bound_process(&profile.address)?
                             .as_ref()
@@ -583,8 +592,8 @@ impl ForgetsEndedBindings for FlowStore {
         let Some(stored) = self.stored_metaflow(address)? else {
             return Ok(false);
         };
-        if stored.metaflow.state != MetaflowState::Awake(flow_id.to_owned())
-            || !stored.metaflow.queue.is_empty()
+        if stored.metaflow.state != MetaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned()))
+            || !stored.metaflow.queue.0.is_empty()
         {
             return Ok(false);
         }
@@ -595,10 +604,11 @@ impl ForgetsEndedBindings for FlowStore {
         for id in stored
             .metaflow
             .past
+            .0
             .iter()
-            .chain(std::iter::once(&flow_id.to_owned()))
+            .chain(std::iter::once(&signal_flow::FlowId(flow_id.to_owned())))
         {
-            if self.flow(id)?.is_some() {
+            if self.flow(&id.0)?.is_some() {
                 return Ok(false);
             }
         }
@@ -646,7 +656,7 @@ impl SeedsMetaflow for FlowStore {
             .keys()
             .cloned()
             .collect::<std::collections::HashSet<_>>();
-        for entry in &mut metaflow.queue {
+        for entry in &mut metaflow.queue.0 {
             if existing
                 .get(&entry.request_id)
                 .is_some_and(|logical_id| logical_id == &entry.logical_delivery_id)
@@ -655,7 +665,7 @@ impl SeedsMetaflow for FlowStore {
                 continue;
             }
             use sha2::Digest;
-            let digest = sha2::Sha256::digest(entry.logical_delivery_id.as_bytes());
+            let digest = sha2::Sha256::digest(entry.logical_delivery_id.0.as_bytes());
             let mut candidate = String::with_capacity(4);
             for byte in digest {
                 candidate
@@ -664,7 +674,7 @@ impl SeedsMetaflow for FlowStore {
                     break;
                 }
             }
-            while !seen.insert(candidate.clone()) {
+            while !seen.insert(flow_ethos::RequestId(candidate.clone())) {
                 let last = candidate.pop().expect("four-character fixture id");
                 let at = b"0123456789abcdefghijklmnopqrstuvwxyz"
                     .iter()
@@ -672,7 +682,7 @@ impl SeedsMetaflow for FlowStore {
                     .expect("base36 fixture id");
                 candidate.push(b"0123456789abcdefghijklmnopqrstuvwxyz"[(at + 1) % 36] as char);
             }
-            entry.request_id = candidate;
+            entry.request_id = flow_ethos::RequestId(candidate);
         }
         let exists = self
             .stored_metaflow(&metaflow.address)
@@ -696,15 +706,21 @@ impl SeedsMetaflow for FlowStore {
 /// the launch itself bound is never its own predecessor, so a launch read
 /// again after its flow took the Address resolves as it first did.
 pub(crate) trait ResolvesRemembering {
-    fn remembered_flows(&self, profile: &LaunchProfile) -> Result<Vec<String>, StoreError>;
+    fn remembered_flows(
+        &self,
+        profile: &LaunchProfile,
+    ) -> Result<Vec<signal_flow::FlowId>, StoreError>;
 }
 
 impl ResolvesRemembering for FlowStore {
-    fn remembered_flows(&self, profile: &LaunchProfile) -> Result<Vec<String>, StoreError> {
+    fn remembered_flows(
+        &self,
+        profile: &LaunchProfile,
+    ) -> Result<Vec<signal_flow::FlowId>, StoreError> {
         let depth = match &profile.remembering {
             signal_flow::Remembering::Custom(flows) => return Ok(flows.clone()),
             signal_flow::Remembering::Predecessors(depth) => {
-                usize::try_from(*depth).unwrap_or_default()
+                usize::try_from(depth.0).unwrap_or_default()
             }
         };
         if depth == 0 {
@@ -714,15 +730,15 @@ impl ResolvesRemembering for FlowStore {
             return Ok(Vec::new());
         };
         let own = self
-            .launch_attempt(&profile.launch_request_id)?
+            .launch_attempt(&profile.launch_request_id.0)?
             .and_then(|attempt| attempt.native_launch_binding_option)
             .map(|binding| binding.flow_id);
-        let mut lineage: Vec<String> = Vec::new();
+        let mut lineage: Vec<signal_flow::FlowId> = Vec::new();
         let awake = match &stored.metaflow.state {
             MetaflowState::Awake(flow_id) => Some(flow_id.clone()),
             MetaflowState::Asleep => None,
         };
-        for flow_id in stored.metaflow.past.iter().cloned().chain(awake) {
+        for flow_id in stored.metaflow.past.0.iter().cloned().chain(awake) {
             if Some(&flow_id) == own.as_ref() {
                 continue;
             }
@@ -740,8 +756,8 @@ mod tests {
 
     fn deliver_key(counter: i64) -> signal_flow::DeliverKey {
         signal_flow::DeliverKey {
-            namespace: "testMessageMemory".into(),
-            counter,
+            namespace: signal_flow::Namespace("testMessageMemory".into()),
+            counter: signal_flow::Counter(counter),
         }
     }
 
@@ -764,15 +780,19 @@ mod tests {
                 ConfigurationOnlyStore::open(&path).expect("new configuration store");
             configuration
                 .configure_change(ConfigurationChange::Nexus(ConfigureNexus {
-                    source_root: settings.source_root,
-                    stable_codex: settings.stable_codex,
-                    next_codex: settings.next_codex,
-                    harness_profiles: settings.harness_profile_vector,
-                    meta_aspects: settings.meta_aspects,
-                    message_nexus_path_option: Some(settings.message_nexus_path.clone()),
-                    message_nexus_binary_option: Some(binary),
-                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                    lease: 30,
+                    source_root: flow_ethos::SourceRoot(settings.source_root),
+                    first_codex_endpoint: settings.stable_codex,
+                    second_codex_endpoint: settings.next_codex,
+                    harness_profiles: flow_ethos::HarnessProfiles(settings.harness_profile_vector),
+                    meta_aspects: flow_ethos::MetaAspects(settings.meta_aspects),
+                    message_nexus_path_option: Some(flow_ethos::MessageNexusPath(
+                        settings.message_nexus_path.clone(),
+                    )),
+                    message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(binary)),
+                    curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+                        "/fixture/curriculum.sock".into(),
+                    ),
+                    lease: flow_ethos::Lease(30),
                     presentation_prompt_option: None,
                 }))
                 .expect("Nexus configuration");
@@ -786,7 +806,7 @@ mod tests {
                     .expect("current process"),
                 message: Address {
                     aspect: Aspect::Field,
-                    topic: "message".into(),
+                    topic: flow_ethos::Topic("message".into()),
                     model: Model::Astra,
                 },
             }
@@ -808,7 +828,7 @@ mod tests {
             Response::Refused(Refusal::NotMessage)
         );
         let mut forged = binding;
-        forged.process.started += 1;
+        forged.process.started.0 += 1;
         assert!(matches!(
             fixture
                 .store
@@ -851,28 +871,28 @@ mod tests {
         fixture.store.seed_metaflow(Metaflow {
             address: target.clone(),
             state: MetaflowState::Asleep,
-            past: vec![],
-            queue: vec![],
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![]),
         });
         let request = Lock_Data {
-            sender: fixture.message.clone(),
-            recipient: target.clone(),
+            first_address: fixture.message.clone(),
+            second_address: target.clone(),
         };
         let Response::Locked(lock) = fixture.store.lock_metaflow(request.clone(), 100).unwrap()
         else {
             panic!("lease expected")
         };
-        assert_eq!(lock.until, 130);
+        assert_eq!(lock.until, flow_ethos::Until(130));
         assert_eq!(
             fixture.store.lock_metaflow(request, 100).unwrap(),
             Response::Refused(Refusal::Held(lock.clone()))
         );
         let body = Request::Psyche(flow_ethos::Said {
-            context: "fixture context".into(),
-            verbatim: "Exact words.\nSecond line.".into(),
+            context: flow_ethos::Context("fixture context".into()),
+            verbatim: flow_ethos::Verbatim("Exact words.\nSecond line.".into()),
         });
         let mut forged = lock.clone();
-        forged.until += 1;
+        forged.until.0 += 1;
         assert!(matches!(
             fixture
                 .store
@@ -899,6 +919,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .queue
+                .0
                 .is_empty()
         );
         assert!(matches!(
@@ -922,17 +943,17 @@ mod tests {
         ));
         // Queued with the Sender its Lock named.
         assert_eq!(
-            fixture.store.metaflow(&target).unwrap().unwrap().queue[0].sent_by,
-            signal_flow::SentBy::Sender(lock.sender.clone())
+            fixture.store.metaflow(&target).unwrap().unwrap().queue.0[0].sent_by,
+            signal_flow::SentBy::Sender(lock.first_address.clone())
         );
         assert_eq!(
-            fixture.store.metaflow(&target).unwrap().unwrap().queue[0].message,
+            fixture.store.metaflow(&target).unwrap().unwrap().queue.0[0].message,
             flow_ethos::Message::Soft(body)
         );
         assert!(
             fixture
                 .store
-                .stored_metaflow_lock(&lock.address)
+                .stored_metaflow_lock(&lock.second_address)
                 .unwrap()
                 .is_none()
         );
@@ -963,8 +984,8 @@ mod tests {
                 .into_owned(),
         );
         let request = Lock_Data {
-            sender: fixture.message.clone(),
-            recipient: fixture.message.clone(),
+            first_address: fixture.message.clone(),
+            second_address: fixture.message.clone(),
         };
         assert!(matches!(
             fixture.store.lock_metaflow(request.clone(), 10).unwrap(),
@@ -1000,6 +1021,11 @@ mod tests {
                 .unwrap(),
             signal_flow::PrivateSendResponse::Refused(Refusal::Lapsed)
         );
-        assert!(fixture.store.list_metaflows().unwrap()[0].queue.is_empty());
+        assert!(
+            fixture.store.list_metaflows().unwrap()[0]
+                .queue
+                .0
+                .is_empty()
+        );
     }
 }

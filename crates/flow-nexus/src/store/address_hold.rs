@@ -124,7 +124,10 @@ impl HoldsLaunchAddress for FlowStore {
         let taken = match self.address_taking(
             &profile.address,
             flow_id,
-            profile.flow_id_option.as_deref(),
+            profile
+                .flow_id_option
+                .as_ref()
+                .map(|value| value.0.as_str()),
             0,
         )? {
             AddressTaking::Takes(taken) => taken,
@@ -164,7 +167,7 @@ impl HoldsLaunchAddress for FlowStore {
             return Ok(commit);
         };
         // A metaflow another binding or an End changed since is left as it is.
-        if current.metaflow.state != MetaflowState::Awake(flow_id.to_owned()) {
+        if current.metaflow.state != MetaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned())) {
             return Ok(commit);
         }
         let queue = current.metaflow.queue;
@@ -175,7 +178,7 @@ impl HoldsLaunchAddress for FlowStore {
                     metaflow: Metaflow { queue, ..found },
                 },
             ),
-            None if queue.is_empty() => commit.retract(
+            None if queue.0.is_empty() => commit.retract(
                 self.metaflows,
                 RecordKey::new(FlowStore::address_record_key(&hold.address)),
             ),
@@ -185,7 +188,7 @@ impl HoldsLaunchAddress for FlowStore {
                     metaflow: Metaflow {
                         address: hold.address,
                         state: MetaflowState::Asleep,
-                        past: vec![],
+                        past: flow_ethos::Past(vec![]),
                         queue,
                     },
                 },
@@ -206,8 +209,8 @@ impl HoldsLaunchAddress for FlowStore {
         };
         let address = metaflow.address.clone();
         metaflow.state = MetaflowState::Asleep;
-        metaflow.past.retain(|past| past != flow_id);
-        metaflow.past.push(flow_id.to_owned());
+        metaflow.past.0.retain(|past| past.0 != flow_id);
+        metaflow.past.0.push(flow_ethos::FlowId(flow_id.to_owned()));
         let commit = commit.mutate(self.metaflows, StoredMetaflow { metaflow });
         self.sender_locks_released(&address, commit)
     }
@@ -222,8 +225,8 @@ impl HoldsLaunchAddress for FlowStore {
             .match_records(QueryPlan::all(self.metaflow_locks))?
             .records()
             .iter()
-            .filter(|row| &row.lock.sender == sender)
-            .map(|row| row.lock.address.clone())
+            .filter(|row| &row.lock.first_address == sender)
+            .map(|row| row.lock.second_address.clone())
             .collect::<Vec<_>>();
         Ok(held.into_iter().fold(commit, |commit, recipient| {
             commit.retract(
@@ -283,9 +286,9 @@ impl LeavesStaleHold for FlowStore {
                 StoredMetaflow {
                     metaflow: Metaflow {
                         address: address.clone(),
-                        state: MetaflowState::Awake(flow_id.to_owned()),
-                        past: vec![],
-                        queue: vec![],
+                        state: MetaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned())),
+                        past: flow_ethos::Past(vec![]),
+                        queue: flow_ethos::Queue(vec![]),
                     },
                 },
             )

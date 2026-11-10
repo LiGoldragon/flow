@@ -106,7 +106,7 @@ impl ShowsWaitingAttempt for OrderedLaunch {
         LaunchAttempt {
             launch_request_id: self.launch_profile.launch_request_id.clone(),
             launch_profile: self.launch_profile.clone(),
-            prompt_sha256: self.prompt_sha256.clone(),
+            prompt_sha256: signal_flow::PromptSha256(self.prompt_sha256.clone()),
             origin: self.origin.clone(),
             launch_attempt_phase: LaunchAttemptPhase::Reserved,
             native_launch_intent_option: None,
@@ -171,9 +171,9 @@ impl OrdersReplacements for FlowStore {
         launch_request_id: &str,
     ) -> Result<Option<OrderedReplacement>, StoreError> {
         Ok(self.ordered_replacements()?.into_iter().find(|order| {
-            order
-                .ordered_launch()
-                .is_some_and(|launch| launch.launch_profile.launch_request_id == launch_request_id)
+            order.ordered_launch().is_some_and(|launch| {
+                launch.launch_profile.launch_request_id.0 == launch_request_id
+            })
         }))
     }
 

@@ -31,9 +31,18 @@ fn request(address: Address, system: &[&str], user: &[&str]) -> ContextRequest {
     ContextRequest {
         address,
         harness_kind: HarnessKind::Claude,
-        system_modules: system.iter().map(|module| (*module).into()).collect(),
-        user_modules: user.iter().map(|module| (*module).into()).collect(),
-        remembered_flows: vec![],
+        system_modules: signal_flow::SystemModules(
+            system
+                .iter()
+                .map(|module| signal_flow::ModuleIdentity((*module).into()))
+                .collect(),
+        ),
+        user_modules: signal_flow::UserModules(
+            user.iter()
+                .map(|module| signal_flow::ModuleIdentity((*module).into()))
+                .collect(),
+        ),
+        remembered_flows: crate::generated::starter::RememberedFlows(vec![]),
     }
 }
 
@@ -41,7 +50,7 @@ fn missing_module_request() -> ContextRequest {
     request(
         Address {
             aspect: Aspect::Psyche,
-            topic: "core".into(),
+            topic: flow_ethos::Topic("core".into()),
             model: Model::Fable,
         },
         &["spirit:core"],
@@ -53,7 +62,7 @@ fn startup_request() -> ContextRequest {
     request(
         Address {
             aspect: Aspect::Psyche,
-            topic: "book".into(),
+            topic: flow_ethos::Topic("book".into()),
             model: Model::Haiku,
         },
         &["spirit:core", "intent:energy"],
@@ -132,12 +141,12 @@ fn a_real_478c_startup_composed_frame_reads_and_verifies() {
     else {
         panic!("a StartupComposed frame")
     };
-    assert!(composition.system_text.starts_with(CONTEXT_OPENING));
+    assert!(composition.system_text.0.starts_with(CONTEXT_OPENING));
     assert_eq!(
         composition
             .context_provenance_vector
             .iter()
-            .map(|provenance| provenance.module_identity.as_str())
+            .map(|provenance| provenance.module_identity.0.as_str())
             .collect::<Vec<_>>(),
         ["spirit:core", "intent:energy"]
     );

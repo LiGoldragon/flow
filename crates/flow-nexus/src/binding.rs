@@ -28,14 +28,14 @@ pub trait ChecksProcessIdentity {
 
 impl ChecksProcessIdentity for ProcessIdentity {
     fn is_live_process(&self) -> bool {
-        let Ok(process_id) = u32::try_from(self.process_id) else {
+        let Ok(process_id) = u32::try_from(self.process_id.0) else {
             return false;
         };
         let process_root = PathBuf::from(format!("/proc/{process_id}"));
         let Ok(metadata) = fs::metadata(&process_root) else {
             return false;
         };
-        if i64::from(metadata.uid()) != self.process_user_id {
+        if i64::from(metadata.uid()) != self.process_user_id.0 {
             return false;
         }
         let Ok(stat) = fs::read_to_string(process_root.join("stat")) else {
@@ -44,11 +44,11 @@ impl ChecksProcessIdentity for ProcessIdentity {
         let Some((_, fields)) = stat.rsplit_once(") ") else {
             return false;
         };
-        fields.split_whitespace().nth(19) == Some(self.process_start_token.as_str())
+        fields.split_whitespace().nth(19) == Some(self.process_start_token.0.as_str())
     }
 
     fn works_in(&self, expected: &str) -> bool {
-        let Ok(process_id) = u32::try_from(self.process_id) else {
+        let Ok(process_id) = u32::try_from(self.process_id.0) else {
             return false;
         };
         let expected = Path::new(expected);
@@ -71,9 +71,11 @@ impl ReadsProcessIdentity for ProcessIdentity {
         let stat = fs::read_to_string(process_root.join("stat")).ok()?;
         let (_, fields) = stat.rsplit_once(") ")?;
         Some(Self {
-            process_id: i64::from(process_id),
-            process_user_id: i64::from(metadata.uid()),
-            process_start_token: fields.split_whitespace().nth(19)?.into(),
+            process_id: meta_signal_flow::ProcessId(i64::from(process_id)),
+            process_user_id: meta_signal_flow::ProcessUserId(i64::from(metadata.uid())),
+            process_start_token: meta_signal_flow::ProcessStartToken(
+                fields.split_whitespace().nth(19)?.into(),
+            ),
         })
     }
 }
@@ -87,13 +89,13 @@ pub trait ChecksFlowContainer {
 
 impl ChecksFlowContainer for FlowContainer {
     fn is_well_formed(&self) -> bool {
-        !self.herdr_session_name.is_empty()
-            && !self.meta_flow_owner_id.is_empty()
-            && Path::new(&self.herdr_server_socket_path).is_absolute()
+        !self.herdr_session_name.0.is_empty()
+            && !self.meta_flow_owner_id.0.0.is_empty()
+            && Path::new(&self.herdr_server_socket_path.0).is_absolute()
     }
 
     fn socket_is_live(&self) -> bool {
-        fs::metadata(&self.herdr_server_socket_path)
+        fs::metadata(&self.herdr_server_socket_path.0)
             .map(|metadata| metadata.file_type().is_socket())
             .unwrap_or(false)
     }
@@ -106,15 +108,15 @@ pub trait ChecksFlowBinding {
 
 impl ChecksFlowBinding for FlowBinding {
     fn is_well_formed(&self) -> bool {
-        !self.flow_id.is_empty()
-            && !self.model_name.is_empty()
-            && !self.native_session_id.is_empty()
-            && !self.herdr_workspace_id.is_empty()
-            && !self.herdr_pane_id.is_empty()
-            && !self.herdr_tab_id.is_empty()
-            && !self.herdr_terminal_id.is_empty()
-            && !self.herdr_agent_name.is_empty()
-            && Path::new(&self.working_directory).is_absolute()
+        !self.flow_id.0.is_empty()
+            && !self.model_name.0.is_empty()
+            && !self.native_session_id.0.is_empty()
+            && !self.herdr_workspace_id.0.is_empty()
+            && !self.herdr_pane_id.0.is_empty()
+            && !self.herdr_tab_id.0.is_empty()
+            && !self.herdr_terminal_id.0.is_empty()
+            && !self.herdr_agent_name.0.is_empty()
+            && Path::new(&self.working_directory.0).is_absolute()
     }
 }
 
@@ -143,7 +145,7 @@ impl VerifiesAdoptedSeat for RunningNexus {
         }
         if !binding
             .process_identity
-            .works_in(&binding.working_directory)
+            .works_in(&binding.working_directory.0)
         {
             return Err(FlowBindingRefusalReason::AnatomyMismatch);
         }
@@ -151,7 +153,7 @@ impl VerifiesAdoptedSeat for RunningNexus {
             .store
             .configured_model(address)
             .map_err(|_| FlowBindingRefusalReason::HerdrUnreadable)?;
-        if configured_model.as_deref() != Some(binding.model_name.as_str()) {
+        if configured_model.as_deref() != Some(binding.model_name.0.as_str()) {
             return Err(FlowBindingRefusalReason::RoleMismatch);
         }
         self.herdr
@@ -162,10 +164,10 @@ impl VerifiesAdoptedSeat for RunningNexus {
         // endpoint and origin observations already held for that session.
         let previous = self
             .store
-            .flow_node(&binding.flow_id)
+            .flow_node(&binding.flow_id.0)
             .map_err(|_| FlowBindingRefusalReason::HerdrUnreadable)?
             .filter(|node| {
-                node.session_id == binding.native_session_id
+                node.session_id.0 == binding.native_session_id.0
                     && node.harness_kind == binding.harness_kind
             });
         let endpoint_selection = previous
@@ -175,11 +177,11 @@ impl VerifiesAdoptedSeat for RunningNexus {
         let origin = previous.map(|node| node.origin).unwrap_or(Origin::Unbound);
         Ok(FlowNode {
             flow_id: binding.flow_id.clone(),
-            session_id: binding.native_session_id.clone(),
+            session_id: signal_flow::SessionId(binding.native_session_id.0.clone()),
             harness_kind: binding.harness_kind.clone(),
             endpoint_selection,
             herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
-                herdr_session_name: herdr_session_name.to_owned(),
+                herdr_session_name: signal_flow::HerdrSessionName(herdr_session_name.to_owned()),
                 herdr_agent_name: binding.herdr_agent_name.clone(),
                 herdr_pane_id: binding.herdr_pane_id.clone(),
                 herdr_terminal_id: binding.herdr_terminal_id.clone(),
@@ -198,7 +200,7 @@ pub trait RefusesBinding {
 impl RefusesBinding for FlowBindingRefusalReason {
     fn refusal_of(self, flow_id: String) -> FlowBindingResult {
         FlowBindingResult::Refused(RefusedFlowBinding {
-            flow_id,
+            flow_id: signal_flow::FlowId(flow_id),
             flow_binding_refusal_reason: self,
         })
     }
@@ -247,10 +249,10 @@ impl VerifiesExistingBinding for crate::herdr::HerdrCli {
                 .map(str::to_owned)
         };
         let mut matching_agents = agents.iter().filter(|agent| {
-            field(agent, "workspace_id").as_deref() == Some(binding.herdr_workspace_id.as_str())
-                && field(agent, "pane_id").as_deref() == Some(binding.herdr_pane_id.as_str())
+            field(agent, "workspace_id").as_deref() == Some(binding.herdr_workspace_id.0.as_str())
+                && field(agent, "pane_id").as_deref() == Some(binding.herdr_pane_id.0.as_str())
                 && field(agent, "terminal_id").as_deref()
-                    == Some(binding.herdr_terminal_id.as_str())
+                    == Some(binding.herdr_terminal_id.0.as_str())
                 && field(agent, "agent").as_deref() == Some(expected)
         });
         let agent = matching_agents
@@ -260,9 +262,10 @@ impl VerifiesExistingBinding for crate::herdr::HerdrCli {
             return Err(FlowBindingRefusalReason::AmbiguousPane);
         }
         let claimed_native_identity = self
-            .claimed_native_identity(&binding.flow_id, &binding.harness_kind)
+            .claimed_native_identity(&binding.flow_id.0, &binding.harness_kind)
             .map_err(|_| FlowBindingRefusalReason::NativeIdentityMismatch)?;
-        if claimed_native_identity != Self::canonical_native_identity(&binding.native_session_id) {
+        if claimed_native_identity != Self::canonical_native_identity(&binding.native_session_id.0)
+        {
             return Err(FlowBindingRefusalReason::NativeIdentityMismatch);
         }
         let processes = self
@@ -272,21 +275,21 @@ impl VerifiesExistingBinding for crate::herdr::HerdrCli {
                 "pane".into(),
                 "process-info".into(),
                 "--pane".into(),
-                binding.herdr_pane_id.clone(),
+                binding.herdr_pane_id.clone().0,
             ])
             .map_err(|_| FlowBindingRefusalReason::HerdrUnreadable)?;
         let information = processes
             .pointer("/result/process_info")
             .ok_or(FlowBindingRefusalReason::HerdrUnreadable)?;
         let runs_process = field(information, "pane_id").as_deref()
-            == Some(binding.herdr_pane_id.as_str())
+            == Some(binding.herdr_pane_id.0.as_str())
             && information
                 .get("foreground_processes")
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|foreground| {
                     foreground.iter().any(|process| {
                         process.get("pid").and_then(serde_json::Value::as_i64)
-                            == Some(binding.process_identity.process_id)
+                            == Some(binding.process_identity.process_id.0)
                     })
                 });
         if !runs_process {
@@ -298,30 +301,30 @@ impl VerifiesExistingBinding for crate::herdr::HerdrCli {
                 .and_then(serde_json::Value::as_str),
             &binding.harness_kind,
         ) {
-            (Some(session), _) if session == binding.native_session_id => Ok(()),
+            (Some(session), _) if session == binding.native_session_id.0 => Ok(()),
             (Some(_), _) => Err(FlowBindingRefusalReason::SessionMismatch),
             // Where the harness assigned the session, Claude's own record of
             // the bound process names it.
             (None, HarnessKind::Claude) => {
                 use crate::claude::ReadsClaudeSessions;
-                match u32::try_from(binding.process_identity.process_id)
+                match u32::try_from(binding.process_identity.process_id.0)
                     .ok()
                     .and_then(|process_id| self.claude_sessions.session_of(process_id))
                 {
-                    Some(session) if session == binding.native_session_id => Ok(()),
+                    Some(session) if session == binding.native_session_id.0 => Ok(()),
                     Some(_) => Err(FlowBindingRefusalReason::SessionMismatch),
                     None => Err(FlowBindingRefusalReason::SessionUnreported),
                 }
             }
             (None, HarnessKind::Codex) => {
                 let proven = self
-                    .native_transcript_root(&HarnessKind::Codex, &binding.model_name)
+                    .native_transcript_root(&HarnessKind::Codex, &binding.model_name.0)
                     .ok()
                     .and_then(|root| root.canonicalize().ok())
                     .is_some_and(|root| {
                         let mut found = Vec::new();
                         root.collect_native_transcripts(
-                            &binding.native_session_id,
+                            &binding.native_session_id.0,
                             &HarnessKind::Codex,
                             0,
                             &mut found,
@@ -334,7 +337,7 @@ impl VerifiesExistingBinding for crate::herdr::HerdrCli {
                                     .and_then(|mut reader| reader.read_line(&mut first))
                                     .is_ok()
                                     && serde_json::from_str::<serde_json::Value>(&first).is_ok_and(
-                                        |row| row.names_thread(&binding.native_session_id),
+                                        |row| row.names_thread(&binding.native_session_id.0),
                                     )
                             })
                     });

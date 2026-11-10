@@ -90,7 +90,7 @@ impl PublishesHandoverArchive for BlockingPublisher {
         self.entered.wait();
         self.proceed.wait();
         Ok(HandoverArchivePublication {
-            path: request.address.topic.into(),
+            path: request.address.topic.0.into(),
             commit: "commit".into(),
             blob: "blob".into(),
         })
@@ -106,7 +106,7 @@ impl PublishesHandoverArchive for RecordingPublisher {
             return Err(HandoverArchiveRefusal::Git("test failure".into()));
         }
         Ok(HandoverArchivePublication {
-            path: request.address.topic.into(),
+            path: request.address.topic.0.into(),
             commit: "test-commit".into(),
             blob: "test-blob".into(),
         })
@@ -134,7 +134,7 @@ fn request(_path: &Path) -> HandoverArchiveRequest {
     HandoverArchiveRequest {
         address: Address {
             aspect: Aspect::Mind,
-            topic: "core".into(),
+            topic: flow_ethos::Topic("core".into()),
             model: Model::Sol,
         },
         flow_id: "abc123".into(),
@@ -154,7 +154,7 @@ fn timed_retirement_at_phase(
     let archive = repo();
     let address = Address {
         aspect: Aspect::Mind,
-        topic: format!("{:?}Deadline", phase),
+        topic: flow_ethos::Topic(format!("{:?}Deadline", phase)),
         model: Model::Sol,
     };
     fixture
@@ -193,7 +193,7 @@ fn inspection_phase_uses_whole_publication_budget_and_retains_generation() {
     assert!(
         !archive
             .path()
-            .join(format!("Mind/{}/Sol/before.md", address.topic))
+            .join(format!("Mind/{}/Sol/before.md", address.topic.0))
             .exists()
     );
 }
@@ -202,7 +202,7 @@ fn inspection_phase_uses_whole_publication_budget_and_retains_generation() {
 fn add_phase_uses_whole_publication_budget_and_retains_generation() {
     let (_fixture, archive, address, runner) = timed_retirement_at_phase(DelayedGitPhase::Add);
     assert!(runner.deadlines.lock().unwrap().len() >= 2);
-    let relative = format!("Mind/{}/Sol/before.md", address.topic);
+    let relative = format!("Mind/{}/Sol/before.md", address.topic.0);
     assert!(archive.path().join(&relative).exists());
     assert_eq!(
         runout(archive.path(), &["diff", "--cached", "--name-only"]),
@@ -225,7 +225,7 @@ fn post_commit_timeout_reverifies_same_generation_before_removal() {
     let archive = repo();
     let address = Address {
         aspect: Aspect::Mind,
-        topic: "RealPostCommitDeadline".into(),
+        topic: flow_ethos::Topic("RealPostCommitDeadline".into()),
         model: Model::Sol,
     };
     fixture
@@ -258,7 +258,7 @@ fn post_commit_timeout_reverifies_same_generation_before_removal() {
     let retained = fixture.nexus.store.closed_handovers(&address, 0).unwrap();
     assert_eq!(retained.len(), 1);
     assert_eq!(retained[0].predecessor, "before");
-    let relative = format!("Mind/{}/Sol/before.md", address.topic);
+    let relative = format!("Mind/{}/Sol/before.md", address.topic.0);
     let commit = runout(archive.path(), &["rev-parse", "HEAD"]);
     let blob = runout(
         archive.path(),
@@ -323,7 +323,7 @@ fn separate_session_pipe_holder_cannot_extend_the_budget_or_remove_the_generatio
     let archive = repo();
     let address = Address {
         aspect: Aspect::Mind,
-        topic: "SeparateSessionPipes".into(),
+        topic: flow_ethos::Topic("SeparateSessionPipes".into()),
         model: Model::Sol,
     };
     fixture
@@ -470,7 +470,7 @@ fn retirement_publishes_before_removal_and_retries_failures() {
     let fixture = NexusFixture::new();
     let address = Address {
         aspect: Aspect::Mind,
-        topic: "retire".into(),
+        topic: flow_ethos::Topic("retire".into()),
         model: Model::Sol,
     };
     fixture
@@ -530,7 +530,7 @@ fn retirement_scan_read_failure_is_explicitly_incomplete() {
     let fixture = NexusFixture::new();
     let address = Address {
         aspect: Aspect::Mind,
-        topic: "retirementScanReadFailure".into(),
+        topic: flow_ethos::Topic("retirementScanReadFailure".into()),
         model: Model::Sol,
     };
     fixture
@@ -577,7 +577,7 @@ fn attaching_during_publication_sees_closed_then_archive_then_removed() {
     let fixture = NexusFixture::new();
     let address = Address {
         aspect: Aspect::Mind,
-        topic: "attachDuringPublication".into(),
+        topic: flow_ethos::Topic("attachDuringPublication".into()),
         model: Model::Sol,
     };
     fixture
@@ -629,7 +629,7 @@ fn initial_snapshot_write_failure_detaches_the_ephemeral_subscription() {
     let fixture = NexusFixture::new();
     let address = Address {
         aspect: Aspect::Mind,
-        topic: "initialWriteFailure".into(),
+        topic: flow_ethos::Topic("initialWriteFailure".into()),
         model: Model::Sol,
     };
     let subscription = fixture
@@ -672,7 +672,7 @@ fn retention_boundary_and_zero_count_are_explicit() {
     let fixture = NexusFixture::new();
     let address = Address {
         aspect: Aspect::Mind,
-        topic: "retention".into(),
+        topic: flow_ethos::Topic("retention".into()),
         model: Model::Sol,
     };
     fixture
@@ -733,7 +733,7 @@ fn archive_tick_finds_closed_handover_without_a_metaflow_row() {
     let archive = repo();
     let address = Address {
         aspect: Aspect::Mind,
-        topic: "orphaned".into(),
+        topic: flow_ethos::Topic("orphaned".into()),
         model: Model::Sol,
     };
     fixture
@@ -754,7 +754,9 @@ fn archive_tick_finds_closed_handover_without_a_metaflow_row() {
         .nexus
         .store
         .configure_change(ConfigurationChange::HandoverArchive(
-            archive.path().to_string_lossy().into_owned(),
+            meta_signal_flow::generated::signal::Path(
+                archive.path().to_string_lossy().into_owned(),
+            ),
         ))
         .unwrap();
     fixture

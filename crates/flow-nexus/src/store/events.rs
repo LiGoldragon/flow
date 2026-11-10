@@ -219,19 +219,19 @@ mod tests {
 
     fn node() -> FlowNode {
         FlowNode {
-            flow_id: "5a4d0b".into(),
-            session_id: "c0ffee00-0000-4000-8000-000000000001".into(),
+            flow_id: flow_ethos::FlowId("5a4d0b".into()),
+            session_id: signal_flow::SessionId("c0ffee00-0000-4000-8000-000000000001".into()),
             harness_kind: HarnessKind::Claude,
             endpoint_selection: EndpointSelection::Unavailable,
             herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
-                herdr_session_name: "sandbox".into(),
-                herdr_agent_name: "sandbox-claude".into(),
-                herdr_pane_id: "w1:p1".into(),
-                herdr_terminal_id: "term-1".into(),
+                herdr_session_name: signal_flow::HerdrSessionName("sandbox".into()),
+                herdr_agent_name: signal_flow::HerdrAgentName("sandbox-claude".into()),
+                herdr_pane_id: signal_flow::HerdrPaneId("w1:p1".into()),
+                herdr_terminal_id: signal_flow::HerdrTerminalId("term-1".into()),
             }),
             origin: Origin::Flow(FlowOrigin {
-                flow_id: "5a4d0b".into(),
-                session_id: "c0ffee00-0000-4000-8000-000000000001".into(),
+                flow_id: flow_ethos::FlowId("5a4d0b".into()),
+                session_id: signal_flow::SessionId("c0ffee00-0000-4000-8000-000000000001".into()),
             }),
             flow_lifecycle: FlowLifecycle::Active,
         }
@@ -239,10 +239,12 @@ mod tests {
 
     fn stop() -> Event {
         Event::Stopped(signal_flow::NativeStop {
-            native_session_id_option: Some("c0ffee00-0000-4000-8000-000000000001".into()),
-            transcript_path_option: Some("/t/c0ffee00.jsonl".into()),
-            last_assistant_message_option: None,
-            background_work: vec![],
+            native_session_id_option: Some(signal_flow::NativeSessionId(
+                "c0ffee00-0000-4000-8000-000000000001".into(),
+            )),
+            transcript_path_option: Some(signal_flow::TranscriptPath("/t/c0ffee00.jsonl".into())),
+            last_assistant_message_option: signal_flow::LastAssistantMessageOption(None),
+            background_work: signal_flow::BackgroundWork(vec![]),
         })
     }
 
@@ -250,11 +252,17 @@ mod tests {
     /// session and the start of the session after it.
     fn events() -> Vec<Event> {
         vec![
-            Event::Started(Some("c0ffee00-0000-4000-8000-000000000001".into())),
+            Event::Started(Some(signal_flow::NativeSessionId(
+                "c0ffee00-0000-4000-8000-000000000001".into(),
+            ))),
             Event::ToolUsed("Bash".into()),
             stop(),
-            Event::Cleared(Some("c0ffee00-0000-4000-8000-000000000001".into())),
-            Event::Started(Some("c0ffee00-0000-4000-8000-000000000002".into())),
+            Event::Cleared(Some(signal_flow::NativeSessionId(
+                "c0ffee00-0000-4000-8000-000000000001".into(),
+            ))),
+            Event::Started(Some(signal_flow::NativeSessionId(
+                "c0ffee00-0000-4000-8000-000000000002".into(),
+            ))),
         ]
     }
 

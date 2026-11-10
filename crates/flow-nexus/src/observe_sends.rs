@@ -114,7 +114,7 @@ impl ObservesLogicalSends for RunningNexus {
                 Ok(observation) => observation,
                 Err(error) => return send(&Response::Refused(Refusal::Store(error.to_string()))),
             };
-            cursor = Some(observation.delivery_cursor);
+            cursor = Some(observation.delivery_cursor.0);
             if disconnected.load(Ordering::Acquire) {
                 return Err("the observing peer disconnected".into());
             }

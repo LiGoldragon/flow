@@ -105,8 +105,8 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
 
 fn retired() -> signal_flow::FlowNode {
     signal_flow::FlowNode {
-        flow_id: "fac697".into(),
-        session_id: "session-1".into(),
+        flow_id: signal_flow::FlowId("fac697".into()),
+        session_id: signal_flow::SessionId("session-1".into()),
         harness_kind: signal_flow::HarnessKind::Claude,
         endpoint_selection: signal_flow::EndpointSelection::Unavailable,
         herdr_route_selection: signal_flow::HerdrRouteSelection::Unavailable,

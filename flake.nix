@@ -7,7 +7,8 @@
     # version and feature set has one store path across them.
     base.url = "github:LiGoldragon/build-base";
     # The Curriculum whose schema Flow pins (crates/flow-nexus/ethos/
-    # curriculum.ethos, 478cbc5's byte for byte): the capsule runs its own
+    # curriculum.ethos, 478cbc5's but for RolesDocument's bare Roles variant,
+    # which ethos-zero 22 requires and which keeps every form): the capsule runs its own
     # Curriculum Nexus from it.
     curriculum = {
       url = "github:LiGoldragon/Curriculum/478cbc51878921a0668278120aacca0031a72f92";
@@ -41,7 +42,7 @@
     }:
     let
       lib = base.inputs.nixpkgs.lib;
-      version = "0.53.4";
+      version = "0.54.0";
       forSystems = function: lib.genAttrs base.lib.systems function;
       # The revision the process checks bind their test build and binaries
       # to: the committed revision, or the dirty one a working tree has.
@@ -180,6 +181,13 @@
                 };
             };
           });
+          # The stamped test build with the message-joint test compiled in.
+          # Its dev-dependencies, Message f46b38e and signal-message 998c824,
+          # are out of the graph until both pin signal-flow 6881724 (see
+          # crates/flow-nexus/Cargo.toml), so this build does not compile yet.
+          messageJointTests = stampedNexusTests.override (old: {
+            features = old.features ++ [ "message-joint" ];
+          });
           # The one test binary of a test build that lists the named test,
           # ignored ones included; the shell variable it is bound to.
           findTest =
@@ -203,6 +211,10 @@
           # once with the given environment from a copy of the source.
           processCheck =
             name: testName: environment:
+            processCheckOf stampedNexusTests name testName environment;
+          # One ignored test of a given test build, run as processCheck runs it.
+          processCheckOf =
+            tests: name: testName: environment:
             pkgs.runCommand "flow-${name}"
               {
                 nativeBuildInputs = [
@@ -212,10 +224,10 @@
               }
               ''
                 set -o pipefail
-                cp -r ${stampedNexusTests.src} "$NIX_BUILD_TOP/source"
+                cp -r ${tests.src} "$NIX_BUILD_TOP/source"
                 chmod -R u+w "$NIX_BUILD_TOP/source"
                 cd "$NIX_BUILD_TOP/source"
-                ${findTest "binary" stampedNexusTests testName}
+                ${findTest "binary" tests testName}
                 ${environment}
                 "$binary" --exact ${testName} --ignored --nocapture 2>&1 | tee "$NIX_BUILD_TOP/${name}.log"
                 ran=$(grep -cF "test ${testName} ... ok" "$NIX_BUILD_TOP/${name}.log" || true)
@@ -391,7 +403,7 @@
             # The real Flow Nexus and the real Message Nexus share one durable
             # delivery ledger.
             message-joint =
-              processCheck "message-joint"
+              processCheckOf messageJointTests "message-joint"
                 "store::message_joint::real_flow_and_message_share_the_durable_delivery_ledger"
                 ''
                   export FLOW_MESSAGE_JOINT_FLOW_BIN="${flowNexus}"
@@ -417,10 +429,10 @@
               "flow-request-id-immutable-contract-pins"
               { nativeBuildInputs = [ pkgs.gnugrep ]; }
               ''
-                grep -F 'rev = "3d0a4cdd0364a30e5586eac7db59917faca5072f"' ${./Cargo.toml}
-                grep -F 'rev = "27d06b7b4995ad275c2c2c85dd0ffb5499482dd7"' ${./Cargo.toml}
-                grep -F 'signal-flow?rev=3d0a4cdd0364a30e5586eac7db59917faca5072f#3d0a4cdd0364a30e5586eac7db59917faca5072f' ${./Cargo.lock}
-                grep -F 'meta-signal-flow?rev=27d06b7b4995ad275c2c2c85dd0ffb5499482dd7#27d06b7b4995ad275c2c2c85dd0ffb5499482dd7' ${./Cargo.lock}
+                grep -F 'rev = "6881724"' ${./Cargo.toml}
+                grep -F 'rev = "a90a889"' ${./Cargo.toml}
+                grep -F 'signal-flow?rev=6881724#6881724d1752058195a770ab8244763151904541' ${./Cargo.lock}
+                grep -F 'meta-signal-flow?rev=a90a889#a90a889af74d2582ef1b9f36cda73627f975a4a6' ${./Cargo.lock}
                 touch "$out"
               '';
 

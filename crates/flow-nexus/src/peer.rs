@@ -33,7 +33,7 @@ impl ResolvesPeer for RunningNexus {
         if !identity.is_live_process() {
             return Response::PeerResolutionRejected(CallerResolutionRejection::CallerUnknown);
         }
-        let Ok(process_id) = u32::try_from(identity.process_id) else {
+        let Ok(process_id) = u32::try_from(identity.process_id.0) else {
             return Response::PeerResolutionRejected(CallerResolutionRejection::CallerUnknown);
         };
         let pane = CallerProcess { process_id }.caller_pane(&self.herdr);
@@ -60,11 +60,18 @@ impl AdmitsMetaPeer for RunningNexus {
         };
         let (message_binary, meta_aspects) = match self.store.configuration_snapshot() {
             Ok(Some(snapshot)) => (
-                snapshot.nexus.message_nexus_binary_option,
-                snapshot.nexus.meta_aspects,
+                snapshot
+                    .configured_nexus
+                    .0
+                    .message_nexus_binary_option
+                    .map(|binary| binary.0),
+                snapshot.configured_nexus.0.meta_aspects,
             ),
             Ok(None) => match self.store.delivery_configuration() {
-                Ok(legacy) => (legacy.message_nexus_path_option, legacy.meta_aspects),
+                Ok(legacy) => (
+                    legacy.message_nexus_path_option.map(|path| path.0),
+                    legacy.meta_aspects,
+                ),
                 Err(_) => return Some(MetaRefusal::PeerUnknown),
             },
             Err(_) => return Some(MetaRefusal::PeerUnknown),
@@ -85,7 +92,7 @@ impl AdmitsMetaPeer for RunningNexus {
             // In no pane, or in a pane that holds no flow: the owner.
             _ => return None,
         };
-        if meta_aspects.contains(&caller.aspect) {
+        if meta_aspects.0.contains(&caller.aspect) {
             None
         } else {
             Some(MetaRefusal::PeerNotAuthorized(caller))

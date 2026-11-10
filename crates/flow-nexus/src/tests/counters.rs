@@ -55,16 +55,22 @@ fn configured() -> NexusFixture {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
             meta_signal_flow::ConfigureNexus {
-                source_root: settings.source_root,
-                stable_codex: settings.stable_codex,
-                next_codex: settings.next_codex,
-                harness_profiles: settings.harness_profile_vector,
-                meta_aspects: settings.meta_aspects,
-                message_nexus_path_option: Some(settings.message_nexus_path.clone()),
-                message_nexus_binary_option: Some("/fixture/message-nexus".into()),
+                source_root: flow_ethos::SourceRoot(settings.source_root),
+                first_codex_endpoint: settings.stable_codex,
+                second_codex_endpoint: settings.next_codex,
+                harness_profiles: flow_ethos::HarnessProfiles(settings.harness_profile_vector),
+                meta_aspects: flow_ethos::MetaAspects(settings.meta_aspects),
+                message_nexus_path_option: Some(flow_ethos::MessageNexusPath(
+                    settings.message_nexus_path.clone(),
+                )),
+                message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(
+                    "/fixture/message-nexus".into(),
+                )),
 
-                curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                lease: 30,
+                curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+                    "/fixture/curriculum.sock".into(),
+                ),
+                lease: flow_ethos::Lease(30),
                 presentation_prompt_option: None,
             },
         ))
@@ -149,7 +155,10 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
             signal_flow::PrivateSendResponse::Refused(signal_flow::Refusal::Lapsed),
         )
         .expect("send outcome recorded");
-    assert_eq!(outcome.send_outcome_id, "send-outcome-0000000000000136");
+    assert_eq!(
+        outcome.send_outcome_id,
+        meta_signal_flow::SendOutcomeId("send-outcome-0000000000000136".into())
+    );
     assert_eq!(counters(&fixture), "{ 130 50 311 } 64 3");
     assert_eq!(
         ask(&fixture, "Configure.Counters.{ 500 500 500 }"),
@@ -160,8 +169,8 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: seat.clone(),
         state: State::Asleep,
-        past: vec![],
-        queue: vec![],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let signal_flow::PrivateSendResponse::SendAccepted(SendAcceptance {
         logical_delivery_id,
@@ -180,7 +189,10 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
     else {
         panic!("the request is queued")
     };
-    assert_eq!(logical_delivery_id, "logical-delivery-00000000000000000130");
+    assert_eq!(
+        logical_delivery_id,
+        flow_ethos::LogicalDeliveryId("logical-delivery-00000000000000000130".into())
+    );
 
     claude_seat(&fixture, 40_000);
     let queue = fixture
@@ -192,8 +204,8 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
         .queue;
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: seat.clone(),
-        state: State::Awake(CLAUDE_SEAT.into()),
-        past: vec![],
+        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        past: flow_ethos::Past(vec![]),
         queue,
     });
     let PrepareQueueDelivery::Prepared(attempt) = fixture

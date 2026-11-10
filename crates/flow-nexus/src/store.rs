@@ -17,7 +17,7 @@ pub(crate) mod handover_configuration;
 pub(crate) mod handover_reminders;
 pub(crate) mod launch_cleanup;
 pub(crate) mod logical_delivery;
-#[cfg(test)]
+#[cfg(all(test, feature = "message-joint"))]
 mod message_joint;
 pub(crate) mod metaflow;
 pub(crate) mod metaflow_declaration;
@@ -76,7 +76,7 @@ use sema_engine::{
 #[cfg(test)]
 use signal_flow::Request;
 use signal_flow::{
-    Address, Aspect, Caller, CallerResolutionRejection, ComposedLaunch, EndpointSelection,
+    Address, Aspect, CallerIdentity, CallerResolutionRejection, ComposedLaunch, EndpointSelection,
     FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
     LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, Launched, LeaveOut,
     Lock, Metaflow, Model, NativeLaunchBinding, NativeLaunchIntent, Origin, Process,
@@ -348,7 +348,7 @@ impl SeedsConfiguration for DefaultConfiguration {
                 HarnessKind::Claude.default_profile(),
                 HarnessKind::Codex.default_profile(),
             ],
-            meta_aspects: vec![Aspect::Psyche],
+            meta_aspects: flow_ethos::MetaAspects(vec![Aspect::Psyche]),
             message_nexus_path_option: None,
         }
     }
@@ -386,10 +386,14 @@ pub struct CodexEndpointConfiguration {
 impl From<&meta_signal_flow::CodexEndpoint> for CodexEndpointConfiguration {
     fn from(endpoint: &meta_signal_flow::CodexEndpoint) -> Self {
         Self {
-            client_path: endpoint.client_path.clone(),
-            home: endpoint.home.clone(),
-            socket: endpoint.control_socket_path.clone(),
-            model_names: endpoint.model_name_vector.clone(),
+            client_path: endpoint.client_path.clone().0,
+            home: endpoint.home.clone().0,
+            socket: endpoint.control_socket_path.clone().0,
+            model_names: endpoint
+                .model_name_vector
+                .iter()
+                .map(|name| name.0.clone())
+                .collect(),
         }
     }
 }
@@ -397,10 +401,15 @@ impl From<&meta_signal_flow::CodexEndpoint> for CodexEndpointConfiguration {
 impl From<&CodexEndpointConfiguration> for meta_signal_flow::CodexEndpoint {
     fn from(endpoint: &CodexEndpointConfiguration) -> Self {
         Self {
-            client_path: endpoint.client_path.clone(),
-            home: endpoint.home.clone(),
-            control_socket_path: endpoint.socket.clone(),
-            model_name_vector: endpoint.model_names.clone(),
+            client_path: flow_ethos::ClientPath(endpoint.client_path.clone()),
+            home: flow_ethos::Home(endpoint.home.clone()),
+            control_socket_path: flow_ethos::ControlSocketPath(endpoint.socket.clone()),
+            model_name_vector: endpoint
+                .model_names
+                .iter()
+                .cloned()
+                .map(flow_ethos::ModelName)
+                .collect(),
         }
     }
 }
@@ -418,9 +427,9 @@ impl From<&Configuration> for RuntimeConfiguration {
 impl From<&ConfigureNexus> for RuntimeConfiguration {
     fn from(configuration: &ConfigureNexus) -> Self {
         Self {
-            source_root: configuration.source_root.clone(),
-            stable_codex: CodexEndpointConfiguration::from(&configuration.stable_codex),
-            next_codex: CodexEndpointConfiguration::from(&configuration.next_codex),
+            source_root: configuration.source_root.clone().0,
+            stable_codex: CodexEndpointConfiguration::from(&configuration.first_codex_endpoint),
+            next_codex: CodexEndpointConfiguration::from(&configuration.second_codex_endpoint),
         }
     }
 }
@@ -560,13 +569,13 @@ impl DerivesNativeOwnerProof for NativeOwnerProof {
         environment: &NativeOwnerEnvironment,
     ) -> Option<Self> {
         (!environment.host_id.is_empty() && !environment.boot_id.is_empty()).then(|| Self {
-            process_id: binding.process_identity.process_id,
-            process_user_id: binding.process_identity.process_user_id,
-            process_start_token: binding.process_identity.process_start_token.clone(),
+            process_id: binding.process_identity.process_id.0,
+            process_user_id: binding.process_identity.process_user_id.0,
+            process_start_token: binding.process_identity.process_start_token.clone().0,
             host_id: environment.host_id.clone(),
             boot_id: environment.boot_id.clone(),
             harness_kind: binding.harness_kind.clone(),
-            native_session_id: binding.native_session_id.clone(),
+            native_session_id: binding.native_session_id.clone().0,
         })
     }
 
@@ -712,7 +721,7 @@ pub(crate) struct StoredMetaflowLock {
 
 impl EngineRecord for StoredMetaflowLock {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.lock.address))
+        RecordKey::new(FlowStore::address_record_key(&self.lock.second_address))
     }
 }
 
@@ -771,7 +780,7 @@ struct StoredMetaThresholdConfiguration {
 
 impl EngineRecord for StoredMetaThresholdConfiguration {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.threshold.model_name.clone())
+        RecordKey::new(self.threshold.model_name.clone().0)
     }
 }
 
@@ -1121,12 +1130,13 @@ pub(crate) trait NamesConfiguredModel {
 impl NamesConfiguredModel for FlowStore {
     fn configured_model(&self, address: &Address) -> Result<Option<String>, StoreError> {
         let key = RecordKey::new(FlowStore::model_record_key(&address.model));
-        Ok(self
+        Ok((self
             .engine
             .match_records(QueryPlan::key(self.meta_configuration_tables.models, key))?
             .records()
             .first()
             .map(|stored| stored.model.native.clone()))
+        .map(|value| value.0))
     }
 }
 
@@ -1197,27 +1207,27 @@ impl MemoryDefinition for FlowRecord {
 }
 
 /// A flow's role: its aspect and model, keyed by its FlowId. It is
-/// exactly what ResolveCaller answers, so the Caller is stored as it is.
+/// exactly what ResolveCaller answers, so the CallerIdentity is stored as it is.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct StoredRole {
-    caller: Caller,
+    caller: CallerIdentity,
 }
 
 impl EngineRecord for StoredRole {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.caller.flow_id.clone())
+        RecordKey::new(self.caller.flow_id.clone().0)
     }
 }
 
 /// Seeds a flow's role directly, for tests of what reads its model.
 #[cfg(test)]
 pub(crate) trait SeedsRole {
-    fn seed_role(&self, role: Caller);
+    fn seed_role(&self, role: CallerIdentity);
 }
 
 #[cfg(test)]
 impl SeedsRole for FlowStore {
-    fn seed_role(&self, role: Caller) {
+    fn seed_role(&self, role: CallerIdentity) {
         self.engine
             .assert(Assertion::new(self.roles, StoredRole { caller: role }))
             .expect("role seeded");
@@ -1286,10 +1296,11 @@ impl CompletesConfiguration for FlowStoreConfiguration {
             stable_codex: meta_signal_flow::CodexEndpoint::from(&runtime.stable_codex),
             next_codex: meta_signal_flow::CodexEndpoint::from(&runtime.next_codex),
             harness_profile_vector: delivery.harness_profile_vector.clone(),
-            meta_aspects: delivery.meta_aspects.clone(),
+            meta_aspects: delivery.meta_aspects.clone().0,
             message_nexus_path: delivery
                 .message_nexus_path_option
                 .clone()
+                .map(|path| path.0)
                 .unwrap_or_default(),
         }
     }
@@ -1319,7 +1330,7 @@ pub(crate) struct StoredLaunchAttempt {
 
 impl EngineRecord for StoredLaunchAttempt {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.attempt.launch_request_id.clone())
+        RecordKey::new(self.attempt.launch_request_id.clone().0)
     }
 }
 
@@ -1385,7 +1396,7 @@ impl NamesLaunchedRoute for FlowStore {
         let record = input.launched_record();
         Launched {
             herdr_route_selection: self
-                .flow_node(&record.flow_id)
+                .flow_node(&record.flow_id.0)
                 .ok()
                 .flatten()
                 .map(|node| node.herdr_route_selection)
@@ -1462,7 +1473,7 @@ impl MemoryDefinition for StoredLaunchOutcome {
 /// Replaced outcome, the flow its launch binds is held out of routing.
 impl EngineRecord for Replacement {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.launch_request_id.clone())
+        RecordKey::new(self.launch_request_id.clone().0)
     }
 }
 
@@ -1733,13 +1744,18 @@ impl ReadsRequestPolicy for FlowStore {
                 .assert(Assertion::new(
                     self.meta_configuration_tables.request_policy,
                     StoredMetaRequestPolicyConfiguration {
-                        request_id_draws: SEEDED_REQUEST_ID_DRAWS,
-                        announcement_tries: SEEDED_ANNOUNCEMENT_TRIES,
+                        request_id_draws: meta_signal_flow::DrawBound(SEEDED_REQUEST_ID_DRAWS),
+                        announcement_tries: meta_signal_flow::TryBound(SEEDED_ANNOUNCEMENT_TRIES),
                     },
                 ))
                 .map(drop)
                 .map_err(StoreError::from),
-            [stored] if stored.request_id_draws >= 1 && stored.announcement_tries >= 1 => Ok(()),
+            [stored]
+                if stored.request_id_draws >= meta_signal_flow::DrawBound(1)
+                    && stored.announcement_tries >= meta_signal_flow::TryBound(1) =>
+            {
+                Ok(())
+            }
             _ => Err(StoreError::StateInvariant),
         }
     }
@@ -1749,8 +1765,8 @@ impl ReadsRequestPolicy for FlowStore {
             self.meta_configuration_tables.request_policy,
         ))?;
         match rows.records() {
-            [stored] if stored.request_id_draws >= 1 => {
-                usize::try_from(stored.request_id_draws).map_err(|_| StoreError::StateInvariant)
+            [stored] if stored.request_id_draws >= meta_signal_flow::DrawBound(1) => {
+                usize::try_from(stored.request_id_draws.0).map_err(|_| StoreError::StateInvariant)
             }
             _ => Err(StoreError::StateInvariant),
         }
@@ -1861,25 +1877,43 @@ pub trait CompletesSnapshot {
 impl CompletesSnapshot for ConfiguredFamilies {
     fn with_counters(self, counters: ConfigureCounters) -> ConfigurationSnapshot {
         ConfigurationSnapshot {
-            nexus: self.nexus,
-            models: self.models,
-            thresholds: self.thresholds,
-            default_leave_outs: self.default_leave_outs,
-            send_servers: self.send_servers,
-            metaflows: self.metaflows,
-            investigation: self.investigation,
-            default_minutes: self.default_minutes,
-            configured_harness_flags: self.configured_harness_flags,
-            heartbeat: self.heartbeat,
-            protected_addresses: self.protected_addresses,
-            handover_policies: self.handover_policies,
-            handover_archive: self.handover_archive,
-            handover_count: self.handover_count,
-            publication_deadline: self.publication_deadline,
-            counters,
-            request_id_draws: self.request_id_draws,
-            announcement_tries: self.announcement_tries,
-            harness_hook: self.harness_hook,
+            configured_nexus: meta_signal_flow::ConfiguredNexus(self.nexus),
+            configured_models: meta_signal_flow::ConfiguredModels(self.models),
+            configured_thresholds: meta_signal_flow::ConfiguredThresholds(self.thresholds),
+            default_leave_outs: meta_signal_flow::DefaultLeaveOuts(self.default_leave_outs),
+            configured_send_servers: meta_signal_flow::ConfiguredSendServers(self.send_servers),
+            configured_metaflows: meta_signal_flow::ConfiguredMetaflows(self.metaflows),
+            configured_investigation: meta_signal_flow::ConfiguredInvestigation(self.investigation),
+            configured_default_minutes: meta_signal_flow::ConfiguredDefaultMinutes(
+                flow_ethos::Minutes(self.default_minutes),
+            ),
+            configured_harness_flags: meta_signal_flow::ConfiguredHarnessFlags(
+                self.configured_harness_flags,
+            ),
+            configured_heartbeat: meta_signal_flow::ConfiguredHeartbeat(self.heartbeat),
+            configured_protected_addresses: meta_signal_flow::ConfiguredProtectedAddresses(
+                self.protected_addresses,
+            ),
+            configured_handover_policies: meta_signal_flow::ConfiguredHandoverPolicies(
+                self.handover_policies,
+            ),
+            configured_handover_archive: meta_signal_flow::ConfiguredHandoverArchive(
+                self.handover_archive,
+            ),
+            configured_handover_count: meta_signal_flow::ConfiguredHandoverCount(
+                self.handover_count,
+            ),
+            configured_publication_deadline: meta_signal_flow::ConfiguredPublicationDeadline(
+                self.publication_deadline,
+            ),
+            configured_counters: meta_signal_flow::ConfiguredCounters(counters),
+            configured_request_id_draws: meta_signal_flow::ConfiguredRequestIdDraws(
+                self.request_id_draws,
+            ),
+            configured_announcement_tries: meta_signal_flow::ConfiguredAnnouncementTries(
+                self.announcement_tries,
+            ),
+            configured_harness_hook: meta_signal_flow::ConfiguredHarnessHook(self.harness_hook),
         }
     }
 }
@@ -2017,12 +2051,14 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 engine.assert(Assertion::new(
                     meta_configuration_tables.request_policy,
                     StoredMetaRequestPolicyConfiguration {
-                        request_id_draws: SEEDED_REQUEST_ID_DRAWS,
-                        announcement_tries: SEEDED_ANNOUNCEMENT_TRIES,
+                        request_id_draws: meta_signal_flow::DrawBound(SEEDED_REQUEST_ID_DRAWS),
+                        announcement_tries: meta_signal_flow::TryBound(SEEDED_ANNOUNCEMENT_TRIES),
                     },
                 ))?;
             }
-            [stored] if stored.request_id_draws >= 1 && stored.announcement_tries >= 1 => {}
+            [stored]
+                if stored.request_id_draws >= meta_signal_flow::DrawBound(1)
+                    && stored.announcement_tries >= meta_signal_flow::TryBound(1) => {}
             _ => return Err(StoreError::StateInvariant),
         }
         Ok(Self {
@@ -2213,7 +2249,7 @@ pub trait RegistersFlowIdentity {
     fn register_flow_in_role(
         &self,
         flow_node: FlowNode,
-        role: Caller,
+        role: CallerIdentity,
     ) -> Result<FlowRegistration, StoreError>;
 }
 
@@ -2222,7 +2258,7 @@ pub(crate) trait RegistersExistingFlow {
     fn adopt_existing_flow(
         &self,
         flow_node: FlowNode,
-        role: Caller,
+        role: CallerIdentity,
         address: Address,
         binding: &meta_signal_flow::FlowBinding,
     ) -> Result<ExistingSeatAdoption, StoreError>;
@@ -2231,7 +2267,7 @@ pub(crate) trait RegistersExistingFlow {
 /// The role each flow was bound or launched in, and the flows a Herdr pane
 /// holds: what ResolveCaller reads.
 pub trait ReadsFlowRoles {
-    fn role(&self, flow_id: &str) -> Result<Option<Caller>, StoreError>;
+    fn role(&self, flow_id: &str) -> Result<Option<CallerIdentity>, StoreError>;
     /// The routable flows whose recorded route names this session and pane.
     fn flows_in_pane(
         &self,
@@ -3123,7 +3159,7 @@ impl ManagesMetaflowState for FlowStore {
         ))?;
         match rows.records() {
             [] => Ok(Vec::new()),
-            [stored] => Ok(stored.leave_out.leave_outs.clone()),
+            [stored] => Ok(stored.leave_out.leave_outs.clone().0),
             _ => Err(StoreError::StateInvariant),
         }
     }
@@ -3136,7 +3172,7 @@ impl ManagesMetaflowState for FlowStore {
         match rows.records() {
             [] => Ok(String::new()),
             [stored] if stored.configured.address == *address => {
-                Ok(stored.configured.harness_flags.clone())
+                Ok(stored.configured.harness_flag_text.clone().0)
             }
             _ => Err(StoreError::StateInvariant),
         }
@@ -3191,7 +3227,7 @@ impl ManagesMetaflowState for FlowStore {
             .to_vec();
         match rows.as_slice() {
             [] => Ok(None),
-            [lock] if lock.lock.address == *address => Ok(Some(lock.clone())),
+            [lock] if lock.lock.second_address == *address => Ok(Some(lock.clone())),
             _ => Err(StoreError::StateInvariant),
         }
     }
@@ -3258,7 +3294,7 @@ impl ManagesMetaflowState for FlowStore {
         lock: Lock,
         now_epoch_seconds: i64,
     ) -> Result<Response, StoreError> {
-        let Some(stored) = self.stored_metaflow_lock(&lock.address)? else {
+        let Some(stored) = self.stored_metaflow_lock(&lock.second_address)? else {
             return Ok(Response::Refused(signal_flow::Refusal::Unknown(
                 signal_flow::Unknown_Data::Lock(lock),
             )));
@@ -3268,10 +3304,10 @@ impl ManagesMetaflowState for FlowStore {
                 signal_flow::Unknown_Data::Lock(lock),
             )));
         }
-        let expired = lock.until <= now_epoch_seconds;
+        let expired = lock.until <= flow_ethos::generated::library::Until(now_epoch_seconds);
         self.engine.retract(Retraction::new(
             self.metaflow_locks,
-            RecordKey::new(FlowStore::address_record_key(&lock.address)),
+            RecordKey::new(FlowStore::address_record_key(&lock.second_address)),
         ))?;
         if expired {
             Ok(Response::Refused(signal_flow::Refusal::Lapsed))
@@ -3299,7 +3335,7 @@ impl AppliesFlowQuery for FlowStore {
             Query::Restart(_) => Ok(Response::Refused(signal_flow::Refusal::Store(
                 "the store alone closes no pane".into(),
             ))),
-            Query::ResolveRecipient(flow_id) => self.resolve_recipient(&flow_id),
+            Query::ResolveRecipient(flow_id) => self.resolve_recipient(&flow_id.0.0),
             Query::Stop(_) => Ok(Response::StopRejected(
                 signal_flow::StopRejection::PersistenceRefused,
             )),
@@ -3320,7 +3356,10 @@ impl AppliesFlowQuery for FlowStore {
             | Query::ObserveSender(_)
             | Query::ObserveDeliveries(_) => Ok(Response::Refused(
                 <signal_flow::Refusal as crate::sending::RefusesUnidentified>::unidentified(
-                    signal_flow::Process { pid: 0, started: 0 },
+                    signal_flow::Process {
+                        pid: flow_ethos::generated::library::Pid(0),
+                        started: flow_ethos::generated::library::Started(0),
+                    },
                 ),
             )),
             Query::Launch(_) => Ok(Response::StartRejected(
@@ -3345,7 +3384,7 @@ impl AppliesFlowQuery for FlowStore {
             )),
             Query::Report(report) => {
                 use events::{EventRecording, RecordsHarnessEvents};
-                match self.record_event(&report.flow_id, report.event)? {
+                match self.record_event(&report.flow_id.0, report.event)? {
                     EventRecording::Recorded => Ok(Response::Reported),
                     EventRecording::UnknownFlow => {
                         Ok(Response::Refused(signal_flow::Refusal::Unknown(
@@ -3446,7 +3485,7 @@ impl ConfiguresFlowStore for FlowStore {
 
     fn runtime_configuration(&self) -> Result<RuntimeConfiguration, StoreError> {
         if let Some(snapshot) = self.configuration_snapshot()? {
-            return Ok(RuntimeConfiguration::from(&snapshot.nexus));
+            return Ok(RuntimeConfiguration::from(&snapshot.configured_nexus.0));
         }
         let records = self
             .engine
@@ -3477,7 +3516,7 @@ trait RegistersBindings {
         &self,
         flow_node: FlowNode,
         flow_type: String,
-        role: Option<Caller>,
+        role: Option<CallerIdentity>,
     ) -> Result<FlowRegistration, StoreError>;
 }
 
@@ -3486,7 +3525,7 @@ impl RegistersBindings for FlowStore {
         &self,
         flow_node: FlowNode,
         flow_type: String,
-        role: Option<Caller>,
+        role: Option<CallerIdentity>,
     ) -> Result<FlowRegistration, StoreError> {
         if role
             .as_ref()
@@ -3497,13 +3536,13 @@ impl RegistersBindings for FlowStore {
         let HerdrRouteSelection::Available(route) = flow_node.herdr_route_selection.clone() else {
             return Ok(FlowRegistration::ConflictingBinding);
         };
-        if let Some(flow) = self.flow(&flow_node.flow_id)? {
-            if flow.thread_id.as_deref() != Some(flow_node.session_id.as_str())
+        if let Some(flow) = self.flow(&flow_node.flow_id.0)? {
+            if flow.thread_id.as_deref() != Some(flow_node.session_id.0.as_str())
                 || flow.harness_kind != flow_node.harness_kind
             {
                 return Ok(FlowRegistration::ConflictingBinding);
             }
-            match self.herdr_route(&flow_node.flow_id)? {
+            match self.herdr_route(&flow_node.flow_id.0)? {
                 Some(existing) if existing.route != route => {
                     return Ok(FlowRegistration::ConflictingBinding);
                 }
@@ -3512,14 +3551,14 @@ impl RegistersBindings for FlowStore {
                     self.engine.assert(Assertion::new(
                         self.herdr_routes,
                         FlowHerdrRouteRecord {
-                            flow_id: flow_node.flow_id.clone(),
+                            flow_id: flow_node.flow_id.clone().0,
                             route,
                         },
                     ))?;
                 }
             }
             if let Some(role) = role {
-                match self.role(&flow_node.flow_id)? {
+                match self.role(&flow_node.flow_id.0)? {
                     Some(existing) if existing != role => {
                         return Ok(FlowRegistration::ConflictingBinding);
                     }
@@ -3540,10 +3579,10 @@ impl RegistersBindings for FlowStore {
             SignalFlowLifecycle::Exited => FlowLifecycle::Exited,
         };
         let record = FlowRecord {
-            flow_id: flow_node.flow_id.clone(),
+            flow_id: flow_node.flow_id.clone().0,
             flow_type,
             origin: flow_node.origin.clone(),
-            thread_id: Some(flow_node.session_id.clone()),
+            thread_id: Some(flow_node.session_id.clone().0),
             harness_kind: flow_node.harness_kind.clone(),
             endpoint_selection: flow_node.endpoint_selection.clone(),
             lifecycle,
@@ -3556,7 +3595,7 @@ impl RegistersBindings for FlowStore {
             .assert(
                 self.herdr_routes,
                 FlowHerdrRouteRecord {
-                    flow_id: flow_node.flow_id.clone(),
+                    flow_id: flow_node.flow_id.clone().0,
                     route,
                 },
             );
@@ -3581,7 +3620,7 @@ impl RegistersFlowIdentity for FlowStore {
     fn register_flow_in_role(
         &self,
         flow_node: FlowNode,
-        role: Caller,
+        role: CallerIdentity,
     ) -> Result<FlowRegistration, StoreError> {
         let flow_type = match flow_node.harness_kind {
             HarnessKind::Codex => "codex-registered".into(),
@@ -3595,7 +3634,7 @@ impl RegistersExistingFlow for FlowStore {
     fn adopt_existing_flow(
         &self,
         flow_node: FlowNode,
-        role: Caller,
+        role: CallerIdentity,
         address: Address,
         binding: &meta_signal_flow::FlowBinding,
     ) -> Result<ExistingSeatAdoption, StoreError> {
@@ -3603,7 +3642,7 @@ impl RegistersExistingFlow for FlowStore {
         if role.flow_id != flow_node.flow_id || role.aspect != address.aspect {
             return Ok(ExistingSeatAdoption::Refused(Refusal::RoleMismatch));
         }
-        if self.configured_model(&address)?.as_deref() != Some(role.model_name.as_str()) {
+        if self.configured_model(&address)?.as_deref() != Some(role.model_name.0.as_str()) {
             return Ok(ExistingSeatAdoption::Refused(Refusal::RoleMismatch));
         }
         let HerdrRouteSelection::Available(route) = flow_node.herdr_route_selection.clone() else {
@@ -3631,8 +3670,8 @@ impl RegistersExistingFlow for FlowStore {
             .unwrap_or(Metaflow {
                 address: address.clone(),
                 state: MetaflowState::Asleep,
-                past: Vec::new(),
-                queue: Vec::new(),
+                past: flow_ethos::generated::library::Past(Vec::new()),
+                queue: flow_ethos::generated::library::Queue(Vec::new()),
             });
         let previous_flow = match &metaflow.state {
             MetaflowState::Awake(current) if current == &flow_node.flow_id => None,
@@ -3640,10 +3679,10 @@ impl RegistersExistingFlow for FlowStore {
                 let MetaflowState::Awake(current) = &metaflow.state else {
                     unreachable!();
                 };
-                let Some(previous) = self.flow(current)? else {
+                let Some(previous) = self.flow(&current.0)? else {
                     return Ok(ExistingSeatAdoption::Refused(Refusal::AddressOwnerUnknown));
                 };
-                let Some(proof) = self.native_owner_proof(current)? else {
+                let Some(proof) = self.native_owner_proof(&current.0)? else {
                     return Ok(ExistingSeatAdoption::Refused(Refusal::AddressOwnerUnknown));
                 };
                 if proof.harness_kind != previous.harness_kind
@@ -3664,14 +3703,14 @@ impl RegistersExistingFlow for FlowStore {
             MetaflowState::Asleep => None,
         };
         if let Some(previous) = &previous_flow {
-            metaflow.past.push(previous.clone());
+            metaflow.past.0.push(previous.clone());
         }
-        metaflow.past.retain(|past| past != &flow_node.flow_id);
+        metaflow.past.0.retain(|past| past != &flow_node.flow_id);
         metaflow.state = MetaflowState::Awake(flow_node.flow_id.clone());
 
-        let existing_flow = self.flow(&flow_node.flow_id)?;
+        let existing_flow = self.flow(&flow_node.flow_id.0)?;
         if let Some(existing) = &existing_flow {
-            if existing.thread_id.as_deref() != Some(flow_node.session_id.as_str())
+            if existing.thread_id.as_deref() != Some(flow_node.session_id.0.as_str())
                 || existing.harness_kind != flow_node.harness_kind
             {
                 return Ok(ExistingSeatAdoption::Refused(
@@ -3679,7 +3718,7 @@ impl RegistersExistingFlow for FlowStore {
                 ));
             }
             if self
-                .role(&flow_node.flow_id)?
+                .role(&flow_node.flow_id.0)?
                 .is_some_and(|stored| stored != role)
             {
                 return Ok(ExistingSeatAdoption::Refused(Refusal::RoleMismatch));
@@ -3694,10 +3733,10 @@ impl RegistersExistingFlow for FlowStore {
             }
         };
         let flow_record = FlowRecord {
-            flow_id: flow_node.flow_id.clone(),
-            flow_type: format!("{:?}:{}", role.aspect, role.model_name),
+            flow_id: flow_node.flow_id.clone().0,
+            flow_type: format!("{:?}:{}", role.aspect, role.model_name.0),
             origin: flow_node.origin.clone(),
-            thread_id: Some(flow_node.session_id.clone()),
+            thread_id: Some(flow_node.session_id.clone().0),
             harness_kind: flow_node.harness_kind.clone(),
             endpoint_selection: flow_node.endpoint_selection.clone(),
             lifecycle,
@@ -3710,12 +3749,12 @@ impl RegistersExistingFlow for FlowStore {
             return Ok(ExistingSeatAdoption::Refused(Refusal::AddressOwnerUnknown));
         };
         let owner_proof = NativeOwnerProofRecord {
-            flow_id: flow_node.flow_id.clone(),
+            flow_id: flow_node.flow_id.clone().0,
             proof: owner_proof,
         };
-        let existing_owner_proof = self.native_owner_proof_record(&flow_node.flow_id)?;
-        let existing_route = self.herdr_route(&flow_node.flow_id)?;
-        let existing_role = self.role(&flow_node.flow_id)?;
+        let existing_owner_proof = self.native_owner_proof_record(&flow_node.flow_id.0)?;
+        let existing_route = self.herdr_route(&flow_node.flow_id.0)?;
+        let existing_role = self.role(&flow_node.flow_id.0)?;
         let mut commit = self.engine.begin_atomic_commit();
         commit = match existing_flow {
             Some(_) => commit.mutate(self.flows, flow_record),
@@ -3725,14 +3764,14 @@ impl RegistersExistingFlow for FlowStore {
             Some(_) => commit.mutate(
                 self.herdr_routes,
                 FlowHerdrRouteRecord {
-                    flow_id: flow_node.flow_id.clone(),
+                    flow_id: flow_node.flow_id.clone().0,
                     route,
                 },
             ),
             None => commit.assert(
                 self.herdr_routes,
                 FlowHerdrRouteRecord {
-                    flow_id: flow_node.flow_id.clone(),
+                    flow_id: flow_node.flow_id.clone().0,
                     route,
                 },
             ),
@@ -3745,7 +3784,7 @@ impl RegistersExistingFlow for FlowStore {
             None => commit.assert(self.native_owner_proofs, owner_proof),
         };
         if let Some(previous) = previous_flow.filter(|previous| previous != &flow_node.flow_id)
-            && let Some(mut old) = self.flow(&previous)?
+            && let Some(mut old) = self.flow(&previous.0)?
             && old.lifecycle.is_live()
         {
             old.lifecycle = FlowLifecycle::Exited;
@@ -3766,7 +3805,7 @@ impl RegistersExistingFlow for FlowStore {
 }
 
 impl ReadsFlowRoles for FlowStore {
-    fn role(&self, flow_id: &str) -> Result<Option<Caller>, StoreError> {
+    fn role(&self, flow_id: &str) -> Result<Option<CallerIdentity>, StoreError> {
         let records = self
             .engine
             .match_records(QueryPlan::key(self.roles, RecordKey::new(flow_id)))?
@@ -3789,10 +3828,10 @@ impl ReadsFlowRoles for FlowStore {
             let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
                 continue;
             };
-            if route.herdr_session_name != herdr_session_name
-                || route.herdr_pane_id != herdr_pane_id
+            if route.herdr_session_name.0 != herdr_session_name
+                || route.herdr_pane_id.0 != herdr_pane_id
                 || !node.flow_lifecycle.is_live()
-                || self.held_successor(&node.flow_id)?
+                || self.held_successor(&node.flow_id.0)?
             {
                 continue;
             }
@@ -3810,7 +3849,7 @@ impl ReservesLaunchAttempt for FlowStore {
     ) -> Result<LaunchAttemptReservation, StoreError> {
         let launch_request_id = launch.launch_profile.launch_request_id.clone();
         let prompt_sha256 = launch.first_prompt_payload.prompt_sha256.clone();
-        if let Some(existing) = self.stored_launch_attempt(&launch_request_id)? {
+        if let Some(existing) = self.stored_launch_attempt(&launch_request_id.0)? {
             return Ok(
                 if existing.attempt.prompt_sha256 == prompt_sha256
                     && existing.attempt.launch_profile == launch.launch_profile
@@ -3848,15 +3887,20 @@ impl ReservesLaunchAttempt for FlowStore {
 impl RecordsNativeLaunchIntent for FlowStore {
     fn record_native_launch_intent(&self, intent: NativeLaunchIntent) -> Result<bool, StoreError> {
         use sha2::{Digest, Sha256};
-        let Some(mut stored) = self.stored_launch_attempt(&intent.launch_request_id)? else {
+        let Some(mut stored) = self.stored_launch_attempt(&intent.launch_request_id.0)? else {
             return Ok(false);
         };
         let empty_simplified_start = intent.prompt_sha256_vector.is_empty()
             && stored.attempt.launch_profile.flow_kind == signal_flow::FlowKind::Simplified
             && matches!(&stored.attempt.launch_profile.tool_set,
                 signal_flow::ToolSet::Explicit(tools) if tools.is_empty())
-            && stored.attempt.launch_profile.instruction_prompt.is_empty()
-            && intent.prompt_sha256 == format!("{:x}", Sha256::digest([]));
+            && stored
+                .attempt
+                .launch_profile
+                .instruction_prompt
+                .0
+                .is_empty()
+            && intent.prompt_sha256.0 == format!("{:x}", Sha256::digest([]));
         if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::Reserved
             || stored.attempt.prompt_sha256 != intent.prompt_sha256
             || stored.attempt.launch_profile.model_name != intent.model_name
@@ -3865,7 +3909,8 @@ impl RecordsNativeLaunchIntent for FlowStore {
             || !intent
                 .prompt_sha256_vector
                 .iter()
-                .chain([&intent.system_prompt_sha256])
+                .map(|hash| hash.0.as_str())
+                .chain([intent.system_prompt_sha256.0.as_str()])
                 .all(|hash| {
                     hash.len() == 64
                         && hash
@@ -3888,7 +3933,7 @@ impl RecordsNativeLaunchBinding for FlowStore {
         &self,
         binding: NativeLaunchBinding,
     ) -> Result<bool, StoreError> {
-        let Some(mut stored) = self.stored_launch_attempt(&binding.launch_request_id)? else {
+        let Some(mut stored) = self.stored_launch_attempt(&binding.launch_request_id.0)? else {
             return Ok(false);
         };
         let Some(intent) = stored.attempt.native_launch_intent_option.as_ref() else {
@@ -3914,7 +3959,7 @@ impl RecordsRegistrationAcknowledgement for FlowStore {
         &self,
         acknowledgement: RegistrationAcknowledgement,
     ) -> Result<bool, StoreError> {
-        let Some(mut stored) = self.stored_launch_attempt(&acknowledgement.launch_request_id)?
+        let Some(mut stored) = self.stored_launch_attempt(&acknowledgement.launch_request_id.0)?
         else {
             return Ok(false);
         };
@@ -3937,7 +3982,7 @@ impl RecordsRegistrationAcknowledgement for FlowStore {
         let flow_id = acknowledgement.flow_id.clone();
         let commit = match self.held(
             &stored.attempt.launch_profile,
-            &flow_id,
+            &flow_id.0,
             self.engine.begin_atomic_commit(),
         )? {
             Ok(commit) => commit,
@@ -3958,7 +4003,7 @@ impl RecordsPromptDeliveryIntent for FlowStore {
         intent: PromptDeliveryIntent,
     ) -> Result<bool, StoreError> {
         use sha2::{Digest, Sha256};
-        let Some(mut stored) = self.stored_launch_attempt(&intent.launch_request_id)? else {
+        let Some(mut stored) = self.stored_launch_attempt(&intent.launch_request_id.0)? else {
             return Ok(false);
         };
         let Some(acknowledgement) = stored.attempt.registration_acknowledgement_option.as_ref()
@@ -3974,51 +4019,61 @@ impl RecordsPromptDeliveryIntent for FlowStore {
         // The first part is the one about to be submitted; no Stop count
         // can be negative.
         let empty_simplified_start = native_intent.prompt_sha256_vector.is_empty()
-            && native_intent.prompt_sha256 == format!("{:x}", Sha256::digest([]))
+            && native_intent.prompt_sha256.0 == format!("{:x}", Sha256::digest([]))
             && intent.prompt_sha256 == native_intent.prompt_sha256
             && stored.attempt.launch_profile.flow_kind == signal_flow::FlowKind::Simplified
             && matches!(&stored.attempt.launch_profile.tool_set,
                 signal_flow::ToolSet::Explicit(tools) if tools.is_empty())
-            && stored.attempt.launch_profile.instruction_prompt.is_empty();
+            && stored
+                .attempt
+                .launch_profile
+                .instruction_prompt
+                .0
+                .is_empty();
         let valid_parts = intent.prompt_sha256_vector == native_intent.prompt_sha256_vector
             && if native_intent.prompt_sha256_vector.is_empty() {
-                empty_simplified_start && intent.parts_submitted == 0
+                empty_simplified_start && intent.parts_submitted == signal_flow::PartsSubmitted(0)
             } else {
-                intent.parts_submitted == 1
+                intent.parts_submitted == signal_flow::PartsSubmitted(1)
             }
-            && intent.stops_reported >= 0;
+            && intent.stops_reported >= signal_flow::StopsReported(0);
         let valid_boundary = match &intent.native_transcript_boundary {
             signal_flow::NativeTranscriptBoundary::Existing(cursor) => {
                 cursor.native_session_id == intent.native_session_id
                     && cursor.harness_kind == intent.harness_kind
-                    && cursor.transcript_byte_offset >= 0
-                    && !cursor.transcript_device.is_empty()
+                    && cursor.transcript_byte_offset >= signal_flow::TranscriptByteOffset(0)
+                    && !cursor.transcript_device.0.is_empty()
                     && cursor
                         .transcript_device
+                        .0
                         .bytes()
                         .all(|byte| byte.is_ascii_digit())
-                    && !cursor.transcript_inode.is_empty()
+                    && !cursor.transcript_inode.0.is_empty()
                     && cursor
                         .transcript_inode
+                        .0
                         .bytes()
                         .all(|byte| byte.is_ascii_digit())
-                    && cursor.transcript_prefix_sha256.len() == 64
+                    && cursor.transcript_prefix_sha256.0.len() == 64
                     && cursor
                         .transcript_prefix_sha256
+                        .0
                         .bytes()
                         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             }
             signal_flow::NativeTranscriptBoundary::Absent(absence) => {
                 absence.native_session_id == intent.native_session_id
                     && absence.harness_kind == intent.harness_kind
-                    && !absence.transcript_root_device.is_empty()
+                    && !absence.transcript_root_device.0.is_empty()
                     && absence
                         .transcript_root_device
+                        .0
                         .bytes()
                         .all(|byte| byte.is_ascii_digit())
-                    && !absence.transcript_root_inode.is_empty()
+                    && !absence.transcript_root_inode.0.is_empty()
                     && absence
                         .transcript_root_inode
+                        .0
                         .bytes()
                         .all(|byte| byte.is_ascii_digit())
             }
@@ -4054,7 +4109,7 @@ impl RecordsPromptDeliveryResult for FlowStore {
             PromptDeliveryResult::Observed(receipt) => &receipt.launch_request_id,
             PromptDeliveryResult::Ambiguous(intent) => &intent.launch_request_id,
         };
-        let Some(mut stored) = self.stored_launch_attempt(launch_request_id)? else {
+        let Some(mut stored) = self.stored_launch_attempt(&launch_request_id.0)? else {
             return Ok(false);
         };
         let Some(intent) = stored.attempt.prompt_delivery_intent_option.as_ref() else {
@@ -4099,13 +4154,13 @@ impl RecordsPromptDeliveryResult for FlowStore {
                             signal_flow::NativeTranscriptBoundary::Existing(cursor),
                         ) if absence.native_session_id == cursor.native_session_id
                             && absence.harness_kind == cursor.harness_kind
-                            && cursor.transcript_byte_offset >= 0
-                            && !cursor.transcript_device.is_empty()
-                            && cursor.transcript_device.bytes().all(|byte| byte.is_ascii_digit())
-                            && !cursor.transcript_inode.is_empty()
-                            && cursor.transcript_inode.bytes().all(|byte| byte.is_ascii_digit())
-                            && cursor.transcript_prefix_sha256.len() == 64
-                            && cursor.transcript_prefix_sha256.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                            && cursor.transcript_byte_offset >= signal_flow::TranscriptByteOffset(0)
+                            && !cursor.transcript_device.0.is_empty()
+                            && cursor.transcript_device.0.bytes().all(|byte| byte.is_ascii_digit())
+                            && !cursor.transcript_inode.0.is_empty()
+                            && cursor.transcript_inode.0.bytes().all(|byte| byte.is_ascii_digit())
+                            && cursor.transcript_prefix_sha256.0.len() == 64
+                            && cursor.transcript_prefix_sha256.0.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
                         )
                 }
                 _ => false,
@@ -4127,11 +4182,11 @@ impl RecordsPromptDeliveryResult for FlowStore {
                     PromptDeliveryResult::Ambiguous(updated),
                 ) => {
                     let mut expected = previous.clone();
-                    expected.parts_submitted += 1;
+                    expected.parts_submitted.0 += 1;
                     expected.stops_reported = updated.stops_reported;
                     &expected == updated
                         && updated.stops_reported >= previous.stops_reported
-                        && usize::try_from(updated.parts_submitted)
+                        && usize::try_from(updated.parts_submitted.0)
                             .is_ok_and(|parts| parts <= updated.prompt_sha256_vector.len())
                 }
                 _ => false,
@@ -4154,16 +4209,17 @@ impl RecordsPromptDeliveryResult for FlowStore {
                     && receipt.prompt_sha256 == intent.prompt_sha256
                     && receipt.flow_id == intent.flow_id
                     && receipt.native_session_id == intent.native_session_id
-                    && !receipt.native_turn_id.is_empty()
-                    && receipt.receipt_sha256.len() == 64
+                    && !receipt.native_turn_id.0.is_empty()
+                    && receipt.receipt_sha256.0.len() == 64
                     && receipt
                         .receipt_sha256
+                        .0
                         .bytes()
                         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
                     && receipt.model_name == intent.model_name
                     && receipt.effort == intent.effort
                     && receipt.prompt_sha256_vector == intent.prompt_sha256_vector
-                    && usize::try_from(intent.parts_submitted)
+                    && usize::try_from(intent.parts_submitted.0)
                         .is_ok_and(|parts| parts == intent.prompt_sha256_vector.len()) =>
             {
                 LaunchAttemptPhase::PromptObserved
@@ -4207,7 +4263,7 @@ impl RecordsLaunchOutcome for FlowStore {
                 .launch_attempt(launch_request_id)?
                 .and_then(|attempt| attempt.native_launch_binding_option)
         {
-            commit = self.given_back(&binding.flow_id, commit)?;
+            commit = self.given_back(&binding.flow_id.0, commit)?;
         }
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
@@ -4233,7 +4289,10 @@ impl RecordsLaunchOutcome for FlowStore {
 
 impl RecordsReplacement for FlowStore {
     fn record_replacement(&self, replacement: Replacement) -> Result<(), StoreError> {
-        if self.replacement(&replacement.launch_request_id)?.is_none() {
+        if self
+            .replacement(&replacement.launch_request_id.0)?
+            .is_none()
+        {
             self.engine
                 .assert(Assertion::new(self.replacements, replacement))?;
         }
@@ -4273,15 +4332,15 @@ impl RecordsReplacement for FlowStore {
             .records()
         {
             if matches!(
-                self.launch_outcome(&replacement.launch_request_id)?,
+                self.launch_outcome(&replacement.launch_request_id.0)?,
                 Some(LaunchOutcome::Replaced(_))
             ) {
                 continue;
             }
             let bound = self
-                .launch_attempt(&replacement.launch_request_id)?
+                .launch_attempt(&replacement.launch_request_id.0)?
                 .and_then(|attempt| attempt.native_launch_binding_option)
-                .is_some_and(|binding| binding.flow_id == flow_id);
+                .is_some_and(|binding| binding.flow_id.0 == flow_id);
             if bound {
                 return Ok(true);
             }
@@ -4317,9 +4376,9 @@ impl ReadsLaunchAttempt for FlowStore {
                     .attempt
                     .native_launch_binding_option
                     .as_ref()
-                    .is_some_and(|binding| binding.flow_id == flow_id)
+                    .is_some_and(|binding| binding.flow_id.0 == flow_id)
             })
-            .map(|stored| stored.attempt.launch_request_id.clone())
+            .map(|stored| stored.attempt.launch_request_id.0.clone())
             .collect())
     }
 
@@ -4340,14 +4399,14 @@ impl ReadsLaunchAttempt for FlowStore {
     }
 
     fn launch_attempt_unsettled(&self, attempt: &LaunchAttempt) -> Result<bool, StoreError> {
-        if self.launch_outcome(&attempt.launch_request_id)?.is_some() {
+        if self.launch_outcome(&attempt.launch_request_id.0)?.is_some() {
             return Ok(false);
         }
         let Some(binding) = attempt.native_launch_binding_option.as_ref() else {
             return Ok(true);
         };
         Ok(self
-            .flow(&binding.flow_id)?
+            .flow(&binding.flow_id.0)?
             .is_none_or(|flow| flow.lifecycle.is_live()))
     }
 }
@@ -4431,7 +4490,7 @@ impl ReadsFlowStore for FlowStore {
                 RecipientResolutionRejection::UnknownFlow,
             ));
         };
-        if node.session_id.is_empty()
+        if node.session_id.0.is_empty()
             || !node.flow_lifecycle.is_live()
             || self.held_successor(flow_id)?
         {
@@ -4491,8 +4550,8 @@ impl ReadsLaunchInspectionRecords for FlowStore {
         };
 
         let launch_attempt = stored_attempt.attempt.clone();
-        if launch_attempt.launch_request_id != launch_request_id
-            || launch_attempt.launch_profile.launch_request_id != launch_request_id
+        if launch_attempt.launch_request_id.0 != launch_request_id
+            || launch_attempt.launch_profile.launch_request_id.0 != launch_request_id
         {
             if self.engine.current_database_marker()? != marker {
                 return Err(StoreError::LaunchStatusReadViewChanged);
@@ -4511,9 +4570,9 @@ impl ReadsLaunchInspectionRecords for FlowStore {
                     .native_launch_binding_option
                     .as_ref()
                     .is_some_and(|binding| {
-                        binding.launch_request_id == launch_request_id
+                        binding.launch_request_id.0 == launch_request_id
                             && binding.flow_id == launched.flow_id
-                            && binding.native_session_id == launched.session_id
+                            && binding.native_session_id.0 == launched.session_id.0
                     });
                 if matches_attempt {
                     Some(launched.flow_id.clone())
@@ -4528,9 +4587,9 @@ impl ReadsLaunchInspectionRecords for FlowStore {
                     .native_launch_binding_option
                     .as_ref()
                     .is_some_and(|binding| {
-                        binding.launch_request_id == launch_request_id
+                        binding.launch_request_id.0 == launch_request_id
                             && binding.flow_id == successor.flow_id
-                            && binding.native_session_id == successor.session_id
+                            && binding.native_session_id.0 == successor.session_id.0
                     });
                 if matches_attempt {
                     Some(successor.flow_id.clone())
@@ -4547,9 +4606,10 @@ impl ReadsLaunchInspectionRecords for FlowStore {
 
         let mut flow_node_option = None;
         if let Some(flow_id) = flow_id_option {
-            let flows = self
-                .engine
-                .match_records(QueryPlan::key(self.flows, RecordKey::new(flow_id.as_str())))?;
+            let flows = self.engine.match_records(QueryPlan::key(
+                self.flows,
+                RecordKey::new(flow_id.0.as_str()),
+            ))?;
             if flows.database_marker() != marker {
                 return Err(StoreError::LaunchStatusReadViewChanged);
             }
@@ -4559,7 +4619,7 @@ impl ReadsLaunchInspectionRecords for FlowStore {
             } else if let Some(flow) = flow_rows.first() {
                 let routes = self.engine.match_records(QueryPlan::key(
                     self.herdr_routes,
-                    RecordKey::new(flow_id.as_str()),
+                    RecordKey::new(flow_id.0.as_str()),
                 ))?;
                 if routes.database_marker() != marker {
                     return Err(StoreError::LaunchStatusReadViewChanged);
@@ -4743,7 +4803,7 @@ impl WritesFlowStore for FlowStore {
     fn mutate_launch_attempt(&self, stored: StoredLaunchAttempt) -> Result<(), StoreError> {
         self.engine.mutate_keyed(KeyedMutation::new(
             self.launch_attempts,
-            RecordKey::new(stored.attempt.launch_request_id.clone()),
+            RecordKey::new(stored.attempt.launch_request_id.clone().0),
             stored,
         ))?;
         self.launch_changes.announce();
@@ -4771,7 +4831,7 @@ impl WritesFlowStore for FlowStore {
                         harness_kind: HarnessKind::Codex,
                         endpoint_selection: EndpointSelection::Available(
                             signal_flow::Available_Data {
-                                endpoint_path: stable_socket,
+                                endpoint_path: signal_flow::EndpointPath(stable_socket),
                                 route_readiness: RouteReadiness::Parked,
                             },
                         ),
@@ -4842,7 +4902,10 @@ impl WritesFlowStore for FlowStore {
             match self.address_taking(
                 &profile.address,
                 flow_id,
-                profile.flow_id_option.as_deref(),
+                profile
+                    .flow_id_option
+                    .as_ref()
+                    .map(|value| value.0.as_str()),
                 0,
             )? {
                 metaflow::AddressTaking::Takes(taking) => taken = Some(taking),
@@ -4880,8 +4943,8 @@ impl WritesFlowStore for FlowStore {
             .map(|node| node.herdr_route_selection)
             .unwrap_or(HerdrRouteSelection::Unavailable);
         Ok(Response::Started(Launched {
-            flow_id: flow_id.into(),
-            session_id,
+            flow_id: signal_flow::FlowId(flow_id.into()),
+            session_id: signal_flow::SessionId(session_id),
             herdr_route_selection,
             origin,
         }))
@@ -4923,8 +4986,8 @@ pub(crate) trait ReadsFlowMemory {
         format!(
             "{}:{}:{}:{}",
             FlowStore::aspect_key(&address.aspect),
-            address.topic.len(),
-            address.topic,
+            address.topic.0.len(),
+            address.topic.0,
             address.model.name()
         )
     }
@@ -4942,20 +5005,24 @@ pub(crate) trait ReadsFlowMemory {
     }
 
     fn process_is_live(process: &Process) -> bool {
-        FlowStore::process_start(process.pid).is_some_and(|(_, started)| started == process.started)
+        FlowStore::process_start(process.pid.0)
+            .is_some_and(|(_, started)| started == process.started.0)
     }
 
     fn process_identity_for_pid(pid: u32) -> Option<Process> {
         let pid = i64::from(pid);
         let (_, started) = FlowStore::process_start(pid)?;
-        Some(Process { pid, started })
+        Some(Process {
+            pid: flow_ethos::generated::library::Pid(pid),
+            started: flow_ethos::generated::library::Started(started),
+        })
     }
 
     fn process_executable(process: &Process) -> Option<std::path::PathBuf> {
         if !FlowStore::process_is_live(process) {
             return None;
         }
-        let executable = fs::canonicalize(format!("/proc/{}/exe", process.pid)).ok()?;
+        let executable = fs::canonicalize(format!("/proc/{}/exe", process.pid.0)).ok()?;
         FlowStore::process_is_live(process).then_some(executable)
     }
 
@@ -4964,17 +5031,20 @@ pub(crate) trait ReadsFlowMemory {
         let mut lineage = Vec::new();
         let mut pid = process.pid;
         for depth in 0..ANCESTRY_LIMIT {
-            let Some((parent, started)) = FlowStore::process_start(pid) else {
+            let Some((parent, started)) = FlowStore::process_start(pid.0) else {
                 break;
             };
-            if depth == 0 && started != process.started {
+            if depth == 0 && started != process.started.0 {
                 return Vec::new();
             }
-            lineage.push(Process { pid, started });
-            if pid <= 1 || parent <= 1 || parent == pid {
+            lineage.push(Process {
+                pid,
+                started: flow_ethos::generated::library::Started(started),
+            });
+            if pid <= flow_ethos::generated::library::Pid(1) || parent <= 1 || parent == pid.0 {
                 break;
             }
-            pid = parent;
+            pid = flow_ethos::generated::library::Pid(parent);
         }
         lineage
     }
@@ -5569,9 +5639,9 @@ pub(crate) trait ReadsFlowMemory {
         };
         let harness_hook = match harness_hook_rows.records() {
             [] => meta_signal_flow::HarnessHookConfiguration::Unconfigured,
-            [stored] => {
-                meta_signal_flow::HarnessHookConfiguration::Configured(stored.harness_hook.clone())
-            }
+            [stored] => meta_signal_flow::HarnessHookConfiguration::Configured(
+                meta_signal_flow::generated::signal::Path(stored.harness_hook.clone()),
+            ),
             _ => return Err(StoreError::StateInvariant),
         };
         // A Memory no DefaultMinutes was declared in holds the seed.
@@ -5582,8 +5652,8 @@ pub(crate) trait ReadsFlowMemory {
         };
         let (request_id_draws, announcement_tries) = match request_policy_rows.records() {
             [] => (SEEDED_REQUEST_ID_DRAWS, SEEDED_ANNOUNCEMENT_TRIES),
-            [stored] if stored.request_id_draws >= 1 && stored.announcement_tries >= 1 => {
-                (stored.request_id_draws, stored.announcement_tries)
+            [stored] if stored.request_id_draws.0 >= 1 && stored.announcement_tries.0 >= 1 => {
+                (stored.request_id_draws.0, stored.announcement_tries.0)
             }
             _ => return Err(StoreError::StateInvariant),
         };
@@ -5645,8 +5715,8 @@ pub(crate) trait ReadsFlowMemory {
             handover_archive: handover.archive,
             handover_count: handover.count,
             publication_deadline: handover.publication_deadline,
-            request_id_draws,
-            announcement_tries,
+            request_id_draws: meta_signal_flow::DrawBound(request_id_draws),
+            announcement_tries: meta_signal_flow::TryBound(announcement_tries),
         }))
     }
 
@@ -5742,28 +5812,31 @@ pub(crate) trait ReadsFlowMemory {
             }
             ConfigurationChange::Investigation(address) => vec![address],
             ConfigurationChange::Heartbeat(Some(config)) => {
-                config.heartbeat_recipients.iter().collect()
+                config.heartbeat_recipients.0.iter().collect()
             }
             ConfigurationChange::ProtectedAddresses(addresses) => addresses.iter().collect(),
             _ => Vec::new(),
         };
         if let Some(refused) = addresses
             .into_iter()
-            .find(|address| !address.topic.as_str().is_camel_case_topic())
+            .find(|address| !address.topic.0.as_str().is_camel_case_topic())
         {
-            return Err(StoreError::TopicRefused(refused.topic.clone()));
+            return Err(StoreError::TopicRefused(refused.topic.clone().0));
         }
         match change {
             ConfigurationChange::HandoverPolicies(policies) => {
                 if policies
                     .iter()
-                    .any(|p| !(0..=100).contains(&p.warning_share_left))
+                    .any(|p| !(0..=100).contains(&p.warning_share_left.0))
                 {
                     return Err(StoreError::HandoverConfigurationRefused(
                         meta_signal_flow::HandoverConfigurationRefusal::InvalidWarningShareLeft,
                     ));
                 }
-                if policies.iter().any(|p| p.every_minutes <= 0) {
+                if policies
+                    .iter()
+                    .any(|p| p.every_minutes <= meta_signal_flow::EveryMinutes(0))
+                {
                     return Err(StoreError::HandoverConfigurationRefused(
                         meta_signal_flow::HandoverConfigurationRefusal::InvalidEveryMinutes,
                     ));
@@ -5838,7 +5911,7 @@ pub(crate) trait ReadsFlowMemory {
                 )
             }
             ConfigurationChange::PublicationDeadline(duration) => {
-                if duration <= 0 {
+                if duration <= meta_signal_flow::Duration(0) {
                     return Err(StoreError::HandoverConfigurationRefused(
                         meta_signal_flow::HandoverConfigurationRefusal::InvalidPublicationDeadline,
                     ));
@@ -5862,10 +5935,15 @@ pub(crate) trait ReadsFlowMemory {
             }
             ConfigurationChange::Nexus(nexus) => {
                 if nexus
-                    .stable_codex
+                    .first_codex_endpoint
                     .model_name_vector
                     .iter()
-                    .any(|model| nexus.next_codex.model_name_vector.contains(model))
+                    .any(|model| {
+                        nexus
+                            .second_codex_endpoint
+                            .model_name_vector
+                            .contains(model)
+                    })
                 {
                     return Err(StoreError::CodexModelsOverlap);
                 }
@@ -5896,6 +5974,7 @@ pub(crate) trait ReadsFlowMemory {
                 if leave_outs.iter().any(|entry| {
                     entry
                         .leave_outs
+                        .0
                         .iter()
                         .any(|leave_out| leave_out.harness() != entry.harness_kind)
                 }) {
@@ -5957,7 +6036,9 @@ pub(crate) trait ReadsFlowMemory {
                 FlowStore::replace_configuration_family(
                     engine,
                     tables.harness_hook,
-                    vec![StoredMetaHarnessHookConfiguration { harness_hook }],
+                    vec![StoredMetaHarnessHookConfiguration {
+                        harness_hook: harness_hook.0,
+                    }],
                 )
             }
             // The default Minutes meets the rule a Task's Minutes meets at
@@ -5966,27 +6047,29 @@ pub(crate) trait ReadsFlowMemory {
                 use crate::reminding::CountsUnixSeconds;
                 use crate::store::reminder::RulesMinutes;
                 default_minutes
+                    .0
                     .ruled_interval(std::time::SystemTime::now().seconds_since_epoch())
                     .map_err(StoreError::MinutesRefused)?;
                 FlowStore::replace_configuration_family(
                     engine,
                     tables.default_minutes,
-                    vec![StoredMetaDefaultMinutesConfiguration { default_minutes }],
+                    vec![StoredMetaDefaultMinutesConfiguration {
+                        default_minutes: default_minutes.0,
+                    }],
                 )
             }
             ConfigurationChange::Heartbeat(heartbeat) => {
                 if let Some(configured) = heartbeat.as_ref() {
-                    if configured.heartbeat_period_seconds <= 0 {
+                    if configured.heartbeat_period_seconds
+                        <= meta_signal_flow::HeartbeatPeriodSeconds(0)
+                    {
                         return Err(StoreError::InvalidHeartbeatPeriod);
                     }
-                    if configured
-                        .heartbeat_recipients
-                        .iter()
-                        .enumerate()
-                        .any(|(index, address)| {
-                            configured.heartbeat_recipients[..index].contains(address)
-                        })
-                    {
+                    if configured.heartbeat_recipients.0.iter().enumerate().any(
+                        |(index, address)| {
+                            configured.heartbeat_recipients.0[..index].contains(address)
+                        },
+                    ) {
                         return Err(StoreError::DuplicateConfigurationEntry);
                     }
                 }
@@ -6015,13 +6098,15 @@ pub(crate) trait ReadsFlowMemory {
                 Err(StoreError::CountersRefused(CountersRefusal::NotRunning))
             }
             ConfigurationChange::RequestIdDraws(value) => {
-                if value < 1 {
+                if value < meta_signal_flow::DrawBound(1) {
                     return Err(StoreError::RequestIdDrawsRefused);
                 }
                 let sibling = engine.match_records(QueryPlan::all(tables.request_policy))?;
                 let announcement_tries = match sibling.records() {
                     [] => SEEDED_ANNOUNCEMENT_TRIES,
-                    [stored] if stored.announcement_tries >= 1 => stored.announcement_tries,
+                    [stored] if stored.announcement_tries >= meta_signal_flow::TryBound(1) => {
+                        stored.announcement_tries.0
+                    }
                     _ => return Err(StoreError::StateInvariant),
                 };
                 FlowStore::replace_configuration_family(
@@ -6029,25 +6114,27 @@ pub(crate) trait ReadsFlowMemory {
                     tables.request_policy,
                     vec![StoredMetaRequestPolicyConfiguration {
                         request_id_draws: value,
-                        announcement_tries,
+                        announcement_tries: meta_signal_flow::TryBound(announcement_tries),
                     }],
                 )
             }
             ConfigurationChange::AnnouncementTries(value) => {
-                if value < 1 {
+                if value < meta_signal_flow::TryBound(1) {
                     return Err(StoreError::AnnouncementTriesRefused);
                 }
                 let sibling = engine.match_records(QueryPlan::all(tables.request_policy))?;
                 let request_id_draws = match sibling.records() {
                     [] => SEEDED_REQUEST_ID_DRAWS,
-                    [stored] if stored.request_id_draws >= 1 => stored.request_id_draws,
+                    [stored] if stored.request_id_draws >= meta_signal_flow::DrawBound(1) => {
+                        stored.request_id_draws.0
+                    }
                     _ => return Err(StoreError::StateInvariant),
                 };
                 FlowStore::replace_configuration_family(
                     engine,
                     tables.request_policy,
                     vec![StoredMetaRequestPolicyConfiguration {
-                        request_id_draws,
+                        request_id_draws: meta_signal_flow::DrawBound(request_id_draws),
                         announcement_tries: value,
                     }],
                 )
@@ -6057,8 +6144,8 @@ pub(crate) trait ReadsFlowMemory {
 
     fn recorded_flow_node(flow: FlowRecord, route: Option<FlowHerdrRouteRecord>) -> FlowNode {
         FlowNode {
-            flow_id: flow.flow_id,
-            session_id: flow.thread_id.unwrap_or_default(),
+            flow_id: signal_flow::FlowId(flow.flow_id),
+            session_id: signal_flow::SessionId(flow.thread_id.unwrap_or_default()),
             harness_kind: flow.harness_kind,
             endpoint_selection: flow.endpoint_selection,
             herdr_route_selection: route
@@ -6096,14 +6183,14 @@ mod tests {
         let store = fixture.store();
         let recipient = Address {
             aspect: Aspect::Field,
-            topic: "heartbeatTest".into(),
+            topic: flow_ethos::Topic("heartbeatTest".into()),
             model: Model::Sol,
         };
         store.seed_metaflow(Metaflow {
             address: recipient.clone(),
             state: flow_ethos::State::Asleep,
-            past: Vec::new(),
-            queue: Vec::new(),
+            past: flow_ethos::Past(Vec::new()),
+            queue: flow_ethos::Queue(Vec::new()),
         });
         store
             .replace_heartbeat_standings(vec![StoredHeartbeatStanding {
@@ -6153,20 +6240,23 @@ mod tests {
         assert_eq!(standing.baseline_queue, 7);
         assert_eq!(
             standing.outstanding,
-            Some(accepted.logical_delivery_id.clone())
+            Some(accepted.logical_delivery_id.clone()).map(|value| value.0)
         );
         assert!(store.delivery_purposes().unwrap().iter().any(|row| {
-            row.logical_delivery_id == accepted.logical_delivery_id
+            row.logical_delivery_id == accepted.logical_delivery_id.0
                 && row.purpose == DeliveryPurpose::Heartbeat
         }));
         assert!(store.delivery_purposes().unwrap().iter().any(|row| {
-            row.logical_delivery_id == ordinary.logical_delivery_id
+            row.logical_delivery_id == ordinary.logical_delivery_id.0
                 && row.purpose == DeliveryPurpose::Ordinary
         }));
         drop(store);
         let reopened = fixture.store();
         let standing = reopened.heartbeat_standings().unwrap().pop().unwrap();
-        assert_eq!(standing.outstanding, Some(accepted.logical_delivery_id));
+        assert_eq!(
+            standing.outstanding,
+            Some(accepted.logical_delivery_id).map(|value| value.0)
+        );
     }
 
     #[test]
@@ -6182,19 +6272,19 @@ mod tests {
         let store = fixture.store();
         let recipient = Address {
             aspect: Aspect::Field,
-            topic: "upgradeNotice".into(),
+            topic: flow_ethos::Topic("upgradeNotice".into()),
             model: Model::Sol,
         };
         let sender = Address {
             aspect: Aspect::Mind,
-            topic: "upgradeNotice".into(),
+            topic: flow_ethos::Topic("upgradeNotice".into()),
             model: Model::Sol,
         };
         store.seed_metaflow(flow_ethos::Metaflow {
             address: recipient.clone(),
             state: flow_ethos::State::Asleep,
-            past: Vec::new(),
-            queue: Vec::new(),
+            past: flow_ethos::Past(Vec::new()),
+            queue: flow_ethos::Queue(Vec::new()),
         });
         let signal_flow::PrivateSendResponse::SendAccepted(task) = store
             .accept_logical_delivery(
@@ -6202,7 +6292,7 @@ mod tests {
                 SentBy::Sender(sender.clone()),
                 flow_ethos::Delivery::Queue,
                 Message::Soft(Request::Task(flow_ethos::AnswerableTask {
-                    minutes: 1,
+                    minutes: flow_ethos::Minutes(1),
                     string: "finish the upgrade".into(),
                 })),
                 None,
@@ -6216,8 +6306,8 @@ mod tests {
                 &task.logical_delivery_id,
                 signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
                     harness_kind: flow_ethos::HarnessKind::Codex,
-                    native_session_id: "task-session".into(),
-                    native_prompt_id: "task-prompt".into(),
+                    native_session_id: signal_flow::NativeSessionId("task-session".into()),
+                    native_prompt_id: signal_flow::NativePromptId("task-prompt".into()),
                 }),
             )
             .expect("task delivery ends before its announcement");
@@ -6256,6 +6346,7 @@ mod tests {
             .unwrap()
             .metaflow
             .queue
+            .0
             .len();
         store
             .run_request_id_announcements()
@@ -6267,16 +6358,20 @@ mod tests {
                 .unwrap()
                 .metaflow
                 .queue
+                .0
                 .len(),
             queued,
             "a concurrent trigger cannot admit a second Notice"
         );
         store
-            .transition_logical_delivery(&notice, signal_flow::DeliveryState::Uncertain)
+            .transition_logical_delivery(
+                &flow_ethos::LogicalDeliveryId(notice.to_owned()),
+                signal_flow::DeliveryState::Uncertain,
+            )
             .expect("notice becomes uncertain");
         assert_eq!(
             store
-                .archive_request(&task.request_id, &sender)
+                .archive_request(&task.request_id.0, &sender)
                 .expect("archive checks the announcement Notice"),
             Err(signal_flow::ArchiveRejection::NotYet),
             "an unended announcement Notice holds every Task it lists"
@@ -6291,6 +6386,7 @@ mod tests {
                 .unwrap()
                 .metaflow
                 .queue
+                .0
                 .len(),
             queued,
             "Uncertain never admits another Notice"
@@ -6298,7 +6394,7 @@ mod tests {
 
         store
             .transition_logical_delivery(
-                &notice,
+                &flow_ethos::LogicalDeliveryId(notice.to_owned()),
                 signal_flow::DeliveryState::Failed(signal_flow::Refusal::Direct(
                     "placement absent".into(),
                 )),
@@ -6330,11 +6426,11 @@ mod tests {
         assert_eq!(rows.records()[0].tries, 2);
         store
             .transition_logical_delivery(
-                retried,
+                &flow_ethos::LogicalDeliveryId(retried.to_owned()),
                 signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
                     harness_kind: flow_ethos::HarnessKind::Codex,
-                    native_session_id: "successor".into(),
-                    native_prompt_id: "prompt".into(),
+                    native_session_id: signal_flow::NativeSessionId("successor".into()),
+                    native_prompt_id: signal_flow::NativePromptId("prompt".into()),
                 }),
             )
             .expect("retried Notice delivers");
@@ -6351,7 +6447,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .archive_request(&task.request_id, &sender)
+                .archive_request(&task.request_id.0, &sender)
                 .expect("ended announcement releases the Task"),
             Ok(())
         );
@@ -6370,20 +6466,20 @@ mod tests {
         let store = fixture.store();
         let recipient = Address {
             aspect: Aspect::Field,
-            topic: "closedUpgradeTask".into(),
+            topic: flow_ethos::Topic("closedUpgradeTask".into()),
             model: Model::Sol,
         };
         let sender = Address {
             aspect: Aspect::Mind,
-            topic: "closedUpgradeTask".into(),
+            topic: flow_ethos::Topic("closedUpgradeTask".into()),
             model: Model::Sol,
         };
         for address in [&recipient, &sender] {
             store.seed_metaflow(flow_ethos::Metaflow {
                 address: address.clone(),
                 state: flow_ethos::State::Asleep,
-                past: Vec::new(),
-                queue: Vec::new(),
+                past: flow_ethos::Past(Vec::new()),
+                queue: flow_ethos::Queue(Vec::new()),
             });
         }
         let signal_flow::PrivateSendResponse::SendAccepted(task) = store
@@ -6392,7 +6488,7 @@ mod tests {
                 SentBy::Sender(sender.clone()),
                 flow_ethos::Delivery::Queue,
                 Message::Soft(Request::Task(flow_ethos::AnswerableTask {
-                    minutes: 1,
+                    minutes: flow_ethos::Minutes(1),
                     string: "already archived".into(),
                 })),
                 None,
@@ -6406,14 +6502,14 @@ mod tests {
                 &task.logical_delivery_id,
                 signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
                     harness_kind: flow_ethos::HarnessKind::Codex,
-                    native_session_id: "closed-task-session".into(),
-                    native_prompt_id: "closed-task-prompt".into(),
+                    native_session_id: signal_flow::NativeSessionId("closed-task-session".into()),
+                    native_prompt_id: signal_flow::NativePromptId("closed-task-prompt".into()),
                 }),
             )
             .expect("task ends");
         assert_eq!(
             store
-                .archive_request(&task.request_id, &sender)
+                .archive_request(&task.request_id.0, &sender)
                 .expect("task archives"),
             Ok(())
         );
@@ -6446,6 +6542,7 @@ mod tests {
                 .unwrap()
                 .metaflow
                 .queue
+                .0
                 .is_empty(),
             "an archived Task creates no announcement Notice"
         );
@@ -6464,23 +6561,25 @@ mod tests {
         fixture.configured();
         let store = fixture.configured_store();
         store
-            .configure_change(meta_signal_flow::ConfigurationChange::AnnouncementTries(1))
+            .configure_change(meta_signal_flow::ConfigurationChange::AnnouncementTries(
+                meta_signal_flow::TryBound(1),
+            ))
             .expect("one announcement try configures");
         let task_recipient = Address {
             aspect: Aspect::Field,
-            topic: "upgradeTask".into(),
+            topic: flow_ethos::Topic("upgradeTask".into()),
             model: Model::Sol,
         };
         let notice_recipient = Address {
             aspect: Aspect::Mind,
-            topic: "upgradeNoticeBound".into(),
+            topic: flow_ethos::Topic("upgradeNoticeBound".into()),
             model: Model::Sol,
         };
         store.seed_metaflow(flow_ethos::Metaflow {
             address: task_recipient.clone(),
             state: flow_ethos::State::Asleep,
-            past: Vec::new(),
-            queue: Vec::new(),
+            past: flow_ethos::Past(Vec::new()),
+            queue: flow_ethos::Queue(Vec::new()),
         });
         let signal_flow::PrivateSendResponse::SendAccepted(task) = store
             .accept_logical_delivery(
@@ -6488,7 +6587,7 @@ mod tests {
                 SentBy::Sender(notice_recipient.clone()),
                 flow_ethos::Delivery::Queue,
                 Message::Soft(Request::Task(flow_ethos::AnswerableTask {
-                    minutes: 1,
+                    minutes: flow_ethos::Minutes(1),
                     string: "announce after binding".into(),
                 })),
                 None,
@@ -6527,8 +6626,8 @@ mod tests {
         store.seed_metaflow(flow_ethos::Metaflow {
             address: notice_recipient.clone(),
             state: flow_ethos::State::Asleep,
-            past: Vec::new(),
-            queue: Vec::new(),
+            past: flow_ethos::Past(Vec::new()),
+            queue: flow_ethos::Queue(Vec::new()),
         });
         drop(store);
         let store = fixture.configured_store();
@@ -6543,7 +6642,7 @@ mod tests {
         assert_eq!(rows.records()[0].tries, 1);
         store
             .transition_logical_delivery(
-                &notice,
+                &flow_ethos::LogicalDeliveryId(notice.to_owned()),
                 signal_flow::DeliveryState::Failed(signal_flow::Refusal::Direct(
                     "placement absent".into(),
                 )),
@@ -6566,6 +6665,7 @@ mod tests {
             .unwrap()
             .metaflow
             .queue
+            .0
             .len();
         store
             .run_request_id_announcements()
@@ -6577,6 +6677,7 @@ mod tests {
                 .unwrap()
                 .metaflow
                 .queue
+                .0
                 .len(),
             queued
         );
@@ -6595,20 +6696,20 @@ mod tests {
         let mut store = fixture.store();
         let sender = Address {
             aspect: Aspect::Mind,
-            topic: "announcementCapacity".into(),
+            topic: flow_ethos::Topic("announcementCapacity".into()),
             model: Model::Sol,
         };
         let recipient = Address {
             aspect: Aspect::Field,
-            topic: "announcementCapacity".into(),
+            topic: flow_ethos::Topic("announcementCapacity".into()),
             model: Model::Sol,
         };
         for address in [&sender, &recipient] {
             store.seed_metaflow(flow_ethos::Metaflow {
                 address: address.clone(),
                 state: flow_ethos::State::Asleep,
-                past: Vec::new(),
-                queue: Vec::new(),
+                past: flow_ethos::Past(Vec::new()),
+                queue: flow_ethos::Queue(Vec::new()),
             });
         }
         super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
@@ -6632,7 +6733,7 @@ mod tests {
         };
         let holder = accept(Request::Notice("capacity holder".into()));
         let task = accept(Request::Task(flow_ethos::AnswerableTask {
-            minutes: 1,
+            minutes: flow_ethos::Minutes(1),
             string: "announce after capacity returns".into(),
         }));
         store
@@ -6673,14 +6774,14 @@ mod tests {
                 &holder.logical_delivery_id,
                 signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
                     harness_kind: flow_ethos::HarnessKind::Codex,
-                    native_session_id: "capacity-session".into(),
-                    native_prompt_id: "capacity-prompt".into(),
+                    native_session_id: signal_flow::NativeSessionId("capacity-session".into()),
+                    native_prompt_id: signal_flow::NativePromptId("capacity-prompt".into()),
                 }),
             )
             .expect("holder ends");
         assert_eq!(
             store
-                .archive_request(&holder.request_id, &sender)
+                .archive_request(&holder.request_id.0, &sender)
                 .expect("holder archives"),
             Ok(())
         );
@@ -6716,19 +6817,19 @@ mod tests {
         let store = fixture.store();
         let sender = Address {
             aspect: Aspect::Mind,
-            topic: "upgradeAssignment".into(),
+            topic: flow_ethos::Topic("upgradeAssignment".into()),
             model: Model::Sol,
         };
         let recipient = Address {
             aspect: Aspect::Field,
-            topic: "upgradeAssignment".into(),
+            topic: flow_ethos::Topic("upgradeAssignment".into()),
             model: Model::Sol,
         };
         store.seed_metaflow(flow_ethos::Metaflow {
             address: recipient.clone(),
             state: flow_ethos::State::Asleep,
-            past: Vec::new(),
-            queue: Vec::new(),
+            past: flow_ethos::Past(Vec::new()),
+            queue: flow_ethos::Queue(Vec::new()),
         });
         let accept = |words: &str| {
             let signal_flow::PrivateSendResponse::SendAccepted(value) = store
@@ -6753,8 +6854,12 @@ mod tests {
                     &accepted.logical_delivery_id,
                     signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
                         harness_kind: flow_ethos::HarnessKind::Codex,
-                        native_session_id: "assignment-recipient".into(),
-                        native_prompt_id: accepted.logical_delivery_id.clone(),
+                        native_session_id: signal_flow::NativeSessionId(
+                            "assignment-recipient".into(),
+                        ),
+                        native_prompt_id: signal_flow::NativePromptId(
+                            accepted.logical_delivery_id.0.clone(),
+                        ),
                     }),
                 )
                 .expect("Order delivery ends");
@@ -6770,7 +6875,7 @@ mod tests {
                     decisions: vec![AssignmentDecision {
                         recipient,
                         assigned: vec![AssignedAnswer {
-                            answer: "legacy-answer".into(),
+                            answer: flow_ethos::LogicalDeliveryId("legacy-answer".into()),
                             order: assigned.logical_delivery_id.clone(),
                             order_id: Some(assigned.request_id),
                         }],
@@ -6801,8 +6906,8 @@ mod tests {
         store.seed_metaflow(flow_ethos::Metaflow {
             address: sender.clone(),
             state: flow_ethos::State::Asleep,
-            past: Vec::new(),
-            queue: Vec::new(),
+            past: flow_ethos::Past(Vec::new()),
+            queue: flow_ethos::Queue(Vec::new()),
         });
         store
             .run_request_id_announcements()
@@ -6814,6 +6919,7 @@ mod tests {
         let notice = stored
             .metaflow
             .queue
+            .0
             .iter()
             .find_map(|entry| match &entry.message {
                 flow_ethos::Message::Soft(flow_ethos::Request::Notice(text)) => Some(text),
@@ -6822,8 +6928,8 @@ mod tests {
             .expect("assignment Notice queued");
         assert!(notice.contains("answered first original Order words"));
         assert!(notice.contains("open second original Order words"));
-        assert!(!notice.contains(&assigned.logical_delivery_id));
-        assert!(!notice.contains(&open.logical_delivery_id));
+        assert!(!notice.contains(&assigned.logical_delivery_id.0));
+        assert!(!notice.contains(&open.logical_delivery_id.0));
 
         let assignments = store
             .engine
@@ -6835,18 +6941,18 @@ mod tests {
         };
         assert_eq!(
             store
-                .archive_request(&assigned_request_id, &sender)
+                .archive_request(&assigned_request_id.0, &sender)
                 .expect("archive checks assignment Notice"),
             Err(signal_flow::ArchiveRejection::NotYet),
             "an unended assignment Notice holds every Order it lists"
         );
         store
             .transition_logical_delivery(
-                announcement,
+                &flow_ethos::LogicalDeliveryId(announcement.to_owned()),
                 signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
                     harness_kind: flow_ethos::HarnessKind::Codex,
-                    native_session_id: "assignment-sender".into(),
-                    native_prompt_id: "assignment-notice".into(),
+                    native_session_id: signal_flow::NativeSessionId("assignment-sender".into()),
+                    native_prompt_id: signal_flow::NativePromptId("assignment-notice".into()),
                 }),
             )
             .expect("assignment Notice ends");
@@ -6855,7 +6961,7 @@ mod tests {
             .expect("ended assignment settles");
         assert_eq!(
             store
-                .archive_request(&assigned_request_id, &sender)
+                .archive_request(&assigned_request_id.0, &sender)
                 .expect("settled assignment releases Order"),
             Ok(())
         );
@@ -6871,20 +6977,20 @@ mod tests {
         let store = fixture.store();
         let source = Address {
             aspect: Aspect::Mind,
-            topic: "judgment".into(),
+            topic: flow_ethos::Topic("judgment".into()),
             model: Model::Sol,
         };
         let recipient = Address {
             aspect: Aspect::Psyche,
-            topic: "core".into(),
+            topic: flow_ethos::Topic("core".into()),
             model: Model::Opus,
         };
         for address in [&source, &recipient] {
             store.seed_metaflow(Metaflow {
                 address: address.clone(),
                 state: flow_ethos::State::Asleep,
-                past: Vec::new(),
-                queue: Vec::new(),
+                past: flow_ethos::Past(Vec::new()),
+                queue: flow_ethos::Queue(Vec::new()),
             });
         }
         let signal_flow::PrivateSendResponse::SendAccepted(input) = store
@@ -6903,7 +7009,7 @@ mod tests {
             store
                 .deliver_simplified_reply(
                     "simplified",
-                    &input.logical_delivery_id,
+                    &input.logical_delivery_id.0,
                     "claude-session",
                     "prompt-1",
                     "unsolicited startup Stop"
@@ -6916,7 +7022,7 @@ mod tests {
             store
                 .deliver_simplified_reply(
                     "regular-flow",
-                    &input.logical_delivery_id,
+                    &input.logical_delivery_id.0,
                     "claude-session",
                     "prompt-1",
                     "ordinary final message"
@@ -6928,7 +7034,7 @@ mod tests {
         store
             .bind_simplified_reply(SimplifiedReplyBinding {
                 flow_id: "simplified".into(),
-                input_delivery_id: input.logical_delivery_id.clone(),
+                input_delivery_id: input.logical_delivery_id.clone().0,
                 source: source.clone(),
                 recipient: recipient.clone(),
                 completed: false,
@@ -6938,7 +7044,7 @@ mod tests {
             store
                 .deliver_simplified_reply(
                     "simplified",
-                    &input.logical_delivery_id,
+                    &input.logical_delivery_id.0,
                     "claude-session",
                     "prompt-1",
                     "answer"
@@ -6952,8 +7058,8 @@ mod tests {
                 &input.logical_delivery_id,
                 DeliveryState::Delivered(NativeReceipt {
                     harness_kind: flow_ethos::HarnessKind::Claude,
-                    native_session_id: "claude-session".into(),
-                    native_prompt_id: "prompt-1".into(),
+                    native_session_id: signal_flow::NativeSessionId("claude-session".into()),
+                    native_prompt_id: signal_flow::NativePromptId("prompt-1".into()),
                 }),
             )
             .unwrap();
@@ -6961,7 +7067,7 @@ mod tests {
             store
                 .deliver_simplified_reply(
                     "simplified",
-                    &input.logical_delivery_id,
+                    &input.logical_delivery_id.0,
                     "claude-session",
                     "prompt-1",
                     "answer"
@@ -6973,7 +7079,7 @@ mod tests {
             store
                 .deliver_simplified_reply(
                     "simplified",
-                    &input.logical_delivery_id,
+                    &input.logical_delivery_id.0,
                     "claude-session",
                     "prompt-1",
                     "answer"
@@ -6983,29 +7089,29 @@ mod tests {
             "a repeated Stop must not duplicate its Result"
         );
         let queued = store.metaflow(&recipient).unwrap().unwrap().queue;
-        assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].sent_by, SentBy::Sender(source));
+        assert_eq!(queued.0.len(), 1);
+        assert_eq!(queued.0[0].sent_by, SentBy::Sender(source));
         assert_eq!(
-            queued[0].message,
+            queued.0[0].message,
             Message::Soft(Request::Result(flow_ethos::ResultPayload::Historical(
                 "answer".into()
             )))
         );
-        assert_eq!(queued[0].delivery, flow_ethos::Delivery::Wake);
+        assert_eq!(queued.0[0].delivery, flow_ethos::Delivery::Wake);
 
         // A completed judgment may subsequently be woken by another sender;
         // its next result must follow that new logical input, not the prior
         // sender retained in the old binding.
         let second_sender = Address {
             aspect: Aspect::Field,
-            topic: "review".into(),
+            topic: flow_ethos::Topic("review".into()),
             model: Model::Sol,
         };
         store.seed_metaflow(Metaflow {
             address: second_sender.clone(),
             state: flow_ethos::State::Asleep,
-            past: Vec::new(),
-            queue: Vec::new(),
+            past: flow_ethos::Past(Vec::new()),
+            queue: flow_ethos::Queue(Vec::new()),
         });
         let signal_flow::PrivateSendResponse::SendAccepted(second_input) = store
             .accept_logical_delivery(
@@ -7022,7 +7128,7 @@ mod tests {
         store
             .bind_simplified_reply(SimplifiedReplyBinding {
                 flow_id: "simplified".into(),
-                input_delivery_id: second_input.logical_delivery_id.clone(),
+                input_delivery_id: second_input.logical_delivery_id.clone().0,
                 source: second_sender.clone(),
                 recipient: recipient.clone(),
                 completed: false,
@@ -7033,8 +7139,8 @@ mod tests {
                 &second_input.logical_delivery_id,
                 DeliveryState::Delivered(NativeReceipt {
                     harness_kind: flow_ethos::HarnessKind::Claude,
-                    native_session_id: "claude-session".into(),
-                    native_prompt_id: "prompt-2".into(),
+                    native_session_id: signal_flow::NativeSessionId("claude-session".into()),
+                    native_prompt_id: signal_flow::NativePromptId("prompt-2".into()),
                 }),
             )
             .unwrap();
@@ -7042,7 +7148,7 @@ mod tests {
             store
                 .deliver_simplified_reply(
                     "simplified",
-                    &second_input.logical_delivery_id,
+                    &second_input.logical_delivery_id.0,
                     "claude-session",
                     "prompt-2",
                     "second answer"
@@ -7054,7 +7160,7 @@ mod tests {
             store
                 .deliver_simplified_reply(
                     "simplified",
-                    &second_input.logical_delivery_id,
+                    &second_input.logical_delivery_id.0,
                     "claude-session",
                     "prompt-2",
                     "second answer"
@@ -7064,10 +7170,10 @@ mod tests {
             "duplicate Stop for the next input also queues exactly once"
         );
         let queued = store.metaflow(&recipient).unwrap().unwrap().queue;
-        assert_eq!(queued.len(), 2);
-        assert_eq!(queued[1].sent_by, SentBy::Sender(second_sender));
+        assert_eq!(queued.0.len(), 2);
+        assert_eq!(queued.0[1].sent_by, SentBy::Sender(second_sender));
         assert_eq!(
-            queued[1].message,
+            queued.0[1].message,
             Message::Soft(Request::Result(flow_ethos::ResultPayload::Historical(
                 "second answer".into()
             )))
@@ -7084,25 +7190,25 @@ mod tests {
         let store = fixture.store();
         let source = Address {
             aspect: Aspect::Psyche,
-            topic: "core".into(),
+            topic: flow_ethos::Topic("core".into()),
             model: Model::Fable,
         };
         let sender = Address {
             aspect: Aspect::Psyche,
-            topic: "core".into(),
+            topic: flow_ethos::Topic("core".into()),
             model: Model::Opus,
         };
         let book = Address {
             aspect: Aspect::Psyche,
-            topic: "book".into(),
+            topic: flow_ethos::Topic("book".into()),
             model: Model::Sonnet,
         };
         for address in [&source, &sender, &book] {
             store.seed_metaflow(Metaflow {
                 address: address.clone(),
                 state: flow_ethos::State::Asleep,
-                past: Vec::new(),
-                queue: Vec::new(),
+                past: flow_ethos::Past(Vec::new()),
+                queue: flow_ethos::Queue(Vec::new()),
             });
         }
         let signal_flow::PrivateSendResponse::SendAccepted(input) = store
@@ -7120,7 +7226,7 @@ mod tests {
         store
             .bind_simplified_reply(SimplifiedReplyBinding {
                 flow_id: "simplified-core-primary".into(),
-                input_delivery_id: input.logical_delivery_id.clone(),
+                input_delivery_id: input.logical_delivery_id.clone().0,
                 source: source.clone(),
                 recipient: sender.clone(),
                 completed: false,
@@ -7131,8 +7237,8 @@ mod tests {
                 &input.logical_delivery_id,
                 DeliveryState::Delivered(NativeReceipt {
                     harness_kind: flow_ethos::HarnessKind::Claude,
-                    native_session_id: "claude-core-primary".into(),
-                    native_prompt_id: "prompt-core".into(),
+                    native_session_id: signal_flow::NativeSessionId("claude-core-primary".into()),
+                    native_prompt_id: signal_flow::NativePromptId("prompt-core".into()),
                 }),
             )
             .unwrap();
@@ -7140,7 +7246,7 @@ mod tests {
             store
                 .deliver_simplified_reply(
                     "simplified-core-primary",
-                    &input.logical_delivery_id,
+                    &input.logical_delivery_id.0,
                     "claude-core-primary",
                     "prompt-core",
                     "verbatim presentation body",
@@ -7152,7 +7258,7 @@ mod tests {
             store
                 .deliver_simplified_reply(
                     "simplified-core-primary",
-                    &input.logical_delivery_id,
+                    &input.logical_delivery_id.0,
                     "claude-core-primary",
                     "prompt-core",
                     "verbatim presentation body",
@@ -7162,16 +7268,16 @@ mod tests {
             "replayed Stop cannot create another book order or notice"
         );
         let book_queue = store.metaflow(&book).unwrap().unwrap().queue;
-        assert_eq!(book_queue.len(), 1);
-        assert_eq!(book_queue[0].sent_by, SentBy::Sender(source.clone()));
+        assert_eq!(book_queue.0.len(), 1);
+        assert_eq!(book_queue.0[0].sent_by, SentBy::Sender(source.clone()));
         assert_eq!(
-            book_queue[0].message,
+            book_queue.0[0].message,
             Message::Soft(Request::Order("verbatim presentation body".into()))
         );
         let secondary_queue = store.metaflow(&sender).unwrap().unwrap().queue;
-        assert_eq!(secondary_queue.len(), 1);
-        assert_eq!(secondary_queue[0].sent_by, SentBy::Sender(source));
-        let Message::Soft(Request::Notice(notice)) = &secondary_queue[0].message else {
+        assert_eq!(secondary_queue.0.len(), 1);
+        assert_eq!(secondary_queue.0[0].sent_by, SentBy::Sender(source));
+        let Message::Soft(Request::Notice(notice)) = &secondary_queue.0[0].message else {
             panic!("the core Secondary gets a Notice, not a duplicate body")
         };
         assert!(
@@ -7195,7 +7301,7 @@ mod tests {
         assert!(
             store
                 .record_native_launch_intent(NativeLaunchIntent {
-                    launch_request_id: "created-pane".into(),
+                    launch_request_id: signal_flow::LaunchRequestId("created-pane".into()),
                     prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
                     harness_kind: HarnessKind::Codex,
                     model_name: launch.launch_profile.model_name.clone(),
@@ -7338,7 +7444,7 @@ mod tests {
             .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
                 meta_signal_flow::ConfigureModel {
                     model: Model::Sol,
-                    native: "gpt-sol".into(),
+                    native: meta_signal_flow::Native("gpt-sol".into()),
                 },
             ]))
             .expect("owner model configured");
@@ -7360,20 +7466,20 @@ mod tests {
             .to_owned();
         let address = Address {
             aspect: Aspect::Mind,
-            topic: "core".into(),
+            topic: flow_ethos::Topic("core".into()),
             model: Model::Sol,
         };
         let route = |flow_id: &str| signal_flow::FlowNode {
-            flow_id: flow_id.into(),
-            session_id: format!("session-{flow_id}"),
+            flow_id: flow_ethos::FlowId(flow_id.into()),
+            session_id: signal_flow::SessionId(format!("session-{flow_id}")),
             harness_kind: HarnessKind::Claude,
             endpoint_selection: signal_flow::EndpointSelection::Unavailable,
             herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
                 signal_flow::HerdrRoute {
-                    herdr_session_name: "messaging-build".into(),
-                    herdr_agent_name: format!("agent-{flow_id}"),
-                    herdr_pane_id: format!("pane-{flow_id}"),
-                    herdr_terminal_id: format!("terminal-{flow_id}"),
+                    herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+                    herdr_agent_name: signal_flow::HerdrAgentName(format!("agent-{flow_id}")),
+                    herdr_pane_id: signal_flow::HerdrPaneId(format!("pane-{flow_id}")),
+                    herdr_terminal_id: signal_flow::HerdrTerminalId(format!("terminal-{flow_id}")),
                 },
             ),
             origin: Origin::Unbound,
@@ -7381,22 +7487,22 @@ mod tests {
         };
         let binding =
             |flow_id: &str, pid: i64, uid: i64, start: String| meta_signal_flow::FlowBinding {
-                flow_id: flow_id.into(),
+                flow_id: flow_ethos::FlowId(flow_id.into()),
                 aspect: Aspect::Mind,
-                model_name: "gpt-sol".into(),
+                model_name: flow_ethos::ModelName("gpt-sol".into()),
                 harness_kind: HarnessKind::Claude,
-                native_session_id: format!("session-{flow_id}"),
-                herdr_workspace_id: "workspace".into(),
-                herdr_pane_id: format!("pane-{flow_id}"),
-                herdr_tab_id: format!("tab-{flow_id}"),
-                herdr_terminal_id: format!("terminal-{flow_id}"),
-                herdr_agent_name: format!("agent-{flow_id}"),
+                native_session_id: signal_flow::NativeSessionId(format!("session-{flow_id}")),
+                herdr_workspace_id: signal_flow::HerdrWorkspaceId("workspace".into()),
+                herdr_pane_id: signal_flow::HerdrPaneId(format!("pane-{flow_id}")),
+                herdr_tab_id: meta_signal_flow::HerdrTabId(format!("tab-{flow_id}")),
+                herdr_terminal_id: signal_flow::HerdrTerminalId(format!("terminal-{flow_id}")),
+                herdr_agent_name: signal_flow::HerdrAgentName(format!("agent-{flow_id}")),
                 process_identity: meta_signal_flow::ProcessIdentity {
-                    process_id: pid,
-                    process_user_id: uid,
-                    process_start_token: start,
+                    process_id: meta_signal_flow::ProcessId(pid),
+                    process_user_id: meta_signal_flow::ProcessUserId(uid),
+                    process_start_token: meta_signal_flow::ProcessStartToken(start),
                 },
-                working_directory: "/tmp".into(),
+                working_directory: meta_signal_flow::WorkingDirectory("/tmp".into()),
             };
         let incumbent = binding(
             "incumbent",
@@ -7404,10 +7510,10 @@ mod tests {
             i64::from(metadata.uid()),
             start_token,
         );
-        let role = |flow_id: &str| Caller {
-            flow_id: flow_id.into(),
+        let role = |flow_id: &str| CallerIdentity {
+            flow_id: flow_ethos::FlowId(flow_id.into()),
             aspect: Aspect::Mind,
-            model_name: "gpt-sol".into(),
+            model_name: flow_ethos::ModelName("gpt-sol".into()),
         };
         assert!(matches!(
             store
@@ -7453,10 +7559,13 @@ mod tests {
             .stored_metaflow(&address)
             .expect("metaflow reads")
             .expect("metaflow remains");
-        assert_eq!(adopted.metaflow.past, vec!["incumbent"]);
+        assert_eq!(
+            adopted.metaflow.past,
+            flow_ethos::Past(vec![flow_ethos::FlowId("incumbent".into())])
+        );
         assert_eq!(
             adopted.metaflow.state,
-            flow_ethos::State::Awake("challenger".into())
+            flow_ethos::State::Awake(flow_ethos::FlowId("challenger".into()))
         );
     }
 
@@ -7472,11 +7581,12 @@ mod tests {
         SchemaVersion, TableDescriptor, TableName,
     };
     use signal_flow::{
-        Address, Aspect, Caller, ComposedLaunch, FirstPromptPayload, FlowOrigin, HarnessKind,
-        HerdrPaneBinding, LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, Model,
-        NativeLaunchBinding, NativeLaunchIntent, NativeTargetReceipt, NativeTranscriptAbsence,
-        NativeTranscriptBoundary, NativeTranscriptCursor, Origin, PromptDeliveryIntent,
-        PromptDeliveryResult, Query, RegistrationAcknowledgement, Response, TargetReceiptRequest,
+        Address, Aspect, CallerIdentity, ComposedLaunch, FirstPromptPayload, FlowOrigin,
+        HarnessKind, HerdrPaneBinding, LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile,
+        Model, NativeLaunchBinding, NativeLaunchIntent, NativeTargetReceipt,
+        NativeTranscriptAbsence, NativeTranscriptBoundary, NativeTranscriptCursor, Origin,
+        PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement, Response,
+        TargetReceiptRequest,
     };
 
     struct StoreFixture {
@@ -7509,16 +7619,24 @@ mod tests {
             config
                 .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
                     meta_signal_flow::ConfigureNexus {
-                        source_root: settings.source_root,
-                        stable_codex: settings.stable_codex,
-                        next_codex: settings.next_codex,
-                        harness_profiles: settings.harness_profile_vector,
-                        meta_aspects: settings.meta_aspects,
-                        message_nexus_path_option: Some(settings.message_nexus_path.clone()),
-                        message_nexus_binary_option: Some("/fixture/message-nexus".into()),
+                        source_root: flow_ethos::SourceRoot(settings.source_root),
+                        first_codex_endpoint: settings.stable_codex,
+                        second_codex_endpoint: settings.next_codex,
+                        harness_profiles: flow_ethos::HarnessProfiles(
+                            settings.harness_profile_vector,
+                        ),
+                        meta_aspects: flow_ethos::MetaAspects(settings.meta_aspects),
+                        message_nexus_path_option: Some(flow_ethos::MessageNexusPath(
+                            settings.message_nexus_path.clone(),
+                        )),
+                        message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(
+                            "/fixture/message-nexus".into(),
+                        )),
 
-                        curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                        lease: 60,
+                        curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+                            "/fixture/curriculum.sock".into(),
+                        ),
+                        lease: flow_ethos::Lease(60),
                         presentation_prompt_option: None,
                     },
                 ))
@@ -7546,21 +7664,28 @@ mod tests {
 
         fn launch_profile(&self, launch_request_id: &str) -> LaunchProfile {
             LaunchProfile {
-                launch_request_id: launch_request_id.into(),
-                system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-                user_modules: vec!["operation-main-flow".into()],
+                launch_request_id: signal_flow::LaunchRequestId(launch_request_id.into()),
+                system_modules: signal_flow::SystemModules(vec![
+                    signal_flow::ModuleIdentity("spirit-core".into()),
+                    signal_flow::ModuleIdentity("intent-flow".into()),
+                ]),
+                user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                    "operation-main-flow".into(),
+                )]),
                 address: signal_flow::Address {
                     aspect: Aspect::Field,
-                    topic: "flow".into(),
+                    topic: flow_ethos::Topic("flow".into()),
                     model: signal_flow::Model::Sol,
                 },
-                model_name: "fixture-model".into(),
-                effort: "medium".into(),
+                model_name: flow_ethos::ModelName("fixture-model".into()),
+                effort: signal_flow::Effort("medium".into()),
                 flow_id_option: None,
-                remembering: signal_flow::Remembering::Predecessors(0),
-                herdr_session_name: "fixture-session".into(),
+                remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(
+                    0,
+                )),
+                herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
                 leave_outs_option: None,
-                instruction_prompt: "fixture instruction".into(),
+                instruction_prompt: signal_flow::InstructionPrompt("fixture instruction".into()),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
             }
@@ -7571,40 +7696,42 @@ mod tests {
                 harness_kind: HarnessKind::Codex,
                 launch_profile: self.launch_profile(launch_request_id),
                 system_prompt: signal_flow::SystemPrompt {
-                    system_prompt_text: "fixture system prompt".into(),
-                    system_prompt_sha256: "9".repeat(64),
+                    system_prompt_text: signal_flow::SystemPromptText(
+                        "fixture system prompt".into(),
+                    ),
+                    system_prompt_sha256: signal_flow::SystemPromptSha256("9".repeat(64)),
                 },
                 first_prompt_payload: FirstPromptPayload {
-                    first_prompt_body: "fixture prompt".into(),
-                    prompt_sha256: prompt_sha256.into(),
+                    first_prompt_body: signal_flow::FirstPromptBody("fixture prompt".into()),
+                    prompt_sha256: signal_flow::PromptSha256(prompt_sha256.into()),
                     prompt_part_vector: vec![signal_flow::PromptPart {
-                        prompt_part_text: "fixture prompt".into(),
-                        prompt_sha256: prompt_sha256.into(),
+                        prompt_part_text: signal_flow::PromptPartText("fixture prompt".into()),
+                        prompt_sha256: signal_flow::PromptSha256(prompt_sha256.into()),
                     }],
                 },
                 target_receipt_request: TargetReceiptRequest {
-                    launch_request_id: launch_request_id.into(),
-                    prompt_sha256: prompt_sha256.into(),
+                    launch_request_id: signal_flow::LaunchRequestId(launch_request_id.into()),
+                    prompt_sha256: signal_flow::PromptSha256(prompt_sha256.into()),
                 },
-                leave_outs: Vec::new(),
+                leave_outs: signal_flow::LeaveOuts(Vec::new()),
             }
         }
 
         fn origin(&self) -> Origin {
             Origin::Flow(FlowOrigin {
-                flow_id: "9fc62b".into(),
-                session_id: "caller-session".into(),
+                flow_id: flow_ethos::FlowId("9fc62b".into()),
+                session_id: signal_flow::SessionId("caller-session".into()),
             })
         }
 
         fn pane(&self, launch_request_id: &str) -> HerdrPaneBinding {
             HerdrPaneBinding {
-                launch_request_id: launch_request_id.into(),
-                herdr_session_name: "fixture-session".into(),
-                herdr_agent_name: "fixture-agent".into(),
-                herdr_workspace_id: "fixture-workspace".into(),
-                herdr_pane_id: "w1:p1".into(),
-                herdr_terminal_id: "fixture-terminal".into(),
+                launch_request_id: signal_flow::LaunchRequestId(launch_request_id.into()),
+                herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
+                herdr_agent_name: signal_flow::HerdrAgentName("fixture-agent".into()),
+                herdr_workspace_id: signal_flow::HerdrWorkspaceId("fixture-workspace".into()),
+                herdr_pane_id: signal_flow::HerdrPaneId("w1:p1".into()),
+                herdr_terminal_id: signal_flow::HerdrTerminalId("fixture-terminal".into()),
             }
         }
     }
@@ -7620,15 +7747,21 @@ mod tests {
             launch.harness_kind = HarnessKind::Claude;
             launch.launch_profile.flow_kind = signal_flow::FlowKind::Simplified;
             launch.launch_profile.tool_set = signal_flow::ToolSet::Explicit(Vec::new());
-            launch.launch_profile.instruction_prompt.clear();
-            launch.first_prompt_payload.first_prompt_body.clear();
+            launch.launch_profile.instruction_prompt.0.clear();
+            launch.first_prompt_payload.first_prompt_body.0.clear();
             launch.first_prompt_payload.prompt_part_vector.clear();
             match case {
                 1 => launch.launch_profile.flow_kind = signal_flow::FlowKind::Regular,
-                2 => launch.launch_profile.instruction_prompt = "Actual request".into(),
+                2 => {
+                    launch.launch_profile.instruction_prompt =
+                        signal_flow::InstructionPrompt("Actual request".into())
+                }
                 3 => launch.launch_profile.tool_set = signal_flow::ToolSet::Default,
                 4 => launch.harness_kind = HarnessKind::Codex,
-                5 => launch.first_prompt_payload.prompt_sha256 = "1".repeat(64),
+                5 => {
+                    launch.first_prompt_payload.prompt_sha256 =
+                        signal_flow::PromptSha256("1".repeat(64))
+                }
                 _ => {}
             }
             assert!(matches!(
@@ -7679,7 +7812,7 @@ mod tests {
             LaunchAttemptReservation::Reserved(_)
         ));
         let intent = NativeLaunchIntent {
-            launch_request_id: "request-once".into(),
+            launch_request_id: signal_flow::LaunchRequestId("request-once".into()),
             prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
             harness_kind: HarnessKind::Codex,
             model_name: launch.launch_profile.model_name.clone(),
@@ -7710,7 +7843,7 @@ mod tests {
                 if attempt.launch_attempt_phase == LaunchAttemptPhase::NativeLaunchIntentRecorded
         ));
         let mut changed_profile = launch.clone();
-        changed_profile.launch_profile.effort = "high".into();
+        changed_profile.launch_profile.effort = signal_flow::Effort("high".into());
         assert_eq!(
             store
                 .reserve_launch_attempt(&changed_profile, origin.clone())
@@ -7744,7 +7877,7 @@ mod tests {
         assert!(
             store
                 .record_native_launch_intent(NativeLaunchIntent {
-                    launch_request_id: "request-boundary".into(),
+                    launch_request_id: signal_flow::LaunchRequestId("request-boundary".into()),
                     prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
                     harness_kind: HarnessKind::Claude,
                     model_name: launch.launch_profile.model_name.clone(),
@@ -7761,9 +7894,9 @@ mod tests {
         );
         let pane = fixture.pane("request-boundary");
         let binding = NativeLaunchBinding {
-            launch_request_id: "request-boundary".into(),
-            flow_id: "native-flow".into(),
-            native_session_id: "native-session".into(),
+            launch_request_id: signal_flow::LaunchRequestId("request-boundary".into()),
+            flow_id: flow_ethos::FlowId("native-flow".into()),
+            native_session_id: signal_flow::NativeSessionId("native-session".into()),
             harness_kind: HarnessKind::Claude,
             herdr_pane_binding: pane.clone(),
         };
@@ -7771,33 +7904,33 @@ mod tests {
         assert!(
             store
                 .record_registration_acknowledgement(RegistrationAcknowledgement {
-                    launch_request_id: "request-boundary".into(),
-                    flow_id: "native-flow".into(),
-                    native_session_id: "native-session".into(),
+                    launch_request_id: signal_flow::LaunchRequestId("request-boundary".into()),
+                    flow_id: flow_ethos::FlowId("native-flow".into()),
+                    native_session_id: signal_flow::NativeSessionId("native-session".into()),
                     herdr_pane_binding: pane.clone(),
                 })
                 .unwrap()
         );
         let intent = PromptDeliveryIntent {
-            launch_request_id: "request-boundary".into(),
+            launch_request_id: signal_flow::LaunchRequestId("request-boundary".into()),
             prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
-            flow_id: "native-flow".into(),
-            native_session_id: "native-session".into(),
+            flow_id: flow_ethos::FlowId("native-flow".into()),
+            native_session_id: signal_flow::NativeSessionId("native-session".into()),
             harness_kind: HarnessKind::Claude,
             model_name: launch.launch_profile.model_name.clone(),
             effort: launch.launch_profile.effort.clone(),
-            prompt_sha256_vector: vec![
+            prompt_sha256_vector: vec![signal_flow::PromptSha256(
                 "7777777777777777777777777777777777777777777777777777777777777777".into(),
-            ],
-            parts_submitted: 1,
-            stops_reported: 0,
-            leave_outs: Vec::new(),
+            )],
+            parts_submitted: signal_flow::PartsSubmitted(1),
+            stops_reported: signal_flow::StopsReported(0),
+            leave_outs: signal_flow::LeaveOuts(Vec::new()),
             herdr_pane_binding: pane,
             native_transcript_boundary: NativeTranscriptBoundary::Absent(NativeTranscriptAbsence {
-                native_session_id: "different-session".into(),
+                native_session_id: signal_flow::NativeSessionId("different-session".into()),
                 harness_kind: HarnessKind::Claude,
-                transcript_root_device: "2049".into(),
-                transcript_root_inode: "99143".into(),
+                transcript_root_device: signal_flow::TranscriptRootDevice("2049".into()),
+                transcript_root_inode: signal_flow::TranscriptRootInode("99143".into()),
             }),
         };
         assert!(
@@ -7816,7 +7949,7 @@ mod tests {
         else {
             panic!("absence fixture")
         };
-        absence.native_session_id = "native-session".into();
+        absence.native_session_id = signal_flow::NativeSessionId("native-session".into());
         assert!(
             store
                 .record_prompt_delivery_intent(exact.clone())
@@ -7845,13 +7978,14 @@ mod tests {
         let mut cursor_intent = exact.clone();
         cursor_intent.native_transcript_boundary =
             NativeTranscriptBoundary::Existing(NativeTranscriptCursor {
-                native_session_id: "native-session".into(),
+                native_session_id: signal_flow::NativeSessionId("native-session".into()),
                 harness_kind: HarnessKind::Claude,
-                transcript_device: "2049".into(),
-                transcript_inode: "99144".into(),
-                transcript_byte_offset: 127,
-                transcript_prefix_sha256:
+                transcript_device: signal_flow::TranscriptDevice("2049".into()),
+                transcript_inode: signal_flow::TranscriptInode("99144".into()),
+                transcript_byte_offset: signal_flow::TranscriptByteOffset(127),
+                transcript_prefix_sha256: signal_flow::TranscriptPrefixSha256(
                     "5555555555555555555555555555555555555555555555555555555555555555".into(),
+                ),
             });
         assert!(
             reopened
@@ -7876,10 +8010,11 @@ mod tests {
                         prompt_sha256: cursor_intent.prompt_sha256.clone(),
                         flow_id: cursor_intent.flow_id.clone(),
                         native_session_id: cursor_intent.native_session_id.clone(),
-                        native_turn_id: "native-turn".into(),
-                        receipt_sha256:
+                        native_turn_id: signal_flow::NativeTurnId("native-turn".into()),
+                        receipt_sha256: signal_flow::ReceiptSha256(
                             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
                                 .into(),
+                        ),
                         model_name: cursor_intent.model_name.clone(),
                         effort: cursor_intent.effort.clone(),
                         prompt_sha256_vector: cursor_intent.prompt_sha256_vector.clone(),
@@ -7895,10 +8030,11 @@ mod tests {
                         prompt_sha256: cursor_intent.prompt_sha256,
                         flow_id: cursor_intent.flow_id,
                         native_session_id: cursor_intent.native_session_id,
-                        native_turn_id: "native-turn".into(),
-                        receipt_sha256:
+                        native_turn_id: signal_flow::NativeTurnId("native-turn".into()),
+                        receipt_sha256: signal_flow::ReceiptSha256(
                             "4444444444444444444444444444444444444444444444444444444444444444"
                                 .into(),
+                        ),
                         model_name: cursor_intent.model_name,
                         effort: cursor_intent.effort,
                         prompt_sha256_vector: cursor_intent.prompt_sha256_vector,
@@ -7921,12 +8057,12 @@ mod tests {
         );
         launch.first_prompt_payload.prompt_part_vector = vec![
             signal_flow::PromptPart {
-                prompt_part_text: "part one".into(),
-                prompt_sha256: "a".repeat(64),
+                prompt_part_text: signal_flow::PromptPartText("part one".into()),
+                prompt_sha256: signal_flow::PromptSha256("a".repeat(64)),
             },
             signal_flow::PromptPart {
-                prompt_part_text: "part two".into(),
-                prompt_sha256: "b".repeat(64),
+                prompt_part_text: signal_flow::PromptPartText("part two".into()),
+                prompt_sha256: signal_flow::PromptSha256("b".repeat(64)),
             },
         ];
         store
@@ -7935,13 +8071,16 @@ mod tests {
         assert!(
             store
                 .record_native_launch_intent(NativeLaunchIntent {
-                    launch_request_id: "request-parts".into(),
+                    launch_request_id: signal_flow::LaunchRequestId("request-parts".into()),
                     prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
                     system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
                     harness_kind: HarnessKind::Codex,
                     model_name: launch.launch_profile.model_name.clone(),
                     effort: launch.launch_profile.effort.clone(),
-                    prompt_sha256_vector: vec!["a".repeat(64), "b".repeat(64)],
+                    prompt_sha256_vector: vec![
+                        signal_flow::PromptSha256("a".repeat(64)),
+                        signal_flow::PromptSha256("b".repeat(64))
+                    ],
                 })
                 .unwrap()
         );
@@ -7949,9 +8088,9 @@ mod tests {
         assert!(
             store
                 .record_native_launch_binding(NativeLaunchBinding {
-                    launch_request_id: "request-parts".into(),
-                    flow_id: "parts-flow".into(),
-                    native_session_id: "parts-session".into(),
+                    launch_request_id: signal_flow::LaunchRequestId("request-parts".into()),
+                    flow_id: flow_ethos::FlowId("parts-flow".into()),
+                    native_session_id: signal_flow::NativeSessionId("parts-session".into()),
                     harness_kind: HarnessKind::Codex,
                     herdr_pane_binding: pane.clone(),
                 })
@@ -7960,31 +8099,34 @@ mod tests {
         assert!(
             store
                 .record_registration_acknowledgement(RegistrationAcknowledgement {
-                    launch_request_id: "request-parts".into(),
-                    flow_id: "parts-flow".into(),
-                    native_session_id: "parts-session".into(),
+                    launch_request_id: signal_flow::LaunchRequestId("request-parts".into()),
+                    flow_id: flow_ethos::FlowId("parts-flow".into()),
+                    native_session_id: signal_flow::NativeSessionId("parts-session".into()),
                     herdr_pane_binding: pane.clone(),
                 })
                 .unwrap()
         );
         let first = PromptDeliveryIntent {
-            launch_request_id: "request-parts".into(),
+            launch_request_id: signal_flow::LaunchRequestId("request-parts".into()),
             prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
-            flow_id: "parts-flow".into(),
-            native_session_id: "parts-session".into(),
+            flow_id: flow_ethos::FlowId("parts-flow".into()),
+            native_session_id: signal_flow::NativeSessionId("parts-session".into()),
             harness_kind: HarnessKind::Codex,
             model_name: launch.launch_profile.model_name.clone(),
             effort: launch.launch_profile.effort.clone(),
-            prompt_sha256_vector: vec!["a".repeat(64), "b".repeat(64)],
-            parts_submitted: 1,
-            stops_reported: 2,
-            leave_outs: Vec::new(),
+            prompt_sha256_vector: vec![
+                signal_flow::PromptSha256("a".repeat(64)),
+                signal_flow::PromptSha256("b".repeat(64)),
+            ],
+            parts_submitted: signal_flow::PartsSubmitted(1),
+            stops_reported: signal_flow::StopsReported(2),
+            leave_outs: signal_flow::LeaveOuts(Vec::new()),
             herdr_pane_binding: pane,
             native_transcript_boundary: NativeTranscriptBoundary::Absent(NativeTranscriptAbsence {
-                native_session_id: "parts-session".into(),
+                native_session_id: signal_flow::NativeSessionId("parts-session".into()),
                 harness_kind: HarnessKind::Codex,
-                transcript_root_device: "2049".into(),
-                transcript_root_inode: "99150".into(),
+                transcript_root_device: signal_flow::TranscriptRootDevice("2049".into()),
+                transcript_root_inode: signal_flow::TranscriptRootInode("99150".into()),
             }),
         };
         assert!(store.record_prompt_delivery_intent(first.clone()).unwrap());
@@ -7998,8 +8140,8 @@ mod tests {
             prompt_sha256: intent.prompt_sha256.clone(),
             flow_id: intent.flow_id.clone(),
             native_session_id: intent.native_session_id.clone(),
-            native_turn_id: "parts-turn".into(),
-            receipt_sha256: "c".repeat(64),
+            native_turn_id: signal_flow::NativeTurnId("parts-turn".into()),
+            receipt_sha256: signal_flow::ReceiptSha256("c".repeat(64)),
             model_name: intent.model_name.clone(),
             effort: intent.effort.clone(),
             prompt_sha256_vector: intent.prompt_sha256_vector.clone(),
@@ -8011,7 +8153,7 @@ mod tests {
             "no receipt before the last part is submitted"
         );
         let mut skipped = first.clone();
-        skipped.parts_submitted = 3;
+        skipped.parts_submitted = signal_flow::PartsSubmitted(3);
         assert!(
             !store
                 .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(skipped))
@@ -8019,8 +8161,8 @@ mod tests {
             "no part past the last"
         );
         let mut fewer_stops = first.clone();
-        fewer_stops.parts_submitted = 2;
-        fewer_stops.stops_reported = 1;
+        fewer_stops.parts_submitted = signal_flow::PartsSubmitted(2);
+        fewer_stops.stops_reported = signal_flow::StopsReported(1);
         assert!(
             !store
                 .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(fewer_stops))
@@ -8028,8 +8170,8 @@ mod tests {
             "the Stop count never goes back"
         );
         let mut second = first.clone();
-        second.parts_submitted = 2;
-        second.stops_reported = 3;
+        second.parts_submitted = signal_flow::PartsSubmitted(2);
+        second.stops_reported = signal_flow::StopsReported(3);
         assert!(
             store
                 .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(second.clone()))
@@ -8084,7 +8226,7 @@ mod tests {
             let Response::Started(started) = response else {
                 panic!("start must be accepted")
             };
-            started.flow_id
+            started.flow_id.0
         }
     }
 
@@ -8110,7 +8252,9 @@ mod tests {
         assert_eq!(configuration.source_root, "/home/someone/primary");
         assert_eq!(
             configuration.stable_codex.control_socket_path,
-            "/home/someone/.codex/app-server-control/app-server-control.sock"
+            flow_ethos::ControlSocketPath(
+                "/home/someone/.codex/app-server-control/app-server-control.sock".into()
+            )
         );
         let runtime = store
             .runtime_configuration()
@@ -8267,7 +8411,10 @@ mod tests {
                 .match_records(QueryPlan::all(store.meta_configuration_tables.handover))
                 .expect("handover configuration reads");
             assert_eq!(rows.records().len(), 1, "open {open} has one durable row");
-            assert_eq!(rows.records()[0].publication_deadline, 60_000);
+            assert_eq!(
+                rows.records()[0].publication_deadline,
+                meta_signal_flow::Duration(60_000)
+            );
             drop(store);
         }
     }
@@ -8292,24 +8439,30 @@ mod tests {
         configuration
             .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
                 meta_signal_flow::ConfigureNexus {
-                    source_root: settings.source_root,
-                    stable_codex: settings.stable_codex,
-                    next_codex: settings.next_codex,
-                    harness_profiles: settings.harness_profile_vector,
-                    meta_aspects: settings.meta_aspects,
-                    message_nexus_path_option: Some(settings.message_nexus_path),
-                    message_nexus_binary_option: Some("/fixture/message-nexus".into()),
-                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                    lease: 60,
+                    source_root: flow_ethos::SourceRoot(settings.source_root),
+                    first_codex_endpoint: settings.stable_codex,
+                    second_codex_endpoint: settings.next_codex,
+                    harness_profiles: flow_ethos::HarnessProfiles(settings.harness_profile_vector),
+                    meta_aspects: flow_ethos::MetaAspects(settings.meta_aspects),
+                    message_nexus_path_option: Some(flow_ethos::MessageNexusPath(
+                        settings.message_nexus_path,
+                    )),
+                    message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(
+                        "/fixture/message-nexus".into(),
+                    )),
+                    curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+                        "/fixture/curriculum.sock".into(),
+                    ),
+                    lease: flow_ethos::Lease(60),
                     presentation_prompt_option: None,
                 },
             ))
             .expect("nexus configuration commits");
         let policy = meta_signal_flow::HandoverPolicy {
-            model_name: "claude-opus-5-5".into(),
-            warning_share_left: 15,
-            reminder_text: "Continue every five minutes.".into(),
-            every_minutes: 5,
+            model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
+            warning_share_left: meta_signal_flow::WarningShareLeft(15),
+            reminder_text: meta_signal_flow::ReminderText("Continue every five minutes.".into()),
+            every_minutes: meta_signal_flow::EveryMinutes(5),
         };
         configuration
             .configure_change(meta_signal_flow::ConfigurationChange::HandoverPolicies(
@@ -8318,7 +8471,7 @@ mod tests {
             .unwrap();
         configuration
             .configure_change(meta_signal_flow::ConfigurationChange::HandoverArchive(
-                "/archive/v1".into(),
+                meta_signal_flow::generated::signal::Path("/archive/v1".into()),
             ))
             .unwrap();
         configuration
@@ -8328,15 +8481,15 @@ mod tests {
 
         let address = Address {
             aspect: Aspect::Mind,
-            topic: "upgradeSibling".into(),
+            topic: flow_ethos::Topic("upgradeSibling".into()),
             model: Model::Sol,
         };
         let sibling = HandoverMemory {
             address: address.clone(),
             current: vec![Section {
-                title: "Live".into(),
-                description: "current generation".into(),
-                body: "live bytes".into(),
+                title: signal_flow::Title("Live".into()),
+                description: signal_flow::Description("current generation".into()),
+                body: signal_flow::Body("live bytes".into()),
             }],
             touch: Some(Touch::Unknown),
             generation: 8,
@@ -8346,9 +8499,9 @@ mod tests {
                 predecessor: "predecessor".into(),
                 successor: "successor".into(),
                 sections: vec![Section {
-                    title: "Closed".into(),
-                    description: "archived generation".into(),
-                    body: "closed bytes".into(),
+                    title: signal_flow::Title("Closed".into()),
+                    description: signal_flow::Description("archived generation".into()),
+                    body: signal_flow::Body("closed bytes".into()),
                 }],
                 touch: Some(Touch::Unknown),
             }],
@@ -8369,7 +8522,7 @@ mod tests {
         let predecessor = StoredHandoverConfigurationV1 {
             policies: meta_signal_flow::HandoverPoliciesConfiguration::Configured(vec![policy]),
             archive: meta_signal_flow::HandoverArchiveConfiguration::Configured(
-                "/archive/v1".into(),
+                meta_signal_flow::generated::signal::Path("/archive/v1".into()),
             ),
             count: meta_signal_flow::HandoverCountConfiguration::Configured(3),
         };
@@ -8401,7 +8554,10 @@ mod tests {
         let upgraded = ConfigurationOnlyStore::open(&path)
             .expect("the actual configuration opener admits and upgrades v1");
         let snapshot = upgraded.configuration_snapshot().unwrap().unwrap();
-        assert_eq!(snapshot.publication_deadline, 60_000);
+        assert_eq!(
+            snapshot.publication_deadline,
+            meta_signal_flow::Duration(60_000)
+        );
         assert_eq!(snapshot.handover_policies, predecessor.policies);
         assert_eq!(snapshot.handover_archive, predecessor.archive);
         assert_eq!(snapshot.handover_count, predecessor.count);
@@ -8423,8 +8579,8 @@ mod tests {
                     .configuration_snapshot()
                     .unwrap()
                     .unwrap()
-                    .publication_deadline,
-                60_000
+                    .configured_publication_deadline,
+                meta_signal_flow::ConfiguredPublicationDeadline(meta_signal_flow::Duration(60_000))
             );
             drop(running);
         }
@@ -8443,16 +8599,22 @@ mod tests {
         config
             .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
                 meta_signal_flow::ConfigureNexus {
-                    source_root: settings.source_root,
-                    stable_codex: settings.stable_codex,
-                    next_codex: settings.next_codex,
-                    harness_profiles: settings.harness_profile_vector,
-                    meta_aspects: settings.meta_aspects,
-                    message_nexus_path_option: Some(settings.message_nexus_path.clone()),
-                    message_nexus_binary_option: Some("/fixture/message-nexus".into()),
+                    source_root: flow_ethos::SourceRoot(settings.source_root),
+                    first_codex_endpoint: settings.stable_codex,
+                    second_codex_endpoint: settings.next_codex,
+                    harness_profiles: flow_ethos::HarnessProfiles(settings.harness_profile_vector),
+                    meta_aspects: flow_ethos::MetaAspects(settings.meta_aspects),
+                    message_nexus_path_option: Some(flow_ethos::MessageNexusPath(
+                        settings.message_nexus_path.clone(),
+                    )),
+                    message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(
+                        "/fixture/message-nexus".into(),
+                    )),
 
-                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-                    lease: 60,
+                    curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+                        "/fixture/curriculum.sock".into(),
+                    ),
+                    lease: flow_ethos::Lease(60),
                     presentation_prompt_option: None,
                 },
             ))
@@ -8462,7 +8624,7 @@ mod tests {
         let store = FlowStore::open_configured(&path).expect("configured Memory opens");
         store
             .record_lease_step(PaneLease {
-                delivery_id: "interrupted-delivery".into(),
+                delivery_id: meta_signal_flow::DeliveryId("interrupted-delivery".into()),
                 flow_id: "flow-1".into(),
                 herdr_pane_id: "pane-1".into(),
                 lease_step: LeaseStep::Placed,
@@ -8488,7 +8650,10 @@ mod tests {
             .records()
             .to_vec();
         assert_eq!(leases.len(), 1, "either open did not settle the lease");
-        assert_eq!(leases[0].delivery_id, "interrupted-delivery");
+        assert_eq!(
+            leases[0].delivery_id,
+            meta_signal_flow::DeliveryId("interrupted-delivery".into())
+        );
     }
 
     /// Sets redb's recovery-required flag, as a writer killed before it
@@ -8793,10 +8958,10 @@ mod tests {
         let fixture = StoreFixture::new();
         let store = fixture.store();
         let endpoint = |name: &str| meta_signal_flow::CodexEndpoint {
-            client_path: format!("/opt/{name}-client"),
-            home: format!("/srv/{name}"),
-            control_socket_path: format!("/srv/{name}/control.sock"),
-            model_name_vector: vec![format!("{name}-model")],
+            client_path: flow_ethos::ClientPath(format!("/opt/{name}-client")),
+            home: flow_ethos::Home(format!("/srv/{name}")),
+            control_socket_path: flow_ethos::ControlSocketPath(format!("/srv/{name}/control.sock")),
+            model_name_vector: vec![flow_ethos::ModelName(format!("{name}-model"))],
         };
         let configuration = Configuration {
             ordinary_socket_path: "/tmp/ordinary-test.sock".into(),
@@ -8806,9 +8971,9 @@ mod tests {
             next_codex: endpoint("next"),
             harness_profile_vector: vec![meta_signal_flow::HarnessProfile {
                 harness_kind: signal_flow::HarnessKind::Codex,
-                command_sigil_vector: vec!["/".into()],
-                interrupt_keys: vec!["esc".into()],
-                submit_keys: Vec::new(),
+                command_sigil_vector: vec![flow_ethos::CommandSigil("/".into())],
+                interrupt_keys: flow_ethos::InterruptKeys(vec![flow_ethos::KeyName("esc".into())]),
+                submit_keys: flow_ethos::SubmitKeys(Vec::new()),
             }],
             meta_aspects: vec![signal_flow::Aspect::Psyche, signal_flow::Aspect::Mind],
             message_nexus_path: "/opt/message-nexus".into(),
@@ -8834,13 +8999,15 @@ mod tests {
         let store = fixture.store();
         let flow_id = fixture.start(&store);
         let Response::RecipientResolved(node) = store
-            .apply(Query::ResolveRecipient(flow_id.clone()))
+            .apply(Query::ResolveRecipient(
+                signal_flow::RecipientResolutionRequest(flow_ethos::FlowId(flow_id.clone())),
+            ))
             .expect("identity resolves")
         else {
             panic!("active flow must resolve")
         };
-        assert_eq!(node.flow_id, flow_id);
-        assert_eq!(node.session_id, "thread-1");
+        assert_eq!(node.flow_id.0, flow_id);
+        assert_eq!(node.session_id, signal_flow::SessionId("thread-1".into()));
         assert_eq!(node.harness_kind, signal_flow::HarnessKind::Codex);
         assert!(matches!(
             node.endpoint_selection,
@@ -8860,21 +9027,21 @@ mod tests {
         let fixture = StoreFixture::new();
         let store = fixture.store();
         let node = signal_flow::FlowNode {
-            flow_id: "da1e3f".into(),
-            session_id: "claude-session".into(),
+            flow_id: flow_ethos::FlowId("da1e3f".into()),
+            session_id: signal_flow::SessionId("claude-session".into()),
             harness_kind: signal_flow::HarnessKind::Claude,
             endpoint_selection: signal_flow::EndpointSelection::Unavailable,
             herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
                 signal_flow::HerdrRoute {
-                    herdr_session_name: "messaging-build".into(),
-                    herdr_agent_name: "recipient".into(),
-                    herdr_pane_id: "w1:p2".into(),
-                    herdr_terminal_id: "term-current".into(),
+                    herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+                    herdr_agent_name: signal_flow::HerdrAgentName("recipient".into()),
+                    herdr_pane_id: signal_flow::HerdrPaneId("w1:p2".into()),
+                    herdr_terminal_id: signal_flow::HerdrTerminalId("term-current".into()),
                 },
             ),
             origin: signal_flow::Origin::Flow(signal_flow::FlowOrigin {
-                flow_id: "da1e3f".into(),
-                session_id: "claude-session".into(),
+                flow_id: flow_ethos::FlowId("da1e3f".into()),
+                session_id: signal_flow::SessionId("claude-session".into()),
             }),
             flow_lifecycle: signal_flow::FlowLifecycle::Active,
         };
@@ -8885,7 +9052,9 @@ mod tests {
         assert_eq!(
             fixture
                 .store()
-                .apply(Query::ResolveRecipient("da1e3f".into()))
+                .apply(Query::ResolveRecipient(
+                    signal_flow::RecipientResolutionRequest(flow_ethos::FlowId("da1e3f".into()))
+                ))
                 .unwrap(),
             Response::RecipientResolved(node)
         );
@@ -8893,21 +9062,21 @@ mod tests {
 
     fn pane_node(flow_id: &str, pane: &str) -> signal_flow::FlowNode {
         signal_flow::FlowNode {
-            flow_id: flow_id.into(),
-            session_id: format!("{flow_id}-session"),
+            flow_id: flow_ethos::FlowId(flow_id.into()),
+            session_id: signal_flow::SessionId(format!("{flow_id}-session")),
             harness_kind: signal_flow::HarnessKind::Claude,
             endpoint_selection: signal_flow::EndpointSelection::Unavailable,
             herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
                 signal_flow::HerdrRoute {
-                    herdr_session_name: "messaging-build".into(),
-                    herdr_agent_name: format!("agent-{pane}"),
-                    herdr_pane_id: pane.into(),
-                    herdr_terminal_id: format!("terminal-{pane}"),
+                    herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+                    herdr_agent_name: signal_flow::HerdrAgentName(format!("agent-{pane}")),
+                    herdr_pane_id: signal_flow::HerdrPaneId(pane.into()),
+                    herdr_terminal_id: signal_flow::HerdrTerminalId(format!("terminal-{pane}")),
                 },
             ),
             origin: signal_flow::Origin::Flow(signal_flow::FlowOrigin {
-                flow_id: "field-owner".into(),
-                session_id: "messaging-build".into(),
+                flow_id: flow_ethos::FlowId("field-owner".into()),
+                session_id: signal_flow::SessionId("messaging-build".into()),
             }),
             flow_lifecycle: signal_flow::FlowLifecycle::Pending,
         }
@@ -8917,10 +9086,10 @@ mod tests {
     fn a_role_is_kept_with_its_binding_and_a_different_one_conflicts() {
         let fixture = StoreFixture::new();
         let store = fixture.store();
-        let role = signal_flow::Caller {
-            flow_id: "psyche-high".into(),
+        let role = signal_flow::CallerIdentity {
+            flow_id: flow_ethos::FlowId("psyche-high".into()),
             aspect: Aspect::Psyche,
-            model_name: "claude-opus-5-5".into(),
+            model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
         };
         let node = pane_node("psyche-high", "w1:p3");
         assert!(matches!(
@@ -8935,12 +9104,12 @@ mod tests {
                 .flows_in_pane("messaging-build", "w1:p3")
                 .unwrap()
                 .into_iter()
-                .map(|node| node.flow_id)
+                .map(|node| node.flow_id.0)
                 .collect::<Vec<_>>(),
             vec!["psyche-high".to_string()]
         );
         let mut other = role;
-        other.model_name = "claude-sonnet".into();
+        other.model_name = flow_ethos::ModelName("claude-sonnet".into());
         assert_eq!(
             store.register_flow_in_role(node, other).unwrap(),
             super::FlowRegistration::ConflictingBinding
@@ -8952,21 +9121,21 @@ mod tests {
         let fixture = StoreFixture::new();
         let store = fixture.store();
         let node = signal_flow::FlowNode {
-            flow_id: "da1e3f".into(),
-            session_id: "da1e3f9d-full".into(),
+            flow_id: flow_ethos::FlowId("da1e3f".into()),
+            session_id: signal_flow::SessionId("da1e3f9d-full".into()),
             harness_kind: signal_flow::HarnessKind::Claude,
             endpoint_selection: signal_flow::EndpointSelection::Unavailable,
             herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
                 signal_flow::HerdrRoute {
-                    herdr_session_name: "messaging-build".into(),
-                    herdr_agent_name: "recipient".into(),
-                    herdr_pane_id: "w1:p2".into(),
-                    herdr_terminal_id: "term-current".into(),
+                    herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+                    herdr_agent_name: signal_flow::HerdrAgentName("recipient".into()),
+                    herdr_pane_id: signal_flow::HerdrPaneId("w1:p2".into()),
+                    herdr_terminal_id: signal_flow::HerdrTerminalId("term-current".into()),
                 },
             ),
             origin: signal_flow::Origin::Flow(signal_flow::FlowOrigin {
-                flow_id: "da1e3f".into(),
-                session_id: "da1e3f9d-full".into(),
+                flow_id: flow_ethos::FlowId("da1e3f".into()),
+                session_id: signal_flow::SessionId("da1e3f9d-full".into()),
             }),
             flow_lifecycle: signal_flow::FlowLifecycle::Active,
         };
@@ -8975,7 +9144,7 @@ mod tests {
             super::FlowRegistration::Registered(_)
         ));
         let mut conflicting_session = node.clone();
-        conflicting_session.session_id = "da1e3f9d-replaced".into();
+        conflicting_session.session_id = signal_flow::SessionId("da1e3f9d-replaced".into());
         assert_eq!(
             store.register_flow(conflicting_session).unwrap(),
             super::FlowRegistration::ConflictingBinding
@@ -8986,7 +9155,7 @@ mod tests {
         else {
             panic!("fixture route")
         };
-        route.herdr_terminal_id = "term-replaced".into();
+        route.herdr_terminal_id = signal_flow::HerdrTerminalId("term-replaced".into());
         assert_eq!(
             store.register_flow(conflicting_route).unwrap(),
             super::FlowRegistration::ConflictingBinding
@@ -9121,16 +9290,18 @@ mod tests {
         configuration
             .configure_change(meta_signal_flow::ConfigurationChange::HandoverPolicies(
                 vec![meta_signal_flow::HandoverPolicy {
-                    model_name: "claude-opus-5-5".into(),
-                    warning_share_left: 15,
-                    reminder_text: "Continue every five minutes.".into(),
-                    every_minutes: 5,
+                    model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
+                    warning_share_left: meta_signal_flow::WarningShareLeft(15),
+                    reminder_text: meta_signal_flow::ReminderText(
+                        "Continue every five minutes.".into(),
+                    ),
+                    every_minutes: meta_signal_flow::EveryMinutes(5),
                 }],
             ))
             .expect("policy config commits");
         configuration
             .configure_change(meta_signal_flow::ConfigurationChange::HandoverArchive(
-                "/srv/legacy".into(),
+                meta_signal_flow::generated::signal::Path("/srv/legacy".into()),
             ))
             .expect("archive config commits");
         configuration
@@ -9144,16 +9315,20 @@ mod tests {
             configured.handover_policies,
             meta_signal_flow::HandoverPoliciesConfiguration::Configured(vec![
                 meta_signal_flow::HandoverPolicy {
-                    model_name: "claude-opus-5-5".into(),
-                    warning_share_left: 15,
-                    reminder_text: "Continue every five minutes.".into(),
-                    every_minutes: 5,
+                    model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
+                    warning_share_left: meta_signal_flow::WarningShareLeft(15),
+                    reminder_text: meta_signal_flow::ReminderText(
+                        "Continue every five minutes.".into()
+                    ),
+                    every_minutes: meta_signal_flow::EveryMinutes(5),
                 },
             ])
         );
         assert_eq!(
             configured.handover_archive,
-            meta_signal_flow::HandoverArchiveConfiguration::Configured("/srv/legacy".into())
+            meta_signal_flow::HandoverArchiveConfiguration::Configured(
+                meta_signal_flow::generated::signal::Path("/srv/legacy".into())
+            )
         );
         assert_eq!(
             configured.handover_count,
@@ -9348,8 +9523,8 @@ mod tests {
                 .configuration_snapshot()
                 .expect("snapshot reads")
                 .expect("configured")
-                .protected_addresses,
-            Vec::<signal_flow::Address>::new()
+                .configured_protected_addresses,
+            meta_signal_flow::ConfiguredProtectedAddresses(Vec::<signal_flow::Address>::new())
         );
         drop(store);
 
@@ -9413,7 +9588,12 @@ mod tests {
     impl ScriptedRequestIdDrawer {
         fn new(draws: impl IntoIterator<Item = &'static str>) -> Self {
             Self {
-                draws: std::sync::Mutex::new(draws.into_iter().map(str::to_owned).collect()),
+                draws: std::sync::Mutex::new(
+                    draws
+                        .into_iter()
+                        .map(|draw| flow_ethos::RequestId(draw.to_owned()))
+                        .collect(),
+                ),
             }
         }
     }
@@ -9432,7 +9612,7 @@ mod tests {
 
     impl super::logical_delivery::DrawsRequestId for FixedRequestIdDrawer {
         fn draw_request_id(&self) -> Result<flow_ethos::RequestId, super::StoreError> {
-            Ok("abcd".into())
+            Ok(flow_ethos::RequestId("abcd".into()))
         }
     }
 
@@ -9456,8 +9636,8 @@ mod tests {
             .assert(Assertion::new(
                 store.logical_deliveries.request_ids,
                 RequestIdBinding {
-                    request_id: "held".into(),
-                    logical_delivery_id: "delivery-held".into(),
+                    request_id: flow_ethos::RequestId("held".into()),
+                    logical_delivery_id: flow_ethos::LogicalDeliveryId("delivery-held".into()),
                     closure: RequestClosure::Open,
                 },
             ))
@@ -9469,7 +9649,7 @@ mod tests {
 
         assert_eq!(
             MintsRequestIds::mint_request_id(&store).expect("minting reads Memory"),
-            Ok("free".into())
+            Ok(flow_ethos::RequestId("free".into()))
         );
     }
 
@@ -9488,19 +9668,19 @@ mod tests {
         );
         let sender = signal_flow::Address {
             aspect: signal_flow::Aspect::Mind,
-            topic: "independentIds".into(),
+            topic: flow_ethos::Topic("independentIds".into()),
             model: signal_flow::Model::Sol,
         };
         let recipient = signal_flow::Address {
             aspect: signal_flow::Aspect::Field,
-            topic: "independentIds".into(),
+            topic: flow_ethos::Topic("independentIds".into()),
             model: signal_flow::Model::Sol,
         };
         store.seed_metaflow(flow_ethos::Metaflow {
             address: recipient.clone(),
             state: flow_ethos::State::Asleep,
-            past: Vec::new(),
-            queue: Vec::new(),
+            past: flow_ethos::Past(Vec::new()),
+            queue: flow_ethos::Queue(Vec::new()),
         });
         let admit = |words: &str| {
             let PrivateSendResponse::SendAccepted(accepted) = store
@@ -9519,10 +9699,10 @@ mod tests {
         };
         let first = admit("first");
         let second = admit("second");
-        assert_eq!(first.request_id, "r001");
-        assert_eq!(second.request_id, "r002");
-        assert_ne!(first.logical_delivery_id, first.request_id);
-        assert_ne!(second.logical_delivery_id, second.request_id);
+        assert_eq!(first.request_id, flow_ethos::RequestId("r001".into()));
+        assert_eq!(second.request_id, flow_ethos::RequestId("r002".into()));
+        assert_ne!(first.logical_delivery_id.0, first.request_id.0);
+        assert_ne!(second.logical_delivery_id.0, second.request_id.0);
         assert_ne!(first.logical_delivery_id, second.logical_delivery_id);
     }
 
@@ -9538,8 +9718,8 @@ mod tests {
             .assert(Assertion::new(
                 store.logical_deliveries.request_ids,
                 RequestIdBinding {
-                    request_id: "held".into(),
-                    logical_delivery_id: "delivery-held".into(),
+                    request_id: flow_ethos::RequestId("held".into()),
+                    logical_delivery_id: flow_ethos::LogicalDeliveryId("delivery-held".into()),
                     closure: RequestClosure::Open,
                 },
             ))
@@ -9560,7 +9740,10 @@ mod tests {
             .match_records(QueryPlan::all(store.logical_deliveries.request_ids))
             .expect("bindings read");
         assert_eq!(bindings.records().len(), 1, "minting writes no binding");
-        assert_eq!(bindings.records()[0].request_id, "held");
+        assert_eq!(
+            bindings.records()[0].request_id,
+            flow_ethos::RequestId("held".into())
+        );
     }
 
     #[test]
@@ -9598,7 +9781,7 @@ mod tests {
         );
         assert_eq!(
             MintsRequestIds::mint_request_id(&store).expect("minting reads Memory"),
-            Ok("z9a0".into())
+            Ok(flow_ethos::RequestId("z9a0".into()))
         );
         assert!(
             store
@@ -9644,8 +9827,8 @@ mod tests {
             .assert(Assertion::new(
                 store.logical_deliveries.request_ids,
                 RequestIdBinding {
-                    request_id: "same".into(),
-                    logical_delivery_id: "old-delivery".into(),
+                    request_id: flow_ethos::RequestId("same".into()),
+                    logical_delivery_id: flow_ethos::LogicalDeliveryId("old-delivery".into()),
                     closure: RequestClosure::Open,
                 },
             ))
@@ -9656,7 +9839,7 @@ mod tests {
         );
         assert_eq!(
             MintsRequestIds::mint_request_id(&store).expect("held mint reads"),
-            Ok("next".into()),
+            Ok(flow_ethos::RequestId("next".into())),
             "a held id is skipped"
         );
 
@@ -9673,7 +9856,7 @@ mod tests {
         );
         assert_eq!(
             MintsRequestIds::mint_request_id(&store).expect("released mint reads"),
-            Ok("same".into()),
+            Ok(flow_ethos::RequestId("same".into())),
             "only the archive commit frees an id for reuse"
         );
     }
@@ -9704,20 +9887,20 @@ mod tests {
         );
         let requester = signal_flow::Address {
             aspect: signal_flow::Aspect::Mind,
-            topic: "answerRequester".into(),
+            topic: flow_ethos::Topic("answerRequester".into()),
             model: signal_flow::Model::Sol,
         };
         let answerer = signal_flow::Address {
             aspect: signal_flow::Aspect::Field,
-            topic: "answerRecipient".into(),
+            topic: flow_ethos::Topic("answerRecipient".into()),
             model: signal_flow::Model::Sol,
         };
         for address in [&requester, &answerer] {
             store.seed_metaflow(flow_ethos::Metaflow {
                 address: address.clone(),
                 state: flow_ethos::State::Asleep,
-                past: Vec::new(),
-                queue: Vec::new(),
+                past: flow_ethos::Past(Vec::new()),
+                queue: flow_ethos::Queue(Vec::new()),
             });
         }
         let PrivateSendResponse::SendAccepted(order) = store
@@ -9732,32 +9915,32 @@ mod tests {
         else {
             panic!("first Order accepted")
         };
-        assert_eq!(order.request_id, "ord1");
+        assert_eq!(order.request_id, flow_ethos::RequestId("ord1".into()));
         let result = |request_id: &str| {
             SendableMessage::Soft(SendableRequest::Result(
                 signal_flow::SendableRequest_Result_Data {
-                    request_id: request_id.into(),
+                    request_id: flow_ethos::RequestId(request_id.into()),
                     string: "done".into(),
                 },
             ))
         };
         let stranger = signal_flow::Address {
             aspect: signal_flow::Aspect::Psyche,
-            topic: "answerStranger".into(),
+            topic: flow_ethos::Topic("answerStranger".into()),
             model: signal_flow::Model::Opus,
         };
         for (answering, requesting, message) in [
             (
                 answerer.clone(),
                 requester.clone(),
-                result(&order.request_id),
+                result(&order.request_id.0),
             ),
             (
                 stranger.clone(),
                 requester.clone(),
-                result(&order.request_id),
+                result(&order.request_id.0),
             ),
-            (answerer.clone(), stranger, result(&order.request_id)),
+            (answerer.clone(), stranger, result(&order.request_id.0)),
             (
                 answerer.clone(),
                 requester.clone(),
@@ -9790,14 +9973,14 @@ mod tests {
                 &order.logical_delivery_id,
                 DeliveryState::Delivered(NativeReceipt {
                     harness_kind: signal_flow::HarnessKind::Codex,
-                    native_session_id: "first-order-session".into(),
-                    native_prompt_id: "first-order-turn".into(),
+                    native_session_id: signal_flow::NativeSessionId("first-order-session".into()),
+                    native_prompt_id: signal_flow::NativePromptId("first-order-turn".into()),
                 }),
             )
             .expect("first Order delivered");
 
         let resolved = store
-            .resolve_sendable_message(&answerer, &requester, result(&order.request_id))
+            .resolve_sendable_message(&answerer, &requester, result(&order.request_id.0))
             .expect("first Result resolution reads")
             .expect("first Result resolves");
         let Message::Soft(Request::Result(ResultPayload::Answered(answered))) = &resolved else {
@@ -9817,7 +10000,7 @@ mod tests {
         else {
             panic!("first Result accepted")
         };
-        assert_eq!(answer.request_id, "ans1");
+        assert_eq!(answer.request_id, flow_ethos::RequestId("ans1".into()));
         assert_ne!(answer.request_id, order.request_id);
         assert_eq!(
             MintsRequestIds::request_binding(&store, &order.request_id)
@@ -9831,24 +10014,25 @@ mod tests {
             .expect("Order debug reads")
             .expect("Order remains held");
         assert_eq!(
-            debugged.receipt, None,
+            debugged.receipt,
+            meta_signal_flow::Receipt(None),
             "a direct lifecycle transition invents no queue-attempt receipt"
         );
         assert_eq!(
             debugged.read_by,
-            Some(answer.logical_delivery_id.clone()),
+            meta_signal_flow::ReadBy(Some(answer.logical_delivery_id.clone())),
             "the answer is referenced by its logical id, never its reusable request id"
         );
         assert_eq!(
             store
-                .resolve_sendable_message(&requester, &answerer, result(&answer.request_id))
+                .resolve_sendable_message(&requester, &answerer, result(&answer.request_id.0))
                 .expect("an answer's own id reads"),
             Err(Refusal::Unresolved),
             "a Result cannot answer another Result"
         );
         assert_eq!(
             store
-                .resolve_sendable_message(&answerer, &requester, result(&order.request_id))
+                .resolve_sendable_message(&answerer, &requester, result(&order.request_id.0))
                 .expect("duplicate first Result reads"),
             Err(Refusal::Unresolved),
             "the first Order is already closed"
@@ -9873,20 +10057,20 @@ mod tests {
                 &answer.logical_delivery_id,
                 DeliveryState::Delivered(NativeReceipt {
                     harness_kind: signal_flow::HarnessKind::Codex,
-                    native_session_id: "first-answer-session".into(),
-                    native_prompt_id: "first-answer-turn".into(),
+                    native_session_id: signal_flow::NativeSessionId("first-answer-session".into()),
+                    native_prompt_id: signal_flow::NativePromptId("first-answer-turn".into()),
                 }),
             )
             .expect("first Result delivered");
         assert_eq!(
             store
-                .archive_request(&answer.request_id, &answerer)
+                .archive_request(&answer.request_id.0, &answerer)
                 .expect("first Result archive reads"),
             Ok(())
         );
         assert_eq!(
             store
-                .archive_request(&order.request_id, &requester)
+                .archive_request(&order.request_id.0, &requester)
                 .expect("first Order archive reads"),
             Ok(())
         );
@@ -9922,14 +10106,14 @@ mod tests {
                 &reused.logical_delivery_id,
                 DeliveryState::Delivered(NativeReceipt {
                     harness_kind: signal_flow::HarnessKind::Codex,
-                    native_session_id: "second-order-session".into(),
-                    native_prompt_id: "second-order-turn".into(),
+                    native_session_id: signal_flow::NativeSessionId("second-order-session".into()),
+                    native_prompt_id: signal_flow::NativePromptId("second-order-turn".into()),
                 }),
             )
             .expect("reused-id Order delivered");
 
         let duplicate = store
-            .resolve_sendable_message(&answerer, &requester, result(&reused.request_id))
+            .resolve_sendable_message(&answerer, &requester, result(&reused.request_id.0))
             .expect("delayed duplicate resolution reads")
             .expect("the accepted reuse risk resolves to the current Order");
         let PrivateSendResponse::SendAccepted(second_answer) = store
@@ -9944,7 +10128,10 @@ mod tests {
         else {
             panic!("delayed duplicate answer accepted")
         };
-        assert_eq!(second_answer.request_id, "ans2");
+        assert_eq!(
+            second_answer.request_id,
+            flow_ethos::RequestId("ans2".into())
+        );
         assert_eq!(
             MintsRequestIds::request_binding(&store, &reused.request_id)
                 .expect("reused binding reads")
@@ -9979,8 +10166,10 @@ mod tests {
                 && snapshot.delivery_state
                     == DeliveryState::Delivered(NativeReceipt {
                         harness_kind: signal_flow::HarnessKind::Codex,
-                        native_session_id: "second-order-session".into(),
-                        native_prompt_id: "second-order-turn".into(),
+                        native_session_id: signal_flow::NativeSessionId(
+                            "second-order-session".into(),
+                        ),
+                        native_prompt_id: signal_flow::NativePromptId("second-order-turn".into()),
                     })
         }));
     }
@@ -10009,19 +10198,19 @@ mod tests {
             .expect("previous store identity seeds");
         let sender = signal_flow::Address {
             aspect: signal_flow::Aspect::Mind,
-            topic: "replacementSender".into(),
+            topic: flow_ethos::Topic("replacementSender".into()),
             model: signal_flow::Model::Sol,
         };
         let recipient = signal_flow::Address {
             aspect: signal_flow::Aspect::Field,
-            topic: "replacementRecipient".into(),
+            topic: flow_ethos::Topic("replacementRecipient".into()),
             model: signal_flow::Model::Sol,
         };
         previous_store.seed_metaflow(flow_ethos::Metaflow {
             address: recipient.clone(),
             state: flow_ethos::State::Asleep,
-            past: Vec::new(),
-            queue: Vec::new(),
+            past: flow_ethos::Past(Vec::new()),
+            queue: flow_ethos::Queue(Vec::new()),
         });
         let PrivateSendResponse::SendAccepted(previous_request) = previous_store
             .accept_logical_delivery(
@@ -10035,7 +10224,10 @@ mod tests {
         else {
             panic!("previous request accepted")
         };
-        assert_eq!(previous_request.request_id, "old1");
+        assert_eq!(
+            previous_request.request_id,
+            flow_ethos::RequestId("old1".into())
+        );
 
         let replacement = StoreFixture::new();
         let mut replacement_store = replacement.store();
@@ -10048,9 +10240,9 @@ mod tests {
         assert_eq!(
             replacement_store
                 .configure_counters(meta_signal_flow::ConfigureCounters {
-                    logical_delivery: 120,
-                    queue_attempt: 45,
-                    send_outcome: 300,
+                    logical_delivery: meta_signal_flow::LogicalDelivery(120),
+                    queue_attempt: meta_signal_flow::QueueAttempt(45),
+                    send_outcome: meta_signal_flow::SendOutcome(300),
                 })
                 .expect("replacement counters configure"),
             super::ConfigureOutcome::Replaced
@@ -10064,8 +10256,14 @@ mod tests {
         let replacement_identity = replacement_store
             .store_identity()
             .expect("replacement store identity seeds");
-        assert_eq!(previous_identity, "aaaaaaaaaaaaaaaa");
-        assert_eq!(replacement_identity, "bbbbbbbbbbbbbbbb");
+        assert_eq!(
+            previous_identity,
+            signal_flow::StoreIdentity("aaaaaaaaaaaaaaaa".into())
+        );
+        assert_eq!(
+            replacement_identity,
+            signal_flow::StoreIdentity("bbbbbbbbbbbbbbbb".into())
+        );
         assert_ne!(replacement_identity, previous_identity);
     }
 
@@ -10080,19 +10278,19 @@ mod tests {
         let store = fixture.store();
         let sender = signal_flow::Address {
             aspect: signal_flow::Aspect::Mind,
-            topic: "terminalSender".into(),
+            topic: flow_ethos::Topic("terminalSender".into()),
             model: signal_flow::Model::Sol,
         };
         let recipient = signal_flow::Address {
             aspect: signal_flow::Aspect::Field,
-            topic: "terminalRecipient".into(),
+            topic: flow_ethos::Topic("terminalRecipient".into()),
             model: signal_flow::Model::Sol,
         };
         store.seed_metaflow(flow_ethos::Metaflow {
             address: recipient.clone(),
             state: flow_ethos::State::Asleep,
-            past: Vec::new(),
-            queue: Vec::new(),
+            past: flow_ethos::Past(Vec::new()),
+            queue: flow_ethos::Queue(Vec::new()),
         });
         let admit = |words: &str| {
             let PrivateSendResponse::SendAccepted(accepted) = store
@@ -10126,7 +10324,7 @@ mod tests {
             }
             assert_eq!(
                 store
-                    .archive_request(&accepted.request_id, &sender)
+                    .archive_request(&accepted.request_id.0, &sender)
                     .expect("unfinished archive reads"),
                 Err(signal_flow::ArchiveRejection::NotYet)
             );
@@ -10134,8 +10332,8 @@ mod tests {
         let terminal = [
             DeliveryState::Delivered(NativeReceipt {
                 harness_kind: flow_ethos::HarnessKind::Codex,
-                native_session_id: "terminal-session".into(),
-                native_prompt_id: "terminal-prompt".into(),
+                native_session_id: signal_flow::NativeSessionId("terminal-session".into()),
+                native_prompt_id: signal_flow::NativePromptId("terminal-prompt".into()),
             }),
             DeliveryState::Read,
             DeliveryState::Failed(signal_flow::Refusal::Direct("terminal failure".into())),
@@ -10162,7 +10360,7 @@ mod tests {
             );
             assert_eq!(
                 store
-                    .archive_request(&accepted.request_id, &sender)
+                    .archive_request(&accepted.request_id.0, &sender)
                     .expect("terminal archive reads"),
                 Ok(())
             );
@@ -10174,14 +10372,14 @@ mod tests {
                 &archived.logical_delivery_id,
                 DeliveryState::Delivered(NativeReceipt {
                     harness_kind: flow_ethos::HarnessKind::Codex,
-                    native_session_id: "archived-session".into(),
-                    native_prompt_id: "archived-prompt".into(),
+                    native_session_id: signal_flow::NativeSessionId("archived-session".into()),
+                    native_prompt_id: signal_flow::NativePromptId("archived-prompt".into()),
                 }),
             )
             .expect("archived request first ends");
         assert_eq!(
             store
-                .archive_request(&archived.request_id, &sender)
+                .archive_request(&archived.request_id.0, &sender)
                 .expect("archive reads"),
             Ok(())
         );
@@ -10190,8 +10388,8 @@ mod tests {
                 &archived.logical_delivery_id,
                 DeliveryState::Delivered(NativeReceipt {
                     harness_kind: flow_ethos::HarnessKind::Codex,
-                    native_session_id: "later-session".into(),
-                    native_prompt_id: "later-prompt".into(),
+                    native_session_id: signal_flow::NativeSessionId("later-session".into()),
+                    native_prompt_id: signal_flow::NativePromptId("later-prompt".into()),
                 })
             ),
             Err(super::StoreError::StateInvariant)
@@ -10208,7 +10406,7 @@ mod tests {
             ))
             .expect("corrupt binding is planted");
         assert!(matches!(
-            store.archive_request(&archived.request_id, &sender),
+            store.archive_request(&archived.request_id.0, &sender),
             Err(super::StoreError::StateInvariant)
         ));
     }
@@ -10224,20 +10422,20 @@ mod tests {
         let store = fixture.store();
         let address = signal_flow::Address {
             aspect: signal_flow::Aspect::Mind,
-            topic: "flowOwnedRequests".into(),
+            topic: flow_ethos::Topic("flowOwnedRequests".into()),
             model: signal_flow::Model::Sol,
         };
         store.seed_metaflow(flow_ethos::Metaflow {
             address: address.clone(),
             state: flow_ethos::State::Asleep,
-            past: Vec::new(),
-            queue: Vec::new(),
+            past: flow_ethos::Past(Vec::new()),
+            queue: flow_ethos::Queue(Vec::new()),
         });
         let cases = [
             (
                 SentBy::Flow,
                 Message::Soft(Request::Reminder(Reminder_Data {
-                    request_id: "task".into(),
+                    request_id: flow_ethos::RequestId("task".into()),
                     string: "flow reminder".into(),
                 })),
             ),
@@ -10263,14 +10461,18 @@ mod tests {
                     &accepted.logical_delivery_id,
                     DeliveryState::Delivered(NativeReceipt {
                         harness_kind: flow_ethos::HarnessKind::Codex,
-                        native_session_id: format!("internal-session-{index}"),
-                        native_prompt_id: format!("internal-prompt-{index}"),
+                        native_session_id: signal_flow::NativeSessionId(format!(
+                            "internal-session-{index}"
+                        )),
+                        native_prompt_id: signal_flow::NativePromptId(format!(
+                            "internal-prompt-{index}"
+                        )),
                     }),
                 )
                 .expect("internal request ends");
             assert_eq!(
                 store
-                    .archive_request(&accepted.request_id, &address)
+                    .archive_request(&accepted.request_id.0, &address)
                     .expect("archive ownership reads"),
                 Err(signal_flow::ArchiveRejection::UnknownRequest)
             );
@@ -10311,8 +10513,10 @@ mod tests {
             .assert(Assertion::new(
                 store.logical_deliveries.request_ids,
                 RequestIdBinding {
-                    request_id: "same".into(),
-                    logical_delivery_id: "logical-before-restart".into(),
+                    request_id: flow_ethos::RequestId("same".into()),
+                    logical_delivery_id: flow_ethos::LogicalDeliveryId(
+                        "logical-before-restart".into(),
+                    ),
                     closure: RequestClosure::Open,
                 },
             ))
@@ -10326,7 +10530,7 @@ mod tests {
         );
         assert_eq!(
             MintsRequestIds::mint_request_id(&reopened).expect("restarted mint reads"),
-            Ok("next".into()),
+            Ok(flow_ethos::RequestId("next".into())),
             "restart preserves the binding independently of its logical id"
         );
         reopened
@@ -10345,7 +10549,7 @@ mod tests {
         );
         assert_eq!(
             MintsRequestIds::mint_request_id(&after_archive).expect("released mint reads"),
-            Ok("same".into()),
+            Ok(flow_ethos::RequestId("same".into())),
             "the archived id is reusable after another restart"
         );
     }
@@ -10360,7 +10564,7 @@ mod tests {
         );
         assert_eq!(
             store.request_id_drawer.draw_request_id().expect("draws"),
-            "abcd"
+            flow_ethos::RequestId("abcd".into())
         );
     }
 
@@ -10375,7 +10579,7 @@ mod tests {
         let store = fixture.configured_store();
         let at = |topic: &str| Address {
             aspect: Aspect::Mind,
-            topic: topic.into(),
+            topic: flow_ethos::Topic(topic.into()),
             model: Model::Sol,
         };
         let first_sender = at("messageSenderOne");
@@ -10385,27 +10589,30 @@ mod tests {
         for sender in [&first_sender, &second_sender, &ordinary_sender] {
             store.seed_metaflow(Metaflow {
                 address: sender.clone(),
-                state: flow_ethos::State::Awake(format!("{}-flow", sender.topic)),
-                past: Vec::new(),
-                queue: Vec::new(),
+                state: flow_ethos::State::Awake(flow_ethos::FlowId(format!(
+                    "{}-flow",
+                    sender.topic.0
+                ))),
+                past: flow_ethos::Past(Vec::new()),
+                queue: flow_ethos::Queue(Vec::new()),
             });
         }
         store.seed_metaflow(Metaflow {
             address: recipient.clone(),
             state: flow_ethos::State::Asleep,
-            past: Vec::new(),
-            queue: Vec::new(),
+            past: flow_ethos::Past(Vec::new()),
+            queue: flow_ethos::Queue(Vec::new()),
         });
         let key = |counter| signal_flow::DeliverKey {
-            namespace: "messageMemory".into(),
+            namespace: signal_flow::Namespace("messageMemory".into()),
             counter,
         };
         let admit_message = |sender: &Address, counter: i64| {
             let response = store
                 .lock_metaflow(
                     Lock_Data {
-                        sender: sender.clone(),
-                        recipient: recipient.clone(),
+                        first_address: sender.clone(),
+                        second_address: recipient.clone(),
                     },
                     100,
                 )
@@ -10421,7 +10628,7 @@ mod tests {
                     Message::Soft(Request::Notice(format!("message {counter}"))),
                     VerifiedDeliveryLock { lock, now: 100 },
                     DeliverCallSpec {
-                        key: key(counter),
+                        key: key(signal_flow::Counter(counter)),
                         sender: sender.clone(),
                         digest: format!("digest-{counter}"),
                     },
@@ -10463,21 +10670,24 @@ mod tests {
         );
 
         store
-            .acknowledge_deliver_calls(&[key(0), key(1)])
+            .acknowledge_deliver_calls(&[
+                key(signal_flow::Counter(0)),
+                key(signal_flow::Counter(1)),
+            ])
             .expect("Message calls acknowledge");
         store
             .transition_logical_delivery(
                 &first.logical_delivery_id,
                 DeliveryState::Delivered(signal_flow::NativeReceipt {
                     harness_kind: signal_flow::HarnessKind::Codex,
-                    native_session_id: "message-session".into(),
-                    native_prompt_id: "message-prompt".into(),
+                    native_session_id: signal_flow::NativeSessionId("message-session".into()),
+                    native_prompt_id: signal_flow::NativePromptId("message-prompt".into()),
                 }),
             )
             .expect("first Message delivery ends");
         assert_eq!(
             store
-                .archive_request(&first.request_id, &first_sender)
+                .archive_request(&first.request_id.0, &first_sender)
                 .expect("first Message delivery archives"),
             Ok(())
         );
@@ -10515,7 +10725,7 @@ mod tests {
         );
         assert!(
             reopened
-                .read_message_delivery_snapshots(Some(history.delivery_cursor))
+                .read_message_delivery_snapshots(Some(history.delivery_cursor.0))
                 .expect("caught-up Message stream reads")
                 .delivery_snapshot_vector
                 .is_empty()

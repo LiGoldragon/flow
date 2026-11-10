@@ -68,7 +68,7 @@ impl IdentifiesPeerProcess for RunningNexus {
         if !FlowStore::process_is_live(&process) {
             return unidentified();
         }
-        let Some(pane) = u32::try_from(process.pid)
+        let Some(pane) = u32::try_from(process.pid.0)
             .ok()
             .and_then(|process_id| CallerProcess { process_id }.caller_pane(&self.herdr))
         else {
@@ -80,7 +80,7 @@ impl IdentifiesPeerProcess for RunningNexus {
         let Ok(caller) = self.bound_caller(&pane) else {
             return unidentified();
         };
-        match self.store.metaflow_awake_as(&caller.flow_id)? {
+        match self.store.metaflow_awake_as(&caller.flow_id.0)? {
             Some(metaflow) if !self.rest_ended_awake(&metaflow.address) => {
                 Ok(Response::Identified(metaflow.address))
             }
@@ -118,7 +118,7 @@ impl IdentifiesThread for RunningNexus {
         let root_thread = self
             .codex_endpoints
             .current()
-            .root_thread(&native_session_id);
+            .root_thread(&native_session_id.0);
         match self.store.thread_metaflow(&root_thread)? {
             Some(metaflow) if !self.rest_ended_awake(&metaflow.address) => {
                 Ok(Response::Identified(metaflow.address))
@@ -157,7 +157,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
         let result = if let Query::Bind(binding) = query {
             // A peer running in a flow Flow launched binds its Address
             // Awake as that flow, so the flow's own Stop drains its queue.
-            let launched = u32::try_from(peer.pid)
+            let launched = u32::try_from(peer.pid.0)
                 .ok()
                 .and_then(|process_id| CallerProcess { process_id }.caller_pane(&self.herdr))
                 .and_then(|pane| self.bound_caller(&pane).ok())
@@ -176,7 +176,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
                 Err(response) => return (*response).into(),
             };
             use crate::store::logical_delivery::RecordsLogicalDeliveries;
-            return match self.store.archive_request(&request_id, &caller) {
+            return match self.store.archive_request(&request_id.0, &caller) {
                 Ok(Ok(())) => Response::RequestArchived(request_id).into(),
                 Ok(Err(rejection)) => Response::ArchiveRejected(rejection).into(),
                 Err(_) => {
@@ -206,8 +206,8 @@ impl DispatchesMetaflowPeer for RunningNexus {
                 Query::Deliver(request) => {
                     let digest_text = request.datomize(Vec::new()).protosize().compact();
                     let digest = format!("{:x}", Sha256::digest(digest_text.as_bytes()));
-                    let sender = request.lock.sender.clone();
-                    let recipient = request.lock.address.clone();
+                    let sender = request.lock.first_address.clone();
+                    let recipient = request.lock.second_address.clone();
                     use crate::store::logical_delivery::RecordsLogicalDeliveries;
                     match self.store.deliver_call(&request.deliver_key) {
                         Ok(Some(call)) if call.sender == sender && call.digest == digest => {
@@ -224,7 +224,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
                             return Response::Refused(Refusal::Store(error.to_string())).into();
                         }
                     }
-                    self.rest_ended_awake(&request.lock.address);
+                    self.rest_ended_awake(&request.lock.second_address);
                     let abrupt = !matches!(
                         &request.sendable_message,
                         signal_flow::SendableMessage::Soft(_)

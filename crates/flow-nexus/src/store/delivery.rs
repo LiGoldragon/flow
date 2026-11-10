@@ -35,7 +35,7 @@ pub struct StoredDelivery {
 
 impl EngineRecord for StoredDelivery {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.delivery.delivery_id.clone())
+        RecordKey::new(self.delivery.delivery_id.clone().0)
     }
 }
 
@@ -63,7 +63,7 @@ pub struct PaneLease {
 
 impl EngineRecord for PaneLease {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.delivery_id.clone())
+        RecordKey::new(self.delivery_id.clone().0)
     }
 }
 
@@ -76,7 +76,7 @@ impl SettlesInterruptedLease for PaneLease {
     fn uncertain(&self) -> Delivery {
         Delivery {
             delivery_id: self.delivery_id.clone(),
-            flow_id: self.flow_id.clone(),
+            flow_id: signal_flow::FlowId(self.flow_id.clone()),
             interrupt_witness: match self.lease_step {
                 LeaseStep::Acquired => InterruptWitness::NotRequested,
                 LeaseStep::Interrupted | LeaseStep::Placed | LeaseStep::Submitted => {
@@ -116,9 +116,10 @@ impl From<&crate::store::Configuration> for DeliveryConfiguration {
     fn from(configuration: &crate::store::Configuration) -> Self {
         Self {
             harness_profile_vector: configuration.harness_profile_vector.clone(),
-            meta_aspects: configuration.meta_aspects.clone(),
-            message_nexus_path_option: (!configuration.message_nexus_path.is_empty())
-                .then_some(configuration.message_nexus_path.clone()),
+            meta_aspects: flow_ethos::MetaAspects(configuration.meta_aspects.clone()),
+            message_nexus_path_option: (!configuration.message_nexus_path.is_empty()).then_some(
+                flow_ethos::MessageNexusPath(configuration.message_nexus_path.clone()),
+            ),
         }
     }
 }
@@ -150,19 +151,29 @@ impl DefaultsHarnessProfile for HarnessKind {
     /// prompt is followed by one Enter; Codex interrupts on one Escape and
     /// `agent prompt` submits for it. Claude's `#` is its memory mode.
     fn default_profile(&self) -> HarnessProfile {
-        let keys = |keys: &[&str]| keys.iter().map(|key| (*key).to_owned()).collect();
+        let sigils = |sigils: &[&str]| {
+            sigils
+                .iter()
+                .map(|sigil| flow_ethos::CommandSigil((*sigil).to_owned()))
+                .collect()
+        };
+        let keys = |keys: &[&str]| {
+            keys.iter()
+                .map(|key| flow_ethos::KeyName((*key).to_owned()))
+                .collect()
+        };
         match self {
             HarnessKind::Claude => HarnessProfile {
                 harness_kind: HarnessKind::Claude,
-                command_sigil_vector: keys(&["/", "!", "#"]),
-                interrupt_keys: keys(&["esc", "esc"]),
-                submit_keys: keys(&["enter"]),
+                command_sigil_vector: sigils(&["/", "!", "#"]),
+                interrupt_keys: flow_ethos::InterruptKeys(keys(&["esc", "esc"])),
+                submit_keys: flow_ethos::SubmitKeys(keys(&["enter"])),
             },
             HarnessKind::Codex => HarnessProfile {
                 harness_kind: HarnessKind::Codex,
-                command_sigil_vector: keys(&["/", "!"]),
-                interrupt_keys: keys(&["esc"]),
-                submit_keys: Vec::new(),
+                command_sigil_vector: sigils(&["/", "!"]),
+                interrupt_keys: flow_ethos::InterruptKeys(keys(&["esc"])),
+                submit_keys: flow_ethos::SubmitKeys(Vec::new()),
             },
         }
     }
@@ -262,7 +273,7 @@ impl RecordsDeliveries for FlowStore {
     }
 
     fn settle_delivery(&self, delivery: Delivery) -> Result<(), StoreError> {
-        let key = RecordKey::new(delivery.delivery_id.clone());
+        let key = RecordKey::new(delivery.delivery_id.clone().0);
         let leased = !self
             .engine
             .match_records(QueryPlan::key(
@@ -317,9 +328,9 @@ impl RecordsDeliveries for FlowStore {
     fn delivery_configuration(&self) -> Result<DeliveryConfiguration, StoreError> {
         if let Some(snapshot) = self.configuration_snapshot()? {
             return Ok(DeliveryConfiguration {
-                harness_profile_vector: snapshot.nexus.harness_profiles,
-                meta_aspects: snapshot.nexus.meta_aspects,
-                message_nexus_path_option: snapshot.nexus.message_nexus_path_option,
+                harness_profile_vector: snapshot.configured_nexus.0.harness_profiles.0,
+                meta_aspects: snapshot.configured_nexus.0.meta_aspects,
+                message_nexus_path_option: snapshot.configured_nexus.0.message_nexus_path_option,
             });
         }
         let records = self

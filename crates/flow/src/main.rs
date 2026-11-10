@@ -43,9 +43,11 @@ impl ParsesFlowCommand for FlowClient {
             .actualize(&mut budget)
             .map_err(|error| format!("invalid Flow Query: {error:?}"))?;
         Ok(Invocation {
-            ordinary_socket_path: PlaceSockets::ordinary_in(&runtime)
-                .to_string_lossy()
-                .into_owned(),
+            ordinary_socket_path: flow_ethos::OrdinarySocketPath(
+                PlaceSockets::ordinary_in(&runtime)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             query,
         })
     }
@@ -144,10 +146,10 @@ mod tests {
             panic!("fixture must remain a Send")
         };
         assert_eq!(
-            send.recipient,
+            send.address,
             Address {
                 aspect: Aspect::Mind,
-                topic: "core".into(),
+                topic: flow_ethos::Topic("core".into()),
                 model: Model::Sol,
             }
         );
@@ -219,7 +221,7 @@ mod tests {
             send.sendable_message,
             SendableMessage::Soft(SendableRequest::Result(
                 signal_flow::SendableRequest_Result_Data {
-                    request_id: "k7ph".into(),
+                    request_id: flow_ethos::RequestId("k7ph".into()),
                     string: "Reviewed; green.".into(),
                 }
             ))
@@ -230,7 +232,9 @@ mod tests {
     fn cli_prints_sent_with_request_id() {
         let client = FlowClient;
         assert_eq!(
-            client.textualize_reply(&Response::Sent("k7ph".into())),
+            client.textualize_reply(&Response::Sent(signal_flow::VisibleSendReceipt(
+                flow_ethos::RequestId("k7ph".into())
+            ))),
             "Sent.k7ph"
         );
     }
@@ -259,7 +263,9 @@ mod tests {
             client
                 .parse_query(["ResolveRecipient.fac697".into()].into_iter())
                 .unwrap(),
-            Query::ResolveRecipient("fac697".into())
+            Query::ResolveRecipient(signal_flow::RecipientResolutionRequest(
+                signal_flow::FlowId("fac697".into())
+            ))
         );
     }
 
@@ -275,10 +281,26 @@ mod tests {
         else {
             panic!("Start fixture must remain a Start query")
         };
-        assert_eq!(request.launch_request_id, "request-7");
-        assert_eq!(request.system_modules, ["spirit-core", "intent-flow"]);
         assert_eq!(
-            request.user_modules,
+            request.launch_request_id,
+            signal_flow::LaunchRequestId("request-7".into())
+        );
+        assert_eq!(
+            request
+                .system_modules
+                .0
+                .iter()
+                .map(|identity| identity.0.as_str())
+                .collect::<Vec<_>>(),
+            ["spirit-core", "intent-flow"]
+        );
+        assert_eq!(
+            request
+                .user_modules
+                .0
+                .iter()
+                .map(|identity| identity.0.as_str())
+                .collect::<Vec<_>>(),
             ["operation-main-flow", "compensation-behavior"]
         );
         assert_eq!(
@@ -287,10 +309,11 @@ mod tests {
                 signal_flow::LeaveOut::SkillTool,
                 signal_flow::LeaveOut::WorkflowTool
             ])
+            .map(signal_flow::LeaveOuts)
         );
         assert_eq!(
             request.instruction_prompt,
-            "Carry this bounded launch request."
+            signal_flow::InstructionPrompt("Carry this bounded launch request.".into())
         );
     }
 
@@ -326,13 +349,15 @@ mod tests {
             client
                 .parse_query(["LaunchStatus.request-8".into()].into_iter())
                 .unwrap(),
-            Query::LaunchStatus("request-8".into())
+            Query::LaunchStatus(signal_flow::LaunchRequestId("request-8".into()))
         );
         assert_eq!(
             client
                 .parse_query(["Observe.Launch.request-8".into()].into_iter())
                 .unwrap(),
-            Query::Observe(signal_flow::ObserveSelection::Launch("request-8".into()))
+            Query::Observe(signal_flow::ObserveSelection::Launch(
+                signal_flow::LaunchRequestId("request-8".into())
+            ))
         );
         let Query::Replace(request) = client
             .parse_query(["Replace.{ request-8 [ spirit-core ] [] Predecessors.1 { Field flow Astra } opus-5-5 high Some.fac697 messaging-build None Regular Default «Carry on from fac697.» }".into()].into_iter())
@@ -340,7 +365,10 @@ mod tests {
         else {
             panic!("Replace fixture must remain a Replace query")
         };
-        assert_eq!(request.flow_id_option, Some("fac697".into()));
+        assert_eq!(
+            request.flow_id_option,
+            Some(signal_flow::FlowId("fac697".into()))
+        );
     }
 
     #[test]
@@ -365,16 +393,16 @@ mod tests {
     fn native_resolution_serialization_matches_the_signal_contract() {
         let client = FlowClient;
         let reply = Response::RecipientResolved(signal_flow::FlowNode {
-            flow_id: "da1e3f".into(),
-            session_id: "da1e3f9d-full".into(),
+            flow_id: signal_flow::FlowId("da1e3f".into()),
+            session_id: signal_flow::SessionId("da1e3f9d-full".into()),
             harness_kind: signal_flow::HarnessKind::Claude,
             endpoint_selection: signal_flow::EndpointSelection::Unavailable,
             herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
                 signal_flow::HerdrRoute {
-                    herdr_session_name: "messaging-build".into(),
-                    herdr_agent_name: "recipient".into(),
-                    herdr_pane_id: "w1:p2".into(),
-                    herdr_terminal_id: "term-current".into(),
+                    herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+                    herdr_agent_name: signal_flow::HerdrAgentName("recipient".into()),
+                    herdr_pane_id: signal_flow::HerdrPaneId("w1:p2".into()),
+                    herdr_terminal_id: signal_flow::HerdrTerminalId("term-current".into()),
                 },
             ),
             origin: signal_flow::Origin::Unbound,
@@ -413,7 +441,7 @@ mod tests {
         let SendableMessage::Soft(SendableRequest::Task(task)) = &send.sendable_message else {
             panic!("a Soft Task: {:?}", send.sendable_message)
         };
-        assert_eq!(task.minutes, 30);
+        assert_eq!(task.minutes, flow_ethos::Minutes(30));
         assert_eq!(task.string, "Check the capsule run.");
         for text in [
             "Send.{ { Mind core Sol } Soft.Task.{ soon «Check the capsule run.» } }",
@@ -441,10 +469,12 @@ mod tests {
                 peer.write_all(&reply).unwrap();
             });
             let invocation = Invocation {
-                ordinary_socket_path: socket.to_string_lossy().into_owned(),
+                ordinary_socket_path: flow_ethos::OrdinarySocketPath(
+                    socket.to_string_lossy().into_owned(),
+                ),
                 query: Query::Observe(ObserveSelection::Retirement(Address {
                     aspect: Aspect::Mind,
-                    topic: "retirementCli".into(),
+                    topic: flow_ethos::Topic("retirementCli".into()),
                     model: Model::Sol,
                 })),
             };
@@ -466,8 +496,12 @@ mod tests {
             peer.read_exact(&mut query).unwrap();
         });
         let invocation = Invocation {
-            ordinary_socket_path: socket.to_string_lossy().into_owned(),
-            query: Query::Observe(ObserveSelection::Launch("request".into())),
+            ordinary_socket_path: flow_ethos::OrdinarySocketPath(
+                socket.to_string_lossy().into_owned(),
+            ),
+            query: Query::Observe(ObserveSelection::Launch(signal_flow::LaunchRequestId(
+                "request".into(),
+            ))),
         };
         assert!(FlowClient.call(&invocation, &mut |_| {}).is_ok());
         server.join().unwrap();
@@ -492,10 +526,12 @@ mod tests {
             peer.write_all(&bytes).unwrap();
         });
         let invocation = Invocation {
-            ordinary_socket_path: socket.to_string_lossy().into_owned(),
+            ordinary_socket_path: flow_ethos::OrdinarySocketPath(
+                socket.to_string_lossy().into_owned(),
+            ),
             query: Query::Observe(ObserveSelection::Retirement(Address {
                 aspect: Aspect::Mind,
-                topic: "retirementCli".into(),
+                topic: flow_ethos::Topic("retirementCli".into()),
                 model: Model::Sol,
             })),
         };

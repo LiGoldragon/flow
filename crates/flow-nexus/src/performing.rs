@@ -224,11 +224,11 @@ impl Performs for RunningNexus {
                 if !self
                     .codex_endpoints
                     .current()
-                    .launches_exactly(&profile.model_name) =>
+                    .launches_exactly(&profile.model_name.0) =>
             {
                 eprintln!(
                     "flow-nexus: launch {} not composed: model {} is not an exact native model",
-                    profile.launch_request_id, profile.model_name
+                    profile.launch_request_id.0, profile.model_name.0
                 );
                 Outcome::Failed(Failed_Data::CompositionRefused(
                     signal_flow::CompositionRefusal::InexactModel,
@@ -241,7 +241,7 @@ impl Performs for RunningNexus {
                 let harness_kind = self
                     .codex_endpoints
                     .current()
-                    .harness_for(&profile.model_name);
+                    .harness_for(&profile.model_name.0);
                 let default = self
                     .store
                     .default_leave_outs(&profile.address, &harness_kind)
@@ -263,7 +263,10 @@ impl Performs for RunningNexus {
                 let launch_root = match profile.flow_id_option {
                     None => None,
                     Some(_) => Some(self.launch_root(&profile.address).inspect_err(|rejection| {
-                        eprintln!("flow-nexus: launch {request} root unresolved: {rejection:?}");
+                        eprintln!(
+                            "flow-nexus: launch {request} root unresolved: {rejection:?}",
+                            request = request.0
+                        );
                     })),
                 };
                 // A successor is given every request delivered to its
@@ -281,45 +284,60 @@ impl Performs for RunningNexus {
                 };
                 match self.composer.current().compose_in_root(
                     HarnessedProfile {
-                        remembered_flows,
+                        remembered_flows: crate::generated::starter::RememberedFlows(
+                            remembered_flows,
+                        ),
                         harness_kind,
                         launch_profile: profile,
                     },
                     default,
                     match &launch_root {
                         None => HandoverRoot::Unread,
-                        Some(Ok(root)) => HandoverRoot::At(std::path::Path::new(root)),
+                        Some(Ok(root)) => HandoverRoot::At(std::path::Path::new(&root.0)),
                         Some(Err(_)) => HandoverRoot::Unresolved,
                     },
                     &open_requests,
                 ) {
                     Ok(launch) => Outcome::Composed(launch),
                     Err(CompositionError::LeaveOut(refusal)) => {
-                        eprintln!("flow-nexus: launch {request} leave-outs refused: {refusal:?}");
+                        eprintln!(
+                            "flow-nexus: launch {request} leave-outs refused: {refusal:?}",
+                            request = request.0
+                        );
                         Outcome::Failed(Failed_Data::LeaveOutRefused(refusal))
                     }
                     Err(CompositionError::Context(refusal)) => {
-                        eprintln!("flow-nexus: launch {request} context refused: {refusal:?}");
+                        eprintln!(
+                            "flow-nexus: launch {request} context refused: {refusal:?}",
+                            request = request.0
+                        );
                         Outcome::Failed(Failed_Data::ContextRefused(refusal))
                     }
                     Err(CompositionError::InvalidProfileField(refusal)) => {
-                        eprintln!("flow-nexus: launch {request} not composed: {refusal:?}");
+                        eprintln!(
+                            "flow-nexus: launch {request} not composed: {refusal:?}",
+                            request = request.0
+                        );
                         Outcome::Failed(Failed_Data::CompositionRefused(refusal))
                     }
                     Err(error @ CompositionError::PresentationPromptUnavailable(_)) => {
-                        eprintln!("flow-nexus: launch {request} not composed: {error}");
+                        eprintln!(
+                            "flow-nexus: launch {request} not composed: {error}",
+                            request = request.0
+                        );
                         Outcome::Failed(Failed_Data::CompositionRefused(
                             signal_flow::CompositionRefusal::PresentationUnavailable,
                         ))
                     }
                     Err(CompositionError::HandoverUnreadable { predecessor, fault }) => {
                         eprintln!(
-                            "flow-nexus: launch {request} not composed: the handover of {predecessor} could not be read: {fault:?}"
+                            "flow-nexus: launch {request} not composed: the handover of {predecessor} could not be read: {fault:?}",
+                            request = request.0
                         );
                         Outcome::Failed(Failed_Data::CompositionRefused(
                             signal_flow::CompositionRefusal::HandoverUnreadable(
                                 signal_flow::HandoverUnreadable_Data {
-                                    flow_id: predecessor,
+                                    flow_id: signal_flow::FlowId(predecessor),
                                     handover_fault: fault,
                                 },
                             ),
@@ -329,16 +347,17 @@ impl Performs for RunningNexus {
             }
             Operation::Reserve(reserve) => self.reserve(reserve),
             Operation::Record(record) => self.record(record),
-            Operation::Register(Register_Data { flow_node, caller }) => {
-                match self.store.register_flow_in_role(flow_node, caller) {
-                    Ok(FlowRegistration::Registered(node)) => Outcome::Registered(*node),
-                    Ok(FlowRegistration::ConflictingBinding) => {
-                        Outcome::Failed(Failed_Data::ConflictingBinding)
-                    }
-                    Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
+            Operation::Register(Register_Data {
+                flow_node,
+                caller_identity: caller,
+            }) => match self.store.register_flow_in_role(flow_node, caller) {
+                Ok(FlowRegistration::Registered(node)) => Outcome::Registered(*node),
+                Ok(FlowRegistration::ConflictingBinding) => {
+                    Outcome::Failed(Failed_Data::ConflictingBinding)
                 }
-            }
-            Operation::Confirm(flow_id) => match self.store.confirm_started(&flow_id) {
+                Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
+            },
+            Operation::Confirm(flow_id) => match self.store.confirm_started(&flow_id.0) {
                 Ok(Response::Started(started)) => Outcome::Started(started),
                 Ok(Response::StartRejected(StartRejection::AddressAwake)) => {
                     Outcome::Failed(Failed_Data::AddressAwake)
@@ -351,7 +370,7 @@ impl Performs for RunningNexus {
                 root,
             }) => match self
                 .herdr
-                .create_launch_pane_in(&composed_launch, std::path::Path::new(&root))
+                .create_launch_pane_in(&composed_launch, std::path::Path::new(&root.0))
             {
                 Ok(pane) => Outcome::Opened(pane),
                 Err(error) => NativeLaunchRefusal::refused(NativeLaunchStage::Open, error),
@@ -372,11 +391,11 @@ impl Performs for RunningNexus {
                     HarnessKind::Codex => match self
                         .codex_endpoints
                         .current()
-                        .adapter_for(&composed_launch.launch_profile.model_name)
+                        .adapter_for(&composed_launch.launch_profile.model_name.0)
                         .and_then(|adapter| {
                             adapter.open_thread_in(
                                 &composed_launch,
-                                std::path::Path::new(&root),
+                                std::path::Path::new(&root.0),
                                 &mut |thread| {
                                     // Before anything runs on it: the thread is
                                     // recorded as this launch's, durably (a
@@ -394,7 +413,7 @@ impl Performs for RunningNexus {
                                     if !self
                                         .store
                                         .record_opened_thread(
-                                            &composed_launch.launch_profile.launch_request_id,
+                                            &composed_launch.launch_profile.launch_request_id.0,
                                             thread,
                                         )
                                         .unwrap_or(false)
@@ -424,7 +443,7 @@ impl Performs for RunningNexus {
                         Err(error) => {
                             eprintln!(
                                 "flow-nexus: launch {} Codex thread not opened: {error}",
-                                composed_launch.launch_profile.launch_request_id
+                                composed_launch.launch_profile.launch_request_id.0
                             );
                             return NativeLaunchRefusal {
                                 native_launch_stage: NativeLaunchStage::CodexThread,
@@ -447,17 +466,17 @@ impl Performs for RunningNexus {
                         &composed_launch,
                         &herdr_pane_binding,
                         thread,
-                        &harness_arguments,
+                        &harness_arguments.0,
                     ),
                     None => self.herdr.start_configured_native_harness(
                         &composed_launch,
                         &herdr_pane_binding,
-                        flow_id_option.as_deref(),
-                        &harness_arguments,
+                        flow_id_option.as_ref().map(|value| value.0.as_str()),
+                        &harness_arguments.0,
                     ),
                 };
                 match started {
-                    Ok(()) => Outcome::Spawned(opened),
+                    Ok(()) => Outcome::Spawned(opened.map(signal_flow::NativeSessionId)),
                     // A refused start keeps its cause, and the thread a
                     // Codex start opened is accounted for and archived.
                     Err(SpawnFailure::Refused(spawn_refusal_cause)) => {
@@ -473,11 +492,11 @@ impl Performs for RunningNexus {
                             match self
                                 .codex_endpoints
                                 .current()
-                                .adapter_for(&composed_launch.launch_profile.model_name)
+                                .adapter_for(&composed_launch.launch_profile.model_name.0)
                             {
                                 Ok(adapter) => adapter.account_opened_thread(&thread),
                                 Err(_) => signal_flow::OpenedThread {
-                                    native_session_id: thread,
+                                    native_session_id: signal_flow::NativeSessionId(thread),
                                     first_turn: signal_flow::FirstTurn::Unread,
                                     thread_archive: signal_flow::ThreadArchive::ArchiveRefused,
                                 },
@@ -506,12 +525,12 @@ impl Performs for RunningNexus {
                     Some(thread) => self.herdr.observe_attached_codex_binding(
                         &composed_launch,
                         &herdr_pane_binding,
-                        &thread,
+                        &thread.0,
                     ),
                     None => self.herdr.observe_native_binding(
                         &composed_launch,
                         &herdr_pane_binding,
-                        flow_id_option.as_deref(),
+                        flow_id_option.as_ref().map(|value| value.0.as_str()),
                     ),
                 };
                 match observed {
@@ -539,7 +558,7 @@ impl Performs for RunningNexus {
                     HarnessKind::Codex => self.serving_launch_calls(|| {
                         self.codex_endpoints
                             .current()
-                            .adapter_for(&composed_launch.launch_profile.model_name)
+                            .adapter_for(&composed_launch.launch_profile.model_name.0)
                             .map_err(|_| Failed_Data::CodexRefused)
                             .and_then(|adapter| {
                                 adapter
@@ -560,7 +579,7 @@ impl Performs for RunningNexus {
                     Err(failure) => Outcome::Failed(failure),
                 }
             }
-            Operation::Release(flow_id) => self.release(&flow_id),
+            Operation::Release(flow_id) => self.release(&flow_id.0),
             Operation::Close(node) => match self.herdr.close(&node) {
                 true => Outcome::Closed,
                 false => Outcome::Failed(Failed_Data::HerdrRefused),
@@ -586,9 +605,9 @@ impl Performs for RunningNexus {
                 match self.herdr.resume_configured_claude_harness(
                     &composed_launch,
                     &herdr_pane_binding,
-                    &flow_id,
-                    &session,
-                    &harness_arguments,
+                    &flow_id.0,
+                    &session.0,
+                    &harness_arguments.0,
                 ) {
                     Ok(()) => Outcome::Spawned(None),
                     Err(SpawnFailure::Refused(spawn_refusal_cause)) => Outcome::Failed(
@@ -648,7 +667,7 @@ impl PerformsInParts for RunningNexus {
                     Err(error) => {
                         eprintln!(
                             "flow-nexus: launch {} FlowId not claimed: {error}",
-                            composed_launch.launch_profile.launch_request_id
+                            composed_launch.launch_profile.launch_request_id.0
                         );
                         return Outcome::Failed(Failed_Data::ClaimRefused);
                     }
@@ -665,7 +684,7 @@ impl PerformsInParts for RunningNexus {
         }
         Outcome::Reserved(Reserved_Data {
             launch_attempt_reservation: reservation,
-            flow_id_option,
+            flow_id_option: flow_id_option.map(signal_flow::FlowId),
         })
     }
 
@@ -703,9 +722,9 @@ impl PerformsInParts for RunningNexus {
             Record_Data::Delivered(result) => {
                 self.store.record_prompt_delivery_result(result).recorded()
             }
-            Record_Data::Active(flow_id) => self.store.record_active(&flow_id).recorded(),
-            Record_Data::Stopped(flow_id) => self.store.record_stopped(&flow_id).recorded(),
-            Record_Data::Retired(flow_id) => self.store.record_retired(&flow_id).recorded(),
+            Record_Data::Active(flow_id) => self.store.record_active(&flow_id.0).recorded(),
+            Record_Data::Stopped(flow_id) => self.store.record_stopped(&flow_id.0).recorded(),
+            Record_Data::Retired(flow_id) => self.store.record_retired(&flow_id.0).recorded(),
             // No pane outlives its flow: a flow that exited with its pane
             // still there, its harness gone or its own session ended, has
             // that pane closed in the event that records the exit. A pane
@@ -716,16 +735,22 @@ impl PerformsInParts for RunningNexus {
             // restart's to close, and its seat's own exit is fenced.
             Record_Data::Exited(flow_id)
                 if !matches!(
-                    crate::store::restart::RecordsRestarts::restart_record(&*self.store, &flow_id),
+                    crate::store::restart::RecordsRestarts::restart_record(
+                        &*self.store,
+                        &flow_id.0
+                    ),
                     Ok(None)
                 ) =>
             {
-                eprintln!("flow-nexus: flow {flow_id} is restarting; no exit is recorded for it");
+                eprintln!(
+                    "flow-nexus: flow {flow_id} is restarting; no exit is recorded for it",
+                    flow_id = flow_id.0
+                );
                 Outcome::Failed(Failed_Data::Restarting)
             }
             Record_Data::Exited(flow_id) => {
-                let node = self.store.flow_node(&flow_id).ok().flatten();
-                let recorded = self.store.record_exited(&flow_id).recorded();
+                let node = self.store.flow_node(&flow_id.0).ok().flatten();
+                let recorded = self.store.record_exited(&flow_id.0).recorded();
                 if recorded == Outcome::Recorded
                     && let Some(node) = node
                     && matches!(
@@ -734,7 +759,10 @@ impl PerformsInParts for RunningNexus {
                     )
                     && !self.herdr.close(&node)
                 {
-                    eprintln!("flow-nexus: flow {flow_id} exited; its pane was not closed");
+                    eprintln!(
+                        "flow-nexus: flow {flow_id} exited; its pane was not closed",
+                        flow_id = flow_id.0
+                    );
                 }
                 recorded
             }
@@ -743,29 +771,29 @@ impl PerformsInParts for RunningNexus {
             }
             Record_Data::Withdrawn(launch_request_id) => self
                 .store
-                .withdraw_replacement(&launch_request_id)
+                .withdraw_replacement(&launch_request_id.0)
                 .recorded(),
             Record_Data::Settled(Record_Data_Settled_Data {
                 launch_request_id,
                 launch_outcome,
             }) => self
                 .store
-                .record_launch_outcome(&launch_request_id, launch_outcome)
+                .record_launch_outcome(&launch_request_id.0, launch_outcome)
                 .recorded(),
             Record_Data::Asleep(Record_Data_Asleep_Data { address, flow_id }) => {
                 use crate::store::metaflow::SleepsMetaflows;
-                self.store.sleep_metaflow(&address, &flow_id).recorded()
+                self.store.sleep_metaflow(&address, &flow_id.0).recorded()
             }
             Record_Data::Awoken(Record_Data_Awoken_Data {
                 address,
                 flow_id,
-                delivered,
+                delivered_count: delivered,
             }) => {
                 use crate::store::metaflow::SleepsMetaflows;
-                match usize::try_from(delivered) {
+                match usize::try_from(delivered.0) {
                     Ok(delivered) => self
                         .store
-                        .awaken_metaflow(&address, &flow_id, delivered)
+                        .awaken_metaflow(&address, &flow_id.0, delivered)
                         .recorded(),
                     Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
                 }
@@ -780,11 +808,13 @@ impl PerformsInParts for RunningNexus {
             }
             Record_Data::Context(Record_Data_Context_Data { flow_id, tokens }) => {
                 use crate::store::context::RecordsContextSize;
-                self.store.record_context_size(&flow_id, tokens).recorded()
+                self.store
+                    .record_context_size(&flow_id.0, tokens.0)
+                    .recorded()
             }
             Record_Data::Harness(Record_Data_Harness_Data { flow_id, event }) => {
                 use crate::store::events::{EventRecording, RecordsHarnessEvents};
-                match self.store.record_event(&flow_id, event) {
+                match self.store.record_event(&flow_id.0, event) {
                     Ok(EventRecording::Recorded) => Outcome::Recorded,
                     Ok(EventRecording::UnknownFlow) => Outcome::Failed(Failed_Data::UnknownFlow),
                     Err(_) => Outcome::Failed(Failed_Data::StoreRefused),

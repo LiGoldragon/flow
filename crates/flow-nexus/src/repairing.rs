@@ -56,7 +56,7 @@ impl RepairsFromMeta for RunningNexus {
                     Ok(Err(rejection)) => return Response::RebindRejected(rejection),
                     Err(error) => return Self::store_refused(error),
                 };
-                let node = match self.store.flow_node(&flow_id) {
+                let node = match self.store.flow_node(&flow_id.0) {
                     Ok(Some(node)) => node,
                     Ok(None) => return Response::RebindRejected(RebindRejected_Data::FlowUnknown),
                     Err(error) => return Self::store_refused(error),
@@ -67,8 +67,8 @@ impl RepairsFromMeta for RunningNexus {
                     return Response::RebindRejected(RebindRejected_Data::PaneAbsent);
                 };
                 let route = match self.herdr.pane_route(
-                    &recorded.herdr_session_name,
-                    &herdr_pane_id,
+                    &recorded.herdr_session_name.0,
+                    &herdr_pane_id.0,
                     &node.harness_kind,
                 ) {
                     PaneRoute::Shown(route) => route,
@@ -79,15 +79,15 @@ impl RepairsFromMeta for RunningNexus {
                         return Response::RebindRejected(RebindRejected_Data::HerdrUnavailable);
                     }
                 };
-                self.store.rebind_route(&flow_id, route).map(Ok)
+                self.store.rebind_route(&flow_id.0, route).map(Ok)
             }
-            Rebinding::Flow(flow_id) => self.store.rebind_current_flow(&address, &flow_id),
+            Rebinding::Flow(flow_id) => self.store.rebind_current_flow(&address, &flow_id.0),
         };
         match rebound {
             Ok(Ok(())) => {
                 eprintln!(
                     "flow-nexus: {:?} {} {:?} rebound by the owner",
-                    address.aspect, address.topic, address.model
+                    address.aspect, address.topic.0, address.model
                 );
                 Response::Rebound(address)
             }
@@ -101,10 +101,11 @@ impl RepairsFromMeta for RunningNexus {
             address,
             logical_delivery_id,
         } = withdraw;
-        match self.store.withdraw_queued(&address, &logical_delivery_id) {
+        match self.store.withdraw_queued(&address, &logical_delivery_id.0) {
             Ok(Ok(())) => {
                 eprintln!(
-                    "flow-nexus: queued request {logical_delivery_id} withdrawn by the owner"
+                    "flow-nexus: queued request {logical_delivery_id} withdrawn by the owner",
+                    logical_delivery_id = logical_delivery_id.0
                 );
                 Response::Withdrawn
             }

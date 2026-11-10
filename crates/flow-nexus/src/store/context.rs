@@ -115,12 +115,13 @@ pub trait NamesFlowModel {
 impl NamesFlowModel for FlowStore {
     fn flow_model(&self, flow_id: &str) -> Result<Option<String>, StoreError> {
         if let Some(role) = self.role(flow_id)? {
-            return Ok(Some(role.model_name));
+            return Ok(Some(role.model_name.0));
         }
         Ok(match self.launch_requests_bound_to(flow_id)?.pop() {
-            Some(launch_request_id) => self
+            Some(launch_request_id) => (self
                 .launch_attempt(&launch_request_id)?
-                .map(|attempt| attempt.launch_profile.model_name),
+                .map(|attempt| attempt.launch_profile.model_name))
+            .map(|value| value.0),
             None => None,
         })
     }
@@ -169,13 +170,22 @@ impl JudgesThreshold for FlowStore {
             return Ok(ThresholdStanding::Unmeasured);
         };
         use crate::protecting::ProtectsFlows;
-        let refresh = threshold.refresh;
-        Ok(if context < refresh {
-            ThresholdStanding::Below { context, refresh }
+        let refresh = threshold.refresh_threshold;
+        Ok(if context < refresh.0 {
+            ThresholdStanding::Below {
+                context,
+                refresh: refresh.0,
+            }
         } else if self.protected_address(flow_id)?.is_some() {
-            ThresholdStanding::Protected { context, refresh }
+            ThresholdStanding::Protected {
+                context,
+                refresh: refresh.0,
+            }
         } else {
-            ThresholdStanding::Past { context, refresh }
+            ThresholdStanding::Past {
+                context,
+                refresh: refresh.0,
+            }
         })
     }
 }
@@ -197,8 +207,8 @@ impl JudgesCompaction for FlowStore {
             ThresholdStanding::Below { context, refresh }
             | ThresholdStanding::Protected { context, refresh } => {
                 Some(CompactionRefusal::BelowThreshold(ContextBelowThreshold {
-                    context_tokens: context,
-                    refresh_tokens: refresh,
+                    context_tokens: meta_signal_flow::ContextTokens(context),
+                    refresh_tokens: meta_signal_flow::RefreshTokens(refresh),
                 }))
             }
             ThresholdStanding::Past { .. } => None,

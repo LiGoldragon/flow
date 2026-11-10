@@ -11,7 +11,7 @@ use std::time::{Duration, UNIX_EPOCH};
 #[test]
 fn a_task_admission_names_its_minutes_deadline_and_time() {
     let task = Request::Task(AnswerableTask {
-        minutes: 1,
+        minutes: flow_ethos::Minutes(1),
         string: "Answer with one word.".into(),
     });
     assert_eq!(
@@ -30,7 +30,7 @@ fn a_task_admission_names_its_minutes_deadline_and_time() {
 #[test]
 fn a_task_with_no_reminder_names_no_deadline() {
     let task = Request::Task(AnswerableTask {
-        minutes: 5,
+        minutes: flow_ethos::Minutes(5),
         string: "Answer.".into(),
     });
     assert_eq!(
@@ -51,7 +51,9 @@ fn every_other_admission_names_its_kind_and_time() {
         (Request::Notice("Noted.".into()), "Notice"),
         (
             Request::Done(DonePayload::Historical(Historical_Data {
-                logical_delivery_id: "logical-delivery-00000000000000000042".into(),
+                logical_delivery_id: flow_ethos::LogicalDeliveryId(
+                    "logical-delivery-00000000000000000042".into(),
+                ),
                 string: "Done.".into(),
             })),
             "Done",

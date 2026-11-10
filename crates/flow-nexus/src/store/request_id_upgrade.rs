@@ -465,8 +465,8 @@ impl KeysCurrentAddress for Address {
                 flow_ethos::Aspect::Mind => "Mind",
                 flow_ethos::Aspect::Field => "Field",
             },
-            self.topic.len(),
-            self.topic,
+            self.topic.0.len(),
+            self.topic.0,
             self.model.key_word()
         )
     }
@@ -538,21 +538,22 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
             .match_records(QueryPlan::all(self.logical_deliveries.current))?;
         let open = |logical_id: &str| {
             bindings.records().iter().any(|binding| {
-                binding.logical_delivery_id == logical_id && binding.closure == RequestClosure::Open
+                binding.logical_delivery_id.0 == logical_id
+                    && binding.closure == RequestClosure::Open
             }) && currents.records().iter().any(|current| {
-                current.snapshot.logical_delivery_id == logical_id && current.archived.is_none()
+                current.snapshot.logical_delivery_id.0 == logical_id && current.archived.is_none()
             })
         };
         let request_id = |logical_id: &str| {
             bindings
                 .records()
                 .iter()
-                .find(|binding| binding.logical_delivery_id == logical_id)
+                .find(|binding| binding.logical_delivery_id.0 == logical_id)
                 .map(|binding| binding.request_id.clone())
         };
         let task_words = |logical_id: &str| {
             retained.iter().find_map(|value| {
-                if value.entry.logical_delivery_id != logical_id {
+                if value.entry.logical_delivery_id.0 != logical_id {
                     return None;
                 }
                 match &value.entry.message {
@@ -569,7 +570,7 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
             retained
                 .iter()
                 .find_map(|value| {
-                    if value.entry.logical_delivery_id != logical_id {
+                    if value.entry.logical_delivery_id.0 != logical_id {
                         return None;
                     }
                     match &value.entry.message {
@@ -594,7 +595,7 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
             .engine
             .match_records(QueryPlan::all(self.request_id_upgrade.task_announcements))?;
         for mut row in task_rows.records().to_vec() {
-            if self.settle_notice_status(&mut row.status, row.tries, policy.announcement_tries)? {
+            if self.settle_notice_status(&mut row.status, row.tries, policy.announcement_tries.0)? {
                 self.engine.mutate_keyed(KeyedMutation::new(
                     self.request_id_upgrade.task_announcements,
                     row.record_key(),
@@ -607,11 +608,12 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
             }
             let mut lines = Vec::new();
             for logical_id in &row.tasks {
-                if open(logical_id) {
-                    let id = request_id(logical_id).ok_or(StoreError::StateInvariant)?;
-                    let words = task_words(logical_id).ok_or(StoreError::StateInvariant)?;
+                if open(&logical_id.0) {
+                    let id = request_id(&logical_id.0).ok_or(StoreError::StateInvariant)?;
+                    let words = task_words(&logical_id.0).ok_or(StoreError::StateInvariant)?;
                     lines.push(
-                        TASK_ANNOUNCEMENT_HEADER.render_bounded_line(&format!("{id} "), &words),
+                        TASK_ANNOUNCEMENT_HEADER
+                            .render_bounded_line(&format!("{id} ", id = id.0), &words),
                     );
                 }
             }
@@ -636,7 +638,7 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
             .engine
             .match_records(QueryPlan::all(self.request_id_upgrade.upgrade_assignments))?;
         for mut row in assignment_rows.records().to_vec() {
-            if self.settle_notice_status(&mut row.status, row.tries, policy.announcement_tries)? {
+            if self.settle_notice_status(&mut row.status, row.tries, policy.announcement_tries.0)? {
                 self.engine.mutate_keyed(KeyedMutation::new(
                     self.request_id_upgrade.upgrade_assignments,
                     row.record_key(),
@@ -651,8 +653,8 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
                 decision
                     .assigned
                     .iter()
-                    .any(|assigned| open(&assigned.order))
-                    || decision.open.iter().any(|order| open(&order.order))
+                    .any(|assigned| open(&assigned.order.0))
+                    || decision.open.iter().any(|order| open(&order.order.0))
             });
             if !has_open {
                 row.status = TaskAnnouncementStatus::Closed;
@@ -666,19 +668,19 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
             let mut lines = Vec::new();
             for decision in &row.decisions {
                 for assigned in &decision.assigned {
-                    let id = request_id(&assigned.order)
-                        .map(|id| id.to_string())
+                    let id = request_id(&assigned.order.0)
+                        .map(|id| id.0)
                         .unwrap_or_else(|| "archived".into());
-                    let words = order_words(&assigned.order).ok_or(StoreError::StateInvariant)?;
+                    let words = order_words(&assigned.order.0).ok_or(StoreError::StateInvariant)?;
                     lines.push(
                         ASSIGNMENT_HEADER.render_bounded_line(&format!("{id} answered "), &words),
                     );
                 }
                 for order in &decision.open {
-                    let id = request_id(&order.order)
-                        .map(|id| id.to_string())
+                    let id = request_id(&order.order.0)
+                        .map(|id| id.0)
                         .unwrap_or_else(|| "archived".into());
-                    let words = order_words(&order.order).ok_or(StoreError::StateInvariant)?;
+                    let words = order_words(&order.order.0).ok_or(StoreError::StateInvariant)?;
                     lines.push(
                         ASSIGNMENT_HEADER.render_bounded_line(&format!("{id} open "), &words),
                     );
@@ -723,7 +725,9 @@ impl SettlesUpgradeNotices for super::FlowStore {
         let TaskAnnouncementStatus::Admitted(logical_id) = status else {
             return Ok(false);
         };
-        let Some(snapshot) = self.logical_delivery_snapshot(logical_id)? else {
+        let Some(snapshot) =
+            self.logical_delivery_snapshot(&flow_ethos::LogicalDeliveryId(logical_id.clone()))?
+        else {
             return Err(StoreError::StateInvariant);
         };
         match snapshot.delivery_state {
@@ -916,7 +920,9 @@ impl BecomesCurrent for old_flow::Request {
             old_flow::Request::Done(done) => flow_ethos::Request::Done(match done {
                 old_flow::DonePayload::Answered(answered) => {
                     flow_ethos::DonePayload::Historical(flow_ethos::Historical_Data {
-                        logical_delivery_id: answered.logical_delivery_id.clone(),
+                        logical_delivery_id: flow_ethos::LogicalDeliveryId(
+                            answered.logical_delivery_id.clone(),
+                        ),
                         string: answered.string.clone(),
                     })
                 }
@@ -938,7 +944,7 @@ impl BecomesCurrentWithRequestId for old_flow::QueueEntry {
         request_id: RequestId,
     ) -> Result<flow_ethos::QueueEntry, StoreError> {
         Ok(flow_ethos::QueueEntry {
-            logical_delivery_id: self.logical_delivery_id.clone(),
+            logical_delivery_id: flow_ethos::LogicalDeliveryId(self.logical_delivery_id.clone()),
             request_id,
             sent_by: self.sent_by.current()?,
             delivery: recode_unchanged!(&self.delivery, flow_ethos::Delivery)?,
@@ -956,18 +962,19 @@ impl BecomesCurrentWithRequestIds for old_flow::Metaflow {
         Ok(flow_ethos::Metaflow {
             address: self.address.current()?,
             state: recode_unchanged!(&self.state, flow_ethos::State)?,
-            past: self.past.clone(),
-            queue: self
-                .queue
-                .iter()
-                .map(|entry| {
-                    let request_id = request_ids
-                        .get(&entry.logical_delivery_id)
-                        .cloned()
-                        .ok_or(StoreError::StateInvariant)?;
-                    entry.current_with_request_id(request_id)
-                })
-                .collect::<Result<Vec<_>, _>>()?,
+            past: flow_ethos::Past(self.past.iter().cloned().map(flow_ethos::FlowId).collect()),
+            queue: flow_ethos::Queue(
+                self.queue
+                    .iter()
+                    .map(|entry| {
+                        let request_id = request_ids
+                            .get(&entry.logical_delivery_id)
+                            .cloned()
+                            .ok_or(StoreError::StateInvariant)?;
+                        entry.current_with_request_id(request_id)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
         })
     }
 }
@@ -978,25 +985,42 @@ impl BecomesCurrent for old_signal::Event {
     type Current = signal_flow::Event;
     fn current(&self) -> Result<signal_flow::Event, StoreError> {
         Ok(match self {
-            old_signal::Event::Started(session) => signal_flow::Event::Started(session.clone()),
+            old_signal::Event::Started(session) => {
+                signal_flow::Event::Started(session.clone().map(signal_flow::NativeSessionId))
+            }
             old_signal::Event::ToolUsed(tool) => signal_flow::Event::ToolUsed(tool.clone()),
             old_signal::Event::Stopped(stop) => {
                 signal_flow::Event::Stopped(signal_flow::NativeStop {
-                    native_session_id_option: stop.native_session_id_option.clone(),
-                    transcript_path_option: stop.transcript_path_option.clone(),
-                    last_assistant_message_option: stop.last_assistant_message_option.clone(),
-                    background_work: Vec::new(),
+                    native_session_id_option: stop
+                        .native_session_id_option
+                        .clone()
+                        .map(signal_flow::NativeSessionId),
+                    transcript_path_option: stop
+                        .transcript_path_option
+                        .clone()
+                        .map(signal_flow::TranscriptPath),
+                    last_assistant_message_option: signal_flow::LastAssistantMessageOption(
+                        stop.last_assistant_message_option.clone(),
+                    ),
+                    background_work: signal_flow::BackgroundWork(Vec::new()),
                 })
             }
             old_signal::Event::PromptSubmitted(prompt) => {
                 signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
-                    native_session_id_option: prompt.native_session_id_option.clone(),
-                    prompt_id_option: prompt.prompt_id_option.clone(),
-                    prompt_sha256: prompt.prompt_sha256.clone(),
+                    native_session_id_option: prompt
+                        .native_session_id_option
+                        .clone()
+                        .map(signal_flow::NativeSessionId),
+                    prompt_id_option: prompt.prompt_id_option.clone().map(signal_flow::PromptId),
+                    prompt_sha256: signal_flow::PromptSha256(prompt.prompt_sha256.clone()),
                 })
             }
-            old_signal::Event::Ended(session) => signal_flow::Event::Ended(session.clone()),
-            old_signal::Event::Cleared(session) => signal_flow::Event::Cleared(session.clone()),
+            old_signal::Event::Ended(session) => {
+                signal_flow::Event::Ended(session.clone().map(signal_flow::NativeSessionId))
+            }
+            old_signal::Event::Cleared(session) => {
+                signal_flow::Event::Cleared(session.clone().map(signal_flow::NativeSessionId))
+            }
         })
     }
 }
@@ -1023,7 +1047,9 @@ impl BecomesCurrent for old_signal::Refusal {
             old_signal::Refusal::Held(lock) => {
                 signal_flow::Refusal::Held(recode_unchanged!(lock, flow_ethos::Lock)?)
             }
-            old_signal::Refusal::Awake(flow_id) => signal_flow::Refusal::Awake(flow_id.clone()),
+            old_signal::Refusal::Awake(flow_id) => {
+                signal_flow::Refusal::Awake(signal_flow::FlowId(flow_id.clone()))
+            }
             old_signal::Refusal::Asleep => signal_flow::Refusal::Asleep,
             old_signal::Refusal::Lapsed => signal_flow::Refusal::Lapsed,
             old_signal::Refusal::Unknown(unknown) => signal_flow::Refusal::Unknown(match unknown {
@@ -1034,7 +1060,7 @@ impl BecomesCurrent for old_signal::Refusal {
                     signal_flow::Unknown_Data::Lock(recode_unchanged!(lock, flow_ethos::Lock)?)
                 }
                 old_signal::Unknown_Data::FlowId(flow_id) => {
-                    signal_flow::Unknown_Data::FlowId(flow_id.clone())
+                    signal_flow::Unknown_Data::FlowId(signal_flow::FlowId(flow_id.clone()))
                 }
                 old_signal::Unknown_Data::Key(key) => {
                     signal_flow::Unknown_Data::Key(recode_unchanged!(key, flow_ethos::Key)?)
@@ -1055,7 +1081,7 @@ impl BecomesCurrent for old_signal::Refusal {
             ),
             old_signal::Refusal::Direct(words) => signal_flow::Refusal::Direct(words.clone()),
             old_signal::Refusal::TopicRefused(topic) => {
-                signal_flow::Refusal::TopicRefused(topic.clone())
+                signal_flow::Refusal::TopicRefused(signal_flow::Topic(topic.clone()))
             }
             old_signal::Refusal::NoOpenTask(_)
             | old_signal::Refusal::Unresolved
@@ -1095,8 +1121,8 @@ impl BecomesCurrentWithRequestId for old_signal::DeliverySnapshot {
         request_id: RequestId,
     ) -> Result<signal_flow::DeliverySnapshot, StoreError> {
         Ok(signal_flow::DeliverySnapshot {
-            delivery_cursor: self.delivery_cursor,
-            logical_delivery_id: self.logical_delivery_id.clone(),
+            delivery_cursor: signal_flow::DeliveryCursor(self.delivery_cursor),
+            logical_delivery_id: signal_flow::LogicalDeliveryId(self.logical_delivery_id.clone()),
             request_id,
             sent_by: self.sent_by.current()?,
             address: self.address.current()?,
@@ -1249,9 +1275,9 @@ impl BecomesCurrentWithRequestId for old_signal::SendAcceptance {
         request_id: RequestId,
     ) -> Result<signal_flow::SendAcceptance, StoreError> {
         Ok(signal_flow::SendAcceptance {
-            logical_delivery_id: self.logical_delivery_id.clone(),
+            logical_delivery_id: signal_flow::LogicalDeliveryId(self.logical_delivery_id.clone()),
             request_id,
-            delivery_cursor: self.delivery_cursor,
+            delivery_cursor: signal_flow::DeliveryCursor(self.delivery_cursor),
             delivery_state: self.delivery_state.current()?,
         })
     }
@@ -1288,7 +1314,9 @@ impl BecomesCurrentWithRequestIds for PriorStoredSendOutcome {
                     .cloned()
                     .ok_or(StoreError::StateInvariant)?;
                 OrdinarySendOutcome::Sent(signal_flow::SendReceipt {
-                    logical_delivery_id: receipt.logical_delivery_id.clone(),
+                    logical_delivery_id: signal_flow::LogicalDeliveryId(
+                        receipt.logical_delivery_id.clone(),
+                    ),
                     request_id: id,
                 })
             }
@@ -1301,7 +1329,9 @@ impl BecomesCurrentWithRequestIds for PriorStoredSendOutcome {
                             .cloned()
                             .ok_or(StoreError::StateInvariant)?;
                         signal_flow::SendFailure::Admitted(signal_flow::SendFailure_Admitted_Data {
-                            logical_delivery_id: logical_delivery_id.clone(),
+                            logical_delivery_id: signal_flow::LogicalDeliveryId(
+                                logical_delivery_id.clone(),
+                            ),
                             request_id: id,
                             send_failure_reason: reason,
                         })
@@ -1312,7 +1342,7 @@ impl BecomesCurrentWithRequestIds for PriorStoredSendOutcome {
         };
         Ok(super::send_outcome::StoredSendOutcome {
             record: SendOutcomeRecord {
-                send_outcome_id: old.send_outcome_id.clone(),
+                send_outcome_id: meta_signal_flow::SendOutcomeId(old.send_outcome_id.clone()),
                 process_option: old
                     .process_option
                     .as_ref()
@@ -1328,7 +1358,7 @@ impl BecomesCurrentWithRequestIds for PriorStoredSendOutcome {
                     .as_ref()
                     .map(old_flow::Address::current)
                     .transpose()?,
-                request_digest: old.request_digest.clone(),
+                request_digest: meta_signal_flow::RequestDigest(old.request_digest.clone()),
                 ordinary_send_outcome,
             },
         })
@@ -1340,9 +1370,9 @@ impl From<&crate::generated::send_tool_before_request_ids::ToolCallKey>
 {
     fn from(value: &crate::generated::send_tool_before_request_ids::ToolCallKey) -> Self {
         crate::generated::send_tool::ToolCallKey {
-            thread_id: value.thread_id.clone(),
-            turn_id: value.turn_id.clone(),
-            call_id: value.call_id.clone(),
+            thread_id: crate::generated::send_tool::ThreadId(value.thread_id.clone()),
+            turn_id: crate::generated::send_tool::TurnId(value.turn_id.clone()),
+            call_id: crate::generated::send_tool::CallId(value.call_id.clone()),
         }
     }
 }
@@ -1358,16 +1388,16 @@ impl BecomesCurrent for crate::generated::send_tool_before_request_ids::SendRefu
             old::SendRefusal::FlowEnded => current::SendRefusal::FlowEnded,
             old::SendRefusal::NotAwake => current::SendRefusal::NotAwake,
             old::SendRefusal::KeyReused => current::SendRefusal::KeyReused,
-            old::SendRefusal::UnknownRecipient(target) => {
-                current::SendRefusal::UnknownRecipient(target.current()?)
-            }
+            old::SendRefusal::UnknownRecipient(target) => current::SendRefusal::UnknownRecipient(
+                crate::generated::send_tool::Target(target.current()?),
+            ),
             old::SendRefusal::Held => current::SendRefusal::Held,
             old::SendRefusal::Oversized(size) => current::SendRefusal::Oversized(
                 recode_unchanged!(size, signal_flow::SendPayloadSize)?,
             ),
             old::SendRefusal::Store => current::SendRefusal::Store,
             old::SendRefusal::TopicRefused(topic) => {
-                current::SendRefusal::TopicRefused(topic.clone())
+                current::SendRefusal::TopicRefused(signal_flow::Topic(topic.clone()))
             }
         })
     }
@@ -1393,8 +1423,8 @@ impl BecomesCurrentSendCall for PriorSendCall {
         let send_outcome = match &self.send_outcome {
             old::SendOutcome::Accepted(accepted) if archived => {
                 current::SendOutcome::Archived(current::Archived_Data {
-                    sender: accepted.sender.current()?,
-                    target: accepted.target.current()?,
+                    address: accepted.sender.current()?,
+                    target: crate::generated::send_tool::Target(accepted.target.current()?),
                 })
             }
             old::SendOutcome::Accepted(accepted) => {
@@ -1404,8 +1434,8 @@ impl BecomesCurrentSendCall for PriorSendCall {
                     .cloned()
                     .ok_or(StoreError::StateInvariant)?;
                 current::SendOutcome::Accepted(current::Accepted_Data {
-                    sender: accepted.sender.current()?,
-                    target: accepted.target.current()?,
+                    address: accepted.sender.current()?,
+                    target: crate::generated::send_tool::Target(accepted.target.current()?),
                     send_acceptance: accepted
                         .send_acceptance
                         .current_with_request_id(request_id)?,
@@ -1413,15 +1443,15 @@ impl BecomesCurrentSendCall for PriorSendCall {
             }
             old::SendOutcome::LegacyUnknown(unknown) => {
                 current::SendOutcome::LegacyUnknown(current::LegacyUnknown_Data {
-                    sender: unknown.sender.current()?,
-                    target: unknown.target.current()?,
+                    address: unknown.sender.current()?,
+                    target: crate::generated::send_tool::Target(unknown.target.current()?),
                 })
             }
             old::SendOutcome::Refused(refusal) => current::SendOutcome::Refused(refusal.current()?),
         };
         Ok(current::SendCall {
             tool_call_key: (&self.tool_call_key).into(),
-            content_sha256: self.content_sha256.clone(),
+            content_sha256: crate::generated::send_tool::ContentSha256(self.content_sha256.clone()),
             send_outcome,
         })
     }
@@ -1892,8 +1922,9 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             let mut selected = None;
             for _ in 0..super::SEEDED_REQUEST_ID_DRAWS {
                 let id = drawer.draw_request_id()?;
-                if id.len() != 4
+                if id.0.len() != 4
                     || !id
+                        .0
                         .bytes()
                         .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
                 {
@@ -1921,7 +1952,7 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             {
                 closures.insert(
                     done.logical_delivery_id.clone(),
-                    RequestClosure::Answered(answer_id.clone()),
+                    RequestClosure::Answered(signal_flow::LogicalDeliveryId(answer_id.clone())),
                 );
             }
         }
@@ -1929,10 +1960,10 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             if held.contains(&binding.input_delivery_id) {
                 closures.insert(
                     binding.input_delivery_id.clone(),
-                    RequestClosure::Answered(format!(
+                    RequestClosure::Answered(LogicalDeliveryId(format!(
                         "simplified-result-{}-{}",
                         binding.flow_id, binding.input_delivery_id
-                    )),
+                    ))),
                 );
             }
         }
@@ -2013,11 +2044,14 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
                 };
                 used.insert(order.clone());
                 if held.contains(order) {
-                    closures.insert(order.clone(), RequestClosure::Answered(answer.clone()));
+                    closures.insert(
+                        order.clone(),
+                        RequestClosure::Answered(signal_flow::LogicalDeliveryId(answer.clone())),
+                    );
                 }
                 assigned.push(AssignedAnswer {
-                    answer,
-                    order: order.clone(),
+                    answer: flow_ethos::LogicalDeliveryId(answer),
+                    order: flow_ethos::LogicalDeliveryId(order.clone()),
                     order_id: request_ids.get(order).cloned(),
                 });
             }
@@ -2028,7 +2062,7 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
                 .iter()
                 .filter(|(order, _, _)| held.contains(order) && !used.contains(order))
                 .map(|(order, _, _)| OpenOrder {
-                    order: order.clone(),
+                    order: flow_ethos::LogicalDeliveryId(order.clone()),
                     order_id: request_ids[order].clone(),
                 })
                 .collect();
@@ -2174,7 +2208,7 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             .iter()
             .map(|logical_id| RequestIdBinding {
                 request_id: request_ids[logical_id].clone(),
-                logical_delivery_id: logical_id.clone(),
+                logical_delivery_id: signal_flow::LogicalDeliveryId(logical_id.clone()),
                 closure: closures
                     .get(logical_id)
                     .cloned()
@@ -2219,7 +2253,7 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
                         .ok_or(StoreError::StateInvariant)?;
                     let line = TASK_ANNOUNCEMENT_HEADER
                         .render_bounded_line(&format!("{LONGEST_TASK_ID} "), &words);
-                    Ok((logical_id, line))
+                    Ok((flow_ethos::LogicalDeliveryId(logical_id), line))
                 })
                 .collect::<Result<Vec<_>, StoreError>>()?;
             for (part, tasks) in TASK_ANNOUNCEMENT_HEADER
@@ -2243,7 +2277,7 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             for (_, decision) in decisions {
                 for assigned in decision.assigned {
                     let words = requests
-                        .get(&assigned.order)
+                        .get(&assigned.order.0)
                         .ok_or(StoreError::StateInvariant)?
                         .prior_order_words()
                         .ok_or(StoreError::StateInvariant)?;
@@ -2260,7 +2294,7 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
                 }
                 for open in decision.open {
                     let words = requests
-                        .get(&open.order)
+                        .get(&open.order.0)
                         .ok_or(StoreError::StateInvariant)?
                         .prior_order_words()
                         .ok_or(StoreError::StateInvariant)?;
@@ -2293,7 +2327,7 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
 
         let mut identity = String::with_capacity(16);
         for _ in 0..4 {
-            identity.push_str(&drawer.draw_request_id()?);
+            identity.push_str(&drawer.draw_request_id()?.0);
         }
         if identity.len() != 16
             || !identity
@@ -2323,7 +2357,7 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             .register(
                 descriptors.store_identity,
                 vec![StoredStoreIdentity {
-                    store_identity: identity,
+                    store_identity: signal_flow::StoreIdentity(identity),
                 }],
             )
             .register(descriptors.prior_deliveries, prior_rows)
@@ -2332,8 +2366,10 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             .register(
                 descriptors.request_policy,
                 vec![super::StoredMetaRequestPolicyConfiguration {
-                    request_id_draws: super::SEEDED_REQUEST_ID_DRAWS,
-                    announcement_tries: super::SEEDED_ANNOUNCEMENT_TRIES,
+                    request_id_draws: meta_signal_flow::DrawBound(super::SEEDED_REQUEST_ID_DRAWS),
+                    announcement_tries: meta_signal_flow::TryBound(
+                        super::SEEDED_ANNOUNCEMENT_TRIES,
+                    ),
                 }],
             );
         for standing in heartbeat_rows {
@@ -2375,7 +2411,10 @@ mod tests {
     impl ScriptedDrawer {
         fn new(values: &[&str]) -> Self {
             Self(Mutex::new(
-                values.iter().map(|value| (*value).into()).collect(),
+                values
+                    .iter()
+                    .map(|value| flow_ethos::RequestId((*value).into()))
+                    .collect(),
             ))
         }
     }
@@ -2660,24 +2699,28 @@ mod tests {
             FlowEvents {
                 flow_id: "5a4d0b".into(),
                 event_vector: vec![
-                    signal_flow::Event::Started(Some(
+                    signal_flow::Event::Started(Some(signal_flow::NativeSessionId(
                         "c0ffee00-0000-4000-8000-000000000001".into()
-                    )),
+                    ))),
                     signal_flow::Event::ToolUsed("Bash".into()),
                     signal_flow::Event::Stopped(signal_flow::NativeStop {
-                        native_session_id_option: Some(
+                        native_session_id_option: Some(signal_flow::NativeSessionId(
                             "c0ffee00-0000-4000-8000-000000000001".into()
+                        )),
+                        transcript_path_option: Some(signal_flow::TranscriptPath(
+                            "/t/c0ffee00.jsonl".into()
+                        )),
+                        last_assistant_message_option: signal_flow::LastAssistantMessageOption(
+                            Some("done".into())
                         ),
-                        transcript_path_option: Some("/t/c0ffee00.jsonl".into()),
-                        last_assistant_message_option: Some("done".into()),
-                        background_work: vec![],
+                        background_work: signal_flow::BackgroundWork(vec![]),
                     }),
                     signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
-                        native_session_id_option: Some(
+                        native_session_id_option: Some(signal_flow::NativeSessionId(
                             "c0ffee00-0000-4000-8000-000000000001".into()
-                        ),
+                        )),
                         prompt_id_option: None,
-                        prompt_sha256: "ab12".into(),
+                        prompt_sha256: signal_flow::PromptSha256("ab12".into()),
                     }),
                     signal_flow::Event::Cleared(None),
                 ],
@@ -2815,10 +2858,10 @@ mod tests {
         let [binding] = before.as_slice() else {
             panic!("only the held singleton Order receives a request id")
         };
-        assert_eq!(binding.request_id, "s001");
+        assert_eq!(binding.request_id, RequestId("s001".into()));
         assert_eq!(
             binding.closure,
-            RequestClosure::Answered("singleton-answer".into())
+            RequestClosure::Answered(LogicalDeliveryId("singleton-answer".into()))
         );
         assert_eq!(
             Some(binding.clone()).open_answer_binding(),
@@ -3101,10 +3144,19 @@ mod tests {
             panic!("one assignment part")
         };
         assert_eq!(assignment.decisions.len(), 2);
-        assert_eq!(assignment.decisions[0].assigned[0].order, "order-first");
+        assert_eq!(
+            assignment.decisions[0].assigned[0].order,
+            LogicalDeliveryId("order-first".into())
+        );
         assert_eq!(assignment.decisions[0].assigned[0].order_id, None);
-        assert_eq!(assignment.decisions[1].open[0].order, "order-second");
-        assert_eq!(assignment.decisions[1].open[0].order_id, "a001");
+        assert_eq!(
+            assignment.decisions[1].open[0].order,
+            LogicalDeliveryId("order-second".into())
+        );
+        assert_eq!(
+            assignment.decisions[1].open[0].order_id,
+            RequestId("a001".into())
+        );
         let prior_table = engine
             .register_table(descriptors.prior_deliveries)
             .expect("prior deliveries register");
@@ -3325,14 +3377,14 @@ mod tests {
             .flat_map(|decision| &decision.assigned)
             .collect::<Vec<_>>();
         assert_eq!(assigned.len(), 2);
-        assert_eq!(assigned[0].order, "order-early");
-        assert_eq!(assigned[1].order, "order-late");
+        assert_eq!(assigned[0].order, LogicalDeliveryId("order-early".into()));
+        assert_eq!(assigned[1].order, LogicalDeliveryId("order-late".into()));
         assert_eq!(
             assignment
                 .decisions
                 .iter()
                 .flat_map(|decision| &decision.open)
-                .map(|open| open.order.as_str())
+                .map(|open| open.order.0.as_str())
                 .collect::<std::collections::BTreeSet<_>>(),
             std::collections::BTreeSet::from(["order-after-answer"])
         );
@@ -3495,7 +3547,7 @@ mod tests {
             .expect("current reads");
         assert_eq!(current.records().len(), 3);
         assert!(current.records().iter().all(|row| {
-            row.snapshot.logical_delivery_id != "delivered-moved"
+            row.snapshot.logical_delivery_id.0 != "delivered-moved"
                 && row.admission
                     == super::super::logical_delivery::DeliveryAdmission::HistoricalUnknown
         }));
@@ -3523,7 +3575,9 @@ mod tests {
         assert_eq!(announcements.records().len(), 1);
         assert_eq!(
             announcements.records()[0].tasks,
-            vec!["task-held-by-reminder"]
+            vec![flow_ethos::LogicalDeliveryId(
+                "task-held-by-reminder".into()
+            )]
         );
         let heartbeat_rows = engine
             .match_records(QueryPlan::all(heartbeat_table))
@@ -3700,7 +3754,10 @@ mod tests {
         let metaflows = engine
             .match_records(QueryPlan::all(metaflows))
             .expect("metaflows read");
-        assert_eq!(metaflows.records()[0].metaflow.queue[0].request_id, "held");
+        assert_eq!(
+            metaflows.records()[0].metaflow.queue.0[0].request_id,
+            RequestId("held".into())
+        );
         let holds = engine
             .register_table(descriptors.address_holds)
             .expect("holds register");
@@ -3708,8 +3765,14 @@ mod tests {
             .match_records(QueryPlan::all(holds))
             .expect("holds read");
         assert_eq!(
-            holds.records()[0].found.as_ref().expect("found kept").queue[0].request_id,
-            "held"
+            holds.records()[0]
+                .found
+                .as_ref()
+                .expect("found kept")
+                .queue
+                .0[0]
+                .request_id,
+            RequestId("held".into())
         );
         let attempts = engine
             .register_table(descriptors.attempts)
@@ -3721,7 +3784,7 @@ mod tests {
         else {
             panic!("logical evidence stays logical")
         };
-        assert_eq!(entry.request_id, "held");
+        assert_eq!(entry.request_id, RequestId("held".into()));
         let outcomes = engine
             .register_table(descriptors.outcomes)
             .expect("outcomes register");
@@ -3733,7 +3796,7 @@ mod tests {
         else {
             panic!("accepted outcome stays accepted")
         };
-        assert_eq!(acceptance.request_id, "held");
+        assert_eq!(acceptance.request_id, RequestId("held".into()));
         let calls = engine
             .register_table(descriptors.send_calls)
             .expect("send calls register");
@@ -3745,7 +3808,10 @@ mod tests {
         else {
             panic!("accepted call stays accepted")
         };
-        assert_eq!(accepted.send_acceptance.request_id, "held");
+        assert_eq!(
+            accepted.send_acceptance.request_id,
+            RequestId("held".into())
+        );
     }
 
     #[test]
@@ -4096,7 +4162,10 @@ mod tests {
                 .iter()
                 .map(|row| (row.part, row.tasks.clone()))
                 .collect::<Vec<_>>(),
-            vec![(0, vec!["task-one".into()]), (1, vec!["task-two".into()])]
+            vec![
+                (0, vec![LogicalDeliveryId("task-one".into())]),
+                (1, vec![LogicalDeliveryId("task-two".into())])
+            ]
         );
         let expected_announcements = announcements.records().to_vec();
         drop(announcements);
@@ -4399,7 +4468,10 @@ mod tests {
         let identities = reopened
             .match_records(QueryPlan::all(identity_table))
             .expect("identity reads");
-        assert_eq!(identities.records()[0].store_identity, "0000000100020003");
+        assert_eq!(
+            identities.records()[0].store_identity,
+            signal_flow::StoreIdentity("0000000100020003".into())
+        );
         let policy_table = reopened
             .register_table(descriptors.request_policy)
             .expect("policy registers");
@@ -4407,7 +4479,13 @@ mod tests {
             .match_records(QueryPlan::all(policy_table))
             .expect("policy reads");
         assert_eq!(policy.records().len(), 1);
-        assert_eq!(policy.records()[0].request_id_draws, 64);
-        assert_eq!(policy.records()[0].announcement_tries, 3);
+        assert_eq!(
+            policy.records()[0].request_id_draws,
+            meta_signal_flow::DrawBound(64)
+        );
+        assert_eq!(
+            policy.records()[0].announcement_tries,
+            meta_signal_flow::TryBound(3)
+        );
     }
 }

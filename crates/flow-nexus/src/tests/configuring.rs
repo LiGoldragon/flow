@@ -33,9 +33,10 @@ fn this_process() -> Process {
         .split_whitespace()
         .nth(19)
         .and_then(|field| field.parse().ok())
+        .map(flow_ethos::Started)
         .expect("start time");
     Process {
-        pid: i64::from(std::process::id()),
+        pid: flow_ethos::Pid(i64::from(std::process::id())),
         started,
     }
 }
@@ -46,7 +47,7 @@ fn harness_flags_are_per_metaflow_persistent_and_absent_by_default() {
     let nexus = fixture.open();
     let address = Address {
         aspect: Aspect::Field,
-        topic: "flagsTest".into(),
+        topic: flow_ethos::Topic("flagsTest".into()),
         model: Model::Sol,
     };
     assert!(
@@ -56,6 +57,7 @@ fn harness_flags_are_per_metaflow_persistent_and_absent_by_default() {
             .unwrap()
             .unwrap()
             .configured_harness_flags
+            .0
             .is_empty(),
         "an older configuration has the empty family"
     );
@@ -66,11 +68,13 @@ fn harness_flags_are_per_metaflow_persistent_and_absent_by_default() {
             ConfigurationChange::HarnessFlags(vec![
                 ConfigureHarnessFlags {
                     address: address.clone(),
-                    harness_flags: "--one 'two three'".into(),
+                    harness_flag_text: meta_signal_flow::HarnessFlagText(
+                        "--one 'two three'".into()
+                    ),
                 },
                 ConfigureHarnessFlags {
                     address: address.clone(),
-                    harness_flags: "--duplicate".into(),
+                    harness_flag_text: meta_signal_flow::HarnessFlagText("--duplicate".into()),
                 },
             ])
         ),
@@ -82,7 +86,7 @@ fn harness_flags_are_per_metaflow_persistent_and_absent_by_default() {
             &nexus,
             ConfigurationChange::HarnessFlags(vec![ConfigureHarnessFlags {
                 address: address.clone(),
-                harness_flags: "--one 'two three'".into(),
+                harness_flag_text: meta_signal_flow::HarnessFlagText("--one 'two three'".into()),
             }])
         ),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
@@ -105,15 +109,18 @@ fn heartbeat_configuration_requires_a_positive_period_and_unique_recipients() {
     let nexus = fixture.open();
     let recipient = Address {
         aspect: Aspect::Field,
-        topic: "heartbeatTest".into(),
+        topic: flow_ethos::Topic("heartbeatTest".into()),
         model: Model::Sol,
     };
     assert_eq!(
         configure(
             &nexus,
             ConfigurationChange::Heartbeat(Some(HeartbeatConfig {
-                heartbeat_period_seconds: 60,
-                heartbeat_recipients: vec![recipient.clone(), recipient],
+                heartbeat_period_seconds: meta_signal_flow::HeartbeatPeriodSeconds(60),
+                heartbeat_recipients: meta_signal_flow::HeartbeatRecipients(vec![
+                    recipient.clone(),
+                    recipient
+                ]),
             }))
         ),
         MetaResponse::ConfigureRejected(ConfigureRejection::DuplicateEntry),
@@ -122,8 +129,8 @@ fn heartbeat_configuration_requires_a_positive_period_and_unique_recipients() {
         configure(
             &nexus,
             ConfigurationChange::Heartbeat(Some(HeartbeatConfig {
-                heartbeat_period_seconds: 0,
-                heartbeat_recipients: vec![],
+                heartbeat_period_seconds: meta_signal_flow::HeartbeatPeriodSeconds(0),
+                heartbeat_recipients: meta_signal_flow::HeartbeatRecipients(vec![]),
             }))
         ),
         MetaResponse::ConfigureRejected(ConfigureRejection::StoreRefused),
@@ -156,9 +163,11 @@ impl ConfiguredStore {
         let path = |name: &str| directory.path().join(name).to_string_lossy().into_owned();
         // The place keeps its memory at <State>/flow.sema.
         let place = crate::place::Place {
-            place_name: "main".into(),
-            runtime: path("runtime/nexus/main"),
-            state: directory.path().to_string_lossy().into_owned(),
+            place_name: crate::generated::library::PlaceName("main".into()),
+            runtime: crate::generated::library::Runtime(path("runtime/nexus/main")),
+            state: crate::generated::library::State(
+                directory.path().to_string_lossy().into_owned(),
+            ),
         };
         let store_path = path("flow.sema");
         let configuration = ConfigurationOnlyStore::open(std::path::Path::new(&store_path))
@@ -167,11 +176,11 @@ impl ConfiguredStore {
             ConfigurationChange::Nexus(Self::nexus(&defaults, &[TERRA, SOL, LUNA], 30)),
             ConfigurationChange::Models(vec![ConfigureModel {
                 model: Model::Astra,
-                native: "gpt-6-astra".into(),
+                native: meta_signal_flow::Native("gpt-6-astra".into()),
             }]),
             ConfigurationChange::Thresholds(vec![ConfigureThreshold {
-                model_name: "claude-fable-5-1".into(),
-                refresh: 200_000,
+                model_name: flow_ethos::ModelName("claude-fable-5-1".into()),
+                refresh_threshold: meta_signal_flow::RefreshThreshold(200_000),
             }]),
         ] {
             configuration
@@ -202,8 +211,8 @@ impl ConfiguredStore {
             store
                 .lock_metaflow(
                     Lock_Data {
-                        sender: Self::message(),
-                        recipient: Self::message(),
+                        first_address: Self::message(),
+                        second_address: Self::message(),
                     },
                     100,
                 )
@@ -222,22 +231,29 @@ impl ConfiguredStore {
     fn nexus(defaults: &DefaultConfiguration, stable: &[&str], lease: i64) -> ConfigureNexus {
         let settings = defaults.configuration();
         let mut stable_codex = settings.stable_codex;
-        stable_codex.model_name_vector = stable.iter().map(|model| (*model).into()).collect();
+        stable_codex.model_name_vector = stable
+            .iter()
+            .map(|model| flow_ethos::ModelName((*model).into()))
+            .collect();
         ConfigureNexus {
-            source_root: settings.source_root,
-            stable_codex,
-            next_codex: settings.next_codex,
-            harness_profiles: settings.harness_profile_vector,
-            meta_aspects: settings.meta_aspects,
-            message_nexus_path_option: Some(settings.message_nexus_path.clone()),
-            message_nexus_binary_option: Some(
+            source_root: flow_ethos::SourceRoot(settings.source_root),
+            first_codex_endpoint: stable_codex,
+            second_codex_endpoint: settings.next_codex,
+            harness_profiles: flow_ethos::HarnessProfiles(settings.harness_profile_vector),
+            meta_aspects: flow_ethos::MetaAspects(settings.meta_aspects),
+            message_nexus_path_option: Some(flow_ethos::MessageNexusPath(
+                settings.message_nexus_path.clone(),
+            )),
+            message_nexus_binary_option: Some(flow_ethos::MessageNexusBinary(
                 std::env::current_exe()
                     .expect("test executable")
                     .to_string_lossy()
                     .into_owned(),
+            )),
+            curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+                "/fixture/curriculum.sock".into(),
             ),
-            curriculum_nexus_path: "/fixture/curriculum.sock".into(),
-            lease,
+            lease: flow_ethos::Lease(lease),
             presentation_prompt_option: None,
         }
     }
@@ -245,26 +261,26 @@ impl ConfiguredStore {
     fn message() -> Address {
         Address {
             aspect: Aspect::Field,
-            topic: "message".into(),
+            topic: flow_ethos::Topic("message".into()),
             model: Model::Astra,
         }
     }
 
     fn flow_node() -> FlowNode {
         FlowNode {
-            flow_id: "da1e3f".into(),
-            session_id: "claude-session".into(),
+            flow_id: flow_ethos::FlowId("da1e3f".into()),
+            session_id: signal_flow::SessionId("claude-session".into()),
             harness_kind: HarnessKind::Claude,
             endpoint_selection: EndpointSelection::Unavailable,
             herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
-                herdr_session_name: "messaging-build".into(),
-                herdr_agent_name: "recipient".into(),
-                herdr_pane_id: "w1:p2".into(),
-                herdr_terminal_id: "term-current".into(),
+                herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+                herdr_agent_name: signal_flow::HerdrAgentName("recipient".into()),
+                herdr_pane_id: signal_flow::HerdrPaneId("w1:p2".into()),
+                herdr_terminal_id: signal_flow::HerdrTerminalId("term-current".into()),
             }),
             origin: Origin::Flow(FlowOrigin {
-                flow_id: "da1e3f".into(),
-                session_id: "claude-session".into(),
+                flow_id: flow_ethos::FlowId("da1e3f".into()),
+                session_id: signal_flow::SessionId("claude-session".into()),
             }),
             flow_lifecycle: FlowLifecycle::Active,
         }
@@ -289,7 +305,9 @@ struct OtherRows {
 
 fn other_rows(nexus: &RunningNexus) -> OtherRows {
     let ConfigurationSnapshot {
-        models, thresholds, ..
+        configured_models: meta_signal_flow::ConfiguredModels(models),
+        configured_thresholds: meta_signal_flow::ConfiguredThresholds(thresholds),
+        ..
     } = snapshot(nexus);
     let peer = this_process();
     OtherRows {
@@ -325,7 +343,7 @@ fn configure(nexus: &RunningNexus, change: ConfigurationChange) -> MetaResponse 
 fn quaternary_field() -> Address {
     Address {
         aspect: Aspect::Field,
-        topic: "flow".into(),
+        topic: flow_ethos::Topic("flow".into()),
         model: Model::Terra,
     }
 }
@@ -347,7 +365,11 @@ fn configure_nexus_replaces_only_the_nexus_value_and_takes_effect_without_a_rest
         configure(&nexus, ConfigurationChange::Nexus(replaced.clone())),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
-    assert_eq!(snapshot(&nexus).nexus, replaced, "the whole value replaced");
+    assert_eq!(
+        snapshot(&nexus).configured_nexus.0,
+        replaced,
+        "the whole value replaced"
+    );
     assert_eq!(other_rows(&nexus), before, "no other row changed");
     // The same declaration again writes nothing.
     assert_eq!(
@@ -368,7 +390,7 @@ fn configure_nexus_replaces_only_the_nexus_value_and_takes_effect_without_a_rest
         stable_models(&reopened),
         BTreeSet::from([SOL.to_owned(), LUNA.to_owned()])
     );
-    assert_eq!(snapshot(&reopened).nexus, replaced);
+    assert_eq!(snapshot(&reopened).configured_nexus.0, replaced);
     assert_eq!(other_rows(&reopened), before);
 }
 
@@ -400,7 +422,7 @@ fn a_subscription_sees_the_configuration_as_it_changes() {
         else {
             panic!("a configured store answers its snapshot")
         };
-        assert_ne!(first.nexus, replaced);
+        assert_ne!(first.configured_nexus.0, replaced);
         assert_eq!(
             configure(&nexus, ConfigurationChange::Nexus(replaced.clone())),
             MetaResponse::Configured(ConfigureOutcome::Replaced)
@@ -411,7 +433,7 @@ fn a_subscription_sees_the_configuration_as_it_changes() {
         else {
             panic!("the change is a snapshot")
         };
-        assert_eq!(second.nexus, replaced);
+        assert_eq!(second.configured_nexus.0, replaced);
         disconnected.store(true, Ordering::Release);
         nexus.configuration_changes.announce();
         assert!(observer.join().expect("observer joins").is_err());
@@ -426,9 +448,9 @@ fn a_refused_declaration_changes_nothing() {
     let rows = other_rows(&nexus);
     let mut overlapping = ConfiguredStore::nexus(&fixture.defaults, &[SOL, LUNA], 45);
     overlapping
-        .next_codex
+        .second_codex_endpoint
         .model_name_vector
-        .push(LUNA.to_owned());
+        .push(flow_ethos::ModelName(LUNA.to_owned()));
     assert_eq!(
         configure(&nexus, ConfigurationChange::Nexus(overlapping)),
         MetaResponse::ConfigureRejected(ConfigureRejection::CodexModelsOverlap)
@@ -436,7 +458,7 @@ fn a_refused_declaration_changes_nothing() {
     // One key named twice is not a family.
     let model = |native: &str| ConfigureModel {
         model: Model::Sol,
-        native: native.into(),
+        native: meta_signal_flow::Native(native.into()),
     };
     assert_eq!(
         configure(
@@ -457,21 +479,21 @@ fn a_refused_declaration_changes_nothing() {
 fn each_family_is_its_last_declaration() {
     let fixture = ConfiguredStore::new();
     let nexus = fixture.open();
-    let nexus_before = snapshot(&nexus).nexus;
+    let nexus_before = snapshot(&nexus).configured_nexus;
 
     // In the order the snapshot reads them, by Model name.
     let models = vec![
         ConfigureModel {
             model: Model::Haiku,
-            native: "claude-haiku-5-5".into(),
+            native: meta_signal_flow::Native("claude-haiku-5-5".into()),
         },
         ConfigureModel {
             model: Model::Opus,
-            native: "claude-opus-5-5".into(),
+            native: meta_signal_flow::Native("claude-opus-5-5".into()),
         },
         ConfigureModel {
             model: Model::Sol,
-            native: SOL.into(),
+            native: meta_signal_flow::Native(SOL.into()),
         },
     ];
     assert_eq!(
@@ -479,7 +501,7 @@ fn each_family_is_its_last_declaration() {
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
     // The Primary model the store held is gone: it is not declared.
-    assert_eq!(snapshot(&nexus).models, models);
+    assert_eq!(snapshot(&nexus).configured_models.0, models);
     assert_eq!(
         configure(&nexus, ConfigurationChange::Models(models.clone())),
         MetaResponse::Configured(ConfigureOutcome::Unchanged)
@@ -487,30 +509,30 @@ fn each_family_is_its_last_declaration() {
 
     let thresholds = vec![
         ConfigureThreshold {
-            model_name: "claude-opus-5-5".into(),
-            refresh: 200_000,
+            model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
+            refresh_threshold: meta_signal_flow::RefreshThreshold(200_000),
         },
         ConfigureThreshold {
-            model_name: "gpt-6.1-sol".into(),
-            refresh: 150_000,
+            model_name: flow_ethos::ModelName("gpt-6.1-sol".into()),
+            refresh_threshold: meta_signal_flow::RefreshThreshold(150_000),
         },
     ];
     assert_eq!(
         configure(&nexus, ConfigurationChange::Thresholds(thresholds.clone())),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
-    assert_eq!(snapshot(&nexus).thresholds, thresholds);
+    assert_eq!(snapshot(&nexus).configured_thresholds.0, thresholds);
 
     let first = vec![
         ConfigureLeaveOut {
             address: quaternary_field(),
             harness_kind: HarnessKind::Claude,
-            leave_outs: vec![signal_flow::LeaveOut::SkillTool],
+            leave_outs: signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::SkillTool]),
         },
         ConfigureLeaveOut {
             address: ConfiguredStore::message(),
             harness_kind: HarnessKind::Claude,
-            leave_outs: vec![signal_flow::LeaveOut::ClaudeMd],
+            leave_outs: signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::ClaudeMd]),
         },
     ];
     assert_eq!(
@@ -520,16 +542,16 @@ fn each_family_is_its_last_declaration() {
     let second = vec![ConfigureLeaveOut {
         address: quaternary_field(),
         harness_kind: HarnessKind::Claude,
-        leave_outs: vec![
+        leave_outs: signal_flow::LeaveOuts(vec![
             signal_flow::LeaveOut::SkillTool,
             signal_flow::LeaveOut::WorkflowTool,
-        ],
+        ]),
     }];
     assert_eq!(
         configure(&nexus, ConfigurationChange::LeaveOuts(second.clone())),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
-    assert_eq!(snapshot(&nexus).default_leave_outs, second);
+    assert_eq!(snapshot(&nexus).default_leave_outs.0, second);
     assert!(
         nexus
             .store
@@ -538,10 +560,14 @@ fn each_family_is_its_last_declaration() {
             .is_empty()
     );
     // A fresh store trusts no send server; a declaration names each pair.
-    assert!(snapshot(&nexus).send_servers.is_empty());
+    assert!(snapshot(&nexus).configured_send_servers.0.is_empty());
     let send_servers = vec![meta_signal_flow::ConfigureSendServer {
-        codex_app_server_binary: "/nix/store/codex/bin/codex".into(),
-        mcp_send_server_binary: "/nix/store/send/bin/flow-send-mcp".into(),
+        codex_app_server_binary: meta_signal_flow::CodexAppServerBinary(
+            "/nix/store/codex/bin/codex".into(),
+        ),
+        mcp_send_server_binary: meta_signal_flow::McpSendServerBinary(
+            "/nix/store/send/bin/flow-send-mcp".into(),
+        ),
     }];
     assert_eq!(
         configure(
@@ -550,7 +576,7 @@ fn each_family_is_its_last_declaration() {
         ),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
-    assert_eq!(snapshot(&nexus).send_servers, send_servers);
+    assert_eq!(snapshot(&nexus).configured_send_servers.0, send_servers);
     // The effective snapshot equals the last declaration of every family,
     // across a restart.
     drop(nexus);
@@ -558,29 +584,47 @@ fn each_family_is_its_last_declaration() {
     assert_eq!(
         snapshot(&reopened),
         ConfigurationSnapshot {
-            nexus: nexus_before,
-            models,
-            thresholds,
-            default_leave_outs: second,
-            send_servers,
-            metaflows: Vec::new(),
-            configured_harness_flags: Vec::new(),
-            investigation: None,
-            default_minutes: crate::store::SEEDED_DEFAULT_MINUTES,
-            heartbeat: None,
-            protected_addresses: vec![],
-            handover_policies: meta_signal_flow::HandoverPoliciesConfiguration::Unconfigured,
-            handover_archive: meta_signal_flow::HandoverArchiveConfiguration::Unconfigured,
-            handover_count: meta_signal_flow::HandoverCountConfiguration::Unconfigured,
-            publication_deadline: 60_000,
-            counters: meta_signal_flow::ConfigureCounters {
-                logical_delivery: 1,
-                queue_attempt: 3,
-                send_outcome: 1,
-            },
-            request_id_draws: 64,
-            announcement_tries: 3,
-            harness_hook: meta_signal_flow::HarnessHookConfiguration::Unconfigured,
+            configured_nexus: nexus_before,
+            configured_models: meta_signal_flow::ConfiguredModels(models),
+            configured_thresholds: meta_signal_flow::ConfiguredThresholds(thresholds),
+            default_leave_outs: meta_signal_flow::DefaultLeaveOuts(second),
+            configured_send_servers: meta_signal_flow::ConfiguredSendServers(send_servers),
+            configured_metaflows: meta_signal_flow::ConfiguredMetaflows(Vec::new()),
+            configured_harness_flags: meta_signal_flow::ConfiguredHarnessFlags(Vec::new()),
+            configured_investigation: meta_signal_flow::ConfiguredInvestigation(None),
+            configured_default_minutes: meta_signal_flow::ConfiguredDefaultMinutes(
+                flow_ethos::Minutes(crate::store::SEEDED_DEFAULT_MINUTES,)
+            ),
+            configured_heartbeat: meta_signal_flow::ConfiguredHeartbeat(None),
+            configured_protected_addresses: meta_signal_flow::ConfiguredProtectedAddresses(vec![]),
+            configured_handover_policies: meta_signal_flow::ConfiguredHandoverPolicies(
+                meta_signal_flow::HandoverPoliciesConfiguration::Unconfigured
+            ),
+            configured_handover_archive: meta_signal_flow::ConfiguredHandoverArchive(
+                meta_signal_flow::HandoverArchiveConfiguration::Unconfigured
+            ),
+            configured_handover_count: meta_signal_flow::ConfiguredHandoverCount(
+                meta_signal_flow::HandoverCountConfiguration::Unconfigured
+            ),
+            configured_publication_deadline: meta_signal_flow::ConfiguredPublicationDeadline(
+                meta_signal_flow::Duration(60_000)
+            ),
+            configured_counters: meta_signal_flow::ConfiguredCounters(
+                meta_signal_flow::ConfigureCounters {
+                    logical_delivery: meta_signal_flow::LogicalDelivery(1),
+                    queue_attempt: meta_signal_flow::QueueAttempt(3),
+                    send_outcome: meta_signal_flow::SendOutcome(1),
+                }
+            ),
+            configured_request_id_draws: meta_signal_flow::ConfiguredRequestIdDraws(
+                meta_signal_flow::DrawBound(64)
+            ),
+            configured_announcement_tries: meta_signal_flow::ConfiguredAnnouncementTries(
+                meta_signal_flow::TryBound(3)
+            ),
+            configured_harness_hook: meta_signal_flow::ConfiguredHarnessHook(
+                meta_signal_flow::HarnessHookConfiguration::Unconfigured
+            ),
         }
     );
     // An empty declaration empties the family.
@@ -588,7 +632,7 @@ fn each_family_is_its_last_declaration() {
         configure(&reopened, ConfigurationChange::LeaveOuts(Vec::new())),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
-    assert!(snapshot(&reopened).default_leave_outs.is_empty());
+    assert!(snapshot(&reopened).default_leave_outs.0.is_empty());
     assert_eq!(
         configure(&reopened, ConfigurationChange::LeaveOuts(Vec::new())),
         MetaResponse::Configured(ConfigureOutcome::Unchanged)
@@ -605,10 +649,10 @@ fn a_launch_after_a_replaced_declaration_takes_the_new_defaults() {
     // A first launch: it names no predecessor, so no handover is read under
     // the store's root.
     profile.flow_id_option = None;
-    profile.model_name = "claude-haiku-5-5".into();
+    profile.model_name = flow_ethos::ModelName("claude-haiku-5-5".into());
     let composed_leave_outs =
         |nexus: &RunningNexus| match nexus.perform(Operation::Compose(profile.clone())) {
-            Outcome::Composed(launch) => launch.leave_outs,
+            Outcome::Composed(launch) => launch.leave_outs.0,
             outcome => panic!("launch not composed: {outcome:?}"),
         };
     let declare = |nexus: &RunningNexus, leave_outs: Vec<signal_flow::LeaveOut>| {
@@ -617,7 +661,7 @@ fn a_launch_after_a_replaced_declaration_takes_the_new_defaults() {
             ConfigurationChange::LeaveOuts(vec![ConfigureLeaveOut {
                 address: quaternary_field(),
                 harness_kind: HarnessKind::Claude,
-                leave_outs,
+                leave_outs: signal_flow::LeaveOuts(leave_outs),
             }]),
         )
     };
@@ -675,7 +719,7 @@ fn a_launch_naming_a_claude_alias_is_not_composed_and_its_full_name_is() {
         "Claude-Haiku-5-5",
         "claude-",
     ] {
-        profile.model_name = inexact.into();
+        profile.model_name = flow_ethos::ModelName(inexact.into());
         assert_eq!(
             nexus.perform(Operation::Compose(profile.clone())),
             Outcome::Failed(
@@ -686,7 +730,7 @@ fn a_launch_naming_a_claude_alias_is_not_composed_and_its_full_name_is() {
             "{inexact}"
         );
     }
-    profile.model_name = "claude-haiku-5-5".into();
+    profile.model_name = flow_ethos::ModelName("claude-haiku-5-5".into());
     assert!(matches!(
         nexus.perform(Operation::Compose(profile.clone())),
         Outcome::Composed(_)
@@ -713,7 +757,7 @@ fn a_leave_out_default_naming_another_harness_is_refused_and_writes_nothing() {
     let committed = vec![ConfigureLeaveOut {
         address: quaternary_field(),
         harness_kind: HarnessKind::Claude,
-        leave_outs: vec![signal_flow::LeaveOut::ClaudeMd],
+        leave_outs: signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::ClaudeMd]),
     }];
     assert_eq!(
         configure(&nexus, ConfigurationChange::LeaveOuts(committed.clone())),
@@ -725,22 +769,22 @@ fn a_leave_out_default_naming_another_harness_is_refused_and_writes_nothing() {
         ConfigureLeaveOut {
             address: ConfiguredStore::message(),
             harness_kind: HarnessKind::Codex,
-            leave_outs: vec![
+            leave_outs: signal_flow::LeaveOuts(vec![
                 signal_flow::LeaveOut::CodexAgentsMd,
                 signal_flow::LeaveOut::ClaudeMd,
-            ],
+            ]),
         },
         ConfigureLeaveOut {
             address: ConfiguredStore::message(),
             harness_kind: HarnessKind::Claude,
-            leave_outs: vec![signal_flow::LeaveOut::CodexSkillListing],
+            leave_outs: signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::CodexSkillListing]),
         },
     ] {
         let declaration = vec![
             ConfigureLeaveOut {
                 address: quaternary_field(),
                 harness_kind: HarnessKind::Codex,
-                leave_outs: vec![signal_flow::LeaveOut::CodexAgentsMd],
+                leave_outs: signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::CodexAgentsMd]),
             },
             crossed,
         ];
@@ -759,7 +803,7 @@ fn a_leave_out_default_naming_another_harness_is_refused_and_writes_nothing() {
         configuration.configure_change(ConfigurationChange::LeaveOuts(vec![ConfigureLeaveOut {
             address: quaternary_field(),
             harness_kind: HarnessKind::Codex,
-            leave_outs: vec![signal_flow::LeaveOut::SkillTool],
+            leave_outs: signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::SkillTool]),
         }])),
         Err(crate::store::StoreError::LeaveOutNotForHarness)
     ));
@@ -788,10 +832,10 @@ fn a_codex_start_naming_none_takes_no_claude_default() {
             ConfigurationChange::LeaveOuts(vec![ConfigureLeaveOut {
                 address: quaternary_field(),
                 harness_kind: HarnessKind::Claude,
-                leave_outs: vec![
+                leave_outs: signal_flow::LeaveOuts(vec![
                     signal_flow::LeaveOut::WorkflowTool,
                     signal_flow::LeaveOut::ClaudeMd,
-                ],
+                ]),
             }]),
         ),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
@@ -802,18 +846,18 @@ fn a_codex_start_naming_none_takes_no_claude_default() {
     // the store's root.
     profile.flow_id_option = None;
     profile.leave_outs_option = None;
-    profile.model_name = SOL.into();
+    profile.model_name = flow_ethos::ModelName(SOL.into());
     match nexus.perform(Operation::Compose(profile.clone())) {
         Outcome::Composed(launch) => {
             assert_eq!(launch.harness_kind, HarnessKind::Codex);
-            assert!(launch.leave_outs.is_empty(), "{:?}", launch.leave_outs);
+            assert!(launch.leave_outs.0.is_empty(), "{:?}", launch.leave_outs);
         }
         outcome => panic!("Codex launch not composed: {outcome:?}"),
     }
-    profile.model_name = "claude-haiku-5-5".into();
+    profile.model_name = flow_ethos::ModelName("claude-haiku-5-5".into());
     match nexus.perform(Operation::Compose(profile)) {
         Outcome::Composed(launch) => assert_eq!(
-            launch.leave_outs,
+            launch.leave_outs.0,
             [
                 signal_flow::LeaveOut::WorkflowTool,
                 signal_flow::LeaveOut::ClaudeMd
@@ -864,7 +908,7 @@ fn a_store_configured_while_stopped_opens_with_the_replaced_value() {
     );
     drop(configuration);
     let nexus = fixture.open();
-    assert_eq!(snapshot(&nexus).nexus, replaced);
+    assert_eq!(snapshot(&nexus).configured_nexus.0, replaced);
     assert_eq!(other_rows(&nexus), rows);
     assert!(!stable_models(&nexus).contains(TERRA));
 }
@@ -984,15 +1028,18 @@ fn protected_addresses_persist_across_reopen() {
     let nexus = fixture.open();
     let fable = Address {
         aspect: Aspect::Psyche,
-        topic: "core".into(),
+        topic: flow_ethos::Topic("core".into()),
         model: Model::Fable,
     };
     let other = Address {
         aspect: Aspect::Mind,
-        topic: "versionZero".into(),
+        topic: flow_ethos::Topic("versionZero".into()),
         model: Model::Astra,
     };
-    assert_eq!(snapshot(&nexus).protected_addresses, Vec::<Address>::new());
+    assert_eq!(
+        snapshot(&nexus).configured_protected_addresses,
+        meta_signal_flow::ConfiguredProtectedAddresses(Vec::<Address>::new())
+    );
     assert_eq!(
         configure(
             &nexus,
@@ -1018,18 +1065,20 @@ fn protected_addresses_persist_across_reopen() {
         configure(
             &nexus,
             ConfigurationChange::ProtectedAddresses(vec![Address {
-                topic: "Not-camel".into(),
+                topic: flow_ethos::Topic("Not-camel".into()),
                 ..fable.clone()
             }])
         ),
-        MetaResponse::ConfigureRejected(ConfigureRejection::TopicRefused("Not-camel".into()))
+        MetaResponse::ConfigureRejected(ConfigureRejection::TopicRefused(flow_ethos::Topic(
+            "Not-camel".into()
+        )))
     );
-    let declared = snapshot(&nexus).protected_addresses;
-    assert_eq!(declared.len(), 2);
-    assert!(declared.contains(&fable) && declared.contains(&other));
+    let declared = snapshot(&nexus).configured_protected_addresses;
+    assert_eq!(declared.0.len(), 2);
+    assert!(declared.0.contains(&fable) && declared.0.contains(&other));
     drop(nexus);
     let reopened = fixture.open();
-    assert_eq!(snapshot(&reopened).protected_addresses, declared);
+    assert_eq!(snapshot(&reopened).configured_protected_addresses, declared);
     assert_eq!(
         configure(
             &reopened,
@@ -1038,7 +1087,10 @@ fn protected_addresses_persist_across_reopen() {
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
     drop(reopened);
-    assert_eq!(snapshot(&fixture.open()).protected_addresses, vec![fable]);
+    assert_eq!(
+        snapshot(&fixture.open()).configured_protected_addresses,
+        meta_signal_flow::ConfiguredProtectedAddresses(vec![fable])
+    );
 }
 
 #[test]
@@ -1046,30 +1098,60 @@ fn request_policy_fields_replace_independently_validate_and_survive_reopen() {
     let fixture = ConfiguredStore::new();
     let nexus = fixture.open();
     let seeded = snapshot(&nexus);
-    assert_eq!(seeded.request_id_draws, 64);
-    assert_eq!(seeded.announcement_tries, 3);
+    assert_eq!(
+        seeded.configured_request_id_draws,
+        meta_signal_flow::ConfiguredRequestIdDraws(meta_signal_flow::DrawBound(64))
+    );
+    assert_eq!(
+        seeded.configured_announcement_tries,
+        meta_signal_flow::ConfiguredAnnouncementTries(meta_signal_flow::TryBound(3))
+    );
 
     assert_eq!(
-        configure(&nexus, ConfigurationChange::AnnouncementTries(7)),
+        configure(
+            &nexus,
+            ConfigurationChange::AnnouncementTries(meta_signal_flow::TryBound(7))
+        ),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
     let after_tries = snapshot(&nexus);
-    assert_eq!(after_tries.request_id_draws, 64);
-    assert_eq!(after_tries.announcement_tries, 7);
+    assert_eq!(
+        after_tries.configured_request_id_draws,
+        meta_signal_flow::ConfiguredRequestIdDraws(meta_signal_flow::DrawBound(64))
+    );
+    assert_eq!(
+        after_tries.configured_announcement_tries,
+        meta_signal_flow::ConfiguredAnnouncementTries(meta_signal_flow::TryBound(7))
+    );
 
     assert_eq!(
-        configure(&nexus, ConfigurationChange::RequestIdDraws(19)),
+        configure(
+            &nexus,
+            ConfigurationChange::RequestIdDraws(meta_signal_flow::DrawBound(19))
+        ),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
     let after_draws = snapshot(&nexus);
-    assert_eq!(after_draws.request_id_draws, 19);
-    assert_eq!(after_draws.announcement_tries, 7);
     assert_eq!(
-        configure(&nexus, ConfigurationChange::RequestIdDraws(0)),
+        after_draws.configured_request_id_draws,
+        meta_signal_flow::ConfiguredRequestIdDraws(meta_signal_flow::DrawBound(19))
+    );
+    assert_eq!(
+        after_draws.configured_announcement_tries,
+        meta_signal_flow::ConfiguredAnnouncementTries(meta_signal_flow::TryBound(7))
+    );
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::RequestIdDraws(meta_signal_flow::DrawBound(0))
+        ),
         MetaResponse::ConfigureRejected(ConfigureRejection::RequestIdDrawsRefused)
     );
     assert_eq!(
-        configure(&nexus, ConfigurationChange::AnnouncementTries(-1)),
+        configure(
+            &nexus,
+            ConfigurationChange::AnnouncementTries(meta_signal_flow::TryBound(-1))
+        ),
         MetaResponse::ConfigureRejected(ConfigureRejection::AnnouncementTriesRefused)
     );
     assert_eq!(snapshot(&nexus), after_draws);
@@ -1078,14 +1160,26 @@ fn request_policy_fields_replace_independently_validate_and_survive_reopen() {
     assert_eq!(snapshot(&reopened), after_draws);
 
     assert_eq!(
-        configure(&reopened, ConfigurationChange::RequestIdDraws(23)),
+        configure(
+            &reopened,
+            ConfigurationChange::RequestIdDraws(meta_signal_flow::DrawBound(23))
+        ),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
     assert_eq!(
-        configure(&reopened, ConfigurationChange::AnnouncementTries(5)),
+        configure(
+            &reopened,
+            ConfigurationChange::AnnouncementTries(meta_signal_flow::TryBound(5))
+        ),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
     let opposite = snapshot(&reopened);
-    assert_eq!(opposite.request_id_draws, 23);
-    assert_eq!(opposite.announcement_tries, 5);
+    assert_eq!(
+        opposite.configured_request_id_draws,
+        meta_signal_flow::ConfiguredRequestIdDraws(meta_signal_flow::DrawBound(23))
+    );
+    assert_eq!(
+        opposite.configured_announcement_tries,
+        meta_signal_flow::ConfiguredAnnouncementTries(meta_signal_flow::TryBound(5))
+    );
 }

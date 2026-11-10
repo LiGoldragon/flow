@@ -21,7 +21,9 @@ impl NamesCodexAppServers for FlowStore {
             .match_records(QueryPlan::all(self.meta_configuration_tables.send_servers))?
             .records()
             .iter()
-            .filter_map(|stored| fs::canonicalize(&stored.send_server.codex_app_server_binary).ok())
+            .filter_map(|stored| {
+                fs::canonicalize(&stored.send_server.codex_app_server_binary.0).ok()
+            })
             .collect())
     }
 }

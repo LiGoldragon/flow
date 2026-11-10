@@ -74,7 +74,7 @@
 ; types (memory.ethos), named through the Nexus crate.
 
 Operation
-[ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch Origin LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request QueueEntry LogicalDeliveryId ContextRefusal CompositionRefusal LeaveOutRefusal NativeSessionId HarnessSpawnRefusal NativeLaunchRefusal ]
+[ signal_flow:[ FlowId LaunchRequestId FlowNode CallerIdentity LaunchProfile ComposedLaunch Origin LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request QueueEntry LogicalDeliveryId ContextRefusal CompositionRefusal LeaveOutRefusal NativeSessionId HarnessSpawnRefusal NativeLaunchRefusal ]
   meta_signal_flow:[ Root RestartRecord ]
   flow_nexus:[ LaunchOutcome Replacement SeatBirth ] ]
 [ Compose.LaunchProfile
@@ -94,10 +94,10 @@ Operation
            Harness.{ FlowId Event }
            Context.{ FlowId Tokens.Integer }
            Asleep.{ Address FlowId }
-           Awoken.{ Address FlowId Delivered.Integer }
+           Awoken.{ Address FlowId DeliveredCount.Integer }
            Restart.RestartRecord
            Rebound.SeatBirth ]
-  Register.{ FlowNode Caller }
+  Register.{ FlowNode CallerIdentity }
   Confirm.FlowId
   Open.{ ComposedLaunch Root }
   Spawn.PaneLaunch

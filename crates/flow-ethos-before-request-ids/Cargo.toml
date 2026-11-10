@@ -10,4 +10,4 @@ datom = ["dep:datom-codec"]
 
 [dependencies]
 rkyv.workspace = true
-datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "eabead4", optional = true }
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09a0526", optional = true }

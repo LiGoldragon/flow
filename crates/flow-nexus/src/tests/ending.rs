@@ -22,22 +22,26 @@ const CLEARED_SUCCESSOR_SESSION: &str = "c1a0de00-0000-4000-8000-000000000002";
 fn report(fixture: &NexusFixture, event: Event) {
     assert_eq!(
         fixture.nexus.report(Report_Data {
-            flow_id: CLAUDE_SEAT.into(),
+            flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
             event: event.clone(),
         }),
         Response::Reported
     );
-    fixture.nexus.after_report(&CLAUDE_SEAT.to_owned(), &event);
+    fixture.nexus.after_report(
+        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+        &event,
+    );
 }
 
 fn session(fixture: &NexusFixture) -> String {
-    fixture
+    (fixture
         .nexus
         .store
         .flow_node(CLAUDE_SEAT)
         .unwrap()
         .expect("the flow's row is kept")
-        .session_id
+        .session_id)
+        .0
 }
 
 fn state(fixture: &NexusFixture) -> State {
@@ -76,9 +80,9 @@ fn awake_seat(fixture: &NexusFixture) {
     claude_seat(fixture, 40_000);
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address(Model::Sol),
-        state: State::Awake(CLAUDE_SEAT.into()),
-        past: vec![],
-        queue: vec![],
+        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
 }
 
@@ -90,9 +94,12 @@ fn after_retire_the_flow_s_pane_is_closed() {
     let fixture = NexusFixture::new();
     awake_seat(&fixture);
 
-    let meta_signal_flow::Response::FlowRetired(retired) = fixture
-        .nexus
-        .dispatch_meta(meta_signal_flow::Query::Retire(CLAUDE_SEAT.into()))
+    let meta_signal_flow::Response::FlowRetired(retired) =
+        fixture
+            .nexus
+            .dispatch_meta(meta_signal_flow::Query::Retire(flow_ethos::FlowId(
+                CLAUDE_SEAT.into(),
+            )))
     else {
         panic!("a live flow is retired")
     };
@@ -111,13 +118,16 @@ fn declare_secondary(fixture: &NexusFixture, continuity: meta_signal_flow::Conti
             meta_signal_flow::ConfigureMetaflow {
                 root_option: None,
                 address: address(Model::Sol),
-                system_modules: vec!["spirit:core".into(), "intent:flow".into()],
-                user_modules: vec![],
+                system_modules: signal_flow::SystemModules(vec![
+                    signal_flow::ModuleIdentity("spirit:core".into()),
+                    signal_flow::ModuleIdentity("intent:flow".into()),
+                ]),
+                user_modules: signal_flow::UserModules(vec![]),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 continuity,
-                purpose: String::new(),
-                records: vec![],
+                purpose: meta_signal_flow::Purpose(String::new()),
+                records: meta_signal_flow::Records(vec![]),
             },
         ]))
         .expect("metaflow declared");
@@ -135,18 +145,26 @@ fn retire_of_a_maintained_metaflow_s_flow_is_refused_and_changes_nothing() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_meta(meta_signal_flow::Query::Retire(CLAUDE_SEAT.into())),
+            .dispatch_meta(meta_signal_flow::Query::Retire(flow_ethos::FlowId(
+                CLAUDE_SEAT.into()
+            ))),
         meta_signal_flow::Response::RetireRejected(meta_signal_flow::RetireRejection::Maintained)
     );
     assert!(lifecycle(&fixture).is_live(), "the flow stays live");
-    assert_eq!(state(&fixture), State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(
+        state(&fixture),
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
     assert!(!closed(&fixture), "its pane is not closed");
     assert!(fixture.typed().is_none(), "nothing is typed");
 
     declare_secondary(&fixture, meta_signal_flow::Continuity::OnDemand);
-    let meta_signal_flow::Response::FlowRetired(retired) = fixture
-        .nexus
-        .dispatch_meta(meta_signal_flow::Query::Retire(CLAUDE_SEAT.into()))
+    let meta_signal_flow::Response::FlowRetired(retired) =
+        fixture
+            .nexus
+            .dispatch_meta(meta_signal_flow::Query::Retire(flow_ethos::FlowId(
+                CLAUDE_SEAT.into(),
+            )))
     else {
         panic!("an OnDemand metaflow's flow is retired")
     };
@@ -162,8 +180,8 @@ fn a_flow_whose_session_ended_has_its_pane_closed() {
     awake_seat(&fixture);
 
     fixture.nexus.after_report(
-        &CLAUDE_SEAT.to_owned(),
-        &Event::Ended(Some(CLAUDE_SESSION.into())),
+        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+        &Event::Ended(Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into()))),
     );
 
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Exited);
@@ -189,8 +207,8 @@ fn a_flow_whose_pane_is_gone_exits_with_nothing_to_close() {
     fixture.accept_pane_operations(vec![], PromptFixture::Prompted("w1:p3"));
 
     fixture.nexus.after_report(
-        &CLAUDE_SEAT.to_owned(),
-        &Event::Ended(Some(CLAUDE_SESSION.into())),
+        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+        &Event::Ended(Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into()))),
     );
 
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Exited);
@@ -208,25 +226,41 @@ fn a_cleared_session_is_not_an_exit_and_the_next_start_rebinds_the_flow() {
     let live = lifecycle(&fixture);
     assert!(live.is_live());
 
-    report(&fixture, Event::Cleared(Some(CLAUDE_SESSION.into())));
+    report(
+        &fixture,
+        Event::Cleared(Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into()))),
+    );
     assert_eq!(lifecycle(&fixture), live, "a cleared session is no exit");
     assert!(!closed(&fixture), "the cleared flow's pane stays");
-    assert_eq!(state(&fixture), State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(
+        state(&fixture),
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
     assert_eq!(session(&fixture), CLAUDE_SESSION);
 
     report(
         &fixture,
-        Event::Started(Some(CLEARED_SUCCESSOR_SESSION.into())),
+        Event::Started(Some(signal_flow::NativeSessionId(
+            CLEARED_SUCCESSOR_SESSION.into(),
+        ))),
     );
     assert_eq!(session(&fixture), CLEARED_SUCCESSOR_SESSION);
     assert_eq!(lifecycle(&fixture), live);
-    assert_eq!(state(&fixture), State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(
+        state(&fixture),
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
 
-    report(&fixture, Event::Ended(Some(CLAUDE_SESSION.into())));
+    report(
+        &fixture,
+        Event::Ended(Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into()))),
+    );
     assert_eq!(lifecycle(&fixture), live, "the old session is not its own");
     report(
         &fixture,
-        Event::Ended(Some(CLEARED_SUCCESSOR_SESSION.into())),
+        Event::Ended(Some(signal_flow::NativeSessionId(
+            CLEARED_SUCCESSOR_SESSION.into(),
+        ))),
     );
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Exited);
 }
@@ -240,17 +274,23 @@ fn a_start_after_no_clear_of_its_own_session_rebinds_nothing() {
 
     report(
         &fixture,
-        Event::Started(Some(CLEARED_SUCCESSOR_SESSION.into())),
+        Event::Started(Some(signal_flow::NativeSessionId(
+            CLEARED_SUCCESSOR_SESSION.into(),
+        ))),
     );
     assert_eq!(session(&fixture), CLAUDE_SESSION);
 
     report(
         &fixture,
-        Event::Cleared(Some("0ther000-0000-4000-8000-000000000009".into())),
+        Event::Cleared(Some(signal_flow::NativeSessionId(
+            "0ther000-0000-4000-8000-000000000009".into(),
+        ))),
     );
     report(
         &fixture,
-        Event::Started(Some(CLEARED_SUCCESSOR_SESSION.into())),
+        Event::Started(Some(signal_flow::NativeSessionId(
+            CLEARED_SUCCESSOR_SESSION.into(),
+        ))),
     );
     assert_eq!(session(&fixture), CLAUDE_SESSION);
     assert!(lifecycle(&fixture).is_live());
@@ -268,11 +308,16 @@ fn a_retire_whose_close_herdr_refuses_answers_close_refused_and_records_nothing(
     assert_eq!(
         fixture
             .nexus
-            .dispatch_meta(meta_signal_flow::Query::Retire(CLAUDE_SEAT.into())),
+            .dispatch_meta(meta_signal_flow::Query::Retire(flow_ethos::FlowId(
+                CLAUDE_SEAT.into()
+            ))),
         meta_signal_flow::Response::RetireRejected(meta_signal_flow::RetireRejection::CloseRefused)
     );
     assert_eq!(lifecycle(&fixture), live);
-    assert_eq!(state(&fixture), State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(
+        state(&fixture),
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
 }
 
 /// An exit is recorded though Herdr refuses to close the pane: the exit
@@ -283,7 +328,10 @@ fn an_exit_whose_close_herdr_refuses_is_recorded_all_the_same() {
     awake_seat(&fixture);
     close_answers(&fixture, "exit 1");
 
-    report(&fixture, Event::Ended(Some(CLAUDE_SESSION.into())));
+    report(
+        &fixture,
+        Event::Ended(Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into()))),
+    );
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Exited);
     assert_eq!(state(&fixture), State::Asleep);
 }

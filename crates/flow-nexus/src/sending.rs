@@ -49,7 +49,7 @@ use crate::waking::{
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
-    Address, Caller, HarnessKind, HerdrRoute, LaunchProfile, LaunchRequest, Message,
+    Address, CallerIdentity, HarnessKind, HerdrRoute, LaunchProfile, LaunchRequest, Message,
     PrivateSendResponse, Process, Refusal, Request, Response, SendPayloadSize, SendRequest,
     SendableMessage, SentBy, StartRejection, Unknown_Data,
 };
@@ -72,7 +72,7 @@ impl MeasuresSendPayload for Request {
 impl MeasuresSendPayload for Message {
     fn native_prompt_bytes(&self, sender: &Address) -> usize {
         const PLACEHOLDER_REQUEST_ID: &str = "0000";
-        let request_id = PLACEHOLDER_REQUEST_ID.to_owned();
+        let request_id = flow_ethos::RequestId(PLACEHOLDER_REQUEST_ID.to_owned());
         vec![
             crate::message_projection::ProjectsAdmittedMessage::admitted_input(
                 self,
@@ -96,8 +96,8 @@ impl AdmitsSendPayload for Request {
     fn oversized_refusal(&self, sender: &Address) -> Option<Refusal> {
         let actual_bytes = self.native_prompt_bytes(sender);
         (actual_bytes > MAX_SEND_PAYLOAD_BYTES).then_some(Refusal::Oversized(SendPayloadSize {
-            actual_bytes: i64::try_from(actual_bytes).unwrap_or(i64::MAX),
-            maximum_bytes: MAX_SEND_PAYLOAD_BYTES as i64,
+            actual_bytes: signal_flow::ActualBytes(i64::try_from(actual_bytes).unwrap_or(i64::MAX)),
+            maximum_bytes: signal_flow::MaximumBytes(MAX_SEND_PAYLOAD_BYTES as i64),
         }))
     }
 }
@@ -106,8 +106,8 @@ impl AdmitsSendPayload for Message {
     fn oversized_refusal(&self, sender: &Address) -> Option<Refusal> {
         let actual_bytes = self.native_prompt_bytes(sender);
         (actual_bytes > MAX_SEND_PAYLOAD_BYTES).then_some(Refusal::Oversized(SendPayloadSize {
-            actual_bytes: i64::try_from(actual_bytes).unwrap_or(i64::MAX),
-            maximum_bytes: MAX_SEND_PAYLOAD_BYTES as i64,
+            actual_bytes: signal_flow::ActualBytes(i64::try_from(actual_bytes).unwrap_or(i64::MAX)),
+            maximum_bytes: signal_flow::MaximumBytes(MAX_SEND_PAYLOAD_BYTES as i64),
         }))
     }
 }
@@ -126,7 +126,7 @@ impl IdentifiesSender for RunningNexus {
         {
             ProcessAuthority::Bound(origin) => self
                 .store
-                .metaflow_awake_as(&origin.flow_id)
+                .metaflow_awake_as(&origin.flow_id.0)
                 .map_err(|error| Box::new(Response::Refused(Refusal::Store(error.to_string()))))?
                 .map(|metaflow| metaflow.address)
                 .ok_or_else(unidentified),
@@ -237,7 +237,7 @@ impl SendsRequests for RunningNexus {
             .as_ref()
             .and_then(|result| result.as_ref().ok())
             .cloned();
-        let recipient = Some(send.recipient.clone());
+        let recipient = Some(send.address.clone());
         let mut pending_answer = None;
         let mut answer = (|| -> SendAnswer {
             let _turn = self
@@ -248,17 +248,17 @@ impl SendsRequests for RunningNexus {
             // an uncapitalized camelCase identifier, kept as written.
             {
                 use crate::launching::NamesTopic;
-                if !send.recipient.topic.as_str().is_camel_case_topic() {
+                if !send.address.topic.0.as_str().is_camel_case_topic() {
                     return PrivateSendResponse::Refused(Refusal::TopicRefused(
-                        send.recipient.topic.clone(),
+                        send.address.topic.clone(),
                     ))
                     .into();
                 }
             }
             if peer.is_none() {
                 return PrivateSendResponse::Refused(Refusal::unidentified(Process {
-                    pid: 0,
-                    started: 0,
+                    pid: flow_ethos::generated::library::Pid(0),
+                    started: flow_ethos::generated::library::Started(0),
                 }))
                 .into();
             }
@@ -292,7 +292,7 @@ impl SendsRequests for RunningNexus {
             } else {
                 flow_ethos::Delivery::Queue
             };
-            let recipient = send.recipient.clone();
+            let recipient = send.address.clone();
             let message = match self.store.resolve_sendable_message(
                 &sender,
                 &recipient,
@@ -344,7 +344,7 @@ impl SendsRequests for RunningNexus {
                 | Message::MiddleAbrupt(request)
                 | Message::Soft(request)) = &message;
                 let deadline = matches!(request, Request::Task(_))
-                    .then(|| self.store.reminder(&acceptance.logical_delivery_id))
+                    .then(|| self.store.reminder(&acceptance.logical_delivery_id.0))
                     .and_then(Result::ok)
                     .flatten()
                     .and_then(|reminder| reminder.due);
@@ -415,11 +415,13 @@ impl SendsRequests for RunningNexus {
         let flow_ethos::State::Awake(flow_id) = metaflow.state else {
             return None;
         };
-        self.store
-            .flow_is_live(&flow_id)
+        (self
+            .store
+            .flow_is_live(&flow_id.0)
             .ok()
             .filter(|live| *live)
-            .map(|_| flow_id)
+            .map(|_| flow_id))
+        .map(|value| value.0)
     }
 
     fn deliver_all(&self, address: Address, peer: Option<&Process>) -> Response {
@@ -428,7 +430,10 @@ impl SendsRequests for RunningNexus {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(peer) = peer else {
-            return Response::Refused(Refusal::unidentified(Process { pid: 0, started: 0 }));
+            return Response::Refused(Refusal::unidentified(Process {
+                pid: flow_ethos::generated::library::Pid(0),
+                started: flow_ethos::generated::library::Started(0),
+            }));
         };
         if let Err(refusal) = self.sending_address(peer) {
             return *refusal;
@@ -436,7 +441,7 @@ impl SendsRequests for RunningNexus {
         self.rest_ended_awake(&address);
         let asleep = match self.store.metaflow(&address) {
             Ok(Some(metaflow)) => {
-                if metaflow.queue.is_empty() {
+                if metaflow.queue.0.is_empty() {
                     return Response::Drained(signal_flow::VisibleDrainOutcome {
                         address: address.clone(),
                         visible_drain_state: signal_flow::VisibleDrainState::Delivered,
@@ -460,7 +465,7 @@ impl SendsRequests for RunningNexus {
             self.wake_due(address.clone());
         }
         match self.store.metaflow(&address) {
-            Ok(Some(metaflow)) if metaflow.queue.is_empty() => {
+            Ok(Some(metaflow)) if metaflow.queue.0.is_empty() => {
                 Response::Drained(signal_flow::VisibleDrainOutcome {
                     address: address.clone(),
                     visible_drain_state: signal_flow::VisibleDrainState::Delivered,
@@ -536,7 +541,7 @@ impl LaunchesDeclared for RunningNexus {
         // The topic is input: checked before the declaration is looked up.
         {
             use crate::launching::NamesTopic;
-            if !address.topic.as_str().is_camel_case_topic() {
+            if !address.topic.0.as_str().is_camel_case_topic() {
                 return Err(Box::new(Response::StartRejected(
                     StartRejection::TopicRefused(address.topic.clone()),
                 )));
@@ -565,30 +570,35 @@ impl LaunchesDeclared for RunningNexus {
             "<session>".to_owned()
         } else {
             caller
-                .and_then(|process| u32::try_from(process.pid).ok())
+                .and_then(|process| u32::try_from(process.pid.0).ok())
                 .and_then(|process_id| CallerProcess { process_id }.caller_pane(&self.herdr))
                 .map(|pane| pane.herdr_session_name)
                 .unwrap_or_else(|| DEFAULT_HERDR_SESSION.to_owned())
         };
         let profile = LaunchProfile {
             launch_request_id: if rehearsal {
-                "rehearse-launch".into()
+                signal_flow::LaunchRequestId("rehearse-launch".into())
             } else {
-                "launch".minted_id()
+                signal_flow::LaunchRequestId("launch".minted_id())
             },
             system_modules: declaration.system_modules,
             user_modules: declaration.user_modules,
             address: address.clone(),
-            model_name,
-            effort: Self::effort_of(&address).to_owned(),
-            flow_id_option: predecessor.clone(),
+            model_name: signal_flow::ModelName(model_name),
+            effort: signal_flow::Effort(Self::effort_of(&address).to_owned()),
+            flow_id_option: predecessor.clone().map(flow_ethos::FlowId),
             remembering: launch.remembering,
-            herdr_session_name,
+            herdr_session_name: signal_flow::HerdrSessionName(herdr_session_name),
             leave_outs_option: None,
             flow_kind: declaration.flow_kind,
             tool_set: declaration.tool_set,
             // The declaration's purpose is composed ahead of the brief.
-            instruction_prompt: launch.instruction_prompt.with_purpose(&declaration.purpose),
+            instruction_prompt: signal_flow::InstructionPrompt(
+                launch
+                    .instruction_prompt
+                    .0
+                    .with_purpose(&declaration.purpose.0),
+            ),
         };
         Ok((profile, predecessor))
     }
@@ -637,7 +647,7 @@ impl RehearsesDeclared for RunningNexus {
             .herdr
             .harness_command(&composed, resources, &harness_arguments)
         {
-            Ok(command) => Response::Rehearsed(command.shell_command()),
+            Ok(command) => Response::Rehearsed(signal_flow::Command(command.shell_command())),
             Err(failure) => {
                 let cause = match failure {
                     crate::herdr::launch::SpawnFailure::Refused(cause) => cause,
@@ -715,12 +725,14 @@ impl TypesSeatEvidence for SeatEvidence {
     fn typed(self, process: Process) -> signal_flow::SeatEvidence {
         signal_flow::SeatEvidence {
             seat_pane_option: self.pane.map(|pane| signal_flow::SeatPane {
-                herdr_session_name: pane.herdr_session_name,
-                herdr_pane_id: pane.herdr_pane_id,
+                herdr_session_name: signal_flow::HerdrSessionName(pane.herdr_session_name),
+                herdr_pane_id: signal_flow::HerdrPaneId(pane.herdr_pane_id),
             }),
-            pane_label_option: self.pane_label,
-            native_session_id_option: self.native_session,
-            observed_at: i64::try_from(self.observed_at).unwrap_or(i64::MAX),
+            pane_label_option: self.pane_label.map(signal_flow::PaneLabel),
+            native_session_id_option: self.native_session.map(signal_flow::NativeSessionId),
+            observed_at: signal_flow::ObservedAt(
+                i64::try_from(self.observed_at).unwrap_or(i64::MAX),
+            ),
             process,
         }
     }
@@ -757,10 +769,12 @@ impl ReadsUnreportedThread for RunningNexus {
             return None;
         }
         let route = HerdrRoute {
-            herdr_session_name: herdr_session_name.to_owned(),
-            herdr_agent_name: text("name").unwrap_or_default().to_owned(),
-            herdr_pane_id: text("pane_id")?.to_owned(),
-            herdr_terminal_id: text("terminal_id")?.to_owned(),
+            herdr_session_name: signal_flow::HerdrSessionName(herdr_session_name.to_owned()),
+            herdr_agent_name: signal_flow::HerdrAgentName(
+                text("name").unwrap_or_default().to_owned(),
+            ),
+            herdr_pane_id: signal_flow::HerdrPaneId(text("pane_id")?.to_owned()),
+            herdr_terminal_id: signal_flow::HerdrTerminalId(text("terminal_id")?.to_owned()),
         };
         let threads = self.herdr.foreground_threads(&route)?;
         let mut threads = threads.into_iter();
@@ -852,10 +866,14 @@ impl ReadsClaudeSeat for RunningNexus {
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
         let route = HerdrRoute {
-            herdr_session_name: herdr_session_name.to_owned(),
-            herdr_agent_name: text("name").unwrap_or_default().to_owned(),
-            herdr_pane_id: text("pane_id").unwrap_or_default().to_owned(),
-            herdr_terminal_id: text("terminal_id").unwrap_or_default().to_owned(),
+            herdr_session_name: signal_flow::HerdrSessionName(herdr_session_name.to_owned()),
+            herdr_agent_name: signal_flow::HerdrAgentName(
+                text("name").unwrap_or_default().to_owned(),
+            ),
+            herdr_pane_id: signal_flow::HerdrPaneId(text("pane_id").unwrap_or_default().to_owned()),
+            herdr_terminal_id: signal_flow::HerdrTerminalId(
+                text("terminal_id").unwrap_or_default().to_owned(),
+            ),
         };
         let mut claude = self
             .herdr
@@ -994,7 +1012,7 @@ impl BindsSeats for RunningNexus {
     fn adopt(&self, request: signal_flow::Adopt_Data, peer: Option<&Process>) -> Response {
         match self.adopt_seat(
             request.address,
-            Some(request.native_session_id.as_str()),
+            Some(request.native_session_id.0.as_str()),
             peer,
         ) {
             Response::Bound(flow_id) => Response::Adopted(flow_id),
@@ -1026,7 +1044,10 @@ impl AdoptsSeat for RunningNexus {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(peer) = peer else {
-            return Response::Refused(Refusal::unidentified(Process { pid: 0, started: 0 }));
+            return Response::Refused(Refusal::unidentified(Process {
+                pid: flow_ethos::generated::library::Pid(0),
+                started: flow_ethos::generated::library::Started(0),
+            }));
         };
         // A restart holds the Address: no seat binds to it meanwhile.
         if !matches!(
@@ -1046,14 +1067,14 @@ impl AdoptsSeat for RunningNexus {
             match self.identify_peer_process(peer.clone()) {
                 Ok(Response::Identified(known)) if known == address => {
                     if let Some(flow_id) = self.live_awake_flow(&address) {
-                        return Response::Bound(flow_id);
+                        return Response::Bound(signal_flow::FlowId(flow_id));
                     }
                 }
                 Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
                 _ => {}
             }
         }
-        let Some(process_id) = u32::try_from(peer.pid).ok() else {
+        let Some(process_id) = u32::try_from(peer.pid.0).ok() else {
             return unidentified();
         };
         // A caller no seat is named for is refused, and what its pane
@@ -1121,10 +1142,10 @@ impl AdoptsSeat for RunningNexus {
             return unidentified();
         }
         let route = HerdrRoute {
-            herdr_session_name: seat.herdr_session_name.clone(),
-            herdr_agent_name: herdr_agent_name.clone(),
-            herdr_pane_id: herdr_pane_id.clone(),
-            herdr_terminal_id: herdr_terminal_id.clone(),
+            herdr_session_name: signal_flow::HerdrSessionName(seat.herdr_session_name.clone()),
+            herdr_agent_name: signal_flow::HerdrAgentName(herdr_agent_name.clone()),
+            herdr_pane_id: signal_flow::HerdrPaneId(herdr_pane_id.clone()),
+            herdr_terminal_id: signal_flow::HerdrTerminalId(herdr_terminal_id.clone()),
         };
         let Some(mut foreground) = self.herdr.foreground_processes(&route) else {
             return unidentified();
@@ -1158,23 +1179,25 @@ impl AdoptsSeat for RunningNexus {
             return unidentified();
         };
         let binding = meta_signal_flow::FlowBinding {
-            flow_id: flow_id.clone(),
+            flow_id: signal_flow::FlowId(flow_id.clone()),
             aspect: address.aspect.clone(),
-            model_name: model_name.clone(),
+            model_name: signal_flow::ModelName(model_name.clone()),
             harness_kind: harness_kind.clone(),
-            native_session_id: native_session_id.clone(),
-            herdr_workspace_id,
-            herdr_pane_id: herdr_pane_id.clone(),
-            herdr_tab_id,
-            herdr_terminal_id: herdr_terminal_id.clone(),
-            herdr_agent_name: herdr_agent_name.clone(),
+            native_session_id: signal_flow::NativeSessionId(native_session_id.clone()),
+            herdr_workspace_id: signal_flow::HerdrWorkspaceId(herdr_workspace_id),
+            herdr_pane_id: signal_flow::HerdrPaneId(herdr_pane_id.clone()),
+            herdr_tab_id: meta_signal_flow::HerdrTabId(herdr_tab_id),
+            herdr_terminal_id: signal_flow::HerdrTerminalId(herdr_terminal_id.clone()),
+            herdr_agent_name: signal_flow::HerdrAgentName(herdr_agent_name.clone()),
             process_identity,
-            working_directory: working_directory.to_string_lossy().into_owned(),
+            working_directory: meta_signal_flow::WorkingDirectory(
+                working_directory.to_string_lossy().into_owned(),
+            ),
         };
-        let role = Caller {
-            flow_id: flow_id.clone(),
+        let role = CallerIdentity {
+            flow_id: flow_ethos::FlowId(flow_id.clone()),
             aspect: address.aspect.clone(),
-            model_name,
+            model_name: flow_ethos::ModelName(model_name),
         };
         match self.verified_seat_node(&seat.herdr_session_name, &address, &binding) {
             Err(reason) => {
@@ -1187,7 +1210,7 @@ impl AdoptsSeat for RunningNexus {
                 .store
                 .adopt_existing_flow(node, role, address.clone(), &binding)
             {
-                Ok(ExistingSeatAdoption::Bound(_)) => Response::Bound(flow_id),
+                Ok(ExistingSeatAdoption::Bound(_)) => Response::Bound(signal_flow::FlowId(flow_id)),
                 Ok(ExistingSeatAdoption::Refused(_)) => Response::Refused(Refusal::Taken(address)),
                 Err(error) => Response::Refused(Refusal::Store(error.to_string())),
             },
@@ -1379,7 +1402,7 @@ impl CompletesDirectSends for RunningNexus {
                 delivery_state: DeliveryState::Queued,
                 ..
             }))
-        ) && self.carrying_attempt(address, &logical_id).is_none()
+        ) && self.carrying_attempt(address, &logical_id.0).is_none()
         {
             let private_response = PrivateSendResponse::SendAccepted(acceptance);
             return SendAnswer {
@@ -1401,7 +1424,7 @@ impl CompletesDirectSends for RunningNexus {
             let seen = changes.current();
             let state = {
                 let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(attempt) = self.carrying_attempt(address, &logical_id) {
+                if let Some(attempt) = self.carrying_attempt(address, &logical_id.0) {
                     let _ = self.reconcile_delivery(&attempt);
                 }
                 self.store.logical_delivery_snapshot(&logical_id)
@@ -1431,7 +1454,7 @@ impl CompletesDirectSends for RunningNexus {
                 delivery_state: DeliveryState::Queued,
                 ..
             }))
-        ) && self.carrying_attempt(address, &logical_id).is_none()
+        ) && self.carrying_attempt(address, &logical_id.0).is_none()
         {
             // Starting the next flow failed before any native submission.
             // The existing metaflow still owns the same admitted request;
@@ -1446,7 +1469,7 @@ impl CompletesDirectSends for RunningNexus {
             };
             if let Ok(Some(metaflow)) = self.store.metaflow(address) {
                 let _ = self.store.mark_queue_retryable(
-                    &metaflow.queue,
+                    &metaflow.queue.0,
                     signal_flow::RetryCause::WakeRefused(rejection),
                 );
             }
@@ -1464,11 +1487,11 @@ impl CompletesDirectSends for RunningNexus {
             // A native transcript can land without a harness hook. One
             // final correlated reconciliation follows the bounded event
             // wait; timeout alone is never evidence of absence.
-            if let Some(attempt) = self.carrying_attempt(address, &logical_id) {
+            if let Some(attempt) = self.carrying_attempt(address, &logical_id.0) {
                 let _ = self.reconcile_delivery(&attempt);
             }
             self.store
-                .finish_failed_direct(address, &logical_id, &observed)
+                .finish_failed_direct(address, &logical_id.0, &observed)
         };
         if let Ok(delivery_state) = &state
             && let Some(response) = delivery_state.completed_direct_response(&acceptance)

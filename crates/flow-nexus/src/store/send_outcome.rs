@@ -42,7 +42,7 @@ pub(crate) struct StoredSendOutcome {
 
 impl EngineRecord for StoredSendOutcome {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.record.send_outcome_id.clone())
+        RecordKey::new(self.record.send_outcome_id.clone().0)
     }
 }
 
@@ -161,11 +161,13 @@ impl RecordsSendOutcomes for FlowStore {
                 .ok_or(StoreError::StateInvariant)?,
         };
         let record = SendOutcomeRecord {
-            send_outcome_id: format!("send-outcome-{record_number:016x}"),
+            send_outcome_id: meta_signal_flow::SendOutcomeId(format!(
+                "send-outcome-{record_number:016x}"
+            )),
             process_option: caller,
             first_address_option: sender,
             second_address_option: recipient,
-            request_digest,
+            request_digest: meta_signal_flow::RequestDigest(request_digest),
             ordinary_send_outcome,
         };
         let counter_mutation = self.engine.begin_atomic_commit();
@@ -265,15 +267,19 @@ mod tests {
         let fixture = tempfile::tempdir().expect("temporary store path");
         let store_path = fixture.path().join("outcomes.sema");
         let first = SendOutcomeRecord {
-            send_outcome_id: "send-outcome-0000000000000001".into(),
+            send_outcome_id: meta_signal_flow::SendOutcomeId(
+                "send-outcome-0000000000000001".into(),
+            ),
             process_option: None,
             first_address_option: None,
             second_address_option: None,
-            request_digest: "abc".into(),
+            request_digest: meta_signal_flow::RequestDigest("abc".into()),
             ordinary_send_outcome: OrdinarySendOutcome::Accepted(signal_flow::SendAcceptance {
-                logical_delivery_id: "logical-delivery-0000000000000001".into(),
-                request_id: "test".into(),
-                delivery_cursor: 1,
+                logical_delivery_id: flow_ethos::LogicalDeliveryId(
+                    "logical-delivery-0000000000000001".into(),
+                ),
+                request_id: flow_ethos::RequestId("test".into()),
+                delivery_cursor: signal_flow::DeliveryCursor(1),
                 delivery_state: signal_flow::DeliveryState::Queued,
             }),
         };

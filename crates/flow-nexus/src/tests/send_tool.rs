@@ -7,8 +7,10 @@
 
 use super::{ControlsHerdrSnapshot, NexusFixture};
 use crate::Dispatches;
+use crate::HoldsStopRequest;
 use crate::codex::{CodexAdapter, ResponderSignal, SelectsCodexEndpoint};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+use crate::generated::send_tool::DeclaresSendTool;
 use crate::generated::send_tool::{
     HandlesSendCall, ReadsToolCall, SendCall, SendOutcome, SendRefusal, ToolCall, ToolCallKey,
 };
@@ -22,12 +24,11 @@ use crate::store::logical_delivery::{MintsRequestIds, RecordsLogicalDeliveries};
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{AnnouncesLaunchChanges, RecordsFlowLifecycle, RegistersFlowIdentity};
-use crate::{HoldsStopRequest, generated::send_tool::DeclaresSendTool};
 use flow_ethos::State;
 use meta_signal_flow::QueueEvidence;
 use signal_flow::{
-    Address, Aspect, Caller, FlowNode, HerdrRoute, HerdrRouteSelection, Message, Metaflow, Model,
-    QueueEntry, Request, SentBy,
+    Address, Aspect, CallerIdentity, FlowNode, HerdrRoute, HerdrRouteSelection, Message, Metaflow,
+    Model, QueueEntry, Request, SentBy,
 };
 use std::{
     path::{Path, PathBuf},
@@ -47,8 +48,8 @@ struct TestRequest {
 
 fn queue_entry(id: impl Into<String>, queued: TestRequest) -> QueueEntry {
     QueueEntry {
-        logical_delivery_id: id.into(),
-        request_id: "test".into(),
+        logical_delivery_id: flow_ethos::LogicalDeliveryId(id.into()),
+        request_id: flow_ethos::RequestId("test".into()),
         sent_by: queued.sent_by,
         delivery: flow_ethos::Delivery::Wake,
         message: Message::Soft(queued.request),
@@ -58,7 +59,7 @@ fn queue_entry(id: impl Into<String>, queued: TestRequest) -> QueueEntry {
 fn address(topic: &str, model: Model) -> Address {
     Address {
         aspect: Aspect::Mind,
-        topic: topic.into(),
+        topic: flow_ethos::Topic(topic.into()),
         model,
     }
 }
@@ -117,7 +118,7 @@ fn send_request(
             "arguments": {
                 "target": {
                     "aspect": format!("{:?}", to.aspect),
-                    "topic": to.topic,
+                    "topic": to.topic.0,
                     "model": format!("{:?}", to.model)
                 },
             "priority": "Soft",
@@ -131,18 +132,20 @@ fn send_request(
 fn tool_call(thread: &str, call: &str, body: &str) -> ToolCall {
     ToolCall {
         tool_call_key: ToolCallKey {
-            thread_id: thread.into(),
-            turn_id: TURN.into(),
-            call_id: call.into(),
+            thread_id: crate::generated::send_tool::ThreadId(thread.into()),
+            turn_id: crate::generated::send_tool::TurnId(TURN.into()),
+            call_id: crate::generated::send_tool::CallId(call.into()),
         },
         tool_name: SendTool::tool_name(),
-        arguments: serde_json::json!({
-            "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
-            "priority": "Soft",
-            "kind": "Order",
-            "body": body
-        })
-        .to_string(),
+        arguments: crate::generated::send_tool::Arguments(
+            serde_json::json!({
+                "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
+                "priority": "Soft",
+                "kind": "Order",
+                "body": body
+            })
+            .to_string(),
+        ),
     }
 }
 
@@ -418,39 +421,39 @@ trait SeatsCodexFlows {
 impl SeatsCodexFlows for NexusFixture {
     fn codex_seat(&self, flow_id: &str, thread: &str, pane: &str, model: &str, at: Address) {
         let mut node: FlowNode = self.node();
-        node.flow_id = flow_id.into();
-        node.session_id = thread.into();
+        node.flow_id = flow_ethos::FlowId(flow_id.into());
+        node.session_id = signal_flow::SessionId(thread.into());
         node.herdr_route_selection = HerdrRouteSelection::Available(HerdrRoute {
-            herdr_session_name: "messaging-build".into(),
-            herdr_agent_name: format!("agent-{flow_id}"),
-            herdr_pane_id: pane.into(),
-            herdr_terminal_id: format!("terminal-{flow_id}"),
+            herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+            herdr_agent_name: signal_flow::HerdrAgentName(format!("agent-{flow_id}")),
+            herdr_pane_id: signal_flow::HerdrPaneId(pane.into()),
+            herdr_terminal_id: signal_flow::HerdrTerminalId(format!("terminal-{flow_id}")),
         });
         self.nexus
             .store
             .register_flow_in_role(
                 node,
-                Caller {
-                    flow_id: flow_id.into(),
+                CallerIdentity {
+                    flow_id: flow_ethos::FlowId(flow_id.into()),
                     aspect: Aspect::Mind,
-                    model_name: model.into(),
+                    model_name: flow_ethos::ModelName(model.into()),
                 },
             )
             .expect("Codex seat registered");
         self.nexus.store.seed_metaflow(Metaflow {
             address: at,
-            state: State::Awake(flow_id.into()),
-            past: vec![],
-            queue: vec![],
+            state: State::Awake(flow_ethos::FlowId(flow_id.into())),
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![]),
         });
     }
 
     fn awake_target(&self) {
         self.nexus.store.seed_metaflow(Metaflow {
             address: target(),
-            state: State::Awake("c0ffee".into()),
-            past: vec![],
-            queue: vec![],
+            state: State::Awake(flow_ethos::FlowId("c0ffee".into())),
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![]),
         });
     }
 
@@ -461,6 +464,7 @@ impl SeatsCodexFlows for NexusFixture {
             .expect("target readable")
             .expect("target held")
             .queue
+            .0
             .into_iter()
             .map(|entry| TestRequest {
                 sent_by: entry.sent_by,
@@ -625,9 +629,9 @@ fn a_replayed_call_of_a_retired_or_superseded_flow_is_refused() {
     );
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: sender_b(),
-        state: State::Awake("b3b3b3".into()),
-        past: vec!["b2b2b2".into()],
-        queue: vec![],
+        state: State::Awake(flow_ethos::FlowId("b3b3b3".into())),
+        past: flow_ethos::Past(vec![flow_ethos::FlowId("b2b2b2".into())]),
+        queue: flow_ethos::Queue(vec![]),
     });
     assert_eq!(
         fixture.nexus.handle_send_call(call_b),
@@ -697,7 +701,7 @@ fn an_admitted_send_tool_call_holds_archive_until_its_answer_object_is_released(
         fixture
             .nexus
             .store
-            .withdraw_queued(&target(), &accepted.send_acceptance.logical_delivery_id)
+            .withdraw_queued(&target(), &accepted.send_acceptance.logical_delivery_id.0)
             .unwrap(),
         Ok(())
     );
@@ -705,7 +709,7 @@ fn an_admitted_send_tool_call_holds_archive_until_its_answer_object_is_released(
         fixture
             .nexus
             .store
-            .archive_request(&accepted.send_acceptance.request_id, &sender_a())
+            .archive_request(&accepted.send_acceptance.request_id.0, &sender_a())
             .unwrap(),
         Err(signal_flow::ArchiveRejection::NotYet)
     );
@@ -730,7 +734,7 @@ fn an_admitted_send_tool_call_holds_archive_until_its_answer_object_is_released(
         fixture
             .nexus
             .store
-            .archive_request(&accepted.send_acceptance.request_id, &sender_a())
+            .archive_request(&accepted.send_acceptance.request_id.0, &sender_a())
             .unwrap(),
         Err(signal_flow::ArchiveRejection::NotYet),
         "the replayed answer object holds archive until its write completes"
@@ -740,7 +744,7 @@ fn an_admitted_send_tool_call_holds_archive_until_its_answer_object_is_released(
         fixture
             .nexus
             .store
-            .archive_request(&accepted.send_acceptance.request_id, &sender_a())
+            .archive_request(&accepted.send_acceptance.request_id.0, &sender_a())
             .unwrap(),
         Ok(())
     );
@@ -762,8 +766,8 @@ impl SeatsAsleepTargets for NexusFixture {
         self.nexus.store.seed_metaflow(Metaflow {
             address: at,
             state: State::Asleep,
-            past: vec!["abc123".into()],
-            queue: vec![],
+            past: flow_ethos::Past(vec![flow_ethos::FlowId("abc123".into())]),
+            queue: flow_ethos::Queue(vec![]),
         });
     }
 
@@ -821,12 +825,14 @@ fn dynamic_send_requires_priority() {
     assert_eq!(arguments.send_priority, SendPriority::Soft);
 
     let mut old_shape = explicit;
-    old_shape.arguments = serde_json::json!({
-        "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
-        "kind": "Order",
-        "body": "old implicit policy"
-    })
-    .to_string();
+    old_shape.arguments = crate::generated::send_tool::Arguments(
+        serde_json::json!({
+            "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
+            "kind": "Order",
+            "body": "old implicit policy"
+        })
+        .to_string(),
+    );
     assert!(old_shape.send_arguments().is_none());
 }
 
@@ -844,20 +850,22 @@ fn the_declared_result_shape_names_and_requires_the_request_id_the_parser_reads(
     assert_eq!(schema["allOf"][0]["then"]["required"][0], "request");
 
     let mut result = tool_call(THREAD_A, "result-shape", "reviewed");
-    result.arguments = serde_json::json!({
-        "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
-        "priority": "Soft",
-        "kind": "Result",
-        "body": "reviewed",
-        "request": "a001"
-    })
-    .to_string();
+    result.arguments = crate::generated::send_tool::Arguments(
+        serde_json::json!({
+            "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
+            "priority": "Soft",
+            "kind": "Result",
+            "body": "reviewed",
+            "request": "a001"
+        })
+        .to_string(),
+    );
     assert_eq!(
         result
             .send_arguments()
             .expect("declared Result parses")
             .send_kind,
-        SendKind::Result("a001".into())
+        SendKind::Result(flow_ethos::RequestId("a001".into()))
     );
 
     for malformed in [
@@ -879,7 +887,7 @@ fn the_declared_result_shape_names_and_requires_the_request_id_the_parser_reads(
             "request": "a001", "unknown": true
         }),
     ] {
-        result.arguments = malformed.to_string();
+        result.arguments = crate::generated::send_tool::Arguments(malformed.to_string());
         assert!(result.send_arguments().is_none());
     }
 }
@@ -890,21 +898,23 @@ fn soft_dynamic_admission_queues_without_waking() {
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.asleep_at(asleep_target());
     let mut call = tool_call(THREAD_A, "queue-only", "retain this");
-    call.arguments = serde_json::json!({
-        "target": { "aspect": "Mind", "topic": "flow", "model": "Sol" },
-        "priority": "Soft",
-        "kind": "Order",
-        "body": "retain this"
-    })
-    .to_string();
+    call.arguments = crate::generated::send_tool::Arguments(
+        serde_json::json!({
+            "target": { "aspect": "Mind", "topic": "flow", "model": "Sol" },
+            "priority": "Soft",
+            "kind": "Order",
+            "body": "retain this"
+        })
+        .to_string(),
+    );
     let outcome = fixture.nexus.handle_send_call(call);
     assert!(matches!(outcome, SendOutcome::Accepted(_)));
     let held = fixture.stored_at(&asleep_target());
     assert_eq!(held.state, State::Asleep);
-    assert_eq!(held.queue.len(), 1);
-    assert_eq!(held.queue[0].delivery, flow_ethos::Delivery::Queue);
+    assert_eq!(held.queue.0.len(), 1);
+    assert_eq!(held.queue.0[0].delivery, flow_ethos::Delivery::Queue);
     assert_eq!(
-        held.queue[0].message,
+        held.queue.0[0].message,
         Message::Soft(Request::Order("retain this".into()))
     );
     let purposes = fixture.nexus.store.delivery_purposes().unwrap();
@@ -964,12 +974,14 @@ fn a_malformed_call_is_refused_and_recorded() {
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.awake_target();
     let mut call = tool_call(THREAD_A, "call-m", "x");
-    call.arguments = serde_json::json!({
-        "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
-        "kind": "Psyche",
-        "body": "the living's words are not a flow's to send"
-    })
-    .to_string();
+    call.arguments = crate::generated::send_tool::Arguments(
+        serde_json::json!({
+            "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
+            "kind": "Psyche",
+            "body": "the living's words are not a flow's to send"
+        })
+        .to_string(),
+    );
     assert_eq!(
         fixture.nexus.handle_send_call(call.clone()),
         SendOutcome::Refused(SendRefusal::Malformed)
@@ -996,14 +1008,17 @@ fn a_call_to_a_topic_that_is_not_camel_case_is_refused_as_written() {
     fixture.awake_target();
     for (call_id, topic) in [("call-capital", "Gamma"), ("call-snake", "gamma_two")] {
         let mut call = tool_call(THREAD_A, call_id, "x");
-        call.arguments = serde_json::json!({
-            "target": { "aspect": "Mind", "topic": topic, "model": "Sol" },
-            "priority": "Soft",
-            "kind": "Order",
-            "body": "x"
-        })
-        .to_string();
-        let refused = SendOutcome::Refused(SendRefusal::TopicRefused(topic.into()));
+        call.arguments = crate::generated::send_tool::Arguments(
+            serde_json::json!({
+                "target": { "aspect": "Mind", "topic": topic, "model": "Sol" },
+                "priority": "Soft",
+                "kind": "Order",
+                "body": "x"
+            })
+            .to_string(),
+        );
+        let refused =
+            SendOutcome::Refused(SendRefusal::TopicRefused(flow_ethos::Topic(topic.into())));
         assert_eq!(fixture.nexus.handle_send_call(call.clone()), refused);
         assert!(fixture.target_queue().is_empty(), "nothing reaches gamma");
         assert_eq!(
@@ -1039,8 +1054,8 @@ fn an_oversized_dynamic_send_is_typed_durable_and_not_queued() {
         SendOutcome::Refused(SendRefusal::Oversized(signal_flow::SendPayloadSize {
             actual_bytes,
             maximum_bytes,
-        })) if actual_bytes == (MAX_SEND_PAYLOAD_BYTES + 1) as i64
-            && maximum_bytes == MAX_SEND_PAYLOAD_BYTES as i64
+        })) if actual_bytes == signal_flow::ActualBytes((MAX_SEND_PAYLOAD_BYTES + 1) as i64)
+            && maximum_bytes == signal_flow::MaximumBytes(MAX_SEND_PAYLOAD_BYTES as i64)
     ));
     assert!(fixture.target_queue().is_empty());
     assert_eq!(
@@ -1089,11 +1104,11 @@ fn start_first_turn(
             "turn/start",
             serde_json::json!({
                 "threadId": thread,
-                "effort": launch.launch_profile.effort,
-                "model": launch.launch_profile.model_name,
+                "effort": launch.launch_profile.effort.0,
+                "model": launch.launch_profile.model_name.0,
                 "input": [{
                     "type": "text",
-                    "text": launch.first_prompt_payload.prompt_part_vector[0].prompt_part_text,
+                    "text": launch.first_prompt_payload.prompt_part_vector[0].prompt_part_text.0,
                     "text_elements": []
                 }],
                 "turnTrigger": "flow-nexus"
@@ -1140,12 +1155,12 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
         .expect("gpt-6-luna selects the next endpoint");
 
     let mut profile = fixture_profile();
-    profile.model_name = "gpt-6-luna".into();
-    profile.effort = "low".into();
+    profile.model_name = flow_ethos::ModelName("gpt-6-luna".into());
+    profile.effort = signal_flow::Effort("low".into());
     let mut launch = fixture_composer()
         .compose(
             crate::composition::HarnessedProfile {
-                remembered_flows: Vec::new(),
+                remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                 harness_kind: signal_flow::HarnessKind::Codex,
                 launch_profile: profile,
             },
@@ -1154,13 +1169,14 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
         .expect("launch composes");
     let instruction = "Call the send tool exactly once with target aspect Mind, topic flow, model Sol, kind Order and body witness-order. Then reply with the exact text the tool returned.";
     let digest = format!("{:x}", Sha256::digest(instruction.as_bytes()));
-    launch.first_prompt_payload.first_prompt_body = instruction.into();
-    launch.first_prompt_payload.prompt_sha256 = digest.clone();
+    launch.first_prompt_payload.first_prompt_body =
+        signal_flow::FirstPromptBody(instruction.into());
+    launch.first_prompt_payload.prompt_sha256 = signal_flow::PromptSha256(digest.clone());
     launch.first_prompt_payload.prompt_part_vector = vec![signal_flow::PromptPart {
-        prompt_part_text: instruction.into(),
-        prompt_sha256: digest.clone(),
+        prompt_part_text: signal_flow::PromptPartText(instruction.into()),
+        prompt_sha256: signal_flow::PromptSha256(digest.clone()),
     }];
-    launch.target_receipt_request.prompt_sha256 = digest;
+    launch.target_receipt_request.prompt_sha256 = signal_flow::PromptSha256(digest);
 
     let (thread, mut connection) = adapter
         .open_thread(&launch, &mut |_| Ok("{ Mind flow Sol witness }".into()))
@@ -1235,8 +1251,8 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
                     .metaflow(&asleep_target())
                     .expect("metaflow readable")
                     .expect("metaflow held");
-                matches!(&woken.state, State::Awake(flow_id) if flow_id != "abc123")
-                    && woken.queue.is_empty()
+                matches!(&woken.state, State::Awake(flow_id) if flow_id.0 != "abc123")
+                    && woken.queue.0.is_empty()
             },
         );
         assert!(woken, "the target was never woken");
@@ -1249,8 +1265,8 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
     eprintln!("witness herdr agent starts {starts}");
     let handed = handed_orders(&fixture, &world, "witness-order");
     eprintln!("witness handed orders {handed}");
-    assert!(matches!(&woken.state, State::Awake(flow_id) if flow_id != "abc123"));
-    assert!(woken.queue.is_empty());
+    assert!(matches!(&woken.state, State::Awake(flow_id) if flow_id.0 != "abc123"));
+    assert!(woken.queue.0.is_empty());
     assert_eq!(starts, 1);
     assert_eq!(handed, 1);
     let recorded = fixture
@@ -1297,13 +1313,13 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
         .adapter_for("gpt-6-luna")
         .expect("gpt-6-luna selects the next endpoint");
     let mut profile = fixture_profile();
-    profile.model_name = "gpt-6-luna".into();
-    profile.effort = "low".into();
+    profile.model_name = flow_ethos::ModelName("gpt-6-luna".into());
+    profile.effort = signal_flow::Effort("low".into());
     let sender = profile.address.clone();
     let mut launch = fixture_composer()
         .compose(
             crate::composition::HarnessedProfile {
-                remembered_flows: Vec::new(),
+                remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                 harness_kind: signal_flow::HarnessKind::Codex,
                 launch_profile: profile.clone(),
             },
@@ -1312,13 +1328,14 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
         .expect("launch composes");
     let instruction = "Call the send tool exactly once with target aspect Mind, topic flow, model Sol, kind Order and body first-turn-witness. Then reply with the exact text the tool returned, and end your turn.";
     let digest = format!("{:x}", Sha256::digest(instruction.as_bytes()));
-    launch.first_prompt_payload.first_prompt_body = instruction.into();
-    launch.first_prompt_payload.prompt_sha256 = digest.clone();
+    launch.first_prompt_payload.first_prompt_body =
+        signal_flow::FirstPromptBody(instruction.into());
+    launch.first_prompt_payload.prompt_sha256 = signal_flow::PromptSha256(digest.clone());
     launch.first_prompt_payload.prompt_part_vector = vec![signal_flow::PromptPart {
-        prompt_part_text: instruction.into(),
-        prompt_sha256: digest.clone(),
+        prompt_part_text: signal_flow::PromptPartText(instruction.into()),
+        prompt_sha256: signal_flow::PromptSha256(digest.clone()),
     }];
-    launch.target_receipt_request.prompt_sha256 = digest;
+    launch.target_receipt_request.prompt_sha256 = signal_flow::PromptSha256(digest);
     // The launch as Start leaves it before its Spawn: reserved, its native
     // intent recorded.
     fixture
@@ -1361,7 +1378,7 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
             assert!(
                 nexus
                     .store
-                    .record_opened_thread(&profile.launch_request_id, thread)
+                    .record_opened_thread(&profile.launch_request_id.0, thread)
                     .unwrap()
             );
             eprintln!("witness thread {thread} recorded before its first turn");
@@ -1401,11 +1418,11 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
     // Queued once, from the launching metaflow, before the target woke.
     let held = fixture.stored_at(&asleep_target());
     assert_eq!(held.state, State::Asleep);
-    assert_eq!(held.queue.len(), 1);
-    assert_eq!(held.queue[0].sent_by, SentBy::Sender(sender.clone()));
-    assert_eq!(held.queue[0].delivery, flow_ethos::Delivery::Wake);
+    assert_eq!(held.queue.0.len(), 1);
+    assert_eq!(held.queue.0[0].sent_by, SentBy::Sender(sender.clone()));
+    assert_eq!(held.queue.0[0].delivery, flow_ethos::Delivery::Wake);
     assert_eq!(
-        held.queue[0].message,
+        held.queue.0[0].message,
         Message::Soft(Request::Order("first-turn-witness".into()))
     );
     let handed = super::waking::ReadsFreshWorld::user_turns(&world, &fixture)
@@ -1447,12 +1464,12 @@ fn witness_interrupted_launch_first_half_exits_with_its_call_pending() {
         .adapter_for("gpt-6-luna")
         .expect("gpt-6-luna selects the next endpoint");
     let mut profile = fixture_profile();
-    profile.model_name = "gpt-6-luna".into();
-    profile.effort = "low".into();
+    profile.model_name = flow_ethos::ModelName("gpt-6-luna".into());
+    profile.effort = signal_flow::Effort("low".into());
     let mut launch = fixture_composer()
         .compose(
             crate::composition::HarnessedProfile {
-                remembered_flows: Vec::new(),
+                remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                 harness_kind: signal_flow::HarnessKind::Codex,
                 launch_profile: profile.clone(),
             },
@@ -1461,13 +1478,14 @@ fn witness_interrupted_launch_first_half_exits_with_its_call_pending() {
         .expect("launch composes");
     let instruction = "Call the send tool exactly once with target aspect Mind, topic flow, model Sol, kind Order and body interrupted-witness. Then reply with the exact text the tool returned, and end your turn.";
     let digest = format!("{:x}", Sha256::digest(instruction.as_bytes()));
-    launch.first_prompt_payload.first_prompt_body = instruction.into();
-    launch.first_prompt_payload.prompt_sha256 = digest.clone();
+    launch.first_prompt_payload.first_prompt_body =
+        signal_flow::FirstPromptBody(instruction.into());
+    launch.first_prompt_payload.prompt_sha256 = signal_flow::PromptSha256(digest.clone());
     launch.first_prompt_payload.prompt_part_vector = vec![signal_flow::PromptPart {
-        prompt_part_text: instruction.into(),
-        prompt_sha256: digest.clone(),
+        prompt_part_text: signal_flow::PromptPartText(instruction.into()),
+        prompt_sha256: signal_flow::PromptSha256(digest.clone()),
     }];
-    launch.target_receipt_request.prompt_sha256 = digest;
+    launch.target_receipt_request.prompt_sha256 = signal_flow::PromptSha256(digest);
     fixture
         .nexus
         .store
@@ -1500,7 +1518,7 @@ fn witness_interrupted_launch_first_half_exits_with_its_call_pending() {
             assert!(
                 nexus
                     .store
-                    .record_opened_thread(&profile.launch_request_id, thread)
+                    .record_opened_thread(&profile.launch_request_id.0, thread)
                     .unwrap()
             );
             Ok("{ Field flow Sol witness }".into())
@@ -1567,7 +1585,7 @@ fn witness_interrupted_launch_second_half_is_reconciled_at_restart() {
     ));
     let target = fixture.stored_at(&asleep_target());
     eprintln!("witness target {:?} queue {:?}", target.state, target.queue);
-    assert!(target.queue.is_empty());
+    assert!(target.queue.0.is_empty());
     let found = || {
         walk(&home)
             .into_iter()
@@ -1625,8 +1643,8 @@ fn a_queued_request_is_rendered_as_its_datom_in_one_vector() {
     let queue = [
         queue_entry("render-1", sent(sender_a(), "Carry on.")),
         QueueEntry {
-            logical_delivery_id: "render-2".into(),
-            request_id: "test".into(),
+            logical_delivery_id: flow_ethos::LogicalDeliveryId("render-2".into()),
+            request_id: flow_ethos::RequestId("test".into()),
             sent_by: SentBy::Unknown,
             delivery: flow_ethos::Delivery::Queue,
             message: Message::Soft(Request::Notice("kept".into())),
@@ -1654,7 +1672,7 @@ fn seat_at() -> Address {
 fn core() -> Address {
     Address {
         aspect: Aspect::Psyche,
-        topic: "core".into(),
+        topic: flow_ethos::Topic("core".into()),
         model: Model::Opus,
     }
 }
@@ -1662,7 +1680,7 @@ fn core() -> Address {
 fn core_primary() -> Address {
     Address {
         aspect: Aspect::Psyche,
-        topic: "core".into(),
+        topic: flow_ethos::Topic("core".into()),
         model: Model::Fable,
     }
 }
@@ -1673,13 +1691,13 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: core_primary(),
         state: State::Asleep,
-        past: vec![],
-        queue: vec![],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let key = |call: &str| ToolCallKey {
-        thread_id: THREAD_A.into(),
-        turn_id: TURN.into(),
-        call_id: call.into(),
+        thread_id: crate::generated::send_tool::ThreadId(THREAD_A.into()),
+        turn_id: crate::generated::send_tool::TurnId(TURN.into()),
+        call_id: crate::generated::send_tool::CallId(call.into()),
     };
     let authorized = fixture
         .nexus
@@ -1688,7 +1706,7 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
             &key("authorized"),
             "authorized-content",
             core(),
-            &core_primary(),
+            &crate::generated::send_tool::Target(core_primary()),
             Message::Soft(Request::Question("source".into())),
             0,
         )
@@ -1703,7 +1721,7 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
             &key("unauthorized"),
             "unauthorized-content",
             unauthorized_sender,
-            &core_primary(),
+            &crate::generated::send_tool::Target(core_primary()),
             Message::Soft(Request::Question("must not enter".into())),
             0,
         )
@@ -1716,14 +1734,14 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
         .unwrap()
         .unwrap()
         .queue;
-    assert_eq!(queued.len(), 2);
-    assert_eq!(queued[0].sent_by, SentBy::Sender(core()));
+    assert_eq!(queued.0.len(), 2);
+    assert_eq!(queued.0[0].sent_by, SentBy::Sender(core()));
     assert_eq!(
-        queued[0].message,
+        queued.0[0].message,
         Message::Soft(Request::Question("source".into()))
     );
     assert_eq!(
-        queued[1].message,
+        queued.0[1].message,
         Message::Soft(Request::Question("must not enter".into()))
     );
 }
@@ -1734,13 +1752,13 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: core_primary(),
         state: State::Asleep,
-        past: vec![],
-        queue: vec![],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let key = ToolCallKey {
-        thread_id: THREAD_A.into(),
-        turn_id: TURN.into(),
-        call_id: "archive-replay".into(),
+        thread_id: crate::generated::send_tool::ThreadId(THREAD_A.into()),
+        turn_id: crate::generated::send_tool::TurnId(TURN.into()),
+        call_id: crate::generated::send_tool::CallId("archive-replay".into()),
     };
     let first = fixture
         .nexus
@@ -1749,7 +1767,7 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
             &key,
             "archive-content",
             core(),
-            &core_primary(),
+            &crate::generated::send_tool::Target(core_primary()),
             Message::Soft(Request::Notice("historical".into())),
             0,
         )
@@ -1764,8 +1782,8 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
             &accepted.send_acceptance.logical_delivery_id,
             signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
                 harness_kind: flow_ethos::HarnessKind::Codex,
-                native_session_id: "recipient-session".into(),
-                native_prompt_id: "recipient-prompt".into(),
+                native_session_id: signal_flow::NativeSessionId("recipient-session".into()),
+                native_prompt_id: signal_flow::NativePromptId("recipient-prompt".into()),
             }),
         )
         .expect("request ends");
@@ -1778,7 +1796,7 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
         fixture
             .nexus
             .store
-            .archive_request(&accepted.send_acceptance.request_id, &core())
+            .archive_request(&accepted.send_acceptance.request_id.0, &core())
             .expect("archive checks the admitting call"),
         Err(signal_flow::ArchiveRejection::NotYet),
         "an admission whose answer has not been written still holds its request"
@@ -1788,7 +1806,7 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
         fixture
             .nexus
             .store
-            .archive_request(&accepted.send_acceptance.request_id, &core())
+            .archive_request(&accepted.send_acceptance.request_id.0, &core())
             .expect("archive reads"),
         Ok(())
     );
@@ -1799,7 +1817,7 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
             &key,
             "archive-content",
             core(),
-            &core_primary(),
+            &crate::generated::send_tool::Target(core_primary()),
             Message::Soft(Request::Notice("historical".into())),
             0,
         )
@@ -1807,8 +1825,11 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
     let SendOutcome::Archived(archived) = replay else {
         panic!("archived replay is explicit")
     };
-    assert_eq!(archived.sender, core());
-    assert_eq!(archived.target, core_primary());
+    assert_eq!(archived.address, core());
+    assert_eq!(
+        archived.target,
+        crate::generated::send_tool::Target(core_primary())
+    );
 }
 
 #[test]
@@ -1824,21 +1845,21 @@ fn archive_serializes_with_logical_delivery_admission_and_commits_after_the_gate
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: core_primary(),
         state: State::Asleep,
-        past: vec![],
-        queue: vec![],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let SendOutcome::Accepted(accepted) = fixture
         .nexus
         .store
         .accept_tool_send(
             &ToolCallKey {
-                thread_id: THREAD_A.into(),
-                turn_id: TURN.into(),
-                call_id: "archive-gate".into(),
+                thread_id: crate::generated::send_tool::ThreadId(THREAD_A.into()),
+                turn_id: crate::generated::send_tool::TurnId(TURN.into()),
+                call_id: crate::generated::send_tool::CallId("archive-gate".into()),
             },
             "archive-gate-content",
             core(),
-            &core_primary(),
+            &crate::generated::send_tool::Target(core_primary()),
             Message::Soft(Request::Notice("archive through the gate".into())),
             0,
         )
@@ -1853,8 +1874,8 @@ fn archive_serializes_with_logical_delivery_admission_and_commits_after_the_gate
             &accepted.send_acceptance.logical_delivery_id,
             signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
                 harness_kind: flow_ethos::HarnessKind::Codex,
-                native_session_id: "archive-gate-session".into(),
-                native_prompt_id: "archive-gate-prompt".into(),
+                native_session_id: signal_flow::NativeSessionId("archive-gate-session".into()),
+                native_prompt_id: signal_flow::NativePromptId("archive-gate-prompt".into()),
             }),
         )
         .expect("request ends");
@@ -1872,7 +1893,7 @@ fn archive_serializes_with_logical_delivery_admission_and_commits_after_the_gate
             );
             contended.send(()).expect("archive observes contention");
             let result = store
-                .archive_request(&request_id, &core())
+                .archive_request(&request_id.0, &core())
                 .expect("archive reads");
             finished.send(()).expect("archive thread finishes");
             result
@@ -1899,13 +1920,13 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: core_primary(),
         state: State::Asleep,
-        past: vec![],
-        queue: vec![],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let key = ToolCallKey {
-        thread_id: THREAD_A.into(),
-        turn_id: TURN.into(),
-        call_id: "archive-contract".into(),
+        thread_id: crate::generated::send_tool::ThreadId(THREAD_A.into()),
+        turn_id: crate::generated::send_tool::TurnId(TURN.into()),
+        call_id: crate::generated::send_tool::CallId("archive-contract".into()),
     };
     let SendOutcome::Accepted(accepted) = fixture
         .nexus
@@ -1914,7 +1935,7 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
             &key,
             "archive-contract-content",
             core(),
-            &core_primary(),
+            &crate::generated::send_tool::Target(core_primary()),
             Message::Soft(Request::Notice("archive me".into())),
             0,
         )
@@ -1936,7 +1957,7 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
         fixture
             .nexus
             .store
-            .archive_request(&request_id, &sender_a())
+            .archive_request(&request_id.0, &sender_a())
             .expect("stranger archive reads"),
         Err(signal_flow::ArchiveRejection::UnknownRequest)
     );
@@ -1944,7 +1965,7 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
         fixture
             .nexus
             .store
-            .archive_request(&request_id, &core())
+            .archive_request(&request_id.0, &core())
             .expect("early archive reads"),
         Err(signal_flow::ArchiveRejection::NotYet)
     );
@@ -1966,8 +1987,8 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
             &logical_id,
             signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
                 harness_kind: flow_ethos::HarnessKind::Codex,
-                native_session_id: "archive-contract-session".into(),
-                native_prompt_id: "archive-contract-prompt".into(),
+                native_session_id: signal_flow::NativeSessionId("archive-contract-session".into()),
+                native_prompt_id: signal_flow::NativePromptId("archive-contract-prompt".into()),
             }),
         )
         .expect("request ends");
@@ -1975,7 +1996,7 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
         fixture
             .nexus
             .store
-            .archive_request_with_injected_commit_failure(&request_id, &core())
+            .archive_request_with_injected_commit_failure(&request_id.0, &core())
             .is_err(),
         "a fault in the archive commit is returned"
     );
@@ -2004,7 +2025,7 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
         fixture
             .nexus
             .store
-            .archive_request(&request_id, &core())
+            .archive_request(&request_id.0, &core())
             .expect("archive commits"),
         Ok(())
     );
@@ -2108,23 +2129,25 @@ impl SeatsAwakeCodexSeat for NexusFixture {
         assert!(matches!(
             self.nexus.store.register_flow_in_role(
                 node,
-                Caller {
-                    flow_id: "908786".into(),
+                CallerIdentity {
+                    flow_id: flow_ethos::FlowId("908786".into()),
                     aspect: Aspect::Mind,
-                    model_name: "gpt-sol".into(),
+                    model_name: flow_ethos::ModelName("gpt-sol".into()),
                 },
             ),
             Ok(crate::store::FlowRegistration::Registered(_))
         ));
         self.nexus.store.seed_metaflow(Metaflow {
             address: seat_at(),
-            state: State::Awake("908786".into()),
-            past: vec![],
-            queue: queue
-                .into_iter()
-                .enumerate()
-                .map(|(index, queued)| queue_entry(format!("seat-{index}"), queued))
-                .collect(),
+            state: State::Awake(flow_ethos::FlowId("908786".into())),
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(
+                queue
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, queued)| queue_entry(format!("seat-{index}"), queued))
+                    .collect(),
+            ),
         });
         self.awake_target();
     }
@@ -2136,6 +2159,7 @@ impl SeatsAwakeCodexSeat for NexusFixture {
             .expect("seat readable")
             .expect("seat held")
             .queue
+            .0
             .into_iter()
             .map(|entry| TestRequest {
                 sent_by: entry.sent_by,
@@ -2181,8 +2205,8 @@ fn seat_responding(
 fn a_codex_native_event_delivers_the_oldest_cohort_through_its_pane() {
     let mut fixture = NexusFixture::new();
     let psyche = from_core(Request::Psyche(flow_ethos::Said {
-        context: "The living".into(),
-        verbatim: "Make it so.".into(),
+        context: flow_ethos::Context("The living".into()),
+        verbatim: flow_ethos::Verbatim("Make it so.".into()),
     }));
     let brief = from_core(Request::Order("Your brief.".into()));
     let notice = from_core(Request::Notice("Then report.".into()));
@@ -2293,8 +2317,8 @@ fn soft_work_queued_while_a_codex_turn_runs_waits_for_its_completion() {
 fn a_working_codex_seat_holds_soft_work_until_its_turn_completes() {
     let mut fixture = NexusFixture::new();
     let psyche = from_core(Request::Psyche(flow_ethos::Said {
-        context: "The living".into(),
-        verbatim: "Words.".into(),
+        context: flow_ethos::Context("The living".into()),
+        verbatim: flow_ethos::Verbatim("Words.".into()),
     }));
     let brief = from_core(Request::Order("Brief.".into()));
     fixture.awake_codex_seat(vec![psyche.clone(), brief.clone()]);
@@ -2690,9 +2714,11 @@ fn codex_resolved_absent(
     fake.accept_queued_turns(SEAT_THREAD, 1..=2);
     let response = fixture.nexus.dispatch_meta_serially(
         meta_signal_flow::Query::ResolveQueueDelivery(QueueDeliveryResolution {
-            queue_attempt_id: attempt,
+            queue_attempt_id: meta_signal_flow::QueueAttemptId(attempt),
             queue_resolution_outcome: QueueResolutionOutcome::Absent,
-            queue_resolution_reason: "the owner looked".into(),
+            queue_resolution_reason: meta_signal_flow::QueueResolutionReason(
+                "the owner looked".into(),
+            ),
         }),
         Some(crate::tests::queue_drain::resolver()),
     );
@@ -2743,15 +2769,15 @@ fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
     let order = from_core(Request::Order("Read the new ruling.".into()));
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: seat_at(),
-        state: State::Awake("908786".into()),
-        past: vec![],
-        queue: vec![QueueEntry {
-            logical_delivery_id: "logical-delivery-test".into(),
-            request_id: "test".into(),
+        state: State::Awake(flow_ethos::FlowId("908786".into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![QueueEntry {
+            logical_delivery_id: flow_ethos::LogicalDeliveryId("logical-delivery-test".into()),
+            request_id: flow_ethos::RequestId("test".into()),
             sent_by: order.sent_by,
             delivery: flow_ethos::Delivery::Wake,
             message: Message::Soft(order.request),
-        }],
+        }]),
     });
     fixture.nexus.wake_due(seat_at());
     fixture.nexus.wake_due(seat_at());
@@ -2761,7 +2787,10 @@ fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
     assert!(typed.contains("Read the new ruling."), "{typed}");
     assert_eq!(fixture.seat_queue(), vec![]);
     let seat = fixture.nexus.store.metaflow(&seat_at()).unwrap().unwrap();
-    assert_eq!(seat.state, State::Awake("908786".into()));
+    assert_eq!(
+        seat.state,
+        State::Awake(flow_ethos::FlowId("908786".into()))
+    );
 }
 
 /// A Codex seat in a turn keeps an owner-resolved-absent Soft request

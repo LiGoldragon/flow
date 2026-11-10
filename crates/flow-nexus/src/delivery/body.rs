@@ -55,22 +55,28 @@ impl RendersNativeContent for signal_flow::Request {
             },
             signal_flow::Request::Reminder(reminder) => reminder.string.clone(),
             signal_flow::Request::Task(task) => {
-                format!("Task, {} minutes:\n{}", task.minutes, task.string)
+                format!("Task, {} minutes:\n{}", task.minutes.0, task.string)
             }
             signal_flow::Request::Done(done) => match done {
                 flow_ethos::DonePayload::Answered(done) => format!("Done:\n{}", done.string),
                 flow_ethos::DonePayload::Historical(done) => format!("Done:\n{}", done.string),
             },
-            signal_flow::Request::Psyche(said) if said.context.is_empty() => said.verbatim.clone(),
-            signal_flow::Request::Psyche(said) if said.verbatim.is_empty() => said.context.clone(),
-            signal_flow::Request::Psyche(said) => format!("{}\n{}", said.context, said.verbatim),
+            signal_flow::Request::Psyche(said) if said.context.0.is_empty() => {
+                said.verbatim.clone().0
+            }
+            signal_flow::Request::Psyche(said) if said.verbatim.0.is_empty() => {
+                said.context.clone().0
+            }
+            signal_flow::Request::Psyche(said) => {
+                format!("{}\n{}", said.context.0, said.verbatim.0)
+            }
             signal_flow::Request::Psyches(said) => said
                 .iter()
                 .map(
-                    |said| match (said.context.is_empty(), said.verbatim.is_empty()) {
-                        (true, _) => said.verbatim.clone(),
-                        (_, true) => said.context.clone(),
-                        (false, false) => format!("{}\n{}", said.context, said.verbatim),
+                    |said| match (said.context.0.is_empty(), said.verbatim.0.is_empty()) {
+                        (true, _) => said.verbatim.0.clone(),
+                        (_, true) => said.context.0.clone(),
+                        (false, false) => format!("{}\n{}", said.context.0, said.verbatim.0),
                     },
                 )
                 .collect::<Vec<_>>()
@@ -100,7 +106,7 @@ impl RendersNativeContent for signal_flow::VisibleRequest {
                 signal_flow::VisibleResultPayload::Historical(text) => text.clone(),
             },
             signal_flow::VisibleRequest::Task(task) => {
-                format!("Task, {} minutes:\n{}", task.minutes, task.string)
+                format!("Task, {} minutes:\n{}", task.minutes.0, task.string)
             }
             signal_flow::VisibleRequest::Done(done) => match done {
                 signal_flow::VisibleDonePayload::Answered(done) => {
@@ -108,22 +114,22 @@ impl RendersNativeContent for signal_flow::VisibleRequest {
                 }
                 signal_flow::VisibleDonePayload::Historical(text) => format!("Done:\n{text}"),
             },
-            signal_flow::VisibleRequest::Psyche(said) if said.context.is_empty() => {
-                said.verbatim.clone()
+            signal_flow::VisibleRequest::Psyche(said) if said.context.0.is_empty() => {
+                said.verbatim.clone().0
             }
-            signal_flow::VisibleRequest::Psyche(said) if said.verbatim.is_empty() => {
-                said.context.clone()
+            signal_flow::VisibleRequest::Psyche(said) if said.verbatim.0.is_empty() => {
+                said.context.clone().0
             }
             signal_flow::VisibleRequest::Psyche(said) => {
-                format!("{}\n{}", said.context, said.verbatim)
+                format!("{}\n{}", said.context.0, said.verbatim.0)
             }
             signal_flow::VisibleRequest::Psyches(said) => said
                 .iter()
                 .map(
-                    |said| match (said.context.is_empty(), said.verbatim.is_empty()) {
-                        (true, _) => said.verbatim.clone(),
-                        (_, true) => said.context.clone(),
-                        (false, false) => format!("{}\n{}", said.context, said.verbatim),
+                    |said| match (said.context.0.is_empty(), said.verbatim.0.is_empty()) {
+                        (true, _) => said.verbatim.0.clone(),
+                        (_, true) => said.context.0.clone(),
+                        (false, false) => format!("{}\n{}", said.context.0, said.verbatim.0),
                     },
                 )
                 .collect::<Vec<_>>()
@@ -146,24 +152,24 @@ impl RendersNativeContent for signal_flow::DeliveredMessage {
                 signal_flow::DeliveredRequest::Done(value) => value.string.clone(),
                 signal_flow::DeliveredRequest::Reminder(value) => value.string.clone(),
                 signal_flow::DeliveredRequest::Task(value) => {
-                    format!("Task, {} minutes:\n{}", value.minutes, value.string)
+                    format!("Task, {} minutes:\n{}", value.minutes.0, value.string)
                 }
                 signal_flow::DeliveredRequest::Psyche(value) => match (
-                    value.said.context.is_empty(),
-                    value.said.verbatim.is_empty(),
+                    value.said.context.0.is_empty(),
+                    value.said.verbatim.0.is_empty(),
                 ) {
-                    (true, _) => value.said.verbatim.clone(),
-                    (_, true) => value.said.context.clone(),
-                    _ => format!("{}\n{}", value.said.context, value.said.verbatim),
+                    (true, _) => value.said.verbatim.clone().0,
+                    (_, true) => value.said.context.clone().0,
+                    _ => format!("{}\n{}", value.said.context.0, value.said.verbatim.0),
                 },
                 signal_flow::DeliveredRequest::Psyches(value) => value
                     .said_vector
                     .iter()
                     .map(
-                        |said| match (said.context.is_empty(), said.verbatim.is_empty()) {
-                            (true, _) => said.verbatim.clone(),
-                            (_, true) => said.context.clone(),
-                            _ => format!("{}\n{}", said.context, said.verbatim),
+                        |said| match (said.context.0.is_empty(), said.verbatim.0.is_empty()) {
+                            (true, _) => said.verbatim.0.clone(),
+                            (_, true) => said.context.0.clone(),
+                            _ => format!("{}\n{}", said.context.0, said.verbatim.0),
                         },
                     )
                     .collect::<Vec<_>>()
@@ -237,13 +243,15 @@ impl VetsBody for Message {
             return Some(BodyRefusal::EmptyBody);
         }
         if let Some(offset) = self.pane_text().control_character_offset() {
-            return Some(BodyRefusal::ControlCharacter(offset));
+            return Some(BodyRefusal::ControlCharacter(meta_signal_flow::ByteOffset(
+                offset,
+            )));
         }
         content
             .strings()
             .into_iter()
             .find_map(|text| profile.command_line(&text))
-            .map(BodyRefusal::HarnessCommand)
+            .map(|line| BodyRefusal::HarnessCommand(meta_signal_flow::CommandLine(line)))
     }
 }
 
@@ -261,7 +269,7 @@ impl ReadsContent for Content {
                 .iter()
                 .all(|input| input.delivered_message.native_content().trim().is_empty()),
             Content::Text(text) => text.trim().is_empty(),
-            Content::Psyche(psyche) => psyche.psyche_verbatim.trim().is_empty(),
+            Content::Psyche(psyche) => psyche.psyche_verbatim.0.trim().is_empty(),
         }
     }
 
@@ -274,8 +282,8 @@ impl ReadsContent for Content {
             Content::Text(text) => vec![text.clone()],
             Content::Psyche(psyche) => {
                 vec![
-                    psyche.psyche_context.clone(),
-                    psyche.psyche_verbatim.clone(),
+                    psyche.psyche_context.clone().0,
+                    psyche.psyche_verbatim.clone().0,
                 ]
             }
         }
@@ -315,12 +323,12 @@ impl ReadsCommandLine for HarnessProfile {
         let sigil = self
             .command_sigil_vector
             .iter()
-            .find(|sigil| !sigil.is_empty() && line.starts_with(sigil.as_str()))?;
+            .find(|sigil| !sigil.0.is_empty() && line.starts_with(sigil.0.as_str()))?;
         // Shell mode runs whatever follows the sigil.
-        if sigil == "!" {
+        if sigil.0 == "!" {
             return Some(line.to_owned());
         }
-        let rest = &line[sigil.len()..];
+        let rest = &line[sigil.0.len()..];
         let mut characters = rest.char_indices();
         let (_, first) = characters.next()?;
         if !first.is_ascii_lowercase() {
@@ -420,15 +428,17 @@ mod tests {
         use datom_codec::{Actualizing, Potential};
         let text = "keep «quotes» and { braces }\nand preserve the second line";
         let input = signal_flow::NativeInput {
-            logical_delivery_id: "logical-delivery-00000000000000000001".into(),
+            logical_delivery_id: flow_ethos::LogicalDeliveryId(
+                "logical-delivery-00000000000000000001".into(),
+            ),
             sent_by: signal_flow::SentBy::Sender(signal_flow::Address {
                 aspect: signal_flow::Aspect::Psyche,
-                topic: "flow".into(),
+                topic: flow_ethos::Topic("flow".into()),
                 model: signal_flow::Model::Opus,
             }),
             message: signal_flow::Message::HardAbrupt(signal_flow::Request::Task(
                 flow_ethos::AnswerableTask {
-                    minutes: 40,
+                    minutes: flow_ethos::Minutes(40),
                     string: text.into(),
                 },
             )),
@@ -438,14 +448,14 @@ mod tests {
             content: Content::Waking(vec![
                 signal_flow::QueueEntry {
                     logical_delivery_id: input.logical_delivery_id.clone(),
-                    request_id: "test".into(),
+                    request_id: flow_ethos::RequestId("test".into()),
                     sent_by: input.sent_by.clone(),
                     delivery: flow_ethos::Delivery::Wake,
                     message: input.message.clone(),
                 }
                 .visible_input(&signal_flow::Address {
                     aspect: signal_flow::Aspect::Psyche,
-                    topic: "flow".into(),
+                    topic: flow_ethos::Topic("flow".into()),
                     model: signal_flow::Model::Opus,
                 }),
             ]),
@@ -471,20 +481,22 @@ mod tests {
         assert_eq!(refusal(&message, HarnessKind::Codex), None);
         assert!(!typed.as_str().opens_a_letter());
         let second = signal_flow::NativeInput {
-            logical_delivery_id: "logical-delivery-00000000000000000002".into(),
+            logical_delivery_id: flow_ethos::LogicalDeliveryId(
+                "logical-delivery-00000000000000000002".into(),
+            ),
             sent_by: signal_flow::SentBy::Flow,
             message: signal_flow::Message::Soft(signal_flow::Request::Notice("n".into())),
         };
         let entries = [input.clone(), second.clone()].map(|input| signal_flow::QueueEntry {
             logical_delivery_id: input.logical_delivery_id,
-            request_id: "test".into(),
+            request_id: flow_ethos::RequestId("test".into()),
             sent_by: input.sent_by,
             delivery: flow_ethos::Delivery::Queue,
             message: input.message,
         });
         let cohort = entries.prompt_text(&signal_flow::Address {
             aspect: signal_flow::Aspect::Psyche,
-            topic: "flow".into(),
+            topic: flow_ethos::Topic("flow".into()),
             model: signal_flow::Model::Opus,
         });
         assert!(cohort.starts_with("[ { "));
@@ -499,7 +511,7 @@ mod tests {
                         entry,
                         &signal_flow::Address {
                             aspect: signal_flow::Aspect::Psyche,
-                            topic: "flow".into(),
+                            topic: flow_ethos::Topic("flow".into()),
                             model: signal_flow::Model::Opus,
                         },
                     )
@@ -515,8 +527,8 @@ mod tests {
                 visible_sender: signal_flow::VisibleSender::Notification,
                 content: Content::Waking(vec![
                     signal_flow::QueueEntry {
-                        logical_delivery_id: "native-content".into(),
-                        request_id: "test".into(),
+                        logical_delivery_id: flow_ethos::LogicalDeliveryId("native-content".into()),
+                        request_id: flow_ethos::RequestId("test".into()),
                         sent_by: signal_flow::SentBy::Flow,
                         delivery: flow_ethos::Delivery::Wake,
                         message: signal_flow::Message::HardAbrupt(signal_flow::Request::Order(
@@ -525,7 +537,7 @@ mod tests {
                     }
                     .visible_input(&signal_flow::Address {
                         aspect: signal_flow::Aspect::Psyche,
-                        topic: "flow".into(),
+                        topic: flow_ethos::Topic("flow".into()),
                         model: signal_flow::Model::Opus,
                     }),
                 ]),
@@ -533,7 +545,9 @@ mod tests {
         };
         assert_eq!(
             refusal(&native("/compact now"), HarnessKind::Claude),
-            Some(BodyRefusal::HarnessCommand("/compact now".into()))
+            Some(BodyRefusal::HarnessCommand(meta_signal_flow::CommandLine(
+                "/compact now".into()
+            )))
         );
         let escaped = native("a\u{1b}b");
         let offset = escaped
@@ -543,7 +557,9 @@ mod tests {
             .expect("the key is typed") as i64;
         assert_eq!(
             refusal(&escaped, HarnessKind::Claude),
-            Some(BodyRefusal::ControlCharacter(offset))
+            Some(BodyRefusal::ControlCharacter(meta_signal_flow::ByteOffset(
+                offset
+            )))
         );
     }
 
@@ -559,9 +575,9 @@ mod tests {
         ] {
             assert_eq!(
                 refusal(&soft(text), harness.clone()),
-                Some(BodyRefusal::HarnessCommand(
+                Some(BodyRefusal::HarnessCommand(meta_signal_flow::CommandLine(
                     text.lines().next().unwrap().trim_start().into()
-                )),
+                ))),
                 "{text} to {harness:?}"
             );
         }
@@ -597,7 +613,9 @@ mod tests {
         ] {
             assert_eq!(
                 refusal(&soft(text), HarnessKind::Claude),
-                Some(BodyRefusal::ControlCharacter(head + at)),
+                Some(BodyRefusal::ControlCharacter(meta_signal_flow::ByteOffset(
+                    head + at
+                ))),
                 "{text:?}"
             );
         }
@@ -612,8 +630,8 @@ mod tests {
         let relay = Message::MiddleAbrupt(Letter {
             visible_sender: signal_flow::VisibleSender::Notification,
             content: Content::Psyche(Psyche_Data {
-                psyche_context: "context".into(),
-                psyche_verbatim: " ".into(),
+                psyche_context: meta_signal_flow::PsycheContext("context".into()),
+                psyche_verbatim: meta_signal_flow::PsycheVerbatim(" ".into()),
             }),
         });
         assert_eq!(

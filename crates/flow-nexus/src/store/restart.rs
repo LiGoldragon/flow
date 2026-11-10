@@ -38,7 +38,7 @@ pub struct StoredRestart {
 
 impl EngineRecord for StoredRestart {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.restart_record.flow_id.clone())
+        RecordKey::new(self.restart_record.flow_id.clone().0)
     }
 }
 
@@ -54,7 +54,7 @@ impl MemoryDefinition for StoredRestart {
 
 impl EngineRecord for SeatBirth {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.flow_id.clone())
+        RecordKey::new(self.flow_id.clone().0)
     }
 }
 
@@ -148,7 +148,7 @@ impl RecordsRestarts for FlowStore {
     }
 
     fn record_restart(&self, record: RestartRecord) -> Result<(), StoreError> {
-        let exists = self.restart_record(&record.flow_id)?.is_some();
+        let exists = self.restart_record(&record.flow_id.0)?.is_some();
         let stored = StoredRestart {
             restart_record: record,
         };
@@ -164,7 +164,7 @@ impl RecordsRestarts for FlowStore {
     }
 
     fn rebind_restarted(&self, birth: SeatBirth) -> Result<bool, StoreError> {
-        let Some(record) = self.restart_record(&birth.flow_id)? else {
+        let Some(record) = self.restart_record(&birth.flow_id.0)? else {
             return Ok(false);
         };
         let RestartPhase::Spawning(pane) = &record.restart_phase else {
@@ -177,18 +177,18 @@ impl RecordsRestarts for FlowStore {
             return Ok(false);
         }
         let route = FlowHerdrRouteRecord {
-            flow_id: birth.flow_id.clone(),
+            flow_id: birth.flow_id.clone().0,
             route: birth.herdr_route.clone(),
         };
         let commit = self
             .engine
             .begin_atomic_commit()
-            .retract(self.restarts, RecordKey::new(birth.flow_id.clone()));
-        let commit = match self.herdr_route(&birth.flow_id)? {
+            .retract(self.restarts, RecordKey::new(birth.flow_id.clone().0));
+        let commit = match self.herdr_route(&birth.flow_id.0)? {
             Some(_) => commit.mutate(self.herdr_routes, route),
             None => commit.assert(self.herdr_routes, route),
         };
-        let commit = match self.seat_birth(&birth.flow_id)? {
+        let commit = match self.seat_birth(&birth.flow_id.0)? {
             Some(_) => commit.mutate(self.seat_births, birth),
             None => commit.assert(self.seat_births, birth),
         };

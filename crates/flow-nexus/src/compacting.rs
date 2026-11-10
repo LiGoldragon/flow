@@ -268,7 +268,7 @@ impl WritesSeat for Address {
             Aspect::Mind => "Mind",
             Aspect::Field => "Field",
         };
-        format!("{{ {aspect} {} {} }}", self.topic, self.model.name())
+        format!("{{ {aspect} {} {} }}", self.topic.0, self.model.name())
     }
 }
 
@@ -344,13 +344,13 @@ impl WatchesCompactions for RunningNexus {
                 if self.perform(Operation::Record(Record_Data::Context(
                     Record_Data_Context_Data {
                         flow_id: node.flow_id.clone(),
-                        tokens,
+                        tokens: crate::generated::operation::Tokens(tokens),
                     },
                 ))) != Outcome::Recorded
                 {
                     eprintln!(
                         "flow-nexus: flow {} context size not recorded",
-                        node.flow_id
+                        node.flow_id.0
                     );
                 }
             }
@@ -360,9 +360,9 @@ impl WatchesCompactions for RunningNexus {
                     .requested
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .remove(&node.flow_id);
+                    .remove(&node.flow_id.0);
                 if !asked {
-                    let pre_tokens = self.store.context_size(&node.flow_id).ok().flatten();
+                    let pre_tokens = self.store.context_size(&node.flow_id.0).ok().flatten();
                     self.raise_compaction(&node, &item, pre_tokens);
                 }
             }
@@ -378,7 +378,7 @@ impl WatchesCompactions for RunningNexus {
     }
 
     fn raise_compaction(&self, node: &FlowNode, boundary: &str, pre_tokens: Option<i64>) {
-        let flow_id = node.flow_id.as_str();
+        let flow_id = node.flow_id.0.as_str();
         match self.store.compaction_recorded(flow_id, boundary) {
             Ok(false) => {}
             Ok(true) => return,
@@ -403,7 +403,7 @@ impl WatchesCompactions for RunningNexus {
             flow_id,
             address: address.as_ref(),
             harness_kind: &node.harness_kind,
-            session: &node.session_id,
+            session: &node.session_id.0,
             transcript: transcript.as_deref(),
             pre_tokens,
         }
@@ -569,7 +569,7 @@ mod tests {
     fn the_warning_names_the_flow_and_its_seat() {
         let address = Address {
             aspect: Aspect::Mind,
-            topic: "flow".into(),
+            topic: flow_ethos::Topic("flow".into()),
             model: Model::Sol,
         };
         let transcript = std::path::PathBuf::from("/home/li/.claude/projects/p/s.jsonl");

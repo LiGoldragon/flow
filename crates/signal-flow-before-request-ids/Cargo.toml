@@ -10,6 +10,6 @@ datom = ["dep:datom-codec", "flow-ethos/datom", "signal/datom"]
 
 [dependencies]
 rkyv.workspace = true
-datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "eabead4", optional = true }
-signal = { git = "https://github.com/LiGoldragon/signal", rev = "7afb68bcd19ce774f47d11c5e69f6e10054f78de", default-features = false }
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09a0526", optional = true }
+signal = { git = "https://github.com/LiGoldragon/signal", rev = "6d4eb74", default-features = false }
 flow-ethos = { package = "flow-ethos-before-request-ids", path = "../flow-ethos-before-request-ids" }

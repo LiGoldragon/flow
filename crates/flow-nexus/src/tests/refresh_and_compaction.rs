@@ -26,7 +26,8 @@ use meta_signal_flow::{
     ConfigurationChange, ConfigureMetaflow, ConfigureModel, ConfigureThreshold, Continuity,
 };
 use signal_flow::{
-    Address, Aspect, Caller, FlowLifecycle, Message, Metaflow, Model, Request, Section, SentBy,
+    Address, Aspect, CallerIdentity, FlowLifecycle, Message, Metaflow, Model, Request, Section,
+    SentBy,
 };
 use std::fs;
 use std::io::Write;
@@ -36,7 +37,7 @@ const CLAUDE_MODEL: &str = "claude-opus-5-5";
 fn seat_address() -> Address {
     Address {
         aspect: Aspect::Mind,
-        topic: "flow".into(),
+        topic: flow_ethos::Topic("flow".into()),
         model: Model::Sol,
     }
 }
@@ -44,17 +45,17 @@ fn seat_address() -> Address {
 /// The Claude seat runs `CLAUDE_MODEL`, whose refresh threshold is
 /// `refresh` tokens.
 pub(super) fn seat_refreshing_at(fixture: &NexusFixture, refresh: i64) {
-    fixture.nexus.store.seed_role(Caller {
-        flow_id: CLAUDE_SEAT.into(),
+    fixture.nexus.store.seed_role(CallerIdentity {
+        flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
         aspect: Aspect::Mind,
-        model_name: CLAUDE_MODEL.into(),
+        model_name: flow_ethos::ModelName(CLAUDE_MODEL.into()),
     });
     fixture
         .nexus
         .store
         .configure_change(ConfigurationChange::Thresholds(vec![ConfigureThreshold {
-            model_name: CLAUDE_MODEL.into(),
-            refresh,
+            model_name: flow_ethos::ModelName(CLAUDE_MODEL.into()),
+            refresh_threshold: meta_signal_flow::RefreshThreshold(refresh),
         }]))
         .expect("threshold configured");
     fixture
@@ -62,10 +63,10 @@ pub(super) fn seat_refreshing_at(fixture: &NexusFixture, refresh: i64) {
         .store
         .configure_change(ConfigurationChange::HandoverPolicies(vec![
             meta_signal_flow::HandoverPolicy {
-                model_name: CLAUDE_MODEL.into(),
-                warning_share_left: 15,
-                reminder_text: "fixture".into(),
-                every_minutes: 5,
+                model_name: flow_ethos::ModelName(CLAUDE_MODEL.into()),
+                warning_share_left: meta_signal_flow::WarningShareLeft(15),
+                reminder_text: meta_signal_flow::ReminderText("fixture".into()),
+                every_minutes: meta_signal_flow::EveryMinutes(5),
             },
         ]))
         .expect("handover policy configured");
@@ -76,14 +77,14 @@ pub(super) fn seat_refreshing_at(fixture: &NexusFixture, refresh: i64) {
             &seat_address(),
             &seat_address(),
             signal_flow::Section {
-                title: "fixture".into(),
-                description: "fixture".into(),
-                body: "fixture".into(),
+                title: signal_flow::Title("fixture".into()),
+                description: signal_flow::Description("fixture".into()),
+                body: signal_flow::Body("fixture".into()),
             },
             signal_flow::Touch::Known(signal_flow::Known_Data {
-                flow_id: CLAUDE_SEAT.into(),
-                tokens: refresh,
-                timestamp: 1,
+                flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+                tokens: signal_flow::Tokens(refresh),
+                timestamp: signal_flow::Timestamp(1),
             }),
         )
         .expect("handover touch configured");
@@ -96,19 +97,23 @@ pub(super) fn seat_metaflow(fixture: &NexusFixture, queue: Vec<Request>) {
 fn seat_metaflow_with(queue: Vec<Request>) -> Metaflow {
     Metaflow {
         address: seat_address(),
-        state: State::Awake(CLAUDE_SEAT.into()),
-        past: vec![],
-        queue: queue
-            .into_iter()
-            .enumerate()
-            .map(|(index, request)| signal_flow::QueueEntry {
-                logical_delivery_id: format!("refresh-test-{index}"),
-                request_id: "test".into(),
-                sent_by: SentBy::Unknown,
-                delivery: flow_ethos::Delivery::Queue,
-                message: Message::Soft(request),
-            })
-            .collect(),
+        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(
+            queue
+                .into_iter()
+                .enumerate()
+                .map(|(index, request)| signal_flow::QueueEntry {
+                    logical_delivery_id: flow_ethos::LogicalDeliveryId(format!(
+                        "refresh-test-{index}"
+                    )),
+                    request_id: flow_ethos::RequestId("test".into()),
+                    sent_by: SentBy::Unknown,
+                    delivery: flow_ethos::Delivery::Queue,
+                    message: Message::Soft(request),
+                })
+                .collect(),
+        ),
     }
 }
 
@@ -148,13 +153,20 @@ pub(super) fn declare_seat(
         .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
             root_option: None,
             address: seat_address(),
-            system_modules,
-            user_modules: vec!["operation-main-flow".into()],
+            system_modules: signal_flow::SystemModules(
+                system_modules
+                    .into_iter()
+                    .map(signal_flow::ModuleIdentity)
+                    .collect(),
+            ),
+            user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                "operation-main-flow".into(),
+            )]),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             continuity,
-            purpose: String::new(),
-            records: vec![],
+            purpose: meta_signal_flow::Purpose(String::new()),
+            records: meta_signal_flow::Records(vec![]),
         }]))
         .expect("metaflow declared");
     fixture
@@ -162,7 +174,7 @@ pub(super) fn declare_seat(
         .store
         .configure_change(ConfigurationChange::Models(vec![ConfigureModel {
             model: Model::Sol,
-            native: "fixture-model".into(),
+            native: meta_signal_flow::Native("fixture-model".into()),
         }]))
         .expect("successor model configured");
 }
@@ -173,17 +185,18 @@ pub(super) fn declare_seat(
 pub(super) fn staged_refresh_successor(fixture: &NexusFixture) -> StagedLaunch {
     let mut successor = fixture.staged_launch(SUCCESSOR_REQUEST, Some(CLAUDE_SEAT));
     successor.profile.address = seat_address();
-    successor.profile.model_name = "fixture-model".into();
-    successor.profile.herdr_session_name = "default".into();
-    successor.profile.remembering = signal_flow::Remembering::Predecessors(1);
-    successor.profile.instruction_prompt.clear();
+    successor.profile.model_name = flow_ethos::ModelName("fixture-model".into());
+    successor.profile.herdr_session_name = signal_flow::HerdrSessionName("default".into());
+    successor.profile.remembering =
+        signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(1));
+    successor.profile.instruction_prompt.0.clear();
     successor.composed = fixture
         .nexus
         .composer
         .current()
         .compose(
             HarnessedProfile {
-                remembered_flows: Vec::new(),
+                remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
                 harness_kind: signal_flow::HarnessKind::Codex,
                 launch_profile: successor.profile.clone(),
             },
@@ -252,14 +265,14 @@ fn a_flow_s_context_is_judged_against_its_model_s_threshold() {
             &seat_address(),
             &seat_address(),
             signal_flow::Section {
-                title: "fixture".into(),
-                description: "fixture".into(),
-                body: "fixture".into(),
+                title: signal_flow::Title("fixture".into()),
+                description: signal_flow::Description("fixture".into()),
+                body: signal_flow::Body("fixture".into()),
             },
             signal_flow::Touch::Known(signal_flow::Known_Data {
-                flow_id: CLAUDE_SEAT.into(),
-                tokens: 200_000,
-                timestamp: 1,
+                flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+                tokens: signal_flow::Tokens(200_000),
+                timestamp: signal_flow::Timestamp(1),
             }),
         )
         .unwrap();
@@ -269,8 +282,8 @@ fn a_flow_s_context_is_judged_against_its_model_s_threshold() {
         .nexus
         .store
         .configure_change(ConfigurationChange::Thresholds(vec![ConfigureThreshold {
-            model_name: "gpt-6.1-sol".into(),
-            refresh: 150_000,
+            model_name: flow_ethos::ModelName("gpt-6.1-sol".into()),
+            refresh_threshold: meta_signal_flow::RefreshThreshold(150_000),
         }]))
         .unwrap();
     assert_eq!(
@@ -303,9 +316,10 @@ fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_fl
         vec![Request::Order("Held for the next flow.".into())],
     );
 
-    fixture
-        .nexus
-        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+    fixture.nexus.after_report(
+        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+        &claude_stop(&fixture),
+    );
     assert_eq!(
         fixture.nexus.store.context_size(CLAUDE_SEAT).unwrap(),
         Some(230_000)
@@ -325,10 +339,14 @@ fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_fl
     assert_eq!(node.flow_lifecycle, FlowLifecycle::Stopped);
     let metaflow = seat_metaflow_now(&fixture);
     assert_eq!(metaflow.state, State::Asleep);
-    assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
+    assert_eq!(
+        metaflow.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])
+    );
     assert_eq!(
         metaflow
             .queue
+            .0
             .iter()
             .map(|queued| match &queued.message {
                 Message::HardAbrupt(request)
@@ -368,16 +386,24 @@ fn a_seat_past_its_threshold_shown_working_is_kept_until_it_rests() {
         vec![Request::Order("Held for the next flow.".into())],
     );
 
-    fixture
-        .nexus
-        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+    fixture.nexus.after_report(
+        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+        &claude_stop(&fixture),
+    );
 
     assert!(!closed(&fixture), "the working seat's pane stays open");
     assert!(fixture.typed().is_none(), "nothing is typed into it");
     assert_ne!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
     let metaflow = seat_metaflow_now(&fixture);
-    assert_eq!(metaflow.state, State::Awake(CLAUDE_SEAT.into()));
-    assert_eq!(metaflow.queue.len(), 1, "the work waits for the next flow");
+    assert_eq!(
+        metaflow.state,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
+    assert_eq!(
+        metaflow.queue.0.len(),
+        1,
+        "the work waits for the next flow"
+    );
 }
 
 /// A seat past its threshold whose turn ends with a subagent and a monitor
@@ -430,16 +456,30 @@ fn a_stop_with_live_background_work_is_not_rest_and_a_later_stop_with_none_close
     );
     assert!(!closed(&fixture), "a monitor in flight is work in flight");
     let metaflow = seat_metaflow_now(&fixture);
-    assert_eq!(metaflow.state, State::Awake(CLAUDE_SEAT.into()));
-    assert_eq!(metaflow.queue.len(), 1, "the work waits for the next flow");
+    assert_eq!(
+        metaflow.state,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
+    assert_eq!(
+        metaflow.queue.0.len(),
+        1,
+        "the work waits for the next flow"
+    );
 
     report_claude_stop(&fixture, vec![]);
     assert!(closed(&fixture), "the resting seat's pane is closed");
     assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
     let metaflow = seat_metaflow_now(&fixture);
     assert_eq!(metaflow.state, State::Asleep);
-    assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
-    assert_eq!(metaflow.queue.len(), 1, "the work waits for the next flow");
+    assert_eq!(
+        metaflow.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])
+    );
+    assert_eq!(
+        metaflow.queue.0.len(),
+        1,
+        "the work waits for the next flow"
+    );
 }
 
 /// An OnDemand seat resting past its threshold whose successor cannot be
@@ -466,7 +506,7 @@ fn a_seat_whose_successor_cannot_compose_stays_and_is_handed_its_queue() {
         },
         signal_flow::Address {
             aspect: Aspect::Psyche,
-            topic: "core".into(),
+            topic: flow_ethos::Topic("core".into()),
             model: Model::Opus,
         },
     ];
@@ -474,14 +514,15 @@ fn a_seat_whose_successor_cannot_compose_stays_and_is_handed_its_queue() {
         fixture.nexus.store.seed_metaflow(Metaflow {
             address: address.clone(),
             state: State::Asleep,
-            past: vec![],
-            queue: vec![],
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![]),
         });
     }
 
-    fixture
-        .nexus
-        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+    fixture.nexus.after_report(
+        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+        &claude_stop(&fixture),
+    );
 
     assert!(!closed(&fixture), "the seat's pane stays open");
     assert!(
@@ -492,7 +533,7 @@ fn a_seat_whose_successor_cannot_compose_stays_and_is_handed_its_queue() {
     );
     assert_eq!(
         seat_metaflow_now(&fixture).state,
-        State::Awake(CLAUDE_SEAT.into())
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
     );
     // The refusal is told to no flow: no message is queued anywhere, and
     // only the seat's own metaflow and the two held are Flow's.
@@ -506,7 +547,7 @@ fn a_seat_whose_successor_cannot_compose_stays_and_is_handed_its_queue() {
             .metaflow(address)
             .unwrap()
             .expect("the held metaflow");
-        assert!(metaflow.queue.is_empty(), "{address:?} is told nothing");
+        assert!(metaflow.queue.0.is_empty(), "{address:?} is told nothing");
     }
 }
 
@@ -576,14 +617,14 @@ fn a_maintained_seat_refreshed_with_nothing_queued_starts_its_successor_first() 
             &seat_address(),
             &seat_address(),
             Section {
-                title: "before".into(),
-                description: "d".into(),
-                body: "body".into(),
+                title: signal_flow::Title("before".into()),
+                description: signal_flow::Description("d".into()),
+                body: signal_flow::Body("body".into()),
             },
             signal_flow::Touch::Known(signal_flow::Known_Data {
-                flow_id: CLAUDE_SEAT.into(),
-                tokens: 200_000,
-                timestamp: 1,
+                flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+                tokens: signal_flow::Tokens(200_000),
+                timestamp: signal_flow::Timestamp(1),
             }),
         )
         .unwrap();
@@ -601,7 +642,7 @@ fn a_maintained_seat_refreshed_with_nothing_queued_starts_its_successor_first() 
         .handover_green(&seat_address(), CLAUDE_SEAT, 200_000)
         .unwrap();
     assert!(
-        matches!(before.state, State::Awake(ref id) if id == CLAUDE_SEAT),
+        matches!(before.state, State::Awake(ref id) if id.0 == CLAUDE_SEAT),
         "state={:?} row={:?}",
         before.state,
         fixture
@@ -632,8 +673,14 @@ fn a_maintained_seat_refreshed_with_nothing_queued_starts_its_successor_first() 
         AtStop::Refreshed(seat_address())
     );
     let metaflow = seat_metaflow_now(&fixture);
-    assert_eq!(metaflow.state, State::Awake("908786".into()));
-    assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
+    assert_eq!(
+        metaflow.state,
+        State::Awake(flow_ethos::FlowId("908786".into()))
+    );
+    assert_eq!(
+        metaflow.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])
+    );
     assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
     assert!(closed(&fixture), "the predecessor's pane is closed");
     assert_eq!(
@@ -659,14 +706,14 @@ fn a_maintained_seat_refreshed_with_nothing_queued_starts_its_successor_first() 
         handover.closed[0].sections,
         vec![
             Section {
-                title: "fixture".into(),
-                description: "fixture".into(),
-                body: "fixture".into(),
+                title: signal_flow::Title("fixture".into()),
+                description: signal_flow::Description("fixture".into()),
+                body: signal_flow::Body("fixture".into()),
             },
             Section {
-                title: "before".into(),
-                description: "d".into(),
-                body: "body".into(),
+                title: signal_flow::Title("before".into()),
+                description: signal_flow::Description("d".into()),
+                body: signal_flow::Body("body".into()),
             },
         ]
     );
@@ -690,8 +737,8 @@ fn an_on_demand_seat_refreshed_with_a_waking_request_starts_its_successor_first(
         vec!["spirit-core".into(), "intent-flow".into()],
     );
     let mut waking = seat_metaflow_with(vec![Request::Order("For the successor.".into())]);
-    waking.queue[0].delivery = flow_ethos::Delivery::Wake;
-    waking.queue[0].message = Message::MiddleAbrupt(Request::Order("For the successor.".into()));
+    waking.queue.0[0].delivery = flow_ethos::Delivery::Wake;
+    waking.queue.0[0].message = Message::MiddleAbrupt(Request::Order("For the successor.".into()));
     fixture.nexus.store.seed_metaflow(waking);
     owe_staged_successor(&fixture);
     fixture.herdr_for_replacement_showing(0, vec![claude_agent(&fixture)]);
@@ -702,14 +749,14 @@ fn an_on_demand_seat_refreshed_with_a_waking_request_starts_its_successor_first(
             &seat_address(),
             &seat_address(),
             Section {
-                title: "before".into(),
-                description: "d".into(),
-                body: "body".into(),
+                title: signal_flow::Title("before".into()),
+                description: signal_flow::Description("d".into()),
+                body: signal_flow::Body("body".into()),
             },
             signal_flow::Touch::Known(signal_flow::Known_Data {
-                flow_id: CLAUDE_SEAT.into(),
-                tokens: 230_000,
-                timestamp: 1,
+                flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+                tokens: signal_flow::Tokens(230_000),
+                timestamp: signal_flow::Timestamp(1),
             }),
         )
         .unwrap();
@@ -727,7 +774,7 @@ fn an_on_demand_seat_refreshed_with_a_waking_request_starts_its_successor_first(
         .handover_green(&seat_address(), CLAUDE_SEAT, 200_000)
         .unwrap();
     assert!(
-        matches!(before.state, State::Awake(ref id) if id == CLAUDE_SEAT),
+        matches!(before.state, State::Awake(ref id) if id.0 == CLAUDE_SEAT),
         "state={:?} row={:?}",
         before.state,
         fixture
@@ -760,7 +807,10 @@ fn an_on_demand_seat_refreshed_with_a_waking_request_starts_its_successor_first(
     assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
     assert!(closed(&fixture), "the predecessor's pane is closed");
     let metaflow = seat_metaflow_now(&fixture);
-    assert_eq!(metaflow.state, State::Awake("908786".into()));
+    assert_eq!(
+        metaflow.state,
+        State::Awake(flow_ethos::FlowId("908786".into()))
+    );
     assert!(
         fixture.typed().is_none(),
         "nothing is typed into the predecessor"
@@ -807,7 +857,7 @@ fn a_refused_successor_launch_keeps_the_predecessor() {
     assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Active);
     assert_eq!(
         seat_metaflow_now(&fixture).state,
-        State::Awake(CLAUDE_SEAT.into())
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
     );
     assert_eq!(
         fixture
@@ -832,7 +882,7 @@ fn a_codex_flow_s_context_is_its_thread_s_last_input() {
     let thread = fixture.node().session_id;
     fixture
         .nexus
-        .codex_context_signal(&thread, CodexContextSignal::TokenUsage(160_000));
+        .codex_context_signal(&thread.0, CodexContextSignal::TokenUsage(160_000));
     assert_eq!(
         fixture.nexus.store.context_size("908786").unwrap(),
         Some(160_000)
@@ -889,12 +939,14 @@ fn a_compaction_during_continuous_work_is_recorded_once_without_an_order() {
     append_boundary(&fixture, "continuous", "auto", &now_transcript_time());
 
     let started = signal_flow::Event::Started(None);
-    fixture
-        .nexus
-        .after_report(&CLAUDE_SEAT.to_owned(), &started);
-    fixture
-        .nexus
-        .after_report(&CLAUDE_SEAT.to_owned(), &started);
+    fixture.nexus.after_report(
+        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+        &started,
+    );
+    fixture.nexus.after_report(
+        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+        &started,
+    );
 
     let compactions = fixture.nexus.store.compactions_of(CLAUDE_SEAT).unwrap();
     assert_eq!(
@@ -916,9 +968,10 @@ fn a_compaction_with_no_investigation_seat_is_recorded_not_investigated() {
     claude_seat(&fixture, 40_000);
     seat_metaflow(&fixture, vec![]);
     append_boundary(&fixture, "continuous", "auto", &now_transcript_time());
-    fixture
-        .nexus
-        .after_report(&CLAUDE_SEAT.to_owned(), &signal_flow::Event::Started(None));
+    fixture.nexus.after_report(
+        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+        &signal_flow::Event::Started(None),
+    );
     let compactions = fixture.nexus.store.compactions_of(CLAUDE_SEAT).unwrap();
     assert_eq!(compactions.len(), 1);
     assert_eq!(compactions[0].investigation, Investigation::NotConfigured);
@@ -936,9 +989,10 @@ fn a_codex_compaction_is_raised_unless_a_compact_asked_for_it() {
     fixture.register_with(FlowLifecycle::Active);
     let thread = fixture.node().session_id;
     fixture.nexus.compaction_requested("908786");
-    fixture
-        .nexus
-        .codex_context_signal(&thread, CodexContextSignal::Compacted("item-asked".into()));
+    fixture.nexus.codex_context_signal(
+        &thread.0,
+        CodexContextSignal::Compacted("item-asked".into()),
+    );
     assert!(
         fixture
             .nexus
@@ -949,7 +1003,7 @@ fn a_codex_compaction_is_raised_unless_a_compact_asked_for_it() {
     );
     fixture
         .nexus
-        .codex_context_signal(&thread, CodexContextSignal::Compacted("item-own".into()));
+        .codex_context_signal(&thread.0, CodexContextSignal::Compacted("item-own".into()));
     let compactions = fixture.nexus.store.compactions_of("908786").unwrap();
     assert_eq!(
         compactions
@@ -997,7 +1051,7 @@ fn unconfirmed_successor_keeps_predecessor_unreaped() {
     assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Active);
     assert_eq!(
         seat_metaflow_now(&fixture).state,
-        State::Awake(CLAUDE_SEAT.into())
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
     );
     assert!(
         fixture
@@ -1015,7 +1069,7 @@ const FABLE_MODEL: &str = "claude-fable-5";
 fn fable_address(topic: &str) -> Address {
     Address {
         aspect: Aspect::Psyche,
-        topic: topic.into(),
+        topic: flow_ethos::Topic(topic.into()),
         model: Model::Fable,
     }
 }
@@ -1030,37 +1084,41 @@ fn fable_seat_past_its_threshold(fixture: &NexusFixture, protected: Vec<Address>
     );
     claude_seat(fixture, 230_000);
     append_main_rows(fixture, &[end_turn("last-turn")]);
-    fixture.nexus.store.seed_role(Caller {
-        flow_id: CLAUDE_SEAT.into(),
+    fixture.nexus.store.seed_role(CallerIdentity {
+        flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
         aspect: Aspect::Psyche,
-        model_name: FABLE_MODEL.into(),
+        model_name: flow_ethos::ModelName(FABLE_MODEL.into()),
     });
     for change in [
         ConfigurationChange::Thresholds(vec![ConfigureThreshold {
-            model_name: FABLE_MODEL.into(),
-            refresh: 200_000,
+            model_name: flow_ethos::ModelName(FABLE_MODEL.into()),
+            refresh_threshold: meta_signal_flow::RefreshThreshold(200_000),
         }]),
         ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
             root_option: None,
             address: fable_address("core"),
-            system_modules: vec!["spirit-core".into()],
-            user_modules: vec!["operation-main-flow".into()],
+            system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
+                "spirit-core".into(),
+            )]),
+            user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                "operation-main-flow".into(),
+            )]),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             continuity: Continuity::OnDemand,
-            purpose: String::new(),
-            records: vec![],
+            purpose: meta_signal_flow::Purpose(String::new()),
+            records: meta_signal_flow::Records(vec![]),
         }]),
         ConfigurationChange::Models(vec![ConfigureModel {
             model: Model::Fable,
-            native: FABLE_MODEL.into(),
+            native: meta_signal_flow::Native(FABLE_MODEL.into()),
         }]),
         ConfigurationChange::ProtectedAddresses(protected),
         ConfigurationChange::HandoverPolicies(vec![meta_signal_flow::HandoverPolicy {
-            model_name: FABLE_MODEL.into(),
-            warning_share_left: 15,
-            reminder_text: "fixture".into(),
-            every_minutes: 5,
+            model_name: flow_ethos::ModelName(FABLE_MODEL.into()),
+            warning_share_left: meta_signal_flow::WarningShareLeft(15),
+            reminder_text: meta_signal_flow::ReminderText("fixture".into()),
+            every_minutes: meta_signal_flow::EveryMinutes(5),
         }]),
     ] {
         fixture
@@ -1084,14 +1142,14 @@ fn fable_seat_past_its_threshold(fixture: &NexusFixture, protected: Vec<Address>
             &fable_address("core"),
             &fable_address("core"),
             signal_flow::Section {
-                title: "fixture".into(),
-                description: "fixture".into(),
-                body: "fixture".into(),
+                title: signal_flow::Title("fixture".into()),
+                description: signal_flow::Description("fixture".into()),
+                body: signal_flow::Body("fixture".into()),
             },
             signal_flow::Touch::Known(signal_flow::Known_Data {
-                flow_id: CLAUDE_SEAT.into(),
-                tokens: 230_000,
-                timestamp: 1,
+                flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+                tokens: signal_flow::Tokens(230_000),
+                timestamp: signal_flow::Timestamp(1),
             }),
         )
         .expect("handover touch configured");
@@ -1118,15 +1176,16 @@ fn a_protected_seat_past_its_threshold_is_kept_and_handed_its_work() {
         fixture.nexus.store.compaction_refusal(CLAUDE_SEAT).unwrap(),
         Some(meta_signal_flow::CompactionRefusal::BelowThreshold(
             meta_signal_flow::ContextBelowThreshold {
-                context_tokens: 230_000,
-                refresh_tokens: 200_000,
+                context_tokens: meta_signal_flow::ContextTokens(230_000),
+                refresh_tokens: meta_signal_flow::RefreshTokens(200_000),
             }
         ))
     );
 
-    fixture
-        .nexus
-        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+    fixture.nexus.after_report(
+        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+        &claude_stop(&fixture),
+    );
 
     assert!(!closed(&fixture), "the protected seat's pane stays");
     assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Active);
@@ -1136,8 +1195,11 @@ fn a_protected_seat_past_its_threshold_is_kept_and_handed_its_work() {
         .metaflow(&fable_address("core"))
         .unwrap()
         .expect("metaflow held");
-    assert_eq!(metaflow.state, State::Awake(CLAUDE_SEAT.into()));
-    assert!(metaflow.past.is_empty());
+    assert_eq!(
+        metaflow.state,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
+    assert!(metaflow.past.0.is_empty());
     assert!(
         fixture
             .typed()
@@ -1162,9 +1224,10 @@ fn an_unprotected_fable_seat_past_its_threshold_is_refreshed() {
         }
     );
 
-    fixture
-        .nexus
-        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
+    fixture.nexus.after_report(
+        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
+        &claude_stop(&fixture),
+    );
 
     assert!(closed(&fixture), "the seat's pane is closed");
     assert!(fixture.typed().is_none(), "nothing is typed into it");
@@ -1176,6 +1239,13 @@ fn an_unprotected_fable_seat_past_its_threshold_is_refreshed() {
         .unwrap()
         .expect("metaflow held");
     assert_eq!(metaflow.state, State::Asleep);
-    assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
-    assert_eq!(metaflow.queue.len(), 1, "the work waits for the next flow");
+    assert_eq!(
+        metaflow.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])
+    );
+    assert_eq!(
+        metaflow.queue.0.len(),
+        1,
+        "the work waits for the next flow"
+    );
 }

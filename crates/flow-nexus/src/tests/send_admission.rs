@@ -6,7 +6,7 @@ use flow_ethos::{Address, Aspect, Model, Request};
 fn sender() -> Address {
     Address {
         aspect: Aspect::Mind,
-        topic: "send-admission-test".into(),
+        topic: flow_ethos::Topic("send-admission-test".into()),
         model: Model::Astra,
     }
 }
@@ -29,8 +29,8 @@ fn rendered_native_prompt_budget_accepts_exact_boundary_and_refuses_one_byte_ove
         Some(signal_flow::Refusal::Oversized(signal_flow::SendPayloadSize {
             actual_bytes,
             maximum_bytes,
-        })) if actual_bytes == (MAX_SEND_PAYLOAD_BYTES + 1) as i64
-            && maximum_bytes == MAX_SEND_PAYLOAD_BYTES as i64
+        })) if actual_bytes == signal_flow::ActualBytes((MAX_SEND_PAYLOAD_BYTES + 1) as i64)
+            && maximum_bytes == signal_flow::MaximumBytes(MAX_SEND_PAYLOAD_BYTES as i64)
     ));
 }
 
@@ -68,20 +68,20 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
     fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
     let target = Address {
         aspect: Aspect::Mind,
-        topic: "directTarget".into(),
+        topic: flow_ethos::Topic("directTarget".into()),
         model: Model::Sol,
     };
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: target.clone(),
         state: flow_ethos::State::Asleep,
-        past: vec![],
-        queue: vec![],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let caller = MarkedProcess::spawn("sleep", &["30"], "pane-1");
     let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
     let answer = fixture.nexus.send_request(
         SendRequest {
-            recipient: target.clone(),
+            address: target.clone(),
             sendable_message: super::sendable_message(Message::MiddleAbrupt(Request::Order(
                 "wake when configured".into(),
             ))),
@@ -109,17 +109,18 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
             .unwrap()
             .unwrap()
             .queue
+            .0
             .len(),
         1,
         "wake configuration failure never discards admitted work"
     );
     let unknown = Address {
-        topic: "unknownDirectTarget".into(),
+        topic: flow_ethos::Topic("unknownDirectTarget".into()),
         ..target.clone()
     };
     let answer = fixture.nexus.send_request(
         SendRequest {
-            recipient: unknown.clone(),
+            address: unknown.clone(),
             sendable_message: signal_flow::SendableMessage::HardAbrupt(
                 signal_flow::SendableRequest::Notice("no hidden queue".into()),
             ),
@@ -135,7 +136,7 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
     assert!(fixture.nexus.store.metaflow(&unknown).unwrap().is_none());
     let queued = fixture.nexus.send_request(
         SendRequest {
-            recipient: target.clone(),
+            address: target.clone(),
             sendable_message: signal_flow::SendableMessage::Soft(
                 signal_flow::SendableRequest::Notice("explicit durable queue".into()),
             ),
@@ -151,6 +152,7 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
             .unwrap()
             .unwrap()
             .queue
+            .0
             .len(),
         2
     );
@@ -173,20 +175,20 @@ fn an_admitted_send_holds_archive_until_its_answer_object_is_released() {
     fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
     let target = Address {
         aspect: Aspect::Mind,
-        topic: "answerHoldTarget".into(),
+        topic: flow_ethos::Topic("answerHoldTarget".into()),
         model: Model::Sol,
     };
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: target.clone(),
         state: flow_ethos::State::Asleep,
-        past: vec![],
-        queue: vec![],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let caller = MarkedProcess::spawn("sleep", &["30"], "pane-1");
     let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
     let answer = fixture.nexus.send_request(
         SendRequest {
-            recipient: target.clone(),
+            address: target.clone(),
             sendable_message: super::sendable_message(Message::Soft(Request::Notice(
                 "hold the admission answer".into(),
             ))),
@@ -201,20 +203,20 @@ fn an_admitted_send_holds_archive_until_its_answer_object_is_released() {
         fixture
             .nexus
             .store
-            .withdraw_queued(&target, &accepted.logical_delivery_id)
+            .withdraw_queued(&target, &accepted.logical_delivery_id.0)
             .unwrap(),
         Ok(())
     );
     let sender = Address {
         aspect: Aspect::Mind,
-        topic: "core".into(),
+        topic: flow_ethos::Topic("core".into()),
         model: Model::Sol,
     };
     assert_eq!(
         fixture
             .nexus
             .store
-            .archive_request(&accepted.request_id, &sender)
+            .archive_request(&accepted.request_id.0, &sender)
             .unwrap(),
         Err(signal_flow::ArchiveRejection::NotYet)
     );
@@ -223,7 +225,7 @@ fn an_admitted_send_holds_archive_until_its_answer_object_is_released() {
         fixture
             .nexus
             .store
-            .archive_request(&accepted.request_id, &sender)
+            .archive_request(&accepted.request_id.0, &sender)
             .unwrap(),
         Ok(())
     );
@@ -268,14 +270,14 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         );
         let target = Address {
             aspect: Aspect::Mind,
-            topic: "flow".into(),
+            topic: flow_ethos::Topic("flow".into()),
             model: Model::Sol,
         };
         fixture.nexus.store.seed_metaflow(Metaflow {
             address: target.clone(),
-            state: flow_ethos::State::Awake(CLAUDE_SEAT.into()),
-            past: vec![],
-            queue: vec![],
+            state: flow_ethos::State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![]),
         });
         append_main_rows(&fixture, &[end_turn("direct-before")]);
         let caller = MarkedProcess::spawn("sleep", &["30"], "pane-1");
@@ -322,12 +324,12 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                 .nexus
                 .dispatch_metaflow_peer(
                     signal_flow::Query::Lock(signal_flow::Lock_Data {
-                        sender: Address {
+                        first_address: Address {
                             aspect: Aspect::Mind,
-                            topic: "core".into(),
+                            topic: flow_ethos::Topic("core".into()),
                             model: Model::Sol,
                         },
-                        recipient: target.clone(),
+                        second_address: target.clone(),
                     }),
                     Some(&message_peer),
                 )
@@ -351,7 +353,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         } else {
             let answer = fixture.nexus.send_request(
                 SendRequest {
-                    recipient: target.clone(),
+                    address: target.clone(),
                     sendable_message: super::sendable_message(message),
                 },
                 Some(&peer),
@@ -412,6 +414,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                     .unwrap()
                     .unwrap()
                     .queue
+                    .0
                     .is_empty()
             );
             continue;
@@ -433,7 +436,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                 answer
             )
         };
-        assert_eq!(receipt.len(), 4);
+        assert_eq!(receipt.0.0.len(), 4);
         assert!(
             fixture
                 .nexus
@@ -442,6 +445,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                 .unwrap()
                 .unwrap()
                 .queue
+                .0
                 .is_empty()
         );
     }
@@ -455,7 +459,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
     let fixture = NexusFixture::new();
     let target = Address {
         aspect: Aspect::Mind,
-        topic: "newConfiguredDirect".into(),
+        topic: flow_ethos::Topic("newConfiguredDirect".into()),
         model: Model::Sol,
     };
     assert!(fixture.nexus.direct_send_lease(&target).is_err());
@@ -463,13 +467,15 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
     let declaration = meta_signal_flow::ConfigureMetaflow {
         root_option: None,
         address: target.clone(),
-        system_modules: vec!["spirit-core".into()],
-        user_modules: vec![],
+        system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
+            "spirit-core".into(),
+        )]),
+        user_modules: signal_flow::UserModules(vec![]),
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
         continuity: meta_signal_flow::Continuity::OnDemand,
-        purpose: String::new(),
-        records: vec![],
+        purpose: meta_signal_flow::Purpose(String::new()),
+        records: meta_signal_flow::Records(vec![]),
     };
     fixture
         .nexus
@@ -477,7 +483,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
         .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
             meta_signal_flow::ConfigureModel {
                 model: Model::Sol,
-                native: "gpt-6-sol".into(),
+                native: meta_signal_flow::Native("gpt-6-sol".into()),
             },
         ]))
         .unwrap();
@@ -494,7 +500,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
         .expect("configured address can start");
     let working = fixture.nexus.store.metaflow(&target).unwrap().unwrap();
     assert_eq!(working.state, flow_ethos::State::Asleep);
-    assert!(working.queue.is_empty());
+    assert!(working.queue.0.is_empty());
     use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
     assert_eq!(
         fixture.nexus.store.metaflow_declaration(&target).unwrap(),
@@ -506,9 +512,9 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
 #[test]
 fn a_direct_send_read_by_its_answer_returns_sent_without_a_native_receipt() {
     let acceptance = signal_flow::SendAcceptance {
-        logical_delivery_id: "read-direct".into(),
-        request_id: "r3ad".into(),
-        delivery_cursor: 7,
+        logical_delivery_id: flow_ethos::LogicalDeliveryId("read-direct".into()),
+        request_id: flow_ethos::RequestId("r3ad".into()),
+        delivery_cursor: signal_flow::DeliveryCursor(7),
         delivery_state: signal_flow::DeliveryState::Uncertain,
     };
     assert_eq!(
@@ -535,14 +541,14 @@ fn a_task_is_admitted_only_with_minutes_above_zero_and_a_reachable_deadline() {
     let fixture = NexusFixture::new();
     let target = Address {
         aspect: Aspect::Mind,
-        topic: "minutesTarget".into(),
+        topic: flow_ethos::Topic("minutesTarget".into()),
         model: Model::Sol,
     };
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: target.clone(),
         state: flow_ethos::State::Asleep,
-        past: vec![],
-        queue: vec![],
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
     });
     let admit = |minutes: i64| {
         fixture
@@ -553,7 +559,7 @@ fn a_task_is_admitted_only_with_minutes_above_zero_and_a_reachable_deadline() {
                 SentBy::Sender(sender()),
                 flow_ethos::Delivery::Queue,
                 Message::Soft(Request::Task(flow_ethos::AnswerableTask {
-                    minutes,
+                    minutes: flow_ethos::Minutes(minutes),
                     string: "Draft the proposal.".into(),
                 })),
                 None,
@@ -581,6 +587,7 @@ fn a_task_is_admitted_only_with_minutes_above_zero_and_a_reachable_deadline() {
             .unwrap()
             .unwrap()
             .queue
+            .0
             .is_empty(),
         "a refused Task is never queued"
     );
@@ -663,7 +670,7 @@ impl ServesCliWorld for CliWorld {
         // Field flow Terra.
         let sender_address = Address {
             aspect: Aspect::Field,
-            topic: "flow".into(),
+            topic: flow_ethos::Topic("flow".into()),
             model: Model::Terra,
         };
         fixture
@@ -671,26 +678,28 @@ impl ServesCliWorld for CliWorld {
             .store
             .register_flow_in_role(
                 FlowNode {
-                    flow_id: "5e4de7".into(),
-                    session_id: "5e4de700-0000-4000-8000-000000000001".into(),
+                    flow_id: flow_ethos::FlowId("5e4de7".into()),
+                    session_id: signal_flow::SessionId(
+                        "5e4de700-0000-4000-8000-000000000001".into(),
+                    ),
                     harness_kind: HarnessKind::Claude,
                     endpoint_selection: EndpointSelection::Unavailable,
                     herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
-                        herdr_session_name: "messaging-build".into(),
-                        herdr_agent_name: "sender-agent".into(),
-                        herdr_pane_id: "w5:p1".into(),
-                        herdr_terminal_id: "term-sender".into(),
+                        herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+                        herdr_agent_name: signal_flow::HerdrAgentName("sender-agent".into()),
+                        herdr_pane_id: signal_flow::HerdrPaneId("w5:p1".into()),
+                        herdr_terminal_id: signal_flow::HerdrTerminalId("term-sender".into()),
                     }),
                     origin: Origin::Flow(FlowOrigin {
-                        flow_id: "da2038".into(),
-                        session_id: "field-session".into(),
+                        flow_id: flow_ethos::FlowId("da2038".into()),
+                        session_id: signal_flow::SessionId("field-session".into()),
                     }),
                     flow_lifecycle: FlowLifecycle::Active,
                 },
-                signal_flow::Caller {
-                    flow_id: "5e4de7".into(),
+                signal_flow::CallerIdentity {
+                    flow_id: flow_ethos::FlowId("5e4de7".into()),
                     aspect: Aspect::Field,
-                    model_name: "haiku".into(),
+                    model_name: flow_ethos::ModelName("haiku".into()),
                 },
             )
             .expect("sender registered");
@@ -813,6 +822,7 @@ fn a_zero_minutes_task_from_the_cli_is_refused_minutes_refused_by_the_nexus() {
             .unwrap()
             .unwrap()
             .queue
+            .0
             .is_empty(),
         "a refused Task is never queued"
     );
@@ -857,6 +867,7 @@ fn a_send_with_nested_and_escaped_guillemets_round_trips_through_the_cli_and_the
         .unwrap()
         .unwrap()
         .queue
+        .0
         .into_iter()
         .map(|entry| entry.message)
         .collect();

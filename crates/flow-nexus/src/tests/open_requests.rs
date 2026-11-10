@@ -355,7 +355,7 @@ fn a_successor_with_nothing_open_is_given_no_open_requests_line() {
         fixture.nexus.dispatch(Query::Refresh(at.clone())),
         Response::Refreshed(Refreshed {
             address: at.clone(),
-            flow_id: "abc123".into(),
+            flow_id: FlowId("abc123".into()),
         }),
         "Herdr calls: {}",
         world.calls()

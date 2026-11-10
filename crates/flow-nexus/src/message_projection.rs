@@ -552,9 +552,9 @@ impl ProjectsSendOutcomeRecord for meta_signal_flow::SendOutcomeRecord {
             }),
             Private::Refused(value) => Visible::Refused(value.visible_refusal()),
             Private::PriorAdmission(value) => Visible::PriorAdmission(value.clone()),
-            // STAND-IN, not for landing: meta-signal-flow a90a889 asks a
-            // NativeReceipt where Flow holds a SendReceipt.
-            Private::Sent(value) => todo!("meta-signal-flow a90a889 Sent of {value:?}"),
+            Private::Sent(value) => {
+                Visible::Sent(signal_flow::VisibleSendReceipt(value.request_id.clone()))
+            }
             Private::Failed(value) => Visible::Failed(value.visible_send_failure()),
         };
         meta_signal_flow::VisibleSendOutcomeRecord {

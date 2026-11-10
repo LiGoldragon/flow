@@ -721,7 +721,7 @@ fn configured_executable_seeds_only_its_fresh_typed_nexus_row() {
         .configuration_snapshot()
         .expect("snapshot reads")
         .expect("fresh executable seeded Nexus");
-    assert_eq!(snapshot.nexus.lease, 60);
+    assert_eq!(snapshot.nexus.lease, flow_ethos::Lease(60));
     assert!(snapshot.nexus.message_nexus_path_option.is_none());
     assert!(snapshot.nexus.message_nexus_binary_option.is_none());
 }

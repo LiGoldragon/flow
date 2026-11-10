@@ -6,7 +6,7 @@ ethos-zero `1976e45`, signal 11.0.0 (`6d4eb74`), signal-flow 58.0.1
 other consumers write, so the lock holds one source of each. The
 message-joint test runs against Message 0.23.0 (`69a9eb7`) and
 signal-message 22.0.0 (`2fed750`), both with datom as the build base's
-set holds them. The flake's base is build-base `62307eb`.
+set holds them. The flake's base is build-base `82d3c8e`, which Message follows. It includes 0.53.5.
 
 - ethos-zero 22 makes a head over one type a newtype (`FlowId(String)`,
   `RequestId(String)`, `Path(String)`, …) and refuses a head over a named
@@ -29,6 +29,16 @@ set holds them. The flake's base is build-base `62307eb`.
   `MetaConfigured` a newtype, and the acceptance cursor and store identity
   are read as their inner values. Its check runs Message's `message-nexus`
   build, whose binary is its own file rather than a link.
+
+# Flow 0.53.5: a successor is told what its open requests are
+
+- A successor's open requests are preceded, directly, by one line naming
+  the predecessor that left them open, the same with or without a
+  handover: «Flow abc123, which this flow succeeds, left these requests
+  open; answer each by its id.» A successor with nothing open is given no
+  line. The line lives in `handover::FramesOpenRequests`; the predecessor
+  is the launch's own `flow_id_option`.
+- No stored format or wire changes.
 
 # Flow 0.53.4: a successor is given its permaflow's open requests
 

@@ -68,20 +68,11 @@
             cargoNix = ./Cargo.nix;
             memberChecks = _: memberChecks // lib.genAttrs untested (_: null);
             extraChecks =
-              { clippy, doc, ... }:
+              { doc, ... }:
               extraChecks
               // {
-                # The base's clippy over every target of each member, and its
-                # rustdoc over each library, warnings denied.
-                clippy = pkgs.linkFarm "flow-clippy" (
-                  lib.mapAttrs (
-                    name: features:
-                    clippy name features [
-                      "-D"
-                      "warnings"
-                    ]
-                  ) lintFeatures
-                );
+                # The base's rustdoc over each library, warnings denied; clippy
+                # runs inside each member's test build.
                 doc = pkgs.linkFarm "flow-doc" (
                   lib.mapAttrs (
                     name: features:

@@ -100,7 +100,9 @@
           ) (throw "flow builds no flow-ethos") members.flow.dependencies;
           testBuilds = workspace.tests // {
             flow-ethos = workspace.tests.flow-ethos.override {
-              features = [ "datom" ];
+              # The feature set flow already builds flow-ethos with, so the
+              # test links that library rather than building another.
+              features = flowEthosWithDatom.crateFeatures;
               inherit (flowEthosWithDatom) dependencies;
             };
           };

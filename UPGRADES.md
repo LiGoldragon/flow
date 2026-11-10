@@ -29,6 +29,10 @@ set holds them. The flake's base is build-base `82d3c8e`, which Message follows.
   `MetaConfigured` a newtype, and the acceptance cursor and store identity
   are read as their inner values. Its check runs Message's `message-nexus`
   build, whose binary is its own file rather than a link.
+- The message-joint and request-id-migration process tests read the source
+  revision at run time, from the environment their check sets, so one
+  flow-nexus test build serves every check and a commit that changes no
+  source rebuilds none.
 
 # Flow 0.53.5: a successor is told what its open requests are
 

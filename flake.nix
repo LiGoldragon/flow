@@ -45,8 +45,9 @@
       lib = base.inputs.nixpkgs.lib;
       version = "0.54.0";
       forSystems = function: lib.genAttrs base.lib.systems function;
-      # The revision the process checks bind their test build and binaries
-      # to: the committed revision, or the dirty one a working tree has.
+      # The revision the process checks bind their binaries to, given to the
+      # test at run time: the committed revision, or the dirty one a working
+      # tree has. No build reads it, so a commit rebuilds only what it changed.
       sourceRevision = self.rev or self.dirtyRev or "unpublished";
       # The accepted 0.53.2 revision the migration check names; a lock that
       # moved migration-predecessor elsewhere fails evaluation.
@@ -179,21 +180,6 @@
           memberChecks = lib.mapAttrs (
             name: tests: crateCheck name tests (checkEnvironments.${name} or { })
           ) (removeAttrs testBuilds untested);
-          # flow-nexus's test build with the source revision compiled in,
-          # which the joint and migration process tests compare with the
-          # revision their check names at run time. Only flow-nexus's test
-          # build is compiled again.
-          stampedNexusTests = testBuilds.flow-nexus.override (old: {
-            crateOverrides = old.crateOverrides // {
-              flow-nexus =
-                attributes:
-                (old.crateOverrides.flow-nexus or (_: { })) attributes
-                // {
-                  FLOW_MESSAGE_JOINT_SOURCE_REV = sourceRevision;
-                  FLOW_MIGRATION_SOURCE_REV = sourceRevision;
-                };
-            };
-          });
           # The one test binary of a test build that lists the named test,
           # ignored ones included; the shell variable it is bound to.
           findTest = variable: tests: testName: ''
@@ -212,8 +198,8 @@
               exit 1
             fi
           '';
-          # One ignored test of the stamped flow-nexus test build, run exactly
-          # once with the given environment from a copy of the source.
+          # One ignored test of the flow-nexus test build, run exactly once
+          # with the given environment from a copy of the source.
           processCheck =
             name: testName: environment:
             pkgs.runCommand "flow-${name}"
@@ -225,10 +211,10 @@
               }
               ''
                 set -o pipefail
-                cp -r ${stampedNexusTests.src} "$NIX_BUILD_TOP/source"
+                cp -r ${testBuilds.flow-nexus.src} "$NIX_BUILD_TOP/source"
                 chmod -R u+w "$NIX_BUILD_TOP/source"
                 cd "$NIX_BUILD_TOP/source"
-                ${findTest "binary" stampedNexusTests testName}
+                ${findTest "binary" testBuilds.flow-nexus testName}
                 ${environment}
                 "$binary" --exact ${testName} --ignored --nocapture 2>&1 | tee "$NIX_BUILD_TOP/${name}.log"
                 ran=$(grep -cF "test ${testName} ... ok" "$NIX_BUILD_TOP/${name}.log" || true)
@@ -417,6 +403,7 @@
                     message.packages.${system}.message-nexus
                   }/bin/message-nexus"
                   export FLOW_MESSAGE_JOINT_FLOW_REV="${sourceRevision}"
+                  export FLOW_MESSAGE_JOINT_SOURCE_REV="${sourceRevision}"
                   export FLOW_MESSAGE_JOINT_MESSAGE_REV="69a9eb7b2e95fb7ba85f138f58d38f38996f6d70"
                   sha256sum "$FLOW_MESSAGE_JOINT_FLOW_BIN" "$FLOW_MESSAGE_JOINT_MESSAGE_BIN"
                 '';
@@ -431,6 +418,7 @@
                   export FLOW_MIGRATION_CURRENT_BIN="${flowNexus}"
                   export FLOW_MIGRATION_PREDECESSOR_REV="${predecessorRevision}"
                   export FLOW_MIGRATION_CURRENT_REV="${sourceRevision}"
+                  export FLOW_MIGRATION_SOURCE_REV="${sourceRevision}"
                   sha256sum "$FLOW_MIGRATION_PREDECESSOR_BIN" "$FLOW_MIGRATION_CURRENT_BIN"
                 '';
             flow-request-id-immutable-contract-pins =
@@ -466,7 +454,6 @@
             members
             commands
             testBuilds
-            stampedNexusTests
             findTest
             binaries
             crateCheck
@@ -513,12 +500,11 @@
           # is built only through lib.<system>.mkFlowPackage with an explicit
           # defaultConfiguration; production has supplied none yet.
           default = unconfigured-flow.packages.${system}.default;
-          # The flow-nexus library test executable, from its stamped test
-          # build, so a test kept out of every check (one that needs a store
-          # no repository holds, named at run time) can be run by name where
-          # a build runs.
+          # The flow-nexus library test executable, from its test build, so a
+          # test kept out of every check (one that needs a store no repository
+          # holds, named at run time) can be run by name where a build runs.
           store-proof = pkgs.runCommand "flow-nexus-store-proof" { } ''
-            ${context.findTest "binary" context.stampedNexusTests
+            ${context.findTest "binary" context.testBuilds.flow-nexus
               "store::request_id_migration_process::actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without_writing"
             }
             mkdir -p "$out/bin"

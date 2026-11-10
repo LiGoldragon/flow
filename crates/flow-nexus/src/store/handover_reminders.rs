@@ -82,6 +82,9 @@ pub trait SchedulesHandoverReminders {
         address: &Address,
         generation: i64,
     ) -> Result<bool, StoreError>;
+    /// Whether `flow_id`, the Address's current flow, has been sent the
+    /// handover warning of its live generation at least once.
+    fn warned(&self, address: &Address, flow_id: &str) -> Result<bool, StoreError>;
 }
 
 impl SchedulesHandoverReminders for FlowStore {
@@ -159,6 +162,18 @@ impl SchedulesHandoverReminders for FlowStore {
         ))?;
         self.reminder_changes.announce();
         Ok(true)
+    }
+    fn warned(&self, address: &Address, flow_id: &str) -> Result<bool, StoreError> {
+        use super::handover::HoldsHandovers;
+        let Some(live) = self.handover_memory(address)? else {
+            return Ok(false);
+        };
+        if live.current_flow_id.as_deref() != Some(flow_id) {
+            return Ok(false);
+        }
+        Ok(self
+            .handover_reminder(address, live.generation)?
+            .is_some_and(|reminder| reminder.sent > 0))
     }
 }
 

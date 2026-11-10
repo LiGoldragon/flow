@@ -173,7 +173,11 @@ pub struct RunningNexus {
     pub configuration_changes: store::LaunchChanges,
 }
 
-/// The running Memory is the sole handover source for fresh successors.
+/// The handover source for fresh successors: the predecessor's sections in
+/// the running Memory, or, when Memory holds none, the file the handover
+/// warning names, `flows/<predecessor>/handover.md` under the launch root
+/// ([`crate::handover::HandoverFile`]). With no root resolved only Memory is
+/// read.
 #[derive(Clone)]
 struct MemoryHandoverSource(Arc<FlowStore>);
 
@@ -192,7 +196,7 @@ impl crate::handover::YieldsHandover for MemoryHandoverSource {
         &self,
         address: &signal_flow::Address,
         predecessor: &str,
-        _launch_root: &Path,
+        launch_root: &Path,
     ) -> crate::handover::Handover {
         match self.store_handover(address, predecessor) {
             Ok(Some(sections)) if !sections.is_empty() => crate::handover::Handover::Text(
@@ -207,7 +211,8 @@ impl crate::handover::YieldsHandover for MemoryHandoverSource {
                     .collect::<Vec<_>>()
                     .join("\n\n"),
             ),
-            Ok(_) => crate::handover::Handover::Absent,
+            Ok(_) if launch_root.as_os_str().is_empty() => crate::handover::Handover::Absent,
+            Ok(_) => crate::handover::HandoverFile.handover(address, predecessor, launch_root),
             Err(error) => crate::handover::Handover::Unreadable(
                 signal_flow::HandoverFault::Unreadable(error.to_string()),
             ),

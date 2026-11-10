@@ -30,11 +30,12 @@
 //! is then its rest (`JudgesClosingRest`). Soft work is handed over at the
 //! turn's end whatever background work runs.
 //!
-//! A seat past its model's refresh threshold is replaced at its idle event,
-//! its Stop or its Codex thread's turn completed, and only once it rests: a
-//! refresh never closes a working seat, and one in its turn, or a Claude
-//! seat whose Stop names work in flight, keeps its queue for its successor
-//! until a later idle event finds it resting. A
+//! A seat is replaced at its idle event, its Stop or its Codex thread's turn
+//! completed, once it is past its model's refresh threshold, or once it was
+//! sent its handover warning before that event: the warning goes at the
+//! warning share of the threshold, and the idle event after it refreshes
+//! the seat whether or not it rests by the tests above, background work in
+//! flight included, and whether or not it wrote its handover. A
 //! Maintained metaflow, or one holding work that wakes it, is owed its
 //! successor: the intent is recorded, the successor is started and
 //! confirmed through Replace, and only then is the predecessor recorded
@@ -430,8 +431,9 @@ pub enum AtStop {
     Slept(Address),
     /// The seat rested with work queued: the oldest request was typed in.
     Drained(QueueEntry),
-    /// The seat was due a refresh and stopped, its last measured context past
-    /// its model's refresh threshold. A Maintained metaflow, or one holding
+    /// The seat was due a refresh and stopped: its last measured context
+    /// past its model's refresh threshold, or its handover warning sent
+    /// before this idle event. A Maintained metaflow, or one holding
     /// work that wakes it, had its successor started and confirmed first,
     /// then the predecessor recorded Stopped and its pane closed in the
     /// replacement's reaping. Any other had its pane closed and was recorded
@@ -457,10 +459,6 @@ pub enum KeptAtStop {
     UnknownFlow,
     /// After the bounded wait, Herdr does not show the seat resting.
     NotResting(PaneAgent),
-    /// The seat's turn ended with work it started still in flight, which
-    /// closing it would end: it is not closed. The Stop its turn ends with
-    /// once that work has ended is its rest.
-    BackgroundWorkOpen,
     /// A replacement ordered from outside was carried out at the seat's
     /// rest and refused, with the refusal; the order is spent.
     OrderedRefused(Box<Response>),
@@ -3486,6 +3484,19 @@ impl WakesInParts for RunningNexus {
 
     fn settle_rested(&self, flow_id: &str) -> AtStop {
         self.record_context_at_stop(flow_id);
+        // Whether the flow was sent its handover warning before this idle
+        // event: one warned only by this event's own reminder pass has yet
+        // to read it, and is refreshed at its next idle event.
+        let warned = {
+            use crate::store::handover_reminders::SchedulesHandoverReminders;
+            match self.store.metaflow_awake_as(flow_id) {
+                Ok(Some(metaflow)) => self
+                    .store
+                    .warned(&metaflow.address, flow_id)
+                    .unwrap_or(false),
+                _ => false,
+            }
+        };
         // The stop measurement is the warning-window opening witness. Run the
         // ordinary reminder admission now; the worker remains responsible for
         // anchored repeats and recovery after a restart.
@@ -3534,17 +3545,29 @@ impl WakesInParts for RunningNexus {
         if self.waking.is_waking(&address) {
             return AtStop::Kept(KeptAtStop::Waking);
         }
-        // A seat refreshes automatically only when its latest handover touch
-        // is policy-qualified and reaches the inclusive warning boundary.
-        // The decision is taken under the dispatch gate, as a Soft Send's
+        // A seat is refreshed at this idle event once it is past its
+        // threshold, or once it was sent its handover warning, or wrote a
+        // handover qualified for the warning window, whether or not it rests
+        // and whether or not its handover is written: an absent handover
+        // starts its successor from its definition and its queue. A
+        // protected Address is never refreshed for its context. The
+        // decision is taken under the dispatch gate, as a Soft Send's
         // hand-over at this idle event is: whichever comes first shuts out
         // the other.
         let refresh_due = match self.store.threshold_standing(flow_id) {
-            Ok(crate::store::context::ThresholdStanding::Past { refresh, .. }) => {
-                match self.store.handover_green(&address, flow_id, refresh) {
-                    Ok(green) => green,
-                    Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
-                }
+            Ok(crate::store::context::ThresholdStanding::Past { .. }) => true,
+            Ok(crate::store::context::ThresholdStanding::Below { refresh, .. }) => {
+                use crate::protecting::ProtectsFlows;
+                let warned = warned
+                    || match self.store.handover_green(&address, flow_id, refresh) {
+                        Ok(green) => green,
+                        Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+                    };
+                warned
+                    && match self.store.protected_address(flow_id) {
+                        Ok(protected) => protected.is_none(),
+                        Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+                    }
             }
             Ok(_) => false,
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
@@ -3562,6 +3585,9 @@ impl WakesInParts for RunningNexus {
         // Stop names no background work, since closing it would end that
         // work.
         let closable = match node.harness_kind {
+            // A seat due a refresh is closed at this idle event whatever it
+            // runs.
+            _ if refresh_due => true,
             // A Codex seat is handed work through its app-server, so only
             // the app-server's thread status says it rests, whatever its
             // screen shows.
@@ -3591,14 +3617,8 @@ impl WakesInParts for RunningNexus {
                     return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
                 }
                 // Its turn has ended. A Stop naming work in flight is no
-                // rest: closing the seat would end that work. A refresh
-                // never closes a working seat: it waits, the queue kept for
-                // the successor, for the Stop that names none.
-                let settled = self.background_settled(flow_id);
-                if refresh_due && !settled {
-                    return AtStop::Kept(KeptAtStop::BackgroundWorkOpen);
-                }
-                settled
+                // rest: closing the seat would end that work.
+                self.background_settled(flow_id)
             }
         };
         // A replacement ordered from outside is carried out once the seat

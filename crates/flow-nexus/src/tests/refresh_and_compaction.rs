@@ -43,8 +43,34 @@ fn seat_address() -> Address {
 }
 
 /// The Claude seat runs `CLAUDE_MODEL`, whose refresh threshold is
-/// `refresh` tokens.
+/// `refresh` tokens, and has written a handover qualified for its warning
+/// window.
 pub(super) fn seat_refreshing_at(fixture: &NexusFixture, refresh: i64) {
+    seat_warned_at(fixture, refresh, "fixture");
+    fixture
+        .nexus
+        .store
+        .keep_handover(
+            &seat_address(),
+            &seat_address(),
+            signal_flow::Section {
+                title: signal_flow::Title("fixture".into()),
+                description: signal_flow::Description("fixture".into()),
+                body: signal_flow::Body("fixture".into()),
+            },
+            signal_flow::Touch::Known(signal_flow::Known_Data {
+                flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+                tokens: signal_flow::Tokens(refresh),
+                timestamp: signal_flow::Timestamp(1),
+            }),
+        )
+        .expect("handover touch configured");
+}
+
+/// The Claude seat runs `CLAUDE_MODEL`, whose refresh threshold is
+/// `refresh` tokens and whose handover warning, `words`, goes 15 percent
+/// before it; the seat has written no handover.
+pub(super) fn seat_warned_at(fixture: &NexusFixture, refresh: i64, words: &str) {
     fixture.nexus.store.seed_role(CallerIdentity {
         flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
         aspect: Aspect::Mind,
@@ -65,29 +91,11 @@ pub(super) fn seat_refreshing_at(fixture: &NexusFixture, refresh: i64) {
             meta_signal_flow::HandoverPolicy {
                 model_name: flow_ethos::ModelName(CLAUDE_MODEL.into()),
                 warning_share_left: meta_signal_flow::WarningShareLeft(15),
-                reminder_text: meta_signal_flow::ReminderText("fixture".into()),
+                reminder_text: meta_signal_flow::ReminderText(words.into()),
                 every_minutes: meta_signal_flow::EveryMinutes(5),
             },
         ]))
         .expect("handover policy configured");
-    fixture
-        .nexus
-        .store
-        .keep_handover(
-            &seat_address(),
-            &seat_address(),
-            signal_flow::Section {
-                title: signal_flow::Title("fixture".into()),
-                description: signal_flow::Description("fixture".into()),
-                body: signal_flow::Body("fixture".into()),
-            },
-            signal_flow::Touch::Known(signal_flow::Known_Data {
-                flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
-                tokens: signal_flow::Tokens(refresh),
-                timestamp: signal_flow::Timestamp(1),
-            }),
-        )
-        .expect("handover touch configured");
 }
 
 pub(super) fn seat_metaflow(fixture: &NexusFixture, queue: Vec<Request>) {
@@ -360,11 +368,12 @@ fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_fl
 }
 
 /// A seat past its threshold whose Stop finds it working, Herdr showing its
-/// pane Working and its transcript no ended turn, is not refreshed: a
-/// refresh never closes a working flow. The seat stays Awake, and the work
-/// queued for it stays queued for its next flow.
+/// pane Working and its transcript no ended turn, is refreshed at that Stop:
+/// the Stop is its idle event, whatever it shows. Its pane is closed, its
+/// flow recorded Stopped, and the work queued for it stays queued for its
+/// next flow.
 #[test]
-fn a_seat_past_its_threshold_shown_working_is_kept_until_it_rests() {
+fn a_seat_past_its_threshold_shown_working_is_refreshed_at_its_stop() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![{
@@ -375,7 +384,7 @@ fn a_seat_past_its_threshold_shown_working_is_kept_until_it_rests() {
         PromptFixture::Prompted("w1:p3"),
     );
     claude_seat(&fixture, 230_000);
-    seat_refreshing_at(&fixture, 200_000);
+    seat_warned_at(&fixture, 200_000, "fixture");
     declare_seat(
         &fixture,
         Continuity::OnDemand,
@@ -391,14 +400,11 @@ fn a_seat_past_its_threshold_shown_working_is_kept_until_it_rests() {
         &claude_stop(&fixture),
     );
 
-    assert!(!closed(&fixture), "the working seat's pane stays open");
+    assert!(closed(&fixture), "the working seat's pane is closed");
     assert!(fixture.typed().is_none(), "nothing is typed into it");
-    assert_ne!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
+    assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
     let metaflow = seat_metaflow_now(&fixture);
-    assert_eq!(
-        metaflow.state,
-        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
-    );
+    assert_eq!(metaflow.state, State::Asleep);
     assert_eq!(
         metaflow.queue.0.len(),
         1,
@@ -407,14 +413,11 @@ fn a_seat_past_its_threshold_shown_working_is_kept_until_it_rests() {
 }
 
 /// A seat past its threshold whose turn ends with a subagent and a monitor
-/// in flight has not rested, though Herdr shows it resting and its
-/// transcript records its turn's end: no reading of Herdr stands for the
-/// Stop, and closing it would end that work. It stays Awake with its pane
-/// open and its queue kept, while a monitor alone runs too. Claude wakes it
-/// when that work ends, and the Stop that turn ends with, naming none, is
-/// its rest: the seat due a refresh is closed then.
+/// in flight is refreshed at that Stop: a flow that keeps background work
+/// running at every turn's end would otherwise never be refreshed. Its pane
+/// is closed, its queue kept for the next flow.
 #[test]
-fn a_stop_with_live_background_work_is_not_rest_and_a_later_stop_with_none_closes() {
+fn a_stop_with_live_background_work_past_the_threshold_refreshes() {
     use super::waking::{background_task, report_claude_stop};
     use signal_flow::BackgroundTaskKind;
     let fixture = NexusFixture::new();
@@ -424,7 +427,7 @@ fn a_stop_with_live_background_work_is_not_rest_and_a_later_stop_with_none_close
     );
     claude_seat(&fixture, 230_000);
     append_main_rows(&fixture, &[end_turn("last-turn")]);
-    seat_refreshing_at(&fixture, 200_000);
+    seat_warned_at(&fixture, 200_000, "fixture");
     declare_seat(
         &fixture,
         Continuity::OnDemand,
@@ -442,32 +445,8 @@ fn a_stop_with_live_background_work_is_not_rest_and_a_later_stop_with_none_close
             background_task("m1", BackgroundTaskKind::Monitor),
         ],
     );
-    assert!(!closed(&fixture), "the working seat's pane stays open");
+    assert!(closed(&fixture), "the seat's pane is closed");
     assert!(fixture.typed().is_none(), "nothing is typed into it");
-    assert_ne!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
-    assert_eq!(
-        fixture.nexus.settle_stopped(CLAUDE_SEAT),
-        AtStop::Kept(crate::waking::KeptAtStop::BackgroundWorkOpen)
-    );
-
-    report_claude_stop(
-        &fixture,
-        vec![background_task("m1", BackgroundTaskKind::Monitor)],
-    );
-    assert!(!closed(&fixture), "a monitor in flight is work in flight");
-    let metaflow = seat_metaflow_now(&fixture);
-    assert_eq!(
-        metaflow.state,
-        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
-    );
-    assert_eq!(
-        metaflow.queue.0.len(),
-        1,
-        "the work waits for the next flow"
-    );
-
-    report_claude_stop(&fixture, vec![]);
-    assert!(closed(&fixture), "the resting seat's pane is closed");
     assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
     let metaflow = seat_metaflow_now(&fixture);
     assert_eq!(metaflow.state, State::Asleep);
@@ -479,6 +458,108 @@ fn a_stop_with_live_background_work_is_not_rest_and_a_later_stop_with_none_close
         metaflow.queue.0.len(),
         1,
         "the work waits for the next flow"
+    );
+}
+
+/// A flow busy across several turns, every Stop naming background work and
+/// Herdr showing it Working, is sent its handover warning once its context
+/// reaches the warning share of its threshold, at MiddleAbrupt, the
+/// configured words and its handover path and nothing else; it is not
+/// refreshed at the Stop that warned it, and is refreshed at the next,
+/// though it never rested and wrote no handover.
+#[test]
+fn a_busy_flow_is_warned_and_then_refreshed_at_its_next_stop() {
+    use super::waking::{background_task, report_claude_stop};
+    use crate::store::handover_reminders::SchedulesHandoverReminders;
+    use signal_flow::BackgroundTaskKind;
+    const WORDS: &str = "Write your handover now.";
+    let usage = |tokens: i64| {
+        serde_json::json!({"type":"assistant","message":{"usage":{
+            "input_tokens": 3,
+            "cache_read_input_tokens": tokens - 13,
+            "cache_creation_input_tokens": 10,
+            "output_tokens": 50
+        }}})
+    };
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![{
+            let mut agent = claude_agent(&fixture);
+            agent["agent_status"] = serde_json::Value::String("working".into());
+            agent
+        }],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 150_000);
+    seat_warned_at(&fixture, 200_000, WORDS);
+    declare_seat(
+        &fixture,
+        Continuity::OnDemand,
+        vec!["spirit-core".into(), "intent-flow".into()],
+    );
+    seat_metaflow(&fixture, vec![]);
+    fixture
+        .nexus
+        .store
+        .ensure_live_handover(&seat_address(), CLAUDE_SEAT)
+        .unwrap();
+    let busy = || {
+        vec![
+            background_task("a1", BackgroundTaskKind::Subagent),
+            background_task("b1", BackgroundTaskKind::Shell),
+        ]
+    };
+
+    // Two turns below the warning share: neither warned nor refreshed.
+    report_claude_stop(&fixture, busy());
+    append_main_rows(&fixture, &[usage(160_000)]);
+    report_claude_stop(&fixture, busy());
+    assert_eq!(
+        fixture.nexus.store.context_size(CLAUDE_SEAT).unwrap(),
+        Some(160_000)
+    );
+    assert!(!closed(&fixture), "below the warning the seat runs on");
+    assert!(
+        fixture
+            .nexus
+            .store
+            .handover_reminder(&seat_address(), 0)
+            .unwrap()
+            .is_none()
+    );
+
+    // The turn that reaches the warning share is warned, not refreshed.
+    append_main_rows(&fixture, &[usage(175_000)]);
+    report_claude_stop(&fixture, busy());
+    let reminder = fixture
+        .nexus
+        .store
+        .handover_reminder(&seat_address(), 0)
+        .unwrap()
+        .expect("the warning opened");
+    assert_eq!(reminder.sent, 1);
+    assert!(!closed(&fixture), "the warned seat is not refreshed yet");
+    assert_eq!(
+        seat_metaflow_now(&fixture).state,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
+    let typed = fixture.typed().expect("the warning reached the pane");
+    let notice = format!("{WORDS}\nflows/{CLAUDE_SEAT}/handover.md");
+    assert!(typed.contains("MiddleAbrupt"), "{typed}");
+    assert!(typed.contains(&notice), "{typed}");
+    assert!(!typed.contains("flow-nexus"), "{typed}");
+    assert!(!typed.contains("Keep"), "{typed}");
+
+    // The next turn's end refreshes it, busy and with no handover written.
+    append_main_rows(&fixture, &[usage(180_000)]);
+    report_claude_stop(&fixture, busy());
+    assert!(closed(&fixture), "the warned seat is refreshed");
+    assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
+    let metaflow = seat_metaflow_now(&fixture);
+    assert_eq!(metaflow.state, State::Asleep);
+    assert_eq!(
+        metaflow.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])
     );
 }
 
@@ -551,9 +632,9 @@ fn a_seat_whose_successor_cannot_compose_stays_and_is_handed_its_queue() {
     }
 }
 
-/// An idle OnDemand seat with nothing queued closes its harness either way:
-/// past its threshold it is refreshed, below it it sleeps, its metaflow
-/// Asleep until work wakes its next flow.
+/// An idle OnDemand seat with nothing queued, never warned before, closes
+/// its harness either way: past its threshold it is refreshed, below it it
+/// sleeps, its metaflow Asleep until work wakes its next flow.
 #[test]
 fn an_idle_on_demand_seat_is_refreshed_only_past_its_threshold() {
     for (tokens, refreshed) in [(199_999, false), (200_000, true)] {
@@ -564,7 +645,7 @@ fn an_idle_on_demand_seat_is_refreshed_only_past_its_threshold() {
         );
         claude_seat(&fixture, tokens);
         append_main_rows(&fixture, &[end_turn("last-turn")]);
-        seat_refreshing_at(&fixture, 200_000);
+        seat_warned_at(&fixture, 200_000, "fixture");
         declare_seat(
             &fixture,
             Continuity::OnDemand,

@@ -1,5 +1,5 @@
 use crate::handover_reminding::RemindsHandoverCallers;
-use crate::handover_reminding::{DecidesHandoverReminder, RendersHandoverCommands};
+use crate::handover_reminding::{DecidesHandoverReminder, RendersHandoverWarning};
 use crate::reporting::RecordsReports;
 use crate::store::handover::HoldsHandovers;
 use crate::store::handover_reminders::SchedulesHandoverReminders;
@@ -68,18 +68,18 @@ fn recurrence_advances_from_each_due_instant() {
     assert_eq!(r.next_due, 900);
 }
 
+/// The warning holds the configured words and the flow's handover path,
+/// nothing else.
 #[test]
-fn an_empty_handover_notice_still_has_typed_keep_and_drop_forms() {
+fn the_warning_is_the_configured_words_and_the_handover_path() {
     let reminder =
         HandoverReminder::open_handover_reminder(address(), 1, "m".into(), 0, 5, "continue".into())
             .unwrap();
     let notice = reminder.notice_if_due(0).unwrap();
-    let text = notice.notice_text(&[]);
-    let lines: Vec<_> = text.lines().collect();
-    assert_eq!(lines.len(), 3);
-    assert!(lines[0].contains("Keep"), "{text}");
-    assert!(lines[1].contains("Drop"), "{text}");
-    assert_eq!(lines[2], "continue");
+    assert_eq!(
+        notice.notice_text("ab12cd"),
+        "continue\nflows/ab12cd/handover.md"
+    );
 }
 
 #[test]
@@ -105,54 +105,7 @@ fn window_requires_boundary_qualified_current_flow_touch() {
 }
 
 #[test]
-fn typed_keep_and_drop_commands_are_shell_single_argument_forms() {
-    use crate::handover_reminding::{HandoverReminderNotice, RendersHandoverCommands};
-    use datom_codec::{Actualizing, Budget, Potential};
-    use protos::ReaderBudget;
-    use signal_flow::{Query, Section};
-    let notice = HandoverReminderNotice {
-        address: address(),
-        text: "Configured reminder".into(),
-        generation: 1,
-    };
-    let section = Section {
-        title: signal_flow::Title("title with ' apostrophe".into()),
-        description: signal_flow::Description("description with ' apostrophe".into()),
-        body: signal_flow::Body("body with ' apostrophe".into()),
-    };
-    let parse = |text: String| {
-        assert!(text.starts_with("flow-nexus '") && text.ends_with("'"));
-        let payload = text
-            .strip_prefix("flow-nexus '")
-            .unwrap()
-            .strip_suffix('\'')
-            .unwrap()
-            .replace("'\"'\"'", "'");
-        let mut budget = Budget {
-            remaining: 4096,
-            reader: ReaderBudget::try_from(4096).unwrap(),
-            depth: 0,
-            maximum_depth: 1024,
-        };
-        Potential::<Query>::from(payload.as_str())
-            .actualize(&mut budget)
-            .unwrap()
-    };
-    let keep = parse(notice.keep_commands(std::slice::from_ref(&section)));
-    let Query::Keep(keep) = keep else {
-        panic!("expected Keep query")
-    };
-    assert_eq!(keep.section, section);
-    let drop = parse(notice.drop_command(section.title.clone()));
-    let Query::Drop(drop) = drop else {
-        panic!("expected Drop query")
-    };
-    assert_eq!(drop.title, section.title);
-    assert_eq!(drop.address, address());
-}
-
-#[test]
-fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
+fn runtime_tick_admits_due_middle_abrupt_notice_and_wakes_recipient() {
     use super::NexusFixture;
     use crate::store::context::RecordsContextSize;
     use crate::store::handover_reminders::{
@@ -232,7 +185,8 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
     let metaflow = fixture.nexus.store.metaflow(&address).unwrap().unwrap();
     assert!(metaflow.queue.0.iter().any(|entry| matches!(
         &entry.message,
-        flow_ethos::Message::HardAbrupt(flow_ethos::Request::Notice(_))
+        flow_ethos::Message::MiddleAbrupt(flow_ethos::Request::Notice(text))
+            if text == "configured\nflows/fixture-seat/handover.md"
     )));
     fixture
         .nexus
@@ -254,13 +208,13 @@ fn runtime_tick_admits_due_hard_notice_and_wakes_recipient() {
     );
 }
 
-/// A scheduled warning is an ordinary queued HardAbrupt delivery: once the
-/// recipient is already past its threshold, admission still drains through
-/// the real waking path and reaches its pane.  The threshold is a warning
-/// observation, not a delivery hold.
+/// A scheduled warning is an ordinary queued MiddleAbrupt delivery: once the
+/// recipient is already past its threshold and in its turn, admission still
+/// drains through the real waking path and reaches its pane.  The threshold
+/// is a warning observation, not a delivery hold.
 #[test]
-fn runtime_tick_drains_due_hard_notice_past_threshold_into_the_pane() {
-    use super::waking::{CLAUDE_SEAT, claude_agent, claude_seat};
+fn runtime_tick_drains_due_middle_abrupt_notice_past_threshold_into_the_pane() {
+    use super::waking::{CLAUDE_SEAT, claude_agent, claude_prompt_taken, claude_seat};
     use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture, prompts};
     use crate::store::context::{JudgesThreshold, RecordsContextSize};
     use crate::store::handover::HoldsHandovers;
@@ -276,6 +230,7 @@ fn runtime_tick_drains_due_hard_notice_past_threshold_into_the_pane() {
         PromptFixture::Prompted("w1:p3"),
     );
     claude_seat(&fixture, 200);
+    claude_prompt_taken(&fixture);
     let address = signal_flow::Address {
         aspect: Aspect::Mind,
         topic: flow_ethos::Topic("flow".into()),
@@ -647,7 +602,7 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
     let public = fixture.nexus.store.metaflow(&address).unwrap().unwrap();
     assert!(public.queue.0.iter().any(|entry| matches!(
         &entry.message,
-        flow_ethos::Message::HardAbrupt(flow_ethos::Request::Notice(_))
+        flow_ethos::Message::MiddleAbrupt(flow_ethos::Request::Notice(_))
     )));
     fixture.nexus.send_due_handover_reminders(319);
     assert_eq!(

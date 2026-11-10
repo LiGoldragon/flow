@@ -1165,7 +1165,7 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
         .0
         .iter()
         .find(|entry| {
-            matches!(&entry.message, Message::HardAbrupt(Request::Notice(text))
+            matches!(&entry.message, Message::MiddleAbrupt(Request::Notice(text))
                 if text.contains("flow Keep."))
         })
         .expect("the scheduler durably admitted its first warning")
@@ -1210,7 +1210,7 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
                 .iter()
                 .find(|entry| {
                     entry.logical_delivery_id != first_warning_id
-                        && matches!(&entry.message, Message::HardAbrupt(Request::Notice(text))
+                        && matches!(&entry.message, Message::MiddleAbrupt(Request::Notice(text))
                         if text.contains("flow Keep."))
                 })
                 .map(|entry| entry.logical_delivery_id.clone())

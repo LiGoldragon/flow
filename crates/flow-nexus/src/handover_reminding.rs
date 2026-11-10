@@ -4,7 +4,6 @@
 //! message to ordinary logical admission, exactly as any other Notice.
 
 use crate::store::handover_reminders::{HandoverReminder, HandoverReminderRules};
-use signal_flow::{Drop_Data, Keep_Data, Query, Section};
 
 /// One due reminder is admitted through the ordinary delivery machinery.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,62 +21,16 @@ pub trait DecidesHandoverReminder {
     fn advanced_due(&self) -> Option<i64>;
     fn advanced(&self) -> Option<HandoverReminder>;
 }
-/// Typed command rendering: the reminder contains copyable Keep input rather
-/// than a hand-written path or URI. The datom codec is the sole printer.
-pub trait RendersHandoverCommands {
-    fn keep_commands(&self, sections: &[Section]) -> String;
-    fn drop_command(&self, title: signal_flow::Title) -> String;
-    fn notice_text(&self, sections: &[Section]) -> String;
+/// The warning a flow is sent: the configured words, then the path its
+/// handover is written at, `flows/<its FlowId>/handover.md`, which its
+/// successor's first prompt carries; nothing else.
+pub trait RendersHandoverWarning {
+    fn notice_text(&self, flow_id: &str) -> String;
 }
-impl RendersHandoverCommands for HandoverReminderNotice {
-    fn keep_commands(&self, sections: &[Section]) -> String {
-        use datom_codec::Datomizable;
-        use protos::{Compactable, Protosizable};
-        let section = sections.first().cloned().unwrap_or(Section {
-            title: signal_flow::Title(String::new()),
-            description: signal_flow::Description(String::new()),
-            body: signal_flow::Body(String::new()),
-        });
-        let query = Query::Keep(Keep_Data {
-            address: self.address.clone(),
-            section,
-        });
-        format!(
-            "flow-nexus '{}'",
-            query
-                .datomize(vec![])
-                .protosize()
-                .compact()
-                .replace('\'', "'\"'\"'")
-        )
-    }
-    fn notice_text(&self, sections: &[Section]) -> String {
-        let mut commands = vec![self.keep_commands(sections)];
-        if sections.is_empty() {
-            commands.push(self.drop_command(signal_flow::Title(String::new())));
-        } else {
-            for section in sections {
-                commands.push(self.drop_command(section.title.clone()));
-            }
-        }
-        commands.push(self.text.clone());
-        commands.join("\n")
-    }
-    fn drop_command(&self, title: signal_flow::Title) -> String {
-        use datom_codec::Datomizable;
-        use protos::{Compactable, Protosizable};
-        let query = Query::Drop(Drop_Data {
-            address: self.address.clone(),
-            title,
-        });
-        format!(
-            "flow-nexus '{}'",
-            query
-                .datomize(vec![])
-                .protosize()
-                .compact()
-                .replace('\'', "'\"'\"'")
-        )
+
+impl RendersHandoverWarning for HandoverReminderNotice {
+    fn notice_text(&self, flow_id: &str) -> String {
+        format!("{}\nflows/{flow_id}/handover.md", self.text)
     }
 }
 
@@ -142,7 +95,10 @@ pub trait RemindsHandoverCallers {
 
 impl RemindsHandoverCallers for crate::RunningNexus {
     fn send_due_handover_reminders(&self, now: i64) {
+        use crate::codex_turns::SettlesRestingCodexSeats;
         use crate::store::ManagesMetaflowState;
+        use crate::store::ReadsFlowRows;
+        use crate::store::context::JudgesThreshold;
         use crate::store::context::{NamesFlowModel, RecordsContextSize};
         use crate::store::handover::HoldsHandovers;
         use crate::store::handover_configuration::ReadsHandoverConfiguration;
@@ -150,7 +106,7 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             HandoverReminderRules, OpensHandoverReminder, SchedulesHandoverReminders,
         };
         use crate::store::logical_delivery::RecordsLogicalDeliveries;
-        use crate::waking::SleepsAndWakesSeats;
+        use crate::waking::{CorrelatesNativeEvents, SleepsAndWakesSeats};
         use meta_signal_flow::HandoverPoliciesConfiguration;
         use signal_flow::{Message, Request};
         // Discover warning windows from every awake metaflow before reading
@@ -280,12 +236,24 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             ) {
                 continue;
             }
+            // A flow past its threshold at its idle event is refreshed at
+            // that event: a warning typed now would only start a turn it
+            // never finishes.
+            if matches!(
+                self.store.threshold_standing(flow_id),
+                Ok(crate::store::context::ThresholdStanding::Past { .. })
+            ) && match self.store.flow_node(flow_id) {
+                Ok(Some(node)) => match node.harness_kind {
+                    signal_flow::HarnessKind::Codex => self.codex_resting(flow_id),
+                    signal_flow::HarnessKind::Claude => self.turn_end_recorded(flow_id),
+                },
+                _ => false,
+            } {
+                continue;
+            }
             // Admission is deliberately ordinary. In particular this does
             // not use DeliveryPurpose::Heartbeat or any refresh hold bypass.
-            let sections = match self.store.handover(&reminder.address) {
-                Ok(sections) => sections,
-                Err(_) => continue,
-            };
+            // MiddleAbrupt reaches the flow at its next tool boundary.
             let base = HandoverReminderNotice {
                 address: reminder.address.clone(),
                 text: reminder.reminder_text.clone(),
@@ -302,7 +270,7 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             };
             let accepted = self.store.accept_handover_reminder(
                 &reminder.address,
-                Message::HardAbrupt(Request::Notice(base.notice_text(&sections))),
+                Message::MiddleAbrupt(Request::Notice(base.notice_text(flow_id))),
                 admitted,
             );
             if !matches!(

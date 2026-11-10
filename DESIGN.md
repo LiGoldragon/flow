@@ -271,10 +271,10 @@ its first turn. The first USER message is the same for both.
 The first prompt is the brief, and the seat's first answer performs it. The
 brief ends asking for a presentation, as does queued work that carries the
 living's words; a message from another flow carries no such line. A
-successor of a refresh or a waking is given its predecessor's
-`flows/<FlowId>/handover.md`, under the launch root, whole, after the
-brief, read through one source (`handover::YieldsHandover`) the composer
-holds. After the handover, last, it is given the requests its permaflow
+successor of a refresh or a waking is given its predecessor's handover,
+whole, after the brief, read through one source (`handover::YieldsHandover`)
+the composer holds: the sections the predecessor kept in Memory, or, when
+it kept none, its `flows/<FlowId>/handover.md` under the launch root. After the handover, last, it is given the requests its permaflow
 still owes an answer: each Order, Question or Task a sender's delivery
 reached any flow of the Address, its id not yet closed by a Result or Done,
 oldest first, as one vector datom in the form it was delivered in, under
@@ -579,26 +579,24 @@ failed. Both are queued in the commit that records them on the landing.
 Every request the pipeline queues is sent by `Flow`.
 
 A flow is refreshed when its context passes its model's threshold
-(`Configure.Thresholds`, one `{ ModelName Refresh }` per model). Its context
-is measured at each Claude Stop from the transcript, and for Codex from each
-`thread/tokenUsage/updated` its app-server sends. A flow at or past the
-threshold is told nothing and writes no handover; it is given no new message
-(a Drain hands it nothing, a Deliver is refused), so what is queued stays for
-the metaflow's next flow. At its rest it is a seat due a refresh, the same
-predicate a landing sets. The refresh is taken at its idle event, a Claude
-Stop or a Codex thread's turn completed, and only once the seat rests: a
-Codex thread its app-server shows resting and in no turn; a Claude seat
-whose own last turn event is a Stop naming no background work, its turn
-shown ended by Herdr resting or by its transcript's main turn end. Claude
-Code gives every Stop hook its `background_tasks` (shell, subagent, monitor,
-workflow and more, a monitor counted as any other); `flow-nexus-hook` carries them
-in the Stop's `BackgroundWork`, and when that work ends Claude wakes the
-seat into a turn whose Stop is the next idle event. No reading of Herdr
-stands for that Stop. A refresh never closes a working flow; a seat still in
-its turn, or whose Stop names work in flight, keeps its queue for its
-successor until a later idle event finds it resting. Soft work is handed
-over at the turn's end whatever background work runs: the rest governs
-closing alone.
+(`Configure.Thresholds`, one `{ ModelName Refresh }` per model), or once it
+was warned to write its handover. Its context is measured at each Claude
+Stop from the transcript, and for Codex from each `thread/tokenUsage/updated`
+its app-server sends. Once the measured context reaches the warning share
+of the threshold (`Configure.HandoverPolicies`, one `{ ModelName
+WarningShareLeft ReminderText EveryMinutes }` per model), the flow is sent the
+warning as a MiddleAbrupt Notice, arriving at its next tool boundary: the
+configured words, then its handover path, `flows/<FlowId>/handover.md`,
+and nothing else, repeated every `EveryMinutes` until it is refreshed; a
+flow past its threshold is not warned at its idle event, which refreshes
+it. The
+refresh is taken at its next idle event, a Claude Stop or a Codex thread's
+turn completed, after the warning or once past the threshold, whether or
+not the seat rests by the tests above, background work in flight included,
+and whether or not it wrote its handover: an absent one starts its
+successor from its definition and queue. A protected Address is never
+refreshed for its context. Soft work is handed over at the turn's end
+whatever background work runs.
 
 A replacement ordered from outside waits for the same rest, whoever asks:
 `Refresh.Address`, the flow refreshing itself included, and a Launch or

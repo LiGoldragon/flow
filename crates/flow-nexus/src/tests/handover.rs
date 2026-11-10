@@ -705,8 +705,44 @@ fn an_installed_memory_source_reads_the_live_store_and_ignores_the_file() {
     assert!(!body.0.contains("file text"), "{body}", body = body.0);
 }
 
+/// A predecessor that left no sections in Memory is given the file the
+/// handover warning named, `flows/<predecessor>/handover.md` under the
+/// launch root.
 #[test]
-fn memory_source_reads_only_the_last_closed_generation_and_ignores_root() {
+fn an_installed_memory_source_holding_none_reads_the_predecessor_s_file() {
+    use crate::composition::OpensLaunchComposer;
+    let mut fixture = NexusFixture::new();
+    leave(fixture.directory.path(), "abc123", Left::Text(b"file text"));
+    let at = address(Model::Sol);
+    *fixture.nexus.composer.edit() = fixture
+        .nexus
+        .composer
+        .current()
+        .as_ref()
+        .clone()
+        .with_handover_source(std::sync::Arc::new(crate::MemoryHandoverSource(
+            fixture.nexus.store.clone(),
+        )));
+    let launch = composed(&fixture, "claude-fixture", Some("abc123"), |profile| {
+        profile.address = at.clone();
+    });
+    let body = &launch.first_prompt_payload.first_prompt_body;
+    assert_eq!(
+        body.0.matches("file text").count(),
+        1,
+        "{body}",
+        body = body.0
+    );
+    let source = crate::MemoryHandoverSource(fixture.nexus.store.clone());
+    assert_eq!(
+        source.handover(&at, "abc123", Path::new("")),
+        Handover::Absent,
+        "with no root only Memory is read"
+    );
+}
+
+#[test]
+fn memory_source_reads_only_the_last_closed_generation_whatever_the_root() {
     let fixture = NexusFixture::new();
     let at = address(Model::Sol);
     fixture

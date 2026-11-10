@@ -1,3 +1,28 @@
+# Flow 0.54.1: a warned flow is refreshed at its next idle event
+
+Builds on 0.54.0's handover warning (`handover_reminding`), its threshold
+refresh at the idle event (`waking::settle_rested`) and its Refresh
+mechanism (`refresh_successor_first`, `close_at_rest`).
+
+- The handover warning goes as `MiddleAbrupt.Notice`, arriving at the flow's
+  next tool boundary, and its text is the configured words, a newline, and
+  `flows/<FlowId>/handover.md`. The `flow-nexus 'Keep…'` and
+  `flow-nexus 'Drop…'` lines before the words are gone
+  (`RendersHandoverCommands` became `RendersHandoverWarning`). A flow
+  past its threshold is not warned at its idle event, which refreshes it.
+- A flow is refreshed at its idle event (Claude Stop, Codex turn completed)
+  once it is past its threshold, or once it was sent the warning before that
+  event, or kept a handover qualified for the warning window. A Memory
+  handover touch is no longer required past the threshold. The rest test is
+  not applied to a seat due a refresh: Herdr showing it Working, its turn
+  not ended, or its Stop naming background work no longer keeps it
+  (`KeptAtStop::BackgroundWorkOpen` is gone). A protected Address is still
+  never refreshed for its context.
+- A successor whose predecessor kept no sections in Memory is given the
+  predecessor's `flows/<FlowId>/handover.md` under the launch root; with
+  neither, it starts from its definition and queue.
+- No stored format or wire changes.
+
 # Flow 0.54.0: one revision of each contract crate
 
 Pins protos `c93b598`, datom-codec and datom-codec-derive `09a0526`,

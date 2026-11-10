@@ -73,10 +73,22 @@
                 # The base's clippy over every target of each member, and its
                 # rustdoc over each library, warnings denied.
                 clippy = pkgs.linkFarm "flow-clippy" (
-                  lib.mapAttrs (name: features: clippy name features [ "-D" "warnings" ]) lintFeatures
+                  lib.mapAttrs (
+                    name: features:
+                    clippy name features [
+                      "-D"
+                      "warnings"
+                    ]
+                  ) lintFeatures
                 );
                 doc = pkgs.linkFarm "flow-doc" (
-                  lib.mapAttrs (name: features: doc name features [ "-D" "warnings" ]) lintFeatures
+                  lib.mapAttrs (
+                    name: features:
+                    doc name features [
+                      "-D"
+                      "warnings"
+                    ]
+                  ) lintFeatures
                 );
               };
           };
@@ -184,23 +196,22 @@
           });
           # The one test binary of a test build that lists the named test,
           # ignored ones included; the shell variable it is bound to.
-          findTest =
-            variable: tests: testName: ''
-              ${variable}=
-              for candidate in ${tests}/tests/*; do
-                if "$candidate" --list --ignored 2>/dev/null | grep -qFx "${testName}: test"; then
-                  if [ -n "''$${variable}" ]; then
-                    echo "${testName} is listed by more than one test binary" >&2
-                    exit 1
-                  fi
-                  ${variable}=$candidate
+          findTest = variable: tests: testName: ''
+            ${variable}=
+            for candidate in ${tests}/tests/*; do
+              if "$candidate" --list --ignored 2>/dev/null | grep -qFx "${testName}: test"; then
+                if [ -n "''$${variable}" ]; then
+                  echo "${testName} is listed by more than one test binary" >&2
+                  exit 1
                 fi
-              done
-              if [ -z "''$${variable}" ]; then
-                echo "no test binary lists ${testName}" >&2
-                exit 1
+                ${variable}=$candidate
               fi
-            '';
+            done
+            if [ -z "''$${variable}" ]; then
+              echo "no test binary lists ${testName}" >&2
+              exit 1
+            fi
+          '';
           # One ignored test of the stamped flow-nexus test build, run exactly
           # once with the given environment from a copy of the source.
           processCheck =
@@ -235,7 +246,10 @@
           # The feature sets each member is linted and documented under: every
           # member as its dependents build it, flow-ethos in its datom form.
           lintFeatures = lib.genAttrs (lib.attrNames workspace.tests) (_: [ "default" ]) // {
-            flow-ethos = [ "default" "datom" ];
+            flow-ethos = [
+              "default"
+              "datom"
+            ];
           };
           # The Rust text alone, for the checks that read it and compile
           # nothing.
@@ -262,36 +276,38 @@
           # The accepted 0.53.2 Flow, built by its own flake, whose Memory
           # the request-id migration evolves.
           migrationRoot = "/tmp/flow-request-id-migration-intermediate";
-          migrationPredecessorPackage = (migration-predecessor.lib.${system}.mkFlowPackage {
-            defaultConfiguration = {
-              sourceRoot = "${migrationRoot}/source";
-              runtimeDirectory = "${migrationRoot}/runtime";
-              stableCodex = {
-                clientPath = "${migrationRoot}/bin/codex-stable";
-                home = "${migrationRoot}/codex-stable";
-                controlSocketPath = "${migrationRoot}/runtime/stable.sock";
-                roster = [ "migration-stable" ];
+          migrationPredecessorPackage =
+            (migration-predecessor.lib.${system}.mkFlowPackage {
+              defaultConfiguration = {
+                sourceRoot = "${migrationRoot}/source";
+                runtimeDirectory = "${migrationRoot}/runtime";
+                stableCodex = {
+                  clientPath = "${migrationRoot}/bin/codex-stable";
+                  home = "${migrationRoot}/codex-stable";
+                  controlSocketPath = "${migrationRoot}/runtime/stable.sock";
+                  roster = [ "migration-stable" ];
+                };
+                nextCodex = {
+                  clientPath = "${migrationRoot}/bin/codex-next";
+                  home = "${migrationRoot}/codex-next";
+                  controlSocketPath = "${migrationRoot}/runtime/next.sock";
+                  roster = [ "migration-next" ];
+                };
+                harnessProfiles = [
+                  {
+                    harnessKind = "Codex";
+                    commandSigils = [ "/" ];
+                    interruptKeys = [ "esc" ];
+                    submitKeys = [ ];
+                  }
+                ];
+                metaAspects = [ "Mind" ];
+                presentationPrompt = null;
               };
-              nextCodex = {
-                clientPath = "${migrationRoot}/bin/codex-next";
-                home = "${migrationRoot}/codex-next";
-                controlSocketPath = "${migrationRoot}/runtime/next.sock";
-                roster = [ "migration-next" ];
-              };
-              harnessProfiles = [
-                {
-                  harnessKind = "Codex";
-                  commandSigils = [ "/" ];
-                  interruptKeys = [ "esc" ];
-                  submitKeys = [ ];
-                }
-              ];
-              metaAspects = [ "Mind" ];
-              presentationPrompt = null;
-            };
-          }).overrideAttrs (old: {
-            nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [ pkgs.util-linux ];
-          });
+            }).overrideAttrs
+              (old: {
+                nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [ pkgs.util-linux ];
+              });
           migrationPredecessorFixture = migrationPredecessorPackage.overrideAttrs (old: {
             pname = "flow-configured-request-id-predecessor-fixture";
             nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [ pkgs.inotify-tools ];
@@ -384,12 +400,12 @@
                 '';
             # `fn main()` is the only production free function, and every
             # production method lives in a trait.
-            no-free-functions =
-              pkgs.runCommand "flow-no-free-functions" { src = lawSource; }
-                (builtins.readFile ./checks/no-free-functions.sh);
-            no-inherent-methods =
-              pkgs.runCommand "flow-no-inherent-methods" { src = lawSource; }
-                (builtins.readFile ./checks/no-inherent-methods.sh);
+            no-free-functions = pkgs.runCommand "flow-no-free-functions" { src = lawSource; } (
+              builtins.readFile ./checks/no-free-functions.sh
+            );
+            no-inherent-methods = pkgs.runCommand "flow-no-inherent-methods" { src = lawSource; } (
+              builtins.readFile ./checks/no-inherent-methods.sh
+            );
             # The real Flow Nexus and the real Message Nexus share one durable
             # delivery ledger.
             message-joint =
@@ -397,7 +413,9 @@
                 "store::message_joint::real_flow_and_message_share_the_durable_delivery_ledger"
                 ''
                   export FLOW_MESSAGE_JOINT_FLOW_BIN="${flowNexus}"
-                  export FLOW_MESSAGE_JOINT_MESSAGE_BIN="${message.packages.${system}.message-nexus}/bin/message-nexus"
+                  export FLOW_MESSAGE_JOINT_MESSAGE_BIN="${
+                    message.packages.${system}.message-nexus
+                  }/bin/message-nexus"
                   export FLOW_MESSAGE_JOINT_FLOW_REV="${sourceRevision}"
                   export FLOW_MESSAGE_JOINT_MESSAGE_REV="69a9eb7b2e95fb7ba85f138f58d38f38996f6d70"
                   sha256sum "$FLOW_MESSAGE_JOINT_FLOW_BIN" "$FLOW_MESSAGE_JOINT_MESSAGE_BIN"
@@ -415,16 +433,15 @@
                   export FLOW_MIGRATION_CURRENT_REV="${sourceRevision}"
                   sha256sum "$FLOW_MIGRATION_PREDECESSOR_BIN" "$FLOW_MIGRATION_CURRENT_BIN"
                 '';
-            flow-request-id-immutable-contract-pins = pkgs.runCommand
-              "flow-request-id-immutable-contract-pins"
-              { nativeBuildInputs = [ pkgs.gnugrep ]; }
-              ''
-                grep -F 'rev = "6881724"' ${./Cargo.toml}
-                grep -F 'rev = "8d8a22e"' ${./Cargo.toml}
-                grep -F 'signal-flow?rev=6881724#6881724d1752058195a770ab8244763151904541' ${./Cargo.lock}
-                grep -F 'meta-signal-flow?rev=8d8a22e#8d8a22ed2cacd1e1173459f5e65b16abc855e930' ${./Cargo.lock}
-                touch "$out"
-              '';
+            flow-request-id-immutable-contract-pins =
+              pkgs.runCommand "flow-request-id-immutable-contract-pins" { nativeBuildInputs = [ pkgs.gnugrep ]; }
+                ''
+                  grep -F 'rev = "6881724"' ${./Cargo.toml}
+                  grep -F 'rev = "8d8a22e"' ${./Cargo.toml}
+                  grep -F 'signal-flow?rev=6881724#6881724d1752058195a770ab8244763151904541' ${./Cargo.lock}
+                  grep -F 'meta-signal-flow?rev=8d8a22e#8d8a22ed2cacd1e1173459f5e65b16abc855e930' ${./Cargo.lock}
+                  touch "$out"
+                '';
 
           };
           # The pinned Curriculum, built per crate on the same base.
@@ -433,8 +450,7 @@
             inherit (context) buildRustCrateForPkgs;
             defaultCrateOverrides = context.crateOverrides // {
               curriculum =
-                attributes:
-                (context.crateOverrides.curriculum or (_: { })) attributes // { src = curriculum; };
+                attributes: (context.crateOverrides.curriculum or (_: { })) attributes // { src = curriculum; };
             };
             rootFeatures = [
               "default"
@@ -545,7 +561,43 @@
 
       # Every check, the base's cargo-nix with the ones above; checks.default
       # is all of them, so a green default is the whole gate.
-      checks = forSystems (system: (mkContext system).workspace.checks);
+      checks = forSystems (
+        system:
+        (mkContext system).workspace.checks
+        // {
+          # The package a deployment builds: the executable with a default
+          # configuration composed into its Rust, so a contract change that
+          # breaks that composition fails here and not at a deployment.
+          configured-package = self.lib.${system}.mkFlowPackage {
+            defaultConfiguration = {
+              sourceRoot = "/home/example/primary";
+              runtimeDirectory = "/run/user/1000/nexus/main";
+              stableCodex = {
+                clientPath = "/nix/store/example-codex-stable-flow-client/bin/codex-stable-flow-client";
+                home = "/home/example/.codex-next";
+                controlSocketPath = "/home/example/.codex-next/app-server-control/app-server-control.sock";
+                roster = [ "gpt-5.6-sol" ];
+              };
+              nextCodex = {
+                clientPath = "/nix/store/example-codex-next-flow-client/bin/codex-next-flow-client";
+                home = "/home/example/.codex-next-candidate";
+                controlSocketPath = "/home/example/.codex-next-candidate/app-server-control/app-server-control.sock";
+                roster = [ "gpt-6-astra" ];
+              };
+              harnessProfiles = [
+                {
+                  harnessKind = "Claude";
+                  commandSigils = [ "/" ];
+                  interruptKeys = [ "esc" ];
+                  submitKeys = [ "enter" ];
+                }
+              ];
+              metaAspects = [ "Psyche" ];
+              presentationPrompt = null;
+            };
+          };
+        }
+      );
 
       devShells = forSystems (
         system:

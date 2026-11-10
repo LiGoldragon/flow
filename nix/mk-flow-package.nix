@@ -143,21 +143,23 @@ let
   ) stableCodex.roster;
 
   quote = builtins.toJSON;
+  # A vector of one newtype over String, each value wrapped by its type.
   rustStrings =
-    values: "vec![${lib.concatMapStringsSep ", " (value: "${quote value}.to_owned()") values}]";
+    newtype: values:
+    "vec![${lib.concatMapStringsSep ", " (value: "${newtype}(${quote value}.to_owned())") values}]";
   rustEndpoint = value: ''
     flow_ethos::CodexEndpoint {
-        client_path: ${quote value.clientPath}.to_owned(),
-        home: ${quote value.home}.to_owned(),
-        control_socket_path: ${quote value.controlSocketPath}.to_owned(),
-        model_name_vector: ${rustStrings value.roster},
+        client_path: flow_ethos::ClientPath(${quote value.clientPath}.to_owned()),
+        home: flow_ethos::Home(${quote value.home}.to_owned()),
+        control_socket_path: flow_ethos::ControlSocketPath(${quote value.controlSocketPath}.to_owned()),
+        model_name_vector: ${rustStrings "flow_ethos::ModelName" value.roster},
     }'';
   rustProfile = value: ''
     flow_ethos::HarnessProfile {
         harness_kind: flow_ethos::HarnessKind::${value.harnessKind},
-        command_sigil_vector: ${rustStrings value.commandSigils},
-        interrupt_keys: ${rustStrings value.interruptKeys},
-        submit_keys: ${rustStrings value.submitKeys},
+        command_sigil_vector: ${rustStrings "flow_ethos::CommandSigil" value.commandSigils},
+        interrupt_keys: flow_ethos::InterruptKeys(${rustStrings "flow_ethos::KeyName" value.interruptKeys}),
+        submit_keys: flow_ethos::SubmitKeys(${rustStrings "flow_ethos::KeyName" value.submitKeys}),
     }'';
   rustAspect = aspect: "flow_ethos::Aspect::${aspect}";
 
@@ -167,22 +169,25 @@ let
     // untyped runtime file, so contract drift is a build failure.
     pub(crate) fn executable_default_configuration() -> meta_signal_flow::ConfigureNexus {
         meta_signal_flow::ConfigureNexus {
-            source_root: ${quote sourceRoot}.to_owned(),
-            stable_codex: ${rustEndpoint stableCodex},
-            next_codex: ${rustEndpoint nextCodex},
-            harness_profiles: vec![
+            source_root: flow_ethos::SourceRoot(${quote sourceRoot}.to_owned()),
+            // The stable Codex endpoint first, the next one second.
+            first_codex_endpoint: ${rustEndpoint stableCodex},
+            second_codex_endpoint: ${rustEndpoint nextCodex},
+            harness_profiles: flow_ethos::HarnessProfiles(vec![
                 ${lib.concatMapStringsSep ",\n        " rustProfile harnessProfiles}
-            ],
-            meta_aspects: vec![${lib.concatMapStringsSep ", " rustAspect metaAspects}],
+            ]),
+            meta_aspects: flow_ethos::MetaAspects(vec![${
+              lib.concatMapStringsSep ", " rustAspect metaAspects
+            }]),
             message_nexus_path_option: None,
             message_nexus_binary_option: None,
-            curriculum_nexus_path: ${quote curriculumNexusPath}.to_owned(),
-            lease: 60,
+            curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(${quote curriculumNexusPath}.to_owned()),
+            lease: flow_ethos::Lease(60),
             presentation_prompt_option: ${
               if presentationPrompt == null then
                 "None"
               else
-                "Some(${quote presentationPrompt}.to_owned())"
+                "Some(meta_signal_flow::PresentationPrompt(${quote presentationPrompt}.to_owned()))"
             },
         }
     }

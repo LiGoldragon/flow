@@ -1107,8 +1107,14 @@ rec {
             packageId = "message-nexus";
           }
           {
+            name = "meta-signal-message";
+            packageId = "meta-signal-message";
+            features = [ "datom" ];
+          }
+          {
             name = "signal-message";
             packageId = "signal-message";
+            features = [ "datom" ];
           }
         ];
         features = {
@@ -1883,6 +1889,16 @@ rec {
         libName = "meta_signal_message";
         dependencies = [
           {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            optional = true;
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            optional = true;
+          }
+          {
             name = "rkyv";
             packageId = "rkyv";
             usesDefaultFeatures = false;
@@ -1913,7 +1929,7 @@ rec {
         features = {
           "datom" = [ "dep:datom-codec" "dep:protos" "signal-message/datom" "signal/datom" ];
         };
-        resolvedDefaultFeatures = [ "default" ];
+        resolvedDefaultFeatures = [ "datom" "default" ];
       };
       "mio" = rec {
         crateName = "mio";
@@ -3217,6 +3233,16 @@ rec {
         libName = "signal_message";
         dependencies = [
           {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            optional = true;
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            optional = true;
+          }
+          {
             name = "rkyv";
             packageId = "rkyv";
             usesDefaultFeatures = false;
@@ -3241,7 +3267,7 @@ rec {
         features = {
           "datom" = [ "dep:datom-codec" "dep:protos" "signal-flow/datom" "signal/datom" ];
         };
-        resolvedDefaultFeatures = [ "default" ];
+        resolvedDefaultFeatures = [ "datom" "default" ];
       };
       "signal-sema" = rec {
         crateName = "signal-sema";

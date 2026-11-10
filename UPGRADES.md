@@ -5,8 +5,8 @@ ethos-zero `1976e45`, signal 11.0.0 (`6d4eb74`), signal-flow 58.0.1
 (`6881724`) and meta-signal-flow 73.0.2 (`8d8a22e`), each by the string its
 other consumers write, so the lock holds one source of each. The
 message-joint test runs against Message 0.23.0 (`69a9eb7`) and
-signal-message 22.0.0 (`2fed750`). The flake's base is build-base
-`1089d69`.
+signal-message 22.0.0 (`2fed750`), both with datom as the build base's
+set holds them. The flake's base is build-base `62307eb`.
 
 - ethos-zero 22 makes a head over one type a newtype (`FlowId(String)`,
   `RequestId(String)`, `Path(String)`, …) and refuses a head over a named

@@ -46,4 +46,8 @@ tungstenite = "0.28"
 ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "1976e45" }
 [dev-dependencies]
 message-nexus = { git = "https://github.com/LiGoldragon/message", rev = "69a9eb7" }
-signal-message = { git = "https://github.com/LiGoldragon/signal-message", rev = "2fed750" }
+# Both contracts with datom, as Message's CLIs build them and the build
+# base's set holds them, so each has one build and its optional
+# dependencies resolve here. The joint test reads only signal-message.
+signal-message = { git = "https://github.com/LiGoldragon/signal-message", rev = "2fed750", features = ["datom"] }
+meta-signal-message = { git = "https://github.com/LiGoldragon/meta-signal-message", rev = "01d5553", features = ["datom"] }

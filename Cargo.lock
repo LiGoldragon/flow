@@ -280,6 +280,7 @@ dependencies = [
  "message-nexus",
  "meta-signal-flow",
  "meta-signal-flow-before-request-ids",
+ "meta-signal-message",
  "notify",
  "protos",
  "redb",
@@ -533,7 +534,9 @@ name = "meta-signal-message"
 version = "4.0.0"
 source = "git+https://github.com/LiGoldragon/meta-signal-message?rev=01d5553#01d5553290428b093552be10cfde21c69ba7054e"
 dependencies = [
+ "datom-codec",
  "ethos-zero",
+ "protos",
  "rkyv",
  "signal",
  "signal-message",
@@ -933,7 +936,9 @@ name = "signal-message"
 version = "22.0.0"
 source = "git+https://github.com/LiGoldragon/signal-message?rev=2fed750#2fed7500c915befc8fc42359771e8a27d43a451e"
 dependencies = [
+ "datom-codec",
  "ethos-zero",
+ "protos",
  "rkyv",
  "signal",
  "signal-flow",

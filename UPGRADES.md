@@ -33,6 +33,11 @@ set holds them. The flake's base is build-base `82d3c8e`, which Message follows.
   revision at run time, from the environment their check sets, so one
   flow-nexus test build serves every check and a commit that changes no
   source rebuilds none.
+- Repinned to signal-flow 58.0.2 (`15790be`), meta-signal-flow 73.0.3
+  (`5f90d4c`), Message 0.23.1 (`c3d519d`, flake input and joint check),
+  signal-message 22.0.1 (`2999252`) and meta-signal-message 4.0.1
+  (`b9b6a5b`), each pinning flow-ethos at 0.54.0. The joint test expects
+  the new Message revision; no API or behaviour change.
 
 # Flow 0.53.5: a successor is told what its open requests are
 

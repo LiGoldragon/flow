@@ -18,7 +18,7 @@
     # callers move explicitly to lib.<system>.mkFlowPackage.
     unconfigured-flow.url = "github:LiGoldragon/flow/d3ab87ee18b1dd30947d5f0089f5abb4bafa80d5";
     # The Message Nexus the joint check runs beside the real Flow Nexus.
-    message.url = "github:LiGoldragon/message/69a9eb7b2e95fb7ba85f138f58d38f38996f6d70";
+    message.url = "github:LiGoldragon/message/c3d519d1494a534fe573c2749a5309b95bfa91ab";
     message.inputs.base.follows = "base";
     # The accepted 0.53.2 Flow, built by its own flake, whose Memory the
     # request-id migration check evolves. The lock holds its commit, f7d2336,
@@ -404,7 +404,7 @@
                   }/bin/message-nexus"
                   export FLOW_MESSAGE_JOINT_FLOW_REV="${sourceRevision}"
                   export FLOW_MESSAGE_JOINT_SOURCE_REV="${sourceRevision}"
-                  export FLOW_MESSAGE_JOINT_MESSAGE_REV="69a9eb7b2e95fb7ba85f138f58d38f38996f6d70"
+                  export FLOW_MESSAGE_JOINT_MESSAGE_REV="c3d519d1494a534fe573c2749a5309b95bfa91ab"
                   sha256sum "$FLOW_MESSAGE_JOINT_FLOW_BIN" "$FLOW_MESSAGE_JOINT_MESSAGE_BIN"
                 '';
             # The accepted 0.53.2's real Memory, evolved and served by this
@@ -424,10 +424,10 @@
             flow-request-id-immutable-contract-pins =
               pkgs.runCommand "flow-request-id-immutable-contract-pins" { nativeBuildInputs = [ pkgs.gnugrep ]; }
                 ''
-                  grep -F 'rev = "6881724"' ${./Cargo.toml}
-                  grep -F 'rev = "8d8a22e"' ${./Cargo.toml}
-                  grep -F 'signal-flow?rev=6881724#6881724d1752058195a770ab8244763151904541' ${./Cargo.lock}
-                  grep -F 'meta-signal-flow?rev=8d8a22e#8d8a22ed2cacd1e1173459f5e65b16abc855e930' ${./Cargo.lock}
+                  grep -F 'rev = "15790be"' ${./Cargo.toml}
+                  grep -F 'rev = "5f90d4c"' ${./Cargo.toml}
+                  grep -F 'signal-flow?rev=15790be#15790be9d6549e03912afa9603f9b4098622ba2e' ${./Cargo.lock}
+                  grep -F 'meta-signal-flow?rev=5f90d4c#5f90d4ccd84391777815247192028b6a094f6759' ${./Cargo.lock}
                   touch "$out"
                 '';
 

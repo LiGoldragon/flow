@@ -659,7 +659,7 @@ rec {
           }
           {
             name = "windows-sys";
-            packageId = "windows-sys 0.60.2";
+            packageId = "windows-sys 0.61.2";
             target = { target, features }: (target."windows" or false);
             features = [ "Win32_Foundation" "Win32_System_Diagnostics_Debug" ];
           }
@@ -1691,27 +1691,27 @@ rec {
       };
       "message-defaults" = rec {
         crateName = "message-defaults";
-        version = "0.23.0";
+        version = "0.23.1";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/message";
-          rev = "69a9eb7b2e95fb7ba85f138f58d38f38996f6d70";
-          sha256 = "04gfddjx66k9klqph7fim17kvl26iw7mvc75nr7d71z4m1lq18an";
+          rev = "c3d519d1494a534fe573c2749a5309b95bfa91ab";
+          sha256 = "18sqfa98jmxkvd6zvgn5972vnrsx9402kdnyndnqbmzq8yl6lb39";
         };
         libName = "message_defaults";
 
       };
       "message-nexus" = rec {
         crateName = "message-nexus";
-        version = "0.23.0";
+        version = "0.23.1";
         edition = "2024";
         crateBin = [];
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/message";
-          rev = "69a9eb7b2e95fb7ba85f138f58d38f38996f6d70";
-          sha256 = "04gfddjx66k9klqph7fim17kvl26iw7mvc75nr7d71z4m1lq18an";
+          rev = "c3d519d1494a534fe573c2749a5309b95bfa91ab";
+          sha256 = "18sqfa98jmxkvd6zvgn5972vnrsx9402kdnyndnqbmzq8yl6lb39";
         };
         libName = "message_nexus";
         dependencies = [
@@ -1785,13 +1785,13 @@ rec {
       };
       "meta-signal-flow" = rec {
         crateName = "meta-signal-flow";
-        version = "73.0.2";
+        version = "73.0.3";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-flow";
-          rev = "8d8a22ed2cacd1e1173459f5e65b16abc855e930";
-          sha256 = "1cc5bphb0grw64qkkvf9lqqyk11db6rmrr8m3wslhngnym4jqnxa";
+          rev = "5f90d4ccd84391777815247192028b6a094f6759";
+          sha256 = "16jni9cb303fkq324f8zk00yxbbw5zkr5fzl7qjgdh2mf8jrvi7g";
         };
         libName = "meta_signal_flow";
         dependencies = [
@@ -1878,13 +1878,13 @@ rec {
       };
       "meta-signal-message" = rec {
         crateName = "meta-signal-message";
-        version = "4.0.0";
+        version = "4.0.1";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-message";
-          rev = "01d5553290428b093552be10cfde21c69ba7054e";
-          sha256 = "0pzqsvk2hiip2qz5nb2cahhdqnlk7g3vp7l2mdz5afq3nc1x3ahq";
+          rev = "b9b6a5b60c0e97ddc78244cfc9e99539619a1e4a";
+          sha256 = "0rv83lj55yx3g3c685fw67d5al2zhsyrbjsm5nscg3cbq5h5yqxw";
         };
         libName = "meta_signal_message";
         dependencies = [
@@ -2725,7 +2725,7 @@ rec {
           }
           {
             name = "windows-sys";
-            packageId = "windows-sys 0.60.2";
+            packageId = "windows-sys 0.61.2";
             target = { target, features }: (target."windows" or false);
             features = [ "Win32_Foundation" "Win32_Networking_WinSock" ];
           }
@@ -3138,13 +3138,13 @@ rec {
       };
       "signal-flow" = rec {
         crateName = "signal-flow";
-        version = "58.0.1";
+        version = "58.0.2";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal-flow";
-          rev = "6881724d1752058195a770ab8244763151904541";
-          sha256 = "10ma0vqf3xsmk5bdyhypcn9g25b1svmyb6zbbdrwgx99kffh9mgz";
+          rev = "15790be9d6549e03912afa9603f9b4098622ba2e";
+          sha256 = "1imw199l2nqq0mn1dvvqcbaclkpb7q9xa17cb02f7v578wqzhzs2";
         };
         libName = "signal_flow";
         dependencies = [
@@ -3222,13 +3222,13 @@ rec {
       };
       "signal-message" = rec {
         crateName = "signal-message";
-        version = "22.0.0";
+        version = "22.0.1";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal-message";
-          rev = "2fed7500c915befc8fc42359771e8a27d43a451e";
-          sha256 = "1ynal4j1jz475gfvg1nlhdkd6fahr1xbj11db2b93m9apidwz8l5";
+          rev = "29992527e8da25b1f659c8827101f2a8b047f313";
+          sha256 = "0yccv3m4ki7mrf8xk83wdjg3g48wbnxj3iz0jaq1jqn67q68llz8";
         };
         libName = "signal_message";
         dependencies = [
@@ -3406,7 +3406,7 @@ rec {
           }
           {
             name = "getrandom";
-            packageId = "getrandom 0.4.3";
+            packageId = "getrandom 0.3.4";
             optional = true;
             usesDefaultFeatures = false;
             target = { target, features }: ((target."unix" or false) || (target."windows" or false) || ("wasi" == target."os" or null));
@@ -3425,7 +3425,7 @@ rec {
           }
           {
             name = "windows-sys";
-            packageId = "windows-sys 0.60.2";
+            packageId = "windows-sys 0.61.2";
             target = { target, features }: (target."windows" or false);
             features = [ "Win32_Storage_FileSystem" "Win32_Foundation" ];
           }
@@ -3901,7 +3901,7 @@ rec {
         dependencies = [
           {
             name = "windows-sys";
-            packageId = "windows-sys 0.60.2";
+            packageId = "windows-sys 0.61.2";
             target = { target, features }: (target."windows" or false);
             features = [ "Win32_Foundation" "Win32_Storage_FileSystem" "Win32_System_Console" "Win32_System_SystemInformation" ];
           }
@@ -4179,7 +4179,7 @@ rec {
           "Win32_Web" = [ "Win32" ];
           "Win32_Web_InternetExplorer" = [ "Win32_Web" ];
         };
-        resolvedDefaultFeatures = [ "Win32" "Win32_Foundation" "Win32_Networking" "Win32_Networking_WinSock" "Win32_Security" "Win32_Storage" "Win32_Storage_FileSystem" "Win32_System" "Win32_System_Console" "Win32_System_Diagnostics" "Win32_System_Diagnostics_Debug" "Win32_System_IO" "Win32_System_SystemInformation" "Win32_System_Threading" "Win32_System_WindowsProgramming" "default" ];
+        resolvedDefaultFeatures = [ "Win32" "Win32_Foundation" "Win32_Security" "Win32_Storage" "Win32_Storage_FileSystem" "Win32_System" "Win32_System_IO" "Win32_System_Threading" "Win32_System_WindowsProgramming" "default" ];
       };
       "windows-sys 0.61.2" = rec {
         crateName = "windows-sys";
@@ -4441,7 +4441,7 @@ rec {
           "Win32_Web" = [ "Win32" ];
           "Win32_Web_InternetExplorer" = [ "Win32_Web" ];
         };
-        resolvedDefaultFeatures = [ "Wdk" "Wdk_Foundation" "Wdk_Storage" "Wdk_Storage_FileSystem" "Wdk_System" "Wdk_System_IO" "Win32" "Win32_Foundation" "Win32_Networking" "Win32_Networking_WinSock" "Win32_Security" "Win32_Storage" "Win32_Storage_FileSystem" "Win32_System" "Win32_System_IO" "Win32_System_Pipes" "Win32_System_WindowsProgramming" "default" ];
+        resolvedDefaultFeatures = [ "Wdk" "Wdk_Foundation" "Wdk_Storage" "Wdk_Storage_FileSystem" "Wdk_System" "Wdk_System_IO" "Win32" "Win32_Foundation" "Win32_Networking" "Win32_Networking_WinSock" "Win32_Security" "Win32_Storage" "Win32_Storage_FileSystem" "Win32_System" "Win32_System_Console" "Win32_System_Diagnostics" "Win32_System_Diagnostics_Debug" "Win32_System_IO" "Win32_System_Pipes" "Win32_System_SystemInformation" "Win32_System_WindowsProgramming" "default" ];
       };
       "windows-targets" = rec {
         crateName = "windows-targets";

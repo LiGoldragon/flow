@@ -176,7 +176,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -480,13 +480,13 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "message-defaults"
-version = "0.23.0"
-source = "git+https://github.com/LiGoldragon/message?rev=69a9eb7#69a9eb7b2e95fb7ba85f138f58d38f38996f6d70"
+version = "0.23.1"
+source = "git+https://github.com/LiGoldragon/message?rev=c3d519d#c3d519d1494a534fe573c2749a5309b95bfa91ab"
 
 [[package]]
 name = "message-nexus"
-version = "0.23.0"
-source = "git+https://github.com/LiGoldragon/message?rev=69a9eb7#69a9eb7b2e95fb7ba85f138f58d38f38996f6d70"
+version = "0.23.1"
+source = "git+https://github.com/LiGoldragon/message?rev=c3d519d#c3d519d1494a534fe573c2749a5309b95bfa91ab"
 dependencies = [
  "ethos-zero",
  "flow-ethos",
@@ -506,8 +506,8 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-flow"
-version = "73.0.2"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=8d8a22e#8d8a22ed2cacd1e1173459f5e65b16abc855e930"
+version = "73.0.3"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=5f90d4c#5f90d4ccd84391777815247192028b6a094f6759"
 dependencies = [
  "datom-codec",
  "ethos-zero",
@@ -531,8 +531,8 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-message"
-version = "4.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-message?rev=01d5553#01d5553290428b093552be10cfde21c69ba7054e"
+version = "4.0.1"
+source = "git+https://github.com/LiGoldragon/meta-signal-message?rev=b9b6a5b#b9b6a5b60c0e97ddc78244cfc9e99539619a1e4a"
 dependencies = [
  "datom-codec",
  "ethos-zero",
@@ -786,7 +786,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -910,8 +910,8 @@ dependencies = [
 
 [[package]]
 name = "signal-flow"
-version = "58.0.1"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=6881724#6881724d1752058195a770ab8244763151904541"
+version = "58.0.2"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=15790be#15790be9d6549e03912afa9603f9b4098622ba2e"
 dependencies = [
  "datom-codec",
  "ethos-zero",
@@ -933,8 +933,8 @@ dependencies = [
 
 [[package]]
 name = "signal-message"
-version = "22.0.0"
-source = "git+https://github.com/LiGoldragon/signal-message?rev=2fed750#2fed7500c915befc8fc42359771e8a27d43a451e"
+version = "22.0.1"
+source = "git+https://github.com/LiGoldragon/signal-message?rev=2999252#29992527e8da25b1f659c8827101f2a8b047f313"
 dependencies = [
  "datom-codec",
  "ethos-zero",
@@ -994,10 +994,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1162,7 +1162,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

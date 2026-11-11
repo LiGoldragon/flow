@@ -12,7 +12,6 @@ use super::waking::{
     launched_claude_ended_by, maintain, metaflow, stored,
 };
 use crate::Dispatches;
-use crate::caller::{CallerPane, CallerProcess, LocatesCallerPane, ReadsProcess};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::memory::SeatBirth;
 use crate::generated::operation::{Operation, Outcome, Record_Data};
@@ -71,6 +70,8 @@ trait SeatsRestartWorld {
 
 impl SeatsRestartWorld for NexusFixture {
     fn restart_world(&mut self, alive: bool) -> RestartWorld {
+        // The world's Herdr session is the one the Nexus declares.
+        self.declare_launch_session("fixture-session");
         let seat = launched_claude_ended_by(self, |_| true);
         self.nexus.store.seed_metaflow(metaflow(
             Model::Sol,
@@ -192,18 +193,19 @@ fn pid_in(path: &Path) -> u32 {
 }
 
 impl RestartWorld {
-    /// The resumed harness's hook process.
-    fn new_hook(&self) -> CallerProcess {
-        CallerProcess {
-            process_id: pid_in(&self.fresh.state.join("hook-pid")),
-        }
+    /// The birth a hook of the resumed harness names: that harness's, once
+    /// its hook has run.
+    fn new_hook(&self) -> Process {
+        pid_in(&self.fresh.state.join("hook-pid"));
+        FlowStore::process_identity_for_pid(pid_in(&self.fresh.state.join("pid")))
+            .expect("resumed harness running")
     }
 
-    /// The old harness's hook process.
-    fn old_hook(&self) -> CallerProcess {
-        CallerProcess {
-            process_id: pid_in(&self.fresh.state.join("old-hook-pid")),
-        }
+    /// The birth a hook of the old harness names: that harness's, read
+    /// while it runs.
+    fn old_hook(&self) -> Process {
+        pid_in(&self.fresh.state.join("old-hook-pid"));
+        self.old_harness()
     }
 
     fn old_harness(&self) -> Process {
@@ -255,13 +257,14 @@ fn route_pane(fixture: &NexusFixture) -> String {
     }
 }
 
-/// A report as the ordinary socket serves it: attributed while its caller
-/// waits, recorded, then acted on only when attributed.
-fn report_from(fixture: &NexusFixture, event: Event, caller: Option<CallerProcess>) -> bool {
-    let acts = fixture.nexus.report_acts(FLOW, caller);
+/// A report as the ordinary socket serves it, naming the harness `birth`:
+/// recorded, then acted on only when it names the bound seat's harness.
+fn report_from(fixture: &NexusFixture, event: Event, birth: Option<Process>) -> bool {
+    let acts = fixture.nexus.report_acts(FLOW, birth.as_ref());
     assert_eq!(
         fixture.nexus.report(Report_Data {
             flow_id: flow_ethos::FlowId(FLOW.into()),
+            process_option: birth,
             event: event.clone(),
         }),
         Response::Reported
@@ -512,6 +515,74 @@ fn restart_awake_resting_claude_resumes_same_session() {
     );
 }
 
+/// A working seat's Restart answers RestartQueued and closes nothing; at
+/// its next Stop, background work still in flight, the restart is carried
+/// out as a resting seat's is: the old pane closed, the same session
+/// resumed in a new pane and bound, the order gone.
+#[test]
+fn restart_of_a_working_seat_is_carried_out_at_its_next_stop() {
+    use crate::store::ordered_replacement::{OrdersReplacements, ReplacementOrder};
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    let agent = world.fresh.state.join("old-agent");
+    let shown = fs::read_to_string(&agent).unwrap();
+    fs::write(
+        &agent,
+        shown.replace("\"agent_status\":\"idle\"", "\"agent_status\":\"working\""),
+    )
+    .unwrap();
+    assert_eq!(
+        restarted(&fixture),
+        Response::RestartQueued(flow_ethos::FlowId(FLOW.into()))
+    );
+    assert!(world.calls_naming("pane close").is_empty());
+    assert!(world.resumes().is_empty());
+    assert!(matches!(
+        fixture.nexus.store.ordered_replacement(&address(Model::Sol)),
+        Ok(Some(order)) if order.order == ReplacementOrder::Restart && order.predecessor == FLOW
+    ));
+    // Asked again, it stays queued.
+    assert_eq!(
+        restarted(&fixture),
+        Response::RestartQueued(flow_ethos::FlowId(FLOW.into()))
+    );
+
+    // Its Stop names work in flight; the restart runs at it all the same.
+    let mut stop = stop_of(&world, &fixture);
+    if let Event::Stopped(native) = &mut stop {
+        native.background_work = signal_flow::BackgroundWork(vec![signal_flow::BackgroundTask {
+            background_task_id: signal_flow::BackgroundTaskId("watch".into()),
+            background_task_kind: signal_flow::BackgroundTaskKind::Monitor,
+            background_task_status: signal_flow::BackgroundTaskStatus("running".into()),
+            description: signal_flow::Description("a comment watch".into()),
+        }]);
+    }
+    assert!(report_from(&fixture, stop, Some(world.old_hook())));
+    let resumes = world.resumes();
+    assert_eq!(resumes.len(), 1, "{}", world.fresh.calls());
+    assert!(resumes[0].contains(&format!("--resume {}", world.seat.session)));
+    assert_eq!(
+        world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
+        1
+    );
+    assert!(ended(&old), "the old harness exited");
+    assert_eq!(route_pane(&fixture), NEW_PANE);
+    assert_eq!(record(&fixture), None);
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .ordered_replacement(&address(Model::Sol))
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(flow_ethos::FlowId(FLOW.into()))
+    );
+}
+
 /// A Send while the restart holds its spawn queues, and nothing reaches any
 /// pane; once bound, the queue is handed to the resumed seat exactly once,
 /// and a second drain hands it nothing more.
@@ -580,20 +651,21 @@ fn restart_old_session_end_fenced() {
         Response::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
 
-    // The old hook outlived its harness, as a SessionEnd hook does.
-    assert!(
-        FlowStore::process_identity_for_pid(old_hook.process_id).is_some(),
-        "the old hook still runs"
-    );
+    // The old hook outlived its harness, as a SessionEnd hook does, and
+    // names that harness's birth.
     let ended = Event::Ended(Some(signal_flow::NativeSessionId(
         world.seat.session.clone(),
     )));
     assert!(!report_from(
         &fixture,
         stop_of(&world, &fixture),
-        Some(old_hook)
+        Some(old_hook.clone())
     ));
-    assert!(!report_from(&fixture, ended.clone(), Some(old_hook)));
+    assert!(!report_from(
+        &fixture,
+        ended.clone(),
+        Some(old_hook.clone())
+    ));
     assert!(!report_from(&fixture, ended.clone(), None));
     use crate::observe_agent::RecordsWitnessedExit;
     fixture
@@ -634,14 +706,6 @@ fn restart_new_seat_real_exit_ends() {
         Response::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     let hook = world.new_hook();
-    assert_eq!(hook.marked_pane_id(), None, "the hook's own marks are gone");
-    assert_eq!(
-        hook.caller_pane(&fixture.nexus.herdr),
-        Some(CallerPane {
-            herdr_session_name: "fixture-session".into(),
-            herdr_pane_id: NEW_PANE.into(),
-        })
-    );
     assert!(report_from(
         &fixture,
         Event::Ended(Some(signal_flow::NativeSessionId(
@@ -2576,6 +2640,7 @@ impl OpensSecondNexus for NexusFixture {
                     ),
                     lease: flow_ethos::Lease(30),
                     presentation_prompt_option: None,
+                    herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
                 },
             ))
             .expect("Nexus configured");
@@ -2659,13 +2724,14 @@ printf 'version=1\nharness=claude\nidentity=%s\nalias=%s\nuuid-version=uuid-v5\n
 printf '%s\n' "$alias"
 "#;
 
-/// A report served by `nexus`'s ordinary socket from `caller`: recorded,
-/// then acted on only when `nexus` attributes it.
-fn reported_to(nexus: &crate::RunningNexus, event: Event, caller: Option<CallerProcess>) -> bool {
-    let acts = nexus.report_acts(FLOW, caller);
+/// A report served by `nexus`'s ordinary socket naming the harness
+/// `birth`: recorded, then acted on only when `nexus` attributes it.
+fn reported_to(nexus: &crate::RunningNexus, event: Event, birth: Option<Process>) -> bool {
+    let acts = nexus.report_acts(FLOW, birth.as_ref());
     assert_eq!(
         nexus.report(Report_Data {
             flow_id: flow_ethos::FlowId(FLOW.into()),
+            process_option: birth,
             event: event.clone(),
         }),
         Response::Reported
@@ -2771,7 +2837,11 @@ fn restart_cutover_two_nexus() {
         )),
     }]);
     new.store.seed_metaflow(queued);
-    assert!(reported_to(&new, stop_of(&world, &fixture), Some(new_hook)));
+    assert!(reported_to(
+        &new,
+        stop_of(&world, &fixture),
+        Some(new_hook.clone())
+    ));
     assert_eq!(received(&world, &fixture, "for the resumed seat"), 1);
 
     // A message the old Nexus holds for abc123, queued there during the
@@ -2800,14 +2870,14 @@ fn restart_cutover_two_nexus() {
     assert!(reported_to(
         &fixture.nexus,
         stop_of(&world, &fixture),
-        Some(old_hook)
+        Some(old_hook.clone())
     ));
     assert!(reported_to(
         &fixture.nexus,
         Event::Ended(Some(signal_flow::NativeSessionId(
             world.seat.session.clone()
         ))),
-        Some(old_hook)
+        Some(old_hook.clone())
     ));
     {
         use crate::observe_agent::RecordsWitnessedExit;
@@ -2840,7 +2910,7 @@ fn restart_cutover_two_nexus() {
         Event::Ended(Some(signal_flow::NativeSessionId(
             world.seat.session.clone()
         ))),
-        Some(old_hook)
+        Some(old_hook.clone())
     ));
     assert!(!reported_to(
         &new,
@@ -2905,7 +2975,7 @@ fn restart_cutover_two_nexus() {
         None
     );
     assert_eq!(new.store.seat_birth(FLOW).unwrap(), Some(birth));
-    assert!(new.report_acts(FLOW, Some(new_hook)));
+    assert!(new.report_acts(FLOW, Some(&new_hook)));
 }
 
 /// abc123's Address, `{ Mind flow Sol }`, protected.
@@ -3488,8 +3558,9 @@ fn restart_not_composed_refused_then_recovered() {
 /// The owner's Stop after a restart refused NotComposed is an ordinary
 /// Stop, since the refusal left no record: the old pane closed once, the
 /// flow Stopped with its FlowId and session kept, its queue kept on its
-/// metaflow, nothing started or typed. A Restart of the stopped flow is
-/// Unsupported: only a live flow is restarted.
+/// metaflow, nothing started or typed. A Restart of the stopped flow, the
+/// last of its Asleep metaflow, answers Asleep: it has no harness to close,
+/// and nothing is done.
 #[test]
 fn restart_not_composed_owner_stop() {
     let mut fixture = NexusFixture::new();
@@ -3534,7 +3605,7 @@ fn restart_not_composed_owner_stop() {
     curriculum.accept_models();
     assert_eq!(
         new.dispatch(Query::Restart(flow_ethos::FlowId(FLOW.into()))),
-        Response::RestartRefused(RestartRefusal::Unsupported(flow_ethos::FlowId(FLOW.into())))
+        Response::RestartRefused(RestartRefusal::Asleep(flow_ethos::FlowId(FLOW.into())))
     );
     assert!(world.resumes().is_empty());
 }
@@ -3604,7 +3675,7 @@ fn restart_composition_against_curriculum_socket() {
                 <crate::RunningNexus as crate::sending::ChoosesEffort>::effort_of(&address).into(),
             ),
             flow_id_option: None,
-            herdr_session_name: signal_flow::HerdrSessionName("default".into()),
+            herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
             leave_outs_option: None,
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,

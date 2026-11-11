@@ -28,7 +28,7 @@ use signal_flow::{Address, LaunchProfile, Metaflow, StartRejection};
 
 pub(super) const ADDRESS_HOLD_TABLE_NAME: TableName = TableName::new("flow_nexus_address_holds");
 pub(super) const ADDRESS_HOLD_FAMILY: &str = "flow-nexus-address-hold";
-pub(super) const ADDRESS_HOLD_SCHEMA: &str = "flow-nexus-address-hold-v7";
+pub(super) const ADDRESS_HOLD_SCHEMA: &str = "flow-nexus-address-hold-v8";
 
 /// The Address a launched flow holds, and the metaflow it found there.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -46,7 +46,7 @@ impl EngineRecord for AddressHold {
 
 impl MemoryDefinition for AddressHold {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(7)
+        MemoryVersion::new(8)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -66,6 +66,7 @@ impl DescribesAddressHoldTable for AddressHold {
             AddressHold::schema_hash(),
         )
         .with_predecessor::<super::request_id_upgrade::PriorAddressHold>()
+        .with_predecessor::<super::living_upgrade::AddressHoldBeforeLiving>()
     }
 }
 

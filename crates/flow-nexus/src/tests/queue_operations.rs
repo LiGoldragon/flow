@@ -15,9 +15,9 @@ use crate::store::turn_end::RecordsTurnEnds;
 use crate::store::{FlowStore, ReadsFlowMemory};
 use flow_ethos::State;
 use signal_flow::{
-    Address, Aspect, DeliveredRequest, DeliveryState, HarnessKind, Message, Metaflow, Model,
-    NativeReceipt, Origin, PrivateSendResponse, Query, Request, RequestRejection, Response,
-    SendAcceptance, SendRequest, SentBy, TurnEnd,
+    Address, Aspect, DeliveredMessage, DeliveredRequest, DeliveryState, HarnessKind, Message,
+    Metaflow, Model, NativeReceipt, Origin, PrivateSendResponse, Query, Request, RequestRejection,
+    Response, SendAcceptance, SendRequest, SentBy, TurnEnd, VisibleNativeInput, VisibleSender,
 };
 
 fn at(topic: &str) -> Address {
@@ -258,7 +258,8 @@ fn silence_stops_a_tasks_reminders_and_leaves_it_open() {
 }
 
 /// Clear empties one queue and answers the ids that left; ClearAll empties
-/// every queue; Queues reads what is queued, each request with its id.
+/// every queue; Queues reads what is queued, each request with its id, its
+/// sender and its priority, as it would land in the prompt.
 #[test]
 fn clear_and_clear_all_empty_queues_that_queues_reads() {
     let fixture = NexusFixture::new();
@@ -275,7 +276,7 @@ fn clear_and_clear_all_empty_queues_that_queues_reads() {
     let b = admitted(
         &fixture,
         &first,
-        SentBy::Unbound,
+        SentBy::Sender(at("clearAsker")),
         Request::Order("b".into()),
     );
     let c = admitted(
@@ -293,16 +294,26 @@ fn clear_and_clear_all_empty_queues_that_queues_reads() {
         .find(|queue| queue.address == first)
         .expect("the first queue holds something");
     assert_eq!(
-        first_queue.delivered_request_vector,
+        first_queue.visible_native_input_vector,
         vec![
-            DeliveredRequest::Order(signal_flow::Order_Data {
-                request_id: a.request_id.clone(),
-                string: "a".into(),
-            }),
-            DeliveredRequest::Order(signal_flow::Order_Data {
-                request_id: b.request_id.clone(),
-                string: "b".into(),
-            }),
+            VisibleNativeInput {
+                visible_sender: VisibleSender::Unbound,
+                delivered_message: DeliveredMessage::Soft(DeliveredRequest::Order(
+                    signal_flow::Order_Data {
+                        request_id: a.request_id.clone(),
+                        string: "a".into(),
+                    }
+                )),
+            },
+            VisibleNativeInput {
+                visible_sender: VisibleSender::Sender(at("clearAsker")),
+                delivered_message: DeliveredMessage::Soft(DeliveredRequest::Order(
+                    signal_flow::Order_Data {
+                        request_id: b.request_id.clone(),
+                        string: "b".into(),
+                    }
+                )),
+            },
         ]
     );
 
@@ -490,15 +501,249 @@ fn the_owner_and_an_unbound_caller_are_served_as_a_flow_is() {
     );
     delivered(&fixture, &recipient, &order);
     assert!(matches!(
-        fixture.nexus.store.resolve_sendable_message(
-            &at("anyAnswerer"),
-            signal_flow::SendableMessage::Soft(signal_flow::SendableRequest::Result(
-                signal_flow::SendableRequest_Result_Data {
+        fixture
+            .nexus
+            .store
+            .resolve_sendable_message(signal_flow::SendableMessage::Soft(
+                signal_flow::SendableRequest::Result(signal_flow::SendableRequest_Result_Data {
                     request_id: order.request_id.clone(),
                     string: "done".into(),
-                },
-            )),
-        ),
+                },)
+            ),),
         Ok(Ok(Message::Soft(Request::Result(_))))
     ));
+}
+
+/// The Send of a Result, naming `request_id`, written to `written`.
+fn answer_to(written: &Address, request_id: &flow_ethos::RequestId) -> SendRequest {
+    SendRequest {
+        address: written.clone(),
+        sendable_message: signal_flow::SendableMessage::Soft(signal_flow::SendableRequest::Result(
+            signal_flow::SendableRequest_Result_Data {
+                request_id: request_id.clone(),
+                string: "Reviewed; green.".into(),
+            },
+        )),
+    }
+}
+
+/// A Result goes to the sender of the request it names, whatever Address
+/// its Send writes: the Nexus routes it, and the Address named is given
+/// nothing.
+#[test]
+fn a_result_goes_to_the_requests_sender_whatever_address_it_names() {
+    let fixture = NexusFixture::new();
+    let asker = at("routeAsker");
+    let answerer = at("routeAnswerer");
+    let elsewhere = at("routeElsewhere");
+    for address in [&asker, &answerer, &elsewhere] {
+        asleep(&fixture, address);
+    }
+    let order = admitted(
+        &fixture,
+        &answerer,
+        SentBy::Sender(asker.clone()),
+        Request::Order("Review the drain fix.".into()),
+    );
+    delivered(&fixture, &answerer, &order);
+    let answer = fixture
+        .nexus
+        .send_request(answer_to(&elsewhere, &order.request_id), None);
+    assert!(
+        matches!(
+            answer.response,
+            Response::SendAccepted(_) | Response::Sent(_)
+        ),
+        "{:?}",
+        answer.response
+    );
+    assert!(queued(&fixture, &elsewhere).is_empty());
+    let routed = queued(&fixture, &asker);
+    assert_eq!(routed.len(), 1);
+    assert!(matches!(
+        &routed[0].message,
+        Message::Soft(Request::Result(flow_ethos::ResultPayload::Answered(result)))
+            if result.request_id == order.request_id
+    ));
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Query::Answer(order.request_id.clone())),
+        Response::AnswerRejected(signal_flow::AnswerRejection::Routed)
+    );
+}
+
+/// A request whose sender is no Address keeps its answer: the Send is
+/// answered Sent with the request's id, nothing is queued anywhere, the
+/// request is closed, and Answer reads the answer with its sender and
+/// priority. Before it, Answer says the request is open; an id no request
+/// holds is unknown.
+#[test]
+fn an_answer_to_an_unbound_request_is_kept_and_read_by_answer() {
+    let fixture = NexusFixture::new();
+    let answerer = at("keptAnswerer");
+    let elsewhere = at("keptElsewhere");
+    asleep(&fixture, &answerer);
+    asleep(&fixture, &elsewhere);
+    let question = admitted(
+        &fixture,
+        &answerer,
+        SentBy::Unbound,
+        Request::Question("Which revision?".into()),
+    );
+    delivered(&fixture, &answerer, &question);
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Query::Answer(question.request_id.clone())),
+        Response::AnswerRejected(signal_flow::AnswerRejection::Open)
+    );
+    let answer = fixture
+        .nexus
+        .send_request(answer_to(&elsewhere, &question.request_id), None);
+    assert_eq!(
+        answer.response,
+        Response::Sent(signal_flow::VisibleSendReceipt(question.request_id.clone()))
+    );
+    assert!(queued(&fixture, &elsewhere).is_empty());
+    assert!(queued(&fixture, &answerer).is_empty());
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Query::Answer(question.request_id.clone())),
+        Response::Answered(VisibleNativeInput {
+            visible_sender: VisibleSender::Unbound,
+            delivered_message: DeliveredMessage::Soft(DeliveredRequest::Result(
+                signal_flow::DeliveredRequest_Result_Data {
+                    request_id: question.request_id.clone(),
+                    string: "Reviewed; green.".into(),
+                }
+            )),
+        })
+    );
+    // The request is closed: a second answer resolves nothing.
+    assert_eq!(
+        fixture
+            .nexus
+            .send_request(answer_to(&elsewhere, &question.request_id), None)
+            .response,
+        Response::SendRefused(signal_flow::VisibleRefusal::Unresolved)
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Query::Answer(flow_ethos::RequestId("zzzz".into()))),
+        Response::AnswerRejected(signal_flow::AnswerRejection::UnknownRequest)
+    );
+}
+
+/// Remind keeps a reminder for the Address it names and answers its id;
+/// when its minutes lapse the Address is sent MiddleAbrupt
+/// `Reminder.{ id words }` from whoever asked, and its request closes.
+#[test]
+fn remind_sends_its_address_a_reminder_when_its_minutes_lapse() {
+    use crate::reminding::RemindsCallers;
+    use crate::store::scheduled_reminder::SchedulesReminders;
+    let fixture = NexusFixture::new();
+    let reminded = at("remindedSeat");
+    let asker = at("remindAsker");
+    asleep(&fixture, &reminded);
+    asleep(&fixture, &asker);
+    let Response::Reminded(request_id) = fixture.nexus.remind(
+        signal_flow::Remind_Data {
+            address: reminded.clone(),
+            minutes: flow_ethos::Minutes(30),
+            string: "Check the gate.".into(),
+        },
+        SentBy::Sender(asker.clone()),
+    ) else {
+        panic!("a reminder is kept")
+    };
+    assert!(queued(&fixture, &reminded).is_empty(), "not yet due");
+    assert!(
+        fixture
+            .nexus
+            .store
+            .scheduled_reminder(&request_id)
+            .unwrap()
+            .is_some(),
+        "the reminder is kept"
+    );
+    // Its minutes lapse.
+    fixture
+        .nexus
+        .store
+        .rewind_scheduled_reminder(&request_id, 0)
+        .unwrap();
+    fixture.nexus.send_due_reminders();
+    let sent = queued(&fixture, &reminded);
+    assert!(
+        sent.iter()
+            .any(|entry| entry.sent_by == SentBy::Sender(asker.clone())
+                && entry.message
+                    == Message::MiddleAbrupt(Request::Reminder(flow_ethos::Reminder_Data {
+                        request_id: request_id.clone(),
+                        string: "Check the gate.".into(),
+                    }))),
+        "{sent:?}"
+    );
+    assert_eq!(
+        fixture.nexus.store.scheduled_reminder(&request_id).unwrap(),
+        None
+    );
+    assert_eq!(
+        fixture.nexus.dispatch(Query::Cancel(request_id)),
+        Response::CancelRejected(RequestRejection::Closed)
+    );
+}
+
+/// A reminder is a request like any other: Cancel ends it before it is
+/// sent, and its asker is told. Its Minutes meets a Task's rule, and an
+/// Address Flow holds no metaflow for is refused.
+#[test]
+fn cancel_ends_a_reminder_and_remind_refuses_what_a_task_refuses() {
+    use crate::store::scheduled_reminder::SchedulesReminders;
+    let fixture = NexusFixture::new();
+    let reminded = at("cancelledReminder");
+    let asker = at("cancellingAsker");
+    asleep(&fixture, &reminded);
+    asleep(&fixture, &asker);
+    let remind = |minutes: i64, address: &Address| signal_flow::Remind_Data {
+        address: address.clone(),
+        minutes: flow_ethos::Minutes(minutes),
+        string: "Later.".into(),
+    };
+    let Response::Reminded(request_id) = fixture
+        .nexus
+        .remind(remind(5, &reminded), SentBy::Sender(asker.clone()))
+    else {
+        panic!("a reminder is kept")
+    };
+    assert_eq!(
+        fixture.nexus.dispatch(Query::Cancel(request_id.clone())),
+        Response::Cancelled(request_id.clone())
+    );
+    assert_eq!(
+        fixture.nexus.store.scheduled_reminder(&request_id).unwrap(),
+        None
+    );
+    assert_eq!(
+        notices(&fixture, &asker),
+        vec![format!("Request {} was cancelled.", request_id.0)]
+    );
+    assert!(queued(&fixture, &reminded).is_empty());
+    assert_eq!(
+        fixture.nexus.remind(remind(0, &reminded), SentBy::Unbound),
+        Response::Refused(signal_flow::Refusal::MinutesRefused(
+            signal_flow::MinutesRefusal::Zero
+        ))
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .remind(remind(5, &at("noSuchSeat")), SentBy::Unbound),
+        Response::Refused(signal_flow::Refusal::Unknown(
+            signal_flow::Unknown_Data::Address(at("noSuchSeat"))
+        ))
+    );
 }

@@ -2,10 +2,11 @@
 ; `send`, and the Nexus answers its calls. A call names a target Address, a
 ; kind and a body; the sender is never in the call. It is the metaflow
 ; Flow's records bind to the calling thread, read again each time a call is
-; handled, a replayed one included: the thread's flow must be live and its
-; metaflow Awake as it, or, while the launch that opened the thread is
-; unsettled and no other flow or launch holds its Address, the sender is
-; that launching metaflow. The thread is recorded as its launch's when it
+; handled, a replayed one included: the metaflow Awake as the thread's live
+; flow, or, while the launch that opened the thread is unsettled and no
+; other flow or launch holds its Address, that launching metaflow. A thread
+; no live flow of an Awake metaflow runs sends as Unbound, as a caller in
+; no flow does on the ordinary socket. The thread is recorded as its launch's when it
 ; is opened, and the connection that opened it, subscribed to its calls,
 ; answers them while the launch holds the gate, so a first turn's call made
 ; while the launch submits it is served. The request is durably admitted
@@ -27,7 +28,7 @@
 ; a turn on a thread through the app-server socket.
 
 Library
-[ signal_flow:[ Address Message SendAcceptance SendPayloadSize Topic RequestId ]
+[ signal_flow:[ Address Message SendAcceptance SendPayloadSize Topic RequestId SentBy ]
   serde_json:JsonValue.Value ]
 [ SendKind.[ Order Question Result.RequestId Notice ]
   Target.Address
@@ -47,10 +48,9 @@ Library
   ; The digest of the tool name and the canonical JSON of its arguments.
   ContentSha256.String
   ; UnknownTool: the call names no tool Flow declared. Malformed: its
-  ; arguments are no SendArguments. ThreadUnowned: no flow Flow holds runs
-  ; the thread. FlowEnded: the thread's flow is Stopped, Retired or Exited.
-  ; NotAwake: its metaflow is not Awake as it (Asleep, or a fresh wake
-  ; moved it on). KeyReused: the call's key was recorded with
+  ; arguments are no SendArguments. ThreadUnowned, FlowEnded and NotAwake
+  ; are answered no longer, since such a thread sends as Unbound; they stay
+  ; for the outcomes recorded with them. KeyReused: the call's key was recorded with
   ; other content. UnknownRecipient: the target is no metaflow. Held:
   ; Message holds a lock on the target, about to deliver. Store: the store
   ; refused; the Nexus log names why. Oversized: the rendered native
@@ -73,11 +73,14 @@ Library
                 RequestIdDrawsCollided ]
   ; Accepted is a durable logical delivery, never a claim of delivery.
   ; LegacyUnknown preserves historical calls which predate logical IDs.
-  ; An outcome's Address is the sender's.
-  SendOutcome.[ Accepted.{ Address Target SendAcceptance }
-                LegacyUnknown.{ Address Target }
-                Archived.{ Address Target }
-                Refused.SendRefusal ]
+  ; An outcome names its sender, the type every sender is recorded as.
+  ; Kept: a Result whose request's sender is no Address, kept with that
+  ; request, which it names.
+  SendOutcome.[ Accepted.{ SentBy Target SendAcceptance }
+                LegacyUnknown.{ SentBy Target }
+                Archived.{ SentBy Target }
+                Refused.SendRefusal
+                Kept.{ SentBy RequestId } ]
   ; A typed journal entry for each handling attempt, including a replay.
   SendInvocationId.String
   SendInvocation.{ SendInvocationId ToolCallKey ToolName ContentSha256 SendOutcome }

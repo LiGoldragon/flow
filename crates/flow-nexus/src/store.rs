@@ -15,7 +15,9 @@ pub mod events;
 pub(crate) mod handover;
 pub(crate) mod handover_configuration;
 pub(crate) mod handover_reminders;
+pub(crate) mod kept_answer;
 pub(crate) mod launch_cleanup;
+pub(crate) mod living_upgrade;
 pub(crate) mod logical_delivery;
 #[cfg(test)]
 mod message_joint;
@@ -32,6 +34,7 @@ pub(crate) mod repair;
 mod request_id_migration_process;
 pub(crate) mod request_id_upgrade;
 pub(crate) mod restart;
+pub(crate) mod scheduled_reminder;
 pub(crate) mod send_call;
 pub(crate) mod send_outcome;
 pub(crate) mod send_server;
@@ -156,6 +159,9 @@ const OPTIONAL_ORDERED_REPLACEMENT_TABLE: &str = "flow_nexus_ordered_replacement
 const OPTIONAL_UNDECODABLE_FRAME_TABLE: &str = "flow_nexus_undecodable_frames";
 /// Added in 0.53.3; a 0.53.2 store has recorded no turn end.
 const OPTIONAL_TURN_END_TABLE: &str = "flow_nexus_turn_ends";
+/// Added in 0.54.3; an earlier store keeps no answer and holds no reminder.
+const OPTIONAL_KEPT_ANSWER_TABLE: &str = "flow_nexus_kept_answers";
+const OPTIONAL_SCHEDULED_REMINDER_TABLE: &str = "flow_nexus_scheduled_reminders";
 /// Added in 0.53.3; a 0.53.2 store names no harness hook.
 const OPTIONAL_HARNESS_HOOK_TABLE: &str = "flow_nexus_meta_harness_hook_configuration";
 const META_HARNESS_HOOK_CONFIGURATION_TABLE_NAME: TableName =
@@ -257,6 +263,8 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_UNDECODABLE_FRAME_TABLE,
     OPTIONAL_TURN_END_TABLE,
     OPTIONAL_HARNESS_HOOK_TABLE,
+    OPTIONAL_KEPT_ANSWER_TABLE,
+    OPTIONAL_SCHEDULED_REMINDER_TABLE,
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -681,11 +689,29 @@ impl EngineRecord for StoredMetaflow {
 
 impl MemoryDefinition for StoredMetaflow {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(8)
+        MemoryVersion::new(9)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-metaflow-v8")
+        SchemaHash::for_label("flow-nexus-metaflow-v9")
+    }
+}
+
+/// The metaflow family: current, upgraded from 0.53.2's request-id
+/// predecessor or from 0.54.2's.
+pub(crate) trait DescribesMetaflowTable {
+    fn metaflow_descriptor() -> TableDescriptor<StoredMetaflow>;
+}
+
+impl DescribesMetaflowTable for FlowStore {
+    fn metaflow_descriptor() -> TableDescriptor<StoredMetaflow> {
+        TableDescriptor::<StoredMetaflow>::new(
+            METAFLOW_TABLE_NAME,
+            FamilyName::new("flow-nexus-metaflow"),
+            StoredMetaflow::schema_hash(),
+        )
+        .with_predecessor::<request_id_upgrade::PriorStoredMetaflow>()
+        .with_predecessor::<living_upgrade::StoredMetaflowBeforeLiving>()
     }
 }
 
@@ -1579,6 +1605,8 @@ pub enum StoreError {
     HandoverConfigurationRefused(meta_signal_flow::HandoverConfigurationRefusal),
     #[error("handover configuration upgrade failed: {0}")]
     HandoverConfigurationUpgrade(String),
+    #[error("0.54.2 Memory upgrade failed: {0}")]
+    LivingUpgrade(String),
     #[error("heartbeat period must be positive")]
     InvalidHeartbeatPeriod,
     #[error("store path must be an absolute file path")]
@@ -1703,6 +1731,8 @@ pub struct FlowStore {
     ordered_replacements: TableReference<ordered_replacement::OrderedReplacement>,
     undecodable_frames: TableReference<undecodable_frame::UndecodableRecord>,
     turn_ends: TableReference<turn_end::TurnEndRecord>,
+    kept_answers: TableReference<kept_answer::KeptAnswer>,
+    scheduled_reminders: TableReference<scheduled_reminder::ScheduledReminder>,
     queue_delivery: QueueDeliveryTables,
     send_outcomes: SendOutcomeTables,
     logical_deliveries: LogicalDeliveryTables,
@@ -2012,6 +2042,12 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_harness_hook_descriptor)
                 .with_family(&meta_metaflows_descriptor)
                 .with_family(&meta_handover_descriptor),
+        )?;
+        // The Nexus 0.54.2 declared is upgraded before anything is
+        // registered; the families a running store adds are upgraded when
+        // the running Nexus opens it.
+        <FlowStore as living_upgrade::UpgradesBeforeLiving>::upgrade_configuration_before_living(
+            &mut engine,
         )?;
         let state = engine.register_table(state_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
@@ -2449,12 +2485,7 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-state"),
             SchemaHash::for_label("flow-nexus-state-v2"),
         );
-        let metaflows_descriptor = TableDescriptor::<StoredMetaflow>::new(
-            METAFLOW_TABLE_NAME,
-            FamilyName::new("flow-nexus-metaflow"),
-            StoredMetaflow::schema_hash(),
-        )
-        .with_predecessor::<request_id_upgrade::PriorStoredMetaflow>();
+        let metaflows_descriptor = <FlowStore as DescribesMetaflowTable>::metaflow_descriptor();
         let metaflow_processes_descriptor = TableDescriptor::<StoredMetaflowProcess>::new(
             METAFLOW_PROCESS_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow-process"),
@@ -2668,6 +2699,10 @@ impl OpensFlowStore for FlowStore {
                 &logical_delivery::SystemRequestIdDrawer,
             )?;
         }
+        // What 0.54.2 stored is upgraded before anything is registered.
+        <FlowStore as living_upgrade::UpgradesBeforeLiving>::upgrade_running_before_living(
+            &mut engine,
+        )?;
 
         let flows = engine.register_table(flows_descriptor)?;
         let native_owner_proofs = engine.register_table(native_owner_proofs_descriptor)?;
@@ -2721,6 +2756,12 @@ impl OpensFlowStore for FlowStore {
         let turn_ends = engine.register_table(
             <turn_end::TurnEndRecord as turn_end::DescribesTurnEndTable>::descriptor(),
         )?;
+        let kept_answers = engine.register_table(
+            <kept_answer::KeptAnswer as kept_answer::DescribesKeptAnswerTable>::descriptor(),
+        )?;
+        let scheduled_reminders = engine.register_table(
+            <scheduled_reminder::ScheduledReminder as scheduled_reminder::DescribesScheduledReminderTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2753,6 +2794,8 @@ impl OpensFlowStore for FlowStore {
             ordered_replacements,
             undecodable_frames,
             turn_ends,
+            kept_answers,
+            scheduled_reminders,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -2920,6 +2963,12 @@ impl OpensFlowStore for FlowStore {
         let turn_ends = engine.register_table(
             <turn_end::TurnEndRecord as turn_end::DescribesTurnEndTable>::descriptor(),
         )?;
+        let kept_answers = engine.register_table(
+            <kept_answer::KeptAnswer as kept_answer::DescribesKeptAnswerTable>::descriptor(),
+        )?;
+        let scheduled_reminders = engine.register_table(
+            <scheduled_reminder::ScheduledReminder as scheduled_reminder::DescribesScheduledReminderTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2952,6 +3001,8 @@ impl OpensFlowStore for FlowStore {
             ordered_replacements,
             undecodable_frames,
             turn_ends,
+            kept_answers,
+            scheduled_reminders,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -3383,7 +3434,9 @@ impl AppliesFlowQuery for FlowStore {
             | Query::ClearAll
             | Query::Push(_)
             | Query::Queues
-            | Query::Hot => Ok(Response::Refused(signal_flow::Refusal::Store(
+            | Query::Hot
+            | Query::Remind(_)
+            | Query::Answer(_) => Ok(Response::Refused(signal_flow::Refusal::Store(
                 "the Nexus answers this query, not its store alone".into(),
             ))),
             Query::Launch(_) => Ok(Response::StartRejected(
@@ -3465,7 +3518,9 @@ impl ReservesPendingStart for FlowStore {
             | Query::ClearAll
             | Query::Push(_)
             | Query::Queues
-            | Query::Hot => Ok(None),
+            | Query::Hot
+            | Query::Remind(_)
+            | Query::Answer(_) => Ok(None),
         }
     }
 }
@@ -5099,7 +5154,7 @@ pub(crate) trait ReadsFlowMemory {
             }
             "flow_nexus_replacements" => ("flow-nexus-replacement", "flow-nexus-replacement-v1"),
             "flow_nexus_roles" => ("flow-nexus-role", "flow-nexus-role-v1"),
-            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v8"),
+            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v9"),
             "flow_nexus_metaflow_processes" => (
                 "flow-nexus-metaflow-process",
                 "flow-nexus-metaflow-process-v2",
@@ -5222,6 +5277,14 @@ pub(crate) trait ReadsFlowMemory {
                 undecodable_frame::UNDECODABLE_FRAME_SCHEMA,
             ),
             "flow_nexus_turn_ends" => (turn_end::TURN_END_FAMILY, turn_end::TURN_END_SCHEMA),
+            "flow_nexus_kept_answers" => (
+                kept_answer::KEPT_ANSWER_FAMILY,
+                kept_answer::KEPT_ANSWER_SCHEMA,
+            ),
+            "flow_nexus_scheduled_reminders" => (
+                scheduled_reminder::SCHEDULED_REMINDER_FAMILY,
+                scheduled_reminder::SCHEDULED_REMINDER_SCHEMA,
+            ),
             "flow_nexus_meta_leave_out_configuration" => {
                 return Some((
                     "flow-nexus-meta-leave-out-configuration",
@@ -5273,11 +5336,11 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_queue_delivery_requests" => (
                 "flow-nexus-queue-delivery-request",
-                "flow-nexus-queue-delivery-request-v8",
+                "flow-nexus-queue-delivery-request-v9",
             ),
             "flow_nexus_queue_delivery_attempts" => (
                 "flow-nexus-queue-delivery-attempt",
-                "flow-nexus-queue-delivery-attempt-v9",
+                "flow-nexus-queue-delivery-attempt-v10",
             ),
             _ => return None,
         };
@@ -5312,6 +5375,11 @@ pub(crate) trait ReadsFlowMemory {
                 Some(("flow-nexus-send-outcome", "flow-nexus-send-outcome-v7"))
             }
             "flow_nexus_send_calls" => Some(("flow-nexus-send-call", "flow-nexus-send-call-v7")),
+            // Unchanged from 0.53.2 until 0.54.3 named a Herdr session.
+            "flow_nexus_meta_nexus_configuration" => Some((
+                "flow-nexus-meta-nexus-configuration",
+                "flow-nexus-meta-nexus-configuration-v4",
+            )),
             "flow_nexus_flow_events" => {
                 Some(("flow-nexus-flow-events", "flow-nexus-flow-events-v4"))
             }
@@ -5343,17 +5411,30 @@ pub(crate) trait ReadsFlowMemory {
         )
     }
 
-    /// A family registration this Flow opens: its current identity alone.
+    /// A family registration this Flow opens: its current identity, or the
+    /// 0.54.2 identity of a family it upgrades on open.
     fn is_current_flow_registration(table_key: &str, registration: &TableRegistration) -> bool {
         let identity = registration.identity();
-        FlowStore::current_flow_family_identity(table_key).is_some_and(|(family, schema_hash)| {
-            let predecessor_handover = table_key == OPTIONAL_HANDOVER_TABLE
-                && identity.schema_hash()
-                    == SchemaHash::for_label("flow-nexus-handover-configuration-v1");
-            identity.table_name() == table_key
-                && identity.family().as_str() == family
-                && (identity.schema_hash() == schema_hash || predecessor_handover)
-        })
+        let before_living =
+            <FlowStore as living_upgrade::NamesIdentityBeforeLiving>::identity_before_living(
+                table_key,
+            )
+            .is_some_and(|(family, schema_hash)| {
+                identity.table_name() == table_key
+                    && identity.family().as_str() == family
+                    && identity.schema_hash() == schema_hash
+            });
+        before_living
+            || FlowStore::current_flow_family_identity(table_key).is_some_and(
+                |(family, schema_hash)| {
+                    let predecessor_handover = table_key == OPTIONAL_HANDOVER_TABLE
+                        && identity.schema_hash()
+                            == SchemaHash::for_label("flow-nexus-handover-configuration-v1");
+                    identity.table_name() == table_key
+                        && identity.family().as_str() == family
+                        && (identity.schema_hash() == schema_hash || predecessor_handover)
+                },
+            )
     }
 
     /// The catalog of a configuration-only store or of a running store,
@@ -5381,6 +5462,8 @@ pub(crate) trait ReadsFlowMemory {
                     || *name == OPTIONAL_ORDERED_REPLACEMENT_TABLE
                     || *name == OPTIONAL_UNDECODABLE_FRAME_TABLE
                     || *name == OPTIONAL_TURN_END_TABLE
+                    || *name == OPTIONAL_KEPT_ANSWER_TABLE
+                    || *name == OPTIONAL_SCHEDULED_REMINDER_TABLE
                     || *name == OPTIONAL_HARNESS_HOOK_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
                     || *name == OPTIONAL_DELIVER_CALL_TABLE
@@ -7801,6 +7884,7 @@ mod tests {
                         ),
                         lease: flow_ethos::Lease(60),
                         presentation_prompt_option: None,
+                        herdr_session_name: signal_flow::HerdrSessionName("default".into()),
                     },
                 ))
                 .expect("configuration commits");
@@ -8618,6 +8702,7 @@ mod tests {
                     ),
                     lease: flow_ethos::Lease(60),
                     presentation_prompt_option: None,
+                    herdr_session_name: signal_flow::HerdrSessionName("default".into()),
                 },
             ))
             .expect("nexus configuration commits");
@@ -8779,6 +8864,7 @@ mod tests {
                     ),
                     lease: flow_ethos::Lease(60),
                     presentation_prompt_option: None,
+                    herdr_session_name: signal_flow::HerdrSessionName("default".into()),
                 },
             ))
             .expect("configuration commits");
@@ -10092,7 +10178,7 @@ mod tests {
             topic: flow_ethos::Topic("answerStranger".into()),
             model: signal_flow::Model::Opus,
         };
-        for (_answering, requesting, message) in [
+        for (_answering, _requesting, message) in [
             (
                 answerer.clone(),
                 requester.clone(),
@@ -10117,7 +10203,7 @@ mod tests {
         ] {
             assert_eq!(
                 store
-                    .resolve_sendable_message(&requesting, message)
+                    .resolve_sendable_message(message)
                     .expect("answer refusal reads"),
                 Err(Refusal::Unresolved),
                 "queued state, foreign party, wrong requester and wrong kind read alike"
@@ -10143,7 +10229,7 @@ mod tests {
             .expect("first Order delivered");
 
         let resolved = store
-            .resolve_sendable_message(&requester, result(&order.request_id.0))
+            .resolve_sendable_message(result(&order.request_id.0))
             .expect("first Result resolution reads")
             .expect("first Result resolves");
         let Message::Soft(Request::Result(ResultPayload::Answered(answered))) = &resolved else {
@@ -10188,14 +10274,14 @@ mod tests {
         );
         assert_eq!(
             store
-                .resolve_sendable_message(&answerer, result(&answer.request_id.0))
+                .resolve_sendable_message(result(&answer.request_id.0))
                 .expect("an answer's own id reads"),
             Err(Refusal::Unresolved),
             "a Result cannot answer another Result"
         );
         assert_eq!(
             store
-                .resolve_sendable_message(&requester, result(&order.request_id.0))
+                .resolve_sendable_message(result(&order.request_id.0))
                 .expect("duplicate first Result reads"),
             Err(Refusal::Unresolved),
             "the first Order is already closed"
@@ -10276,7 +10362,7 @@ mod tests {
             .expect("reused-id Order delivered");
 
         let duplicate = store
-            .resolve_sendable_message(&requester, result(&reused.request_id.0))
+            .resolve_sendable_message(result(&reused.request_id.0))
             .expect("delayed duplicate resolution reads")
             .expect("the accepted reuse risk resolves to the current Order");
         let PrivateSendResponse::SendAccepted(second_answer) = store

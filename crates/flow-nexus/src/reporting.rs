@@ -45,9 +45,9 @@ pub trait RecordsReports {
     /// flow's context size is written, and its resting seat is handed its
     /// oldest queued request or sleeps when nothing waits for it (see
     /// `waking`). Runs after the
-    /// hook has its answer, so the harness never waits on it. A report no
-    /// caller stands behind acts only for a flow no restart bound or holds
-    /// (see `restarting`).
+    /// hook has its answer, so the harness never waits on it. A report that
+    /// names no harness acts only for a flow no restart bound or holds (see
+    /// `restarting`).
     fn after_report(&self, flow_id: &FlowId, event: &Event);
     /// What a report sets going once its caller was attributed to the
     /// flow's bound seat.
@@ -67,7 +67,7 @@ pub trait RecordsReports {
 
 impl RecordsReports for RunningNexus {
     fn report(&self, report: Report_Data) -> Response {
-        let Report_Data { flow_id, event } = report;
+        let Report_Data { flow_id, event, .. } = report;
         match self.perform(Operation::Record(Record_Data::Harness(
             Record_Data_Harness_Data {
                 flow_id: flow_id.clone(),
@@ -99,7 +99,7 @@ impl RecordsReports for RunningNexus {
             self.after_attributed_report(flow_id, event);
         } else {
             eprintln!(
-                "flow-nexus: a report for flow {flow_id} has no caller of its bound seat; it acts on nothing",
+                "flow-nexus: a report for flow {flow_id} names no harness of its bound seat; it acts on nothing",
                 flow_id = flow_id.0
             );
         }

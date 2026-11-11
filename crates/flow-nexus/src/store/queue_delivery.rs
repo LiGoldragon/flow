@@ -118,11 +118,11 @@ impl EngineRecord for StoredDeliveryRequest {
 
 impl MemoryDefinition for StoredDeliveryRequest {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(8)
+        MemoryVersion::new(9)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-queue-delivery-request-v8")
+        SchemaHash::for_label("flow-nexus-queue-delivery-request-v9")
     }
 }
 
@@ -249,11 +249,11 @@ impl EngineRecord for QueueDeliveryAttempt {
 
 impl MemoryDefinition for QueueDeliveryAttempt {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(9)
+        MemoryVersion::new(10)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v9")
+        SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v10")
     }
 }
 
@@ -299,13 +299,15 @@ impl DeclaresQueueDeliveryTables for QueueDeliveryTables {
                 FamilyName::new("flow-nexus-queue-delivery-request"),
                 StoredDeliveryRequest::schema_hash(),
             )
-            .with_predecessor::<super::request_id_upgrade::PriorStoredDeliveryRequest>(),
+            .with_predecessor::<super::request_id_upgrade::PriorStoredDeliveryRequest>()
+            .with_predecessor::<super::living_upgrade::DeliveryRequestBeforeLiving>(),
             TableDescriptor::new(
                 DELIVERY_ATTEMPT_TABLE_NAME,
                 FamilyName::new("flow-nexus-queue-delivery-attempt"),
                 QueueDeliveryAttempt::schema_hash(),
             )
-            .with_predecessor::<super::request_id_upgrade::PriorQueueDeliveryAttempt>(),
+            .with_predecessor::<super::request_id_upgrade::PriorQueueDeliveryAttempt>()
+            .with_predecessor::<super::living_upgrade::DeliveryAttemptBeforeLiving>(),
         )
     }
 

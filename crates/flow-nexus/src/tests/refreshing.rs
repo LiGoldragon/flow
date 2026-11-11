@@ -986,14 +986,11 @@ fn a_launch_to_an_awake_metaflow_names_the_replace_of_its_flow() {
         vec!["spirit-core".into(), "intent-flow".into()],
     );
     awake_seat(&fixture, vec![]);
-    let Ok(Query::Replace(profile)) = fixture.nexus.declared_launch(
-        signal_flow::LaunchRequest {
-            address: seat_address(),
-            remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(1)),
-            instruction_prompt: signal_flow::InstructionPrompt("Take up the work.".into()),
-        },
-        None,
-    ) else {
+    let Ok(Query::Replace(profile)) = fixture.nexus.declared_launch(signal_flow::LaunchRequest {
+        address: seat_address(),
+        remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(1)),
+        instruction_prompt: signal_flow::InstructionPrompt("Take up the work.".into()),
+    }) else {
         panic!("a Launch to an Awake metaflow is a Replace");
     };
     assert_eq!(
@@ -1592,6 +1589,55 @@ fn a_self_refresh_of_a_working_seat_waits_for_its_idle_event_and_answers_refresh
         metaflow.past,
         flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])
     );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .ordered_replacement(&seat_address())
+            .unwrap(),
+        None,
+        "the order is spent"
+    );
+}
+
+/// An ordered Refresh is carried out at the flow's next Stop though that
+/// Stop names work in flight, a comment watch's monitor among it: the
+/// background work is ended with the harness, as a refresh past the
+/// threshold ends it. Its pane is closed, its flow Stopped, the order spent.
+#[test]
+fn an_ordered_refresh_is_carried_out_at_the_next_stop_ending_background_work() {
+    use super::waking::background_task;
+    use crate::store::ordered_replacement::OrdersReplacements;
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    awake_seat(&fixture, vec![]);
+    declare(&fixture, seat_address());
+    super::waking::claude_prompt_taken(&fixture);
+    assert!(matches!(
+        fixture
+            .nexus
+            .dispatch_from(Query::Refresh(seat_address()), own_seat()),
+        Response::RefreshQueued(_)
+    ));
+
+    super::waking::report_claude_stop(
+        &fixture,
+        vec![background_task(
+            "m1",
+            signal_flow::BackgroundTaskKind::Monitor,
+        )],
+    );
+
+    assert!(closed(&fixture), "the flow is refreshed at this Stop");
+    assert!(
+        fixture.typed().is_none(),
+        "the ending flow is given no turn"
+    );
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
+    assert_eq!(stored(&fixture).state, State::Asleep);
     assert_eq!(
         fixture
             .nexus

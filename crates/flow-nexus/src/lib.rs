@@ -314,7 +314,7 @@ impl Dispatches for RunningNexus {
                 }
                 self.dispatch_from(Query::Start(profile), Origin::Unbound)
             }
-            Query::Launch(launch) => match self.declared_launch(launch, None) {
+            Query::Launch(launch) => match self.declared_launch(launch) {
                 Ok(query) => self.dispatch(query),
                 Err(refusal) => *refusal,
             },
@@ -426,7 +426,7 @@ impl Dispatches for RunningNexus {
                 )
             }
             Query::Send(send) => self.send_request(send, None).response,
-            Query::Launch(launch) => match self.declared_launch(launch, None) {
+            Query::Launch(launch) => match self.declared_launch(launch) {
                 Ok(query) => self.dispatch_from(query, origin),
                 Err(refusal) => *refusal,
             },
@@ -583,6 +583,9 @@ impl Dispatches for RunningNexus {
             Query::Push(push) => self.push(&push.address, &push.priority),
             Query::Queues => self.queues(),
             Query::Hot => self.hot(),
+            // No calling process stands behind it: Unbound asks.
+            Query::Remind(remind) => self.remind(remind, signal_flow::SentBy::Unbound),
+            Query::Answer(request_id) => self.answer(&request_id),
             Query::Metaflows => {
                 use crate::store::metaflow_watch::WatchesMetaflows;
                 self.store.available_metaflows().map_or_else(
@@ -1518,14 +1521,13 @@ impl ServesConnection for Connection {
             // What the report sets going runs after the hook has its answer
             // and the connection is closed: the harness waits on its hook,
             // and the settling waits on the harness.
-            // The reporting process is read while it waits for its answer,
-            // to tell which harness the event is of: a seat a restart bound
-            // acts only on events its own harness's descendants report. The
-            // answer is Reported whoever reports.
+            // The Report names the harness that ran its hook by its birth:
+            // a seat a restart bound acts only on events of its own harness.
+            // The answer is Reported whoever reports.
             Query::Report(report) => {
                 use crate::restarting::FencesSeatEvents;
                 let (flow_id, event) = (report.flow_id.clone(), report.event.clone());
-                let acts = nexus.report_acts(&flow_id.0, self.peer.peer_process());
+                let acts = nexus.report_acts(&flow_id.0, report.process_option.as_ref());
                 let response = nexus.report(report);
                 self.peer.write_response(&response)?;
                 drop(self);
@@ -1587,6 +1589,19 @@ impl ServesConnection for Connection {
                 let response = nexus.deliver_all(address);
                 return self.peer.write_response(&response);
             }
+            // A reminder is sent from whoever asks for it, as a Send is.
+            Query::Remind(remind) => {
+                use crate::sending::IdentifiesSender;
+                let sent_by = match self.process.as_ref() {
+                    Some(process) => nexus.sender_of(process),
+                    None => Ok(signal_flow::SentBy::Unbound),
+                };
+                let response = match sent_by {
+                    Ok(sent_by) => nexus.remind(remind, sent_by),
+                    Err(refusal) => *refusal,
+                };
+                return self.peer.write_response(&response);
+            }
             // An adopted seat resting at its adoption is handed what is
             // queued for it now, as its turn's end would; Flow sees no Stop
             // from a seat it did not start until its next turn ends.
@@ -1620,7 +1635,7 @@ impl ServesConnection for Connection {
                         .dispatch_gate
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    nexus.declared_launch(launch, self.process.as_ref())
+                    nexus.declared_launch(launch)
                 };
                 match declared {
                     Ok(query) => nexus.dispatch_serially(query, origin),
@@ -2087,6 +2102,7 @@ impl AnswersOnMeta for Response {
     fn into_meta(self) -> meta_signal_flow::Response {
         match self {
             Response::Restarted(flow_id) => meta_signal_flow::Response::Restarted(flow_id),
+            Response::RestartQueued(flow_id) => meta_signal_flow::Response::RestartQueued(flow_id),
             Response::RestartRefused(refusal) => {
                 meta_signal_flow::Response::RestartRefused(refusal)
             }
@@ -2133,6 +2149,7 @@ impl DispatchesSerially for RunningNexus {
         | Query::Deliver(_)
         | Query::Release(_)
         | Query::Cancel(_)
+        | Query::Remind(_)
         | Query::Clear(_)
         | Query::ClearAll
         | Query::Push(_) = &query
@@ -2392,8 +2409,12 @@ mod tests {
         let request = |request| match request {
             signal_flow::Request::Order(value) => signal_flow::SendableRequest::Order(value),
             signal_flow::Request::Question(value) => signal_flow::SendableRequest::Question(value),
-            signal_flow::Request::Psyche(value) => signal_flow::SendableRequest::Psyche(value),
-            signal_flow::Request::Psyches(value) => signal_flow::SendableRequest::Psyches(value),
+            signal_flow::Request::Living(value) => {
+                signal_flow::SendableRequest::Living(signal_flow::SendableRequest_Living_Data {
+                    context: value.context,
+                    verbatim: value.verbatim,
+                })
+            }
             signal_flow::Request::Notice(value) => signal_flow::SendableRequest::Notice(value),
             signal_flow::Request::Task(value) => signal_flow::SendableRequest::Task(value),
             signal_flow::Request::Result(flow_ethos::ResultPayload::Answered(value)) => {
@@ -2569,7 +2590,13 @@ mod tests {
             fixture
                 .nexus
                 .store
-                .record_send_outcome(None, None, None, "digest".into(), response)
+                .record_send_outcome(
+                    None,
+                    signal_flow::SentBy::Unknown,
+                    None,
+                    "digest".into(),
+                    response,
+                )
                 .unwrap();
         }
         let records = fixture.nexus.store.read_send_outcomes().unwrap();
@@ -3284,8 +3311,12 @@ mod tests {
             )
         }
 
-        /// What the fixture Herdr's `session list --json` answers.
+        /// What the fixture Herdr's `session list --json` answers. The last
+        /// session listed is the live one: every launch opens there.
         fn list_herdr_sessions(&self, sessions: &[(&str, PathBuf)]) {
+            if let Some((live, _)) = sessions.last() {
+                self.declare_launch_session(live);
+            }
             let sessions: Vec<serde_json::Value> = sessions
                 .iter()
                 .map(|(name, socket)| serde_json::json!({"name": name, "socket_path": socket}))
@@ -3295,6 +3326,72 @@ mod tests {
                 serde_json::json!({"sessions": sessions}).to_string(),
             )
             .expect("fixture Herdr session list");
+        }
+
+        /// Declares `session` the one Herdr session every launch opens in:
+        /// the declared Nexus with that session, or, where none is declared,
+        /// one declared from the fixture store's own runtime and delivery
+        /// configuration.
+        fn declare_launch_session(&self, session: &str) {
+            use crate::store::delivery::RecordsDeliveries;
+            use crate::store::{ConfiguresFlowStore, ManagesMetaflowState};
+            let herdr_session_name = signal_flow::HerdrSessionName(session.into());
+            let nexus = match self
+                .nexus
+                .store
+                .configuration_snapshot()
+                .expect("fixture configuration")
+            {
+                Some(snapshot) => meta_signal_flow::ConfigureNexus {
+                    herdr_session_name,
+                    ..snapshot.configured_nexus.0
+                },
+                None => {
+                    let runtime = self
+                        .nexus
+                        .store
+                        .runtime_configuration()
+                        .expect("fixture runtime configuration");
+                    let delivery = self
+                        .nexus
+                        .store
+                        .delivery_configuration()
+                        .expect("fixture delivery configuration");
+                    let endpoint = |endpoint: crate::store::CodexEndpointConfiguration| {
+                        meta_signal_flow::CodexEndpoint {
+                            client_path: flow_ethos::ClientPath(endpoint.client_path),
+                            home: flow_ethos::Home(endpoint.home),
+                            control_socket_path: flow_ethos::ControlSocketPath(endpoint.socket),
+                            model_name_vector: endpoint
+                                .model_names
+                                .into_iter()
+                                .map(flow_ethos::ModelName)
+                                .collect(),
+                        }
+                    };
+                    meta_signal_flow::ConfigureNexus {
+                        source_root: flow_ethos::SourceRoot(runtime.source_root),
+                        first_codex_endpoint: endpoint(runtime.stable_codex),
+                        second_codex_endpoint: endpoint(runtime.next_codex),
+                        harness_profiles: flow_ethos::HarnessProfiles(
+                            delivery.harness_profile_vector,
+                        ),
+                        meta_aspects: delivery.meta_aspects,
+                        message_nexus_path_option: delivery.message_nexus_path_option,
+                        message_nexus_binary_option: None,
+                        curriculum_nexus_path: meta_signal_flow::CurriculumNexusPath(
+                            "/fixture/curriculum.sock".into(),
+                        ),
+                        lease: flow_ethos::Lease(60),
+                        presentation_prompt_option: None,
+                        herdr_session_name,
+                    }
+                }
+            };
+            self.nexus
+                .store
+                .configure_change(meta_signal_flow::ConfigurationChange::Nexus(nexus))
+                .expect("fixture launch session declared");
         }
 
         /// The fixture Herdr's first line after its shebang: it answers
@@ -5131,6 +5228,7 @@ mod tests {
         let report = |flow_id: &str, event: Event| {
             fixture.nexus.dispatch(Query::Report(Report_Data {
                 flow_id: flow_ethos::FlowId(flow_id.into()),
+                process_option: None,
                 event,
             }))
         };
@@ -5413,6 +5511,8 @@ mod tests {
             launch_request_id: &str,
             predecessor: Option<&str>,
         ) -> StagedLaunch {
+            // A staged launch opens in the session the Nexus declares.
+            self.declare_launch_session("fixture-session");
             let profile = LaunchProfile {
                 launch_request_id: signal_flow::LaunchRequestId(launch_request_id.into()),
                 system_modules: signal_flow::SystemModules(vec![
@@ -6883,26 +6983,16 @@ mod tests {
             fixture
                 .nexus
                 .store
-                .resolve_sendable_message(&sender, result(accepted.request_id.clone().0)),
+                .resolve_sendable_message(result(accepted.request_id.clone().0)),
             Ok(Ok(Message::Soft(flow_ethos::Request::Result(
                 ResultPayload::Answered(_)
             ))))
         ));
-        // Whoever sends it, a Result is addressed to the request's sender:
-        // one addressed elsewhere resolves nothing.
         assert_eq!(
             fixture
                 .nexus
                 .store
-                .resolve_sendable_message(&stranger, result(accepted.request_id.clone().0))
-                .unwrap(),
-            Err(Refusal::Unresolved)
-        );
-        assert_eq!(
-            fixture
-                .nexus
-                .store
-                .resolve_sendable_message(&sender, result("none".into()))
+                .resolve_sendable_message(result("none".into()))
                 .unwrap(),
             Err(Refusal::Unresolved)
         );
@@ -6963,15 +7053,12 @@ mod tests {
         let resolved = fixture
             .nexus
             .store
-            .resolve_sendable_message(
-                &sender,
-                SendableMessage::Soft(SendableRequest::Result(
-                    signal_flow::SendableRequest_Result_Data {
-                        request_id: order.request_id.clone(),
-                        string: "done".into(),
-                    },
-                )),
-            )
+            .resolve_sendable_message(SendableMessage::Soft(SendableRequest::Result(
+                signal_flow::SendableRequest_Result_Data {
+                    request_id: order.request_id.clone(),
+                    string: "done".into(),
+                },
+            )))
             .expect("answer resolves")
             .expect("answer is authorized");
         assert!(matches!(
@@ -7104,7 +7191,7 @@ mod tests {
         let private_done = fixture
             .nexus
             .store
-            .resolve_sendable_message(&sender, done())
+            .resolve_sendable_message(done())
             .expect("done resolution")
             .expect("task id resolves");
         assert!(matches!(
@@ -7129,7 +7216,7 @@ mod tests {
             fixture
                 .nexus
                 .store
-                .resolve_sendable_message(&sender, done())
+                .resolve_sendable_message(done())
                 .unwrap(),
             Err(Refusal::Unresolved)
         );
@@ -7191,9 +7278,7 @@ mod tests {
                 "Publish the newest edition.".into(),
             ),
         };
-        let Ok(Query::Start(profile)) = fixture
-            .nexus
-            .declared_launch(launch(declared.clone()), None)
+        let Ok(Query::Start(profile)) = fixture.nexus.declared_launch(launch(declared.clone()))
         else {
             panic!("a declared Address launches as a Start");
         };
@@ -7212,6 +7297,22 @@ mod tests {
         );
         assert_eq!(profile.effort, signal_flow::Effort("low".into()));
         assert_eq!(profile.flow_id_option, None);
+        // Every launch opens in the one Herdr session the Nexus declares,
+        // whoever asks: the fixture's live session, then another declared.
+        assert_eq!(
+            profile.herdr_session_name,
+            signal_flow::HerdrSessionName("messaging-build".into())
+        );
+        fixture.declare_launch_session("declaredSession");
+        let Ok(Query::Start(redeclared)) = fixture.nexus.declared_launch(launch(declared.clone()))
+        else {
+            panic!("a declared Address launches as a Start");
+        };
+        assert_eq!(
+            redeclared.herdr_session_name,
+            signal_flow::HerdrSessionName("declaredSession".into())
+        );
+        fixture.declare_launch_session("messaging-build");
         assert_eq!(
             profile.instruction_prompt,
             signal_flow::InstructionPrompt(

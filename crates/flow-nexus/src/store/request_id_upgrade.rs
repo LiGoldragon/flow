@@ -897,14 +897,18 @@ impl BecomesCurrent for old_flow::Request {
             old_flow::Request::Order(words) => flow_ethos::Request::Order(words.clone()),
             old_flow::Request::Question(words) => flow_ethos::Request::Question(words.clone()),
             old_flow::Request::Psyche(said) => {
-                flow_ethos::Request::Psyche(recode_unchanged!(said, flow_ethos::Said)?)
+                flow_ethos::Request::Living(recode_unchanged!(said, flow_ethos::Living_Data)?)
             }
-            old_flow::Request::Psyches(saids) => flow_ethos::Request::Psyches(
-                saids
-                    .iter()
-                    .map(|said| recode_unchanged!(said, flow_ethos::Said))
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
+            old_flow::Request::Psyches(saids) => {
+                use crate::store::living_upgrade::JoinsSayings;
+                flow_ethos::Request::Living(
+                    saids
+                        .iter()
+                        .map(|said| recode_unchanged!(said, flow_ethos::Living_Data))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .joined(),
+                )
+            }
             old_flow::Request::Result(result) => flow_ethos::Request::Result(match result {
                 old_flow::ResultPayload::Answered(answered) => {
                     flow_ethos::ResultPayload::Historical(answered.string.clone())
@@ -1348,12 +1352,13 @@ impl BecomesCurrentWithRequestIds for PriorStoredSendOutcome {
                     .as_ref()
                     .map(|value| recode_unchanged!(value, signal_flow::Process))
                     .transpose()?,
-                first_address_option: old
+                sent_by: old
                     .first_address_option
                     .as_ref()
                     .map(old_flow::Address::current)
-                    .transpose()?,
-                second_address_option: old
+                    .transpose()?
+                    .map_or(signal_flow::SentBy::Unknown, signal_flow::SentBy::Sender),
+                address_option: old
                     .second_address_option
                     .as_ref()
                     .map(old_flow::Address::current)
@@ -1423,7 +1428,7 @@ impl BecomesCurrentSendCall for PriorSendCall {
         let send_outcome = match &self.send_outcome {
             old::SendOutcome::Accepted(accepted) if archived => {
                 current::SendOutcome::Archived(current::Archived_Data {
-                    address: accepted.sender.current()?,
+                    sent_by: signal_flow::SentBy::Sender(accepted.sender.current()?),
                     target: crate::generated::send_tool::Target(accepted.target.current()?),
                 })
             }
@@ -1434,7 +1439,7 @@ impl BecomesCurrentSendCall for PriorSendCall {
                     .cloned()
                     .ok_or(StoreError::StateInvariant)?;
                 current::SendOutcome::Accepted(current::Accepted_Data {
-                    address: accepted.sender.current()?,
+                    sent_by: signal_flow::SentBy::Sender(accepted.sender.current()?),
                     target: crate::generated::send_tool::Target(accepted.target.current()?),
                     send_acceptance: accepted
                         .send_acceptance
@@ -1443,7 +1448,7 @@ impl BecomesCurrentSendCall for PriorSendCall {
             }
             old::SendOutcome::LegacyUnknown(unknown) => {
                 current::SendOutcome::LegacyUnknown(current::LegacyUnknown_Data {
-                    address: unknown.sender.current()?,
+                    sent_by: signal_flow::SentBy::Sender(unknown.sender.current()?),
                     target: crate::generated::send_tool::Target(unknown.target.current()?),
                 })
             }
@@ -2448,12 +2453,7 @@ mod tests {
         let outcomes = SendOutcomeTables::descriptors();
         let upgrade = RequestIdUpgradeTables::descriptors();
         RequestIdEvolutionDescriptors {
-            metaflows: TableDescriptor::new(
-                crate::store::METAFLOW_TABLE_NAME,
-                FamilyName::new("flow-nexus-metaflow"),
-                crate::store::StoredMetaflow::schema_hash(),
-            )
-            .with_predecessor::<PriorStoredMetaflow>(),
+            metaflows: <crate::store::FlowStore as crate::store::DescribesMetaflowTable>::metaflow_descriptor(),
             address_holds: crate::store::address_hold::AddressHold::descriptor(),
             send_calls: crate::generated::send_tool::SendCall::descriptor(),
             requests: queue.1,

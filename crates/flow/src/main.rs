@@ -182,8 +182,7 @@ mod tests {
             "Soft.Result.{ k7ph «Wake Send.{ is content }» }",
             "MiddleAbrupt.Notice.«Check the source.»",
             "HardAbrupt.Question.«Which revision?»",
-            "Soft.Psyche.{ «context» «verbatim» }",
-            "Soft.Psyches.[ { «context» «verbatim» } ]",
+            "Soft.Living.{ «context» «verbatim» }",
         ] {
             let explicit = client
                 .parse_query([format!("Send.{{ {{ Psyche core Opus }} {message} }}")].into_iter())
@@ -197,6 +196,9 @@ mod tests {
             "Send.{ { Psyche core Opus } Unknown Soft.Order.«Review.» }",
             "Send.{ Unknown Soft.Order.«Review.» }",
             "Send.[ { Psyche core Opus } Soft.Order.«Review.» ]",
+            // The living's words are one saying; Psyche and Psyches are gone.
+            "Send.{ { Psyche core Opus } Soft.Psyche.{ «context» «verbatim» } }",
+            "Send.{ { Psyche core Opus } Soft.Psyches.[ { «context» «verbatim» } ] }",
         ] {
             assert!(
                 client.parse_query([invalid.into()].into_iter()).is_err(),
@@ -414,11 +416,12 @@ mod tests {
         );
     }
 
-    /// Remind is gone: a reminder is a Task with its Minutes, which the CLI
-    /// reads as a Send. Minutes that is no integer, or an integer beyond
-    /// i64, is the CLI's compose error and never reaches Flow.
+    /// A reminder names whom it reminds and after how many minutes; a time
+    /// of day is no Minutes. A Task carries its Minutes as a Send. Minutes
+    /// that is no integer, or an integer beyond i64, is the CLI's compose
+    /// error and never reaches Flow.
     #[test]
-    fn remind_is_no_query_and_a_task_carries_its_minutes() {
+    fn remind_names_its_address_and_a_task_carries_its_minutes() {
         let client = FlowClient;
         assert!(
             client
@@ -427,8 +430,16 @@ mod tests {
                         .into_iter()
                 )
                 .is_err(),
-            "Remind still reads"
+            "a Remind at a time of day reads"
         );
+        assert!(matches!(
+            client
+                .parse_query(
+                    ["Remind.{ { Mind core Sol } 30 «Check the capsule run.» }".into()].into_iter()
+                )
+                .expect("a Remind reads"),
+            Query::Remind(_)
+        ));
         let Query::Send(send) = client
             .parse_query(
                 ["Send.{ { Mind core Sol } Soft.Task.{ 30 «Check the capsule run.» } }".into()]

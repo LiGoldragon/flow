@@ -134,6 +134,7 @@ mod tests {
                     ),
                     lease: flow_ethos::Lease(60),
                     presentation_prompt_option: None,
+                    herdr_session_name: signal_flow::HerdrSessionName("default".into()),
                 },
             ))
             .unwrap();

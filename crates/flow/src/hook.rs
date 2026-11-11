@@ -1,16 +1,25 @@
 //! `flow-nexus-hook`: the Claude Code command hook Flow writes into every
 //! Claude flow it launches. Claude Code runs it on SessionStart, PostToolUse,
 //! UserPromptSubmit, Stop and SessionEnd with the event as JSON on stdin; it turns the
-//! event into one `Report.{ FlowId Event }` and sends it, through the client
-//! the `flow-nexus` CLI speaks Signal with, to the socket its typed
-//! configuration names: the socket of the place whose Nexus launched the flow.
+//! event into one `Report.{ FlowId Option<Process> Event }` and sends it,
+//! through the client the `flow-nexus` CLI speaks Signal with, to the socket
+//! its typed configuration names: the socket of the place whose Nexus
+//! launched the flow.
 //!
-//!   SessionStart     -> Report.{ «FLOW_ID» Started.Some.«session_id» }
-//!   PostToolUse      -> Report.{ «FLOW_ID» ToolUsed.«tool_name» }
-//!   UserPromptSubmit -> Report.{ «FLOW_ID» PromptSubmitted.{ Some.«session_id» Some.«prompt_id» SHA256 } }
-//!   Stop             -> Report.{ «FLOW_ID» Stopped.{ Some.«session_id» Some.«transcript_path» Some.«last_assistant_message» [ «background_tasks» ] } }
-//!   SessionEnd       -> Report.{ «FLOW_ID» Ended.Some.«session_id» }
-//!   SessionEnd clear -> Report.{ «FLOW_ID» Cleared.Some.«session_id» }
+//!   SessionStart     -> Report.{ «FLOW_ID» BIRTH Started.Some.«session_id» }
+//!   PostToolUse      -> Report.{ «FLOW_ID» BIRTH ToolUsed.«tool_name» }
+//!   UserPromptSubmit -> Report.{ «FLOW_ID» BIRTH PromptSubmitted.{ Some.«session_id» Some.«prompt_id» SHA256 } }
+//!   Stop             -> Report.{ «FLOW_ID» BIRTH Stopped.{ Some.«session_id» Some.«transcript_path» Some.«last_assistant_message» [ «background_tasks» ] } }
+//!   SessionEnd       -> Report.{ «FLOW_ID» BIRTH Ended.Some.«session_id» }
+//!   SessionEnd clear -> Report.{ «FLOW_ID» BIRTH Cleared.Some.«session_id» }
+//!
+//! BIRTH names the harness that ran the hook, `Some.{ pid start }`: the
+//! nearest process above the hook whose command line names the event's
+//! session after `--session-id` or `--resume`, or whose Claude session
+//! record (`<Claude home>/sessions/<pid>.json`, at the start it runs with
+//! now) names it; `None` when no ancestor does. An event names the harness
+//! it came from in its own data, so a resumed seat's events are told from a
+//! late hook of the harness it replaced, which shares its session.
 //!
 //! A SessionEnd whose reason is `clear` is a session change, not an exit:
 //! the harness goes on in the session the SessionStart after it names.
@@ -56,11 +65,99 @@ use signal_flow::{
 };
 use std::{env, io::Read, process::ExitCode};
 
-/// One hook invocation: the event Claude Code wrote, and the flow it ran in.
+/// One hook invocation: the event Claude Code wrote, the flow it ran in,
+/// and the birth of the harness that ran it.
 struct HarnessHook {
     input: serde_json::Value,
     flow_id: Option<String>,
     configuration: Option<HookConfiguration>,
+    harness: Option<flow_ethos::Process>,
+}
+
+/// What the kernel and Claude Code show of the processes above the hook.
+trait ReadsProcessTable {
+    /// A process's parent and its start time, from `/proc/<pid>/stat`.
+    fn parent_and_start(&self, pid: u32) -> Option<(u32, i64)>;
+    /// A process's command line, argument by argument.
+    fn arguments(&self, pid: u32) -> Vec<String>;
+    /// The session Claude Code's record of `pid` names, when the record
+    /// names that process at `started`.
+    fn claude_session(&self, pid: u32, started: i64) -> Option<String>;
+}
+
+/// The kernel's `/proc` and the session records under a Claude home.
+struct ProcessTable {
+    claude_home: std::path::PathBuf,
+}
+
+impl ReadsProcessTable for ProcessTable {
+    fn parent_and_start(&self, pid: u32) -> Option<(u32, i64)> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let (_, fields) = stat.rsplit_once(") ")?;
+        let fields = fields.split_whitespace().collect::<Vec<_>>();
+        Some((fields.get(1)?.parse().ok()?, fields.get(19)?.parse().ok()?))
+    }
+
+    fn arguments(&self, pid: u32) -> Vec<String> {
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .map(|bytes| {
+                bytes
+                    .split(|byte| *byte == 0)
+                    .filter(|argument| !argument.is_empty())
+                    .map(|argument| String::from_utf8_lossy(argument).into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn claude_session(&self, pid: u32, started: i64) -> Option<String> {
+        let text = std::fs::read_to_string(
+            self.claude_home
+                .join("sessions")
+                .join(format!("{pid}.json")),
+        )
+        .ok()?;
+        let record: serde_json::Value = serde_json::from_str(&text).ok()?;
+        let recorded_start = match record.get("procStart")? {
+            serde_json::Value::String(start) => start.parse::<i64>().ok()?,
+            serde_json::Value::Number(start) => start.as_i64()?,
+            _ => return None,
+        };
+        (record.get("pid").and_then(serde_json::Value::as_u64) == Some(u64::from(pid))
+            && recorded_start == started)
+            .then(|| record.get("sessionId")?.as_str().map(str::to_owned))
+            .flatten()
+            .filter(|session| !session.is_empty())
+    }
+}
+
+/// The harness that runs `session`, found above the process `below`.
+trait FindsHarness {
+    fn harness_above(&self, below: u32, session: &str) -> Option<flow_ethos::Process>;
+}
+
+impl<Table: ReadsProcessTable> FindsHarness for Table {
+    fn harness_above(&self, below: u32, session: &str) -> Option<flow_ethos::Process> {
+        const ANCESTRY_LIMIT: usize = 64;
+        let (mut pid, _) = self.parent_and_start(below)?;
+        for _ in 0..ANCESTRY_LIMIT {
+            if pid <= 1 {
+                return None;
+            }
+            let (parent, started) = self.parent_and_start(pid)?;
+            let named = self.arguments(pid).windows(2).any(|pair| {
+                (pair[0] == "--session-id" || pair[0] == "--resume") && pair[1] == session
+            }) || self.claude_session(pid, started).as_deref() == Some(session);
+            if named {
+                return Some(flow_ethos::Process {
+                    pid: flow_ethos::Pid(i64::from(pid)),
+                    started: flow_ethos::Started(started),
+                });
+            }
+            pid = parent;
+        }
+        None
+    }
 }
 
 /// Why a Stop's input does not decode. It is never taken for the flow's
@@ -145,8 +242,21 @@ impl ReadsHookInput for HarnessHook {
     fn from_environment() -> Self {
         let mut text = String::new();
         let _ = std::io::stdin().read_to_string(&mut text);
+        let input: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+        let claude_home = env::var_os("CLAUDE_CONFIG_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| std::path::Path::new(&home).join(".claude")))
+            .unwrap_or_default();
+        let harness = input
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|session| {
+                ProcessTable { claude_home }.harness_above(std::process::id(), session)
+            });
         Self {
-            input: serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+            input,
+            harness,
             flow_id: env::var("FLOW_ID")
                 .ok()
                 .filter(|flow_id| !flow_id.is_empty()),
@@ -286,6 +396,7 @@ impl ChoosesHookCall for HarnessHook {
         };
         HookCall::Report(Box::new(Query::Report(Report_Data {
             flow_id: signal_flow::FlowId(flow_id.clone()),
+            process_option: self.harness.clone(),
             event,
         })))
     }
@@ -344,7 +455,10 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChoosesHookCall, HarnessHook, HookCall, ReportsThroughCli, StopRefusal};
+    use super::{
+        ChoosesHookCall, FindsHarness, HarnessHook, HookCall, ReadsProcessTable, ReportsThroughCli,
+        StopRefusal,
+    };
     use datom_codec::{Actualizing, Budget, Potential};
     use protos::ReaderBudget;
 
@@ -369,7 +483,95 @@ mod tests {
             configuration: Some(flow::HookConfiguration {
                 ordinary_socket_path: flow_ethos::OrdinarySocketPath("unused".into()),
             }),
+            harness: None,
         }
+    }
+
+    /// A process tree: pid, its parent, its start, its command line, and
+    /// the session its Claude record names.
+    struct Table(Vec<(u32, u32, i64, &'static [&'static str], Option<&'static str>)>);
+
+    impl ReadsProcessTable for Table {
+        fn parent_and_start(&self, pid: u32) -> Option<(u32, i64)> {
+            self.0
+                .iter()
+                .find(|row| row.0 == pid)
+                .map(|row| (row.1, row.2))
+        }
+        fn arguments(&self, pid: u32) -> Vec<String> {
+            self.0
+                .iter()
+                .find(|row| row.0 == pid)
+                .map(|row| {
+                    row.3
+                        .iter()
+                        .map(|argument| (*argument).to_owned())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        fn claude_session(&self, pid: u32, started: i64) -> Option<String> {
+            self.0
+                .iter()
+                .find(|row| row.0 == pid && row.2 == started)
+                .and_then(|row| row.4.map(str::to_owned))
+        }
+    }
+
+    /// The hook names the nearest process above it that runs the event's
+    /// session: by `--resume` or `--session-id` in its command line, or by
+    /// its Claude session record; none when no ancestor runs it.
+    #[test]
+    fn the_hook_names_the_harness_that_runs_its_session() {
+        let resumed = Table(vec![
+            (900, 800, 9_000, &["flow-nexus-hook"], None),
+            (800, 700, 8_000, &["sh", "-c", "flow-nexus-hook"], None),
+            (
+                700,
+                600,
+                7_000,
+                &["claude", "--resume", "s1", "--model", "m"],
+                None,
+            ),
+            (600, 1, 6_000, &["herdr"], None),
+        ]);
+        assert_eq!(
+            resumed.harness_above(900, "s1"),
+            Some(flow_ethos::Process {
+                pid: flow_ethos::Pid(700),
+                started: flow_ethos::Started(7_000),
+            })
+        );
+        assert_eq!(resumed.harness_above(900, "s2"), None);
+        let recorded = Table(vec![
+            (900, 700, 9_000, &["flow-nexus-hook"], None),
+            (700, 1, 7_100, &["node", "claude"], Some("s1")),
+        ]);
+        assert_eq!(
+            recorded.harness_above(900, "s1"),
+            Some(flow_ethos::Process {
+                pid: flow_ethos::Pid(700),
+                started: flow_ethos::Started(7_100),
+            })
+        );
+    }
+
+    /// The Report carries the harness's birth as the hook found it.
+    #[test]
+    fn a_report_names_its_harness_birth() {
+        let mut named = hook(
+            serde_json::json!({"hook_event_name": "SessionEnd", "session_id": "s",
+                "reason": "logout"}),
+            Some("5a4d0b"),
+        );
+        named.harness = Some(flow_ethos::Process {
+            pid: flow_ethos::Pid(700),
+            started: flow_ethos::Started(7_000),
+        });
+        assert_eq!(
+            named.call(),
+            report("Report.{ «5a4d0b» Some.{ 700 7000 } Ended.Some.«s» }".into())
+        );
     }
 
     /// The datoms are the ones signal-flow 9.0.0's Report reads, written
@@ -382,7 +584,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            report("Report.{ «5a4d0b» Started.Some.«s» }".into())
+            report("Report.{ «5a4d0b» None Started.Some.«s» }".into())
         );
         assert_eq!(
             hook(
@@ -390,7 +592,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            report("Report.{ «5a4d0b» ToolUsed.«Bash» }".into())
+            report("Report.{ «5a4d0b» None ToolUsed.«Bash» }".into())
         );
         assert_eq!(
             hook(
@@ -401,7 +603,7 @@ mod tests {
             )
             .call(),
             report(
-                "Report.{ «5a4d0b» Stopped.{ Some.«s» Some.«/t/s.jsonl» Some.«answer» [] } }"
+                "Report.{ «5a4d0b» None Stopped.{ Some.«s» Some.«/t/s.jsonl» Some.«answer» [] } }"
                     .into()
             )
         );
@@ -411,7 +613,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            report("Report.{ «5a4d0b» Stopped.{ None None None [] } }".into())
+            report("Report.{ «5a4d0b» None Stopped.{ None None None [] } }".into())
         );
         assert_eq!(
             hook(
@@ -420,7 +622,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            report("Report.{ «5a4d0b» Stopped.{ None None Some.«» [] } }".into())
+            report("Report.{ «5a4d0b» None Stopped.{ None None Some.«» [] } }".into())
         );
         assert_eq!(
             hook(
@@ -429,7 +631,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            report("Report.{ «5a4d0b» Ended.Some.«s» }".into())
+            report("Report.{ «5a4d0b» None Ended.Some.«s» }".into())
         );
         assert_eq!(
             hook(
@@ -438,7 +640,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            report("Report.{ «5a4d0b» Ended.Some.«s» }".into())
+            report("Report.{ «5a4d0b» None Ended.Some.«s» }".into())
         );
     }
 
@@ -466,7 +668,7 @@ mod tests {
             )
             .call(),
             report(
-                "Report.{ «5a4d0b» Stopped.{ Some.«s» Some.«/t/s.jsonl» None [ \
+                "Report.{ «5a4d0b» None Stopped.{ Some.«s» Some.«/t/s.jsonl» None [ \
                  { «b1» Shell «running» «tail logs» } \
                  { «a1» Subagent «running» «review» } \
                  { «m1» Monitor «running» «watch CI» } \
@@ -536,7 +738,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            report("Report.{ «5a4d0b» Cleared.Some.«s1» }".into())
+            report("Report.{ «5a4d0b» None Cleared.Some.«s1» }".into())
         );
         assert_eq!(
             hook(
@@ -545,7 +747,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            report("Report.{ «5a4d0b» Started.Some.«s2» }".into())
+            report("Report.{ «5a4d0b» None Started.Some.«s2» }".into())
         );
     }
 
@@ -569,7 +771,7 @@ mod tests {
                 )
                 .call(),
                 report(format!(
-                    "Report.{{ «5a4d0b» PromptSubmitted.{{ Some.«s» Some.«p» {digest} }} }}"
+                    "Report.{{ «5a4d0b» None PromptSubmitted.{{ Some.«s» Some.«p» {digest} }} }}"
                 ))
             );
         }
@@ -615,6 +817,7 @@ mod tests {
             ),
             signal_flow::Query::Report(signal_flow::Report_Data {
                 flow_id: signal_flow::FlowId("5a4d0b".into()),
+                process_option: None,
                 event: signal_flow::Event::Stopped(signal_flow::NativeStop {
                     native_session_id_option: Some(signal_flow::NativeSessionId("s".into())),
                     transcript_path_option: Some(signal_flow::TranscriptPath(
@@ -630,6 +833,7 @@ mod tests {
                 "session_id": "s", "prompt": "abc"})),
             signal_flow::Query::Report(signal_flow::Report_Data {
                 flow_id: signal_flow::FlowId("5a4d0b".into()),
+                process_option: None,
                 event: signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
                     native_session_id_option: Some(signal_flow::NativeSessionId("s".into())),
                     prompt_id_option: None,
@@ -644,6 +848,7 @@ mod tests {
                 "session_id": "s1", "reason": "clear"})),
             signal_flow::Query::Report(signal_flow::Report_Data {
                 flow_id: signal_flow::FlowId("5a4d0b".into()),
+                process_option: None,
                 event: signal_flow::Event::Cleared(Some(signal_flow::NativeSessionId("s1".into()))),
             })
         );
@@ -651,6 +856,7 @@ mod tests {
             read(serde_json::json!({"hook_event_name": "SessionStart", "session_id": "s2"})),
             signal_flow::Query::Report(signal_flow::Report_Data {
                 flow_id: signal_flow::FlowId("5a4d0b".into()),
+                process_option: None,
                 event: signal_flow::Event::Started(Some(signal_flow::NativeSessionId("s2".into()))),
             })
         );
@@ -669,6 +875,7 @@ mod tests {
             *query,
             signal_flow::Query::Report(signal_flow::Report_Data {
                 flow_id: signal_flow::FlowId("5a4d0b".into()),
+                process_option: None,
                 event: signal_flow::Event::ToolUsed("Bash".into()),
             })
         );

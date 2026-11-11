@@ -101,7 +101,7 @@ pub enum SendRefusal {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Accepted_Data {
-    pub address: signal_flow::Address,
+    pub sent_by: signal_flow::SentBy,
     pub target: Target,
     pub send_acceptance: signal_flow::SendAcceptance,
 }
@@ -109,15 +109,22 @@ pub struct Accepted_Data {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct LegacyUnknown_Data {
-    pub address: signal_flow::Address,
+    pub sent_by: signal_flow::SentBy,
     pub target: Target,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Archived_Data {
-    pub address: signal_flow::Address,
+    pub sent_by: signal_flow::SentBy,
     pub target: Target,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Kept_Data {
+    pub sent_by: signal_flow::SentBy,
+    pub request_id: signal_flow::RequestId,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -127,6 +134,7 @@ pub enum SendOutcome {
     LegacyUnknown(LegacyUnknown_Data),
     Archived(Archived_Data),
     Refused(SendRefusal),
+    Kept(Kept_Data),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

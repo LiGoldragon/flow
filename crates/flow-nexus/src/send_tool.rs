@@ -199,6 +199,7 @@ impl JournalsSendInvocations for RunningNexus {
             SendOutcome::LegacyUnknown(_) => "LegacyUnknown",
             SendOutcome::Archived(_) => "Archived",
             SendOutcome::Refused(_) => "Refused",
+            SendOutcome::Kept(_) => "Kept",
         };
         eprintln!("flow-nexus: send tool invocation {status}");
         outcome
@@ -364,15 +365,21 @@ impl BecomesMessage for SendArguments {
 /// private logical-delivery identity or the sender's run identity.
 #[derive(datom_codec::Datomizable)]
 struct VisibleToolAccepted {
-    sender: Address,
+    sender: signal_flow::SentBy,
     target: Address,
     visible_send_acceptance: signal_flow::VisibleSendAcceptance,
 }
 
 #[derive(datom_codec::Datomizable)]
 struct VisibleToolLegacyUnknown {
-    sender: Address,
+    sender: signal_flow::SentBy,
     target: Address,
+}
+
+#[derive(datom_codec::Datomizable)]
+struct VisibleToolKept {
+    sender: signal_flow::SentBy,
+    request_id: signal_flow::RequestId,
 }
 
 #[derive(datom_codec::Datomizable)]
@@ -381,6 +388,7 @@ enum VisibleToolOutcome {
     LegacyUnknown(VisibleToolLegacyUnknown),
     Archived(VisibleToolLegacyUnknown),
     Refused(SendRefusal),
+    Kept(VisibleToolKept),
 }
 
 trait ProjectsToolOutcome {
@@ -391,7 +399,7 @@ impl ProjectsToolOutcome for SendOutcome {
     fn visible_tool_outcome(&self) -> VisibleToolOutcome {
         match self {
             SendOutcome::Accepted(value) => VisibleToolOutcome::Accepted(VisibleToolAccepted {
-                sender: value.address.clone(),
+                sender: value.sent_by.clone(),
                 target: value.target.clone().0,
                 visible_send_acceptance: signal_flow::VisibleSendAcceptance {
                     delivery_cursor: value.send_acceptance.delivery_cursor,
@@ -404,17 +412,21 @@ impl ProjectsToolOutcome for SendOutcome {
             }),
             SendOutcome::Archived(value) => {
                 VisibleToolOutcome::Archived(VisibleToolLegacyUnknown {
-                    sender: value.address.clone(),
+                    sender: value.sent_by.clone(),
                     target: value.target.clone().0,
                 })
             }
             SendOutcome::LegacyUnknown(value) => {
                 VisibleToolOutcome::LegacyUnknown(VisibleToolLegacyUnknown {
-                    sender: value.address.clone(),
+                    sender: value.sent_by.clone(),
                     target: value.target.clone().0,
                 })
             }
             SendOutcome::Refused(value) => VisibleToolOutcome::Refused(value.clone()),
+            SendOutcome::Kept(value) => VisibleToolOutcome::Kept(VisibleToolKept {
+                sender: value.sent_by.clone(),
+                request_id: value.request_id.clone(),
+            }),
         }
     }
 }
@@ -422,7 +434,7 @@ impl ProjectsToolOutcome for SendOutcome {
 impl AnswersToolCall for SendOutcome {
     fn tool_response(&self) -> serde_json::Value {
         serde_json::json!({
-            "success": matches!(self, SendOutcome::Accepted(_)),
+            "success": matches!(self, SendOutcome::Accepted(_) | SendOutcome::Kept(_)),
             "contentItems": [{
                 "type": "inputText",
                 "text": self.visible_tool_outcome().datomize(Vec::new()).protosize().compact()
@@ -531,11 +543,12 @@ impl HandlesSendCall for RunningNexus {
                 );
                 Self::refused(SendRefusal::Store)
             };
-            // The sender is read again for every call, a replayed one included.
+            // The sender is read again for every call, a replayed one
+            // included: a thread no live flow of an Awake metaflow runs
+            // sends as Unbound.
             let root_thread = self.codex_endpoints.current().root_thread(&key.thread_id.0);
             let sender = match self.store.thread_sender(&root_thread) {
-                Ok(Ok(sender)) => sender,
-                Ok(Err(refusal)) => return Self::refused(refusal),
+                Ok(sender) => sender,
                 Err(error) => return store_refused(error),
             };
             let content_sha256 = call.content_sha256();
@@ -583,18 +596,40 @@ impl HandlesSendCall for RunningNexus {
             {
                 return refused_kept(SendRefusal::Oversized(size), content_sha256.0);
             }
+            // A Result goes to the sender of the request it names, whatever
+            // target the call writes; one whose sender is no Address is
+            // kept with the request.
+            let target = {
+                use crate::store::kept_answer::{AnswerRoute, RoutesAnswers};
+                match self.store.answer_route(&message) {
+                    Ok(AnswerRoute::Unanswering) => arguments.target.clone(),
+                    Ok(AnswerRoute::To(address)) => crate::generated::send_tool::Target(address),
+                    Ok(AnswerRoute::Kept(binding)) => {
+                        let request_id = binding.request_id.clone();
+                        let outcome = match self.store.keep_answer(binding, &sender, &message) {
+                            Ok(()) => SendOutcome::Kept(crate::generated::send_tool::Kept_Data {
+                                sent_by: sender.clone(),
+                                request_id,
+                            }),
+                            Err(error) => return store_refused(error),
+                        };
+                        return match self.store.record_send_call(SendCall {
+                            tool_call_key: key.clone(),
+                            content_sha256,
+                            send_outcome: outcome.clone(),
+                        }) {
+                            Ok(()) => outcome,
+                            Err(error) => store_refused(error),
+                        };
+                    }
+                    Err(error) => return store_refused(error),
+                }
+            };
             let logged = message.clone();
             let admitted_at = std::time::SystemTime::now();
             let outcome = self
                 .store
-                .accept_tool_send(
-                    key,
-                    &content_sha256.0,
-                    sender,
-                    &arguments.target,
-                    message,
-                    now,
-                )
+                .accept_tool_send(key, &content_sha256.0, sender, &target, message, now)
                 .unwrap_or_else(store_refused);
             // Each admission is logged with its kind; the send tool
             // holds no reminder, so a Task it admits names no deadline.
@@ -614,7 +649,7 @@ impl HandlesSendCall for RunningNexus {
                 );
                 // Restore a formerly-awake target only after its logical
                 // delivery and exact tool-call result are durable.
-                self.rest_ended_awake(&arguments.target.0);
+                self.rest_ended_awake(&target.0);
             }
             outcome
         })();

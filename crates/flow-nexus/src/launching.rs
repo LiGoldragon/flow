@@ -232,8 +232,28 @@ impl ResolvesLaunchRoot for RunningNexus {
     }
 }
 
+/// The one Herdr session every launch opens its pane in, whoever asks: the
+/// one the configured Nexus names. A Start's or a Replace's own is set to
+/// it, as its model is set to the configured one.
+pub(crate) trait NamesLaunchSession {
+    fn launch_session(&self) -> Result<signal_flow::HerdrSessionName, crate::store::StoreError>;
+}
+
+impl NamesLaunchSession for RunningNexus {
+    fn launch_session(&self) -> Result<signal_flow::HerdrSessionName, crate::store::StoreError> {
+        self.store
+            .configuration_snapshot()?
+            .map(|snapshot| snapshot.configured_nexus.0.herdr_session_name)
+            .ok_or(crate::store::StoreError::NotConfigured)
+    }
+}
+
 impl LaunchesFlows for RunningNexus {
     fn start(&self, mut profile: LaunchProfile, origin: Origin) -> Response {
+        profile.herdr_session_name = match self.launch_session() {
+            Ok(session) => session,
+            Err(_) => return Response::StartRejected(StartRejection::LaunchPersistenceRefused),
+        };
         let harness_arguments = match self.harness_arguments(&profile.address) {
             Ok(arguments) => arguments,
             Err(rejection) => return Response::StartRejected(rejection),
@@ -698,6 +718,14 @@ impl LaunchesFlows for RunningNexus {
     }
 
     fn replace(&self, mut profile: LaunchProfile, origin: Origin) -> Response {
+        profile.herdr_session_name = match self.launch_session() {
+            Ok(session) => session,
+            Err(_) => {
+                return Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                    StartRejection::LaunchPersistenceRefused,
+                ));
+            }
+        };
         profile.model_name = match self.store.configured_model(&profile.address) {
             Ok(Some(model)) => signal_flow::ModelName(model),
             Ok(None) | Err(_) => {

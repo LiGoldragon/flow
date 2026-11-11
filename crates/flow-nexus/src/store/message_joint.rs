@@ -11,7 +11,7 @@ use message_nexus::{
 use signal_flow::{
     Address, Aspect, Bind_Data, Model, Process, Query as FlowQuery, Response as FlowResponse,
 };
-use signal_flow_message::{SendRequest, SendableMessage, SendableRequest};
+use signal_flow::{SendRequest, SendableMessage, SendableRequest};
 use std::{
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
@@ -233,6 +233,7 @@ fn configure_flow(message_binary: &Path, home: &Path, runtime: &Path, place: &cr
         ),
         lease: flow_ethos::Lease(60),
         presentation_prompt_option: None,
+        herdr_session_name: signal_flow::HerdrSessionName("default".into()),
     });
     assert_eq!(
         ConfigurationOnlyStore::open(&place.store())
@@ -259,7 +260,7 @@ fn bind_sender(flow_socket: &Path, sender: &Address) {
 fn send_through_message(
     message_socket: &Path,
     recipient: Address,
-) -> signal_flow_message::VisibleSendAcceptance {
+) -> signal_flow::VisibleSendAcceptance {
     let mut peer = UnixStream::connect(message_socket).expect("Message's socket listens");
     FramedStream::write_frame(
         &mut peer,
@@ -322,7 +323,7 @@ fn real_flow_and_message_share_the_durable_delivery_ledger() {
     );
     assert_eq!(
         std::env::var("FLOW_MESSAGE_JOINT_MESSAGE_REV").unwrap(),
-        "c3d519d1494a534fe573c2749a5309b95bfa91ab"
+        "71b5ac0dbab577cd25d3d22fb9d789463162c19d"
     );
     let flow_binary = required_path("FLOW_MESSAGE_JOINT_FLOW_BIN");
     let message_binary = required_path("FLOW_MESSAGE_JOINT_MESSAGE_BIN");

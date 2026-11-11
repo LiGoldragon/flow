@@ -72,6 +72,7 @@ fn configured() -> NexusFixture {
                 ),
                 lease: flow_ethos::Lease(30),
                 presentation_prompt_option: None,
+                herdr_session_name: signal_flow::HerdrSessionName("default".into()),
             },
         ))
         .expect("Nexus configured");
@@ -149,7 +150,7 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
         .store
         .record_send_outcome(
             None,
-            None,
+            signal_flow::SentBy::Unknown,
             None,
             "digest".into(),
             signal_flow::PrivateSendResponse::Refused(signal_flow::Refusal::Lapsed),

@@ -575,8 +575,11 @@ fn two_threads_are_each_attributed_to_their_own_metaflow() {
     assert!(matches!(recorded.send_outcome, SendOutcome::Accepted(_)));
 }
 
+/// A call from a thread no live flow of an Awake metaflow runs is sent as
+/// Unbound, as a caller in no flow sends on the ordinary socket: accepted,
+/// queued, and recorded under its key.
 #[test]
-fn a_call_from_a_thread_flow_does_not_hold_is_refused_and_queues_nothing() {
+fn a_call_from_a_thread_no_flow_holds_is_sent_as_unbound() {
     let mut fixture = NexusFixture::new();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.awake_target();
@@ -590,21 +593,35 @@ fn a_call_from_a_thread_flow_does_not_hold_is_refused_and_queues_nothing() {
         answer_to(&fake.written_on(2, |m| m["id"] == 12), 12)
     })
     .expect("the foreign call answered");
-    assert_eq!(answer["success"], false);
-    assert_eq!(answer["contentItems"][0]["text"], "Refused.ThreadUnowned");
-    assert!(fixture.target_queue().is_empty());
+    assert_eq!(answer["success"], true);
+    let text = answer["contentItems"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(text.starts_with("Accepted.{ Unbound "), "{text}");
     assert_eq!(
+        fixture.target_queue(),
+        vec![TestRequest {
+            sent_by: SentBy::Unbound,
+            request: Request::Order("intruder".into()),
+        }]
+    );
+    assert!(matches!(
         fixture
             .nexus
             .store
             .send_call(&tool_call(foreign, "call-x", "intruder").tool_call_key)
-            .unwrap(),
-        None
-    );
+            .unwrap()
+            .map(|call| call.send_outcome),
+        Some(SendOutcome::Accepted(accepted)) if accepted.sent_by == SentBy::Unbound
+    ));
 }
 
+/// A replayed call of a retired flow is answered from its record, queued
+/// once; a call of a flow its metaflow is no longer Awake as is sent as
+/// Unbound.
 #[test]
-fn a_replayed_call_of_a_retired_or_superseded_flow_is_refused() {
+fn a_replayed_call_of_a_retired_flow_is_answered_from_its_record_and_a_superseded_one_sends_as_unbound()
+ {
     let fixture = NexusFixture::new();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.codex_seat("b2b2b2", THREAD_B, "w1:p6", "gpt-sol", sender_b());
@@ -617,7 +634,11 @@ fn a_replayed_call_of_a_retired_or_superseded_flow_is_refused() {
     // Retired: the replay finds the flow ended, though its call was queued.
     assert!(fixture.nexus.store.record_retired("a1a1a1").unwrap());
     let replayed = fixture.nexus.handle_send_call(call_a);
-    assert_eq!(replayed, SendOutcome::Refused(SendRefusal::FlowEnded));
+    assert!(
+        matches!(&replayed, SendOutcome::Accepted(accepted)
+            if accepted.sent_by == SentBy::Sender(sender_a())),
+        "{replayed:?}"
+    );
     // Superseded: a fresh wake made the metaflow Awake as a successor.
     let call_b = tool_call(THREAD_B, "call-b", "pending while superseded");
     assert!(
@@ -633,13 +654,19 @@ fn a_replayed_call_of_a_retired_or_superseded_flow_is_refused() {
         past: flow_ethos::Past(vec![flow_ethos::FlowId("b2b2b2".into())]),
         queue: flow_ethos::Queue(vec![]),
     });
-    assert_eq!(
+    assert!(matches!(
         fixture.nexus.handle_send_call(call_b),
-        SendOutcome::Refused(SendRefusal::NotAwake)
-    );
+        SendOutcome::Accepted(accepted) if accepted.sent_by == SentBy::Unbound
+    ));
     assert_eq!(
         fixture.target_queue(),
-        vec![sent(sender_a(), "before retirement")]
+        vec![
+            sent(sender_a(), "before retirement"),
+            TestRequest {
+                sent_by: SentBy::Unbound,
+                request: Request::Order("pending while superseded".into()),
+            },
+        ]
     );
 }
 
@@ -1705,7 +1732,7 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
         .accept_tool_send(
             &key("authorized"),
             "authorized-content",
-            core(),
+            signal_flow::SentBy::Sender(core()),
             &crate::generated::send_tool::Target(core_primary()),
             Message::Soft(Request::Question("source".into())),
             0,
@@ -1720,7 +1747,7 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
         .accept_tool_send(
             &key("unauthorized"),
             "unauthorized-content",
-            unauthorized_sender,
+            signal_flow::SentBy::Sender(unauthorized_sender),
             &crate::generated::send_tool::Target(core_primary()),
             Message::Soft(Request::Question("must not enter".into())),
             0,
@@ -1766,7 +1793,7 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
         .accept_tool_send(
             &key,
             "archive-content",
-            core(),
+            signal_flow::SentBy::Sender(core()),
             &crate::generated::send_tool::Target(core_primary()),
             Message::Soft(Request::Notice("historical".into())),
             0,
@@ -1816,7 +1843,7 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
         .accept_tool_send(
             &key,
             "archive-content",
-            core(),
+            signal_flow::SentBy::Sender(core()),
             &crate::generated::send_tool::Target(core_primary()),
             Message::Soft(Request::Notice("historical".into())),
             0,
@@ -1825,7 +1852,7 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
     let SendOutcome::Archived(archived) = replay else {
         panic!("archived replay is explicit")
     };
-    assert_eq!(archived.address, core());
+    assert_eq!(archived.sent_by, signal_flow::SentBy::Sender(core()));
     assert_eq!(
         archived.target,
         crate::generated::send_tool::Target(core_primary())
@@ -1858,7 +1885,7 @@ fn archive_serializes_with_logical_delivery_admission_and_commits_after_the_gate
                 call_id: crate::generated::send_tool::CallId("archive-gate".into()),
             },
             "archive-gate-content",
-            core(),
+            signal_flow::SentBy::Sender(core()),
             &crate::generated::send_tool::Target(core_primary()),
             Message::Soft(Request::Notice("archive through the gate".into())),
             0,
@@ -1932,7 +1959,7 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
         .accept_tool_send(
             &key,
             "archive-contract-content",
-            core(),
+            signal_flow::SentBy::Sender(core()),
             &crate::generated::send_tool::Target(core_primary()),
             Message::Soft(Request::Notice("archive me".into())),
             0,
@@ -2203,7 +2230,7 @@ fn seat_responding(
 #[test]
 fn a_codex_native_event_delivers_the_oldest_cohort_through_its_pane() {
     let mut fixture = NexusFixture::new();
-    let psyche = from_core(Request::Psyche(flow_ethos::Said {
+    let psyche = from_core(Request::Living(flow_ethos::Living_Data {
         context: flow_ethos::Context("The living".into()),
         verbatim: flow_ethos::Verbatim("Make it so.".into()),
     }));
@@ -2315,7 +2342,7 @@ fn soft_work_queued_while_a_codex_turn_runs_waits_for_its_completion() {
 #[test]
 fn a_working_codex_seat_holds_soft_work_until_its_turn_completes() {
     let mut fixture = NexusFixture::new();
-    let psyche = from_core(Request::Psyche(flow_ethos::Said {
+    let psyche = from_core(Request::Living(flow_ethos::Living_Data {
         context: flow_ethos::Context("The living".into()),
         verbatim: flow_ethos::Verbatim("Words.".into()),
     }));

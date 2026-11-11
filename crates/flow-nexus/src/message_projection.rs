@@ -143,8 +143,12 @@ impl ProjectsRequest for Request {
         match self {
             Request::Order(value) => VisibleRequest::Order(value.clone()),
             Request::Question(value) => VisibleRequest::Question(value.clone()),
-            Request::Psyche(value) => VisibleRequest::Psyche(value.clone()),
-            Request::Psyches(value) => VisibleRequest::Psyches(value.clone()),
+            Request::Living(value) => {
+                VisibleRequest::Living(signal_flow::VisibleRequest_Living_Data {
+                    context: value.context.clone(),
+                    verbatim: value.verbatim.clone(),
+                })
+            }
             Request::Result(ResultPayload::Answered(value)) => VisibleRequest::Result(
                 VisibleResultPayload::Answered(VisibleResultPayload_Answered_Data {
                     request_id: value.request_id.clone(),
@@ -190,14 +194,13 @@ impl DeliversRequest for Request {
                 request_id: request_id.clone(),
                 string: value.clone(),
             }),
-            Request::Psyche(value) => DeliveredRequest::Psyche(signal_flow::Psyche_Data {
-                request_id: request_id.clone(),
-                said: value.clone(),
-            }),
-            Request::Psyches(value) => DeliveredRequest::Psyches(signal_flow::Psyches_Data {
-                request_id: request_id.clone(),
-                said_vector: value.clone(),
-            }),
+            Request::Living(value) => {
+                DeliveredRequest::Living(signal_flow::DeliveredRequest_Living_Data {
+                    request_id: request_id.clone(),
+                    context: value.context.clone(),
+                    verbatim: value.verbatim.clone(),
+                })
+            }
             Request::Result(ResultPayload::Answered(value)) => {
                 DeliveredRequest::Result(signal_flow::DeliveredRequest_Result_Data {
                     request_id: value.request_id.clone(),
@@ -562,8 +565,8 @@ impl ProjectsSendOutcomeRecord for meta_signal_flow::SendOutcomeRecord {
         };
         meta_signal_flow::VisibleSendOutcomeRecord {
             process_option: value.process_option.clone(),
-            first_address_option: value.first_address_option.clone(),
-            second_address_option: value.second_address_option.clone(),
+            sent_by: value.sent_by.clone(),
+            address_option: value.address_option.clone(),
             request_digest: value.request_digest.clone(),
             visible_ordinary_send_outcome,
         }

@@ -199,13 +199,23 @@ handover), and the Message bridge (`Bind` of the named process, `Identify`,
 `ObserveSender`, `ObserveDeliveries`) take any caller. `BindSeat.{ Address
 SeatPane }` and `Adopt.{ Address SeatPane NativeSessionId }` bind the seat
 in the pane they name. A Result or a Done closes the open request it names
-whoever sends it, addressed to the request's sender when that sender is an
-Address. A hook's Report is answered `Reported` whoever sends it; a seat a
-restart bound shares its native session with the harness it replaced, so its
-events act only when the reporting process descends from the resumed
-harness (the restart fence, a question for the living). A Launch opens its
-pane in the caller's Herdr session, another question. A refusal names the
-state of the thing asked about. Both
+whoever sends it, and the Nexus routes it to the sender of that request,
+whatever Address the Send writes (`store::kept_answer::RoutesAnswers`); a
+request whose sender is no Address (Unbound, Flow, Unknown) keeps its
+answer, which closes it, the Send answered `Sent` with the request's id,
+and `Answer.RequestId` reads it (`Answered` with its sender and priority,
+or `AnswerRejected.[ UnknownRequest Open Routed StoreRefused ]`). A Codex
+thread's send tool routes its Results the same way, answering `Kept` for a
+kept one. A hook's Report is answered `Reported` whoever sends it, and names
+the birth of the harness that ran the hook (`Report.{ FlowId Option<Process>
+Event }`, found by the hook above itself: the nearest process whose command
+line names the event's session after `--session-id` or `--resume`, or whose
+Claude session record names it). A seat a restart bound shares its native
+session with the harness it replaced, so its events act only when they name
+its own harness's birth; the caller is not read. Every launch, a Start, a
+Replace, a Launch, a wake, a successor and a restart's resume, opens its pane
+in the one Herdr session `Configure.Nexus` names (`launching::
+NamesLaunchSession`). A refusal names the state of the thing asked about. Both
 sockets are `0600` under one UID; security is the host's.
 
 A request, a reminder and a queue each have an operation of their own on the
@@ -217,10 +227,17 @@ Soft Notice for its sender, and for its recipient when it reached it;
 `Push.{ Address Priority }` wakes every queued entry and delivers the whole
 queue now as one Waking at the priority named (the waking lease carries it,
 `waking::PushesAtPriority`), waking an Asleep metaflow; `Queues` reads every
-queue that holds something; `Hot` reads every live flow's Address with the
+queue that holds something, each message as it would land in the prompt,
+its sender and priority with it; `Hot` reads every live flow's Address with the
 minutes since its last turn ended, from a per-Address turn end kept beside
 each harness's (`store::turn_end`). `RequestRejection.[ UnknownRequest NotYet
 Closed NotTask StoreRefused ]` names why a Cancel or Silence changed nothing.
+`Remind.{ Address Minutes String }` keeps a reminder for the Address it
+names (`store::scheduled_reminder`), answered `Reminded.RequestId`, its
+request bound open; when its minutes lapse the Address is sent
+`MiddleAbrupt.Reminder.{ RequestId String }` from whoever asked
+(`reminding`), and the request closes. Its Minutes meets a Task's rule;
+`Cancel` ends it before then and tells its asker.
 
 On the meta socket one declaration is changed alone:
 `Configure.Permaflow.ConfigureMetaflow` (keyed by its Address),
@@ -650,7 +667,13 @@ with the attempt it waits as, which LaunchStatus and Observe.Launch answer
 until its replacement is under way and then follow to its outcome. Until it
 rests the flow is handed what it is sent; at the idle event that finds it
 resting the order is carried out under the metaflow's hold, the queue held
-for the successor, and spent. A Nexus that starts again carries out each
+for the successor, and spent. An ordered `Refresh`, and a `Restart` of a
+working seat (answered `RestartQueued.FlowId`, the order `Restart`), is
+carried out at the flow's next idle event whatever it rests, its
+background work ended with its harness, as a refresh past the threshold is:
+a flow holding a comment watch reports background work at every Stop and
+would otherwise never be refreshed. A Restart of the last flow of an Asleep
+metaflow answers `RestartRefused.Asleep` and does nothing. A Nexus that starts again carries out each
 recorded order whose flow rests, keeps the others for their idle event, and
 starts a Launch whose flow ended before it rested as the metaflow's next
 flow; a Refresh for an ended flow is spent. The decision is taken under the dispatch
@@ -662,7 +685,9 @@ predecessor (`Predecessors.1`), and only then is the predecessor recorded
 Stopped and its pane closed, in the replacement's reaping; work queued
 meanwhile is then handed to the successor. A successor whose launch is
 refused leaves the predecessor Awake, the intent forgotten, and the next rest
-tries again. Any other seat due a refresh has its pane closed under its
+tries again; the first time a refusal stands, a Claude predecessor past its
+threshold is compacted (`Command.Compact`), and a Codex one, which has no
+compaction, is sent a Soft Notice that it is kept as it is. Any other seat due a refresh has its pane closed under its
 lease, is recorded Stopped and its metaflow Asleep, its queue kept for the
 next flow.
 

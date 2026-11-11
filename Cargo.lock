@@ -176,7 +176,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -207,7 +207,7 @@ checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
 name = "flow"
-version = "0.54.2"
+version = "0.54.3"
 dependencies = [
  "datom-codec",
  "ethos-zero",
@@ -216,17 +216,17 @@ dependencies = [
  "protos",
  "rkyv",
  "serde_json",
- "signal-flow 59.0.0",
+ "signal-flow",
  "tempfile",
 ]
 
 [[package]]
 name = "flow-defaults"
-version = "0.54.2"
+version = "0.54.3"
 
 [[package]]
 name = "flow-ethos"
-version = "0.54.2"
+version = "0.54.3"
 dependencies = [
  "datom-codec",
  "ethos-zero",
@@ -244,28 +244,28 @@ dependencies = [
 
 [[package]]
 name = "flow-meta"
-version = "0.54.2"
+version = "0.54.3"
 dependencies = [
  "datom-codec",
  "ethos-zero",
  "flow-ethos",
- "meta-signal-flow 74.0.0",
+ "meta-signal-flow",
  "protos",
  "rkyv",
- "signal-flow 59.0.0",
+ "signal-flow",
  "tempfile",
 ]
 
 [[package]]
 name = "flow-native"
-version = "0.54.2"
+version = "0.54.3"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "flow-nexus"
-version = "0.54.2"
+version = "0.54.3"
 dependencies = [
  "base64",
  "datom-codec",
@@ -278,8 +278,7 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
  "message-nexus",
- "meta-signal-flow 73.0.3",
- "meta-signal-flow 74.0.0",
+ "meta-signal-flow",
  "meta-signal-flow-before-request-ids",
  "meta-signal-message",
  "notify",
@@ -292,8 +291,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
- "signal-flow 58.0.2",
- "signal-flow 59.0.0",
+ "signal-flow",
  "signal-flow-before-request-ids",
  "signal-message",
  "tempfile",
@@ -482,34 +480,34 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "message-defaults"
-version = "0.23.1"
-source = "git+https://github.com/LiGoldragon/message?rev=c3d519d#c3d519d1494a534fe573c2749a5309b95bfa91ab"
+version = "0.24.0"
+source = "git+https://github.com/LiGoldragon/message?rev=71b5ac0#71b5ac0dbab577cd25d3d22fb9d789463162c19d"
 
 [[package]]
 name = "message-nexus"
-version = "0.23.1"
-source = "git+https://github.com/LiGoldragon/message?rev=c3d519d#c3d519d1494a534fe573c2749a5309b95bfa91ab"
+version = "0.24.0"
+source = "git+https://github.com/LiGoldragon/message?rev=71b5ac0#71b5ac0dbab577cd25d3d22fb9d789463162c19d"
 dependencies = [
  "ethos-zero",
  "flow-ethos",
  "getrandom 0.4.3",
  "libc",
  "message-defaults",
- "meta-signal-flow 73.0.3",
+ "meta-signal-flow",
  "meta-signal-message",
  "redb",
  "rkyv",
  "rustix",
  "sema-engine",
- "signal-flow 58.0.2",
+ "signal-flow",
  "signal-message",
  "thiserror",
 ]
 
 [[package]]
 name = "meta-signal-flow"
-version = "73.0.3"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=5f90d4c#5f90d4ccd84391777815247192028b6a094f6759"
+version = "75.0.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=e192c0d#e192c0d4338cf3b2381bb37ecb3a177283373db5"
 dependencies = [
  "datom-codec",
  "ethos-zero",
@@ -517,21 +515,7 @@ dependencies = [
  "protos",
  "rkyv",
  "signal",
- "signal-flow 58.0.2",
-]
-
-[[package]]
-name = "meta-signal-flow"
-version = "74.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=41063a9#41063a9509183e9c319451f4ccc042993bb08945"
-dependencies = [
- "datom-codec",
- "ethos-zero",
- "flow-ethos",
- "protos",
- "rkyv",
- "signal",
- "signal-flow 59.0.0",
+ "signal-flow",
 ]
 
 [[package]]
@@ -547,8 +531,8 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-message"
-version = "4.0.1"
-source = "git+https://github.com/LiGoldragon/meta-signal-message?rev=b9b6a5b#b9b6a5b60c0e97ddc78244cfc9e99539619a1e4a"
+version = "4.0.2"
+source = "git+https://github.com/LiGoldragon/meta-signal-message?rev=73b7a82#73b7a8213656f64da64fcc95bdbedc8f98d492c0"
 dependencies = [
  "datom-codec",
  "ethos-zero",
@@ -802,7 +786,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -926,21 +910,8 @@ dependencies = [
 
 [[package]]
 name = "signal-flow"
-version = "58.0.2"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=15790be#15790be9d6549e03912afa9603f9b4098622ba2e"
-dependencies = [
- "datom-codec",
- "ethos-zero",
- "flow-ethos",
- "protos",
- "rkyv",
- "signal",
-]
-
-[[package]]
-name = "signal-flow"
-version = "59.0.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=d2a4ca5#d2a4ca5979e2c3d76161996f6b8054008f62fa77"
+version = "60.0.0"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=04a72fd#04a72fd35345f63a06352c17f46f997d7fdafaee"
 dependencies = [
  "datom-codec",
  "ethos-zero",
@@ -962,15 +933,15 @@ dependencies = [
 
 [[package]]
 name = "signal-message"
-version = "22.0.1"
-source = "git+https://github.com/LiGoldragon/signal-message?rev=2999252#29992527e8da25b1f659c8827101f2a8b047f313"
+version = "23.0.0"
+source = "git+https://github.com/LiGoldragon/signal-message?rev=6d82783#6d82783e35393c9037283cbfd9f98053d22e1b46"
 dependencies = [
  "datom-codec",
  "ethos-zero",
  "protos",
  "rkyv",
  "signal",
- "signal-flow 58.0.2",
+ "signal-flow",
 ]
 
 [[package]]
@@ -1026,7 +997,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1191,7 +1162,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

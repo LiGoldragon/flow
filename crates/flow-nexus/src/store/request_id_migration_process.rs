@@ -673,15 +673,12 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     let before_duplicate = std::fs::read(&store_path).expect("Memory reads before duplicate");
     assert_eq!(
         store
-            .resolve_sendable_message(
-                &sender,
-                signal_flow::SendableMessage::Soft(signal_flow::SendableRequest::Result(
-                    signal_flow::SendableRequest_Result_Data {
-                        request_id: singleton.request_id.clone(),
-                        string: "duplicate".into(),
-                    },
-                )),
-            )
+            .resolve_sendable_message(signal_flow::SendableMessage::Soft(
+                signal_flow::SendableRequest::Result(signal_flow::SendableRequest_Result_Data {
+                    request_id: singleton.request_id.clone(),
+                    string: "duplicate".into(),
+                },)
+            ),)
             .expect("duplicate historical Result reads"),
         Err(signal_flow::Refusal::Unresolved)
     );

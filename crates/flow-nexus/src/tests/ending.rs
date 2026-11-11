@@ -23,6 +23,7 @@ fn report(fixture: &NexusFixture, event: Event) {
     assert_eq!(
         fixture.nexus.report(Report_Data {
             flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+            process_option: None,
             event: event.clone(),
         }),
         Response::Reported

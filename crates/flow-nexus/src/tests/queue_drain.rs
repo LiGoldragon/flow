@@ -101,6 +101,7 @@ fn report(fixture: &NexusFixture, event: Event) {
     assert_eq!(
         fixture.nexus.report(Report_Data {
             flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+            process_option: None,
             event: event.clone(),
         }),
         Response::Reported
@@ -604,6 +605,7 @@ fn a_foreign_stop_before_confirmation_is_not_a_turn_end() {
     assert_eq!(
         fixture.nexus.report(Report_Data {
             flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+            process_option: None,
             event: foreign_stop(),
         }),
         Response::Reported

@@ -194,6 +194,8 @@ pub(super) fn staged_refresh_successor(fixture: &NexusFixture) -> StagedLaunch {
     let mut successor = fixture.staged_launch(SUCCESSOR_REQUEST, Some(CLAUDE_SEAT));
     successor.profile.address = seat_address();
     successor.profile.model_name = flow_ethos::ModelName("fixture-model".into());
+    // The refresh's successor opens in the session the Nexus declares.
+    fixture.declare_launch_session("default");
     successor.profile.herdr_session_name = signal_flow::HerdrSessionName("default".into());
     successor.profile.remembering =
         signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(1));
@@ -910,11 +912,12 @@ fn an_on_demand_seat_refreshed_with_a_waking_request_starts_its_successor_first(
 
 /// A successor whose launch is refused leaves the predecessor Awake and
 /// live, its pane open; the refused launch is not owed again under the same
-/// request.
+/// request. Past its threshold, the kept Claude flow is compacted, once for
+/// the refusal that stands.
 #[test]
 fn a_refused_successor_launch_keeps_the_predecessor() {
     let fixture = NexusFixture::new();
-    fixture.accept_pane_operations(
+    let log = fixture.accept_pane_operations(
         vec![claude_agent(&fixture)],
         PromptFixture::Prompted("w1:p3"),
     );
@@ -936,6 +939,21 @@ fn a_refused_successor_launch_keeps_the_predecessor() {
     ));
     assert!(!closed(&fixture));
     assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Active);
+    let compactions = || {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains(" agent prompt ") && line.contains("/compact"))
+            .count()
+    };
+    assert_eq!(
+        compactions(),
+        1,
+        "past its threshold, the kept flow is compacted"
+    );
+    // The refusal standing, the next Stop compacts nothing more.
+    let _ = fixture.nexus.settle_stopped(CLAUDE_SEAT);
+    assert_eq!(compactions(), 1);
     assert_eq!(
         seat_metaflow_now(&fixture).state,
         State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))

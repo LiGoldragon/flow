@@ -103,14 +103,16 @@ enum ClaudeSession {
     Resumed(String),
 }
 
-/// Starts a restarted Claude flow's harness in the restart's new pane as
-/// the native session the flow already holds: `--resume <session>` where a
-/// launch passes `--session-id`, with the flow's FlowId exported into the
-/// pane as at launch, the launch's title, settings and hook, and no
-/// positional prompt. That a resume keeps the session's id is Claude Code's
-/// own claim; Bind checks the pane reports it.
-pub(crate) trait ResumesClaudeHarness {
-    fn resume_configured_claude_harness(
+/// Starts a restarted flow's harness in the restart's new pane as the
+/// native session the flow already holds, with no positional prompt. A
+/// Claude flow runs `--resume <session>` where a launch passes
+/// `--session-id`, with its FlowId exported into the pane as at launch, the
+/// launch's title, settings and hook; that a resume keeps the session's id
+/// is Claude Code's own claim, and Bind checks the pane reports it. A Codex
+/// flow's TUI attaches through the app-server to the thread it already
+/// holds, `resume <thread>`, as at launch: the app-server keeps the thread.
+pub(crate) trait ResumesHarness {
+    fn resume_configured_harness(
         &self,
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
@@ -120,8 +122,8 @@ pub(crate) trait ResumesClaudeHarness {
     ) -> Result<(), SpawnFailure>;
 }
 
-impl ResumesClaudeHarness for HerdrCli {
-    fn resume_configured_claude_harness(
+impl ResumesHarness for HerdrCli {
+    fn resume_configured_harness(
         &self,
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
@@ -129,19 +131,25 @@ impl ResumesClaudeHarness for HerdrCli {
         native_session_id: &str,
         harness_arguments: &[String],
     ) -> Result<(), SpawnFailure> {
-        if launch.harness_kind != HarnessKind::Claude {
-            return Err("only a Claude harness is resumed in a pane".into());
-        }
         if flow_id.is_empty() || native_session_id.is_empty() {
             return Err("a resumed harness needs its FlowId and native session".into());
         }
-        self.spawn_native_harness(
-            launch,
-            pane,
-            Some(flow_id),
-            ClaudeSession::Resumed(native_session_id.to_owned()),
-            harness_arguments,
-        )
+        match launch.harness_kind {
+            HarnessKind::Claude => self.spawn_native_harness(
+                launch,
+                pane,
+                Some(flow_id),
+                ClaudeSession::Resumed(native_session_id.to_owned()),
+                harness_arguments,
+            ),
+            HarnessKind::Codex => self.spawn_native_harness(
+                launch,
+                pane,
+                None,
+                ClaudeSession::Attached(native_session_id.to_owned()),
+                harness_arguments,
+            ),
+        }
     }
 }
 
@@ -371,7 +379,7 @@ pub trait ObservesNativeTargetReceipt {
 /// The Codex TUI's terminal title items: the thread title alone. The items
 /// codex-tui 0.161.0-alpha.2 accepts in `[tui].terminal_title` include
 /// `project-name`, `current-dir`, `run-state` and `thread-title`.
-const CODEX_TERMINAL_TITLE: &str = "tui.terminal_title=[\"thread-title\"]";
+pub(crate) const CODEX_TERMINAL_TITLE: &str = "tui.terminal_title=[\"thread-title\"]";
 
 /// How each Codex block a launch may leave out opens when Codex puts it in a
 /// request: the openings of the developer and user context messages in the

@@ -218,10 +218,7 @@ impl MutatesMetaflows for FlowStore {
         use sha2::Digest;
         let digest_text = request.datomize(Vec::new()).protosize().compact();
         let digest = format!("{:x}", sha2::Sha256::digest(digest_text.as_bytes()));
-        let message = match self.resolve_sendable_message(
-            &request.lock.second_address,
-            request.sendable_message.clone(),
-        )? {
+        let message = match self.resolve_sendable_message(request.sendable_message.clone())? {
             Ok(message) => message,
             Err(refusal) => return Ok(signal_flow::PrivateSendResponse::Refused(refusal)),
         };
@@ -753,6 +750,7 @@ mod tests {
                     ),
                     lease: flow_ethos::Lease(30),
                     presentation_prompt_option: None,
+                    herdr_session_name: signal_flow::HerdrSessionName("default".into()),
                 }))
                 .expect("Nexus configuration");
             drop(configuration);
@@ -840,7 +838,7 @@ mod tests {
             fixture.store.lock_metaflow(request, 100).unwrap(),
             Response::Refused(Refusal::Held(lock.clone()))
         );
-        let body = Request::Psyche(flow_ethos::Said {
+        let body = Request::Living(flow_ethos::Living_Data {
             context: flow_ethos::Context("fixture context".into()),
             verbatim: flow_ethos::Verbatim("Exact words.\nSecond line.".into()),
         });
@@ -854,8 +852,12 @@ mod tests {
                         lock: forged,
                         deliver_key: deliver_key(0),
                         sendable_message: signal_flow::SendableMessage::Soft(
-                            signal_flow::SendableRequest::Psyche(match body.clone() {
-                                Request::Psyche(value) => value,
+                            signal_flow::SendableRequest::Living(match body.clone() {
+                                Request::Living(value) =>
+                                    signal_flow::SendableRequest_Living_Data {
+                                        context: value.context,
+                                        verbatim: value.verbatim,
+                                    },
                                 _ => unreachable!(),
                             })
                         )
@@ -883,8 +885,12 @@ mod tests {
                         lock: lock.clone(),
                         deliver_key: deliver_key(1),
                         sendable_message: signal_flow::SendableMessage::Soft(
-                            signal_flow::SendableRequest::Psyche(match body.clone() {
-                                Request::Psyche(value) => value,
+                            signal_flow::SendableRequest::Living(match body.clone() {
+                                Request::Living(value) =>
+                                    signal_flow::SendableRequest_Living_Data {
+                                        context: value.context,
+                                        verbatim: value.verbatim,
+                                    },
                                 _ => unreachable!(),
                             })
                         )

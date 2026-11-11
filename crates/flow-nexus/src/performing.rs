@@ -594,7 +594,7 @@ impl Performs for RunningNexus {
                 harness_arguments,
                 ..
             }) => {
-                use crate::herdr::launch::ResumesClaudeHarness;
+                use crate::herdr::launch::ResumesHarness;
                 let (Some(flow_id), Some(session)) = (flow_id_option, native_session_id_option)
                 else {
                     return NativeLaunchRefusal::refused(
@@ -602,7 +602,7 @@ impl Performs for RunningNexus {
                         "a resume needs its FlowId and native session".into(),
                     );
                 };
-                match self.herdr.resume_configured_claude_harness(
+                match self.herdr.resume_configured_harness(
                     &composed_launch,
                     &herdr_pane_binding,
                     &flow_id.0,

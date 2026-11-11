@@ -1,8 +1,11 @@
-//! Reminders: the reminders of a Task left with no Done. Each is held in
-//! Flow's Memory (`store::reminder`), so a refresh of the reminded metaflow
-//! or a restart of the Nexus keeps it. A reminder due is queued for its
-//! metaflow as Soft.Notice with Wake, as from Flow, and woken or handed
-//! over as any waking request is.
+//! Reminders: the reminders of a Task left with no Done, and the reminders
+//! asked for by Remind. Each is held in Flow's Memory (`store::reminder`,
+//! `store::scheduled_reminder`), so a refresh of the reminded metaflow or a
+//! restart of the Nexus keeps it. A Task's reminder due is queued for its
+//! metaflow as Soft.Notice, as from Flow; a reminder asked for is queued for
+//! the Address it names as MiddleAbrupt `Reminder.{ RequestId String }`,
+//! from whoever asked. Each is woken or handed over as any waking request
+//! is.
 
 use crate::HoldsStopRequest;
 use crate::RunningNexus;
@@ -113,6 +116,46 @@ impl RemindsCallers for RunningNexus {
                     eprintln!("flow-nexus: a reminder was not advanced: {error}");
                 }
             }
+            // A reminder asked for reaches the Address it names at
+            // MiddleAbrupt, from whoever asked, and its request closes.
+            use crate::store::scheduled_reminder::SchedulesReminders;
+            let asked = match self.store.due_scheduled_reminders(now) {
+                Ok(asked) => asked,
+                Err(error) => {
+                    eprintln!("flow-nexus: asked reminders unreadable: {error}");
+                    Vec::new()
+                }
+            };
+            for reminder in asked {
+                let address = reminder.address.clone();
+                let closed_by = match self.store.accept_logical_delivery(
+                    &address,
+                    reminder.sent_by.clone(),
+                    flow_ethos::Delivery::Wake,
+                    Message::MiddleAbrupt(Request::Reminder(flow_ethos::Reminder_Data {
+                        request_id: reminder.request_id.clone(),
+                        string: reminder.text.clone(),
+                    })),
+                    None,
+                ) {
+                    Ok(signal_flow::PrivateSendResponse::SendAccepted(acceptance)) => {
+                        if !reminded.contains(&address) {
+                            reminded.push(address);
+                        }
+                        acceptance.logical_delivery_id
+                    }
+                    answer => {
+                        eprintln!(
+                            "flow-nexus: reminder {} was not queued for {address:?}: {answer:?}",
+                            reminder.request_id.0
+                        );
+                        signal_flow::LogicalDeliveryId(format!("unsent:{}", reminder.request_id.0))
+                    }
+                };
+                if let Err(error) = self.store.retire_scheduled_reminder(&reminder, closed_by) {
+                    eprintln!("flow-nexus: an asked reminder was not retired: {error}");
+                }
+            }
         }
         self.send_due_handover_reminders(SystemTime::now().seconds_since_epoch());
         self.retire_handover_archives();
@@ -144,9 +187,11 @@ impl RemindsCallers for RunningNexus {
     fn next_reminder_due(&self) -> Option<std::time::Instant> {
         use crate::store::handover_reminders::SchedulesHandoverReminders;
         let now = SystemTime::now().seconds_since_epoch();
+        use crate::store::scheduled_reminder::SchedulesReminders;
         let due = [
             self.store.next_reminder_due(now).ok().flatten(),
             self.store.next_handover_reminder_due(now).ok().flatten(),
+            self.store.next_scheduled_reminder_due(now).ok().flatten(),
         ]
         .into_iter()
         .flatten()

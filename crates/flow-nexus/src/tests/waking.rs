@@ -267,6 +267,7 @@ pub(super) fn report_claude_stop(
     assert_eq!(
         fixture.nexus.report(signal_flow::Report_Data {
             flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+            process_option: None,
             event: stop.clone(),
         }),
         signal_flow::Response::Reported
@@ -1344,9 +1345,9 @@ fn a_wake_receipt_settles_its_logical_prefix_atomically_and_preserves_the_suffix
     }
 }
 
-/// The context a wake composes a fresh flow from: the module identities,
-/// leave-outs and Herdr session of the metaflow's last launch, whatever
-/// that flow's end.
+/// The context a wake composes a fresh flow from: the module identities and
+/// leave-outs of the metaflow's last launch, whatever that flow's end, in
+/// the Herdr session the Nexus declares.
 fn last_launch_context() -> WakePlan {
     WakePlan::Fresh(FreshContext {
         herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
@@ -1623,6 +1624,8 @@ fn launched_claude_ended_by_with(
     instruction_prompt: &str,
     end: impl FnOnce(&crate::store::FlowStore) -> bool,
 ) -> LaunchedClaude {
+    // The launch of record opened in the session the Nexus declares.
+    fixture.declare_launch_session("fixture-session");
     let profile = LaunchProfile {
         launch_request_id: signal_flow::LaunchRequestId("launched-request".into()),
         system_modules: signal_flow::SystemModules(vec![
@@ -2639,6 +2642,7 @@ pub(super) fn message_peer(fixture: &NexusFixture) -> (super::MarkedProcess, sig
                 ),
                 lease: flow_ethos::Lease(30),
                 presentation_prompt_option: None,
+                herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
             },
         ))
         .expect("Nexus configured");
@@ -3679,6 +3683,7 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
     hook.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     hook.write_query(&signal_flow::Query::Report(signal_flow::Report_Data {
         flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+        process_option: None,
         event: claude_stop(fixture),
     }))
     .unwrap();
@@ -4174,6 +4179,7 @@ fn configure_secondary_model(fixture: &NexusFixture, native: &str) {
                 ),
                 lease: flow_ethos::Lease(30),
                 presentation_prompt_option: None,
+                herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
             },
         ))
         .expect("Nexus configured");
@@ -4855,6 +4861,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
                     ),
                     lease: flow_ethos::Lease(30),
                     presentation_prompt_option: None,
+                    herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
                 },
             ))
             .expect("Nexus configured");
@@ -5152,10 +5159,11 @@ fn a_refused_codex_start_archives_its_idle_thread_and_starts_no_turn() {
         None
     );
     assert!(stored(&fixture, Model::Astra).queue.0.is_empty());
-    // After the refusal the thread is no launch's: a call now is refused.
+    // After the refusal the thread is no launch's: a call now sends as
+    // Unbound.
     assert_eq!(
         fixture.nexus.store.thread_sender(FRESH_THREAD).unwrap(),
-        Err(crate::generated::send_tool::SendRefusal::ThreadUnowned)
+        signal_flow::SentBy::Unbound
     );
 }
 
@@ -5430,7 +5438,7 @@ fn a_launch_interrupted_with_its_first_call_pending_is_refused_archived_and_sett
     );
     assert_eq!(
         fixture.nexus.store.thread_sender(FRESH_THREAD).unwrap(),
-        Err(crate::generated::send_tool::SendRefusal::ThreadUnowned)
+        signal_flow::SentBy::Unbound
     );
     // No second launch: a replayed Start answers the settlement, and a
     // second start reconciles nothing.
@@ -5452,17 +5460,17 @@ fn a_launch_interrupted_with_its_first_call_pending_is_refused_archived_and_sett
 }
 
 /// While a launch runs, its thread's calls are sent from its Address only
-/// while no other flow holds that Address; and a launch settled is never
-/// a sender.
+/// while no other flow holds that Address; otherwise, and once the launch
+/// is settled, they are sent as Unbound.
 #[test]
-fn a_launch_whose_address_another_flow_holds_sends_nothing() {
+fn a_launch_whose_address_another_flow_holds_sends_as_unbound() {
     use crate::store::RecordsLaunchOutcome;
     use crate::store::send_call::KeepsSendCalls;
     let mut fixture = NexusFixture::new();
     let setup = interrupted_launch(&mut fixture);
     assert_eq!(
         fixture.nexus.store.thread_sender(FRESH_THREAD).unwrap(),
-        Ok(setup.sender.address.clone()),
+        signal_flow::SentBy::Sender(setup.sender.address.clone()),
         "an unsettled launch whose Address is free sends from it"
     );
     let owner = fixture.node();
@@ -5475,7 +5483,7 @@ fn a_launch_whose_address_another_flow_holds_sends_nothing() {
     });
     assert_eq!(
         fixture.nexus.store.thread_sender(FRESH_THREAD).unwrap(),
-        Err(crate::generated::send_tool::SendRefusal::ThreadUnowned),
+        signal_flow::SentBy::Unbound,
         "another live flow holds the Address"
     );
     let mut settled = NexusFixture::new();
@@ -5492,7 +5500,7 @@ fn a_launch_whose_address_another_flow_holds_sends_nothing() {
         .unwrap();
     assert_eq!(
         settled.nexus.store.thread_sender(FRESH_THREAD).unwrap(),
-        Err(crate::generated::send_tool::SendRefusal::ThreadUnowned),
+        signal_flow::SentBy::Unbound,
         "a settled launch is no sender"
     );
 }
@@ -5810,7 +5818,10 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
     let SendOutcome::Accepted(accepted) = &committed else {
         panic!("the call is committed with a logical identity: {committed:?}")
     };
-    assert_eq!(accepted.address, setup.sender.address);
+    assert_eq!(
+        accepted.sent_by,
+        signal_flow::SentBy::Sender(setup.sender.address.clone())
+    );
     let logical_delivery_id = accepted.send_acceptance.logical_delivery_id.clone();
     assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 1);
 
@@ -5901,6 +5912,7 @@ fn sender_holding_a_lock(fixture: &NexusFixture) -> Address {
                 ),
                 lease: flow_ethos::Lease(30),
                 presentation_prompt_option: None,
+                herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
             },
         ))
         .expect("Nexus configured");

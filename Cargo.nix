@@ -659,7 +659,7 @@ rec {
           }
           {
             name = "windows-sys";
-            packageId = "windows-sys 0.61.2";
+            packageId = "windows-sys 0.60.2";
             target = { target, features }: (target."windows" or false);
             features = [ "Win32_Foundation" "Win32_System_Diagnostics_Debug" ];
           }
@@ -748,7 +748,7 @@ rec {
       };
       "flow" = rec {
         crateName = "flow";
-        version = "0.54.2";
+        version = "0.54.3";
         edition = "2024";
         crateBin = [
           {
@@ -794,7 +794,7 @@ rec {
           }
           {
             name = "signal-flow";
-            packageId = "signal-flow 59.0.0";
+            packageId = "signal-flow";
             features = [ "datom" ];
           }
         ];
@@ -817,7 +817,7 @@ rec {
       };
       "flow-defaults" = rec {
         crateName = "flow-defaults";
-        version = "0.54.2";
+        version = "0.54.3";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/flow-defaults; };
         libName = "flow_defaults";
@@ -825,7 +825,7 @@ rec {
       };
       "flow-ethos" = rec {
         crateName = "flow-ethos";
-        version = "0.54.2";
+        version = "0.54.3";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/flow-ethos; };
         libName = "flow_ethos";
@@ -884,7 +884,7 @@ rec {
       };
       "flow-meta" = rec {
         crateName = "flow-meta";
-        version = "0.54.2";
+        version = "0.54.3";
         edition = "2024";
         crateBin = [
           {
@@ -908,7 +908,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 74.0.0";
+            packageId = "meta-signal-flow";
             features = [ "datom" ];
           }
           {
@@ -923,7 +923,7 @@ rec {
           }
           {
             name = "signal-flow";
-            packageId = "signal-flow 59.0.0";
+            packageId = "signal-flow";
           }
         ];
         buildDependencies = [
@@ -945,7 +945,7 @@ rec {
       };
       "flow-native" = rec {
         crateName = "flow-native";
-        version = "0.54.2";
+        version = "0.54.3";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/flow-native; };
         libName = "flow_native";
@@ -959,7 +959,7 @@ rec {
       };
       "flow-nexus" = rec {
         crateName = "flow-nexus";
-        version = "0.54.2";
+        version = "0.54.3";
         edition = "2024";
         crateBin = [
           {
@@ -1022,7 +1022,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 74.0.0";
+            packageId = "meta-signal-flow";
             features = [ "datom" ];
           }
           {
@@ -1075,7 +1075,7 @@ rec {
           }
           {
             name = "signal-flow";
-            packageId = "signal-flow 59.0.0";
+            packageId = "signal-flow";
           }
           {
             name = "signal-flow-before-request-ids";
@@ -1107,20 +1107,8 @@ rec {
             packageId = "message-nexus";
           }
           {
-            name = "meta-signal-flow";
-            packageId = "meta-signal-flow 73.0.3";
-            rename = "meta-signal-flow-message";
-            features = [ "datom" ];
-          }
-          {
             name = "meta-signal-message";
             packageId = "meta-signal-message";
-            features = [ "datom" ];
-          }
-          {
-            name = "signal-flow";
-            packageId = "signal-flow 58.0.2";
-            rename = "signal-flow-message";
             features = [ "datom" ];
           }
           {
@@ -1703,27 +1691,27 @@ rec {
       };
       "message-defaults" = rec {
         crateName = "message-defaults";
-        version = "0.23.1";
+        version = "0.24.0";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/message";
-          rev = "c3d519d1494a534fe573c2749a5309b95bfa91ab";
-          sha256 = "18sqfa98jmxkvd6zvgn5972vnrsx9402kdnyndnqbmzq8yl6lb39";
+          rev = "71b5ac0dbab577cd25d3d22fb9d789463162c19d";
+          sha256 = "05j1wskipmb3xan3i211qsydijqckalc06f3629ywkzbnq9kw3ds";
         };
         libName = "message_defaults";
 
       };
       "message-nexus" = rec {
         crateName = "message-nexus";
-        version = "0.23.1";
+        version = "0.24.0";
         edition = "2024";
         crateBin = [];
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/message";
-          rev = "c3d519d1494a534fe573c2749a5309b95bfa91ab";
-          sha256 = "18sqfa98jmxkvd6zvgn5972vnrsx9402kdnyndnqbmzq8yl6lb39";
+          rev = "71b5ac0dbab577cd25d3d22fb9d789463162c19d";
+          sha256 = "05j1wskipmb3xan3i211qsydijqckalc06f3629ywkzbnq9kw3ds";
         };
         libName = "message_nexus";
         dependencies = [
@@ -1746,7 +1734,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 73.0.3";
+            packageId = "meta-signal-flow";
           }
           {
             name = "meta-signal-message";
@@ -1773,7 +1761,7 @@ rec {
           }
           {
             name = "signal-flow";
-            packageId = "signal-flow 58.0.2";
+            packageId = "signal-flow";
           }
           {
             name = "signal-message";
@@ -1795,15 +1783,15 @@ rec {
         };
         resolvedDefaultFeatures = [ "default" ];
       };
-      "meta-signal-flow 73.0.3" = rec {
+      "meta-signal-flow" = rec {
         crateName = "meta-signal-flow";
-        version = "73.0.3";
+        version = "75.0.0";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-flow";
-          rev = "5f90d4ccd84391777815247192028b6a094f6759";
-          sha256 = "16jni9cb303fkq324f8zk00yxbbw5zkr5fzl7qjgdh2mf8jrvi7g";
+          rev = "e192c0d4338cf3b2381bb37ecb3a177283373db5";
+          sha256 = "11xvhv27qxqg685a28g6g10mbwwnwbk89dfx7aw3y4s7ffygdf1x";
         };
         libName = "meta_signal_flow";
         dependencies = [
@@ -1835,61 +1823,7 @@ rec {
           }
           {
             name = "signal-flow";
-            packageId = "signal-flow 58.0.2";
-          }
-        ];
-        buildDependencies = [
-          {
-            name = "ethos-zero";
-            packageId = "ethos-zero";
-          }
-        ];
-        features = {
-          "datom" = [ "dep:datom-codec" "dep:protos" "flow-ethos/datom" "signal-flow/datom" "signal/datom" ];
-        };
-        resolvedDefaultFeatures = [ "datom" "default" ];
-      };
-      "meta-signal-flow 74.0.0" = rec {
-        crateName = "meta-signal-flow";
-        version = "74.0.0";
-        edition = "2024";
-        workspace_member = null;
-        src = pkgs.fetchgit {
-          url = "https://github.com/LiGoldragon/meta-signal-flow";
-          rev = "41063a9509183e9c319451f4ccc042993bb08945";
-          sha256 = "05c7gh11q0jvaplfp14b37y41pbf3dmqbjpqmsiv5yiivc1cms4r";
-        };
-        libName = "meta_signal_flow";
-        dependencies = [
-          {
-            name = "datom-codec";
-            packageId = "datom-codec";
-            optional = true;
-          }
-          {
-            name = "flow-ethos";
-            packageId = "flow-ethos";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "protos";
-            packageId = "protos";
-            optional = true;
-          }
-          {
-            name = "rkyv";
-            packageId = "rkyv";
-            usesDefaultFeatures = false;
-            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
-          }
-          {
-            name = "signal";
-            packageId = "signal";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "signal-flow";
-            packageId = "signal-flow 59.0.0";
+            packageId = "signal-flow";
           }
         ];
         buildDependencies = [
@@ -1944,13 +1878,13 @@ rec {
       };
       "meta-signal-message" = rec {
         crateName = "meta-signal-message";
-        version = "4.0.1";
+        version = "4.0.2";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-message";
-          rev = "b9b6a5b60c0e97ddc78244cfc9e99539619a1e4a";
-          sha256 = "0rv83lj55yx3g3c685fw67d5al2zhsyrbjsm5nscg3cbq5h5yqxw";
+          rev = "73b7a8213656f64da64fcc95bdbedc8f98d492c0";
+          sha256 = "113jr3zhr4ggnsdfapg9kjb71hlfisqkq9y9rlv9q848zl295gbr";
         };
         libName = "meta_signal_message";
         dependencies = [
@@ -2791,7 +2725,7 @@ rec {
           }
           {
             name = "windows-sys";
-            packageId = "windows-sys 0.61.2";
+            packageId = "windows-sys 0.60.2";
             target = { target, features }: (target."windows" or false);
             features = [ "Win32_Foundation" "Win32_Networking_WinSock" ];
           }
@@ -3202,65 +3136,15 @@ rec {
         };
         resolvedDefaultFeatures = [ "datom" ];
       };
-      "signal-flow 58.0.2" = rec {
+      "signal-flow" = rec {
         crateName = "signal-flow";
-        version = "58.0.2";
+        version = "60.0.0";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal-flow";
-          rev = "15790be9d6549e03912afa9603f9b4098622ba2e";
-          sha256 = "1imw199l2nqq0mn1dvvqcbaclkpb7q9xa17cb02f7v578wqzhzs2";
-        };
-        libName = "signal_flow";
-        dependencies = [
-          {
-            name = "datom-codec";
-            packageId = "datom-codec";
-            optional = true;
-          }
-          {
-            name = "flow-ethos";
-            packageId = "flow-ethos";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "protos";
-            packageId = "protos";
-            optional = true;
-          }
-          {
-            name = "rkyv";
-            packageId = "rkyv";
-            usesDefaultFeatures = false;
-            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
-          }
-          {
-            name = "signal";
-            packageId = "signal";
-            usesDefaultFeatures = false;
-          }
-        ];
-        buildDependencies = [
-          {
-            name = "ethos-zero";
-            packageId = "ethos-zero";
-          }
-        ];
-        features = {
-          "datom" = [ "dep:datom-codec" "dep:protos" "flow-ethos/datom" "signal/datom" ];
-        };
-        resolvedDefaultFeatures = [ "datom" "default" ];
-      };
-      "signal-flow 59.0.0" = rec {
-        crateName = "signal-flow";
-        version = "59.0.0";
-        edition = "2024";
-        workspace_member = null;
-        src = pkgs.fetchgit {
-          url = "https://github.com/LiGoldragon/signal-flow";
-          rev = "d2a4ca5979e2c3d76161996f6b8054008f62fa77";
-          sha256 = "0ppn161hkvr6wlf8iw72ancs5jsvxban72d3gddxb49k6ap5lfli";
+          rev = "04a72fd35345f63a06352c17f46f997d7fdafaee";
+          sha256 = "0lkpi5wfykk30x9b35bia592cs8v83bbmgb6c9nl5dmm44ra693r";
         };
         libName = "signal_flow";
         dependencies = [
@@ -3338,13 +3222,13 @@ rec {
       };
       "signal-message" = rec {
         crateName = "signal-message";
-        version = "22.0.1";
+        version = "23.0.0";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal-message";
-          rev = "29992527e8da25b1f659c8827101f2a8b047f313";
-          sha256 = "0yccv3m4ki7mrf8xk83wdjg3g48wbnxj3iz0jaq1jqn67q68llz8";
+          rev = "6d82783e35393c9037283cbfd9f98053d22e1b46";
+          sha256 = "1x8pbnzia7siv6lirj0hpy4ynlxclkixaj6zi7zywxak47xrvsgw";
         };
         libName = "signal_message";
         dependencies = [
@@ -3371,7 +3255,7 @@ rec {
           }
           {
             name = "signal-flow";
-            packageId = "signal-flow 58.0.2";
+            packageId = "signal-flow";
           }
         ];
         buildDependencies = [
@@ -3541,7 +3425,7 @@ rec {
           }
           {
             name = "windows-sys";
-            packageId = "windows-sys 0.61.2";
+            packageId = "windows-sys 0.60.2";
             target = { target, features }: (target."windows" or false);
             features = [ "Win32_Storage_FileSystem" "Win32_Foundation" ];
           }
@@ -4017,7 +3901,7 @@ rec {
         dependencies = [
           {
             name = "windows-sys";
-            packageId = "windows-sys 0.61.2";
+            packageId = "windows-sys 0.60.2";
             target = { target, features }: (target."windows" or false);
             features = [ "Win32_Foundation" "Win32_Storage_FileSystem" "Win32_System_Console" "Win32_System_SystemInformation" ];
           }
@@ -4295,7 +4179,7 @@ rec {
           "Win32_Web" = [ "Win32" ];
           "Win32_Web_InternetExplorer" = [ "Win32_Web" ];
         };
-        resolvedDefaultFeatures = [ "Win32" "Win32_Foundation" "Win32_Security" "Win32_Storage" "Win32_Storage_FileSystem" "Win32_System" "Win32_System_IO" "Win32_System_Threading" "Win32_System_WindowsProgramming" "default" ];
+        resolvedDefaultFeatures = [ "Win32" "Win32_Foundation" "Win32_Networking" "Win32_Networking_WinSock" "Win32_Security" "Win32_Storage" "Win32_Storage_FileSystem" "Win32_System" "Win32_System_Console" "Win32_System_Diagnostics" "Win32_System_Diagnostics_Debug" "Win32_System_IO" "Win32_System_SystemInformation" "Win32_System_Threading" "Win32_System_WindowsProgramming" "default" ];
       };
       "windows-sys 0.61.2" = rec {
         crateName = "windows-sys";
@@ -4557,7 +4441,7 @@ rec {
           "Win32_Web" = [ "Win32" ];
           "Win32_Web_InternetExplorer" = [ "Win32_Web" ];
         };
-        resolvedDefaultFeatures = [ "Wdk" "Wdk_Foundation" "Wdk_Storage" "Wdk_Storage_FileSystem" "Wdk_System" "Wdk_System_IO" "Win32" "Win32_Foundation" "Win32_Networking" "Win32_Networking_WinSock" "Win32_Security" "Win32_Storage" "Win32_Storage_FileSystem" "Win32_System" "Win32_System_Console" "Win32_System_Diagnostics" "Win32_System_Diagnostics_Debug" "Win32_System_IO" "Win32_System_Pipes" "Win32_System_SystemInformation" "Win32_System_WindowsProgramming" "default" ];
+        resolvedDefaultFeatures = [ "Wdk" "Wdk_Foundation" "Wdk_Storage" "Wdk_Storage_FileSystem" "Wdk_System" "Wdk_System_IO" "Win32" "Win32_Foundation" "Win32_Networking" "Win32_Networking_WinSock" "Win32_Security" "Win32_Storage" "Win32_Storage_FileSystem" "Win32_System" "Win32_System_IO" "Win32_System_Pipes" "Win32_System_WindowsProgramming" "default" ];
       };
       "windows-targets" = rec {
         crateName = "windows-targets";

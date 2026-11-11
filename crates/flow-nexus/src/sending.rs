@@ -15,9 +15,7 @@
 
 use crate::RunningNexus;
 use crate::binding::{ReadsProcessIdentity, VerifiesAdoptedSeat};
-use crate::caller::{
-    AuthenticatesProcessAuthority, CallerProcess, LocatesCallerPane, ProcessAuthority,
-};
+use crate::caller::{AuthenticatesProcessAuthority, ProcessAuthority};
 use crate::composition::JoinsPurpose;
 use crate::generated::operation::{Failed_Data, Operation, Outcome};
 use crate::harness_command::{
@@ -249,11 +247,10 @@ impl SendsRequests for RunningNexus {
             Some(peer) => self.sender_of(peer),
             None => Ok(SentBy::Unbound),
         };
-        let sender = match &observed_sender {
-            Ok(SentBy::Sender(address)) => Some(address.clone()),
-            _ => None,
-        };
-        let recipient = Some(send.address.clone());
+        // The sender the outcome is recorded with: Unknown when it could
+        // not be read.
+        let recorded_sender = observed_sender.clone().unwrap_or(SentBy::Unknown);
+        let mut recipient = Some(send.address.clone());
         let mut pending_answer = None;
         let mut answer = (|| -> SendAnswer {
             let _turn = self
@@ -300,10 +297,9 @@ impl SendsRequests for RunningNexus {
             } else {
                 flow_ethos::Delivery::Queue
             };
-            let recipient = send.address.clone();
             let message = match self
                 .store
-                .resolve_sendable_message(&recipient, send.sendable_message.clone())
+                .resolve_sendable_message(send.sendable_message.clone())
             {
                 Ok(Ok(message)) => message,
                 Ok(Err(refusal)) => return PrivateSendResponse::Refused(refusal).into(),
@@ -314,6 +310,38 @@ impl SendsRequests for RunningNexus {
             if let Some(refusal) = message.oversized_refusal(&sender) {
                 return PrivateSendResponse::Refused(refusal).into();
             }
+            // A Result or Done goes to the sender of the request it names,
+            // whatever Address the Send writes. One whose sender is no
+            // Address is kept with the request, answered Sent with its id.
+            let recipient = {
+                use crate::store::kept_answer::{AnswerRoute, MarksKeptAnswer, RoutesAnswers};
+                match self.store.answer_route(&message) {
+                    Ok(AnswerRoute::Unanswering) => send.address.clone(),
+                    Ok(AnswerRoute::To(address)) => {
+                        recipient = Some(address.clone());
+                        address
+                    }
+                    Ok(AnswerRoute::Kept(binding)) => {
+                        recipient = None;
+                        let request_id = binding.request_id.clone();
+                        return match self.store.keep_answer(binding, &sender, &message) {
+                            Ok(()) => PrivateSendResponse::Sent(signal_flow::SendReceipt {
+                                logical_delivery_id: request_id.kept_marker(),
+                                request_id,
+                            })
+                            .into(),
+                            Err(error) => {
+                                PrivateSendResponse::Refused(Refusal::Store(error.to_string()))
+                                    .into()
+                            }
+                        };
+                    }
+                    Err(error) => {
+                        return PrivateSendResponse::Refused(Refusal::Store(error.to_string()))
+                            .into();
+                    }
+                }
+            };
             self.rest_ended_awake(&recipient);
             // Own the address until the direct call has a receipt or a
             // durable non-retryable failure. Background drain/wake may not
@@ -402,7 +430,7 @@ impl SendsRequests for RunningNexus {
         }
         match self.store.record_send_outcome(
             peer.cloned(),
-            sender,
+            recorded_sender,
             recipient,
             request_digest,
             answer.private_response.clone(),
@@ -488,38 +516,25 @@ pub trait ChoosesEffort {
 
 impl ChoosesEffort for RunningNexus {}
 
-/// The Herdr session a launch opens its pane in when its caller runs in
-/// none.
-const DEFAULT_HERDR_SESSION: &str = "default";
-
 pub trait LaunchesDeclared {
-    /// The Start a Launch from `caller` names, or, when the metaflow is
-    /// Awake as a live flow, whoever the caller is, the Replace of that
-    /// flow; Err with the refusal when the Address is undeclared or its
-    /// model unconfigured. It only reads; the Start or Replace it names is
-    /// dispatched as any other.
-    fn declared_launch(
-        &self,
-        launch: LaunchRequest,
-        caller: Option<&Process>,
-    ) -> Result<signal_flow::Query, Box<Response>>;
-    /// The profile and predecessor state one declared request reads. A
-    /// rehearsal uses semantic identities and performs no Herdr read.
+    /// The Start a Launch names, or, when the metaflow is Awake as a live
+    /// flow, whoever asks, the Replace of that flow; Err with the refusal
+    /// when the Address is undeclared or its model unconfigured. It only
+    /// reads; the Start or Replace it names is dispatched as any other.
+    fn declared_launch(&self, launch: LaunchRequest) -> Result<signal_flow::Query, Box<Response>>;
+    /// The profile and predecessor state one declared request reads, in the
+    /// configured Herdr session. A rehearsal uses semantic identities and
+    /// performs no Herdr read.
     fn declared_profile(
         &self,
         launch: LaunchRequest,
-        caller: Option<&Process>,
         rehearsal: bool,
     ) -> Result<(LaunchProfile, Option<String>), Box<Response>>;
 }
 
 impl LaunchesDeclared for RunningNexus {
-    fn declared_launch(
-        &self,
-        launch: LaunchRequest,
-        caller: Option<&Process>,
-    ) -> Result<signal_flow::Query, Box<Response>> {
-        let (profile, predecessor) = self.declared_profile(launch, caller, false)?;
+    fn declared_launch(&self, launch: LaunchRequest) -> Result<signal_flow::Query, Box<Response>> {
+        let (profile, predecessor) = self.declared_profile(launch, false)?;
         Ok(match predecessor {
             Some(_) => signal_flow::Query::Replace(profile),
             None => signal_flow::Query::Start(profile),
@@ -529,7 +544,6 @@ impl LaunchesDeclared for RunningNexus {
     fn declared_profile(
         &self,
         launch: LaunchRequest,
-        caller: Option<&Process>,
         rehearsal: bool,
     ) -> Result<(LaunchProfile, Option<String>), Box<Response>> {
         let store_refused = |error: crate::store::StoreError| {
@@ -564,14 +578,12 @@ impl LaunchesDeclared for RunningNexus {
         // A Launch addressed to an Awake metaflow refreshes it: the flow it
         // is Awake as is replaced by the launch, never typed into.
         let predecessor = self.live_awake_flow(&address);
+        // Every launch opens in the one configured session, whoever asks.
         let herdr_session_name = if rehearsal {
             "<session>".to_owned()
         } else {
-            caller
-                .and_then(|process| u32::try_from(process.pid.0).ok())
-                .and_then(|process_id| CallerProcess { process_id }.caller_pane(&self.herdr))
-                .map(|pane| pane.herdr_session_name)
-                .unwrap_or_else(|| DEFAULT_HERDR_SESSION.to_owned())
+            use crate::launching::NamesLaunchSession;
+            self.launch_session().map_err(store_refused)?.0
         };
         let profile = LaunchProfile {
             launch_request_id: if rehearsal {
@@ -617,7 +629,7 @@ impl RehearsesDeclared for RunningNexus {
             }
             _ => Response::RehearseRejected(StartRejection::LaunchPersistenceRefused),
         };
-        let (profile, _) = match self.declared_profile(launch, None, true) {
+        let (profile, _) = match self.declared_profile(launch, true) {
             Ok(profile) => profile,
             Err(response) => return rejected(*response),
         };

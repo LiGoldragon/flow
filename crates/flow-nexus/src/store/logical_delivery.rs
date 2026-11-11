@@ -486,12 +486,9 @@ pub(crate) trait MintsRequestIds {
     /// `binding` names, whoever sends it: a Result an Order or Question, a
     /// Done a Task, the request delivered, and the answer addressed to the
     /// request's sender when that sender is an Address.
-    fn answerable_by(
-        &self,
-        binding: &RequestIdBinding,
-        recipient: &Address,
-        task: bool,
-    ) -> Result<bool, StoreError>;
+    /// Whether the request `binding` names is answerable: retained,
+    /// delivered, and an Order or Question (a Task for a Done).
+    fn answerable_by(&self, binding: &RequestIdBinding, task: bool) -> Result<bool, StoreError>;
     fn store_identity(&self) -> Result<signal_flow::StoreIdentity, StoreError>;
 }
 
@@ -527,24 +524,13 @@ impl MintsRequestIds for FlowStore {
         ))?;
         Ok(rows.records().first().cloned())
     }
-    fn answerable_by(
-        &self,
-        binding: &RequestIdBinding,
-        recipient: &Address,
-        task: bool,
-    ) -> Result<bool, StoreError> {
+    fn answerable_by(&self, binding: &RequestIdBinding, task: bool) -> Result<bool, StoreError> {
         let Some(retained) = self
             .retained_logical_requests()?
             .into_iter()
             .find(|value| value.entry.logical_delivery_id == binding.logical_delivery_id)
         else {
             return Ok(false);
-        };
-        // A request from an Address is answered to it; one from no Address
-        // (Unbound, Flow, Unknown) is answered to whom the answer names.
-        let addressed = match &retained.entry.sent_by {
-            SentBy::Sender(original_sender) => original_sender == recipient,
-            _ => true,
         };
         let request = match &retained.entry.message {
             Message::HardAbrupt(value) | Message::MiddleAbrupt(value) | Message::Soft(value) => {
@@ -557,7 +543,7 @@ impl MintsRequestIds for FlowStore {
             matches!(request, Request::Order(_) | Request::Question(_))
         };
         let delivered = self.delivered_to_be_answered(&binding.logical_delivery_id)?;
-        Ok(correct_kind && addressed && delivered)
+        Ok(correct_kind && delivered)
     }
     fn mint_request_id(&self) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError> {
         let held = self
@@ -689,20 +675,19 @@ pub(crate) trait RecordsLogicalDeliveries {
     ) -> Result<Result<(), signal_flow::ArchiveRejection>, StoreError>;
     fn seed_missing_queued_deliveries(&self) -> Result<(), StoreError>;
     fn force_queue_wake(&self, address: &Address) -> Result<(), StoreError>;
-    /// Resolves a public message against durable private evidence. The
-    /// recipient is supplied by the Nexus; whoever sends it, an answer
-    /// closes the open request it names. Answer correlation is exact typed
-    /// data.
+    /// Resolves a public message against durable private evidence; answer
+    /// correlation is exact typed data. The request a Send carries, as Flow holds it: a Result or Done is
+    /// resolved to the request it names, which must be open, delivered and
+    /// of its kind, whatever Address the Send writes; the Nexus routes it.
     fn resolve_sendable_message(
         &self,
-        recipient: &Address,
         message: signal_flow::SendableMessage,
     ) -> Result<Result<Message, Refusal>, StoreError>;
     fn accept_tool_send(
         &self,
         key: &ToolCallKey,
         content_sha256: &str,
-        sender: Address,
+        sender: SentBy,
         target: &Target,
         message: Message,
         now: i64,
@@ -1551,7 +1536,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         &self,
         key: &ToolCallKey,
         content_sha256: &str,
-        sender: Address,
+        sender: SentBy,
         target: &Target,
         message: Message,
         now: i64,
@@ -1589,7 +1574,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     }
                     return Ok(ToolSendOutcome::Archived(
                         crate::generated::send_tool::Archived_Data {
-                            address: accepted.address.clone(),
+                            sent_by: accepted.sent_by.clone(),
                             target: accepted.target.clone(),
                         },
                     ));
@@ -1668,7 +1653,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         let entry = QueueEntry {
             logical_delivery_id: flow_ethos::LogicalDeliveryId(id.clone()),
             request_id: request_id.clone(),
-            sent_by: SentBy::Sender(sender.clone()),
+            sent_by: sender.clone(),
             delivery,
             message,
         };
@@ -1677,7 +1662,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             delivery_cursor: signal_flow::DeliveryCursor(cursor),
             logical_delivery_id: signal_flow::LogicalDeliveryId(id.clone()),
             request_id: request_id.clone(),
-            sent_by: SentBy::Sender(sender.clone()),
+            sent_by: sender.clone(),
             address: stored.metaflow.address.clone(),
             delivery_state: DeliveryState::Queued,
         };
@@ -1689,7 +1674,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         };
         let accepted_logical_id = acceptance.logical_delivery_id.clone();
         let outcome = ToolSendOutcome::Accepted(Accepted_Data {
-            address: sender.clone(),
+            sent_by: sender.clone(),
             target: target.clone(),
             send_acceptance: acceptance,
         });
@@ -1817,7 +1802,6 @@ impl RecordsLogicalDeliveries for FlowStore {
     }
     fn resolve_sendable_message(
         &self,
-        recipient: &Address,
         message: signal_flow::SendableMessage,
     ) -> Result<Result<Message, Refusal>, StoreError> {
         use flow_ethos::{ResultPayload, ResultPayload_Answered_Data};
@@ -1831,8 +1815,10 @@ impl RecordsLogicalDeliveries for FlowStore {
         let private = match request {
             SendableRequest::Order(value) => Request::Order(value),
             SendableRequest::Question(value) => Request::Question(value),
-            SendableRequest::Psyche(value) => Request::Psyche(value),
-            SendableRequest::Psyches(value) => Request::Psyches(value),
+            SendableRequest::Living(value) => Request::Living(flow_ethos::Living_Data {
+                context: value.context,
+                verbatim: value.verbatim,
+            }),
             SendableRequest::Notice(value) => Request::Notice(value),
             SendableRequest::Task(value) => Request::Task(value),
             SendableRequest::Result(result) => {
@@ -1843,7 +1829,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     Ok(binding) => binding,
                     Err(refusal) => return Ok(Err(refusal)),
                 };
-                if !self.answerable_by(&binding, recipient, false)? {
+                if !self.answerable_by(&binding, false)? {
                     return Ok(Err(Refusal::Unresolved));
                 }
                 Request::Result(ResultPayload::Answered(ResultPayload_Answered_Data {
@@ -1860,7 +1846,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     Ok(binding) => binding,
                     Err(refusal) => return Ok(Err(refusal)),
                 };
-                if !self.answerable_by(&binding, recipient, true)? {
+                if !self.answerable_by(&binding, true)? {
                     return Ok(Err(Refusal::Unresolved));
                 }
                 Request::Done(flow_ethos::DonePayload::Answered(

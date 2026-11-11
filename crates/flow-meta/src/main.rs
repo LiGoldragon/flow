@@ -204,6 +204,7 @@ mod tests {
             ),
             lease: flow_ethos::Lease(60),
             presentation_prompt_option: None,
+            herdr_session_name: signal_flow::HerdrSessionName("default".into()),
         };
         let query = Query::Configure(ConfigurationChange::Nexus(nexus.clone()));
         let datom = query.datomize(vec![]).protosize().compact();
@@ -363,6 +364,7 @@ mod tests {
                 ),
                 lease: flow_ethos::Lease(60),
                 presentation_prompt_option: None,
+                herdr_session_name: signal_flow::HerdrSessionName("default".into()),
             }),
             configured_models: meta_signal_flow::ConfiguredModels(vec![]),
             configured_thresholds: meta_signal_flow::ConfiguredThresholds(vec![]),

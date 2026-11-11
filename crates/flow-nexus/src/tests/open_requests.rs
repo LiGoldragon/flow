@@ -126,7 +126,7 @@ impl DeliversRequests for FlowStore {
         message: SendableMessage,
     ) -> Result<SendAcceptance, Refusal> {
         let message = self
-            .resolve_sendable_message(requester, message)
+            .resolve_sendable_message(message)
             .expect("the answer resolves")?;
         match self
             .accept_logical_delivery(
@@ -321,12 +321,8 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
         store.reminder(&open_task.logical_delivery_id.0).unwrap(),
         Some(deadline)
     );
-    // Whoever answers, a Done goes to its Task's sender: one addressed
-    // elsewhere resolves nothing. The successor answers by the same id.
-    assert_eq!(
-        store.answered(&sender, &at, done(&open_task.request_id.0)),
-        Err(Refusal::Unresolved)
-    );
+    // The successor answers by the same id; whatever Address the Send
+    // writes, the Nexus routes the Done to its Task's sender.
     store
         .answered(&at, &sender, done(&open_task.request_id.0))
         .expect("the successor's Done is admitted");

@@ -39,6 +39,9 @@ pub enum ReplacementOrder {
     Refresh,
     /// A Launch or a Replace: its own profile is the successor.
     Launch(Box<OrderedLaunch>),
+    /// A Restart: the flow's harness is closed and its own session resumed,
+    /// its background work ended.
+    Restart,
 }
 
 /// A replacement of `predecessor`, the flow the metaflow at `address` is
@@ -89,7 +92,7 @@ impl NamesOrderedLaunch for OrderedReplacement {
     fn ordered_launch(&self) -> Option<&OrderedLaunch> {
         match &self.order {
             ReplacementOrder::Launch(launch) => Some(&**launch),
-            ReplacementOrder::Refresh => None,
+            ReplacementOrder::Refresh | ReplacementOrder::Restart => None,
         }
     }
 }

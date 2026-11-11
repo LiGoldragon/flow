@@ -435,8 +435,8 @@ pub enum WakePlan {
     /// A new flow, launched from configuration and the context the
     /// metaflow's last launch named.
     Fresh(FreshContext),
-    /// No launch of the metaflow names a Herdr session and a context to
-    /// wake it with.
+    /// No declaration or launch of the metaflow names a context to wake it
+    /// with, or no Herdr session is configured.
     Unplaceable,
 }
 
@@ -462,6 +462,9 @@ pub enum AtStop {
     /// replacement's reaping. Any other had its pane closed and was recorded
     /// Stopped, its metaflow Asleep, its queue kept for its next flow.
     Refreshed(Address),
+    /// A restart ordered while the seat worked was carried out at this
+    /// idle event: its harness closed, its own session resumed and bound.
+    Restarted(Address),
     /// The seat stays as it is, for the reason named.
     Kept(KeptAtStop),
 }
@@ -531,6 +534,10 @@ impl JudgesSuccessorRefusal for KeptAtStop {
         )
     }
 }
+
+/// What a Codex flow kept because its successor was refused is told: it
+/// has no compaction, so it goes on as it is.
+pub(crate) const SUCCESSOR_REFUSED_NOTICE: &str = "Your successor could not be started, so this flow is kept as it is and goes on receiving what is sent to it.";
 
 /// The flows owed a successor whose successor was refused. Each is handed
 /// its queue meanwhile, though past its threshold, until a successor
@@ -810,9 +817,10 @@ trait WakesInParts {
     fn successor_composes(&self, flow_id: &str, metaflow: &Metaflow) -> Result<(), KeptAtStop>;
     /// A seat kept because its successor was refused: notes it, so it is
     /// handed its queue though past its threshold, and hands it what is
-    /// queued now, as its rest's drain would. The refusal is told to no
-    /// flow: it stands as Flow recorded it. Takes the dispatch gate; the
-    /// caller holds none.
+    /// queued now, as its rest's drain would. The first time a refusal
+    /// stands, a Claude seat past its threshold is compacted, and a Codex
+    /// seat, which has no compaction, is sent a Notice that it is kept.
+    /// Takes the dispatch gate; the caller holds none.
     fn successor_refused(&self, flow_id: &str);
 }
 
@@ -1440,6 +1448,9 @@ impl SleepsAndWakesSeats for RunningNexus {
                 eprintln!("flow-nexus: flow {flow_id} slept at its rest");
                 self.refresh_refusals.clear(flow_id);
             }
+            AtStop::Restarted(_) => {
+                eprintln!("flow-nexus: flow {flow_id} restarted at its idle event");
+            }
             AtStop::Idle | AtStop::Drained(_) => {}
         }
         // The recipient of an answer queued at this rest is woken off the
@@ -1556,13 +1567,19 @@ impl SleepsAndWakesSeats for RunningNexus {
             .0
             .last()
             .and_then(|flow_id| self.last_launch_profile(&flow_id.0));
+        // Every launch opens in the one configured session.
+        let session = {
+            use crate::launching::NamesLaunchSession;
+            match self.launch_session() {
+                Ok(session) => session,
+                Err(_) => return WakePlan::Unplaceable,
+            }
+        };
         // A declared metaflow wakes with the modules it is bound to; one
         // never declared, with those its last launch named.
         match (self.store.metaflow_declaration(&metaflow.address), last) {
-            (Ok(Some(declared)), last) => WakePlan::Fresh(FreshContext {
-                herdr_session_name: last
-                    .map(|profile| profile.herdr_session_name)
-                    .unwrap_or_else(|| signal_flow::HerdrSessionName("default".to_owned())),
+            (Ok(Some(declared)), _) => WakePlan::Fresh(FreshContext {
+                herdr_session_name: session.clone(),
                 flow_kind: declared.flow_kind.clone(),
                 tool_set: declared.tool_set.clone(),
                 system_modules: declared.system_modules,
@@ -1571,7 +1588,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 purpose: crate::generated::starter::Purpose(declared.purpose.0),
             }),
             (_, Some(profile)) => WakePlan::Fresh(FreshContext {
-                herdr_session_name: profile.herdr_session_name,
+                herdr_session_name: session.clone(),
                 flow_kind: profile.flow_kind.clone(),
                 tool_set: profile.tool_set.clone(),
                 system_modules: profile.system_modules,
@@ -2030,7 +2047,7 @@ impl WaitsForRestToReplace for RunningNexus {
                         address: address.clone(),
                         flow_id: signal_flow::FlowId(flow_id.to_owned()),
                     }),
-                    ReplacementOrder::Launch(_) => {
+                    ReplacementOrder::Launch(_) | ReplacementOrder::Restart => {
                         Response::RefreshRejected(RefreshRejection::Locked)
                     }
                 };
@@ -2166,6 +2183,21 @@ impl WaitsForRestToReplace for RunningNexus {
             order.predecessor
         );
         let response = match order.order {
+            // A restart takes the gate for its own steps and holds the
+            // Address by its record: the waking lease is given back first.
+            ReplacementOrder::Restart => {
+                drop(turn);
+                drop(lock);
+                let _ = self.store.forget_ordered_replacement(&address);
+                let response = crate::restarting::RestartsFlows::restart_at_idle_event(
+                    self,
+                    &order.predecessor,
+                );
+                return match response {
+                    Response::Restarted(_) => AtStop::Restarted(address),
+                    response => AtStop::Kept(KeptAtStop::OrderedRefused(Box::new(response))),
+                };
+            }
             ReplacementOrder::Refresh => self.refresh_held(
                 &address,
                 metaflow,
@@ -2413,20 +2445,17 @@ impl DrainsHeldSeats for RunningNexus {
             signal_flow::Message::HardAbrupt(
                 signal_flow::Request::Order(_)
                     | signal_flow::Request::Question(_)
-                    | signal_flow::Request::Psyche(_)
-                    | signal_flow::Request::Psyches(_)
+                    | signal_flow::Request::Living(_)
                     | signal_flow::Request::Task(_)
             ) | signal_flow::Message::MiddleAbrupt(
                 signal_flow::Request::Order(_)
                     | signal_flow::Request::Question(_)
-                    | signal_flow::Request::Psyche(_)
-                    | signal_flow::Request::Psyches(_)
+                    | signal_flow::Request::Living(_)
                     | signal_flow::Request::Task(_)
             ) | signal_flow::Message::Soft(
                 signal_flow::Request::Order(_)
                     | signal_flow::Request::Question(_)
-                    | signal_flow::Request::Psyche(_)
-                    | signal_flow::Request::Psyches(_)
+                    | signal_flow::Request::Living(_)
                     | signal_flow::Request::Task(_)
             )
         );
@@ -3409,23 +3438,63 @@ impl WakesInParts for RunningNexus {
     }
 
     fn successor_refused(&self, flow_id: &str) {
+        use crate::delivery::DeliversMessages;
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
         let address = match self.store.metaflow_awake_as(flow_id) {
             Ok(Some(metaflow)) => metaflow.address,
             _ => return,
         };
+        // Once for each refusal that stands: the seat is compacted when it
+        // is past its threshold, and a Codex seat, which has no compaction,
+        // is told it is kept.
+        let first = !self.refresh_refusals.holds(flow_id);
         self.refresh_refusals.note(flow_id);
-        // The seat rests now: what is queued is handed to it here, as its
-        // turn's end would, under the gate.
-        let _turn = self
-            .dispatch_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.reconcile_typed(&address);
-        if matches!(
-            self.store.metaflow(&address),
-            Ok(Some(metaflow)) if !metaflow.queue.0.is_empty()
-        ) {
-            let _ = self.perform(Operation::Drain(address));
+        let harness = self
+            .store
+            .flow_node(flow_id)
+            .ok()
+            .flatten()
+            .map(|node| node.harness_kind);
+        let past = matches!(
+            self.store.threshold_standing(flow_id),
+            Ok(crate::store::context::ThresholdStanding::Past { .. })
+        );
+        let compact = first && past && harness == Some(HarnessKind::Claude);
+        {
+            // The seat rests now: what is queued is handed to it here, as
+            // its turn's end would, under the gate.
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if first
+                && harness == Some(HarnessKind::Codex)
+                && let Err(error) = self.store.accept_logical_delivery(
+                    &address,
+                    signal_flow::SentBy::Flow,
+                    flow_ethos::Delivery::Queue,
+                    signal_flow::Message::Soft(signal_flow::Request::Notice(
+                        SUCCESSOR_REFUSED_NOTICE.to_owned(),
+                    )),
+                    None,
+                )
+            {
+                eprintln!("flow-nexus: the kept flow {flow_id} was not told: {error}");
+            }
+            self.reconcile_typed(&address);
+            if matches!(
+                self.store.metaflow(&address),
+                Ok(Some(metaflow)) if !metaflow.queue.0.is_empty()
+            ) {
+                let _ = self.perform(Operation::Drain(address));
+            }
+        }
+        if compact {
+            let compacted = self.command(meta_signal_flow::CommandRequest {
+                flow_id: signal_flow::FlowId(flow_id.to_owned()),
+                harness_command_kind: meta_signal_flow::HarnessCommandKind::Compact,
+            });
+            eprintln!("flow-nexus: the kept flow {flow_id}, past its threshold: {compacted:?}");
         }
     }
 
@@ -3613,13 +3682,27 @@ impl WakesInParts for RunningNexus {
             Ok(continuity) => continuity,
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
+        // A replacement ordered from outside is carried out once the seat
+        // rests; until then the seat is handed what it is sent. A Refresh or
+        // a Restart ordered is carried out at this idle event, its
+        // background work ended, as a refresh past the threshold is.
+        let ordered = match self.store.ordered_replacement(&address) {
+            Ok(order) => order.filter(|order| order.predecessor == flow_id),
+            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+        };
+        let ordered_now = ordered.as_ref().is_some_and(|order| {
+            matches!(
+                order.order,
+                ReplacementOrder::Refresh | ReplacementOrder::Restart
+            )
+        });
         // Whether the harness may be closed now: a Claude seat only once its
         // Stop names no background work, since closing it would end that
         // work.
         let closable = match node.harness_kind {
-            // A seat due a refresh is closed at this idle event whatever it
-            // runs.
-            _ if refresh_due => true,
+            // A seat due a refresh, or ordered refreshed or restarted, is
+            // closed at this idle event whatever it runs.
+            _ if refresh_due || ordered_now => true,
             // A Codex seat is handed work through its app-server, so only
             // the app-server's thread status says it rests, whatever its
             // screen shows.
@@ -3652,12 +3735,6 @@ impl WakesInParts for RunningNexus {
                 // rest: closing the seat would end that work.
                 self.background_settled(flow_id)
             }
-        };
-        // A replacement ordered from outside is carried out once the seat
-        // rests; until then the seat is handed what it is sent.
-        let ordered = match self.store.ordered_replacement(&address) {
-            Ok(order) => order.filter(|order| order.predecessor == flow_id),
-            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
         if closable && let Some(order) = ordered {
             return self.replace_as_ordered(order, metaflow, node, turn);

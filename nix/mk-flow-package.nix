@@ -109,6 +109,7 @@ let
     "harnessProfiles"
     "metaAspects"
     "presentationPrompt"
+    "herdrSession"
   ] defaultConfiguration;
 
   stableCodex = endpoint "defaultConfiguration.stableCodex" configurationFields.stableCodex;
@@ -123,6 +124,12 @@ let
     else
       lib.imap0 harnessProfile configurationFields.harnessProfiles;
   metaAspects = requireStringList "defaultConfiguration.metaAspects" configurationFields.metaAspects;
+  # The one Herdr session every launch opens its pane in.
+  herdrSession =
+    if builtins.isString configurationFields.herdrSession && configurationFields.herdrSession != "" then
+      configurationFields.herdrSession
+    else
+      throw "defaultConfiguration.herdrSession must be a non-empty string";
   presentationPrompt =
     if configurationFields.presentationPrompt == null then
       null
@@ -189,6 +196,7 @@ let
               else
                 "Some(meta_signal_flow::PresentationPrompt(${quote presentationPrompt}.to_owned()))"
             },
+            herdr_session_name: signal_flow::HerdrSessionName(${quote herdrSession}.to_owned()),
         }
     }
   '';

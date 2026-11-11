@@ -30,8 +30,7 @@ impl NamesRequestKind for Request {
         match self {
             Request::Order(_) => "Order",
             Request::Question(_) => "Question",
-            Request::Psyche(_) => "Psyche",
-            Request::Psyches(_) => "Psyches",
+            Request::Living(_) => "Living",
             Request::Result(_) => "Result",
             Request::Notice(_) => "Notice",
             Request::Task(_) => "Task",

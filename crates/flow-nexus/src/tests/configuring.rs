@@ -254,6 +254,7 @@ impl ConfiguredStore {
             ),
             lease: flow_ethos::Lease(lease),
             presentation_prompt_option: None,
+            herdr_session_name: signal_flow::HerdrSessionName("default".into()),
         }
     }
 

@@ -10,16 +10,16 @@ use super::{
     metaflow::{SleepsMetaflows, TakesLaunchAddress},
     opened_thread::RecordsOpenedThreads,
 };
-use crate::generated::send_tool::{SendCall, SendRefusal, ToolCallKey};
+use crate::generated::send_tool::{SendCall, ToolCallKey};
 use sema_engine::{
     Assertion, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey,
     SchemaHash, TableDescriptor, TableName,
 };
-use signal_flow::{Address, HarnessKind};
+use signal_flow::{Address, HarnessKind, SentBy};
 
 pub(super) const SEND_CALL_TABLE_NAME: TableName = TableName::new("flow_nexus_send_calls");
 pub(super) const SEND_CALL_FAMILY: &str = "flow-nexus-send-call";
-pub(super) const SEND_CALL_SCHEMA: &str = "flow-nexus-send-call-v8";
+pub(super) const SEND_CALL_SCHEMA: &str = "flow-nexus-send-call-v9";
 
 /// The record key of a call: each part prefixed by its length, so no two
 /// keys of different parts read alike.
@@ -49,7 +49,7 @@ impl EngineRecord for SendCall {
 
 impl MemoryDefinition for SendCall {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(8)
+        MemoryVersion::new(9)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -69,19 +69,18 @@ impl DescribesSendCallTable for SendCall {
             SchemaHash::for_label(SEND_CALL_SCHEMA),
         )
         .with_predecessor::<super::request_id_upgrade::PriorSendCall>()
+        .with_predecessor::<super::living_upgrade::SendCallBeforeOrigin>()
     }
 }
 
 pub(crate) trait KeepsSendCalls {
-    /// The Address a thread's calls are sent from: the metaflow Awake as
-    /// the one live flow Flow holds on that Codex thread; else, while the
-    /// launch that opened the thread is unsettled and its Address is still
-    /// that launch's to take, that Address, the launching metaflow (a first
-    /// turn calls before its flow is bound). ThreadUnowned when no flow
-    /// Flow holds runs it and no unsettled launch opened it, FlowEnded when
-    /// its flow is Stopped, Retired or Exited, NotAwake when its metaflow is
-    /// not Awake as that flow.
-    fn thread_sender(&self, thread_id: &str) -> Result<Result<Address, SendRefusal>, StoreError>;
+    /// Who a thread's calls are sent from: the metaflow Awake as the one
+    /// live flow Flow holds on that Codex thread; else, while the launch
+    /// that opened the thread is unsettled and its Address is still that
+    /// launch's to take, that Address, the launching metaflow (a first turn
+    /// calls before its flow is bound); else Unbound, as a caller in no flow
+    /// sends on the ordinary socket.
+    fn thread_sender(&self, thread_id: &str) -> Result<SentBy, StoreError>;
     /// The Address of the unsettled Codex launch that opened `thread_id`,
     /// while no other flow or launch holds that Address.
     fn launching_address(&self, thread_id: &str) -> Result<Option<Address>, StoreError>;
@@ -95,7 +94,7 @@ pub(crate) trait KeepsSendCalls {
 }
 
 impl KeepsSendCalls for FlowStore {
-    fn thread_sender(&self, thread_id: &str) -> Result<Result<Address, SendRefusal>, StoreError> {
+    fn thread_sender(&self, thread_id: &str) -> Result<SentBy, StoreError> {
         let flows = self
             .flow_nodes()?
             .into_iter()
@@ -117,18 +116,12 @@ impl KeepsSendCalls for FlowStore {
         if let Some(flow) = flow
             && let Some(metaflow) = self.metaflow_awake_as(&flow.flow_id.0)?
         {
-            return Ok(Ok(metaflow.address));
+            return Ok(SentBy::Sender(metaflow.address));
         }
         if let Some(address) = self.launching_address(thread_id)? {
-            return Ok(Ok(address));
+            return Ok(SentBy::Sender(address));
         }
-        Ok(Err(if flows.is_empty() {
-            SendRefusal::ThreadUnowned
-        } else if flow.is_none() {
-            SendRefusal::FlowEnded
-        } else {
-            SendRefusal::NotAwake
-        }))
+        Ok(SentBy::Unbound)
     }
 
     fn launching_address(&self, thread_id: &str) -> Result<Option<Address>, StoreError> {

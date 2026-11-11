@@ -18,7 +18,7 @@
     # callers move explicitly to lib.<system>.mkFlowPackage.
     unconfigured-flow.url = "github:LiGoldragon/flow/d3ab87ee18b1dd30947d5f0089f5abb4bafa80d5";
     # The Message Nexus the joint check runs beside the real Flow Nexus.
-    message.url = "github:LiGoldragon/message/c3d519d1494a534fe573c2749a5309b95bfa91ab";
+    message.url = "github:LiGoldragon/message/71b5ac0dbab577cd25d3d22fb9d789463162c19d";
     message.inputs.base.follows = "base";
     # The accepted 0.53.2 Flow, built by its own flake, whose Memory the
     # request-id migration check evolves. The lock holds its commit, f7d2336,
@@ -397,7 +397,7 @@
                   }/bin/message-nexus"
                   export FLOW_MESSAGE_JOINT_FLOW_REV="${sourceRevision}"
                   export FLOW_MESSAGE_JOINT_SOURCE_REV="${sourceRevision}"
-                  export FLOW_MESSAGE_JOINT_MESSAGE_REV="c3d519d1494a534fe573c2749a5309b95bfa91ab"
+                  export FLOW_MESSAGE_JOINT_MESSAGE_REV="71b5ac0dbab577cd25d3d22fb9d789463162c19d"
                   sha256sum "$FLOW_MESSAGE_JOINT_FLOW_BIN" "$FLOW_MESSAGE_JOINT_MESSAGE_BIN"
                 '';
             # The accepted 0.53.2's real Memory, evolved and served by this
@@ -417,10 +417,10 @@
             flow-request-id-immutable-contract-pins =
               pkgs.runCommand "flow-request-id-immutable-contract-pins" { nativeBuildInputs = [ pkgs.gnugrep ]; }
                 ''
-                  grep -F 'rev = "d2a4ca5"' ${./Cargo.toml}
-                  grep -F 'rev = "41063a9"' ${./Cargo.toml}
-                  grep -F 'signal-flow?rev=d2a4ca5#d2a4ca5979e2c3d76161996f6b8054008f62fa77' ${./Cargo.lock}
-                  grep -F 'meta-signal-flow?rev=41063a9#41063a9509183e9c319451f4ccc042993bb08945' ${./Cargo.lock}
+                  grep -F 'rev = "04a72fd"' ${./Cargo.toml}
+                  grep -F 'rev = "e192c0d"' ${./Cargo.toml}
+                  grep -F 'signal-flow?rev=04a72fd#04a72fd35345f63a06352c17f46f997d7fdafaee' ${./Cargo.lock}
+                  grep -F 'meta-signal-flow?rev=e192c0d#e192c0d4338cf3b2381bb37ecb3a177283373db5' ${./Cargo.lock}
                   touch "$out"
                 '';
 
@@ -573,6 +573,7 @@
               ];
               metaAspects = [ "Psyche" ];
               presentationPrompt = null;
+                herdrSession = "default";
             };
           };
         }

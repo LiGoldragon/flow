@@ -9,7 +9,7 @@ use sema_engine::{
 };
 
 pub(super) const META_NEXUS_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-nexus-configuration";
-pub(super) const META_NEXUS_CONFIGURATION_SCHEMA: &str = "flow-nexus-meta-nexus-configuration-v4";
+pub(super) const META_NEXUS_CONFIGURATION_SCHEMA: &str = "flow-nexus-meta-nexus-configuration-v5";
 
 /// The declared Nexus, one row.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -25,7 +25,7 @@ impl EngineRecord for StoredMetaNexusConfiguration {
 
 impl MemoryDefinition for StoredMetaNexusConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
+        MemoryVersion::new(5)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -45,5 +45,6 @@ impl DescribesNexusConfigurationTable for StoredMetaNexusConfiguration {
             FamilyName::new(META_NEXUS_CONFIGURATION_FAMILY),
             StoredMetaNexusConfiguration::schema_hash(),
         )
+        .with_predecessor::<super::living_upgrade::StoredNexusBeforeSession>()
     }
 }

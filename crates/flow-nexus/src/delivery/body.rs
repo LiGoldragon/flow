@@ -37,6 +37,25 @@ impl ShowsPaneText for PaneText {
     }
 }
 
+/// The living's words as text: what they were about, then the words, a line
+/// apart; either alone when the other is empty.
+pub(crate) struct LivingWords<'a>(pub &'a flow_ethos::Context, pub &'a flow_ethos::Verbatim);
+
+/// Renders the living's words as the text a prompt carries.
+pub(crate) trait RendersLivingWords {
+    fn text(&self) -> String;
+}
+
+impl RendersLivingWords for LivingWords<'_> {
+    fn text(&self) -> String {
+        match (self.0.0.is_empty(), self.1.0.is_empty()) {
+            (true, _) => self.1.0.clone(),
+            (_, true) => self.0.0.clone(),
+            (false, false) => format!("{}\n{}", self.0.0, self.1.0),
+        }
+    }
+}
+
 /// The exact user-facing text carried by one native message, without its
 /// priority, sender, logical identity, or datom wrapper.
 pub trait RendersNativeContent {
@@ -61,26 +80,9 @@ impl RendersNativeContent for signal_flow::Request {
                 flow_ethos::DonePayload::Answered(done) => format!("Done:\n{}", done.string),
                 flow_ethos::DonePayload::Historical(done) => format!("Done:\n{}", done.string),
             },
-            signal_flow::Request::Psyche(said) if said.context.0.is_empty() => {
-                said.verbatim.clone().0
+            signal_flow::Request::Living(living) => {
+                LivingWords(&living.context, &living.verbatim).text()
             }
-            signal_flow::Request::Psyche(said) if said.verbatim.0.is_empty() => {
-                said.context.clone().0
-            }
-            signal_flow::Request::Psyche(said) => {
-                format!("{}\n{}", said.context.0, said.verbatim.0)
-            }
-            signal_flow::Request::Psyches(said) => said
-                .iter()
-                .map(
-                    |said| match (said.context.0.is_empty(), said.verbatim.0.is_empty()) {
-                        (true, _) => said.verbatim.0.clone(),
-                        (_, true) => said.context.0.clone(),
-                        (false, false) => format!("{}\n{}", said.context.0, said.verbatim.0),
-                    },
-                )
-                .collect::<Vec<_>>()
-                .join("\n"),
         }
     }
 }
@@ -114,26 +116,9 @@ impl RendersNativeContent for signal_flow::VisibleRequest {
                 }
                 signal_flow::VisibleDonePayload::Historical(text) => format!("Done:\n{text}"),
             },
-            signal_flow::VisibleRequest::Psyche(said) if said.context.0.is_empty() => {
-                said.verbatim.clone().0
+            signal_flow::VisibleRequest::Living(living) => {
+                LivingWords(&living.context, &living.verbatim).text()
             }
-            signal_flow::VisibleRequest::Psyche(said) if said.verbatim.0.is_empty() => {
-                said.context.clone().0
-            }
-            signal_flow::VisibleRequest::Psyche(said) => {
-                format!("{}\n{}", said.context.0, said.verbatim.0)
-            }
-            signal_flow::VisibleRequest::Psyches(said) => said
-                .iter()
-                .map(
-                    |said| match (said.context.0.is_empty(), said.verbatim.0.is_empty()) {
-                        (true, _) => said.verbatim.0.clone(),
-                        (_, true) => said.context.0.clone(),
-                        (false, false) => format!("{}\n{}", said.context.0, said.verbatim.0),
-                    },
-                )
-                .collect::<Vec<_>>()
-                .join("\n"),
             signal_flow::VisibleRequest::Reminder(value) => value.string.clone(),
         }
     }
@@ -154,26 +139,9 @@ impl RendersNativeContent for signal_flow::DeliveredMessage {
                 signal_flow::DeliveredRequest::Task(value) => {
                     format!("Task, {} minutes:\n{}", value.minutes.0, value.string)
                 }
-                signal_flow::DeliveredRequest::Psyche(value) => match (
-                    value.said.context.0.is_empty(),
-                    value.said.verbatim.0.is_empty(),
-                ) {
-                    (true, _) => value.said.verbatim.clone().0,
-                    (_, true) => value.said.context.clone().0,
-                    _ => format!("{}\n{}", value.said.context.0, value.said.verbatim.0),
-                },
-                signal_flow::DeliveredRequest::Psyches(value) => value
-                    .said_vector
-                    .iter()
-                    .map(
-                        |said| match (said.context.0.is_empty(), said.verbatim.0.is_empty()) {
-                            (true, _) => said.verbatim.0.clone(),
-                            (_, true) => said.context.0.clone(),
-                            _ => format!("{}\n{}", said.context.0, said.verbatim.0),
-                        },
-                    )
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+                signal_flow::DeliveredRequest::Living(value) => {
+                    LivingWords(&value.context, &value.verbatim).text()
+                }
                 signal_flow::DeliveredRequest::PriorResult(value)
                 | signal_flow::DeliveredRequest::PriorDone(value) => value.clone(),
             },
@@ -269,7 +237,7 @@ impl ReadsContent for Content {
                 .iter()
                 .all(|input| input.delivered_message.native_content().trim().is_empty()),
             Content::Text(text) => text.trim().is_empty(),
-            Content::Psyche(psyche) => psyche.psyche_verbatim.0.trim().is_empty(),
+            Content::Living(living) => living.verbatim.0.trim().is_empty(),
         }
     }
 
@@ -280,11 +248,8 @@ impl ReadsContent for Content {
                 .map(|input| input.delivered_message.native_content())
                 .collect(),
             Content::Text(text) => vec![text.clone()],
-            Content::Psyche(psyche) => {
-                vec![
-                    psyche.psyche_context.clone().0,
-                    psyche.psyche_verbatim.clone().0,
-                ]
+            Content::Living(living) => {
+                vec![living.context.clone().0, living.verbatim.clone().0]
             }
         }
     }
@@ -356,7 +321,7 @@ mod tests {
     use crate::delivery::body::ShowsPaneText;
     use crate::message_projection::ProjectsQueueEntry;
     use crate::store::delivery::DefaultsHarnessProfile;
-    use meta_signal_flow::{BodyRefusal, Content, Letter, Message, Psyche_Data};
+    use meta_signal_flow::{BodyRefusal, Content, Letter, Living_Data, Message};
     use signal_flow::HarnessKind;
 
     fn soft(text: &str) -> Message {
@@ -629,9 +594,9 @@ mod tests {
         );
         let relay = Message::MiddleAbrupt(Letter {
             visible_sender: signal_flow::VisibleSender::Notification,
-            content: Content::Psyche(Psyche_Data {
-                psyche_context: meta_signal_flow::PsycheContext("context".into()),
-                psyche_verbatim: meta_signal_flow::PsycheVerbatim(" ".into()),
+            content: Content::Living(Living_Data {
+                context: flow_ethos::Context("context".into()),
+                verbatim: flow_ethos::Verbatim(" ".into()),
             }),
         });
         assert_eq!(

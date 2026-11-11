@@ -1,6 +1,7 @@
 //! A request, a reminder and a queue are each ended, emptied, forced or
 //! read by an operation of their own, asked by anyone on the ordinary
-//! socket: Cancel, Silence, Clear, ClearAll, Push, Queues and Hot.
+//! socket: Cancel, Silence, Clear, ClearAll, Push, Queues and Hot; a
+//! reminder is asked for with Remind, and a kept answer read with Answer.
 //!
 //! Each operation's name lives in the contract and in its one dispatch arm;
 //! the methods here are named for what they do.
@@ -17,8 +18,8 @@ use crate::waking::{
     DrainsHeldSeats, HoldsWakingMetaflows, PushesAtPriority, RestsEndedAwake, SleepsAndWakesSeats,
 };
 use signal_flow::{
-    Address, ArchiveRejection, DeliveredMessage, Message, Priority, Queue, Refusal, Request,
-    RequestId, RequestRejection, Response, SentBy, Unknown_Data, Warmth,
+    Address, AnswerRejection, ArchiveRejection, Message, Priority, Queue, Refusal, Remind_Data,
+    Request, RequestId, RequestRejection, Response, SentBy, Unknown_Data, Warmth,
 };
 
 pub trait OperatesOnRequestsAndQueues {
@@ -39,6 +40,12 @@ pub trait OperatesOnRequestsAndQueues {
     fn queues(&self) -> Response;
     /// Every live flow's Address, by the minutes since its last turn ended.
     fn hot(&self) -> Response;
+    /// Keeps a reminder for the Address `remind` names, sent from
+    /// `sent_by` when its minutes lapse; answers the request id it is
+    /// named by.
+    fn remind(&self, remind: Remind_Data, sent_by: SentBy) -> Response;
+    /// The answer kept with the request `request_id`.
+    fn answer(&self, request_id: &RequestId) -> Response;
 }
 
 /// The steps the operations share.
@@ -99,6 +106,7 @@ impl EmptiesQueues for RunningNexus {
 
 impl OperatesOnRequestsAndQueues for RunningNexus {
     fn cancel(&self, request_id: &RequestId) -> Response {
+        use crate::store::scheduled_reminder::SchedulesReminders;
         let refused = |rejection| Response::CancelRejected(rejection);
         let mut told = Vec::new();
         {
@@ -106,6 +114,37 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // A reminder not yet sent is ended where it waits; it reached
+            // no one, so only its asker is told.
+            match self.store.scheduled_reminder(request_id) {
+                Ok(Some(reminder)) => {
+                    let cancelled =
+                        signal_flow::LogicalDeliveryId(format!("cancelled:{}", request_id.0));
+                    if self
+                        .store
+                        .retire_scheduled_reminder(&reminder, cancelled)
+                        .is_err()
+                    {
+                        return refused(RequestRejection::StoreRefused);
+                    }
+                    if let SentBy::Sender(asker) = &reminder.sent_by {
+                        let text = format!("Request {} was cancelled.", request_id.0);
+                        if let Err(error) = self.notify(asker, text) {
+                            eprintln!(
+                                "flow-nexus: a cancellation notice for {asker:?} was not queued: {error}"
+                            );
+                        }
+                        told.push(asker.clone());
+                    }
+                    drop(_turn);
+                    for address in told {
+                        self.wake_due(address);
+                    }
+                    return Response::Cancelled(request_id.clone());
+                }
+                Ok(None) => {}
+                Err(_) => return refused(RequestRejection::StoreRefused),
+            }
             let binding = match self.store.request_binding(request_id) {
                 Ok(Some(binding)) => binding,
                 Ok(None) => return refused(RequestRejection::UnknownRequest),
@@ -311,17 +350,13 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
                 .into_iter()
                 .filter(|metaflow| !metaflow.queue.0.is_empty())
                 .map(|metaflow| Queue {
-                    delivered_request_vector: metaflow
+                    // Each as it would land in the prompt: its sender and
+                    // priority with the request.
+                    visible_native_input_vector: metaflow
                         .queue
                         .0
                         .iter()
-                        .map(|entry| {
-                            match entry.visible_input(&metaflow.address).delivered_message {
-                                DeliveredMessage::HardAbrupt(request)
-                                | DeliveredMessage::MiddleAbrupt(request)
-                                | DeliveredMessage::Soft(request) => request,
-                            }
-                        })
+                        .map(|entry| entry.visible_input(&metaflow.address))
                         .collect(),
                     address: metaflow.address,
                 })
@@ -363,5 +398,62 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
         // A flow none of whose turns has ended yet is the warmest.
         warm.sort_by_key(|warmth| warmth.minutes_option.as_ref().map(|minutes| minutes.0));
         Response::Hot(warm)
+    }
+
+    fn remind(&self, remind: Remind_Data, sent_by: SentBy) -> Response {
+        use crate::reminding::CountsUnixSeconds;
+        use crate::store::reminder::RulesMinutes;
+        use crate::store::scheduled_reminder::SchedulesReminders;
+        let address = remind.address;
+        {
+            use crate::launching::NamesTopic;
+            if !address.topic.0.as_str().is_camel_case_topic() {
+                return Response::Refused(Refusal::TopicRefused(address.topic.clone()));
+            }
+        }
+        let now = std::time::SystemTime::now().seconds_since_epoch();
+        // A reminder's Minutes meets a Task's rule: above zero, and a
+        // deadline inside the clock.
+        if let Err(refusal) = remind.minutes.0.ruled_interval(now) {
+            return Response::Refused(Refusal::MinutesRefused(refusal));
+        }
+        let due = now.saturating_add(remind.minutes.0.saturating_mul(60));
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match self.store.metaflow(&address) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Response::Refused(Refusal::Unknown(Unknown_Data::Address(address)));
+            }
+            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+        }
+        match self
+            .store
+            .schedule_reminder(address, sent_by, due, remind.string)
+        {
+            Ok(Ok(request_id)) => Response::Reminded(request_id),
+            Ok(Err(refusal)) => Response::Refused(refusal),
+            Err(error) => Response::Refused(Refusal::Store(error.to_string())),
+        }
+    }
+
+    fn answer(&self, request_id: &RequestId) -> Response {
+        use crate::store::kept_answer::RoutesAnswers;
+        let refused = |rejection| Response::AnswerRejected(rejection);
+        match self.store.kept_answer(request_id) {
+            Ok(Some(kept)) => return Response::Answered(kept.answer),
+            Ok(None) => {}
+            Err(_) => return refused(AnswerRejection::StoreRefused),
+        }
+        match self.store.request_binding(request_id) {
+            Ok(Some(binding)) if binding.closure == RequestClosure::Open => {
+                refused(AnswerRejection::Open)
+            }
+            Ok(Some(_)) => refused(AnswerRejection::Routed),
+            Ok(None) => refused(AnswerRejection::UnknownRequest),
+            Err(_) => refused(AnswerRejection::StoreRefused),
+        }
     }
 }

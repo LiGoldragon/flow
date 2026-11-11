@@ -221,7 +221,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     }
                     return match self.store.record_send_outcome(
                         peer.cloned(),
-                        Some(sender),
+                        signal_flow::SentBy::Sender(sender),
                         Some(recipient),
                         digest,
                         response.private_response.clone(),

@@ -1,9 +1,13 @@
 //! Restart: a live flow's harness is closed and its own native session is
 //! resumed in a new pane, the FlowId, session, Model and transcript kept,
 //! with its Address's current launch configuration, modules and hooks aimed
-//! at this Nexus, and no prompt typed. This slice restarts a Claude flow,
-//! Awake and resting, whoever asks; every other case is refused
-//! Unsupported.
+//! at this Nexus, and no prompt typed, whoever asks. A Claude flow resting
+//! is restarted at once; a working one answers RestartQueued, the restart
+//! recorded as an ordered replacement of its Address and carried out at
+//! its next idle event, as an ordered refresh is, its background work
+//! ended (`restart_at_idle_event`); an Interrupt forces that event. The
+//! last flow of an Asleep metaflow has no harness to close: Restart answers
+//! Asleep and does nothing. A past flow is Unsupported.
 //!
 //! The RestartRecord is the restart's lock on the flow's Address, durable
 //! in Memory and read by every admission: while it stands, a Send queues,
@@ -61,16 +65,14 @@
 //! owner's, is never reopened.
 //!
 //! The fence: once a restart has bound a seat, a harness event acts only
-//! when its caller descends from that seat's harness process, by birth
-//! (`Process.{ pid started }`) and lineage, and is marked in the seat's own
-//! pane; an Observe's Gone acts only for the route and birth it was opened
-//! on. A late event of the seat the restart replaced, or one of unknown
-//! provenance, is recorded and acts on nothing. This reads the reporting
-//! process to tell which harness an event is of, the old or the resumed,
-//! which share one native session; it refuses no caller its answer.
+//! when it names that seat's harness by its birth (`Process.{ pid started }`,
+//! carried in the Report its hook sends) while the flow still runs in that
+//! seat's pane; an Observe's Gone acts only for the route and birth it was
+//! opened on. A late event of the seat the restart replaced, or one naming
+//! no harness, is recorded and acts on nothing. An event names where it came
+//! from in its own data; the caller is not read.
 
 use crate::RunningNexus;
-use crate::caller::{CallerPane, CallerProcess, LocatesCallerPane};
 use crate::generated::memory::SeatBirth;
 use crate::generated::operation::{Failed_Data, Open_Data, Operation, Outcome, PaneLaunch};
 use crate::herdr::launch::{HoldsSystemPrompt, WaitsForPaneRest};
@@ -139,6 +141,10 @@ pub trait RestartsFlows {
     /// takes it for each step, so a Send arriving meanwhile is admitted and
     /// queues.
     fn restart(&self, flow_id: &str) -> Response;
+    /// Restarts `flow_id` at its idle event, whatever its seat shows: the
+    /// restart a working seat was answered RestartQueued for, its
+    /// background work ended by the closing of its harness.
+    fn restart_at_idle_event(&self, flow_id: &str) -> Response;
     /// Takes up every restart an earlier Nexus left: Closing and Closed are
     /// composed again first, then Closing is reconciled against the old
     /// pane and Closed resumes; Opening is Interrupted, and
@@ -161,11 +167,11 @@ pub trait RestartsFlows {
 pub(crate) trait FencesSeatEvents {
     /// The route the flow runs in and the birth of the seat a restart bound.
     fn seat_witness(&self, flow_id: &str) -> Option<SeatWitness>;
-    /// Whether a harness event of `flow_id` reported by `caller` may act:
-    /// never while a restart holds the flow; for a seat a restart bound,
-    /// only when the caller descends from its harness process and is marked
-    /// in its pane; otherwise as before any restart.
-    fn report_acts(&self, flow_id: &str, caller: Option<CallerProcess>) -> bool;
+    /// Whether a harness event of `flow_id` that names the harness born as
+    /// `birth` may act: never while a restart holds the flow; for a seat a
+    /// restart bound, only when it names that seat's harness and the flow
+    /// still runs in that seat's pane; otherwise as before any restart.
+    fn report_acts(&self, flow_id: &str, birth: Option<&Process>) -> bool;
     /// Whether an exit witnessed of `witness` may be recorded: never while a
     /// restart holds the flow, and only while the flow still runs where and
     /// as the witness saw it. None witnesses the flow as it stands.
@@ -181,8 +187,9 @@ pub(crate) trait DiscardsCreatedPane {
 /// What Herdr and the kernel show of a seat's harness.
 trait FindsSeatProcesses {
     /// The foreground process of the pane that runs `session`: its argv
-    /// names it after `--session-id` or `--resume`, or Claude's own record
-    /// of the process names it.
+    /// names it after `--session-id` or `--resume` (Claude) or `resume` (a
+    /// Codex TUI attached to its thread), or Claude's own record of the
+    /// process names it.
     fn harness_process(&self, route: &HerdrRoute, session: &str) -> Option<Process>;
     /// Every pane of the Herdr session whose agent reports `session`; None
     /// when Herdr cannot be read.
@@ -343,7 +350,8 @@ impl FindsSeatProcesses for HerdrCli {
             .iter()
             .find(|process| {
                 process.arguments.windows(2).any(|pair| {
-                    (pair[0] == "--session-id" || pair[0] == "--resume") && pair[1] == session
+                    (pair[0] == "--session-id" || pair[0] == "--resume" || pair[0] == "resume")
+                        && pair[1] == session
                 }) || self
                     .claude_sessions
                     .session_of(process.process_id)
@@ -492,7 +500,21 @@ trait RestartsInSteps {
     /// The checks, the resume composed and validated, then Closing written;
     /// a retry of a Failed restart is written Closing again, so its old
     /// harness is reconciled first. A refusal writes nothing.
-    fn begun(&self, flow_id: &str) -> Result<PreparedRestart, Box<Response>>;
+    /// At an idle event the seat is restarted whatever it shows; asked
+    /// otherwise, a working seat's restart is ordered for its next idle
+    /// event and answered RestartQueued.
+    fn begun(&self, flow_id: &str, at_idle_event: bool) -> Result<PreparedRestart, Box<Response>>;
+    /// A working seat's restart ordered for its next idle event, answered
+    /// RestartQueued; Busy when another replacement is ordered for its
+    /// Address.
+    fn queue_restart(&self, address: &signal_flow::Address, flow_id: &str) -> Response;
+    /// The rest of a restart once its old harness is closed, or its
+    /// refusal: the seat resumed, and its waiting queue handed over.
+    fn restarted_after(
+        &self,
+        flow_id: &str,
+        closed: Result<PreparedRestart, Box<Response>>,
+    ) -> Response;
     /// A restart another Nexus left at Closing or Closed, its resume
     /// composed and validated again; refused, the record is Failed and
     /// nothing is closed.
@@ -529,8 +551,8 @@ trait RestartsInSteps {
     /// The Herdr sessions a pane holding the session is looked for in: the
     /// old seat's, and the flow's own route's.
     fn seat_sessions(&self, record: &RestartRecord) -> BTreeSet<String>;
-    /// The Herdr session a resume opens its pane in: the flow's latest
-    /// launch's, else its old route's.
+    /// The Herdr session a resume opens its pane in: the configured one,
+    /// as every launch's.
     fn resume_session_name(&self, record: &RestartRecord) -> String;
     /// The launch a resume runs: the current declaration's modules, the
     /// flow's own Model, this Nexus's hooks; no brief. Composed, its root
@@ -621,7 +643,52 @@ impl RefusesStoreForRestart for StoreError {
 }
 
 impl RestartsInSteps for RunningNexus {
-    fn begun(&self, flow_id: &str) -> Result<PreparedRestart, Box<Response>> {
+    fn queue_restart(&self, address: &signal_flow::Address, flow_id: &str) -> Response {
+        use crate::store::ordered_replacement::{
+            OrderedReplacement, OrdersReplacements, ReplacementOrder,
+        };
+        let flow = signal_flow::FlowId(flow_id.to_owned());
+        match self.store.ordered_replacement(address) {
+            Ok(Some(order))
+                if order.predecessor == flow_id && order.order == ReplacementOrder::Restart =>
+            {
+                return Response::RestartQueued(flow);
+            }
+            Ok(Some(_)) => return Response::RestartRefused(RestartRefusal::Busy(flow)),
+            Ok(None) => {}
+            Err(error) => return error.refused(),
+        }
+        if let Err(error) = self.store.order_replacement(OrderedReplacement {
+            address: address.clone(),
+            predecessor: flow_id.to_owned(),
+            order: ReplacementOrder::Restart,
+        }) {
+            return error.refused();
+        }
+        eprintln!("flow-nexus: flow {flow_id} works; its restart waits for its idle event");
+        Response::RestartQueued(flow)
+    }
+
+    fn restarted_after(
+        &self,
+        flow_id: &str,
+        closed: Result<PreparedRestart, Box<Response>>,
+    ) -> Response {
+        let response = match closed {
+            Ok(closed) => self.resumed(closed),
+            Err(response) => return *response,
+        };
+        // The queue that waited goes through the ordinary delivery custody.
+        if let Response::Restarted(_) = &response
+            && let Ok(Some(metaflow)) =
+                crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(&*self.store, flow_id)
+        {
+            crate::waking::SleepsAndWakesSeats::drain_awake(self, &metaflow.address);
+        }
+        response
+    }
+
+    fn begun(&self, flow_id: &str, at_idle_event: bool) -> Result<PreparedRestart, Box<Response>> {
         use crate::store::NamesConfiguredModel;
         use crate::store::address_hold::HoldsLaunchAddress;
         use crate::store::metaflow::SleepsMetaflows;
@@ -686,9 +753,21 @@ impl RestartsInSteps for RunningNexus {
             }
             Err(error) => return Err(Box::new(error.refused())),
         }
-        // Asleep, Past, Codex: other slices.
-        if !node.flow_lifecycle.is_live() || node.harness_kind != HarnessKind::Claude {
-            return refused(RestartRefusal::Unsupported);
+        // The last flow of an Asleep metaflow has no harness to close.
+        if !node.flow_lifecycle.is_live() {
+            use crate::store::ManagesMetaflowState;
+            let asleep = match self.store.list_metaflows() {
+                Ok(metaflows) => metaflows.iter().any(|metaflow| {
+                    metaflow.state == flow_ethos::State::Asleep
+                        && metaflow.past.0.last().is_some_and(|last| last.0 == flow_id)
+                }),
+                Err(error) => return Err(Box::new(error.refused())),
+            };
+            return if asleep {
+                refused(RestartRefusal::Asleep)
+            } else {
+                refused(RestartRefusal::Unsupported)
+            };
         }
         if node.session_id.0.is_empty() {
             return refused(RestartRefusal::NoHeldSession);
@@ -707,7 +786,9 @@ impl RestartsInSteps for RunningNexus {
         {
             return refused(RestartRefusal::Busy);
         }
-        if self.claude_transcript(&node).is_none() {
+        // A Claude session resumes from its transcript; a Codex thread is
+        // kept by its app-server.
+        if node.harness_kind == HarnessKind::Claude && self.claude_transcript(&node).is_none() {
             return refused(RestartRefusal::TranscriptAbsent);
         }
         match (
@@ -727,17 +808,27 @@ impl RestartsInSteps for RunningNexus {
         let presence = self.herdr.pane_presence(&node);
         match presence {
             PanePresence::Unknown => return refused(RestartRefusal::CloseRefused),
-            // A working seat is restarted at its Stop, which this slice
-            // does not serve.
-            PanePresence::Present => {
-                let resting = match self.herdr.pane_agent(&node) {
-                    PaneAgent::Present { agent_state, .. } => Self::rests_at(&agent_state),
-                    PaneAgent::Absent | PaneAgent::Unreadable => false,
+            // A working seat is restarted at its next idle event: asked
+            // now, the restart is ordered for it and answered RestartQueued.
+            PanePresence::Present if !at_idle_event => {
+                use crate::codex_turns::SettlesRestingCodexSeats;
+                let resting = match node.harness_kind {
+                    // A Codex seat rests as its app-server's thread does.
+                    HarnessKind::Codex => {
+                        !self.codex_in_turn(flow_id) && self.codex_resting(flow_id)
+                    }
+                    HarnessKind::Claude => {
+                        (match self.herdr.pane_agent(&node) {
+                            PaneAgent::Present { agent_state, .. } => Self::rests_at(&agent_state),
+                            PaneAgent::Absent | PaneAgent::Unreadable => false,
+                        }) && self.claude_main_turn_ended(&node)
+                    }
                 };
-                if !resting || !self.claude_main_turn_ended(&node) {
-                    return refused(RestartRefusal::Unsupported);
+                if !resting {
+                    return Err(Box::new(self.queue_restart(&address, flow_id)));
                 }
             }
+            PanePresence::Present => {}
             PanePresence::Bare | PanePresence::Absent => {}
         }
         // The harness the old pane shows running the session, else the
@@ -1106,11 +1197,12 @@ impl RestartsInSteps for RunningNexus {
     }
 
     fn resume_session_name(&self, record: &RestartRecord) -> String {
-        (self
-            .last_profile(&record.flow_id.0)
-            .map(|profile| profile.herdr_session_name)
-            .unwrap_or_else(|| record.old_seat.herdr_route.herdr_session_name.clone()))
-        .0
+        // The resumed seat opens in the one configured session, as every
+        // launch does; the old seat's own when none can be read.
+        use crate::launching::NamesLaunchSession;
+        self.launch_session()
+            .unwrap_or_else(|_| record.old_seat.herdr_route.herdr_session_name.clone())
+            .0
     }
 
     fn resume_launch(&self, record: &RestartRecord) -> Result<ResumeLaunch, RestartFailure> {
@@ -1199,29 +1291,52 @@ impl RestartsInSteps for RunningNexus {
         };
         use crate::title::{ShowsNativeTitle, TitlesFlow};
         let refused = |category: String| RestartFailure::ResumeRefused(category);
-        // Only a Claude harness is resumed in a pane.
-        if launch.harness_kind != HarnessKind::Claude {
-            return Err(refused("HarnessMismatch".into()));
-        }
-        let title = launch
-            .launch_profile
-            .native_title(&record.flow_id.0)
-            .map_err(|_| refused("TitleRefused".into()))?;
-        let resources = HarnessCommandResources {
-            herdr_session: launch.launch_profile.herdr_session_name.clone().0,
-            agent: launch.launch_agent_name(),
-            // The pane is made only once the old harness is closed.
-            pane: "<pane>".into(),
-            program: launch.harness_kind.expected_harness().to_owned(),
-            codex_socket: None,
-            claude_settings: Some(self.herdr.claude_flag_settings(&launch.lean_start())),
-            claude_title: Some(title.as_str().to_owned()),
-            // The longest path a held system prompt is read by.
-            prompt_fd: Some(format!("/proc/{}/fd/{}", std::process::id(), i32::MAX)),
-            claude_session: None,
-            claude_resume: Some(record.native_session_id.clone().0),
-            codex_title: None,
-            thread: None,
+        let resources = match launch.harness_kind {
+            HarnessKind::Claude => {
+                let title = launch
+                    .launch_profile
+                    .native_title(&record.flow_id.0)
+                    .map_err(|_| refused("TitleRefused".into()))?;
+                HarnessCommandResources {
+                    herdr_session: launch.launch_profile.herdr_session_name.clone().0,
+                    agent: launch.launch_agent_name(),
+                    // The pane is made only once the old harness is closed.
+                    pane: "<pane>".into(),
+                    program: launch.harness_kind.expected_harness().to_owned(),
+                    codex_socket: None,
+                    claude_settings: Some(self.herdr.claude_flag_settings(&launch.lean_start())),
+                    claude_title: Some(title.as_str().to_owned()),
+                    // The longest path a held system prompt is read by.
+                    prompt_fd: Some(format!("/proc/{}/fd/{}", std::process::id(), i32::MAX)),
+                    claude_session: None,
+                    claude_resume: Some(record.native_session_id.clone().0),
+                    codex_title: None,
+                    thread: None,
+                }
+            }
+            // A Codex TUI attaches to the thread its app-server keeps.
+            HarnessKind::Codex => {
+                use crate::codex::SelectsCodexEndpoint;
+                use crate::live::HoldsLiveValue;
+                let endpoints = self.codex_endpoints.current();
+                let endpoint = endpoints
+                    .endpoint_for(&launch.launch_profile.model_name.0)
+                    .map_err(|_| refused("CodexEndpointAbsent".into()))?;
+                HarnessCommandResources {
+                    herdr_session: launch.launch_profile.herdr_session_name.clone().0,
+                    agent: launch.launch_agent_name(),
+                    pane: "<pane>".into(),
+                    program: endpoint.client_path.to_string_lossy().into_owned(),
+                    codex_socket: Some(endpoint.socket.clone()),
+                    claude_settings: None,
+                    claude_title: None,
+                    prompt_fd: None,
+                    claude_session: None,
+                    claude_resume: None,
+                    codex_title: Some(crate::herdr::launch::CODEX_TERMINAL_TITLE.into()),
+                    thread: Some(record.native_session_id.clone().0),
+                }
+            }
         };
         self.herdr
             .harness_command(launch, resources, harness_arguments)
@@ -1239,7 +1354,16 @@ impl RestartsInSteps for RunningNexus {
         model: &str,
     ) -> Result<SeatBirth, RestartFailure> {
         use crate::binding::{ReadsProcessIdentity, VerifiesAdoptedSeat};
+        use crate::herdr::launch::NamesHerdrHarness;
         let refused = |category: &str| RestartFailure::ResumeRefused(category.into());
+        // The harness the flow ran, and runs again: Claude, or a Codex TUI.
+        let harness_kind = self
+            .store
+            .flow_node(&record.flow_id.0)
+            .ok()
+            .flatten()
+            .map(|node| node.harness_kind)
+            .ok_or_else(|| refused("UnknownFlow"))?;
         self.herdr
             .await_pane_rest(pane)
             .map_err(|_| refused("NotReady"))?;
@@ -1261,7 +1385,7 @@ impl RestartsInSteps for RunningNexus {
                     field(agent, "pane_id").as_deref() == Some(pane.herdr_pane_id.0.as_str())
                         && field(agent, "terminal_id").as_deref()
                             == Some(pane.herdr_terminal_id.0.as_str())
-                        && field(agent, "agent").as_deref() == Some("claude")
+                        && field(agent, "agent").as_deref() == Some(harness_kind.expected_harness())
                 })
             })
             .cloned()
@@ -1297,7 +1421,7 @@ impl RestartsInSteps for RunningNexus {
             flow_id: record.flow_id.clone(),
             aspect: record.address.aspect.clone(),
             model_name: signal_flow::ModelName(model.to_owned()),
-            harness_kind: HarnessKind::Claude,
+            harness_kind,
             native_session_id: record.native_session_id.clone(),
             herdr_workspace_id: pane.herdr_workspace_id.clone(),
             herdr_pane_id: pane.herdr_pane_id.clone(),
@@ -1483,21 +1607,22 @@ impl RestartsFlows for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.begun(flow_id)
+            self.begun(flow_id, false)
                 .and_then(|prepared| self.closed_old(prepared))
         };
-        let response = match closed {
-            Ok(closed) => self.resumed(closed),
-            Err(response) => return *response,
+        self.restarted_after(flow_id, closed)
+    }
+
+    fn restart_at_idle_event(&self, flow_id: &str) -> Response {
+        let closed = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.begun(flow_id, true)
+                .and_then(|prepared| self.closed_old(prepared))
         };
-        // The queue that waited goes through the ordinary delivery custody.
-        if let Response::Restarted(_) = &response
-            && let Ok(Some(metaflow)) =
-                crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(&*self.store, flow_id)
-        {
-            crate::waking::SleepsAndWakesSeats::drain_awake(self, &metaflow.address);
-        }
-        response
+        self.restarted_after(flow_id, closed)
     }
 
     fn recover_restarts(&self) {
@@ -1647,34 +1772,23 @@ impl FencesSeatEvents for RunningNexus {
         })
     }
 
-    fn report_acts(&self, flow_id: &str, caller: Option<CallerProcess>) -> bool {
+    fn report_acts(&self, flow_id: &str, birth: Option<&Process>) -> bool {
         if !matches!(self.store.restart_record(flow_id), Ok(None)) {
             return false;
         }
-        let birth = match self.store.seat_birth(flow_id) {
+        let seat = match self.store.seat_birth(flow_id) {
             Ok(None) => return true,
-            Ok(Some(birth)) => birth,
+            Ok(Some(seat)) => seat,
             Err(_) => return false,
         };
-        let route = &birth.herdr_route;
+        let route = &seat.herdr_route;
         // The birth names the seat only while the flow still runs there.
         let current = self.seat_witness(flow_id).is_some_and(|witness| {
             witness.route.herdr_session_name == route.herdr_session_name
                 && witness.route.herdr_pane_id == route.herdr_pane_id
                 && witness.route.herdr_terminal_id == route.herdr_terminal_id
         });
-        let Some(caller) = caller.filter(|_| current) else {
-            return false;
-        };
-        let Some(process) = FlowStore::process_identity_for_pid(caller.process_id) else {
-            return false;
-        };
-        FlowStore::process_lineage(&process).contains(&birth.process)
-            && caller.caller_pane(&self.herdr)
-                == Some(CallerPane {
-                    herdr_session_name: route.herdr_session_name.clone().0,
-                    herdr_pane_id: route.herdr_pane_id.clone().0,
-                })
+        current && birth == Some(&seat.process)
     }
 
     fn witness_holds(&self, flow_id: &str, witness: Option<&SeatWitness>) -> bool {

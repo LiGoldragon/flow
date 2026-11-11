@@ -1,3 +1,82 @@
+# Flow 0.54.3: answers routed, Living, Remind, a Report's harness birth, one Herdr session
+
+Builds on 0.54.2, after Psyche core Fable's rulings on the 0.54.2 questions
+(flows/8c218d/rulings/cgcz-questions.md). On signal-flow 60.0.0 (`04a72fd`)
+and meta-signal-flow 75.0.0 (`e192c0d`), each on its branch
+`0.54.3-5e88e5`, and build-base `57e8678` (branch `0.54.3-5e88e5`), whose set
+holds flow-ethos 0.54.3, the new contracts, and Message 0.24.0
+(`71b5ac0`) with signal-message 23.0.0 and meta-signal-message 4.0.2, so
+Message and Flow speak one pair: the joint test runs Message 0.24.0, and
+the 0.54.2 dev-dependencies on the earlier pair are gone.
+
+- The living's words are `Living.{ Context Verbatim }`, in flow-ethos's
+  Request and signal-flow's SendableRequest, DeliveredRequest
+  (`Living.{ RequestId Context Verbatim }`) and VisibleRequest, and meta's
+  `Content.Living`; `Psyche`, `Psyches` and `Said` are gone. Several of the
+  living's sayings are several Sends.
+- A Result or Done goes to the sender of the request it names, whatever
+  Address its Send writes (`store::kept_answer::RoutesAnswers`). A request
+  whose sender is no Address (Unbound, Flow, Unknown) keeps its answer: the
+  Send answers `Sent.<RequestId>` of the request, nothing is queued, the
+  request closes (a Task's reminder with it), and `Answer.RequestId` reads
+  it, `Answered.{ <sender> <priority>.Result.{ … } }`, or
+  `AnswerRejected.[ UnknownRequest Open Routed StoreRefused ]`. The Codex
+  send tool routes alike and answers `Kept.{ SentBy RequestId }` for a kept
+  one. The Address field stays in the answer's Send (see build-0543.md).
+- The send tool's sender is a `SentBy`: a thread no live flow of an Awake
+  metaflow runs sends as `Unbound` where it was refused `ThreadUnowned`,
+  `FlowEnded` or `NotAwake` (kept in SendRefusal for recorded outcomes). An
+  ordinary Send's outcome record carries its sender as `SentBy` too.
+- `Report.{ FlowId Option<Process> Event }`: the hook names the birth of
+  the harness that ran it, the nearest process above it whose command line
+  names the event's session after `--session-id` or `--resume`, or whose
+  Claude session record names it. The restart fence compares that birth
+  with the bound seat's; the reporting process is no longer read. A hook
+  built on signal-flow 59 is answered FrameRefused, so the stable hook path
+  moves with the deploy.
+- Every launch opens in the one Herdr session `Configure.Nexus` names
+  (`ConfigureNexus` gains `HerdrSessionName`, last): Launch, Start,
+  Replace, wakes, successors and a restart's resume. `mkFlowPackage`'s
+  `defaultConfiguration` takes `herdrSession`.
+- `Remind.{ Address Minutes String }`, answered `Reminded.RequestId`,
+  sends the Address `MiddleAbrupt.Reminder.{ RequestId String }` from
+  whoever asked when its minutes lapse; Cancel ends it before.
+- `Queues` shows each queued message as it would land in the prompt, its
+  sender and priority with it (`Queue.{ Address Vector<VisibleNativeInput> }`).
+- Restart: a working seat answers `RestartQueued.FlowId`, the restart
+  carried out at its next idle event, its background work ended; the last
+  flow of an Asleep metaflow answers `RestartRefused.Asleep`. A Codex flow
+  restarts: its TUI is resumed in a new pane with `resume <thread>` over
+  `--remote`, the thread kept by its app-server.
+- An ordered Refresh is carried out at the flow's next idle event whatever
+  background work it reports (a comment watch's monitor at every Stop), as
+  a refresh past the threshold is.
+- A refused successor: the first time it stands, a Claude predecessor past
+  its threshold is compacted, and a Codex one is sent a Soft Notice that it
+  is kept.
+
+## Stored format
+
+Seven families change shape and are upgraded in place on open, from the
+identity 0.54.2 wrote (`store::living_upgrade`): the metaflows (v8 to v9),
+the address holds (v7 to v8), the queue-delivery requests (v8 to v9) and
+attempts (v9 to v10), whose requests keep their kind, id and words, Psyche
+becoming Living and a Psyches one Living of its sayings joined by blank
+lines; the send calls (v8 to v9) and the send outcomes (v8 to v9), whose
+sender Address becomes `Sender`, an absent one `Unknown`; and the meta
+Nexus (v4 to v5), which takes Herdr's `default` session until the
+deployment's `Configure.Nexus` names its own. Two families are new and
+optional: `flow_nexus_kept_answers` and `flow_nexus_scheduled_reminders`. A
+0.53.2 store still evolves, now to these shapes.
+
+Rollback to 0.54.2 is not clean: 0.54.2 refuses the upgraded identities
+(UnrecognizedMemory). Going back means restoring the memory 0.54.2 left,
+taken before the switch.
+
+The deployment's Configure.Nexus datom names the session
+(CriomOS-home branch `flow-0543-5e88e5`: `herdrSession = "default"`), and
+lands with the relock: 0.54.2 refuses the extra field.
+
 # Flow 0.54.2: every caller is answered alike; queue and request operations
 
 Builds on 0.54.1. Every query on either socket gives the same answer to

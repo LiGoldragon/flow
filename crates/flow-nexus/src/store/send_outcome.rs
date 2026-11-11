@@ -2,12 +2,12 @@
 
 use super::*;
 use meta_signal_flow::{OrdinarySendOutcome, SendOutcomeRecord};
-use signal_flow::{Address, PrivateSendResponse, Process};
+use signal_flow::{Address, PrivateSendResponse, Process, SentBy};
 
 pub(super) const COUNTER_FAMILY: &str = "flow-nexus-send-outcome-counter";
 pub(super) const COUNTER_SCHEMA: &str = "flow-nexus-send-outcome-counter-v1";
 pub(super) const OUTCOME_FAMILY: &str = "flow-nexus-send-outcome";
-pub(super) const OUTCOME_SCHEMA: &str = "flow-nexus-send-outcome-v8";
+pub(super) const OUTCOME_SCHEMA: &str = "flow-nexus-send-outcome-v9";
 
 const COUNTER_KEY: &str = "counter";
 const SEND_OUTCOME_COUNTER_TABLE_NAME: TableName =
@@ -48,7 +48,7 @@ impl EngineRecord for StoredSendOutcome {
 
 impl MemoryDefinition for StoredSendOutcome {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(8)
+        MemoryVersion::new(9)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -88,7 +88,8 @@ impl DeclaresSendOutcomeTables for SendOutcomeTables {
                 FamilyName::new(OUTCOME_FAMILY),
                 StoredSendOutcome::schema_hash(),
             )
-            .with_predecessor::<super::request_id_upgrade::PriorStoredSendOutcome>(),
+            .with_predecessor::<super::request_id_upgrade::PriorStoredSendOutcome>()
+            .with_predecessor::<super::living_upgrade::StoredSendOutcomeBeforeOrigin>(),
         }
     }
 
@@ -108,7 +109,7 @@ pub(crate) trait RecordsSendOutcomes {
     fn record_send_outcome(
         &self,
         caller: Option<Process>,
-        sender: Option<Address>,
+        sender: SentBy,
         recipient: Option<Address>,
         request_digest: String,
         response: PrivateSendResponse,
@@ -120,7 +121,7 @@ impl RecordsSendOutcomes for FlowStore {
     fn record_send_outcome(
         &self,
         caller: Option<Process>,
-        sender: Option<Address>,
+        sender: SentBy,
         recipient: Option<Address>,
         request_digest: String,
         response: PrivateSendResponse,
@@ -165,8 +166,8 @@ impl RecordsSendOutcomes for FlowStore {
                 "send-outcome-{record_number:016x}"
             )),
             process_option: caller,
-            first_address_option: sender,
-            second_address_option: recipient,
+            sent_by: sender,
+            address_option: recipient,
             request_digest: meta_signal_flow::RequestDigest(request_digest),
             ordinary_send_outcome,
         };
@@ -271,8 +272,8 @@ mod tests {
                 "send-outcome-0000000000000001".into(),
             ),
             process_option: None,
-            first_address_option: None,
-            second_address_option: None,
+            sent_by: SentBy::Unknown,
+            address_option: None,
             request_digest: meta_signal_flow::RequestDigest("abc".into()),
             ordinary_send_outcome: OrdinarySendOutcome::Accepted(signal_flow::SendAcceptance {
                 logical_delivery_id: flow_ethos::LogicalDeliveryId(

@@ -156,6 +156,7 @@ fn inspect_answers_the_metaflow_whole() {
                 ),
                 lease: flow_ethos::Lease(60),
                 presentation_prompt_option: None,
+                herdr_session_name: signal_flow::HerdrSessionName("default".into()),
             },
         ))
         .expect("Nexus configured");

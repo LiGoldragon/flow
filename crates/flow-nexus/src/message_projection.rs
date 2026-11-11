@@ -267,6 +267,7 @@ impl ProjectsAdmittedMessage for Message {
                 SentBy::Sender(address) => VisibleSender::Sender(address.clone()),
                 SentBy::Unknown => VisibleSender::Unknown,
                 SentBy::Flow => VisibleSender::Notification,
+                SentBy::Unbound => VisibleSender::Unbound,
             },
             delivered_message: match self {
                 Message::HardAbrupt(request) => {
@@ -297,6 +298,7 @@ impl ProjectsDeliverySnapshot for signal_flow::DeliverySnapshot {
                 SentBy::Sender(address) => VisibleSender::Sender(address.clone()),
                 SentBy::Unknown => VisibleSender::Unknown,
                 SentBy::Flow => VisibleSender::Notification,
+                SentBy::Unbound => VisibleSender::Unbound,
             },
             address: value.address.clone(),
             visible_delivery_state: value.delivery_state.visible_delivery_state(),
@@ -434,6 +436,7 @@ impl ProjectsQueueEvidence for meta_signal_flow::QueueEvidence {
                     SentBy::Sender(address) => VisibleSender::Sender(address.clone()),
                     SentBy::Unknown => VisibleSender::Unknown,
                     SentBy::Flow => VisibleSender::Notification,
+                    SentBy::Unbound => VisibleSender::Unbound,
                 };
                 meta_signal_flow::VisibleQueueEvidence::Legacy(
                     meta_signal_flow::VisibleQueueEvidence_Legacy_Data {

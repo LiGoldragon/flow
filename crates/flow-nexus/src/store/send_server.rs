@@ -9,14 +9,11 @@
 //! their environment, and never a claim the request carries.
 
 use super::metaflow::SleepsMetaflows;
-use super::{FlowStore, NamesLiveFlow, ReadsFlowMemory, ReadsFlowRows, StoreError};
+use super::{FlowStore, NamesLiveFlow, ReadsFlowRows, StoreError};
 use meta_signal_flow::ConfigureSendServer;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema_engine::{
-    EngineRecord, FamilyName, QueryPlan, RecordKey, SchemaHash, TableDescriptor, TableName,
-};
-use signal_flow::{HarnessKind, Metaflow, Process};
-use std::fs;
+use sema_engine::{EngineRecord, FamilyName, RecordKey, SchemaHash, TableDescriptor, TableName};
+use signal_flow::{HarnessKind, Metaflow};
 
 pub(super) const META_SEND_SERVER_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_send_server_configuration");
@@ -48,77 +45,6 @@ impl DescribesSendServerTable for StoredMetaSendServerConfiguration {
             FamilyName::new(META_SEND_SERVER_CONFIGURATION_FAMILY),
             SchemaHash::for_label(META_SEND_SERVER_CONFIGURATION_SCHEMA),
         )
-    }
-}
-
-/// What the configured send servers make of one process.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SendServerTrust {
-    /// No send server is configured.
-    Unconfigured,
-    /// The process, or its parent, is not a configured pair's.
-    Untrusted,
-    /// The process runs a configured send server under its paired app-server.
-    Trusted,
-}
-
-pub(crate) trait TrustsSendServers {
-    /// Reads the process and its parent from the kernel and matches their
-    /// executables against the configured pairs. The process must still run
-    /// with the start it was named by, with the same parent, after its
-    /// parent's executable is read.
-    fn send_server_trust(&self, process: &Process) -> Result<SendServerTrust, StoreError>;
-}
-
-impl TrustsSendServers for FlowStore {
-    fn send_server_trust(&self, process: &Process) -> Result<SendServerTrust, StoreError> {
-        let send_servers = self
-            .engine
-            .match_records(QueryPlan::all(self.meta_configuration_tables.send_servers))?
-            .records()
-            .iter()
-            .map(|stored| stored.send_server.clone())
-            .collect::<Vec<_>>();
-        if send_servers.is_empty() {
-            return Ok(SendServerTrust::Unconfigured);
-        }
-        let Some((parent_pid, started)) = FlowStore::process_start(process.pid.0) else {
-            return Ok(SendServerTrust::Untrusted);
-        };
-        if started != process.started.0 {
-            return Ok(SendServerTrust::Untrusted);
-        }
-        let Some(executable) = FlowStore::process_executable(process) else {
-            return Ok(SendServerTrust::Untrusted);
-        };
-        let Some(parent) = u32::try_from(parent_pid)
-            .ok()
-            .and_then(FlowStore::process_identity_for_pid)
-        else {
-            return Ok(SendServerTrust::Untrusted);
-        };
-        let Some(parent_executable) = FlowStore::process_executable(&parent) else {
-            return Ok(SendServerTrust::Untrusted);
-        };
-        // Still the same process under the same parent once both are read.
-        if FlowStore::process_start(process.pid.0) != Some((parent_pid, started)) {
-            return Ok(SendServerTrust::Untrusted);
-        }
-        let trusted = send_servers.iter().any(|send_server| {
-            fs::canonicalize(&send_server.mcp_send_server_binary.0)
-                .ok()
-                .as_ref()
-                == Some(&executable)
-                && fs::canonicalize(&send_server.codex_app_server_binary.0)
-                    .ok()
-                    .as_ref()
-                    == Some(&parent_executable)
-        });
-        Ok(if trusted {
-            SendServerTrust::Trusted
-        } else {
-            SendServerTrust::Untrusted
-        })
     }
 }
 

@@ -1,35 +1,33 @@
-//! Authenticated logical-delivery subscriptions, resumed by durable cursor.
+//! Logical-delivery subscriptions, resumed by durable cursor, the same to
+//! every caller: ObserveSends follows every send, ObserveSender one
+//! sender's, ObserveDeliveries those Message admitted.
 use crate::metaflow::IdentifiesThread;
 use crate::sending::IdentifiesSender;
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
-use crate::store::metaflow::MutatesMetaflows;
 use crate::{HoldsStopRequest, RunningNexus};
-use signal_flow::{Address, ObserveSender_Data, Process, Refusal, Response};
+use signal_flow::{ObserveSender_Data, Refusal, Response, SentBy};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Which sends an observation follows: every one, one sender's, or those
+/// Message admitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendSelection {
+    /// Every send, whoever sent it: ObserveSends.
+    Every,
+    /// The sends of one sender: ObserveSender.
+    Sent(SentBy),
+    /// The deliveries Message admitted: ObserveDeliveries.
+    Message,
+}
+
 pub(crate) trait ObservesLogicalSends {
-    fn observation_sender(
-        &self,
-        peer: &Process,
-        forwarded: Option<&ObserveSender_Data>,
-    ) -> Result<Address, Box<Response>>;
-    fn observe_sends(
-        &self,
-        sender: &Address,
-        cursor: Option<i64>,
-        disconnected: &AtomicBool,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
-    ) -> Result<(), String>;
-    fn observe_deliveries(
-        &self,
-        cursor: Option<i64>,
-        disconnected: &AtomicBool,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
-    ) -> Result<(), String>;
+    /// The sender a forwarded ObserveSender names: the thread's metaflow
+    /// when it names a Codex thread, else what the named process sends as.
+    fn observation_sender(&self, forwarded: &ObserveSender_Data) -> Result<SentBy, Box<Response>>;
     fn observe_delivery_changes(
         &self,
-        sender: Option<&Address>,
+        selection: &SendSelection,
         cursor: Option<i64>,
         disconnected: &AtomicBool,
         send: &mut dyn FnMut(&Response) -> Result<(), String>,
@@ -37,61 +35,26 @@ pub(crate) trait ObservesLogicalSends {
 }
 
 impl ObservesLogicalSends for RunningNexus {
-    fn observation_sender(
-        &self,
-        peer: &Process,
-        forwarded: Option<&ObserveSender_Data>,
-    ) -> Result<Address, Box<Response>> {
-        let Some(forwarded) = forwarded else {
-            return self.sending_address(peer);
-        };
-        match self.store.message_peer(peer) {
-            Ok(true) => {}
-            Ok(false) => return Err(Box::new(Response::Refused(Refusal::NotMessage))),
-            Err(error) => {
-                return Err(Box::new(Response::Refused(Refusal::Store(
-                    error.to_string(),
-                ))));
-            }
-        }
+    fn observation_sender(&self, forwarded: &ObserveSender_Data) -> Result<SentBy, Box<Response>> {
         if let Some(thread) = &forwarded.native_session_id_option {
             match self.identify_thread(signal_flow::IdentifyThread_Data {
                 process: forwarded.process.clone(),
                 native_session_id: thread.clone(),
             }) {
-                Ok(Response::Identified(address)) => Ok(address),
-                Ok(refusal) => Err(Box::new(refusal)),
+                Ok(Response::Identified(address)) => Ok(SentBy::Sender(address)),
+                Ok(_) => Ok(SentBy::Unbound),
                 Err(error) => Err(Box::new(Response::Refused(Refusal::Store(
                     error.to_string(),
                 )))),
             }
         } else {
-            self.sending_address(&forwarded.process)
+            self.sender_of(&forwarded.process)
         }
-    }
-
-    fn observe_sends(
-        &self,
-        sender: &Address,
-        cursor: Option<i64>,
-        disconnected: &AtomicBool,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
-    ) -> Result<(), String> {
-        self.observe_delivery_changes(Some(sender), cursor, disconnected, send)
-    }
-
-    fn observe_deliveries(
-        &self,
-        cursor: Option<i64>,
-        disconnected: &AtomicBool,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
-    ) -> Result<(), String> {
-        self.observe_delivery_changes(None, cursor, disconnected, send)
     }
 
     fn observe_delivery_changes(
         &self,
-        sender: Option<&Address>,
+        selection: &SendSelection,
         mut cursor: Option<i64>,
         disconnected: &AtomicBool,
         send: &mut dyn FnMut(&Response) -> Result<(), String>,
@@ -106,9 +69,12 @@ impl ObservesLogicalSends for RunningNexus {
             if self.stopping.requested() {
                 return Err("the Nexus is stopping".into());
             }
-            let observation = match sender {
-                Some(sender) => self.store.read_logical_delivery_snapshots(sender, cursor),
-                None => self.store.read_message_delivery_snapshots(cursor),
+            let observation = match selection {
+                SendSelection::Every => self.store.read_every_delivery_snapshot(cursor),
+                SendSelection::Sent(sender) => {
+                    self.store.read_logical_delivery_snapshots(sender, cursor)
+                }
+                SendSelection::Message => self.store.read_message_delivery_snapshots(cursor),
             };
             let observation = match observation {
                 Ok(observation) => observation,

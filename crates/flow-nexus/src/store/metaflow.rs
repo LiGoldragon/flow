@@ -43,14 +43,13 @@ impl PreparesDeclaredMetaflow for FlowStore {
 }
 
 pub(crate) trait MutatesMetaflows {
-    fn message_peer(&self, peer: &Process) -> Result<bool, StoreError>;
-    /// Binds the peer to its Address. `launched` is the FlowId of the
-    /// launched flow the peer runs in, when Flow can name it; the metaflow
-    /// is then Awake as that flow, so its Stop drains its queue.
+    /// Binds the named live process to its Address, whoever asks.
+    /// `launched` is the FlowId of the launched flow the process runs in,
+    /// when Flow can name it; the metaflow is then Awake as that flow, so
+    /// its Stop drains its queue.
     fn bind_metaflow(
         &self,
         binding: Bind_Data,
-        peer: &Process,
         launched: Option<FlowId>,
     ) -> Result<Response, StoreError>;
     fn lock_metaflow(&self, request: Lock_Data, now: i64) -> Result<Response, StoreError>;
@@ -91,48 +90,16 @@ pub(crate) trait SleepsMetaflows {
 }
 
 impl MutatesMetaflows for FlowStore {
-    fn message_peer(&self, peer: &Process) -> Result<bool, StoreError> {
-        let address = Address {
-            aspect: Aspect::Field,
-            topic: signal_flow::Topic("message".into()),
-            model: Model::Astra,
-        };
-        Ok(
-            FlowStore::process_is_live(peer)
-                && self.bound_process(&address)?.as_ref() == Some(peer),
-        )
-    }
-
     fn bind_metaflow(
         &self,
         binding: Bind_Data,
-        peer: &Process,
         launched: Option<FlowId>,
     ) -> Result<Response, StoreError> {
-        if binding.process != *peer || !FlowStore::process_is_live(peer) {
+        let peer = &binding.process;
+        if !FlowStore::process_is_live(peer) {
             return Ok(Response::Refused(Refusal::unidentified(binding.process)));
         }
-        let address = binding.address;
-        if address
-            == (Address {
-                aspect: Aspect::Field,
-                topic: signal_flow::Topic("message".into()),
-                model: Model::Astra,
-            })
-        {
-            let Some(configuration) = self.configuration_snapshot()? else {
-                return Ok(Response::Refused(Refusal::NotConfigured));
-            };
-            let expected = configuration
-                .configured_nexus
-                .0
-                .message_nexus_binary_option
-                .as_ref()
-                .and_then(|binary| fs::canonicalize(&binary.0).ok());
-            if expected.is_none() || FlowStore::process_executable(peer) != expected {
-                return Ok(Response::Refused(Refusal::NotMessage));
-            }
-        }
+        let address = binding.address.clone();
         let bindings = self
             .engine
             .match_records(QueryPlan::all(self.metaflow_processes))?;
@@ -201,15 +168,8 @@ impl MutatesMetaflows for FlowStore {
     }
 
     fn lock_metaflow(&self, request: Lock_Data, now: i64) -> Result<Response, StoreError> {
-        let Some(sender) = self.stored_metaflow(&request.first_address)? else {
-            return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
-                request.first_address,
-            ))));
-        };
-        match sender.metaflow.state {
-            MetaflowState::Asleep => return Ok(Response::Refused(Refusal::Asleep)),
-            MetaflowState::Awake(_) => {}
-        }
+        // The sender is whom the request is queued under; it is checked
+        // against nothing.
         let address = request.second_address;
         if !self.prepare_declared_metaflow(&address)? {
             return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
@@ -259,7 +219,6 @@ impl MutatesMetaflows for FlowStore {
         let digest_text = request.datomize(Vec::new()).protosize().compact();
         let digest = format!("{:x}", sha2::Sha256::digest(digest_text.as_bytes()));
         let message = match self.resolve_sendable_message(
-            &request.lock.first_address,
             &request.lock.second_address,
             request.sendable_message.clone(),
         )? {
@@ -813,30 +772,34 @@ mod tests {
         }
     }
 
+    /// Bind is taken from any caller and for any executable: the Message
+    /// Address binds a process whatever binary it runs. Only a process that
+    /// is not live is refused.
     #[test]
-    fn bind_requires_actual_process_and_configured_message_executable() {
+    fn bind_takes_any_live_process_whatever_its_executable() {
         let fixture = Fixture::new("/not/the/actual/executable".into());
         let binding = Bind_Data {
             address: fixture.message.clone(),
             process: fixture.peer.clone(),
         };
-        assert_eq!(
-            fixture
-                .store
-                .bind_metaflow(binding.clone(), &fixture.peer, None)
-                .unwrap(),
-            Response::Refused(Refusal::NotMessage)
-        );
+        assert!(matches!(
+            fixture.store.bind_metaflow(binding.clone(), None).unwrap(),
+            Response::Bound(_)
+        ));
+        let binding = Bind_Data {
+            address: Address {
+                model: Model::Luna,
+                ..fixture.message.clone()
+            },
+            process: fixture.peer.clone(),
+        };
         let mut forged = binding;
         forged.process.started.0 += 1;
         assert!(matches!(
-            fixture
-                .store
-                .bind_metaflow(forged, &fixture.peer, None)
-                .unwrap(),
+            fixture.store.bind_metaflow(forged, None).unwrap(),
             Response::Refused(Refusal::Unidentified(_))
         ));
-        assert!(fixture.store.list_metaflows().unwrap().is_empty());
+        assert_eq!(fixture.store.list_metaflows().unwrap().len(), 1);
     }
 
     #[test]
@@ -851,19 +814,9 @@ mod tests {
             address: fixture.message.clone(),
             process: fixture.peer.clone(),
         };
-        let first = fixture
-            .store
-            .bind_metaflow(binding.clone(), &fixture.peer, None)
-            .unwrap();
+        let first = fixture.store.bind_metaflow(binding.clone(), None).unwrap();
         assert!(matches!(&first, Response::Bound(_)));
-        assert_eq!(
-            fixture
-                .store
-                .bind_metaflow(binding, &fixture.peer, None)
-                .unwrap(),
-            first
-        );
-        assert!(fixture.store.message_peer(&fixture.peer).unwrap());
+        assert_eq!(fixture.store.bind_metaflow(binding, None).unwrap(), first);
         let target = Address {
             model: Model::Sol,
             ..fixture.message.clone()
@@ -998,7 +951,6 @@ mod tests {
                     address: fixture.message.clone(),
                     process: fixture.peer.clone(),
                 },
-                &fixture.peer,
                 None,
             )
             .unwrap();

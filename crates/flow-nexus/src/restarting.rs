@@ -2,7 +2,7 @@
 //! resumed in a new pane, the FlowId, session, Model and transcript kept,
 //! with its Address's current launch configuration, modules and hooks aimed
 //! at this Nexus, and no prompt typed. This slice restarts a Claude flow,
-//! Awake and resting, asked from outside; every other case is refused
+//! Awake and resting, whoever asks; every other case is refused
 //! Unsupported.
 //!
 //! The RestartRecord is the restart's lock on the flow's Address, durable
@@ -65,7 +65,9 @@
 //! (`Process.{ pid started }`) and lineage, and is marked in the seat's own
 //! pane; an Observe's Gone acts only for the route and birth it was opened
 //! on. A late event of the seat the restart replaced, or one of unknown
-//! provenance, is recorded and acts on nothing.
+//! provenance, is recorded and acts on nothing. This reads the reporting
+//! process to tell which harness an event is of, the old or the resumed,
+//! which share one native session; it refuses no caller its answer.
 
 use crate::RunningNexus;
 use crate::caller::{CallerPane, CallerProcess, LocatesCallerPane};
@@ -75,7 +77,6 @@ use crate::herdr::launch::{HoldsSystemPrompt, WaitsForPaneRest};
 use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::herdr::{HerdrCli, PaneOwnership, PanePresence, ReadsHerdrPanes};
 use crate::performing::Performs;
-use crate::protecting::Asker;
 use crate::store::restart::RecordsRestarts;
 use crate::store::{FlowStore, NamesLiveFlow, ReadsFlowMemory, ReadsFlowRows, StoreError};
 use meta_signal_flow::{
@@ -83,8 +84,8 @@ use meta_signal_flow::{
     RestartRecord,
 };
 use signal_flow::{
-    FlowNode, HarnessKind, HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, Origin, Process,
-    Refusal, Response, RestartRefusal, ResumeRefused_Data, StopRejection,
+    FlowNode, HarnessKind, HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, Process, Refusal,
+    Response, RestartRefusal, ResumeRefused_Data, StopRejection,
 };
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -134,10 +135,10 @@ pub struct SeatWitness {
 
 /// Restart as the Nexus serves it.
 pub trait RestartsFlows {
-    /// Restarts `flow_id`, as `asker` asked. Runs off the dispatch gate and
+    /// Restarts `flow_id`, whoever asks. Runs off the dispatch gate and
     /// takes it for each step, so a Send arriving meanwhile is admitted and
     /// queues.
-    fn restart(&self, flow_id: &str, asker: &Asker) -> Response;
+    fn restart(&self, flow_id: &str) -> Response;
     /// Takes up every restart an earlier Nexus left: Closing and Closed are
     /// composed again first, then Closing is reconciled against the old
     /// pane and Closed resumes; Opening is Interrupted, and
@@ -490,10 +491,8 @@ enum Reopening {
 trait RestartsInSteps {
     /// The checks, the resume composed and validated, then Closing written;
     /// a retry of a Failed restart is written Closing again, so its old
-    /// harness is reconciled first. A refusal writes nothing; a protected
-    /// Address's flow asked by another than its own seat or the meta
-    /// surface is refused Protected first.
-    fn begun(&self, flow_id: &str, asker: &Asker) -> Result<PreparedRestart, Box<Response>>;
+    /// harness is reconciled first. A refusal writes nothing.
+    fn begun(&self, flow_id: &str) -> Result<PreparedRestart, Box<Response>>;
     /// A restart another Nexus left at Closing or Closed, its resume
     /// composed and validated again; refused, the record is Failed and
     /// nothing is closed.
@@ -622,8 +621,7 @@ impl RefusesStoreForRestart for StoreError {
 }
 
 impl RestartsInSteps for RunningNexus {
-    fn begun(&self, flow_id: &str, asker: &Asker) -> Result<PreparedRestart, Box<Response>> {
-        use crate::protecting::{ChecksAsker, GuardedAct, GuardsProtectedAddresses};
+    fn begun(&self, flow_id: &str) -> Result<PreparedRestart, Box<Response>> {
         use crate::store::NamesConfiguredModel;
         use crate::store::address_hold::HoldsLaunchAddress;
         use crate::store::metaflow::SleepsMetaflows;
@@ -639,18 +637,6 @@ impl RestartsInSteps for RunningNexus {
             Ok(None) => return refused(RestartRefusal::UnknownFlow),
             Err(error) => return Err(Box::new(error.refused())),
         };
-        // A protected Address's flow is restarted only as its own seat or
-        // the meta surface asks, before anything is written.
-        match self.admits(flow_id, asker, GuardedAct::Restart) {
-            Ok(true) => {}
-            Ok(false) => return refused(RestartRefusal::Protected),
-            Err(error) => return Err(Box::new(error.refused())),
-        }
-        // A flow asking for its own restart is owed one at its Stop, which
-        // this slice does not serve.
-        if matches!(asker.origin(), Origin::Flow(asking) if asking.flow_id.0 == flow_id) {
-            return refused(RestartRefusal::Unsupported);
-        }
         match self.store.restart_record(flow_id) {
             Ok(None) => {}
             Ok(Some(record)) => {
@@ -1491,13 +1477,13 @@ impl RestartsInSteps for RunningNexus {
 }
 
 impl RestartsFlows for RunningNexus {
-    fn restart(&self, flow_id: &str, asker: &Asker) -> Response {
+    fn restart(&self, flow_id: &str) -> Response {
         let closed = {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.begun(flow_id, asker)
+            self.begun(flow_id)
                 .and_then(|prepared| self.closed_old(prepared))
         };
         let response = match closed {

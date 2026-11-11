@@ -2263,7 +2263,7 @@ mod tests {
         };
         assert_eq!(
             store
-                .archive_request(&first.request_id.0, &sender)
+                .archive_request(&first.request_id.0)
                 .expect("archive reads unfinished attempt"),
             Err(signal_flow::ArchiveRejection::NotYet)
         );
@@ -2279,7 +2279,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .archive_request(&first.request_id.0, &sender)
+                .archive_request(&first.request_id.0)
                 .expect("finished request archives"),
             Ok(())
         );

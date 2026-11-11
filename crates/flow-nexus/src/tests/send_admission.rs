@@ -207,16 +207,11 @@ fn an_admitted_send_holds_archive_until_its_answer_object_is_released() {
             .unwrap(),
         Ok(())
     );
-    let sender = Address {
-        aspect: Aspect::Mind,
-        topic: flow_ethos::Topic("core".into()),
-        model: Model::Sol,
-    };
     assert_eq!(
         fixture
             .nexus
             .store
-            .archive_request(&accepted.request_id.0, &sender)
+            .archive_request(&accepted.request_id.0)
             .unwrap(),
         Err(signal_flow::ArchiveRejection::NotYet)
     );
@@ -225,7 +220,7 @@ fn an_admitted_send_holds_archive_until_its_answer_object_is_released() {
         fixture
             .nexus
             .store
-            .archive_request(&accepted.request_id.0, &sender)
+            .archive_request(&accepted.request_id.0)
             .unwrap(),
         Ok(())
     );

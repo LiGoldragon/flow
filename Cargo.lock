@@ -207,7 +207,7 @@ checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
 name = "flow"
-version = "0.54.1"
+version = "0.54.2"
 dependencies = [
  "datom-codec",
  "ethos-zero",
@@ -216,17 +216,17 @@ dependencies = [
  "protos",
  "rkyv",
  "serde_json",
- "signal-flow",
+ "signal-flow 59.0.0",
  "tempfile",
 ]
 
 [[package]]
 name = "flow-defaults"
-version = "0.54.1"
+version = "0.54.2"
 
 [[package]]
 name = "flow-ethos"
-version = "0.54.1"
+version = "0.54.2"
 dependencies = [
  "datom-codec",
  "ethos-zero",
@@ -244,28 +244,28 @@ dependencies = [
 
 [[package]]
 name = "flow-meta"
-version = "0.54.1"
+version = "0.54.2"
 dependencies = [
  "datom-codec",
  "ethos-zero",
  "flow-ethos",
- "meta-signal-flow",
+ "meta-signal-flow 74.0.0",
  "protos",
  "rkyv",
- "signal-flow",
+ "signal-flow 59.0.0",
  "tempfile",
 ]
 
 [[package]]
 name = "flow-native"
-version = "0.54.1"
+version = "0.54.2"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "flow-nexus"
-version = "0.54.1"
+version = "0.54.2"
 dependencies = [
  "base64",
  "datom-codec",
@@ -278,7 +278,8 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
  "message-nexus",
- "meta-signal-flow",
+ "meta-signal-flow 73.0.3",
+ "meta-signal-flow 74.0.0",
  "meta-signal-flow-before-request-ids",
  "meta-signal-message",
  "notify",
@@ -291,7 +292,8 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
- "signal-flow",
+ "signal-flow 58.0.2",
+ "signal-flow 59.0.0",
  "signal-flow-before-request-ids",
  "signal-message",
  "tempfile",
@@ -493,13 +495,13 @@ dependencies = [
  "getrandom 0.4.3",
  "libc",
  "message-defaults",
- "meta-signal-flow",
+ "meta-signal-flow 73.0.3",
  "meta-signal-message",
  "redb",
  "rkyv",
  "rustix",
  "sema-engine",
- "signal-flow",
+ "signal-flow 58.0.2",
  "signal-message",
  "thiserror",
 ]
@@ -515,7 +517,21 @@ dependencies = [
  "protos",
  "rkyv",
  "signal",
- "signal-flow",
+ "signal-flow 58.0.2",
+]
+
+[[package]]
+name = "meta-signal-flow"
+version = "74.0.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=41063a9#41063a9509183e9c319451f4ccc042993bb08945"
+dependencies = [
+ "datom-codec",
+ "ethos-zero",
+ "flow-ethos",
+ "protos",
+ "rkyv",
+ "signal",
+ "signal-flow 59.0.0",
 ]
 
 [[package]]
@@ -922,6 +938,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "signal-flow"
+version = "59.0.0"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=d2a4ca5#d2a4ca5979e2c3d76161996f6b8054008f62fa77"
+dependencies = [
+ "datom-codec",
+ "ethos-zero",
+ "flow-ethos",
+ "protos",
+ "rkyv",
+ "signal",
+]
+
+[[package]]
 name = "signal-flow-before-request-ids"
 version = "53.0.0"
 dependencies = [
@@ -941,7 +970,7 @@ dependencies = [
  "protos",
  "rkyv",
  "signal",
- "signal-flow",
+ "signal-flow 58.0.2",
 ]
 
 [[package]]

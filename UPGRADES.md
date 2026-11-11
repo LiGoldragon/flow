@@ -1,3 +1,55 @@
+# Flow 0.54.2: every caller is answered alike; queue and request operations
+
+Builds on 0.54.1. Every query on either socket gives the same answer to
+every caller, a flow, a subflow or the living at a shell; the calling
+process is read only to fill in a message's sender. On signal-flow 59.0.0
+(`d2a4ca5`) and meta-signal-flow 74.0.0 (`41063a9`), each on its branch
+`0.54.2-5e88e5`, and build-base `bf2f67a` (branch `0.54.2-5e88e5`), whose
+set holds them beside signal-flow 58.0.2 and meta-signal-flow 73.0.3, the
+pair Message 0.23.1 speaks: the joint test writes Message's frames in that
+pair (dev-dependencies `signal-flow-message`, `meta-signal-flow-message`).
+
+- A caller in no flow sends as `Unbound` and is served: `SentBy` (flow-ethos)
+  and `VisibleSender` gain `Unbound`, last. A request it sends is open until
+  answered, and its Result goes to whom the answer names. A stored row is
+  read unchanged; one naming Unbound is unreadable by 0.54.1.
+- Gone: the meta socket's gate by aspect (`MetaRefused`; `MetaAspects` and
+  `MessageNexusBinary` are configured and read by nothing); the protected
+  address guard on Restart, Refresh, Replace, Launch, Stop and Retire (a
+  protected Address is only never refreshed for its context); the refusal
+  of a flow's own Restart; MetaBindExisting's owner check
+  (`OwnerMismatch`); the Message-only and send-server checks on Bind,
+  Identify, IdentifyThread, Lock, Deliver, Release, Acknowledge,
+  ObserveSender and ObserveDeliveries; the Awake-sender check on Lock;
+  the caller checks on Send, DeliverAll, ArchiveRequest, Keep, Drop and
+  ResolveQueueDelivery (an unreadable peer is recorded as process 0); and
+  the answering-address check on a Result or Done, admitted from any
+  caller while the request is open. `ObserveSends` follows every send.
+  Keep and Drop write the handover of the flow the named Address is Awake
+  as (`HandoverRefusal.UnknownFlow` when it is Awake as none).
+- `BindSeat.{ Address SeatPane }` and `Adopt.{ Address SeatPane
+  NativeSessionId }` bind the seat in the Herdr pane they name, from any
+  caller: `flow 'BindSeat.{ { Mind core Opus } { main w1:p3 } }'`.
+  `BindSeat.Address` no longer reads; a flow binding its own seat names
+  its pane (`$HERDR_SESSION`, `$HERDR_PANE_ID`).
+- A retried LaunchRequestId is the same launch whatever its origin.
+- A lengthened flow id (more than six hex characters) is titled.
+- New on the ordinary socket (`queue_operations`): `Cancel.RequestId`,
+  `Silence.RequestId`, `Clear.Address`, `ClearAll`, `Push.{ Address
+  Priority }`, `Queues`, `Hot`; answers `Cancelled`, `CancelRejected`,
+  `Silenced`, `SilenceRejected`, `Cleared`, `Pushed`, `Queues`, `Hot`.
+  `Hot` reads a per-Address last turn end kept in the turn-end table beside
+  each harness's; Observe.TurnEnds reads the harnesses' alone.
+- New on the meta socket: `Configure.Permaflow`, `Configure.Harness` and
+  `Configure.Refresh` change one metaflow declaration, harness profile or
+  model threshold alone; `Remove.[ Permaflow.Address Harness.HarnessKind
+  Refresh.ModelName ]` takes one away. The family-whole Configure stays.
+- Kept, and listed as questions: the restart fence that tells an old
+  harness's late hook events from the resumed one's by the reporting
+  process; the Herdr session a Launch opens in, read from the caller's
+  pane; the send tool's refusal of a thread no live flow owns.
+- No stored family changes its label.
+
 # Flow 0.54.1: a warned flow is refreshed at its next idle event
 
 Builds on 0.54.0's handover warning (`handover_reminding`), its threshold

@@ -1507,7 +1507,6 @@ impl BoundPeer {
                     address,
                     process: process.clone(),
                 },
-                &process,
                 None,
             ),
             Ok(signal_flow::Response::Bound(_))
@@ -2603,7 +2602,6 @@ fn a_launch_takes_its_address_by_binds_rules() {
 /// at Field message Primary as the configured Message Nexus binary.
 pub(super) fn message_peer(fixture: &NexusFixture) -> (super::MarkedProcess, signal_flow::Process) {
     use crate::metaflow::DispatchesMetaflowPeer;
-    use crate::store::metaflow::MutatesMetaflows;
     use crate::store::{FlowStore, ReadsFlowMemory};
     use signal_flow::{Bind_Data, Response};
     // Message runs as its own process, an ancestor of no seat.
@@ -2663,7 +2661,6 @@ pub(super) fn message_peer(fixture: &NexusFixture) -> (super::MarkedProcess, sig
             .response,
         Response::Bound(_)
     ));
-    assert!(fixture.nexus.store.message_peer(&message).unwrap());
     (message_child, message)
 }
 
@@ -2935,7 +2932,8 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
                 None,
             )
             .response,
-        Response::Refused(signal_flow::Refusal::NotMessage)
+        Response::Acknowledged,
+        "an Acknowledge is taken from any caller"
     );
     assert!(
         fixture
@@ -2943,8 +2941,8 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
             .store
             .deliver_call(&deliver.deliver_key)
             .expect("Deliver key reads")
-            .is_some(),
-        "an unauthenticated Acknowledge writes nothing"
+            .is_none(),
+        "the Acknowledge retracted the replay row"
     );
     assert_eq!(
         fixture
@@ -3010,7 +3008,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         fixture
             .nexus
             .store
-            .archive_request(&accepted.request_id.0, &sender_address)
+            .archive_request(&accepted.request_id.0)
             .expect("archive reads while the Deliver answer is held"),
         Err(signal_flow::ArchiveRejection::NotYet),
         "the replayed Deliver answer holds archive after Acknowledge removed its key"
@@ -3020,7 +3018,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         fixture
             .nexus
             .store
-            .archive_request(&accepted.request_id.0, &sender_address)
+            .archive_request(&accepted.request_id.0)
             .expect("archive reads after the Deliver answer is released"),
         Ok(())
     );
@@ -3110,9 +3108,7 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
         .store
         .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec![], vec![]));
     assert_eq!(
-        fixture
-            .nexus
-            .deliver_all(empty.clone(), Some(&sender_process)),
+        fixture.nexus.deliver_all(empty.clone()),
         Response::Drained(signal_flow::VisibleDrainOutcome {
             address: empty.clone(),
             visible_drain_state: signal_flow::VisibleDrainState::Delivered,
@@ -3130,9 +3126,7 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
         vec![request.clone()],
     ));
     assert_eq!(
-        fixture
-            .nexus
-            .deliver_all(queued.clone(), Some(&sender_process)),
+        fixture.nexus.deliver_all(queued.clone()),
         Response::Drained(signal_flow::VisibleDrainOutcome {
             address: queued.clone(),
             visible_drain_state: signal_flow::VisibleDrainState::Held,
@@ -3193,7 +3187,7 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
     use crate::metaflow::DispatchesMetaflowPeer;
     use crate::store::metaflow::TakesLaunchAddress;
     use crate::store::{FlowStore, ReadsFlowMemory};
-    use signal_flow::{IdentifyThread_Data, Refusal, Response};
+    use signal_flow::{IdentifyThread_Data, Response};
 
     let fixture = NexusFixture::new();
     let (_message_child, message) = message_peer(&fixture);
@@ -3230,10 +3224,11 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
         .to_string_lossy()
         .into_owned();
 
-    // While no send server is configured, none is trusted.
-    assert_eq!(
+    // Before Flow records a flow on the thread, the thread names no one,
+    // whether or not a send server is configured.
+    super::assert_unidentified(
         identify(&send_server_process, thread, &message),
-        Response::Refused(Refusal::NotConfigured)
+        &send_server_process,
     );
     assert_eq!(
         fixture
@@ -3323,8 +3318,9 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
         identify(&send_server_process, "", &message),
         &send_server_process,
     );
-    // The right thread from another executable is refused. The shell
-    // writes its child's pid once the child has started.
+    // The right thread from another executable names the same flow: the
+    // thread is asked about, not the process. The shell writes its child's
+    // pid once the child has started.
     let child_pid = tempfile::tempdir().unwrap();
     let child_pid_file = child_pid.path().join("child.pid");
     let shell = SpawnedProcess(
@@ -3337,18 +3333,17 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
     let shell_process = FlowStore::process_identity_for_pid(shell.0.id()).unwrap();
     assert_eq!(
         identify(&shell_process, thread, &message),
-        Response::Refused(Refusal::NotSendServer(shell_process.clone()))
+        Response::Identified(sender_address.clone())
     );
-    // The send server's own executable under another parent is refused.
     let foreign_child = child_written_at(&child_pid_file);
     assert_eq!(
         identify(&foreign_child, thread, &message),
-        Response::Refused(Refusal::NotSendServer(foreign_child.clone()))
+        Response::Identified(sender_address.clone())
     );
-    // Only the bound Message process may ask.
+    // Any caller may ask, the Message process or another.
     assert_eq!(
         identify(&send_server_process, thread, &send_server_process),
-        Response::Refused(Refusal::NotMessage)
+        Response::Identified(sender_address.clone())
     );
     // The send server runs in no pane: pane identification names no one.
     super::assert_unidentified(
@@ -5083,7 +5078,7 @@ fn a_codex_first_turn_starts_after_the_tui_attached_and_a_long_turn_refuses_noth
 
     let response = fixture.nexus.dispatch_serially(
         signal_flow::Query::Start(setup.sender.clone()),
-        Origin::Unbound.into(),
+        Origin::Unbound,
     );
 
     let calls = fs::read_to_string(setup.world.state.join("calls")).unwrap_or_default();
@@ -5114,7 +5109,7 @@ fn a_refused_codex_start_archives_its_idle_thread_and_starts_no_turn() {
 
     let response = fixture.nexus.dispatch_serially(
         signal_flow::Query::Start(setup.sender.clone()),
-        Origin::Unbound.into(),
+        Origin::Unbound,
     );
 
     let signal_flow::Response::StartRejected(signal_flow::StartRejection::HarnessSpawnRefused(
@@ -5442,7 +5437,7 @@ fn a_launch_interrupted_with_its_first_call_pending_is_refused_archived_and_sett
     assert_eq!(
         fixture.nexus.dispatch_serially(
             signal_flow::Query::Start(setup.sender.clone()),
-            Origin::Unbound.into()
+            Origin::Unbound
         ),
         signal_flow::Response::StartRejected(refused)
     );

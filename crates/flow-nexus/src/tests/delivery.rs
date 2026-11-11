@@ -6,8 +6,8 @@ use super::{
     ControlsHerdrSnapshot, NexusFixture, PromptFixture, Sent, adoption_resolver, existing_binding,
     flow_container, middle_abrupt, prompts, rendered, with_bound_world,
 };
+use crate::Dispatches;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
-use crate::{Dispatches, peer::AdmitsMetaPeer};
 use meta_signal_flow::{
     BodyRefusal, CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Content, Delivery,
     DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommandKind, InterruptWitness,
@@ -768,58 +768,39 @@ fn observe_agent_opens_on_the_state_herdr_shows() {
     );
 }
 
+/// The meta socket answers every peer alike: a Mind flow, a flow whose role
+/// Flow does not know, the owner at a shell and a peer that cannot be read
+/// are each given the same answer. The peer is read only for who asked.
 #[test]
-fn the_meta_socket_admits_the_owner_and_refuses_an_unreadable_peer() {
-    let fixture = NexusFixture::new();
-    fixture.set_agents(vec![]);
-    assert_eq!(
-        fixture.nexus.meta_refusal(None),
-        Some(meta_signal_flow::MetaRefusal::PeerUnknown)
-    );
-    // This test process runs in no flow's pane: it is the owner.
-    let own = crate::caller::CallerProcess {
-        process_id: std::process::id(),
-    };
-    assert_eq!(fixture.nexus.meta_refusal(Some(own)), None);
-}
-
-#[test]
-fn a_flow_outside_meta_aspects_is_refused_the_meta_socket() {
+fn every_meta_peer_is_answered_alike() {
+    use crate::peer::NamesMetaPeer;
     let fixture = NexusFixture::new();
     super::bind_existing_caller(&fixture, "a001", "pane-1");
     fixture.set_agents(vec![super::codex_agent_in("pane-1", "terminal-pane-1")]);
-    let peer = PanePeer::spawn("pane-1");
-    let refusal = fixture
+    let mind_flow = PanePeer::spawn("pane-1");
+    let mind = fixture
         .nexus
-        .meta_refusal(Some(crate::caller::CallerProcess {
-            process_id: peer.0.id(),
+        .meta_resolver(Some(crate::caller::CallerProcess {
+            process_id: mind_flow.0.id(),
         }));
-    assert_eq!(
-        refusal,
-        Some(meta_signal_flow::MetaRefusal::PeerNotAuthorized(
-            super::mind_live()
-        ))
-    );
-}
-
-#[test]
-fn a_flow_whose_role_flow_does_not_know_is_not_taken_for_the_owner() {
-    let fixture = NexusFixture::new();
-    fixture.accept_pane_operations(
-        vec![fixture.current_agent()],
-        PromptFixture::Prompted("w1:p3"),
-    );
-    // Registered through RegisterFlow, which records no role.
-    fixture.register_with(FlowLifecycle::Active);
-    let peer = PanePeer::spawn("w1:p3");
-    assert_eq!(
-        fixture
-            .nexus
-            .meta_refusal(Some(crate::caller::CallerProcess {
-                process_id: peer.0.id(),
-            })),
-        Some(meta_signal_flow::MetaRefusal::PeerUnknown)
-    );
+    let owner = fixture
+        .nexus
+        .meta_resolver(Some(crate::caller::CallerProcess {
+            process_id: std::process::id(),
+        }));
+    let unread = fixture.nexus.meta_resolver(None);
+    assert_eq!(unread.process_identity.process_id.0, 0);
+    assert_eq!(unread.flow_id_option, None);
+    let asked = meta_signal_flow::Query::Configuration;
+    let answer = fixture.nexus.dispatch_meta(asked.clone());
+    for resolver in [mind, owner, unread] {
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta_from(asked.clone(), Some(resolver)),
+            answer
+        );
+    }
 }
 
 /// A process marked as running in a pane of the fixture session, in Herdr's
@@ -980,7 +961,7 @@ fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
         );
         let refresh = fixture
             .nexus
-            .dispatch_serially(Query::Refresh(address.clone()), Origin::Unbound.into());
+            .dispatch_serially(Query::Refresh(address.clone()), Origin::Unbound);
         assert_eq!(
             refresh,
             signal_flow::Response::RefreshRejected(RefreshRejection::Locked)
@@ -999,7 +980,7 @@ fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
     );
     let after = fixture
         .nexus
-        .dispatch_serially(Query::Refresh(address), Origin::Unbound.into());
+        .dispatch_serially(Query::Refresh(address), Origin::Unbound);
     assert!(!matches!(
         after,
         signal_flow::Response::RefreshRejected(RefreshRejection::Locked)

@@ -201,7 +201,6 @@ impl ConfiguredStore {
                         address: Self::message(),
                         process: peer.clone(),
                     },
-                    &peer,
                     None,
                 )
                 .expect("bind reads"),
@@ -315,7 +314,11 @@ fn other_rows(nexus: &RunningNexus) -> OtherRows {
         thresholds,
         flow: nexus.store.flow_node("da1e3f").expect("flow reads"),
         metaflows: nexus.store.list_metaflows().expect("metaflows read"),
-        message_bound: nexus.store.message_peer(&peer).expect("binding reads"),
+        message_bound: nexus
+            .store
+            .bound_process(&ConfiguredStore::message())
+            .expect("binding reads")
+            == Some(peer),
         message_locked: nexus
             .store
             .stored_metaflow_lock(&ConfiguredStore::message())

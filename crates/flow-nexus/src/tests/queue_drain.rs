@@ -801,7 +801,8 @@ fn a_resolution_is_refused_without_a_peer_for_an_unknown_or_non_uncertain_attemp
                 queue_resolution_outcome: QueueResolutionOutcome::Delivered,
                 queue_resolution_reason: meta_signal_flow::QueueResolutionReason("x".into()),
             })),
-        MetaResponse::MetaRefused(meta_signal_flow::MetaRefusal::PeerUnknown)
+        MetaResponse::ResolveQueueDeliveryRejected(VisibleResolveQueueDeliveryRejected::NotOldest),
+        "a resolution with no peer behind it is answered as any other"
     );
     assert!(queue(&fixture).is_empty(), "uncertain entry is parked");
 

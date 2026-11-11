@@ -1,12 +1,13 @@
-//! The ordinary Message bridge uses the accepted socket's kernel identity.
+//! The ordinary Message bridge: Bind, Identify, IdentifyThread, Lock,
+//! Deliver, Release, Acknowledge and ArchiveRequest, each taken from any
+//! caller.
 use crate::caller::{BindsCallerPane, CallerProcess, LocatesCallerPane, NamesRootThread};
 use crate::live::HoldsLiveValue;
 use crate::sending::RefusesUnidentified;
 use crate::sending::{CompletesDirectSends, IdentifiesSender, SendsRequests};
-use crate::store::metaflow::SleepsMetaflows;
 use crate::store::send_outcome::RecordsSendOutcomes;
-use crate::store::send_server::{NamesThreadMetaflow, SendServerTrust, TrustsSendServers};
-use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, StoreError};
+use crate::store::send_server::NamesThreadMetaflow;
+use crate::store::{ManagesMetaflowState, StoreError};
 use crate::waking::{HoldsSoftForIdle, RestsEndedAwake};
 use crate::{RunningNexus, store::metaflow::MutatesMetaflows};
 use datom_codec::Datomizable;
@@ -43,62 +44,12 @@ impl From<Response> for MetaflowAnswer {
     }
 }
 
-/// Names the metaflow a process Message names runs in.
-pub(crate) trait IdentifiesPeerProcess {
-    /// A process bound by Bind, or descended from one, names that binding's
-    /// Address. Otherwise a process running in the pane of a flow Flow
-    /// launched names the Address its launch took: the pane is found from
-    /// the Herdr marks the process or its nearest marked ancestor carries,
-    /// its session, when only the pane ID is marked, from the socket its
-    /// Herdr server ancestor listens on,
-    /// the pane must hold exactly that one flow in the registry with the
-    /// live Herdr snapshot still showing its binding, and the metaflow must
-    /// be Awake as it. The process must still run with the start the
-    /// kernel gave Message, before and after its marks are read.
-    fn identify_peer_process(&self, process: Process) -> Result<Response, StoreError>;
-}
-
-impl IdentifiesPeerProcess for RunningNexus {
-    fn identify_peer_process(&self, process: Process) -> Result<Response, StoreError> {
-        match self.store.identify_process(process.clone())? {
-            Response::Refused(Refusal::Unidentified(_)) => {}
-            identified => return Ok(identified),
-        }
-        let unidentified = || Ok(Response::Refused(Refusal::unidentified(process.clone())));
-        if !FlowStore::process_is_live(&process) {
-            return unidentified();
-        }
-        let Some(pane) = u32::try_from(process.pid.0)
-            .ok()
-            .and_then(|process_id| CallerProcess { process_id }.caller_pane(&self.herdr))
-        else {
-            return unidentified();
-        };
-        if !FlowStore::process_is_live(&process) {
-            return unidentified();
-        }
-        let Ok(caller) = self.bound_caller(&pane) else {
-            return unidentified();
-        };
-        match self.store.metaflow_awake_as(&caller.flow_id.0)? {
-            Some(metaflow) if !self.rest_ended_awake(&metaflow.address) => {
-                Ok(Response::Identified(metaflow.address))
-            }
-            _ => unidentified(),
-        }
-    }
-}
-
-/// Names the metaflow a Codex thread runs as, for the MCP send server
-/// serving it.
+/// Names the metaflow a Codex thread runs as.
 pub(crate) trait IdentifiesThread {
-    /// The process Message names must run a configured send server under
-    /// its paired Codex app-server (`TrustsSendServers`): otherwise
-    /// NotSendServer, or NotConfigured while no send server is configured.
-    /// The thread then names the Address of the metaflow Awake as the one
-    /// live Codex flow whose thread Flow recorded at its Start; any other
-    /// thread is Unidentified. The shared app-server is never bound, and the
-    /// process's environment is never read.
+    /// The Address of the metaflow Awake as the one live Codex flow whose
+    /// thread Flow recorded at its Start; any other thread is Unidentified.
+    /// The shared app-server is never bound, and the process's environment
+    /// is never read.
     fn identify_thread(&self, request: IdentifyThread_Data) -> Result<Response, StoreError>;
 }
 
@@ -108,13 +59,6 @@ impl IdentifiesThread for RunningNexus {
             process,
             native_session_id,
         } = request;
-        match self.store.send_server_trust(&process)? {
-            SendServerTrust::Unconfigured => return Ok(Response::Refused(Refusal::NotConfigured)),
-            SendServerTrust::Untrusted => {
-                return Ok(Response::Refused(Refusal::NotSendServer(process)));
-            }
-            SendServerTrust::Trusted => {}
-        }
         let root_thread = self
             .codex_endpoints
             .current()
@@ -138,9 +82,6 @@ impl DispatchesMetaflowPeer for RunningNexus {
             .dispatch_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(peer) = peer else {
-            return Response::Refused(Refusal::NotMessage).into();
-        };
         let now = match std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()
@@ -155,28 +96,21 @@ impl DispatchesMetaflowPeer for RunningNexus {
             }
         };
         let result = if let Query::Bind(binding) = query {
-            // A peer running in a flow Flow launched binds its Address
+            // A process running in a flow Flow launched binds its Address
             // Awake as that flow, so the flow's own Stop drains its queue.
-            let launched = u32::try_from(peer.pid.0)
+            let launched = u32::try_from(binding.process.pid.0)
                 .ok()
                 .and_then(|process_id| CallerProcess { process_id }.caller_pane(&self.herdr))
                 .and_then(|pane| self.bound_caller(&pane).ok())
                 .map(|caller| caller.flow_id);
-            return match self.store.bind_metaflow(binding, peer, launched) {
+            return match self.store.bind_metaflow(binding, launched) {
                 Ok(response) => response.into(),
                 Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
             };
         } else if let Query::ArchiveRequest(request_id) = query {
-            // A flow bound for sending archives only its own request.  This
-            // uses the same kernel peer and persisted sending binding as
-            // Send; a Message credential is neither required nor accepted
-            // as a substitute for that address.
-            let caller = match self.sending_address(peer) {
-                Ok(caller) => caller,
-                Err(response) => return (*response).into(),
-            };
+            // Any caller archives any request by its id.
             use crate::store::logical_delivery::RecordsLogicalDeliveries;
-            return match self.store.archive_request(&request_id.0, &caller) {
+            return match self.store.archive_request(&request_id.0) {
                 Ok(Ok(())) => Response::RequestArchived(request_id).into(),
                 Ok(Err(rejection)) => Response::ArchiveRejected(rejection).into(),
                 Err(_) => {
@@ -184,14 +118,12 @@ impl DispatchesMetaflowPeer for RunningNexus {
                 }
             };
         } else {
-            match self.store.message_peer(peer) {
-                Ok(true) => {}
-                Ok(false) => return Response::Refused(Refusal::NotMessage).into(),
-                Err(error) => return Response::Refused(Refusal::Store(error.to_string())).into(),
-            }
             match query {
-                Query::Identify(process) => Ok(match self.sending_address(&process) {
-                    Ok(address) => Response::Identified(address),
+                // Identify names the metaflow the named process sends as;
+                // a process in no flow is Unidentified.
+                Query::Identify(process) => Ok(match self.sender_of(&process) {
+                    Ok(signal_flow::SentBy::Sender(address)) => Response::Identified(address),
+                    Ok(_) => Response::Refused(Refusal::unidentified(process)),
                     Err(response) => *response,
                 }),
                 Query::IdentifyThread(request) => self.identify_thread(request),
@@ -288,7 +220,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
                         }
                     }
                     return match self.store.record_send_outcome(
-                        Some(peer.clone()),
+                        peer.cloned(),
                         Some(sender),
                         Some(recipient),
                         digest,
@@ -299,7 +231,12 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     };
                 }
                 Query::Release(lock) => self.store.release_metaflow_lock(lock, now),
-                _ => return Response::Refused(Refusal::NotMessage).into(),
+                _ => {
+                    return Response::Refused(Refusal::Store(
+                        "a query the metaflow bridge does not serve".into(),
+                    ))
+                    .into();
+                }
             }
         };
         result

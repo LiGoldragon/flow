@@ -1601,6 +1601,8 @@ pub enum StoreError {
     RequestIdDrawsRefused,
     #[error("announcement tries must be positive")]
     AnnouncementTriesRefused,
+    #[error("no Nexus is declared")]
+    NexusUnconfigured,
     #[error("store {path} is held by another open; its lock cannot be acquired")]
     StoreHeld { path: String },
     #[error("the store's open could not be staged: {0}")]
@@ -3051,11 +3053,23 @@ impl OpensFlowStore for FlowStore {
     }
 }
 
+/// One configuration change the meta socket asks for: a family declared
+/// whole or one declaration alone (Configure), or one declaration taken
+/// away (Remove).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigurationEdit {
+    Declare(Box<ConfigurationChange>),
+    Remove(meta_signal_flow::Removal),
+}
+
 pub(crate) trait ManagesMetaflowState: Sized {
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
-    /// Replace one configuration family whole with its declaration.
+    /// Replace one configuration family whole with its declaration, or
+    /// change one declaration alone.
     fn configure_change(&self, change: ConfigurationChange)
     -> Result<ConfigureOutcome, StoreError>;
+    /// A Configure or a Remove, committed.
+    fn edit_configuration(&self, edit: ConfigurationEdit) -> Result<ConfigureOutcome, StoreError>;
     /// Whether ProtectedAddresses names `address`.
     fn protects(&self, address: &Address) -> Result<bool, StoreError>;
     /// The refresh threshold configured for one model, if any.
@@ -3118,6 +3132,15 @@ impl ManagesMetaflowState for FlowStore {
                 &self.meta_configuration_tables,
                 change,
             ),
+        }
+    }
+
+    fn edit_configuration(&self, edit: ConfigurationEdit) -> Result<ConfigureOutcome, StoreError> {
+        match edit {
+            ConfigurationEdit::Declare(change) => self.configure_change(*change),
+            ConfigurationEdit::Remove(removal) => {
+                FlowStore::remove_meta_entry(&self.engine, &self.meta_configuration_tables, removal)
+            }
         }
     }
 
@@ -3346,22 +3369,23 @@ impl AppliesFlowQuery for FlowStore {
             | Query::Deliver(_)
             | Query::Acknowledge(_)
             | Query::ArchiveRequest(_)
-            | Query::Release(_) => Ok(Response::Refused(signal_flow::Refusal::NotMessage)),
-            // The sender is read from the socket, which the store never sees.
-            Query::Send(_)
+            | Query::Release(_)
+            | Query::Send(_)
             | Query::DeliverAll(_)
             | Query::BindSeat(_)
             | Query::Adopt(_)
             | Query::ObserveSends(_)
             | Query::ObserveSender(_)
-            | Query::ObserveDeliveries(_) => Ok(Response::Refused(
-                <signal_flow::Refusal as crate::sending::RefusesUnidentified>::unidentified(
-                    signal_flow::Process {
-                        pid: flow_ethos::generated::library::Pid(0),
-                        started: flow_ethos::generated::library::Started(0),
-                    },
-                ),
-            )),
+            | Query::ObserveDeliveries(_)
+            | Query::Cancel(_)
+            | Query::Silence(_)
+            | Query::Clear(_)
+            | Query::ClearAll
+            | Query::Push(_)
+            | Query::Queues
+            | Query::Hot => Ok(Response::Refused(signal_flow::Refusal::Store(
+                "the Nexus answers this query, not its store alone".into(),
+            ))),
             Query::Launch(_) => Ok(Response::StartRejected(
                 StartRejection::LaunchPersistenceRefused,
             )),
@@ -3434,7 +3458,14 @@ impl ReservesPendingStart for FlowStore {
             | Query::Keep(_)
             | Query::Drop(_)
             | Query::Glance(_)
-            | Query::Read(_) => Ok(None),
+            | Query::Read(_)
+            | Query::Cancel(_)
+            | Query::Silence(_)
+            | Query::Clear(_)
+            | Query::ClearAll
+            | Query::Push(_)
+            | Query::Queues
+            | Query::Hot => Ok(None),
         }
     }
 }
@@ -5018,14 +5049,6 @@ pub(crate) trait ReadsFlowMemory {
         })
     }
 
-    fn process_executable(process: &Process) -> Option<std::path::PathBuf> {
-        if !FlowStore::process_is_live(process) {
-            return None;
-        }
-        let executable = fs::canonicalize(format!("/proc/{}/exe", process.pid.0)).ok()?;
-        FlowStore::process_is_live(process).then_some(executable)
-    }
-
     fn process_lineage(process: &Process) -> Vec<Process> {
         const ANCESTRY_LIMIT: usize = 64;
         let mut lineage = Vec::new();
@@ -5789,9 +5812,127 @@ pub(crate) trait ReadsFlowMemory {
         Ok(ConfigureOutcome::Replaced)
     }
 
+    /// One declaration added or replaced alone, keyed by its record key, in
+    /// one atomic commit; the rest of its family is kept. One equal to the
+    /// committed row writes nothing.
+    fn declare_configuration_entry<T>(
+        engine: &Engine,
+        table: TableReference<T>,
+        declared: T,
+    ) -> Result<ConfigureOutcome, StoreError>
+    where
+        T: sema_engine::EngineStoredRecord + PartialEq + Clone + Send + Sync + 'static,
+        <T as rkyv::Archive>::Archived: rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
+            + for<'validation> rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'validation>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        let committed = engine
+            .match_records(QueryPlan::key(table, declared.record_key()))?
+            .records()
+            .to_vec();
+        let commit = match committed.as_slice() {
+            [] => engine.begin_atomic_commit().assert(table, declared),
+            [stored] if stored == &declared => return Ok(ConfigureOutcome::Unchanged),
+            [_] => engine.begin_atomic_commit().mutate(table, declared),
+            _ => return Err(StoreError::StateInvariant),
+        };
+        engine.commit_atomic(commit)?;
+        Ok(ConfigureOutcome::Replaced)
+    }
+
+    /// One declaration taken away by its key; none held under it writes
+    /// nothing.
+    fn remove_configuration_entry<T>(
+        engine: &Engine,
+        table: TableReference<T>,
+        key: RecordKey,
+    ) -> Result<ConfigureOutcome, StoreError>
+    where
+        T: sema_engine::EngineStoredRecord + PartialEq + Clone + Send + Sync + 'static,
+        <T as rkyv::Archive>::Archived: rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
+            + for<'validation> rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'validation>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        let committed = engine
+            .match_records(QueryPlan::key(table, key.clone()))?
+            .records()
+            .len();
+        if committed == 0 {
+            return Ok(ConfigureOutcome::Unchanged);
+        }
+        engine.commit_atomic(engine.begin_atomic_commit().retract(table, key))?;
+        Ok(ConfigureOutcome::Replaced)
+    }
+
+    /// The declared Nexus with its harness profiles changed by `change`,
+    /// committed as the Nexus family; refused NexusUnconfigured while no
+    /// Nexus is declared.
+    fn edit_harness_profiles(
+        engine: &Engine,
+        tables: &MetaConfigurationTables,
+        change: impl FnOnce(&mut Vec<flow_ethos::HarnessProfile>),
+    ) -> Result<ConfigureOutcome, StoreError> {
+        let rows = engine
+            .match_records(QueryPlan::all(tables.nexus))?
+            .records()
+            .to_vec();
+        let [StoredMetaNexusConfiguration { nexus }] = rows.as_slice() else {
+            return Err(StoreError::NexusUnconfigured);
+        };
+        let mut nexus = nexus.clone();
+        change(&mut nexus.harness_profiles.0);
+        FlowStore::replace_configuration_family(
+            engine,
+            tables.nexus,
+            vec![StoredMetaNexusConfiguration { nexus }],
+        )
+    }
+
+    /// One declaration taken away from its family, by its key.
+    fn remove_meta_entry(
+        engine: &Engine,
+        tables: &MetaConfigurationTables,
+        removal: meta_signal_flow::Removal,
+    ) -> Result<ConfigureOutcome, StoreError> {
+        match removal {
+            meta_signal_flow::Removal::Permaflow(address) => FlowStore::remove_configuration_entry(
+                engine,
+                tables.metaflows,
+                RecordKey::new(FlowStore::address_record_key(&address)),
+            ),
+            meta_signal_flow::Removal::Refresh(model_name) => {
+                FlowStore::remove_configuration_entry(
+                    engine,
+                    tables.thresholds,
+                    RecordKey::new(model_name.0),
+                )
+            }
+            meta_signal_flow::Removal::Harness(harness_kind) => {
+                FlowStore::edit_harness_profiles(engine, tables, |profiles| {
+                    profiles.retain(|profile| profile.harness_kind != harness_kind)
+                })
+            }
+        }
+    }
+
     /// One declared configuration family replaces the committed family
-    /// whole. A Nexus whose Codex endpoints share a model is refused before
-    /// any write.
+    /// whole, or one declaration (Permaflow, Harness, Refresh) is added or
+    /// replaced alone. A Nexus whose Codex endpoints share a model is
+    /// refused before any write.
     fn configure_meta_change(
         engine: &Engine,
         tables: &MetaConfigurationTables,
@@ -5815,6 +5956,7 @@ pub(crate) trait ReadsFlowMemory {
                 config.heartbeat_recipients.0.iter().collect()
             }
             ConfigurationChange::ProtectedAddresses(addresses) => addresses.iter().collect(),
+            ConfigurationChange::Permaflow(entry) => vec![&entry.address],
             _ => Vec::new(),
         };
         if let Some(refused) = addresses
@@ -5988,6 +6130,27 @@ pub(crate) trait ReadsFlowMemory {
                         .map(|leave_out| StoredMetaLeaveOutConfiguration { leave_out })
                         .collect(),
                 )
+            }
+            ConfigurationChange::Permaflow(metaflow) => FlowStore::declare_configuration_entry(
+                engine,
+                tables.metaflows,
+                metaflow_declaration::StoredMetaMetaflowConfiguration { metaflow },
+            ),
+            ConfigurationChange::Refresh(threshold) => FlowStore::declare_configuration_entry(
+                engine,
+                tables.thresholds,
+                StoredMetaThresholdConfiguration { threshold },
+            ),
+            ConfigurationChange::Harness(declared) => {
+                FlowStore::edit_harness_profiles(engine, tables, |profiles| {
+                    match profiles
+                        .iter_mut()
+                        .find(|profile| profile.harness_kind == declared.harness_kind)
+                    {
+                        Some(profile) => *profile = declared,
+                        None => profiles.push(declared),
+                    }
+                })
             }
             ConfigurationChange::Metaflows(metaflows) => FlowStore::replace_configuration_family(
                 engine,
@@ -6371,7 +6534,7 @@ mod tests {
             .expect("notice becomes uncertain");
         assert_eq!(
             store
-                .archive_request(&task.request_id.0, &sender)
+                .archive_request(&task.request_id.0)
                 .expect("archive checks the announcement Notice"),
             Err(signal_flow::ArchiveRejection::NotYet),
             "an unended announcement Notice holds every Task it lists"
@@ -6447,7 +6610,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .archive_request(&task.request_id.0, &sender)
+                .archive_request(&task.request_id.0)
                 .expect("ended announcement releases the Task"),
             Ok(())
         );
@@ -6509,7 +6672,7 @@ mod tests {
             .expect("task ends");
         assert_eq!(
             store
-                .archive_request(&task.request_id.0, &sender)
+                .archive_request(&task.request_id.0)
                 .expect("task archives"),
             Ok(())
         );
@@ -6781,7 +6944,7 @@ mod tests {
             .expect("holder ends");
         assert_eq!(
             store
-                .archive_request(&holder.request_id.0, &sender)
+                .archive_request(&holder.request_id.0)
                 .expect("holder archives"),
             Ok(())
         );
@@ -6941,7 +7104,7 @@ mod tests {
         };
         assert_eq!(
             store
-                .archive_request(&assigned_request_id.0, &sender)
+                .archive_request(&assigned_request_id.0)
                 .expect("archive checks assignment Notice"),
             Err(signal_flow::ArchiveRejection::NotYet),
             "an unended assignment Notice holds every Order it lists"
@@ -6961,7 +7124,7 @@ mod tests {
             .expect("ended assignment settles");
         assert_eq!(
             store
-                .archive_request(&assigned_request_id.0, &sender)
+                .archive_request(&assigned_request_id.0)
                 .expect("settled assignment releases Order"),
             Ok(())
         );
@@ -9929,7 +10092,7 @@ mod tests {
             topic: flow_ethos::Topic("answerStranger".into()),
             model: signal_flow::Model::Opus,
         };
-        for (answering, requesting, message) in [
+        for (_answering, requesting, message) in [
             (
                 answerer.clone(),
                 requester.clone(),
@@ -9954,7 +10117,7 @@ mod tests {
         ] {
             assert_eq!(
                 store
-                    .resolve_sendable_message(&answering, &requesting, message)
+                    .resolve_sendable_message(&requesting, message)
                     .expect("answer refusal reads"),
                 Err(Refusal::Unresolved),
                 "queued state, foreign party, wrong requester and wrong kind read alike"
@@ -9980,7 +10143,7 @@ mod tests {
             .expect("first Order delivered");
 
         let resolved = store
-            .resolve_sendable_message(&answerer, &requester, result(&order.request_id.0))
+            .resolve_sendable_message(&requester, result(&order.request_id.0))
             .expect("first Result resolution reads")
             .expect("first Result resolves");
         let Message::Soft(Request::Result(ResultPayload::Answered(answered))) = &resolved else {
@@ -10025,14 +10188,14 @@ mod tests {
         );
         assert_eq!(
             store
-                .resolve_sendable_message(&requester, &answerer, result(&answer.request_id.0))
+                .resolve_sendable_message(&answerer, result(&answer.request_id.0))
                 .expect("an answer's own id reads"),
             Err(Refusal::Unresolved),
             "a Result cannot answer another Result"
         );
         assert_eq!(
             store
-                .resolve_sendable_message(&answerer, &requester, result(&order.request_id.0))
+                .resolve_sendable_message(&requester, result(&order.request_id.0))
                 .expect("duplicate first Result reads"),
             Err(Refusal::Unresolved),
             "the first Order is already closed"
@@ -10064,13 +10227,13 @@ mod tests {
             .expect("first Result delivered");
         assert_eq!(
             store
-                .archive_request(&answer.request_id.0, &answerer)
+                .archive_request(&answer.request_id.0)
                 .expect("first Result archive reads"),
             Ok(())
         );
         assert_eq!(
             store
-                .archive_request(&order.request_id.0, &requester)
+                .archive_request(&order.request_id.0)
                 .expect("first Order archive reads"),
             Ok(())
         );
@@ -10113,7 +10276,7 @@ mod tests {
             .expect("reused-id Order delivered");
 
         let duplicate = store
-            .resolve_sendable_message(&answerer, &requester, result(&reused.request_id.0))
+            .resolve_sendable_message(&requester, result(&reused.request_id.0))
             .expect("delayed duplicate resolution reads")
             .expect("the accepted reuse risk resolves to the current Order");
         let PrivateSendResponse::SendAccepted(second_answer) = store
@@ -10324,7 +10487,7 @@ mod tests {
             }
             assert_eq!(
                 store
-                    .archive_request(&accepted.request_id.0, &sender)
+                    .archive_request(&accepted.request_id.0)
                     .expect("unfinished archive reads"),
                 Err(signal_flow::ArchiveRejection::NotYet)
             );
@@ -10360,7 +10523,7 @@ mod tests {
             );
             assert_eq!(
                 store
-                    .archive_request(&accepted.request_id.0, &sender)
+                    .archive_request(&accepted.request_id.0)
                     .expect("terminal archive reads"),
                 Ok(())
             );
@@ -10379,7 +10542,7 @@ mod tests {
             .expect("archived request first ends");
         assert_eq!(
             store
-                .archive_request(&archived.request_id.0, &sender)
+                .archive_request(&archived.request_id.0)
                 .expect("archive reads"),
             Ok(())
         );
@@ -10406,7 +10569,7 @@ mod tests {
             ))
             .expect("corrupt binding is planted");
         assert!(matches!(
-            store.archive_request(&archived.request_id.0, &sender),
+            store.archive_request(&archived.request_id.0),
             Err(super::StoreError::StateInvariant)
         ));
     }
@@ -10470,12 +10633,6 @@ mod tests {
                     }),
                 )
                 .expect("internal request ends");
-            assert_eq!(
-                store
-                    .archive_request(&accepted.request_id.0, &address)
-                    .expect("archive ownership reads"),
-                Err(signal_flow::ArchiveRejection::UnknownRequest)
-            );
             held.push((accepted.request_id, accepted.logical_delivery_id));
         }
         drop(store);
@@ -10687,7 +10844,7 @@ mod tests {
             .expect("first Message delivery ends");
         assert_eq!(
             store
-                .archive_request(&first.request_id.0, &first_sender)
+                .archive_request(&first.request_id.0)
                 .expect("first Message delivery archives"),
             Ok(())
         );

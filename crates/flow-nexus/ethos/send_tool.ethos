@@ -20,9 +20,7 @@
 ; priority immediately; an Asleep seat retains Soft and wakes for either abrupt priority.
 ;
 ; Kinds are the requests a flow may send. The living's words (Psyche,
-; Psyches) are not among them: Flow admits a Lock and a Deliver from the
-; bound Message process alone, so no route through Flow lets a flow send
-; them.
+; Psyches) are not among them.
 ;
 ; This attributes a call to a thread by Flow's records; it does not
 ; authenticate who started the turn. Any process of the same user can start

@@ -4,22 +4,16 @@
 //! ResolveCaller names an ordinary connection's own peer: Message reads its
 //! own peer from the kernel and asks Flow whose it is.
 //!
-//! The meta socket admits the configured Message Nexus executable, a
-//! process in no flow's pane (the owner, at a terminal or in a service), and
-//! a flow whose aspect is in MetaAspects. Both sockets are `0600` under one
-//! Unix user, and a process that double-forks out of its pane loses its
-//! ancestry and reads as the owner: this gate stops accidents and model
-//! mistakes, not an adversary (F4).
+//! The meta socket answers every peer alike: the Nexus runs for its owner
+//! and keeps nobody out. The peer is read only for the records that name
+//! who asked, a queue resolution's resolver.
 
 use crate::RunningNexus;
 use crate::binding::{ChecksProcessIdentity, ReadsProcessIdentity};
-use crate::caller::{CallerPane, CallerProcess, LocatesCallerPane, ReadsProcess, ResolvesCaller};
-use crate::store::ManagesMetaflowState;
+use crate::caller::{CallerPane, CallerProcess, LocatesCallerPane, ResolvesCaller};
 use crate::store::ReadsFlowRoles;
-use crate::store::delivery::RecordsDeliveries;
-use meta_signal_flow::{MetaRefusal, ProcessIdentity, ResolverIdentity, Response};
+use meta_signal_flow::{ProcessIdentity, ResolverIdentity, Response};
 use signal_flow::CallerResolutionRejection;
-use std::fs;
 
 /// Names the flow a process runs in.
 pub trait ResolvesPeer {
@@ -47,78 +41,37 @@ impl ResolvesPeer for RunningNexus {
     }
 }
 
-/// Decides whether a meta peer may be answered.
-pub trait AdmitsMetaPeer {
-    /// None when admitted; the refusal otherwise.
-    fn meta_refusal(&self, peer: Option<CallerProcess>) -> Option<MetaRefusal>;
-}
-
-impl AdmitsMetaPeer for RunningNexus {
-    fn meta_refusal(&self, peer: Option<CallerProcess>) -> Option<MetaRefusal> {
-        let Some(peer) = peer else {
-            return Some(MetaRefusal::PeerUnknown);
-        };
-        let (message_binary, meta_aspects) = match self.store.configuration_snapshot() {
-            Ok(Some(snapshot)) => (
-                snapshot
-                    .configured_nexus
-                    .0
-                    .message_nexus_binary_option
-                    .map(|binary| binary.0),
-                snapshot.configured_nexus.0.meta_aspects,
-            ),
-            Ok(None) => match self.store.delivery_configuration() {
-                Ok(legacy) => (
-                    legacy.message_nexus_path_option.map(|path| path.0),
-                    legacy.meta_aspects,
-                ),
-                Err(_) => return Some(MetaRefusal::PeerUnknown),
-            },
-            Err(_) => return Some(MetaRefusal::PeerUnknown),
-        };
-        if message_binary.as_ref().is_some_and(|binary| {
-            !binary.is_empty() && peer.executable() == fs::canonicalize(binary).ok()
-        }) {
-            return None;
-        }
-        let pane = peer.caller_pane(&self.herdr);
-        let caller = match self.resolve_caller(pane.clone(), None) {
-            signal_flow::Response::CallerResolved(caller) => caller,
-            // In a pane that holds a flow whose role Flow does not know: a
-            // flow still, never the owner.
-            _ if pane.as_ref().is_some_and(|pane| self.pane_holds_flow(pane)) => {
-                return Some(MetaRefusal::PeerUnknown);
-            }
-            // In no pane, or in a pane that holds no flow: the owner.
-            _ => return None,
-        };
-        if meta_aspects.0.contains(&caller.aspect) {
-            None
-        } else {
-            Some(MetaRefusal::PeerNotAuthorized(caller))
-        }
-    }
-}
-
-/// Who the admitted meta peer is, for the records that name who asked.
+/// Who the meta peer is, for the records that name who asked.
 pub trait NamesMetaPeer {
-    /// The peer's process, and the flow it runs in when it runs in one; None
-    /// when the process cannot be read.
-    fn meta_resolver(&self, peer: Option<CallerProcess>) -> Option<ResolverIdentity>;
+    /// The peer's process, and the flow it runs in when it runs in one; a
+    /// peer whose process cannot be read is process 0, in no flow.
+    fn meta_resolver(&self, peer: Option<CallerProcess>) -> ResolverIdentity;
 }
 
 impl NamesMetaPeer for RunningNexus {
-    fn meta_resolver(&self, peer: Option<CallerProcess>) -> Option<ResolverIdentity> {
-        let peer = peer?;
-        let process_identity = ProcessIdentity::of(peer.process_id)?;
+    fn meta_resolver(&self, peer: Option<CallerProcess>) -> ResolverIdentity {
+        let unread = ResolverIdentity {
+            process_identity: ProcessIdentity {
+                process_id: meta_signal_flow::ProcessId(0),
+                process_user_id: meta_signal_flow::ProcessUserId(0),
+                process_start_token: meta_signal_flow::ProcessStartToken(String::new()),
+            },
+            flow_id_option: None,
+        };
+        let Some(peer) = peer else {
+            return unread;
+        };
+        let Some(process_identity) = ProcessIdentity::of(peer.process_id) else {
+            return unread;
+        };
         let flow_id_option = match self.resolve_caller(peer.caller_pane(&self.herdr), None) {
             signal_flow::Response::CallerResolved(caller) => Some(caller.flow_id),
             _ => None,
         };
-        Some(ResolverIdentity {
+        ResolverIdentity {
             process_identity,
             flow_id_option,
-        })
+        }
     }
 }
 

@@ -201,6 +201,28 @@ pub struct WakingMetaflows {
 pub struct WakingLease<'held> {
     held: &'held WakingMetaflows,
     address: Address,
+    /// The priority a Push delivers the queue at, in place of the
+    /// priority its own requests carry.
+    pushed: Option<signal_flow::Priority>,
+}
+
+/// A hold whose drain a Push sets the priority of.
+pub(crate) trait PushesAtPriority: Sized {
+    /// This hold, delivering at `priority`.
+    fn pushed_at(self, priority: signal_flow::Priority) -> Self;
+    /// The priority a Push set, if one did.
+    fn pushed(&self) -> Option<&signal_flow::Priority>;
+}
+
+impl PushesAtPriority for WakingLease<'_> {
+    fn pushed_at(mut self, priority: signal_flow::Priority) -> Self {
+        self.pushed = Some(priority);
+        self
+    }
+
+    fn pushed(&self) -> Option<&signal_flow::Priority> {
+        self.pushed.as_ref()
+    }
 }
 
 pub(crate) trait IdentifiesWakingLease {
@@ -233,6 +255,7 @@ impl HoldsWakingMetaflows for WakingMetaflows {
         waking.insert(address.clone()).then(|| WakingLease {
             held: self,
             address: address.clone(),
+            pushed: None,
         })
     }
 
@@ -2500,7 +2523,16 @@ impl DrainsHeldSeats for RunningNexus {
             visible_sender,
             content: meta_signal_flow::Content::Waking(waking),
         };
-        let message = if cohort
+        let message = if let Some(pushed) = lease.pushed() {
+            // A Push delivers the whole queue at the priority it names.
+            match pushed {
+                signal_flow::Priority::HardAbrupt => meta_signal_flow::Message::HardAbrupt(letter),
+                signal_flow::Priority::MiddleAbrupt => {
+                    meta_signal_flow::Message::MiddleAbrupt(letter)
+                }
+                signal_flow::Priority::Soft => meta_signal_flow::Message::Soft(letter),
+            }
+        } else if cohort
             .iter()
             .any(|entry| matches!(entry.message, signal_flow::Message::HardAbrupt(_)))
         {

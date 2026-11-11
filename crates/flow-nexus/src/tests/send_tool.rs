@@ -709,7 +709,7 @@ fn an_admitted_send_tool_call_holds_archive_until_its_answer_object_is_released(
         fixture
             .nexus
             .store
-            .archive_request(&accepted.send_acceptance.request_id.0, &sender_a())
+            .archive_request(&accepted.send_acceptance.request_id.0)
             .unwrap(),
         Err(signal_flow::ArchiveRejection::NotYet)
     );
@@ -734,7 +734,7 @@ fn an_admitted_send_tool_call_holds_archive_until_its_answer_object_is_released(
         fixture
             .nexus
             .store
-            .archive_request(&accepted.send_acceptance.request_id.0, &sender_a())
+            .archive_request(&accepted.send_acceptance.request_id.0)
             .unwrap(),
         Err(signal_flow::ArchiveRejection::NotYet),
         "the replayed answer object holds archive until its write completes"
@@ -744,7 +744,7 @@ fn an_admitted_send_tool_call_holds_archive_until_its_answer_object_is_released(
         fixture
             .nexus
             .store
-            .archive_request(&accepted.send_acceptance.request_id.0, &sender_a())
+            .archive_request(&accepted.send_acceptance.request_id.0)
             .unwrap(),
         Ok(())
     );
@@ -1796,7 +1796,7 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
         fixture
             .nexus
             .store
-            .archive_request(&accepted.send_acceptance.request_id.0, &core())
+            .archive_request(&accepted.send_acceptance.request_id.0)
             .expect("archive checks the admitting call"),
         Err(signal_flow::ArchiveRejection::NotYet),
         "an admission whose answer has not been written still holds its request"
@@ -1806,7 +1806,7 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
         fixture
             .nexus
             .store
-            .archive_request(&accepted.send_acceptance.request_id.0, &core())
+            .archive_request(&accepted.send_acceptance.request_id.0)
             .expect("archive reads"),
         Ok(())
     );
@@ -1892,9 +1892,7 @@ fn archive_serializes_with_logical_delivery_admission_and_commits_after_the_gate
                 "the archive observes the held admission gate"
             );
             contended.send(()).expect("archive observes contention");
-            let result = store
-                .archive_request(&request_id.0, &core())
-                .expect("archive reads");
+            let result = store.archive_request(&request_id.0).expect("archive reads");
             finished.send(()).expect("archive thread finishes");
             result
         });
@@ -1949,7 +1947,7 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
         fixture
             .nexus
             .store
-            .archive_request("none", &core())
+            .archive_request("none")
             .expect("unknown archive reads"),
         Err(signal_flow::ArchiveRejection::UnknownRequest)
     );
@@ -1957,15 +1955,16 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
         fixture
             .nexus
             .store
-            .archive_request(&request_id.0, &sender_a())
-            .expect("stranger archive reads"),
-        Err(signal_flow::ArchiveRejection::UnknownRequest)
+            .archive_request(&request_id.0)
+            .expect("an archive by another reads"),
+        Err(signal_flow::ArchiveRejection::NotYet),
+        "an archive asked by another than its sender is answered by the request's state"
     );
     assert_eq!(
         fixture
             .nexus
             .store
-            .archive_request(&request_id.0, &core())
+            .archive_request(&request_id.0)
             .expect("early archive reads"),
         Err(signal_flow::ArchiveRejection::NotYet)
     );
@@ -1996,7 +1995,7 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
         fixture
             .nexus
             .store
-            .archive_request_with_injected_commit_failure(&request_id.0, &core())
+            .archive_request_with_injected_commit_failure(&request_id.0)
             .is_err(),
         "a fault in the archive commit is returned"
     );
@@ -2025,7 +2024,7 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
         fixture
             .nexus
             .store
-            .archive_request(&request_id.0, &core())
+            .archive_request(&request_id.0)
             .expect("archive commits"),
         Ok(())
     );
@@ -2654,10 +2653,9 @@ fn a_start_reading_an_unanswering_codex_history_still_serves_metaflows() {
             ),
             "the native read reaches the app-server"
         );
-        let listed = fixture.nexus.dispatch_serially(
-            signal_flow::Query::Metaflows,
-            signal_flow::Origin::Unbound.into(),
-        );
+        let listed = fixture
+            .nexus
+            .dispatch_serially(signal_flow::Query::Metaflows, signal_flow::Origin::Unbound);
         assert!(
             matches!(listed, signal_flow::Response::Listed(_)),
             "{listed:?}"

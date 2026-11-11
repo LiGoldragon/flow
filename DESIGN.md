@@ -182,11 +182,54 @@ named. A `Deliver` into a flow at or past that threshold is refused
 exact pane closes successfully, and closes under the lease. `List` reads the
 same store rows and sorts them by Flow ID.
 
-The meta socket answers `MetaRefused` unless its peer (read from the kernel)
-is the configured Message Nexus executable, a process in no flow's pane (the
-owner), or a flow whose aspect is in `MetaAspects` (default `[ Psyche ]`).
-Both sockets are `0600` under one UID, so this stops accidents, not an
-adversary.
+Every query on either socket gives the same answer to every caller: a flow,
+a subflow, or the living at a shell. The calling process is read for one
+thing, the sender a message is filled in with (`sending::IdentifiesSender`,
+`caller::AuthenticatesProcessAuthority`): the metaflow its pane's bound flow
+or its Codex thread names, or `Unbound` for a caller in no flow, which is
+served (`SentBy.Unbound`, shown `VisibleSender.Unbound`). A Launch records
+its caller as its origin; nothing else reads the caller. There is no meta
+gate (`MetaAspects` and `MessageNexusBinary` are configured and read by
+nothing), no protected-address guard (a protected Address is only never
+refreshed for its context), no self-restart refusal, and no owner check on
+`MetaBindExisting`. `Send`, `DeliverAll`, `ObserveSends` (every send, whoever
+sent it), `ArchiveRequest`, `Keep` and `Drop` (the Address's Awake flow's
+handover), and the Message bridge (`Bind` of the named process, `Identify`,
+`IdentifyThread`, `Lock`, `Deliver`, `Release`, `Acknowledge`,
+`ObserveSender`, `ObserveDeliveries`) take any caller. `BindSeat.{ Address
+SeatPane }` and `Adopt.{ Address SeatPane NativeSessionId }` bind the seat
+in the pane they name. A Result or a Done closes the open request it names
+whoever sends it, addressed to the request's sender when that sender is an
+Address. A hook's Report is answered `Reported` whoever sends it; a seat a
+restart bound shares its native session with the harness it replaced, so its
+events act only when the reporting process descends from the resumed
+harness (the restart fence, a question for the living). A Launch opens its
+pane in the caller's Herdr session, another question. A refusal names the
+state of the thing asked about. Both
+sockets are `0600` under one UID; security is the host's.
+
+A request, a reminder and a queue each have an operation of their own on the
+ordinary socket (`queue_operations`): `Cancel.RequestId` withdraws a request
+still queued, archives it with its id and a Task's reminder, and queues a
+Soft Notice for its sender, and for its recipient when it reached it;
+`Silence.RequestId` closes a Task's reminder and leaves the Task open;
+`Clear.Address` and `ClearAll` withdraw everything queued, answering the ids;
+`Push.{ Address Priority }` wakes every queued entry and delivers the whole
+queue now as one Waking at the priority named (the waking lease carries it,
+`waking::PushesAtPriority`), waking an Asleep metaflow; `Queues` reads every
+queue that holds something; `Hot` reads every live flow's Address with the
+minutes since its last turn ended, from a per-Address turn end kept beside
+each harness's (`store::turn_end`). `RequestRejection.[ UnknownRequest NotYet
+Closed NotTask StoreRefused ]` names why a Cancel or Silence changed nothing.
+
+On the meta socket one declaration is changed alone:
+`Configure.Permaflow.ConfigureMetaflow` (keyed by its Address),
+`Configure.Harness.HarnessProfile` (by its harness, within the declared
+Nexus) and `Configure.Refresh.ConfigureThreshold` (by its model name) add or
+replace one row in one atomic commit, the rest of its family kept;
+`Remove.[ Permaflow.Address Harness.HarnessKind Refresh.ModelName ]` takes
+one away. Each answers `Configured.[ Replaced Unchanged ]`, a Harness while no
+Nexus is declared `Unconfigured`. The family-whole `Configure` stays.
 
 `Replace` carries a `StartRequest` whose profile names the predecessor. The
 successor launches through the one Start path; on `Started` the predecessor is
@@ -322,9 +365,8 @@ the refused close logged.
 
 Every Codex thread Flow opens declares one dynamic tool, `send`, whose
 arguments are a target Address, a kind (`Order`, `Question`, `Result`,
-`Notice`) and a body. The living's words are not among the kinds: Flow admits
-a Lock and a Deliver from the bound Message process alone, so no route through
-Flow lets a flow send `Psyche` or `Psyches`. The app-server accepts a
+`Notice`) and a body. The living's words are not among the kinds of the send
+tool. The app-server accepts a
 thread's dynamic tools only on a connection initialized with its experimental
 API. Before Flow opens such a connection it probes the deployed app-server: on
 a connection initialized without it, a `thread/start` declaring the tool must

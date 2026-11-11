@@ -1,7 +1,8 @@
 //! The last turn end of each harness: a Claude flow's Stop in its own
 //! session, or a Codex flow's thread reporting a turn completed. One record
 //! per harness, replaced at each turn end, so `Observe.TurnEnds` opens with
-//! the state it names even after a restart.
+//! the state it names even after a restart; and one per Address, the last
+//! turn end of its flows, which `Hot` reads.
 
 use super::{FlowStore, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -67,16 +68,38 @@ impl RanksHarness for HarnessKind {
     }
 }
 
+/// The key of an Address's last turn end, apart from the harnesses' keys.
+pub(crate) trait KeysAddressTurnEnd {
+    fn turn_end_key(&self) -> String;
+}
+
+impl KeysAddressTurnEnd for signal_flow::Address {
+    fn turn_end_key(&self) -> String {
+        use super::ReadsFlowMemory;
+        format!("address/{}", FlowStore::address_record_key(self))
+    }
+}
+
 pub(crate) trait RecordsTurnEnds {
-    /// Makes `turn_end` the last of its harness.
-    fn record_turn_end(&self, turn_end: TurnEnd) -> Result<(), StoreError>;
+    /// Makes `turn_end` the last of its harness and of its Address.
+    fn record_turn_end(&self, turn_end: TurnEnd) -> Result<(), StoreError> {
+        let address_key = turn_end.address.turn_end_key();
+        self.record_turn_end_under(turn_end.harness_kind.key(), turn_end.clone())?;
+        self.record_turn_end_under(&address_key, turn_end)
+    }
+    /// Makes `turn_end` the one held under `key`.
+    fn record_turn_end_under(&self, key: &str, turn_end: TurnEnd) -> Result<(), StoreError>;
     /// The last turn end of each harness that has one, Claude before Codex.
     fn last_turn_ends(&self) -> Result<Vec<TurnEnd>, StoreError>;
+    /// The last turn end of the flows of `address`, if one is held.
+    fn last_turn_end_of(
+        &self,
+        address: &signal_flow::Address,
+    ) -> Result<Option<TurnEnd>, StoreError>;
 }
 
 impl RecordsTurnEnds for FlowStore {
-    fn record_turn_end(&self, turn_end: TurnEnd) -> Result<(), StoreError> {
-        let key = turn_end.harness_kind.key();
+    fn record_turn_end_under(&self, key: &str, turn_end: TurnEnd) -> Result<(), StoreError> {
         let record = TurnEndRecord {
             key: key.to_owned(),
             turn_end,
@@ -107,7 +130,25 @@ impl RecordsTurnEnds for FlowStore {
             .match_records(QueryPlan::all(self.turn_ends))?
             .records()
             .to_vec();
+        records.retain(|record| {
+            [HarnessKind::Claude.key(), HarnessKind::Codex.key()].contains(&record.key.as_str())
+        });
         records.sort_by(|left, right| left.key.cmp(&right.key));
         Ok(records.into_iter().map(|record| record.turn_end).collect())
+    }
+
+    fn last_turn_end_of(
+        &self,
+        address: &signal_flow::Address,
+    ) -> Result<Option<TurnEnd>, StoreError> {
+        Ok(self
+            .engine
+            .match_records(QueryPlan::key(
+                self.turn_ends,
+                RecordKey::new(address.turn_end_key()),
+            ))?
+            .records()
+            .first()
+            .map(|record| record.turn_end.clone()))
     }
 }

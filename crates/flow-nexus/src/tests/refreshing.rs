@@ -172,7 +172,7 @@ fn a_refresh_ends_the_awake_flow_without_a_turn_and_leaves_the_metaflow_asleep()
     assert_eq!(
         fixture
             .nexus
-            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound.into()),
+            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound),
         Response::Refreshed(Refreshed {
             address: seat_address(),
             flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
@@ -259,7 +259,7 @@ fn a_refresh_is_refused_locked_while_another_holds_the_metaflow() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound.into()),
+            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound),
         Response::RefreshRejected(RefreshRejection::Locked)
     );
     assert!(!closed(&fixture), "nothing is closed while the hold stands");
@@ -273,7 +273,7 @@ fn a_refresh_is_refused_locked_while_another_holds_the_metaflow() {
     assert!(matches!(
         fixture
             .nexus
-            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound.into()),
+            .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound),
         Response::Refreshed(_)
     ));
     assert_eq!(stored(&fixture).state, State::Asleep);
@@ -329,7 +329,6 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
                     address: sender_address.clone(),
                     process: peer.clone(),
                 },
-                &peer,
                 Some(flow_ethos::FlowId("a001".into())),
             )
             .unwrap(),
@@ -370,8 +369,8 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
         1,
     ));
     assert_eq!(
-        fixture.nexus.sending_address(&peer).unwrap(),
-        sender_address,
+        fixture.nexus.sender_of(&peer).unwrap(),
+        signal_flow::SentBy::Sender(sender_address.clone()),
         "the caller is authenticated before the recipient transition starts"
     );
     let request = Request::Order("For the successor.".into());
@@ -390,7 +389,7 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
         let refreshing = scope.spawn(|| {
             fixture
                 .nexus
-                .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound.into())
+                .dispatch_serially(Query::Refresh(seat_address()), Origin::Unbound)
         });
         assert!(
             closing.appeared_by(std::time::Instant::now() + Duration::from_secs(20)),
@@ -1528,12 +1527,12 @@ fn a_nexus_start_starts_a_successor_owed_after_a_refresh_or_a_replace() {
     }
 }
 
-/// The seat's own Address, as the Secondary's own seat asks.
-fn own_seat() -> crate::protecting::Asker {
-    crate::protecting::Asker::Ordinary(Origin::Flow(signal_flow::FlowOrigin {
+/// The seat's own origin, as the Secondary's own seat asks.
+fn own_seat() -> Origin {
+    Origin::Flow(signal_flow::FlowOrigin {
         flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
         session_id: signal_flow::SessionId(super::waking::CLAUDE_SESSION.into()),
-    }))
+    })
 }
 
 /// A flow that refreshes itself is working: its Refresh answers
@@ -1556,7 +1555,7 @@ fn a_self_refresh_of_a_working_seat_waits_for_its_idle_event_and_answers_refresh
     assert_eq!(
         fixture
             .nexus
-            .dispatch_asked(Query::Refresh(seat_address()), own_seat()),
+            .dispatch_from(Query::Refresh(seat_address()), own_seat()),
         Response::RefreshQueued(signal_flow::RefreshQueued {
             address: seat_address(),
             flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),

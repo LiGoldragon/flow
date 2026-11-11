@@ -209,7 +209,7 @@ fn archiving_an_ended_task_retracts_its_reminder_atomically() {
         fixture
             .nexus
             .store
-            .archive_request(&acceptance.request_id.0, &sender)
+            .archive_request(&acceptance.request_id.0)
             .unwrap(),
         Ok(())
     );

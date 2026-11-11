@@ -51,7 +51,7 @@ pub trait TitlesFlow {
 
 impl TitlesFlow for LaunchProfile {
     fn native_title(&self, flow_id: &str) -> Result<NativeTitle, TitleRefused> {
-        if flow_id.len() != 6
+        if flow_id.len() < 6
             || !flow_id
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -148,9 +148,22 @@ mod tests {
         }
     }
 
+    /// A flow id lengthened past six characters when two collide is
+    /// titled as it is.
+    #[test]
+    fn a_lengthened_flow_id_is_titled() {
+        assert_eq!(
+            profile(Aspect::Psyche, Model::Fable, "haiku")
+                .native_title("38de5bb")
+                .unwrap()
+                .as_str(),
+            "{ Psyche flow Fable 38de5bb }"
+        );
+    }
+
     #[test]
     fn malformed_flow_ids_are_refused() {
-        for flow_id in ["38DE5B", "38de5", "38de5bb", "38de5g", ""] {
+        for flow_id in ["38DE5B", "38de5", "38de5g", "38de5bg", ""] {
             assert_eq!(
                 profile(Aspect::Psyche, Model::Fable, "haiku").native_title(flow_id),
                 Err(TitleRefused::InvalidFlowId)

@@ -482,11 +482,14 @@ pub(crate) trait MintsRequestIds {
         &self,
         id: &flow_ethos::RequestId,
     ) -> Result<Option<RequestIdBinding>, StoreError>;
+    /// Whether an answer addressed to `recipient` closes the open request
+    /// `binding` names, whoever sends it: a Result an Order or Question, a
+    /// Done a Task, the request delivered, and the answer addressed to the
+    /// request's sender when that sender is an Address.
     fn answerable_by(
         &self,
         binding: &RequestIdBinding,
-        answerer: &Address,
-        requester: &Address,
+        recipient: &Address,
         task: bool,
     ) -> Result<bool, StoreError>;
     fn store_identity(&self) -> Result<signal_flow::StoreIdentity, StoreError>;
@@ -527,8 +530,7 @@ impl MintsRequestIds for FlowStore {
     fn answerable_by(
         &self,
         binding: &RequestIdBinding,
-        answerer: &Address,
-        requester: &Address,
+        recipient: &Address,
         task: bool,
     ) -> Result<bool, StoreError> {
         let Some(retained) = self
@@ -538,9 +540,11 @@ impl MintsRequestIds for FlowStore {
         else {
             return Ok(false);
         };
-        let original_sender = match &retained.entry.sent_by {
-            SentBy::Sender(value) => value,
-            _ => return Ok(false),
+        // A request from an Address is answered to it; one from no Address
+        // (Unbound, Flow, Unknown) is answered to whom the answer names.
+        let addressed = match &retained.entry.sent_by {
+            SentBy::Sender(original_sender) => original_sender == recipient,
+            _ => true,
         };
         let request = match &retained.entry.message {
             Message::HardAbrupt(value) | Message::MiddleAbrupt(value) | Message::Soft(value) => {
@@ -553,10 +557,7 @@ impl MintsRequestIds for FlowStore {
             matches!(request, Request::Order(_) | Request::Question(_))
         };
         let delivered = self.delivered_to_be_answered(&binding.logical_delivery_id)?;
-        Ok(correct_kind
-            && retained.address == *answerer
-            && original_sender == requester
-            && delivered)
+        Ok(correct_kind && addressed && delivered)
     }
     fn mint_request_id(&self) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError> {
         let held = self
@@ -627,7 +628,8 @@ impl HoldsOpenRequests for FlowStore {
     fn open_requests(&self, address: &Address) -> Result<Vec<QueueEntry>, StoreError> {
         let mut open = Vec::new();
         for retained in self.retained_logical_requests()? {
-            if retained.address != *address || !matches!(retained.entry.sent_by, SentBy::Sender(_))
+            if retained.address != *address
+                || !matches!(retained.entry.sent_by, SentBy::Sender(_) | SentBy::Unbound)
             {
                 continue;
             }
@@ -669,31 +671,30 @@ pub(crate) trait RecordsLogicalDeliveries {
         request_id: &flow_ethos::RequestId,
     ) -> Result<Option<meta_signal_flow::DeliveryDebugged_Data>, StoreError>;
     fn seed_store_identity(&self) -> Result<(), StoreError>;
+    /// Archives the request of `request_id`, whoever asks: its delivery
+    /// settled, its id and a Task's reminder retracted.
     fn archive_request(
         &self,
         request_id: &str,
-        sender: &Address,
     ) -> Result<Result<(), signal_flow::ArchiveRejection>, StoreError>;
     fn commit_archive_request(
         &self,
         request_id: &str,
-        sender: &Address,
         commit: AtomicCommit,
     ) -> Result<Result<(), signal_flow::ArchiveRejection>, StoreError>;
     #[cfg(test)]
     fn archive_request_with_injected_commit_failure(
         &self,
         request_id: &str,
-        sender: &Address,
     ) -> Result<Result<(), signal_flow::ArchiveRejection>, StoreError>;
     fn seed_missing_queued_deliveries(&self) -> Result<(), StoreError>;
     fn force_queue_wake(&self, address: &Address) -> Result<(), StoreError>;
     /// Resolves a public message against durable private evidence. The
-    /// authenticated sender and resolved recipient are supplied by the
-    /// Nexus, never by the message. Answer correlation is exact typed data.
+    /// recipient is supplied by the Nexus; whoever sends it, an answer
+    /// closes the open request it names. Answer correlation is exact typed
+    /// data.
     fn resolve_sendable_message(
         &self,
-        sender: &Address,
         recipient: &Address,
         message: signal_flow::SendableMessage,
     ) -> Result<Result<Message, Refusal>, StoreError>;
@@ -790,9 +791,25 @@ pub(crate) trait RecordsLogicalDeliveries {
         startup: &[QueueEntry],
         receipt: Option<&signal_flow::NativeReceipt>,
     ) -> Result<bool, StoreError>;
+    /// The deliveries of one sender.
     fn read_logical_delivery_snapshots(
         &self,
-        sender: &Address,
+        sender: &impl crate::sending::SendsAs,
+        after_cursor: Option<i64>,
+    ) -> Result<SendObservation, StoreError> {
+        self.read_delivery_snapshots_of(Some(&sender.sent_by()), after_cursor)
+    }
+    /// The deliveries of every sender.
+    fn read_every_delivery_snapshot(
+        &self,
+        after_cursor: Option<i64>,
+    ) -> Result<SendObservation, StoreError> {
+        self.read_delivery_snapshots_of(None, after_cursor)
+    }
+    /// The deliveries of one sender, or of every sender with None.
+    fn read_delivery_snapshots_of(
+        &self,
+        sender: Option<&SentBy>,
         after_cursor: Option<i64>,
     ) -> Result<SendObservation, StoreError>;
     fn read_message_delivery_snapshots(
@@ -886,16 +903,21 @@ impl RecordsLogicalDeliveries for FlowStore {
             .write_gate
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // Keys already acknowledged, or never held, write nothing.
         let mut commit = self.engine.begin_atomic_commit();
+        let mut held = false;
         for key in keys {
             if self.deliver_call(key)?.is_some() {
                 commit = commit.retract(
                     self.logical_deliveries.deliver_calls,
                     key.deliver_call_record_key(),
                 );
+                held = true;
             }
         }
-        self.engine.commit_atomic(commit)?;
+        if held {
+            self.engine.commit_atomic(commit)?;
+        }
         Ok(())
     }
 
@@ -925,15 +947,13 @@ impl RecordsLogicalDeliveries for FlowStore {
     fn archive_request(
         &self,
         request_id: &str,
-        sender: &Address,
     ) -> Result<Result<(), signal_flow::ArchiveRejection>, StoreError> {
-        self.commit_archive_request(request_id, sender, self.engine.begin_atomic_commit())
+        self.commit_archive_request(request_id, self.engine.begin_atomic_commit())
     }
 
     fn commit_archive_request(
         &self,
         request_id: &str,
-        sender: &Address,
         commit: AtomicCommit,
     ) -> Result<Result<(), signal_flow::ArchiveRejection>, StoreError> {
         use signal_flow::ArchiveRejection;
@@ -953,9 +973,6 @@ impl RecordsLogicalDeliveries for FlowStore {
         else {
             return Err(StoreError::StateInvariant);
         };
-        if !matches!(&retained.entry.sent_by, SentBy::Sender(owner) if owner == sender) {
-            return Ok(Err(ArchiveRejection::UnknownRequest));
-        }
         if self.admission_answer_is_pending(&binding.request_id) {
             return Ok(Err(ArchiveRejection::NotYet));
         }
@@ -1136,13 +1153,12 @@ impl RecordsLogicalDeliveries for FlowStore {
     fn archive_request_with_injected_commit_failure(
         &self,
         request_id: &str,
-        sender: &Address,
     ) -> Result<Result<(), signal_flow::ArchiveRejection>, StoreError> {
         let failing = self.engine.begin_atomic_commit().retract(
             self.logical_deliveries.current,
             RecordKey::new("missing-archive-row"),
         );
-        self.commit_archive_request(request_id, sender, failing)
+        self.commit_archive_request(request_id, failing)
     }
 
     fn seed_store_identity(&self) -> Result<(), StoreError> {
@@ -1801,7 +1817,6 @@ impl RecordsLogicalDeliveries for FlowStore {
     }
     fn resolve_sendable_message(
         &self,
-        sender: &Address,
         recipient: &Address,
         message: signal_flow::SendableMessage,
     ) -> Result<Result<Message, Refusal>, StoreError> {
@@ -1828,7 +1843,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     Ok(binding) => binding,
                     Err(refusal) => return Ok(Err(refusal)),
                 };
-                if !self.answerable_by(&binding, sender, recipient, false)? {
+                if !self.answerable_by(&binding, recipient, false)? {
                     return Ok(Err(Refusal::Unresolved));
                 }
                 Request::Result(ResultPayload::Answered(ResultPayload_Answered_Data {
@@ -1845,7 +1860,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     Ok(binding) => binding,
                     Err(refusal) => return Ok(Err(refusal)),
                 };
-                if !self.answerable_by(&binding, sender, recipient, true)? {
+                if !self.answerable_by(&binding, recipient, true)? {
                     return Ok(Err(Refusal::Unresolved));
                 }
                 Request::Done(flow_ethos::DonePayload::Answered(
@@ -2453,9 +2468,9 @@ impl RecordsLogicalDeliveries for FlowStore {
             _ => Err(StoreError::StateInvariant),
         }
     }
-    fn read_logical_delivery_snapshots(
+    fn read_delivery_snapshots_of(
         &self,
-        sender: &Address,
+        sender: Option<&SentBy>,
         after_cursor: Option<i64>,
     ) -> Result<SendObservation, StoreError> {
         let _guard = self
@@ -2484,7 +2499,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 .iter()
                 .filter(|r| {
                     r.snapshot.delivery_cursor > signal_flow::DeliveryCursor(cursor)
-                        && r.snapshot.sent_by == signal_flow::SentBy::Sender(sender.clone())
+                        && sender.is_none_or(|sender| &r.snapshot.sent_by == sender)
                 })
                 .map(|r| r.snapshot.clone())
                 .collect()
@@ -2494,7 +2509,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 .iter()
                 .filter(|r| {
                     r.archived.is_none()
-                        && r.snapshot.sent_by == signal_flow::SentBy::Sender(sender.clone())
+                        && sender.is_none_or(|sender| &r.snapshot.sent_by == sender)
                 })
                 .map(|r| r.snapshot.clone())
                 .collect()

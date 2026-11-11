@@ -190,8 +190,22 @@ fn current_socket_client_serves_request_operations() {
                 signal_flow::Response::RequestArchived(archived)
             );
         }
+        // Another than the request's sender archives it: any caller may.
         "archive-foreign" => {
             bind_socket(&socket, migration_recipient());
+            let archived: flow_ethos::RequestId =
+                flow_ethos::RequestId(std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap());
+            assert_eq!(
+                socket_query(
+                    &socket,
+                    signal_flow::Query::ArchiveRequest(archived.clone())
+                ),
+                signal_flow::Response::RequestArchived(archived)
+            );
+        }
+        // Once archived, the id names no request, to a caller in no flow as
+        // to any other.
+        "archive-unbound" => {
             let archived = std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap();
             assert_eq!(
                 socket_query(
@@ -202,16 +216,6 @@ fn current_socket_client_serves_request_operations() {
                     signal_flow::ArchiveRejection::UnknownRequest
                 )
             );
-        }
-        "archive-unbound" => {
-            let archived = std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap();
-            assert!(matches!(
-                socket_query(
-                    &socket,
-                    signal_flow::Query::ArchiveRequest(flow_ethos::RequestId(archived))
-                ),
-                signal_flow::Response::Refused(signal_flow::Refusal::Unidentified(_))
-            ));
         }
         "archive-message" => {
             bind_socket(&socket, migration_message());
@@ -240,6 +244,8 @@ fn current_socket_client_serves_request_operations() {
                 )
             );
         }
+        // A request Flow raised itself is archived by anyone once it is
+        // settled; still queued, it is answered by that state.
         "archive-flow-owned" => {
             bind_socket(&socket, migration_sender());
             let archived = std::env::var("FLOW_MIGRATION_ARCHIVE_REQUEST").unwrap();
@@ -248,9 +254,7 @@ fn current_socket_client_serves_request_operations() {
                     &socket,
                     signal_flow::Query::ArchiveRequest(flow_ethos::RequestId(archived))
                 ),
-                signal_flow::Response::ArchiveRejected(
-                    signal_flow::ArchiveRejection::UnknownRequest
-                )
+                signal_flow::Response::ArchiveRejected(signal_flow::ArchiveRejection::NotYet)
             );
         }
         mode => panic!("unknown migration client mode {mode}"),
@@ -670,7 +674,6 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     assert_eq!(
         store
             .resolve_sendable_message(
-                &singleton_recipient,
                 &sender,
                 signal_flow::SendableMessage::Soft(signal_flow::SendableRequest::Result(
                     signal_flow::SendableRequest_Result_Data {
@@ -834,10 +837,10 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     let current_socket = archive_runtime.path().join("flow.sock");
     wait_for_socket(&current_socket);
     for mode in [
+        "archive-unknown",
         "archive-foreign",
         "archive-unbound",
         "archive-message",
-        "archive-unknown",
     ] {
         run_socket_client(
             &current_socket,
@@ -848,14 +851,6 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
             )],
         );
     }
-    run_socket_client(
-        &current_socket,
-        "archive",
-        &[(
-            "FLOW_MIGRATION_ARCHIVE_REQUEST",
-            open_order.request_id.0.as_str(),
-        )],
-    );
     // The heartbeat the current process admits at its first beat (one
     // second) has no event outside that process: it is a Flow-admitted
     // delivery, and ObserveDeliveries carries Message-admitted ones only, so

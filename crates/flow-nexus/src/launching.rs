@@ -156,7 +156,7 @@ pub trait LaunchesFlows {
     /// Runs or resumes the launch a profile names, for its origin.
     fn start(&self, profile: LaunchProfile, origin: Origin) -> Response;
     /// The recorded outcome of a request already settled, or None.
-    fn settled(&self, profile: &LaunchProfile, origin: &Origin) -> Option<Response>;
+    fn settled(&self, profile: &LaunchProfile) -> Option<Response>;
     /// Records what a Start-path response settles, completing a replacement.
     fn settle(&self, launch_request_id: &str, response: Response) -> Response;
     /// Starts the successor through the Start path, then replaces.
@@ -252,7 +252,7 @@ impl LaunchesFlows for RunningNexus {
             }
         };
         if let Some(attempt) = existing {
-            if attempt.launch_profile != profile || attempt.origin != origin {
+            if attempt.launch_profile != profile {
                 return Response::StartRejected(StartRejection::LaunchRequestConflict);
             }
             if attempt.launch_attempt_phase == LaunchAttemptPhase::PromptObserved {
@@ -624,7 +624,7 @@ impl LaunchesFlows for RunningNexus {
         }
     }
 
-    fn settled(&self, profile: &LaunchProfile, origin: &Origin) -> Option<Response> {
+    fn settled(&self, profile: &LaunchProfile) -> Option<Response> {
         let launch_request_id = &profile.launch_request_id;
         let outcome = match self.store.launch_outcome(&launch_request_id.0) {
             Ok(outcome) => outcome?,
@@ -635,9 +635,8 @@ impl LaunchesFlows for RunningNexus {
             }
         };
         match self.store.launch_attempt(&launch_request_id.0) {
-            Ok(Some(attempt))
-                if &attempt.launch_profile != profile || &attempt.origin != origin =>
-            {
+            // A retried launch request is the same launch whoever asks it.
+            Ok(Some(attempt)) if &attempt.launch_profile != profile => {
                 return Some(Response::StartRejected(
                     StartRejection::LaunchRequestConflict,
                 ));
@@ -720,7 +719,7 @@ impl LaunchesFlows for RunningNexus {
         match self.store.replacement(&launch_request_id.0) {
             Ok(Some(_)) => {
                 // A replacement already under way or settled: resume it.
-                if let Some(settled) = self.settled(&profile, &origin) {
+                if let Some(settled) = self.settled(&profile) {
                     return Self::as_replacement(settled);
                 }
                 let response = self.start(profile, origin);
@@ -739,7 +738,7 @@ impl LaunchesFlows for RunningNexus {
             Err(_) => return persistence(),
         }
         match self.store.launch_attempt(&launch_request_id.0) {
-            Ok(Some(attempt)) if attempt.launch_profile != profile || attempt.origin != origin => {
+            Ok(Some(attempt)) if attempt.launch_profile != profile => {
                 return refused(ReplaceRejection::LaunchRefused(
                     StartRejection::LaunchRequestConflict,
                 ));

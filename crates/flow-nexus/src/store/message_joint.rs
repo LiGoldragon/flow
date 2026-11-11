@@ -10,8 +10,8 @@ use message_nexus::{
 };
 use signal_flow::{
     Address, Aspect, Bind_Data, Model, Process, Query as FlowQuery, Response as FlowResponse,
-    SendRequest, SendableMessage, SendableRequest,
 };
+use signal_flow_message::{SendRequest, SendableMessage, SendableRequest};
 use std::{
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
@@ -259,7 +259,7 @@ fn bind_sender(flow_socket: &Path, sender: &Address) {
 fn send_through_message(
     message_socket: &Path,
     recipient: Address,
-) -> signal_flow::VisibleSendAcceptance {
+) -> signal_flow_message::VisibleSendAcceptance {
     let mut peer = UnixStream::connect(message_socket).expect("Message's socket listens");
     FramedStream::write_frame(
         &mut peer,
@@ -374,7 +374,10 @@ fn real_flow_and_message_share_the_durable_delivery_ledger() {
         .expect("the exact Flow Memory reopens");
     assert!(
         store
-            .deliver_call(&key)
+            .deliver_call(&signal_flow::DeliverKey {
+                namespace: signal_flow::Namespace(key.namespace.0.clone()),
+                counter: signal_flow::Counter(key.counter.0),
+            })
             .expect("Deliver call reads")
             .is_none(),
         "the real authenticated Acknowledge retracted Flow's replay row"

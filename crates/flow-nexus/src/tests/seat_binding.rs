@@ -8,9 +8,9 @@
 
 use super::NexusFixture;
 use super::waking::SpawnedProcess;
-use crate::event_wait::{AwaitsDirectory, AwaitsPath};
+use crate::event_wait::AwaitsPath;
 use crate::fixture_executable::{FixtureExecutable, HoldsLatch, InstallsScript, Latch};
-use crate::sending::{BindsSeats, IdentifiesSender};
+use crate::sending::{BindsSeats, IdentifiesSender, SendsRequests};
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::metaflow::{MutatesMetaflows, SleepsMetaflows};
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory};
@@ -114,7 +114,24 @@ struct CodexCliCall {
     process: signal_flow::Process,
     answer: String,
     codex_thread: Option<String>,
+    /// The Address the caller sends as; None for a caller in no flow,
+    /// which sends as Unbound.
     sending_address: Option<Address>,
+}
+
+/// The seat pane every CodexCliWorld's Herdr shows.
+fn codex_pane() -> signal_flow::SeatPane {
+    signal_flow::SeatPane {
+        herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+        herdr_pane_id: signal_flow::HerdrPaneId("w12:p1".into()),
+    }
+}
+
+fn bind_seat(address: Address) -> signal_flow::Query {
+    signal_flow::Query::BindSeat(signal_flow::BindSeat_Data {
+        address,
+        seat_pane: codex_pane(),
+    })
 }
 
 impl CodexCliWorld {
@@ -215,7 +232,6 @@ impl CodexCliWorld {
     /// peer alive. Returns that exact peer identity and its printed answer.
     fn call(&self, query: signal_flow::Query, thread: Option<&str>) -> CodexCliCall {
         use crate::caller::{CallerProcess, LocatesCodexThread, ReadsProcess};
-        use crate::sending::IdentifiesSender;
         use crate::store::sent::NamesCodexAppServers;
         use datom_codec::Datomizable;
         use protos::{Compactable, Protosizable};
@@ -320,7 +336,10 @@ impl CodexCliWorld {
         let process = FlowStore::process_identity_for_pid(wrapper_pid).unwrap();
         let app_servers = self.fixture.nexus.store.codex_app_servers().unwrap();
         let codex_thread = cli.codex_thread(&app_servers);
-        let sending_address = self.fixture.nexus.sending_address(&process).ok();
+        let sending_address = match self.fixture.nexus.sender_of(&process) {
+            Ok(signal_flow::SentBy::Sender(address)) => Some(address),
+            _ => None,
+        };
         drop(gate);
         let output = child.wait_with_output().unwrap();
         assert!(
@@ -341,7 +360,7 @@ impl CodexCliWorld {
 }
 
 #[test]
-fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
+fn a_codex_seat_herdr_reports_no_session_for_binds_from_its_named_pane() {
     let fixture = NexusFixture::new();
     fixture
         .nexus
@@ -382,38 +401,41 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
     let (_subagent_command, subagent) = command_of(SUBAGENT);
     let (_orphan_command, orphan) = command_of(ORPHAN);
 
-    // Two panes resuming the root name no single seat.
-    super::herdr_world(
-        &fixture,
-        vec![unreported_codex("w12:p1"), unreported_codex("w12:p2")],
-        tui.0.id(),
-    );
-    super::assert_unidentified(
-        fixture.nexus.bind_seat(address.clone(), Some(&subagent)),
-        &subagent,
-    );
-
     super::herdr_world(&fixture, vec![unreported_codex("w12:p1")], tui.0.id());
-    // A thread whose session no pane runs names no seat.
-    super::assert_unidentified(
-        fixture.nexus.bind_seat(address.clone(), Some(&orphan)),
-        &orphan,
-    );
-    // The subagent's command binds its flow's seat, under the root's claim.
-    // Adoption announces the new live Codex thread so the Nexus's responder
-    // subscribes to it and its first rest can drain already queued work.
+    // A pane Herdr shows no agent in names no seat.
+    let pane = |pane: &str| signal_flow::SeatPane {
+        herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+        herdr_pane_id: signal_flow::HerdrPaneId(pane.into()),
+    };
+    assert!(matches!(
+        fixture.nexus.bind_seat(signal_flow::BindSeat_Data {
+            address: address.clone(),
+            seat_pane: pane("w12:p9"),
+        }),
+        Response::Refused(Refusal::Unidentified(_))
+    ));
+    // The pane's seat binds under the root's claim, whoever asks: the
+    // thread its foreground resumes is its session. Adoption announces the
+    // new live Codex thread so the Nexus's responder subscribes to it and
+    // its first rest can drain already queued work.
     let before_adoption = fixture.nexus.store.launch_changes.current();
     assert_eq!(
-        fixture.nexus.bind_seat(address.clone(), Some(&subagent)),
+        fixture.nexus.bind_seat(signal_flow::BindSeat_Data {
+            address: address.clone(),
+            seat_pane: pane("w12:p1"),
+        }),
         Response::Bound(flow_ethos::FlowId("877549".into()))
     );
     assert!(
         fixture.nexus.store.launch_changes.current() > before_adoption,
         "adoption wakes the Codex responder supervisor"
     );
-    assert_eq!(fixture.nexus.sending_address(&subagent).unwrap(), address);
-    // Message's authenticated Identify bridge uses the same root-aware
-    // kernel caller resolution as direct Flow Send, never a claimed seat.
+    // A subagent's command sends as its flow's Address: the sender is
+    // filled in from its root thread. Message's Identify reads the same.
+    assert_eq!(
+        fixture.nexus.sender_of(&subagent).unwrap(),
+        signal_flow::SentBy::Sender(address.clone())
+    );
     use crate::metaflow::DispatchesMetaflowPeer;
     let (_message_child, message) = super::waking::message_peer(&fixture);
     assert_eq!(
@@ -425,6 +447,12 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
             )
             .response,
         Response::Identified(address.clone())
+    );
+    // A command whose thread no flow runs sends as Unbound; Identify names
+    // no Address for it.
+    assert_eq!(
+        fixture.nexus.sender_of(&orphan).unwrap(),
+        signal_flow::SentBy::Unbound
     );
     super::assert_unidentified(
         fixture
@@ -439,19 +467,41 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
 
 /// The same real CLI peer is authenticated once for Send, Keep and Drop
 /// through its configured Codex app-server ancestry.
+/// A real CLI caller is answered alike whoever it is: BindSeat binds the
+/// pane it names, from a Codex command or from a caller in no flow; Send
+/// fills in its sender, the thread's Address or Unbound, and is accepted
+/// either way; Keep and Drop write the named Address's handover, whoever
+/// asks, and answer by the Address's state alone.
 #[test]
-fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
-    use crate::sending::SendsRequests;
-    use crate::store::ReadsFlowRows;
+fn a_real_cli_caller_is_answered_alike_whoever_it_is() {
     use crate::store::handover::HoldsHandovers;
     use crate::store::metaflow::SeedsMetaflow;
     use crate::store::send_outcome::RecordsSendOutcomes;
     use crate::store::sent::NamesCodexAppServers;
+    use crate::store::{ReadsFlowRoles, ReadsFlowRows};
     use flow_ethos::State;
     use signal_flow::{Message, Query, Request, Section, SendRequest};
 
     let terra = super::waking::address(Model::Terra);
     let luna = super::waking::address(Model::Luna);
+    let keep = |address: Address, title: &str| {
+        Query::Keep(signal_flow::Keep_Data {
+            address,
+            section: Section {
+                title: signal_flow::Title(title.into()),
+                description: signal_flow::Description("caller attribution".into()),
+                body: signal_flow::Body("test only".into()),
+            },
+        })
+    };
+    let send = |text: &str| {
+        Query::Send(SendRequest {
+            address: luna.clone(),
+            sendable_message: super::sendable_message(Message::Soft(Request::Notice(text.into()))),
+        })
+    };
+
+    // A Codex command of the seat's thread binds the pane it names.
     let configured = CodexCliWorld::new(true, Model::Terra);
     let app_servers = configured.fixture.nexus.store.codex_app_servers().unwrap();
     assert_eq!(
@@ -460,8 +510,7 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
             .into_iter()
             .collect()
     );
-
-    let bind = configured.call(Query::BindSeat(terra.clone()), Some(ROOT));
+    let bind = configured.call(bind_seat(terra.clone()), Some(ROOT));
     assert_eq!(bind.answer, "Bound.877549");
     assert_eq!(bind.codex_thread.as_deref(), Some(ROOT));
     let node = configured
@@ -473,11 +522,15 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
         .expect("BindSeat registered the live Codex seat");
     assert_eq!(node.session_id.0, ROOT);
     assert_eq!(node.harness_kind, signal_flow::HarnessKind::Codex);
-    assert_eq!(
-        configured.fixture.nexus.live_awake_flow(&terra).as_deref(),
-        Some("877549")
+    assert!(
+        configured
+            .fixture
+            .nexus
+            .store
+            .role("877549")
+            .unwrap()
+            .is_some()
     );
-
     configured
         .fixture
         .nexus
@@ -488,70 +541,35 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
             vec![],
             vec![],
         ));
-    let send_query = Query::Send(SendRequest {
-        address: luna.clone(),
-        sendable_message: super::sendable_message(Message::Soft(Request::Notice(
-            "caller attribution diagnostic".into(),
-        ))),
-    });
-    let send = configured.call(send_query, Some(ROOT));
-    assert!(send.answer.starts_with("SendAccepted."), "{}", send.answer);
-    assert_eq!(send.sending_address, Some(terra.clone()));
+    let sent = configured.call(send("from the seat"), Some(ROOT));
+    assert!(sent.answer.starts_with("SendAccepted."), "{}", sent.answer);
+    assert_eq!(sent.sending_address, Some(terra.clone()));
     let outcomes = configured.fixture.nexus.store.read_send_outcomes().unwrap();
     assert_eq!(
         outcomes
             .last()
             .and_then(|outcome| outcome.process_option.clone()),
-        Some(send.process.clone()),
+        Some(sent.process.clone()),
         "the production ordinary socket recorded the exact live kernel peer"
     );
-
-    let keep = |address: Address| {
-        Query::Keep(signal_flow::Keep_Data {
-            address,
-            section: Section {
-                title: signal_flow::Title("diagnostic".into()),
-                description: signal_flow::Description("caller attribution".into()),
-                body: signal_flow::Body("test only".into()),
-            },
-        })
-    };
-    let prior_call = configured.call(
-        Query::Keep(signal_flow::Keep_Data {
-            address: terra.clone(),
-            section: Section {
-                title: signal_flow::Title("prior".into()),
-                description: signal_flow::Description("must remain".into()),
-                body: signal_flow::Body("existing handover".into()),
-            },
-        }),
-        Some(ROOT),
-    );
+    // The seat and a caller in no flow write the same handover alike.
+    let kept = configured.call(keep(terra.clone(), "prior"), Some(ROOT));
+    assert!(kept.answer.starts_with("Kept."), "{}", kept.answer);
+    let kept_unbound = configured.call(keep(terra.clone(), "diagnostic"), None);
+    assert_eq!(kept_unbound.sending_address, None);
     assert!(
-        prior_call.answer.starts_with("Kept."),
+        kept_unbound.answer.starts_with("Kept."),
         "{}",
-        prior_call.answer
+        kept_unbound.answer
     );
-    let keep_call = configured.call(keep(terra.clone()), Some(ROOT));
-    assert_eq!(keep_call.sending_address, Some(terra.clone()));
-    assert!(
-        keep_call.answer.starts_with("Kept."),
-        "{}",
-        keep_call.answer
-    );
-    let drop_call = configured.call(
+    let dropped = configured.call(
         Query::Drop(signal_flow::Drop_Data {
             address: terra.clone(),
             title: signal_flow::Title("diagnostic".into()),
         }),
-        Some(ROOT),
+        None,
     );
-    assert_eq!(drop_call.sending_address, Some(terra.clone()));
-    assert!(
-        drop_call.answer.starts_with("Dropped."),
-        "{}",
-        drop_call.answer
-    );
+    assert!(dropped.answer.starts_with("Dropped."), "{}", dropped.answer);
     assert_eq!(
         configured
             .fixture
@@ -564,19 +582,21 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
             .collect::<Vec<_>>(),
         vec!["prior"]
     );
-
-    // No SendServers authority: the identical real ancestry has no Codex
-    // thread, BindSeat and Send refuse it, and neither registers a seat nor
-    // mutates the target handover.
-    let unconfigured = CodexCliWorld::new(false, Model::Terra);
-    let unconfigured_bind = unconfigured.call(Query::BindSeat(terra.clone()), Some(ROOT));
+    // A caller in no flow sends as Unbound and is served.
+    let unbound_send = configured.call(send("from a shell"), None);
     assert!(
-        unconfigured_bind
-            .answer
-            .starts_with("Refused.Unidentified."),
+        unbound_send.answer.starts_with("SendAccepted."),
         "{}",
-        unconfigured_bind.answer
+        unbound_send.answer
     );
+    assert_eq!(unbound_send.sending_address, None);
+
+    // With no app-server configured the same command names no thread, and
+    // is answered all the same: it binds the pane it names and sends as
+    // Unbound.
+    let unconfigured = CodexCliWorld::new(false, Model::Terra);
+    let unconfigured_bind = unconfigured.call(bind_seat(terra.clone()), Some(ROOT));
+    assert_eq!(unconfigured_bind.answer, "Bound.877549");
     assert_eq!(unconfigured_bind.codex_thread, None);
     assert_eq!(unconfigured_bind.sending_address, None);
     unconfigured
@@ -589,50 +609,20 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
             vec![],
             vec![],
         ));
-    let unconfigured_send = unconfigured.call(
-        Query::Send(SendRequest {
-            address: luna.clone(),
-            sendable_message: super::sendable_message(Message::Soft(Request::Notice(
-                "unconfigured authority diagnostic".into(),
-            ))),
-        }),
-        Some(ROOT),
-    );
+    let unconfigured_send = unconfigured.call(send("unconfigured"), Some(ROOT));
     assert!(
-        unconfigured_send
-            .answer
-            .starts_with("SendRefused.Unidentified."),
+        unconfigured_send.answer.starts_with("SendAccepted."),
         "{}",
         unconfigured_send.answer
     );
-    let unconfigured_outcomes = unconfigured
-        .fixture
-        .nexus
-        .store
-        .read_send_outcomes()
-        .unwrap();
-    assert_eq!(
-        unconfigured_outcomes
-            .last()
-            .and_then(|outcome| outcome.process_option.clone()),
-        Some(unconfigured_send.process)
-    );
-    assert_eq!(unconfigured.fixture.nexus.live_awake_flow(&terra), None);
-    assert!(
-        unconfigured
-            .fixture
-            .nexus
-            .store
-            .handover_headings(&terra)
-            .unwrap()
-            .is_empty()
-    );
 
-    // A configured caller cannot adopt a different native session.
+    // An Adopt naming another native session than the pane's seat runs is
+    // refused by the seat's state, whoever asks.
     let mismatched = CodexCliWorld::new(true, Model::Terra);
     let mismatch = mismatched.call(
         Query::Adopt(signal_flow::Adopt_Data {
             address: terra.clone(),
+            seat_pane: codex_pane(),
             native_session_id: signal_flow::NativeSessionId("different-native-session".into()),
         }),
         Some(ROOT),
@@ -642,35 +632,19 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
         "{}",
         mismatch.answer
     );
-    assert_eq!(mismatch.codex_thread.as_deref(), Some(ROOT));
     assert_eq!(mismatched.fixture.nexus.live_awake_flow(&terra), None);
-    assert!(
-        mismatched
-            .fixture
-            .nexus
-            .store
-            .handover_headings(&terra)
-            .unwrap()
-            .is_empty()
-    );
 
-    // A real Luna seat asking to Keep Terra is isolated from the positive
-    // Terra case. Its exact peer authenticates as Luna and reaches the
-    // unchanged ownership check.
+    // A Keep of an Address Awake as no flow is refused by that state alone,
+    // to the Luna seat and to a caller in no flow alike.
     let wrong_seat = CodexCliWorld::new(true, Model::Luna);
-    let luna_bind = wrong_seat.call(Query::BindSeat(luna.clone()), Some(ROOT));
+    let luna_bind = wrong_seat.call(bind_seat(luna.clone()), Some(ROOT));
     assert_eq!(luna_bind.answer, "Bound.877549");
-    let luna_keep = wrong_seat.call(keep(terra.clone()), Some(ROOT));
+    let luna_keep = wrong_seat.call(keep(terra.clone(), "diagnostic"), Some(ROOT));
     assert_eq!(luna_keep.sending_address, Some(luna.clone()));
-    assert_eq!(luna_keep.answer, "KeepRefused.NotOwner");
-    let luna_drop = wrong_seat.call(
-        Query::Drop(signal_flow::Drop_Data {
-            address: terra.clone(),
-            title: signal_flow::Title("diagnostic".into()),
-        }),
-        Some(ROOT),
-    );
-    assert_eq!(luna_drop.answer, "DropRefused.NotOwner");
+    assert_eq!(luna_keep.answer, "KeepRefused.UnknownFlow");
+    let unbound_keep = wrong_seat.call(keep(terra.clone(), "diagnostic"), None);
+    assert_eq!(unbound_keep.sending_address, None);
+    assert_eq!(unbound_keep.answer, "KeepRefused.UnknownFlow");
     assert!(
         wrong_seat
             .fixture
@@ -680,47 +654,22 @@ fn ordinary_codex_cli_send_keep_and_drop_share_process_authority() {
             .unwrap()
             .is_empty()
     );
-
-    // A driver carrying neither a pane nor a Codex thread stays unbound and
-    // cannot mutate the Terra handover.
-    let unbound = CodexCliWorld::new(true, Model::Terra);
-    let unbound_keep = unbound.call(keep(terra.clone()), None);
-    assert_eq!(unbound_keep.sending_address, None);
-    assert_eq!(unbound_keep.codex_thread, None);
-    assert_eq!(unbound_keep.answer, "KeepRefused.UnknownCaller");
-    let unbound_drop = unbound.call(
-        Query::Drop(signal_flow::Drop_Data {
-            address: terra.clone(),
-            title: signal_flow::Title("diagnostic".into()),
-        }),
-        None,
-    );
-    assert_eq!(unbound_drop.answer, "DropRefused.UnknownCaller");
-    assert_eq!(unbound.fixture.nexus.live_awake_flow(&terra), None);
-    assert!(
-        unbound
-            .fixture
-            .nexus
-            .store
-            .handover_headings(&terra)
-            .unwrap()
-            .is_empty()
-    );
 }
 
-/// Address-only process registration remains Send authority across a later
-/// native owner, but it never becomes that owner's FlowOrigin or protected
-/// Stop/Retire authority.
+/// Address-only process registration remains the sender a process sends as
+/// across a later native owner, never that owner's FlowOrigin. Nothing it
+/// asks depends on it: a Keep of the Address writes the Address's flow's
+/// handover and a Stop of a protected Address's flow stops it, as for any
+/// caller.
 #[test]
-fn a_registered_address_process_never_inherits_its_successor_flow() {
+fn a_registered_address_process_is_answered_as_any_caller() {
     use crate::Dispatches;
     use crate::caller::{AuthenticatesProcessAuthority, ProcessAuthority};
-    use crate::protecting::{ChecksAsker, GuardedAct, GuardsProtectedAddresses};
     use crate::store::handover::HoldsHandovers;
     use crate::store::metaflow::SeedsMetaflow;
     use crate::store::{ReadsFlowRows, RegistersFlowIdentity};
     use flow_ethos::State;
-    use signal_flow::{FlowLifecycle, HarnessKind, Metaflow, Origin, Query, Section};
+    use signal_flow::{FlowLifecycle, HarnessKind, Metaflow, Origin, Query, Section, SentBy};
 
     let fixture = NexusFixture::new();
     let address = super::waking::address(Model::Terra);
@@ -732,7 +681,6 @@ fn a_registered_address_process_never_inherits_its_successor_flow() {
                 address: address.clone(),
                 process: peer.clone(),
             },
-            &peer,
             None,
         ),
         Ok(Response::Bound(_))
@@ -741,7 +689,10 @@ fn a_registered_address_process_never_inherits_its_successor_flow() {
         fixture.nexus.process_authority(&peer).unwrap(),
         ProcessAuthority::Sending(address.clone())
     );
-    assert_eq!(fixture.nexus.sending_address(&peer).unwrap(), address);
+    assert_eq!(
+        fixture.nexus.sender_of(&peer).unwrap(),
+        SentBy::Sender(address.clone())
+    );
 
     let mut successor = fixture.node();
     successor.flow_id = flow_ethos::FlowId("successor".into());
@@ -769,67 +720,84 @@ fn a_registered_address_process_never_inherits_its_successor_flow() {
         ProcessAuthority::Sending(address.clone()),
         "the old Address binder is never promoted to the successor"
     );
-    assert_eq!(fixture.nexus.sending_address(&peer).unwrap(), address);
-    let asker = fixture.nexus.asker_of(Some(&peer));
-    assert_eq!(asker.origin(), Origin::Unbound);
-    assert!(!asker.may(GuardedAct::Stop, "successor"));
-    assert!(!asker.may(GuardedAct::Retire, "successor"));
+    let keep = Query::Keep(signal_flow::Keep_Data {
+        address: address.clone(),
+        section: Section {
+            title: signal_flow::Title("written".into()),
+            description: signal_flow::Description("any caller".into()),
+            body: signal_flow::Body("lands".into()),
+        },
+    });
+    let Response::Kept(kept) = fixture.nexus.dispatch(keep) else {
+        panic!("a Keep of an Awake Address is taken from any caller")
+    };
+    assert_eq!(kept.address, address);
     assert_eq!(
-        fixture.nexus.dispatch_asked(
-            Query::Keep(signal_flow::Keep_Data {
-                address: address.clone(),
-                section: Section {
-                    title: signal_flow::Title("forbidden".into()),
-                    description: signal_flow::Description("old binder".into()),
-                    body: signal_flow::Body("must not land".into()),
-                },
-            }),
-            asker.clone(),
-        ),
-        Response::KeepRefused(signal_flow::HandoverRefusal::UnknownCaller)
-    );
-    assert_eq!(
-        fixture
-            .nexus
-            .dispatch_asked(Query::Stop(flow_ethos::FlowId("successor".into())), asker),
-        Response::StopRejected(signal_flow::StopRejection::Protected)
-    );
-    assert!(
         fixture
             .nexus
             .store
             .handover_headings(&address)
             .unwrap()
-            .is_empty()
+            .into_iter()
+            .map(|heading| heading.title.0)
+            .collect::<Vec<_>>(),
+        vec!["written"]
+    );
+    // A protected Address's flow is stopped as any flow is: here its pane
+    // is no route, which is the answer every caller gets.
+    let stopped = fixture
+        .nexus
+        .dispatch(Query::Stop(flow_ethos::FlowId("successor".into())));
+    assert_ne!(
+        stopped,
+        Response::Refused(signal_flow::Refusal::Store("protected".into()))
+    );
+    assert!(
+        !matches!(
+            stopped,
+            Response::Refused(signal_flow::Refusal::Unidentified(_))
+        ),
+        "{stopped:?}"
     );
     assert_eq!(
+        fixture.nexus.dispatch_from(
+            Query::Stop(flow_ethos::FlowId("successor".into())),
+            Origin::Flow(signal_flow::FlowOrigin {
+                flow_id: flow_ethos::FlowId("successor".into()),
+                session_id: signal_flow::SessionId("successor-native-session".into()),
+            }),
+        ),
+        fixture
+            .nexus
+            .dispatch(Query::Stop(flow_ethos::FlowId("successor".into()))),
+        "the flow itself and a caller in no flow are answered alike"
+    );
+    assert!(
         fixture
             .nexus
             .store
             .flow_node("successor")
             .unwrap()
-            .unwrap()
-            .flow_lifecycle,
-        FlowLifecycle::Active
+            .is_some()
     );
 }
 
-/// Native/tool markers and stale kernel identities can only deny owner.
+/// What a caller sends as is filled in, never refused: a Codex command with
+/// no live flow on its thread, a stale identity and the operator at a
+/// terminal are all Unbound.
 #[test]
-fn failed_process_authority_evidence_never_becomes_owner() {
+fn a_caller_no_record_names_is_unbound() {
     use crate::caller::{AuthenticatesProcessAuthority, ProcessAuthority};
-    use crate::protecting::{Asker, GuardsProtectedAddresses};
 
     let unconfigured = NexusFixture::new();
     let (_marked_child, marked) = command_of("unknown-native-session");
     assert_eq!(
         unconfigured.nexus.process_authority(&marked).unwrap(),
-        ProcessAuthority::Rejected,
-        "a CODEX_THREAD_ID is deny-owner evidence even with empty SendServers"
+        ProcessAuthority::Unbound,
     );
     assert_eq!(
-        unconfigured.nexus.asker_of(Some(&marked)),
-        Asker::Ordinary(signal_flow::Origin::Unbound)
+        unconfigured.nexus.sender_of(&marked).unwrap(),
+        signal_flow::SentBy::Unbound
     );
 
     let configured = NexusFixture::new();
@@ -837,40 +805,29 @@ fn failed_process_authority_evidence_never_becomes_owner() {
     let (_unknown_child, unknown) = command_of("unknown-native-session");
     assert_eq!(
         configured.nexus.process_authority(&unknown).unwrap(),
-        ProcessAuthority::Rejected,
-        "configured ancestry with no live root is known failed evidence"
+        ProcessAuthority::Unbound,
     );
-    assert_eq!(
-        configured.nexus.asker_of(Some(&unknown)),
-        Asker::Ordinary(signal_flow::Origin::Unbound)
-    );
-
     let mut stale = unknown;
     stale.started.0 += 1;
     assert_eq!(
         configured.nexus.process_authority(&stale).unwrap(),
-        ProcessAuthority::Rejected
+        ProcessAuthority::Unbound
     );
-    assert_eq!(
-        configured.nexus.asker_of(Some(&stale)),
-        Asker::Ordinary(signal_flow::Origin::Unbound)
-    );
-
-    // The fixture process itself is the service/terminal operator here. A
-    // child would be below the configured app-server by construction and
-    // must be rejected even if its own environment were scrubbed.
     let operator = FlowStore::process_identity_for_pid(std::process::id()).unwrap();
     assert_eq!(
         configured.nexus.process_authority(&operator).unwrap(),
-        ProcessAuthority::Owner
+        ProcessAuthority::Unbound
     );
-    assert_eq!(configured.nexus.asker_of(Some(&operator)), Asker::Owner);
+    assert_eq!(
+        configured.nexus.sender_of(&operator).unwrap(),
+        signal_flow::SentBy::Unbound
+    );
 }
 
 #[test]
-fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
+fn a_known_claude_seat_binds_from_its_named_pane_whoever_asks() {
+    use super::ControlsHerdrSnapshot;
     use super::waking::{CLAUDE_SEAT, claude_agent, claude_seat, metaflow};
-    use super::{ControlsHerdrSnapshot, MarkedProcess};
     use crate::store::metaflow::SeedsMetaflow;
     use crate::store::{ReadsFlowRows, RegistersFlowIdentity};
     let fixture = NexusFixture::new();
@@ -895,45 +852,29 @@ fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
         topic: flow_ethos::Topic("flow".into()),
         model: Model::Sol,
     };
-    let child_file = fixture.directory.path().join("claude-command-child");
-    let script = format!("sleep 30 & echo $! > {}; wait; :", child_file.display());
-    let root = MarkedProcess::spawn("sh", &["-c", &script], "w1:p3");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let written = || {
-        fs::read_to_string(&child_file)
-            .ok()
-            .and_then(|text| text.trim().parse::<u32>().ok())
+    // Whoever asks, the seat the Address is Awake as binds idempotently
+    // from the pane it lives in.
+    let pane = |pane: &str| signal_flow::SeatPane {
+        herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+        herdr_pane_id: signal_flow::HerdrPaneId(pane.into()),
     };
-    assert!(
-        fixture
-            .directory
-            .path()
-            .until_holds(deadline, &mut || written().is_some()),
-        "the child's pid is written"
-    );
-    let child_pid = written().expect("the child's pid");
-    for pid in [root.0.id(), child_pid] {
-        let peer = FlowStore::process_identity_for_pid(pid).unwrap();
+    for _ in 0..2 {
         assert_eq!(
-            fixture.nexus.bind_seat(address.clone(), Some(&peer)),
+            fixture.nexus.bind_seat(signal_flow::BindSeat_Data {
+                address: address.clone(),
+                seat_pane: pane("w1:p3"),
+            }),
             Response::Bound(flow_ethos::FlowId(CLAUDE_SEAT.into()))
         );
-        let mut forged = peer;
-        forged.started.0 += 1;
-        assert!(matches!(
-            fixture.nexus.bind_seat(address.clone(), Some(&forged)),
-            Response::Refused(Refusal::Unidentified(_))
-        ));
     }
-    let stranger = MarkedProcess::spawn("sleep", &["30"], "unknown-pane");
-    let unknown = FlowStore::process_identity_for_pid(stranger.0.id()).unwrap();
+    // A pane Herdr shows no agent in names no seat.
     assert!(matches!(
-        fixture.nexus.bind_seat(address, Some(&unknown)),
+        fixture.nexus.bind_seat(signal_flow::BindSeat_Data {
+            address,
+            seat_pane: pane("unknown-pane"),
+        }),
         Response::Refused(Refusal::Unidentified(_))
     ));
-    let _ = std::process::Command::new("kill")
-        .arg(child_pid.to_string())
-        .status();
 }
 
 /// A session id the Claude harness assigned: a UUIDv4 Flow never chose.
@@ -1038,11 +979,19 @@ fn psyche_flow_secondary() -> Address {
     }
 }
 
-/// On an empty store, BindSeat from a Claude pane adopts the seat: the
-/// caller's pane, its Herdr agent record, the Claude session the record
+/// The pane every Claude seat test's Herdr shows the seat in, or another.
+fn claude_pane(pane: &str) -> signal_flow::SeatPane {
+    signal_flow::SeatPane {
+        herdr_session_name: signal_flow::HerdrSessionName("messaging-build".into()),
+        herdr_pane_id: signal_flow::HerdrPaneId(pane.into()),
+    }
+}
+
+/// On an empty store, BindSeat naming a Claude pane adopts the seat, from
+/// any caller: the pane's Herdr agent record, the Claude session the record
 /// reports (or Claude's own session file names) and the process running it
-/// make the seat, bound to the address under the session's Flow ID. A
-/// process in the same pane that is not the Claude process's own refuses.
+/// make the seat, bound to the address under the session's Flow ID. The
+/// seat then sends as that Address.
 #[test]
 fn a_claude_seat_binds_on_an_empty_store_under_its_sessions_flow_id() {
     use super::MarkedProcess;
@@ -1060,23 +1009,19 @@ fn a_claude_seat_binds_on_an_empty_store_under_its_sessions_flow_id() {
             "{ Psyche flow Opus }",
             claude.0.id(),
         );
-        let stranger = MarkedProcess::spawn("sleep", &["30"], "w1:p3");
-        let stranger = FlowStore::process_identity_for_pid(stranger.0.id()).unwrap();
-        assert!(
-            matches!(
-                fixture.nexus.bind_seat(address.clone(), Some(&stranger)),
-                Response::Refused(Refusal::Unidentified(_))
-            ),
-            "{reported:?}: a process the Claude process did not start names no seat"
-        );
-
-        let peer = FlowStore::process_identity_for_pid(claude.0.id()).unwrap();
         assert_eq!(
-            fixture.nexus.bind_seat(address.clone(), Some(&peer)),
+            fixture.nexus.bind_seat(signal_flow::BindSeat_Data {
+                address: address.clone(),
+                seat_pane: claude_pane("w1:p3"),
+            }),
             Response::Bound(flow_ethos::FlowId(HARNESS_FLOW_ID.into())),
             "{reported:?}: the Claude seat binds under its session's Flow ID"
         );
-        assert_eq!(fixture.nexus.sending_address(&peer).unwrap(), address);
+        let peer = FlowStore::process_identity_for_pid(claude.0.id()).unwrap();
+        assert_eq!(
+            fixture.nexus.sender_of(&peer).unwrap(),
+            signal_flow::SentBy::Sender(address.clone())
+        );
         let node = fixture
             .nexus
             .store
@@ -1092,11 +1037,12 @@ fn a_claude_seat_binds_on_an_empty_store_under_its_sessions_flow_id() {
     }
 }
 
-/// Adopt authenticates an unbound socket peer before adding it. The supplied
-/// session is checked before the known-seat idempotency shortcut, so the same
-/// live seat cannot use a different session after its first adoption.
+/// Adopt binds the named pane's seat only when its native session is the
+/// one supplied. The session is checked before the known-seat idempotency
+/// shortcut, so the same live seat cannot be adopted under a different
+/// session after its first adoption.
 #[test]
-fn an_unbound_claude_seat_adopts_only_its_authenticated_session() {
+fn a_claude_seat_is_adopted_only_under_its_own_session() {
     use super::MarkedProcess;
     use crate::sending::SendsRequests;
     let fixture = NexusFixture::new();
@@ -1110,30 +1056,26 @@ fn an_unbound_claude_seat_adopts_only_its_authenticated_session() {
         "{ Psyche flow Opus }",
         claude.0.id(),
     );
-    let peer = FlowStore::process_identity_for_pid(claude.0.id()).unwrap();
     let request = |session: &str| signal_flow::Adopt_Data {
         address: address.clone(),
+        seat_pane: claude_pane("w1:p3"),
         native_session_id: signal_flow::NativeSessionId(session.into()),
     };
 
     assert!(matches!(
-        fixture
-            .nexus
-            .adopt(request("different-session"), Some(&peer)),
+        fixture.nexus.adopt(request("different-session")),
         Response::Refused(Refusal::Unidentified(_))
     ));
     assert_eq!(fixture.nexus.live_awake_flow(&address), None);
 
     for _ in 0..2 {
         assert_eq!(
-            fixture.nexus.adopt(request(HARNESS_SESSION), Some(&peer)),
+            fixture.nexus.adopt(request(HARNESS_SESSION)),
             Response::Adopted(flow_ethos::FlowId(HARNESS_FLOW_ID.into()))
         );
     }
     assert!(matches!(
-        fixture
-            .nexus
-            .adopt(request("different-session"), Some(&peer)),
+        fixture.nexus.adopt(request("different-session")),
         Response::Refused(Refusal::Unidentified(_))
     ));
     assert_eq!(
@@ -1144,11 +1086,12 @@ fn an_unbound_claude_seat_adopts_only_its_authenticated_session() {
 
 /// A pane Herdr holds no agent record for names no seat: BindSeat refuses,
 /// and what the pane showed is kept as raw evidence (its pane, its label,
-/// no session, the time it was read), never made into an identity.
+/// no session, the time it was read), never made into an identity. The
+/// refusal names no process: it is the same whoever asked.
 #[test]
 fn a_pane_with_no_agent_record_refuses_with_its_evidence() {
     use super::MarkedProcess;
-    use crate::caller::{CallerPane, CallerProcess};
+    use crate::caller::CallerPane;
     use crate::sending::{FindsSeat, SeatEvidence};
     let fixture = NexusFixture::new();
     fixture.configures_claude_secondaries();
@@ -1159,20 +1102,20 @@ fn a_pane_with_no_agent_record_refuses_with_its_evidence() {
         "zsh",
         shell.0.id(),
     );
-    let peer = FlowStore::process_identity_for_pid(shell.0.id()).unwrap();
     let before = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let reply = fixture
-        .nexus
-        .bind_seat(psyche_flow_secondary(), Some(&peer));
+    let reply = fixture.nexus.bind_seat(signal_flow::BindSeat_Data {
+        address: psyche_flow_secondary(),
+        seat_pane: claude_pane("w1:p9"),
+    });
     let Response::Refused(Refusal::Unidentified(refused)) = reply else {
         panic!("a pane with no agent record names no seat: {reply:?}");
     };
-    assert_eq!(refused.process, peer);
-    let Err(evidence) = fixture.nexus.seat_of(CallerProcess {
-        process_id: shell.0.id(),
+    let Err(evidence) = fixture.nexus.seat_of(&CallerPane {
+        herdr_session_name: "messaging-build".into(),
+        herdr_pane_id: "w1:p9".into(),
     }) else {
         panic!("a pane with no agent record names no seat");
     };
@@ -1193,7 +1136,7 @@ fn a_pane_with_no_agent_record_refuses_with_its_evidence() {
             observed_at: evidence.observed_at,
         }
     );
-    // The reply carries that evidence, typed, with the process.
+    // The reply carries that evidence, typed, with no process.
     assert_eq!(
         refused,
         signal_flow::SeatEvidence {
@@ -1204,7 +1147,10 @@ fn a_pane_with_no_agent_record_refuses_with_its_evidence() {
             pane_label_option: Some(signal_flow::PaneLabel("zsh".into())),
             native_session_id_option: None,
             observed_at: refused.observed_at,
-            process: peer.clone(),
+            process: signal_flow::Process {
+                pid: flow_ethos::generated::library::Pid(0),
+                started: flow_ethos::generated::library::Started(0),
+            },
         }
     );
     assert!(

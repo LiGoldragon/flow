@@ -51,9 +51,10 @@ Library
   ; Who a queued request is from: the Address Flow resolved for its sender
   ; (the sender Address of a Deliver's Lock, the thread's metaflow of a
   ; send-tool call), Unknown for a request queued before Flow kept
-  ; senders, or Flow for one Flow raised itself (a landing's orders, a
-  ; compaction's investigation).
-  SentBy.[ Sender.Address Unknown Flow ]
+  ; senders, Flow for one Flow raised itself (a landing's orders, a
+  ; compaction's investigation), or Unbound for one from a caller in no
+  ; flow, the living at a shell among them.
+  SentBy.[ Sender.Address Unknown Flow Unbound ]
   ; The durable queue entry is the identity-bearing logical request.
   QueueEntry.{ LogicalDeliveryId RequestId SentBy Delivery Message }
   ; What the native surface receives after selection: identity and origin

@@ -80,13 +80,6 @@ pub struct Context(pub String);
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Verbatim(pub String);
 #[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct Living {
-    pub context: Context,
-    pub verbatim: Verbatim,
-}
-#[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Minutes(pub i64);
@@ -141,6 +134,13 @@ pub enum DonePayload {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Living_Data {
+    pub context: Context,
+    pub verbatim: Verbatim,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Reminder_Data {
     pub request_id: RequestId,
     pub string: String,
@@ -151,7 +151,7 @@ pub struct Reminder_Data {
 pub enum Request {
     Order(String),
     Question(String),
-    Living(Living),
+    Living(Living_Data),
     Result(ResultPayload),
     Notice(String),
     Task(AnswerableTask),

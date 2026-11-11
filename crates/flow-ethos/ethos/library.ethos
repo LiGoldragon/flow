@@ -20,8 +20,9 @@ Library
   Reason.String
   Source.{ Repository Hash Path }
   Key.{ Subaspect Topic }
-  ; The living's words: what they were about, and the words whole.
-  Living.{ Context.String Verbatim.String }
+  ; What the living's words were about, and his words whole.
+  Context.String
+  Verbatim.String
   ; An answer names the complete typed request it answers. New Results
   ; carry that Order. Historical preserves a pre-0.42 Result's words when
   ; its archived row has no answerable request to name; it never resolves
@@ -35,7 +36,7 @@ Library
                 Historical.{ LogicalDeliveryId String } ]
   Request.[ Order.String
             Question.String
-            Living
+            Living.{ Context Verbatim }
             Result.ResultPayload
             Notice.String
             Task.AnswerableTask

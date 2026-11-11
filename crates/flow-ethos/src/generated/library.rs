@@ -82,7 +82,7 @@ pub struct Verbatim(pub String);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct Said {
+pub struct Living {
     pub context: Context,
     pub verbatim: Verbatim,
 }
@@ -151,8 +151,7 @@ pub struct Reminder_Data {
 pub enum Request {
     Order(String),
     Question(String),
-    Psyche(Said),
-    Psyches(std::vec::Vec<Said>),
+    Living(Living),
     Result(ResultPayload),
     Notice(String),
     Task(AnswerableTask),

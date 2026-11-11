@@ -5,12 +5,14 @@
 ; memory versions; the store migration retires those and this file becomes
 ; the only message vocabulary.
 Library
-[ crate:[ FlowId Address LogicalDeliveryId Said Delivery ] ] ; imports, old form: the installed ethos-zero refuses the colon form :flow:ethos:[ ... ]
+[ crate:[ FlowId Address LogicalDeliveryId Delivery ] ] ; imports, old form: the installed ethos-zero refuses the colon form :flow:ethos:[ ... ]
 [ ; Minutes is a whole number of minutes; the wire carries a bare Integer.
   ; The Nexus owns the rule at admission: above zero, and a deadline that
   ; fits the clock, else it answers MinutesRefused. Ethos has no syntax for
   ; a value rule; this comment carries the rule until it has one.
   Minutes.Integer
+  ; One statement of the living's: what it was about, and his words whole.
+  Said.{ Context.String Verbatim.String }
   ; Who sent. Flow is the flow that held the Address when the message was
   ; admitted, its FlowId resolved by Flow from the calling process, never
   ; supplied by a caller. Living is the living psyche. Notification is

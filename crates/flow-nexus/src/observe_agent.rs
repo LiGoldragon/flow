@@ -234,8 +234,8 @@ enum PaneEvent {
     Gone,
 }
 
-/// The observed pane's stream: Herdr's events of it, waited on with the
-/// Nexus's stop.
+/// The observed pane's stream: Herdr's events of it, waited on with its
+/// connection's cancellation.
 struct PaneEvents {
     pane_id: String,
     events: HerdrEvents,
@@ -248,8 +248,8 @@ trait ReadsPaneEvents: Sized {
         cancellation: &ObservationCancellation,
     ) -> Result<Self, String>;
     /// The next event about this pane; None when Herdr closes the stream,
-    /// an error once the Nexus is stopping. The stream and the stop's
-    /// descriptor are waited on together, so either wakes the wait.
+    /// an error once the observation is cancelled. The stream and the
+    /// cancellation descriptor are waited on together, so either wakes it.
     fn next_event(
         &mut self,
         cancellation: &ObservationCancellation,

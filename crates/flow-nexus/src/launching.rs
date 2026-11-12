@@ -3,7 +3,6 @@
 //! a launch request — its attempt, its outcome, and whether it replaces a
 //! predecessor.
 
-use crate::HoldsStopRequest;
 use crate::delivery::lease::LeasesPanes;
 use crate::generated::operation::{
     Failed_Data, Open_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Settled_Data,
@@ -1333,9 +1332,6 @@ impl ObservesLaunch for RunningNexus {
         loop {
             let seen = changes.current();
             cancellation.check()?;
-            if self.stopping.requested() {
-                return Err("the Nexus is stopping".into());
-            }
             let answer = self.launch_status(launch_request_id);
             let Response::LaunchInspected(inspection) = &answer else {
                 return send(&answer);

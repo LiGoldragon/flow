@@ -153,7 +153,7 @@ fn tool_call(thread: &str, call: &str, body: &str) -> ToolCall {
 /// sends after the initialize and resume answers, and whether it closes once
 /// it has sent them; else it holds the connection until the client closes
 /// it.
-struct FakeConnection {
+pub(super) struct FakeConnection {
     requests: Vec<serde_json::Value>,
     closes: bool,
 }
@@ -163,7 +163,7 @@ pub(super) struct FakeAppServer {
     executable: PathBuf,
 }
 
-trait RunsFakeAppServer {
+pub(super) trait RunsFakeAppServer {
     fn install(connections: Vec<FakeConnection>) -> FakeAppServer;
     /// The JSON messages the client wrote on run `run`, waiting until one
     /// satisfies `wanted`.

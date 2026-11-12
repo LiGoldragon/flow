@@ -7,8 +7,8 @@
 
 use super::NexusFixture;
 use super::waking::{
-    FreshWorld, ReadsFreshWorld, WakesFreshClaude, address, launched_claude_ended_by, maintain,
-    metaflow, rested_at_stop,
+    FreshWorld, ReadsFreshWorld, WORKING_CODEX_THREAD, WakesFreshClaude, address,
+    codex_seat_in_fresh_world, launched_claude_ended_by, maintain, metaflow, rested_at_stop,
 };
 use crate::Dispatches;
 use crate::composition::RendersQueuedWork;
@@ -338,6 +338,169 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
         store.reminder(&open_task.logical_delivery_id.0).unwrap(),
         None,
         "the Done closed the Task's reminders"
+    );
+    assert_eq!(store.open_requests(&at).unwrap(), open[..1].to_vec());
+}
+
+/// Hands the oldest queued request of `address` to the Codex flow
+/// `flow_id` on `thread`, anchored on the thread's turns, records its
+/// receipt and settles it out of the queue: delivered, and open until its
+/// Result or Done.
+fn delivered_to_codex(store: &FlowStore, address: &Address, flow_id: &str, thread: &str) {
+    let attempt = match store
+        .prepare_oldest_delivery(
+            address,
+            flow_id,
+            thread,
+            signal_flow::HarnessKind::Codex,
+            NativeHistoryAnchor::CodexTurns(None),
+        )
+        .expect("the oldest request prepares")
+    {
+        PrepareQueueDelivery::Prepared(attempt) => attempt,
+        other => panic!("the oldest request is handed over: {other:?}"),
+    };
+    assert!(
+        store
+            .record_delivery_receipt(
+                &attempt.attempt_id,
+                NativeDeliveryReceipt {
+                    native_request_id: attempt.native_request_id,
+                    thread_id: attempt.thread_id.clone(),
+                    turn_id: format!("{}-turn", attempt.attempt_id),
+                    native_receipt: "{\"result\":{}}".into(),
+                },
+            )
+            .expect("the receipt records")
+    );
+    assert!(
+        store
+            .settle_recorded_delivery(&attempt.attempt_id)
+            .expect("the delivery settles")
+    );
+}
+
+/// Test 7 (Part A): a Codex refresh carries its open requests to its
+/// successor. An Order and a 240-minute Task delivered to the Maintained
+/// Codex flow abc123 and left open, and an Order it answered: a Refresh
+/// ordered while its turn runs is carried out at the thread's rest, and
+/// the successor's first prompt holds, after the handover, the one line
+/// naming abc123 and the two open requests, oldest first, under the ids
+/// they were delivered with; the Task's deadline never moved and the
+/// successor's Done closes it by its id.
+#[test]
+fn a_codex_refresh_carries_its_open_requests_to_its_successor() {
+    use crate::codex_turns::{SettlesRestingCodexSeats, TurnEvent};
+    use crate::waking::AtStop;
+    let mut fixture = NexusFixture::new();
+    let world = codex_seat_in_fresh_world(&mut fixture);
+    let directory = fixture.directory.path().join("flows/abc123");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("handover.md"), HANDOVER).unwrap();
+    fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+        address: psyche_core(),
+        state: State::Asleep,
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
+    });
+    let store = &fixture.nexus.store;
+    let at = address(Model::Sol);
+    let sender = psyche_core();
+
+    let order = Request::Order("Land the Git server line.".into());
+    let open_order = store.admitted(&at, &sender, order.clone());
+    delivered_to_codex(store, &at, "abc123", WORKING_CODEX_THREAD);
+    let task = Request::Task(AnswerableTask {
+        minutes: flow_ethos::Minutes(240),
+        string: "Move every active Rust repository onto build-base.".into(),
+    });
+    let open_task = store.admitted(&at, &sender, task.clone());
+    delivered_to_codex(store, &at, "abc123", WORKING_CODEX_THREAD);
+    let answered = store.admitted(&at, &sender, Request::Order("Answered already.".into()));
+    delivered_to_codex(store, &at, "abc123", WORKING_CODEX_THREAD);
+    store
+        .answered(&at, &sender, result(&answered.request_id.0))
+        .expect("abc123 answers its Order");
+    let open = vec![
+        entry(&open_order, &sender, order),
+        entry(&open_task, &sender, task),
+    ];
+    assert_eq!(store.open_requests(&at).unwrap(), open);
+    let deadline = store
+        .reminder(&open_task.logical_delivery_id.0)
+        .unwrap()
+        .expect("the Task's reminder is held");
+
+    // The thread works: the Refresh waits for its rest.
+    assert_eq!(
+        fixture.nexus.codex_events(
+            WORKING_CODEX_THREAD,
+            vec![TurnEvent::Started("turn-working".into())]
+        ),
+        None
+    );
+    let ordered = fixture.nexus.dispatch(Query::Refresh(at.clone()));
+    assert!(matches!(ordered, Response::RefreshQueued(_)), "{ordered:?}");
+    assert_eq!(world.claude_starts(), 0, "{}", world.calls());
+
+    let at_rest = fixture.nexus.codex_events(
+        WORKING_CODEX_THREAD,
+        vec![TurnEvent::Completed("turn-working".into())],
+    );
+    assert!(
+        matches!(
+            &at_rest,
+            Some(AtStop::ReapPending(pending))
+                if pending.address == at
+                    && pending.predecessor.0.0 == "abc123"
+                    && pending.reap_standing == signal_flow::ReapStanding::Owed
+        ),
+        "{at_rest:?}; Herdr calls: {}",
+        world.calls()
+    );
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+    let successor = match store.metaflow(&at).unwrap().expect("metaflow").state {
+        State::Awake(flow_id) => flow_id,
+        State::Asleep => panic!("the successor is Awake"),
+    };
+    assert_ne!(successor.0, "abc123");
+    let first = world
+        .user_turns(&fixture)
+        .into_iter()
+        .next()
+        .expect("the successor's first turn");
+    let delivered = open.prompt_text(&at);
+    let order_at = delivered.find("Soft.Order.{").expect("the Order");
+    let task_at = delivered.find("Soft.Task.{").expect("the Task");
+    assert!(order_at < task_at, "oldest first: {delivered}");
+    assert!(
+        delivered[task_at..].contains(&open_task.request_id.0)
+            && delivered[task_at..].contains(" 240 ")
+            && delivered[order_at..task_at].contains(&open_order.request_id.0),
+        "{delivered}"
+    );
+    let line = FlowId("abc123".into()).open_requests_line();
+    assert!(
+        first.ends_with(&format!("{HANDOVER}\n\n{line}\n{delivered}")),
+        "the line and the open requests follow the handover, last: {first}"
+    );
+    assert_eq!(first.matches(line.as_str()).count(), 1, "{first}");
+    assert!(
+        !first.contains("Answered already."),
+        "an answered request is not carried: {first}"
+    );
+    assert_eq!(
+        store.reminder(&open_task.logical_delivery_id.0).unwrap(),
+        Some(deadline),
+        "the refresh neither restarted nor extended the Task's deadline"
+    );
+    store
+        .answered(&at, &sender, done(&open_task.request_id.0))
+        .expect("the successor's Done is admitted");
+    assert_eq!(
+        store.answered(&at, &sender, done(&open_task.request_id.0)),
+        Err(Refusal::Unresolved),
+        "a second Done finds the Task closed"
     );
     assert_eq!(store.open_requests(&at).unwrap(), open[..1].to_vec());
 }

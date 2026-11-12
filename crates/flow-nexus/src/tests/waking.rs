@@ -6640,6 +6640,71 @@ fn codex_rest_seat(
     fixture.node().session_id.0
 }
 
+/// The Codex thread of the working seat abc123 in the fresh world.
+pub(super) const WORKING_CODEX_THREAD: &str = "01a0b22c-c0de-7000-8000-0000000abc12";
+
+/// The Maintained Mind flow Sol, Awake as the Codex flow abc123 on the
+/// thread `WORKING_CODEX_THREAD` in pane w1:p3 of `fixture-session`, which
+/// Herdr shows until it is closed; its refresh's successor is started in
+/// the fresh world, as the Claude model the Address's model is configured
+/// to run.
+pub(super) fn codex_seat_in_fresh_world(fixture: &mut NexusFixture) -> FreshWorld {
+    fixture.declare_launch_session("fixture-session");
+    let mut node = fixture.node();
+    node.flow_id = flow_ethos::FlowId("abc123".into());
+    node.session_id = signal_flow::SessionId(WORKING_CODEX_THREAD.into());
+    node.herdr_route_selection = HerdrRouteSelection::Available(HerdrRoute {
+        herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
+        herdr_agent_name: signal_flow::HerdrAgentName("codex-abc123".into()),
+        herdr_pane_id: signal_flow::HerdrPaneId("w1:p3".into()),
+        herdr_terminal_id: signal_flow::HerdrTerminalId("term-old".into()),
+    });
+    node.origin = Origin::Unbound;
+    node.flow_lifecycle = FlowLifecycle::Active;
+    fixture
+        .nexus
+        .store
+        .register_flow(node)
+        .expect("the Codex seat registered");
+    fs::write(
+        fixture.directory.path().join("flows/.abc123.flow-id"),
+        format!(
+            "version=1\nharness=codex\nidentity={}\nalias=abc123\n",
+            WORKING_CODEX_THREAD.replace('-', "")
+        ),
+    )
+    .unwrap();
+    let world = fixture.fresh_claude_world();
+    fs::write(world.state.join("restart-world"), "").unwrap();
+    fs::write(world.state.join("old-pane"), "w1:p3").unwrap();
+    fs::write(
+        world.state.join("old-agent"),
+        serde_json::json!({
+            "name": "codex-abc123",
+            "agent": "codex",
+            "agent_status": "working",
+            "workspace_id": "w1",
+            "tab_id": "w1:t1",
+            "pane_id": "w1:p3",
+            "terminal_id": "term-old",
+            "agent_session": {
+                "source": "herdr:codex", "agent": "codex",
+                "kind": "id", "value": WORKING_CODEX_THREAD,
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    maintain(fixture, address(Model::Sol));
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Model::Sol,
+        State::Awake(flow_ethos::FlowId("abc123".into())),
+        vec![],
+        vec![],
+    ));
+    world
+}
+
 /// Test 1 (Part A): a Refresh ordered while a Codex turn runs is carried
 /// out at the thread's rest with nothing queued.
 #[test]
@@ -6672,6 +6737,81 @@ fn a_codex_ordered_refresh_with_nothing_queued_is_carried_out_at_its_rest() {
         "{at_rest:?}"
     );
     assert!(closes(&fixture), "the ordered refresh closes the seat");
+}
+
+/// Test 1 (Part A), Maintained: a Refresh ordered while a Maintained
+/// Codex seat's turn runs is answered RefreshQueued and starts nothing; at
+/// the thread's rest, with nothing queued, the successor is started and
+/// confirmed first, the Address receives as it, the predecessor is
+/// recorded Stopped and its reap owed to its worker, and the order is
+/// spent. The rest answers the reap pending, never a refusal.
+#[test]
+fn a_codex_ordered_refresh_of_a_maintained_seat_starts_its_successor_at_its_rest() {
+    use crate::codex_turns::{SettlesRestingCodexSeats, TurnEvent};
+    use crate::store::ordered_replacement::OrdersReplacements;
+    use crate::store::pending_reap::RecordsPendingReaps;
+    use crate::{Dispatches, store::ReadsFlowRows};
+    use signal_flow::{Query, Response};
+    let mut fixture = NexusFixture::new();
+    let world = codex_seat_in_fresh_world(&mut fixture);
+    let at = address(Model::Sol);
+    assert_eq!(
+        fixture.nexus.codex_events(
+            WORKING_CODEX_THREAD,
+            vec![TurnEvent::Started("turn-1".into())]
+        ),
+        None,
+        "a turn that starts is no rest"
+    );
+    let ordered = fixture.nexus.dispatch(Query::Refresh(at.clone()));
+    assert!(matches!(ordered, Response::RefreshQueued(_)), "{ordered:?}");
+    assert_eq!(world.claude_starts(), 0, "nothing starts while it works");
+
+    let at_rest = fixture.nexus.codex_events(
+        WORKING_CODEX_THREAD,
+        vec![TurnEvent::Completed("turn-1".into())],
+    );
+    let Some(AtStop::ReapPending(pending)) = &at_rest else {
+        panic!("{at_rest:?}; Herdr calls: {}", world.calls());
+    };
+    assert_eq!(pending.address, at);
+    assert_eq!(pending.predecessor.0.0, "abc123");
+    assert_eq!(pending.reap_standing, signal_flow::ReapStanding::Owed);
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+    let successor = pending.launched.flow_id.clone();
+    assert_ne!(successor.0, "abc123");
+    let metaflow = stored(&fixture, Model::Sol);
+    assert_eq!(metaflow.state, State::Awake(successor));
+    assert!(metaflow.queue.0.is_empty());
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .flow_node("abc123")
+            .unwrap()
+            .expect("the predecessor's row is kept")
+            .flow_lifecycle,
+        FlowLifecycle::Stopped
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .pending_reap("abc123")
+            .unwrap()
+            .map(|row| row.reap_standing),
+        Some(signal_flow::ReapStanding::Owed)
+    );
+    assert_eq!(
+        fixture.nexus.store.ordered_replacement(&at).unwrap(),
+        None,
+        "the order is spent"
+    );
+    assert!(
+        !world.calls().contains("pane close w1:p3"),
+        "the predecessor's close is its worker's, outside the rest: {}",
+        world.calls()
+    );
 }
 
 /// Test 2 (Part A): a Codex seat past its threshold is refreshed at its
@@ -6716,10 +6856,10 @@ fn a_codex_seat_past_its_threshold_is_refreshed_at_its_rest_with_nothing_queued(
     );
 }
 
-/// Test 3 (Part A): a status seen twice is no second rest: a second
-/// Status(Idle) while resting settles nothing.
+/// Test 3 (Part A), the status half: a status seen twice is no second
+/// rest: a second Status(Idle) while resting settles nothing.
 #[test]
-fn a_warned_codex_seat_is_refreshed_at_the_rest_after_its_warning() {
+fn a_second_idle_status_of_a_resting_codex_seat_settles_nothing() {
     use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
     let fixture = NexusFixture::new();
     let thread = codex_rest_seat(&fixture, None, vec![]);
@@ -6739,34 +6879,159 @@ fn a_warned_codex_seat_is_refreshed_at_the_rest_after_its_warning() {
     );
 }
 
+/// Test 3 (Part A), the warning half: an OnDemand Codex seat whose context
+/// reaches its warning share below its threshold is sent its handover
+/// warning at a rest, typed into its pane, and is not refreshed at that
+/// rest; at the rest after the turn the warning opened it is refreshed,
+/// though it wrote no handover and never passed its threshold, and a
+/// second Status(Idle) then settles nothing.
+#[test]
+fn a_warned_codex_seat_is_refreshed_at_the_rest_after_its_warning() {
+    use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
+    use crate::store::SeedsRole;
+    use crate::store::handover_reminders::SchedulesHandoverReminders;
+    const WORDS: &str = "Write your handover now.";
+    let mut fixture = NexusFixture::new();
+    let thread = codex_rest_seat(
+        &fixture,
+        Some(meta_signal_flow::Continuity::OnDemand),
+        vec![],
+    );
+    fixture.nexus.store.seed_role(signal_flow::CallerIdentity {
+        flow_id: flow_ethos::FlowId("908786".into()),
+        aspect: signal_flow::Aspect::Mind,
+        model_name: flow_ethos::ModelName("gpt-sol".into()),
+    });
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Thresholds(vec![
+            meta_signal_flow::ConfigureThreshold {
+                model_name: flow_ethos::ModelName("gpt-sol".into()),
+                refresh_threshold: meta_signal_flow::RefreshThreshold(200_000),
+            },
+        ]))
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::HandoverPolicies(
+            vec![meta_signal_flow::HandoverPolicy {
+                model_name: flow_ethos::ModelName("gpt-sol".into()),
+                warning_share_left: meta_signal_flow::WarningShareLeft(15),
+                reminder_text: meta_signal_flow::ReminderText(WORDS.into()),
+                every_minutes: meta_signal_flow::EveryMinutes(5),
+            }],
+        ))
+        .unwrap();
+    // Inside the warning share (15 percent before 200,000), below the
+    // threshold.
+    fixture
+        .nexus
+        .store
+        .record_context_size("908786", 175_000)
+        .unwrap();
+    use super::send_tool::RunsFakeAppServer;
+    let codex = super::send_tool::accepting_codex_endpoint(&mut fixture, "gpt-sol", &thread);
+
+    // The rest that opens the warning: the warning is typed and the seat,
+    // handed it, is in the turn it opens; it is not refreshed.
+    let warned_at = fixture
+        .nexus
+        .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]);
+    assert_eq!(warned_at, Some(AtStop::Kept(KeptAtStop::InTurn)));
+    let reminder = fixture
+        .nexus
+        .store
+        .handover_reminder(&address(Model::Sol), 0)
+        .unwrap()
+        .expect("the warning opened");
+    assert_eq!(reminder.sent, 1);
+    let typed = fixture.typed().expect("the warning reached the pane");
+    assert!(typed.contains(WORDS), "{typed}");
+    assert!(typed.contains("flows/908786/handover.md"), "{typed}");
+    assert!(!closes(&fixture), "the warned seat is not refreshed yet");
+    assert!(
+        codex.queued_turn_texts().is_empty(),
+        "the warning is typed, never a native turn"
+    );
+
+    // The warning's turn runs and ends: that rest refreshes the seat.
+    let refreshed_at = fixture.nexus.codex_events(
+        &thread,
+        vec![
+            TurnEvent::Started("turn-warned".into()),
+            TurnEvent::Completed("turn-warned".into()),
+        ],
+    );
+    assert_eq!(refreshed_at, Some(AtStop::Refreshed(address(Model::Sol))));
+    assert!(closes(&fixture), "the warned seat is refreshed");
+    let refreshed = stored(&fixture, Model::Sol);
+    assert_eq!(refreshed.state, State::Asleep);
+    assert_eq!(
+        refreshed.past,
+        flow_ethos::Past(vec![flow_ethos::FlowId("908786".into())])
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]),
+        None,
+        "a second Status(Idle) of the refreshed seat settles nothing"
+    );
+}
+
 /// Test 6 (Part A): a resting Codex seat with work queued is handed the
-/// oldest request.
+/// oldest request at its rest: the whole queue is typed into its pane,
+/// oldest first, in one hand-over through the app-server's anchor, the
+/// queue left empty and no native turn started.
 #[test]
 fn a_resting_codex_seat_with_work_queued_is_handed_the_oldest_request() {
     use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
-    let fixture = NexusFixture::new();
-    let entry = signal_flow::QueueEntry {
-        logical_delivery_id: flow_ethos::LogicalDeliveryId("codex-rest-0".into()),
-        request_id: flow_ethos::RequestId("cr00".into()),
+    use crate::store::SeedsRole;
+    let mut fixture = NexusFixture::new();
+    let queued = |id: &str, text: &str| signal_flow::QueueEntry {
+        logical_delivery_id: flow_ethos::LogicalDeliveryId(format!("codex-rest-{id}")),
+        request_id: flow_ethos::RequestId(format!("cr{id}")),
         sent_by: signal_flow::SentBy::Unknown,
         delivery: flow_ethos::Delivery::Queue,
-        message: signal_flow::Message::Soft(signal_flow::Request::Order("Oldest.".into())),
+        message: signal_flow::Message::Soft(signal_flow::Request::Order(text.into())),
     };
-    let thread = codex_rest_seat(&fixture, None, vec![entry]);
+    let oldest = queued("00", "Oldest.");
+    let newer = queued("01", "Newer.");
+    let thread = codex_rest_seat(&fixture, None, vec![oldest.clone(), newer.clone()]);
     maintain(&fixture, address(Model::Sol));
-    // The rest settles the seat with its queue: the oldest request is the
-    // one the Drain takes. With no app-server behind this fixture the
-    // hand-over itself is refused; the send-tool world proves it typed
-    // (`soft_work_queued_while_a_codex_turn_runs_waits_for_its_completion`).
+    // The seat's model selects the endpoint whose app-server anchors the
+    // hand-over (`thread/turns/list`) before anything is typed.
+    fixture.nexus.store.seed_role(signal_flow::CallerIdentity {
+        flow_id: flow_ethos::FlowId("908786".into()),
+        aspect: signal_flow::Aspect::Mind,
+        model_name: flow_ethos::ModelName("gpt-sol".into()),
+    });
+    use super::send_tool::RunsFakeAppServer;
+    let codex = super::send_tool::accepting_codex_endpoint(&mut fixture, "gpt-sol", &thread);
+    assert!(fixture.typed().is_none(), "nothing typed before the rest");
+
     let at_rest = fixture
         .nexus
         .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]);
+    assert_eq!(at_rest, Some(AtStop::Drained(oldest)), "{at_rest:?}");
+    let typed = fixture.typed().expect("the queue is typed into the pane");
     assert!(
-        matches!(
-            &at_rest,
-            Some(AtStop::Drained(_) | AtStop::Kept(KeptAtStop::DrainRefused(_)))
-        ),
-        "{at_rest:?}"
+        typed.find("Oldest.").is_some() && typed.find("Oldest.") < typed.find("Newer."),
+        "oldest first: {typed}"
+    );
+    assert!(
+        stored(&fixture, Model::Sol).queue.0.is_empty(),
+        "the queue is handed over"
+    );
+    assert!(
+        codex.queued_turn_texts().is_empty(),
+        "pane delivery never starts a Codex turn"
+    );
+    assert_eq!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(flow_ethos::FlowId("908786".into()))
     );
 }
 

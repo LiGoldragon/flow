@@ -2270,6 +2270,9 @@ impl WaitsForRestToReplace for RunningNexus {
         let _ = self.store.forget_ordered_replacement(&address);
         match response {
             Response::Refreshed(_) | Response::Replaced(_) => AtStop::Refreshed(address),
+            // The successor started and receives; the predecessor's reap is
+            // owed: the order was carried out.
+            Response::ReapPending(pending) => AtStop::ReapPending(Box::new(pending)),
             response => AtStop::Kept(KeptAtStop::OrderedRefused(Box::new(response))),
         }
     }
@@ -2649,9 +2652,12 @@ impl DrainsHeldSeats for RunningNexus {
         // anchor, and the one receipt of the payload settles them all.
         let _ = self.store.mark_delivery_uncertain(&attempt.attempt_id);
         let typed = self.park_cohort(&attempt, &cohort);
-        if let Reconciled::Settled(..) = self.reconcile_delivery(&attempt)
-            && node.harness_kind == HarnessKind::Codex
-        {
+        let _ = self.reconcile_delivery(&attempt);
+        // A payload typed into a Codex pane is work its thread holds, whose
+        // turn may not have begun, whether or not history shows it yet:
+        // the seat is in its turn until that turn's own events end it, so
+        // the rest that typed it neither closes it nor hands it more.
+        if node.harness_kind == HarnessKind::Codex {
             self.codex_turns.delivered(&node.session_id.0);
         }
         drained.extend(typed);

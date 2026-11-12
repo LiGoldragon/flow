@@ -1,7 +1,7 @@
 # Flow 0.54.7: every Codex rest settles; routing follows the succession; a reap is owed at once and finished outside the dispatch gate; every connection greets
 
 Contracts: signal-flow 61.0.0 (4871bb8) and meta-signal-flow 77.0.0
-(e72f555), on build base 1283af6. **The stored format changes.**
+(e72f555), on build base cd61cac. **The stored format changes.**
 
 - **Every Codex rest settles.** A Codex thread's coming to rest settles its
   flow as a Claude Stop does, whatever is queued: an ordered replacement or a
@@ -9,7 +9,13 @@ Contracts: signal-flow 61.0.0 (4871bb8) and meta-signal-flow 77.0.0
   sleeps. The first authoritative `Resumed(Idle)` after a Nexus start settles
   once; a later one, after a reconnect, settles nothing unless a turn was seen
   running between. An OnDemand seat whose successor cannot be placed or
-  composed is kept (`SleepUnplaceable`, `SleepUncomposable`), untold.
+  composed is kept (`SleepUnplaceable`, `SleepUncomposable`), untold. Work
+  typed into a Codex pane holds the seat in its turn (`InTurn`) until that
+  turn's own events end it, whether or not its history shows it yet, so the
+  rest that typed it (its handover warning, a Send handed over meanwhile)
+  neither closes the seat nor hands it more. A replacement ordered while the
+  seat worked and carried out at its rest with its successor started answers
+  the rest `ReapPending`, as a threshold refresh does.
 - **Routing follows the Address's succession.** Which flow an Address
   receives as is read from the metaflow row and its AddressHold alone. The
   successor's confirmation is the one commit that switches it; the

@@ -272,7 +272,8 @@ impl ReadsPaneEvents for PaneEvents {
             ]),
             None,
             Some(cancellation),
-        )?;
+        )
+        .map_err(|error| error.to_string())?;
         Ok(Self {
             pane_id: pane_id.to_owned(),
             events,
@@ -285,7 +286,11 @@ impl ReadsPaneEvents for PaneEvents {
     ) -> Result<Option<PaneEvent>, String> {
         loop {
             cancellation.check()?;
-            match self.events.next_cue(&[], None, Some(cancellation))? {
+            match self
+                .events
+                .next_cue(&[], None, Some(cancellation))
+                .map_err(|error| error.to_string())?
+            {
                 HerdrCue::Event(event) => {
                     if let Some(event) = event.pane_event(&self.pane_id) {
                         return Ok(Some(event));

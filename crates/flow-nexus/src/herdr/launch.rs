@@ -1628,7 +1628,7 @@ impl TitlesClaudeSession for HerdrCli {
                     ]),
                     Some(deadline),
                     None,
-                )
+                ).map_err(|error| error.to_string())
             })
             .inspect_err(|error| {
                 eprintln!(

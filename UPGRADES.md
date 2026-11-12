@@ -11,6 +11,13 @@ Builds on 0.54.4 with unchanged wire contracts and stored format.
 - Launch cancellation checks share the condition-variable notification
   mutex, and normal completion uses a separate event to join its watcher.
 
+- Herdr subscription establishment makes one nonblocking Unix connect.
+  A saturated backlog returns the distinct transport failure
+  BacklogSaturated and closes that attempt; a new attempt needs a new
+  caller action. Initial request writes retain an offset and wait on
+  writable readiness together with the caller's cancellation/deadline.
+  Cancellation causes remain typed through the transport interface.
+
 Rollback to 0.54.4 opens the same memory. Retention policy is unchanged.
 
 # Flow 0.54.4: a Codex proxy reader ends on its first failed read

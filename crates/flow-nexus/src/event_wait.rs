@@ -10,6 +10,23 @@ use std::{
     time::Instant,
 };
 
+/// The readiness an operation needs from its descriptor.
+#[derive(Clone, Copy)]
+pub enum DescriptorInterest {
+    Readable,
+    Writable,
+}
+
+#[derive(Clone, Copy)]
+pub struct DescriptorWait<'a> {
+    pub descriptor: BorrowedFd<'a>,
+    pub interest: DescriptorInterest,
+}
+
+pub trait AwaitsDescriptorInterests {
+    fn ready_interests(&self, deadline: Option<Instant>) -> io::Result<Vec<bool>>;
+}
+
 /// Descriptors waited on together.
 pub trait AwaitsDescriptors {
     /// Blocks until at least one descriptor is readable, or hung up, or
@@ -20,11 +37,26 @@ pub trait AwaitsDescriptors {
 
 impl AwaitsDescriptors for [BorrowedFd<'_>] {
     fn ready(&self, deadline: Option<Instant>) -> io::Result<Vec<bool>> {
+        self.iter()
+            .map(|descriptor| DescriptorWait {
+                descriptor: *descriptor,
+                interest: DescriptorInterest::Readable,
+            })
+            .collect::<Vec<_>>()
+            .ready_interests(deadline)
+    }
+}
+
+impl AwaitsDescriptorInterests for [DescriptorWait<'_>] {
+    fn ready_interests(&self, deadline: Option<Instant>) -> io::Result<Vec<bool>> {
         let mut entries = self
             .iter()
             .map(|descriptor| libc::pollfd {
-                fd: descriptor.as_raw_fd(),
-                events: libc::POLLIN,
+                fd: descriptor.descriptor.as_raw_fd(),
+                events: match descriptor.interest {
+                    DescriptorInterest::Readable => libc::POLLIN,
+                    DescriptorInterest::Writable => libc::POLLOUT,
+                },
                 revents: 0,
             })
             .collect::<Vec<_>>();
@@ -53,7 +85,10 @@ impl AwaitsDescriptors for [BorrowedFd<'_>] {
             }
             return Ok(entries
                 .iter()
-                .map(|entry| entry.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0)
+                .map(|entry| {
+                    entry.revents & (entry.events | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)
+                        != 0
+                })
                 .collect());
         }
     }

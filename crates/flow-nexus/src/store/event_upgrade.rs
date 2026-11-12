@@ -166,6 +166,24 @@ mod tests {
         );
     }
 
+    #[derive(Archive, RkyvSerialize, RkyvDeserialize, Clone, Debug, PartialEq, Eq)]
+    struct UnrelatedRecord {
+        value: String,
+    }
+    impl EngineRecord for UnrelatedRecord {
+        fn record_key(&self) -> RecordKey {
+            RecordKey::new(self.value.clone())
+        }
+    }
+    impl MemoryDefinition for UnrelatedRecord {
+        fn memory_version() -> MemoryVersion {
+            MemoryVersion::new(1)
+        }
+        fn schema_hash() -> SchemaHash {
+            SchemaHash::for_label("unrelated-fixture")
+        }
+    }
+
     #[test]
     fn v5_upgrade_preserves_keys_metadata_order_and_reopens_current_idempotently() {
         use signal_flow::{
@@ -210,7 +228,57 @@ mod tests {
             engine
                 .assert(Assertion::new(prior, before.clone()))
                 .unwrap();
-            engine.assert(Assertion::new(prior, empty)).unwrap();
+            engine.assert(Assertion::new(prior, empty.clone())).unwrap();
+            let unrelated = engine
+                .register_table(TableDescriptor::<UnrelatedRecord>::new(
+                    sema_engine::TableName::new("unrelated_fixture"),
+                    FamilyName::new("unrelated-fixture"),
+                    UnrelatedRecord::schema_hash(),
+                ))
+                .unwrap();
+            engine
+                .assert(Assertion::new(
+                    unrelated,
+                    UnrelatedRecord {
+                        value: "kept".into(),
+                    },
+                ))
+                .unwrap();
+        }
+        // The real supported fault fires after converted rows are written,
+        // before the log/catalog marker, inside the storage transaction.
+        {
+            let descriptor = FlowEvents::descriptor();
+            let mut engine = Engine::open(
+                EngineOpen::new(&path, SchemaVersion::new(1)).with_family(&descriptor),
+            )
+            .unwrap();
+            engine.interrupt_upgrade_at(sema_engine::UpgradeFault::AfterRowsWritten);
+            let failure = FlowStore::upgrade_event_memory(&mut engine).unwrap_err();
+            assert!(
+                format!("{failure:?}").contains("UpgradeInterrupted"),
+                "{failure:?}"
+            );
+        }
+        {
+            let descriptor = FlowEvents::descriptor();
+            let mut reopened = Engine::open(
+                EngineOpen::new(&path, SchemaVersion::new(1)).with_family(&descriptor),
+            )
+            .unwrap();
+            // Registering the exact old identity proves the catalog rolled
+            // back too; every logical predecessor row is still readable.
+            let prior = reopened
+                .register_table(TableDescriptor::<FlowEventsV5>::new(
+                    FLOW_EVENT_TABLE_NAME,
+                    FamilyName::new(FLOW_EVENT_FAMILY),
+                    FlowEventsV5::schema_hash(),
+                ))
+                .unwrap();
+            let rows = reopened.match_records(QueryPlan::all(prior)).unwrap();
+            assert_eq!(rows.records().len(), 2);
+            assert!(rows.records().contains(&before));
+            assert!(rows.records().contains(&empty));
         }
         for _ in 0..2 {
             let descriptor = FlowEvents::descriptor();
@@ -220,6 +288,22 @@ mod tests {
             .unwrap();
             FlowStore::upgrade_event_memory(&mut engine).unwrap();
             let table = engine.register_table(descriptor).unwrap();
+            let unrelated = engine
+                .register_table(TableDescriptor::<UnrelatedRecord>::new(
+                    sema_engine::TableName::new("unrelated_fixture"),
+                    FamilyName::new("unrelated-fixture"),
+                    UnrelatedRecord::schema_hash(),
+                ))
+                .unwrap();
+            assert_eq!(
+                engine
+                    .match_records(QueryPlan::all(unrelated))
+                    .unwrap()
+                    .records(),
+                &[UnrelatedRecord {
+                    value: "kept".into()
+                }]
+            );
             let rows = engine.match_records(QueryPlan::all(table)).unwrap();
             assert_eq!(rows.records().len(), 2);
             let row = rows

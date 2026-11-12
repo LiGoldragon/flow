@@ -278,6 +278,7 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
  "message-nexus",
+ "meta-signal-flow 75.0.0",
  "meta-signal-flow 76.0.0",
  "meta-signal-flow-before-request-ids",
  "meta-signal-message",
@@ -509,8 +510,10 @@ name = "meta-signal-flow"
 version = "75.0.0"
 source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=e192c0d#e192c0d4338cf3b2381bb37ecb3a177283373db5"
 dependencies = [
+ "datom-codec",
  "ethos-zero",
  "flow-ethos",
+ "protos",
  "rkyv",
  "signal",
  "signal-flow",

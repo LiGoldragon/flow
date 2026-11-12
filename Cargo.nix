@@ -1107,6 +1107,12 @@ rec {
             packageId = "message-nexus";
           }
           {
+            name = "meta-signal-flow";
+            packageId = "meta-signal-flow 75.0.0";
+            rename = "meta-signal-flow-75";
+            features = [ "datom" ];
+          }
+          {
             name = "meta-signal-message";
             packageId = "meta-signal-message";
             features = [ "datom" ];
@@ -1796,9 +1802,19 @@ rec {
         libName = "meta_signal_flow";
         dependencies = [
           {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            optional = true;
+          }
+          {
             name = "flow-ethos";
             packageId = "flow-ethos";
             usesDefaultFeatures = false;
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            optional = true;
           }
           {
             name = "rkyv";
@@ -1825,7 +1841,7 @@ rec {
         features = {
           "datom" = [ "dep:datom-codec" "dep:protos" "flow-ethos/datom" "signal-flow/datom" "signal/datom" ];
         };
-        resolvedDefaultFeatures = [ "default" ];
+        resolvedDefaultFeatures = [ "datom" "default" ];
       };
       "meta-signal-flow 76.0.0" = rec {
         crateName = "meta-signal-flow";

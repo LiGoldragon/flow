@@ -51,3 +51,7 @@ message-nexus = { git = "https://github.com/LiGoldragon/message", rev = "71b5ac0
 # dependencies resolve here. The joint test reads only signal-message.
 signal-message = { git = "https://github.com/LiGoldragon/signal-message", rev = "6d82783", features = ["datom"] }
 meta-signal-message = { git = "https://github.com/LiGoldragon/meta-signal-message", rev = "73b7a82", features = ["datom"] }
+
+# The Message test fixture keeps meta75; resolve its datom attachments in
+# this workspace as the base's named datom set requires.
+meta-signal-flow-75 = { package = "meta-signal-flow", git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "e192c0d", features = ["datom"] }

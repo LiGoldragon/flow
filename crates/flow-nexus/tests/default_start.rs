@@ -216,6 +216,20 @@ fn read_meta(peer: &mut UnixStream) -> meta_signal_flow::Response {
 
 fn meta_call(place: &Place, query: &meta_signal_flow::Query) -> meta_signal_flow::Response {
     let mut peer = UnixStream::connect(place.meta_socket()).expect("the meta socket listens");
+    use signal::Contracted;
+    peer.write_frame(
+        &rkyv::to_bytes::<rkyv::rancor::Error>(&meta_signal_flow::Query::greeting())
+            .expect("greeting encodes"),
+    )
+    .expect("greeting written");
+    let receipt = rkyv::from_bytes::<signal::HandshakeReceipt, rkyv::rancor::Error>(
+        &peer.read_frame().expect("greeting receipt"),
+    )
+    .expect("receipt decodes");
+    assert_eq!(
+        receipt,
+        signal::HandshakeReceipt::Greeted(meta_signal_flow::Query::contract_digest())
+    );
     write_meta(&mut peer, query);
     read_meta(&mut peer)
 }

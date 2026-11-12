@@ -922,6 +922,11 @@ rec {
             features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
           }
           {
+            name = "signal";
+            packageId = "signal";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "signal-flow";
             packageId = "signal-flow";
           }
@@ -1072,6 +1077,11 @@ rec {
           {
             name = "sha2";
             packageId = "sha2";
+          }
+          {
+            name = "signal";
+            packageId = "signal";
+            usesDefaultFeatures = false;
           }
           {
             name = "signal-flow";

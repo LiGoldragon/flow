@@ -16,6 +16,7 @@ meta-signal-flow = { workspace = true, features = ["datom"] }
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "c93b598" }
 rkyv.workspace = true
 signal-flow.workspace = true
+signal = { git = "https://github.com/LiGoldragon/signal", rev = "6d4eb74", default-features = false }
 [dev-dependencies]
 tempfile = "3"
 [build-dependencies]

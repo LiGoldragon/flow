@@ -25,6 +25,10 @@ trait ParsesMetaCommand {
         place: &dyn ResolvesCliPlace,
     ) -> Result<Invocation, String>;
 }
+/// A connected meta peer settles its contract before sending a query.
+trait GreetsMetaNexus {
+    fn greet_meta(&mut self) -> Result<(), String>;
+}
 trait CallsMetaNexus {
     /// Sends one query and hands each reply frame on: one, or for
     /// ObserveConfiguration every frame until the Nexus ends the exchange.
@@ -83,10 +87,41 @@ impl ParsesMetaCommand for FlowMetaClient {
     }
 }
 
+impl GreetsMetaNexus for UnixStream {
+    fn greet_meta(&mut self) -> Result<(), String> {
+        use signal::Contracted;
+        let greeting = Query::greeting();
+        let bytes =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&greeting).map_err(|error| error.to_string())?;
+        self.write_all(&(bytes.len() as u32).to_be_bytes())
+            .and_then(|_| self.write_all(&bytes))
+            .map_err(|error| error.to_string())?;
+        let mut length = [0; 4];
+        self.read_exact(&mut length)
+            .map_err(|error| error.to_string())?;
+        let length = u32::from_be_bytes(length) as usize;
+        if length > 1024 * 1024 {
+            return Err("Signal frame exceeds 1 MiB".into());
+        }
+        let mut bytes = vec![0; length];
+        self.read_exact(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        let receipt = rkyv::from_bytes::<signal::HandshakeReceipt, rkyv::rancor::Error>(&bytes)
+            .map_err(|error| error.to_string())?;
+        match receipt {
+            signal::HandshakeReceipt::Greeted(digest) if digest == greeting.contract_digest => {
+                Ok(())
+            }
+            receipt => Err(format!("meta greeting refused: {receipt:?}")),
+        }
+    }
+}
+
 impl CallsMetaNexus for FlowMetaClient {
     fn call(&self, invocation: &Invocation, each: &mut dyn FnMut(Response)) -> Result<(), String> {
         let mut peer = UnixStream::connect(&invocation.meta_socket_path.0)
             .map_err(|error| error.to_string())?;
+        peer.greet_meta()?;
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&invocation.query)
             .map_err(|error| error.to_string())?;
         peer.write_all(&(bytes.len() as u32).to_be_bytes())

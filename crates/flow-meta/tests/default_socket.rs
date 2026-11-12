@@ -42,6 +42,18 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
     let answering = std::thread::spawn(move || {
         let (mut peer, _) = listener.accept().expect("the selected client connects");
         let mut length = [0; 4];
+        use signal::Contracted;
+        peer.read_exact(&mut length).expect("greeting length");
+        let mut greeting = vec![0; u32::from_be_bytes(length) as usize];
+        peer.read_exact(&mut greeting).expect("greeting");
+        let greeting = rkyv::from_bytes::<signal::Handshake, rkyv::rancor::Error>(&greeting)
+            .expect("the client sends a Signal greeting first");
+        let receipt = meta_signal_flow::Query::receipt(&greeting);
+        assert!(matches!(receipt, signal::HandshakeReceipt::Greeted(_)));
+        let receipt = rkyv::to_bytes::<rkyv::rancor::Error>(&receipt).expect("receipt encodes");
+        peer.write_all(&(receipt.len() as u32).to_be_bytes())
+            .and_then(|_| peer.write_all(&receipt))
+            .expect("receipt written");
         peer.read_exact(&mut length).expect("query length");
         let mut query = vec![0; u32::from_be_bytes(length) as usize];
         peer.read_exact(&mut query).expect("query");

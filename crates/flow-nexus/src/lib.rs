@@ -1664,6 +1664,7 @@ impl ServesConnection for Connection {
     }
 
     fn serve_meta(mut self, nexus: &RunningNexus) -> Result<(), String> {
+        self.peer.greet_meta()?;
         let query = self.peer.read_meta_query()?;
         // Every peer is answered alike. The peer is read from the kernel,
         // only for the records that name who asked; nothing in the query
@@ -2322,6 +2323,8 @@ pub trait CarriesSignalFrames {
     fn read_query(&mut self) -> Result<Query, String>;
     fn write_response(&mut self, value: &Response) -> Result<(), String>;
     fn read_response(&mut self) -> Result<Response, String>;
+    /// Settle the meta contract before decoding any query.
+    fn greet_meta(&mut self) -> Result<(), String>;
     fn read_meta_query(&mut self) -> Result<meta_signal_flow::Query, String>;
     fn write_meta_response(&mut self, value: &meta_signal_flow::Response) -> Result<(), String>;
 }
@@ -2361,6 +2364,23 @@ impl CarriesSignalFrames for UnixStream {
     fn read_response(&mut self) -> Result<Response, String> {
         rkyv::from_bytes::<Response, rkyv::rancor::Error>(&self.read_frame()?)
             .map_err(|e| e.to_string())
+    }
+
+    fn greet_meta(&mut self) -> Result<(), String> {
+        use signal::Contracted;
+        let greeting =
+            rkyv::from_bytes::<signal::Handshake, rkyv::rancor::Error>(&self.read_frame()?)
+                .map_err(|error| format!("invalid meta greeting: {error}"))?;
+        let receipt = meta_signal_flow::Query::receipt(&greeting);
+        self.write_frame(
+            &rkyv::to_bytes::<rkyv::rancor::Error>(&receipt).map_err(|error| error.to_string())?,
+        )?;
+        match receipt {
+            signal::HandshakeReceipt::Greeted(_) => Ok(()),
+            signal::HandshakeReceipt::GreetingRefused(reason) => {
+                Err(format!("meta greeting refused: {reason:?}"))
+            }
+        }
     }
 
     fn read_meta_query(&mut self) -> Result<meta_signal_flow::Query, String> {
@@ -7499,6 +7519,102 @@ mod tests {
             Response::CallerResolutionRejected(
                 signal_flow::CallerResolutionRejection::CallerMismatch(mind_live())
             )
+        );
+    }
+
+    #[test]
+    fn meta_connection_settles_contract_before_decoding_queries() {
+        use signal::Contracted;
+        for greeting in [
+            meta_signal_flow::Query::greeting(),
+            meta_signal_flow_75::Query::greeting(),
+        ] {
+            let fixture = NexusFixture::new();
+            let (peer, mut client) = UnixStream::pair().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            std::thread::scope(|scope| {
+                let server = scope.spawn(|| {
+                    Connection {
+                        peer,
+                        process: None,
+                    }
+                    .serve_meta(&fixture.nexus)
+                });
+                client
+                    .write_frame(&rkyv::to_bytes::<rkyv::rancor::Error>(&greeting).unwrap())
+                    .unwrap();
+                let receipt = rkyv::from_bytes::<signal::HandshakeReceipt, rkyv::rancor::Error>(
+                    &client.read_frame().unwrap(),
+                )
+                .unwrap();
+                if greeting == meta_signal_flow::Query::greeting() {
+                    assert_eq!(
+                        receipt,
+                        signal::HandshakeReceipt::Greeted(
+                            meta_signal_flow::Query::contract_digest()
+                        )
+                    );
+                    client
+                        .write_frame(
+                            &rkyv::to_bytes::<rkyv::rancor::Error>(
+                                &meta_signal_flow::Query::Configuration,
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap();
+                    let response = rkyv::from_bytes::<
+                        meta_signal_flow::Response,
+                        rkyv::rancor::Error,
+                    >(&client.read_frame().unwrap())
+                    .unwrap();
+                    assert!(matches!(
+                        response,
+                        meta_signal_flow::Response::Configuration(_)
+                    ));
+                    assert!(server.join().unwrap().is_ok());
+                } else {
+                    assert_eq!(
+                        receipt,
+                        signal::HandshakeReceipt::GreetingRefused(
+                            signal::HandshakeRejection::ContractMismatch(
+                                meta_signal_flow::Query::contract_digest()
+                            ),
+                        )
+                    );
+                    assert!(
+                        server
+                            .join()
+                            .unwrap()
+                            .unwrap_err()
+                            .contains("meta greeting refused")
+                    );
+                    assert!(
+                        client.read_frame().is_err(),
+                        "refusal closes before any Query is decoded"
+                    );
+                }
+            });
+        }
+
+        let fixture = NexusFixture::new();
+        let (peer, mut client) = UnixStream::pair().unwrap();
+        client
+            .write_frame(
+                &rkyv::to_bytes::<rkyv::rancor::Error>(&meta_signal_flow_75::Query::Configuration)
+                    .unwrap(),
+            )
+            .unwrap();
+        let result = Connection {
+            peer,
+            process: None,
+        }
+        .serve_meta(&fixture.nexus);
+        assert!(result.unwrap_err().contains("invalid meta greeting"));
+        assert!(
+            client.read_frame().is_err(),
+            "raw legacy queries are closed without dispatch"
         );
     }
 

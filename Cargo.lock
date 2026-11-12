@@ -252,6 +252,7 @@ dependencies = [
  "meta-signal-flow 76.0.0",
  "protos",
  "rkyv",
+ "signal",
  "signal-flow",
  "tempfile",
 ]
@@ -292,6 +293,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "signal",
  "signal-flow",
  "signal-flow-before-request-ids",
  "signal-message",

@@ -7708,4 +7708,53 @@ mod tests {
         });
         assert_eq!(fixture.lifecycle("a001"), FlowLifecycle::Exited);
     }
+    #[test]
+    fn saturated_agent_admission_closes_each_attempt_and_preserves_the_live_flow() {
+        use crate::event_wait::AwaitsDescriptors;
+        use crate::observation_lifetime::ServesCancellableObservation;
+        use crate::observe_agent::ObservesAgent;
+        use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
+        use std::os::fd::AsFd;
+        let fixture = NexusFixture::new();
+        bind_existing_caller(&fixture, "a001", "pane-1");
+        fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
+        let socket = fixture.directory.path().join("saturated-herdr.sock");
+        let descriptor = rustix::net::socket_with(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC,
+            None,
+        )
+        .unwrap();
+        rustix::net::bind(&descriptor, &SocketAddrUnix::new(&socket).unwrap()).unwrap();
+        rustix::net::listen(&descriptor, 0).unwrap();
+        let listener = UnixListener::from(descriptor);
+        let _filler = UnixStream::connect(&socket).unwrap();
+        fixture.list_herdr_sessions(&[("messaging-build", socket)]);
+        for _ in 0..10 {
+            let (peer, _client) = UnixStream::pair().unwrap();
+            let mut connection = Connection::accepted(peer).unwrap();
+            let mut states = Vec::new();
+            let result = connection.serve_cancellable_observation(
+                &fixture.nexus,
+                &mut |cancellation, _peer| {
+                    fixture
+                        .nexus
+                        .observe_agent("a001", cancellation, &mut |response| {
+                            states.push(response.clone());
+                            Ok(())
+                        })
+                },
+            );
+            assert!(result.unwrap_err().contains("backlog saturated"));
+            assert_eq!(states.len(), 1, "only the initial state, never Gone");
+            assert_eq!(fixture.lifecycle("a001"), FlowLifecycle::Active);
+        }
+        let (_accepted_filler, _) = listener.accept().unwrap();
+        assert!(
+            ![listener.as_fd()]
+                .ready(Some(std::time::Instant::now()))
+                .unwrap()[0]
+        );
+    }
 }

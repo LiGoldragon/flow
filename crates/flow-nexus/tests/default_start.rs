@@ -203,19 +203,6 @@ fn configured(place: &Place, home: &Path) {
 }
 
 fn write_meta(peer: &mut UnixStream, query: &meta_signal_flow::Query) {
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(query).expect("meta query encodes");
-    peer.write_frame(&bytes).expect("meta query written");
-}
-
-fn read_meta(peer: &mut UnixStream) -> meta_signal_flow::Response {
-    rkyv::from_bytes::<meta_signal_flow::Response, rkyv::rancor::Error>(
-        &peer.read_frame().expect("meta response"),
-    )
-    .expect("meta response decodes")
-}
-
-fn meta_call(place: &Place, query: &meta_signal_flow::Query) -> meta_signal_flow::Response {
-    let mut peer = UnixStream::connect(place.meta_socket()).expect("the meta socket listens");
     use signal::Contracted;
     peer.write_frame(
         &rkyv::to_bytes::<rkyv::rancor::Error>(&meta_signal_flow::Query::greeting())
@@ -230,6 +217,19 @@ fn meta_call(place: &Place, query: &meta_signal_flow::Query) -> meta_signal_flow
         receipt,
         signal::HandshakeReceipt::Greeted(meta_signal_flow::Query::contract_digest())
     );
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(query).expect("meta query encodes");
+    peer.write_frame(&bytes).expect("meta query written");
+}
+
+fn read_meta(peer: &mut UnixStream) -> meta_signal_flow::Response {
+    rkyv::from_bytes::<meta_signal_flow::Response, rkyv::rancor::Error>(
+        &peer.read_frame().expect("meta response"),
+    )
+    .expect("meta response decodes")
+}
+
+fn meta_call(place: &Place, query: &meta_signal_flow::Query) -> meta_signal_flow::Response {
+    let mut peer = UnixStream::connect(place.meta_socket()).expect("the meta socket listens");
     write_meta(&mut peer, query);
     read_meta(&mut peer)
 }

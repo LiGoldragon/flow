@@ -6468,7 +6468,6 @@ fn a_metaflow_put_asleep_for_an_ended_flow_retracts_its_sender_locks() {
 /// in the bound native transcript and is delivered once.
 #[test]
 fn a_simplified_answer_uses_bound_transcript_b_and_never_hook_a() {
-    use crate::store::ReadsFlowMemory;
     use crate::store::logical_delivery::SimplifiedReplyBinding;
     use crate::waking::{QueuesSimplifiedAnswers, SimplifiedAnswer};
     let fixture = NexusFixture::new();

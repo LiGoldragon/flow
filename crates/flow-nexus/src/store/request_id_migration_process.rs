@@ -635,6 +635,41 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     serve_once(&current, home.path(), reopen_runtime.path(), &store_path);
 
     let store = FlowStore::open_configured(&store_path).expect("evolved Memory reopens");
+    use super::events::RecordsHarnessEvents;
+    let events = store
+        .events("MiXeD-v4-key")
+        .expect("upgraded events read")
+        .expect("original key held");
+    assert_eq!(
+        events,
+        vec![
+            super::events::RecordedHarnessEvent::Started(Some(signal_flow::NativeSessionId(
+                "v4-session".into()
+            ))),
+            super::events::RecordedHarnessEvent::Stopped(super::events::RecordedStop {
+                native_session_id_option: Some(signal_flow::NativeSessionId("v4-session".into())),
+                transcript_path_option: Some(signal_flow::TranscriptPath("/t/v4-session".into())),
+                background_work: signal_flow::BackgroundWork(vec![]),
+            }),
+            super::events::RecordedHarnessEvent::ToolUsed("Bash".into()),
+        ]
+    );
+    let row = store
+        .engine
+        .match_records(QueryPlan::key(
+            store.event_tables.events,
+            sema_engine::RecordKey::new("MiXeD-v4-key"),
+        ))
+        .unwrap()
+        .records()[0]
+        .clone();
+    assert_eq!(row.flow_id.0, "MiXeD-v4-key");
+    let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&row).unwrap();
+    assert!(
+        !archived
+            .windows("V4-ASSISTANT-MARKER-雪".len())
+            .any(|part| part == "V4-ASSISTANT-MARKER-雪".as_bytes())
+    );
     let configuration = store
         .configuration_snapshot()
         .expect("configuration reads")

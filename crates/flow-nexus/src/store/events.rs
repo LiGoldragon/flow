@@ -14,6 +14,8 @@
 //! had in flight, and stores events under v5. The 0.53.2 -> 0.53.3 upgrade
 //! converts every stored v4 row with the rest of that Memory, each Stop
 //! carrying no background work: a v4 Stop was read as the flow's rest.
+//! 0.54.6 records metadata alone under v6; both supported predecessors
+//! upgrade before serving, preserving original keys and event ordering.
 
 use super::{FlowStore, ReadsFlowStore, StoreError};
 pub use crate::generated::memory::{FlowEvents, RecordedHarnessEvent, RecordedStop};
@@ -403,6 +405,7 @@ mod tests {
     #[test]
     fn every_assistant_payload_is_removed_before_append_and_after_reopen() {
         use super::{ReadsEventRow, RecordedHarnessEvent, RecordedStop};
+        use crate::store::AppliesFlowQuery;
         use signal_flow::{
             BackgroundTask, BackgroundTaskId, BackgroundTaskKind, BackgroundTaskStatus,
             BackgroundWork, Description, NativeSessionId, TranscriptPath,
@@ -437,7 +440,17 @@ mod tests {
                     last_assistant_message_option: signal_flow::LastAssistantMessageOption(payload),
                     background_work: work.clone(),
                 });
-                store.record_event("5a4d0b", event).unwrap();
+                store.record_event("5a4d0b", event.clone()).unwrap();
+                assert_eq!(
+                    store
+                        .apply(signal_flow::Query::Report(signal_flow::Report_Data {
+                            flow_id: signal_flow::FlowId("5a4d0b".into()),
+                            process_option: None,
+                            event,
+                        }))
+                        .unwrap(),
+                    signal_flow::Response::Reported
+                );
                 let row = store.event_row("5a4d0b").unwrap().unwrap();
                 assert_eq!(row.recorded_harness_event_vector.last(), Some(&expected));
                 let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&row).unwrap();
@@ -450,7 +463,7 @@ mod tests {
         }
         let store = FlowStore::open(&path).unwrap();
         let row = store.event_row("5a4d0b").unwrap().unwrap();
-        assert_eq!(row.recorded_harness_event_vector, vec![expected; 4]);
+        assert_eq!(row.recorded_harness_event_vector, vec![expected; 8]);
         let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&row).unwrap();
         assert!(
             !archive

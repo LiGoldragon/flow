@@ -24,6 +24,24 @@ fn writes_nonempty_request_id_predecessor_memory() {
     let store_path = output.join("flow.sema");
     let store = <FlowStore as OpensFlowStore>::open_configured(&store_path)
         .expect("the exact predecessor process configured Memory before fixture writes");
+    // Written by the exact predecessor's own production event boundary.
+    use crate::store::events::RecordsHarnessEvents;
+    store
+        .hold_reserved_flow("MiXeD-v4-key")
+        .expect("predecessor flow held");
+    for event in [
+        signal_flow::Event::Started(Some("v4-session".into())),
+        signal_flow::Event::Stopped(signal_flow::NativeStop {
+            native_session_id_option: Some("v4-session".into()),
+            transcript_path_option: Some("/t/v4-session".into()),
+            last_assistant_message_option: Some("V4-ASSISTANT-MARKER-雪".into()),
+        }),
+        signal_flow::Event::ToolUsed("Bash".into()),
+    ] {
+        store
+            .record_event("MiXeD-v4-key", event)
+            .expect("predecessor event appended");
+    }
     let sender = Address {
         aspect: Aspect::Mind,
         topic: "migrationSender".into(),

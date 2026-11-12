@@ -5276,7 +5276,7 @@ mod tests {
                 ))),
             meta_signal_flow::Response::EventsRead(meta_signal_flow::EventsRead_Data {
                 flow_id: flow_ethos::FlowId("908786".into()),
-                harness_event_metadata_vector: vec![
+                harness_event_metadata_vector: [
                     Event::Started(None),
                     Event::ToolUsed("Bash".into()),
                     stop

@@ -7499,4 +7499,208 @@ mod tests {
         assert_eq!(ours.peer_process(), own);
         assert_eq!(theirs.peer_process(), own);
     }
+    #[test]
+    fn agent_connection_cancellation_releases_quiet_and_unanswered_subscriptions_without_exit() {
+        use crate::event_wait::AwaitsDescriptors;
+        use crate::observation_lifetime::ServesCancellableObservation;
+        use std::io::{BufRead, BufReader};
+        use std::os::fd::AsFd;
+        use std::sync::mpsc;
+        for acknowledged in [false, true] {
+            for stop in [false, true] {
+                let fixture = NexusFixture::new();
+                bind_existing_caller(&fixture, "a001", "pane-1");
+                fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
+                let (peer, client) = UnixStream::pair().unwrap();
+                let (sent, received) = mpsc::channel();
+                std::thread::scope(|scope| {
+                    let nexus = &fixture.nexus;
+                    let observer = scope.spawn(move || {
+                        let mut connection = Connection::accepted(peer).unwrap();
+                        connection.serve_cancellable_observation(
+                            nexus,
+                            &mut |cancellation, _peer| {
+                                nexus.observe_agent("a001", cancellation, &mut |response| {
+                                    sent.send(response.clone()).unwrap();
+                                    Ok(())
+                                })
+                            },
+                        )
+                    });
+                    let opening = received.recv_timeout(Duration::from_secs(3)).unwrap();
+                    assert!(matches!(
+                        opening,
+                        Response::AgentObserved(signal_flow::AgentObservation {
+                            agent_state: signal_flow::AgentState::Working,
+                            ..
+                        })
+                    ));
+                    assert!(
+                        [fixture._herdr_server.as_fd()]
+                            .ready(Some(std::time::Instant::now() + Duration::from_secs(3)))
+                            .unwrap()[0]
+                    );
+                    let (mut upstream, _) = fixture._herdr_server.accept().unwrap();
+                    upstream
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    let mut request = String::new();
+                    BufReader::new(&upstream).read_line(&mut request).unwrap();
+                    assert!(request.contains("events.subscribe"));
+                    if acknowledged {
+                        upstream
+                            .write_all(b"{\"result\":{\"type\":\"subscription_started\"}}\n")
+                            .unwrap();
+                    }
+                    if stop {
+                        nexus.stopping.request();
+                    } else {
+                        drop(client);
+                    }
+                    let mut byte = [0];
+                    assert_eq!(
+                        upstream.read(&mut byte).unwrap(),
+                        0,
+                        "upstream closes without another event or ack"
+                    );
+                    let result = observer.join().unwrap();
+                    assert!(result.unwrap_err().contains(if stop {
+                        "NexusStopped"
+                    } else {
+                        "PeerClosed"
+                    }));
+                    assert!(
+                        received.try_recv().is_err(),
+                        "cancellation never emits Gone"
+                    );
+                });
+                assert_eq!(fixture.lifecycle("a001"), FlowLifecycle::Active);
+            }
+        }
+    }
+
+    #[test]
+    fn pending_launch_connection_releases_on_peer_close_or_stop() {
+        use crate::observation_lifetime::ServesCancellableObservation;
+        use std::sync::mpsc;
+        for stop in [false, true] {
+            let fixture = NexusFixture::new();
+            let staged = fixture.staged_launch("pending-observation", None);
+            staged.reserve(&fixture.nexus);
+            let (peer, client) = UnixStream::pair().unwrap();
+            let (sent, received) = mpsc::channel();
+            let (done, finished) = mpsc::channel();
+            std::thread::scope(|scope| {
+                let nexus = &fixture.nexus;
+                let observer = scope.spawn(move || {
+                    let mut connection = Connection::accepted(peer).unwrap();
+                    let result = connection.serve_cancellable_observation(
+                        nexus,
+                        &mut |cancellation, _peer| {
+                            nexus.observe_launch(
+                                "pending-observation",
+                                cancellation,
+                                &mut |response| {
+                                    sent.send(response.clone()).unwrap();
+                                    Ok(())
+                                },
+                            )
+                        },
+                    );
+                    done.send(result).unwrap();
+                });
+                assert!(matches!(
+                    received.recv_timeout(Duration::from_secs(3)).unwrap(),
+                    Response::LaunchInspected(_)
+                ));
+                if stop {
+                    nexus.stopping.request();
+                } else {
+                    drop(client);
+                }
+                assert!(
+                    finished
+                        .recv_timeout(Duration::from_secs(3))
+                        .unwrap()
+                        .is_err()
+                );
+                observer.join().unwrap();
+            });
+        }
+    }
+
+    #[test]
+    fn agent_subscription_delivers_state_and_genuine_gone_records_exit() {
+        use crate::event_wait::AwaitsDescriptors;
+        use crate::observation_lifetime::ServesCancellableObservation;
+        use std::io::{BufRead, BufReader};
+        use std::os::fd::AsFd;
+        use std::sync::mpsc;
+        let fixture = NexusFixture::new();
+        bind_existing_caller(&fixture, "a001", "pane-1");
+        fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
+        let (peer, _client) = UnixStream::pair().unwrap();
+        let (sent, received) = mpsc::channel();
+        let (done, finished) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let nexus = &fixture.nexus;
+            let observer = scope.spawn(move || {
+                let mut connection = Connection::accepted(peer).unwrap();
+                let result =
+                    connection.serve_cancellable_observation(nexus, &mut |cancellation, _peer| {
+                        nexus.observe_agent("a001", cancellation, &mut |response| {
+                            sent.send(response.clone()).unwrap();
+                            Ok(())
+                        })
+                    });
+                done.send(result).unwrap();
+            });
+            assert!(matches!(
+                received.recv_timeout(Duration::from_secs(3)).unwrap(),
+                Response::AgentObserved(signal_flow::AgentObservation {
+                    agent_state: signal_flow::AgentState::Working,
+                    ..
+                })
+            ));
+            assert!(
+                [fixture._herdr_server.as_fd()]
+                    .ready(Some(std::time::Instant::now() + Duration::from_secs(3)))
+                    .unwrap()[0]
+            );
+            let (mut upstream, _) = fixture._herdr_server.accept().unwrap();
+            upstream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            BufReader::new(&upstream)
+                .read_line(&mut String::new())
+                .unwrap();
+            upstream.write_all(concat!(
+                "{\"result\":{\"type\":\"subscription_started\"}}\n",
+                "{\"event\":\"pane.agent_status_changed\",\"data\":{\"pane_id\":\"pane-1\",\"agent_status\":\"idle\"}}\n",
+                "{\"event\":\"pane.closed\",\"data\":{\"pane_id\":\"pane-1\"}}\n"
+            ).as_bytes()).unwrap();
+            assert!(matches!(
+                received.recv_timeout(Duration::from_secs(3)).unwrap(),
+                Response::AgentObserved(signal_flow::AgentObservation {
+                    agent_state: signal_flow::AgentState::Idle,
+                    ..
+                })
+            ));
+            assert!(matches!(
+                received.recv_timeout(Duration::from_secs(3)).unwrap(),
+                Response::AgentObserved(signal_flow::AgentObservation {
+                    agent_state: signal_flow::AgentState::Gone,
+                    ..
+                })
+            ));
+            assert!(
+                finished
+                    .recv_timeout(Duration::from_secs(3))
+                    .unwrap()
+                    .is_ok()
+            );
+            observer.join().unwrap();
+        });
+        assert_eq!(fixture.lifecycle("a001"), FlowLifecycle::Exited);
+    }
 }

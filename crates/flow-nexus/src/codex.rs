@@ -554,6 +554,10 @@ impl SpawnsCodexProxy for CodexAdapter {
                 Some(config),
             );
             loop {
+                // A read error is final: the socket answers every later read
+                // with the same error at once, so the reader reports it once
+                // and ends, as it does on Close.
+                let mut ended = false;
                 let event = match socket.read() {
                     Ok(Message::Text(message)) => match serde_json::from_str(message.as_ref()) {
                         Ok(message) => ProxyEvent::Reply(Ok(message)),
@@ -576,13 +580,15 @@ impl SpawnsCodexProxy for CodexAdapter {
                     )),
                     Ok(Message::Frame(_)) => continue,
                     Err(error) => {
+                        ended = true;
                         ProxyEvent::Reply(Err(CodexAdapterUnavailable::Protocol(error.to_string())))
                     }
                 };
-                let closed = matches!(
-                    event,
-                    ProxyEvent::Reply(Err(CodexAdapterUnavailable::Closed))
-                );
+                let closed = ended
+                    || matches!(
+                        event,
+                        ProxyEvent::Reply(Err(CodexAdapterUnavailable::Closed))
+                    );
                 if !sink(event) || closed {
                     return;
                 }

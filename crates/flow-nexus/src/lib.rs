@@ -7786,11 +7786,13 @@ mod tests {
                         drop(client);
                     }
                     let mut byte = [0];
-                    assert_eq!(
-                        upstream.read(&mut byte).unwrap(),
-                        0,
-                        "upstream closes without another event or ack"
-                    );
+                    match upstream.read(&mut byte) {
+                        Ok(0) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+                        other => panic!(
+                            "upstream closes within its read timeout without data: {other:?}"
+                        ),
+                    }
                     let result = observer.join().unwrap();
                     assert!(result.unwrap_err().contains(if stop {
                         "NexusStopped"

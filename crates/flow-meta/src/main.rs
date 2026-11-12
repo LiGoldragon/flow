@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn thirty_one_printed_metaflows_roundtrip_without_head_whitespace() {
         use super::ParsesMetaDatom;
-        use meta_signal_flow::{ConfigurationSnapshot, ConfigureMetaflow, Response};
+        use meta_signal_flow::{ConfigurationSnapshot, ConfigurePermaflow, Response};
         use signal_flow::{Address, Aspect, FlowKind, Model, ToolSet};
         let endpoint = || meta_signal_flow::CodexEndpoint {
             client_path: flow_ethos::ClientPath("/opt/codex".into()),
@@ -357,7 +357,7 @@ mod tests {
             model_name_vector: vec![flow_ethos::ModelName("fixture".into())],
         };
         let rows: Vec<_> = (0..31)
-            .map(|index| ConfigureMetaflow {
+            .map(|index| ConfigurePermaflow {
                 root_option: None,
                 address: Address {
                     aspect: Aspect::Mind,

@@ -29,7 +29,7 @@ use crate::store::{
     FlowStore, ManagesMetaflowState, ReadsFlowMemory, ReadsFlowRows, RegistersFlowIdentity,
 };
 use crate::waking::SleepsAndWakesSeats;
-use flow_ethos::State;
+use flow_ethos::PermaflowState;
 use meta_signal_flow::{OldSeat, RestartFailure, RestartPhase, RestartRecord};
 use signal_flow::{
     Address, Aspect, Event, FlowLifecycle, HerdrPaneBinding, HerdrRoute, HerdrRouteSelection,
@@ -1434,7 +1434,7 @@ fn declared(fixture: &NexusFixture, system_modules: &[&str], root_option: Option
         .nexus
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
-            meta_signal_flow::ConfigureMetaflow {
+            meta_signal_flow::ConfigurePermaflow {
                 root_option: root_option.map(meta_signal_flow::Root),
                 address: address(Model::Sol),
                 system_modules: signal_flow::SystemModules(
@@ -2654,7 +2654,7 @@ impl OpensSecondNexus for NexusFixture {
             .expect("model configured");
         opened
             .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
-                meta_signal_flow::ConfigureMetaflow {
+                meta_signal_flow::ConfigurePermaflow {
                     root_option: None,
                     address: address(Model::Sol),
                     system_modules: signal_flow::SystemModules(vec![
@@ -2898,7 +2898,7 @@ fn restart_cutover_two_nexus() {
     // refused while the resumed session runs in Herdr: nothing is launched,
     // and what it holds stays with it.
     let old_metaflow = stored(&fixture, Model::Sol);
-    assert_eq!(old_metaflow.state, State::Asleep);
+    assert_eq!(old_metaflow.permaflow_state, State::Asleep);
     assert_eq!(old_metaflow.queue.0.len(), 1);
     assert!(matches!(
         fixture.nexus.store.successor_intent(&address(Model::Sol)),
@@ -3372,7 +3372,7 @@ fn not_composed() -> Response {
     }))
 }
 
-fn new_metaflow(nexus: &crate::RunningNexus) -> signal_flow::Metaflow {
+fn new_metaflow(nexus: &crate::RunningNexus) -> signal_flow::Permaflow {
     use crate::store::metaflow::SleepsMetaflows;
     nexus
         .store

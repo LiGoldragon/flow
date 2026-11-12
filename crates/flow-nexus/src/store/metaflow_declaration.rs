@@ -4,7 +4,7 @@
 //! user message.
 
 use super::{FlowStore, ReadsFlowMemory, StoreError};
-use meta_signal_flow::ConfigureMetaflow;
+use meta_signal_flow::ConfigurePermaflow;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey, SchemaHash,
@@ -22,7 +22,7 @@ pub(super) const META_METAFLOW_CONFIGURATION_SCHEMA: &str =
 /// One declared metaflow, keyed by its Address.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredMetaMetaflowConfiguration {
-    pub metaflow: ConfigureMetaflow,
+    pub metaflow: ConfigurePermaflow,
 }
 
 impl EngineRecord for StoredMetaMetaflowConfiguration {
@@ -61,14 +61,14 @@ pub(crate) trait ReadsMetaflowDeclarations {
     fn metaflow_declaration(
         &self,
         address: &Address,
-    ) -> Result<Option<ConfigureMetaflow>, StoreError>;
+    ) -> Result<Option<ConfigurePermaflow>, StoreError>;
 }
 
 impl ReadsMetaflowDeclarations for FlowStore {
     fn metaflow_declaration(
         &self,
         address: &Address,
-    ) -> Result<Option<ConfigureMetaflow>, StoreError> {
+    ) -> Result<Option<ConfigurePermaflow>, StoreError> {
         let records = self
             .engine
             .match_records(QueryPlan::key(

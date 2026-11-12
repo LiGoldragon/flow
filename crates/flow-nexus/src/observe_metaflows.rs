@@ -13,13 +13,13 @@
 use crate::store::metaflow_watch::WatchesMetaflows;
 use crate::store::{AnnouncesLaunchChanges, StoreError};
 use crate::{HoldsStopRequest, RunningNexus};
-use flow_ethos::Metaflow;
+use flow_ethos::Permaflow;
 use signal_flow::Response;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// What the subscriber last sent of the metaflows.
 struct SentMetaflows {
-    metaflows: Vec<Metaflow>,
+    metaflows: Vec<Permaflow>,
 }
 
 trait SendsMetaflowChanges {
@@ -28,7 +28,7 @@ trait SendsMetaflowChanges {
     /// is then what was sent.
     fn send_changes(
         &mut self,
-        listed: Vec<Metaflow>,
+        listed: Vec<Permaflow>,
         send: &mut dyn FnMut(&Response) -> Result<(), String>,
     ) -> Result<(), String>;
 }
@@ -36,7 +36,7 @@ trait SendsMetaflowChanges {
 impl SendsMetaflowChanges for SentMetaflows {
     fn send_changes(
         &mut self,
-        listed: Vec<Metaflow>,
+        listed: Vec<Permaflow>,
         send: &mut dyn FnMut(&Response) -> Result<(), String>,
     ) -> Result<(), String> {
         for metaflow in &listed {

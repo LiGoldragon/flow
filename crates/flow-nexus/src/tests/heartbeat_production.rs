@@ -3,11 +3,11 @@ use crate::heartbeat::{DeliveryPurpose, RunsHeartbeat};
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::{StoredHeartbeatStanding, TracksHeartbeat};
-use signal_flow::{Address, Aspect, DeliveryState, Message, Metaflow, Model, Request, SentBy};
+use signal_flow::{Address, Aspect, DeliveryState, Message, Model, Permaflow, Request, SentBy};
 
 trait HeartbeatFixture {
     fn recipient(topic: &str) -> Address;
-    fn seed(&self, address: &Address, state: flow_ethos::State);
+    fn seed(&self, address: &Address, state: flow_ethos::PermaflowState);
     fn ordinary(&self, address: &Address, body: &str) -> String;
     fn standing(&self, address: &Address) -> StoredHeartbeatStanding;
 }
@@ -21,8 +21,8 @@ impl HeartbeatFixture for NexusFixture {
         }
     }
 
-    fn seed(&self, address: &Address, state: flow_ethos::State) {
-        self.nexus.store.seed_metaflow(Metaflow {
+    fn seed(&self, address: &Address, state: flow_ethos::PermaflowState) {
+        self.nexus.store.seed_metaflow(Permaflow {
             address: address.clone(),
             state,
             past: flow_ethos::Past(Vec::new()),
@@ -67,9 +67,9 @@ fn durable_worker_path_is_quiet_coalesces_and_excludes_its_own_traffic() {
     let unknown = NexusFixture::recipient("heartbeatUnknown");
     fixture.seed(
         &awake,
-        flow_ethos::State::Awake(flow_ethos::FlowId("awake-flow".into())),
+        flow_ethos::PermaflowState::Awake(flow_ethos::FlowId("awake-flow".into())),
     );
-    fixture.seed(&sleeping, flow_ethos::State::Asleep);
+    fixture.seed(&sleeping, flow_ethos::PermaflowState::Asleep);
 
     let evidence = fixture
         .nexus
@@ -220,7 +220,7 @@ fn configuration_churn_preserves_an_unknown_outstanding_delivery() {
     let awake = NexusFixture::recipient("heartbeatReselected");
     fixture.seed(
         &awake,
-        flow_ethos::State::Awake(flow_ethos::FlowId("awake-flow".into())),
+        flow_ethos::PermaflowState::Awake(flow_ethos::FlowId("awake-flow".into())),
     );
     fixture.nexus.sync_heartbeat(std::slice::from_ref(&awake));
     let mut standing = fixture.standing(&awake);

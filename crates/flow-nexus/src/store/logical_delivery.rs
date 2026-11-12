@@ -1180,7 +1180,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         let mut flow_id_vector = Vec::new();
         if let Some(metaflow) = self.metaflow(address)? {
             flow_id_vector.extend(metaflow.past.0);
-            if let flow_ethos::State::Awake(flow_id) = metaflow.state {
+            if let flow_ethos::PermaflowState::Awake(flow_id) = metaflow.permaflow_state {
                 flow_id_vector.push(flow_id);
             }
         }
@@ -1214,7 +1214,8 @@ impl RecordsLogicalDeliveries for FlowStore {
         let Some(mut stored) = self.stored_metaflow(address)? else {
             return Ok(false);
         };
-        if stored.metaflow.state != flow_ethos::State::Awake(flow_ethos::FlowId(flow_id.to_owned()))
+        if stored.metaflow.permaflow_state
+            != flow_ethos::PermaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned()))
             || !stored.metaflow.queue.0.starts_with(startup)
         {
             return Ok(false);

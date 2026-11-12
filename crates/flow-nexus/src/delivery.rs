@@ -303,7 +303,7 @@ impl DeliversMessages for RunningNexus {
             (Some(lease), Some(metaflow)) => {
                 if !lease.owned_by(&self.waking)
                     || lease.address() != &metaflow.address
-                    || !matches!(metaflow.state, flow_ethos::State::Awake(ref id) if id == &request.flow_id)
+                    || !matches!(metaflow.permaflow_state, flow_ethos::PermaflowState::Awake(ref id) if id == &request.flow_id)
                 {
                     return Response::DeliveryRejected(DeliveryRejection::RouteUnavailable);
                 }

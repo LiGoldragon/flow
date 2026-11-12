@@ -27,9 +27,9 @@ impl PreparesDeclaredMetaflow for FlowStore {
             return Ok(false);
         }
         let row = StoredMetaflow {
-            metaflow: Metaflow {
+            metaflow: Permaflow {
                 address: address.clone(),
-                state: MetaflowState::Asleep,
+                permaflow_state: PermaflowState::Asleep,
                 past: flow_ethos::Past(vec![]),
                 queue: flow_ethos::Queue(vec![]),
             },
@@ -85,9 +85,9 @@ pub(crate) trait SleepsMetaflows {
         typed: &flow_ethos::QueueEntry,
     ) -> Result<bool, StoreError>;
     /// The metaflow currently Awake as this flow, if any.
-    fn metaflow_awake_as(&self, flow_id: &str) -> Result<Option<Metaflow>, StoreError>;
+    fn metaflow_awake_as(&self, flow_id: &str) -> Result<Option<Permaflow>, StoreError>;
     /// The metaflow at this Address, if any.
-    fn metaflow(&self, address: &Address) -> Result<Option<Metaflow>, StoreError>;
+    fn metaflow(&self, address: &Address) -> Result<Option<Permaflow>, StoreError>;
 }
 
 impl MutatesMetaflows for FlowStore {
@@ -117,7 +117,7 @@ impl MutatesMetaflows for FlowStore {
             && let Some(previous) = self.bound_process(&address)?
         {
             if previous == *peer
-                && let MetaflowState::Awake(id) = &stored.metaflow.state
+                && let PermaflowState::Awake(id) = &stored.metaflow.permaflow_state
             {
                 return Ok(Response::Bound(id.clone()));
             }
@@ -133,18 +133,18 @@ impl MutatesMetaflows for FlowStore {
             launched.unwrap_or_else(|| FlowId(format!("flow-{:016x}", state.next_flow_number)));
         let new_metaflow = existing.is_none();
         let new_binding = self.bound_process(&address)?.is_none();
-        let mut metaflow = existing.map(|row| row.metaflow).unwrap_or(Metaflow {
+        let mut metaflow = existing.map(|row| row.metaflow).unwrap_or(Permaflow {
             address: address.clone(),
-            state: MetaflowState::Asleep,
+            permaflow_state: PermaflowState::Asleep,
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(vec![]),
         });
-        if let MetaflowState::Awake(previous) = metaflow.state
+        if let PermaflowState::Awake(previous) = metaflow.permaflow_state
             && previous != flow_id
         {
             metaflow.past.0.push(previous);
         }
-        metaflow.state = MetaflowState::Awake(flow_id.clone());
+        metaflow.permaflow_state = PermaflowState::Awake(flow_id.clone());
         let commit = self.engine.begin_atomic_commit().mutate(
             self.state,
             FlowStoreState {
@@ -294,10 +294,12 @@ impl SleepsMetaflows for FlowStore {
         let Some(mut stored) = self.stored_metaflow(address)? else {
             return Ok(false);
         };
-        if stored.metaflow.state != MetaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned())) {
+        if stored.metaflow.permaflow_state
+            != PermaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned()))
+        {
             return Ok(false);
         }
-        stored.metaflow.state = MetaflowState::Asleep;
+        stored.metaflow.permaflow_state = PermaflowState::Asleep;
         stored
             .metaflow
             .past
@@ -385,18 +387,18 @@ impl SleepsMetaflows for FlowStore {
         Ok(true)
     }
 
-    fn metaflow_awake_as(&self, flow_id: &str) -> Result<Option<Metaflow>, StoreError> {
-        let awake = MetaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned()));
+    fn metaflow_awake_as(&self, flow_id: &str) -> Result<Option<Permaflow>, StoreError> {
+        let awake = PermaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned()));
         Ok(self
             .engine
             .match_records(QueryPlan::all(self.metaflows))?
             .records()
             .iter()
-            .find(|stored| stored.metaflow.state == awake)
+            .find(|stored| stored.metaflow.permaflow_state == awake)
             .map(|stored| stored.metaflow.clone()))
     }
 
-    fn metaflow(&self, address: &Address) -> Result<Option<Metaflow>, StoreError> {
+    fn metaflow(&self, address: &Address) -> Result<Option<Permaflow>, StoreError> {
         Ok(self.stored_metaflow(address)?.map(|stored| stored.metaflow))
     }
 }
@@ -456,16 +458,16 @@ impl TakesLaunchAddress for FlowStore {
         let live_binding = binding.as_ref().is_some_and(FlowStore::process_is_live);
         let mut metaflow = match existing.as_ref() {
             Some(stored) => stored.metaflow.clone(),
-            None => Metaflow {
+            None => Permaflow {
                 address: address.clone(),
-                state: MetaflowState::Asleep,
+                permaflow_state: PermaflowState::Asleep,
                 past: flow_ethos::Past(vec![]),
                 queue: flow_ethos::Queue(vec![]),
             },
         };
-        match &metaflow.state {
-            MetaflowState::Awake(current) if current.0 == flow_id => {}
-            MetaflowState::Awake(current) => {
+        match &metaflow.permaflow_state {
+            PermaflowState::Awake(current) if current.0 == flow_id => {}
+            PermaflowState::Awake(current) => {
                 if Some(current.0.as_str()) != predecessor
                     && (live_binding || self.flow_is_live(&current.0)?)
                 {
@@ -473,10 +475,10 @@ impl TakesLaunchAddress for FlowStore {
                 }
                 metaflow.past.0.push(current.clone());
             }
-            MetaflowState::Asleep if live_binding => {
+            PermaflowState::Asleep if live_binding => {
                 return Ok(AddressTaking::Refused(StartRejection::AddressAwake));
             }
-            MetaflowState::Asleep => {}
+            PermaflowState::Asleep => {}
         }
         if delivered != 0 {
             return Ok(AddressTaking::Refused(
@@ -484,7 +486,7 @@ impl TakesLaunchAddress for FlowStore {
             ));
         }
         metaflow.past.0.retain(|past| past.0 != flow_id);
-        metaflow.state = MetaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned()));
+        metaflow.permaflow_state = PermaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned()));
         Ok(AddressTaking::Takes(TakenAddress {
             metaflow: StoredMetaflow { metaflow },
             new: existing.is_none(),
@@ -501,15 +503,15 @@ impl TakesLaunchAddress for FlowStore {
             .as_ref()
             .map(|value| value.0.as_str());
         let refused = match self.stored_metaflow(&profile.address)? {
-            Some(stored) => match &stored.metaflow.state {
-                MetaflowState::Awake(current) => (Some(current.0.as_str()) != predecessor
+            Some(stored) => match &stored.metaflow.permaflow_state {
+                PermaflowState::Awake(current) => (Some(current.0.as_str()) != predecessor
                     && (self.flow_is_live(&current.0)?
                         || self
                             .bound_process(&profile.address)?
                             .as_ref()
                             .is_some_and(FlowStore::process_is_live)))
                 .then_some(StartRejection::AddressAwake),
-                MetaflowState::Asleep => self
+                PermaflowState::Asleep => self
                     .bound_process(&profile.address)?
                     .as_ref()
                     .is_some_and(FlowStore::process_is_live)
@@ -595,7 +597,8 @@ impl ForgetsEndedBindings for FlowStore {
         let Some(stored) = self.stored_metaflow(address)? else {
             return Ok(false);
         };
-        if stored.metaflow.state != MetaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned()))
+        if stored.metaflow.permaflow_state
+            != PermaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned()))
             || !stored.metaflow.queue.0.is_empty()
         {
             return Ok(false);
@@ -646,12 +649,12 @@ impl ForgetsEndedBindings for FlowStore {
 /// Seeds a metaflow row directly, for tests of what reads and moves it.
 #[cfg(test)]
 pub(crate) trait SeedsMetaflow {
-    fn seed_metaflow(&self, metaflow: Metaflow);
+    fn seed_metaflow(&self, metaflow: Permaflow);
 }
 
 #[cfg(test)]
 impl SeedsMetaflow for FlowStore {
-    fn seed_metaflow(&self, mut metaflow: Metaflow) {
+    fn seed_metaflow(&self, mut metaflow: Permaflow) {
         // Hand-authored fixtures historically used `test` for every queued
         // request.  Request ids are store-wide now, so retain the first value
         // and give later colliding fixture rows stable four-character ids.
@@ -768,21 +771,21 @@ pub(crate) trait ReadsSuccession {
 /// The succession every metaflow and hold implies.
 trait ComputesSuccession {
     fn computed(
-        metaflows: &[Metaflow],
+        metaflows: &[Permaflow],
         holds: &[super::address_hold::AddressHold],
     ) -> SuccessionIndex;
     fn receiving_of(
-        metaflow: &Metaflow,
+        metaflow: &Permaflow,
         holds: &[super::address_hold::AddressHold],
     ) -> Option<FlowId>;
 }
 
 impl ComputesSuccession for FlowStore {
     fn receiving_of(
-        metaflow: &Metaflow,
+        metaflow: &Permaflow,
         holds: &[super::address_hold::AddressHold],
     ) -> Option<FlowId> {
-        let MetaflowState::Awake(awake) = &metaflow.state else {
+        let PermaflowState::Awake(awake) = &metaflow.permaflow_state else {
             return None;
         };
         let found = holds
@@ -792,21 +795,21 @@ impl ComputesSuccession for FlowStore {
         match found {
             // Between acknowledgement and confirmation the Address receives
             // as the flow the hold found it Awake as, if any.
-            Some(Some(MetaflowState::Awake(found))) if found != *awake => Some(found),
+            Some(Some(PermaflowState::Awake(found))) if found != *awake => Some(found),
             Some(_) => None,
             None => Some(awake.clone()),
         }
     }
 
     fn computed(
-        metaflows: &[Metaflow],
+        metaflows: &[Permaflow],
         holds: &[super::address_hold::AddressHold],
     ) -> SuccessionIndex {
         let mut successions = std::collections::BTreeMap::new();
         for metaflow in metaflows {
-            let awake = match &metaflow.state {
-                MetaflowState::Awake(flow_id) => Some(flow_id.clone()),
-                MetaflowState::Asleep => None,
+            let awake = match &metaflow.permaflow_state {
+                PermaflowState::Awake(flow_id) => Some(flow_id.clone()),
+                PermaflowState::Asleep => None,
             };
             let mut lineage: Vec<FlowId> = Vec::new();
             for flow_id in metaflow.past.0.iter().cloned().chain(awake.clone()) {
@@ -913,9 +916,9 @@ impl ResolvesRemembering for FlowStore {
             .and_then(|attempt| attempt.native_launch_binding_option)
             .map(|binding| binding.flow_id);
         let mut lineage: Vec<signal_flow::FlowId> = Vec::new();
-        let awake = match &stored.metaflow.state {
-            MetaflowState::Awake(flow_id) => Some(flow_id.clone()),
-            MetaflowState::Asleep => None,
+        let awake = match &stored.metaflow.permaflow_state {
+            PermaflowState::Awake(flow_id) => Some(flow_id.clone()),
+            PermaflowState::Asleep => None,
         };
         for flow_id in stored.metaflow.past.0.iter().cloned().chain(awake) {
             if Some(&flow_id) == own.as_ref() {
@@ -1042,9 +1045,9 @@ mod tests {
             model: Model::Sol,
             ..fixture.message.clone()
         };
-        fixture.store.seed_metaflow(Metaflow {
+        fixture.store.seed_metaflow(Permaflow {
             address: target.clone(),
-            state: MetaflowState::Asleep,
+            permaflow_state: PermaflowState::Asleep,
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(vec![]),
         });

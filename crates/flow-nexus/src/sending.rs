@@ -447,7 +447,7 @@ impl SendsRequests for RunningNexus {
 
     fn live_awake_flow(&self, address: &Address) -> Option<String> {
         let metaflow = self.store.metaflow(address).ok()??;
-        let flow_ethos::State::Awake(flow_id) = metaflow.state else {
+        let flow_ethos::PermaflowState::Awake(flow_id) = metaflow.permaflow_state else {
             return None;
         };
         (self
@@ -473,7 +473,7 @@ impl SendsRequests for RunningNexus {
                         visible_drain_state: signal_flow::VisibleDrainState::Delivered,
                     });
                 }
-                metaflow.state == flow_ethos::State::Asleep
+                metaflow.permaflow_state == flow_ethos::PermaflowState::Asleep
             }
             Ok(None) => {
                 return Response::Refused(Refusal::Unknown(Unknown_Data::Address(address)));

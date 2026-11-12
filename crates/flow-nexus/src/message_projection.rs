@@ -475,15 +475,15 @@ impl ProjectsQueueDelivery for meta_signal_flow::QueueDelivery {
 }
 
 trait ProjectsMetaflow {
-    fn visible_metaflow(&self) -> meta_signal_flow::VisibleMetaflow;
+    fn visible_metaflow(&self) -> meta_signal_flow::VisiblePermaflow;
 }
 
-impl ProjectsMetaflow for flow_ethos::Metaflow {
-    fn visible_metaflow(&self) -> meta_signal_flow::VisibleMetaflow {
+impl ProjectsMetaflow for flow_ethos::Permaflow {
+    fn visible_metaflow(&self) -> meta_signal_flow::VisiblePermaflow {
         let value = self;
-        meta_signal_flow::VisibleMetaflow {
+        meta_signal_flow::VisiblePermaflow {
             address: value.address.clone(),
-            state: value.state.clone(),
+            permaflow_state: value.state.clone(),
             flow_id_vector: value.past.clone().0,
             visible_native_input_vector: value
                 .queue
@@ -504,7 +504,7 @@ impl ProjectsInspection for crate::store::repair::Inspection {
         let value = self;
         let address = value.metaflow.address.clone();
         meta_signal_flow::Inspected_Data {
-            visible_metaflow: value.metaflow.visible_metaflow(),
+            visible_permaflow: value.metaflow.visible_metaflow(),
             binding: value.binding,
             lock_vector: value.lock_vector,
             visible_attempt_vector: value

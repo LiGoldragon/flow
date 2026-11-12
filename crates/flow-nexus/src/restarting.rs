@@ -758,7 +758,7 @@ impl RestartsInSteps for RunningNexus {
             use crate::store::ManagesMetaflowState;
             let asleep = match self.store.list_metaflows() {
                 Ok(metaflows) => metaflows.iter().any(|metaflow| {
-                    metaflow.state == flow_ethos::State::Asleep
+                    metaflow.permaflow_state == flow_ethos::PermaflowState::Asleep
                         && metaflow.past.0.last().is_some_and(|last| last.0 == flow_id)
                 }),
                 Err(error) => return Err(Box::new(error.refused())),

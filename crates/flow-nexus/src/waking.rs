@@ -140,7 +140,7 @@ use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
 use signal_flow::{
     Address, AgentState, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
-    Metaflow, NativePrompt, Origin, QueueEntry, Response,
+    NativePrompt, Origin, Permaflow, QueueEntry, Response,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -300,7 +300,7 @@ impl RestsEndedAwake for RunningNexus {
         let Ok(Some(metaflow)) = self.store.metaflow(address) else {
             return false;
         };
-        let flow_ethos::State::Awake(flow_id) = metaflow.state else {
+        let flow_ethos::PermaflowState::Awake(flow_id) = metaflow.permaflow_state else {
             return false;
         };
         let ended = match self.store.flow_node(&flow_id.0) {
@@ -680,13 +680,13 @@ pub trait SleepsAndWakesSeats {
     fn drain_awake(&self, address: &Address);
     /// Whether Flow's records show the metaflow due a wake: Asleep and
     /// holding work that wakes it.
-    fn wake_is_due(&self, metaflow: &Metaflow) -> bool;
+    fn wake_is_due(&self, metaflow: &Permaflow) -> bool;
     /// Types what arrived during a wake into the woken flow, oldest first,
     /// until the queue is seen empty under the gate; the hold is released
     /// there.
     fn drain_woken(&self, address: &Address, lease: WakingLease<'_>);
     /// Which way an Asleep metaflow is woken.
-    fn wake_plan(&self, metaflow: &Metaflow) -> WakePlan;
+    fn wake_plan(&self, metaflow: &Permaflow) -> WakePlan;
     /// At the Nexus's start: wakes every metaflow due a wake, as a wake the
     /// last Nexus did not start or did not finish left it.
     fn recover_wakes(&self);
@@ -765,7 +765,7 @@ trait WakesInParts {
     fn waken(&self, address: &Address) -> Result<FlowId, WakeRefusal>;
     fn start_fresh(
         &self,
-        metaflow: &Metaflow,
+        metaflow: &Permaflow,
         fresh: FreshContext,
         text: &str,
     ) -> Result<FreshStarted, FreshRefusal>;
@@ -799,7 +799,7 @@ trait WakesInParts {
     fn refresh_successor_first(
         &self,
         flow_id: &str,
-        metaflow: &Metaflow,
+        metaflow: &Permaflow,
         cause: SuccessionCause,
     ) -> AtStop;
     /// Starts a successor an earlier Nexus owed after a Refresh ordered from
@@ -824,13 +824,13 @@ trait WakesInParts {
     fn successor_profile(
         &self,
         flow_id: &str,
-        metaflow: &Metaflow,
+        metaflow: &Permaflow,
         launch_request_id: String,
     ) -> Option<LaunchProfile>;
     /// Composes the successor the seat would get, launching nothing, under
     /// the dispatch gate the caller holds: an OnDemand seat is closed only
     /// once its successor composes.
-    fn successor_composes(&self, flow_id: &str, metaflow: &Metaflow) -> Result<(), KeptAtStop>;
+    fn successor_composes(&self, flow_id: &str, metaflow: &Permaflow) -> Result<(), KeptAtStop>;
     /// A seat kept because its successor was refused: notes it, so it is
     /// handed its queue though past its threshold, and hands it what is
     /// queued now, as its rest's drain would. The first time a refusal
@@ -1395,8 +1395,8 @@ impl ReconcilesQueueDelivery for RunningNexus {
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|metaflow| !metaflow.queue.0.is_empty())
-                .filter_map(|metaflow| match metaflow.state {
-                    flow_ethos::State::Awake(flow_id) => Some(flow_id),
+                .filter_map(|metaflow| match metaflow.permaflow_state {
+                    flow_ethos::PermaflowState::Awake(flow_id) => Some(flow_id),
                     _ => None,
                 })
                 .filter(|flow_id| {
@@ -1494,7 +1494,7 @@ impl SleepsAndWakesSeats for RunningNexus {
             let Ok(Some(metaflow)) = self.store.metaflow(address) else {
                 return;
             };
-            let flow_ethos::State::Awake(flow_id) = metaflow.state else {
+            let flow_ethos::PermaflowState::Awake(flow_id) = metaflow.permaflow_state else {
                 return;
             };
             if metaflow.queue.0.is_empty()
@@ -1586,7 +1586,7 @@ impl SleepsAndWakesSeats for RunningNexus {
         }
     }
 
-    fn wake_plan(&self, metaflow: &Metaflow) -> WakePlan {
+    fn wake_plan(&self, metaflow: &Permaflow) -> WakePlan {
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
         let last = metaflow
             .past
@@ -1626,8 +1626,8 @@ impl SleepsAndWakesSeats for RunningNexus {
         }
     }
 
-    fn wake_is_due(&self, metaflow: &Metaflow) -> bool {
-        metaflow.state == flow_ethos::State::Asleep
+    fn wake_is_due(&self, metaflow: &Permaflow) -> bool {
+        metaflow.permaflow_state == flow_ethos::PermaflowState::Asleep
             && (metaflow
                 .queue
                 .0
@@ -1658,7 +1658,10 @@ impl SleepsAndWakesSeats for RunningNexus {
                 .into_iter()
                 .filter(|metaflow| {
                     !metaflow.queue.0.is_empty()
-                        && matches!(metaflow.state, flow_ethos::State::Awake(_))
+                        && matches!(
+                            metaflow.permaflow_state,
+                            flow_ethos::PermaflowState::Awake(_)
+                        )
                 })
                 .map(|metaflow| metaflow.address)
                 .collect::<Vec<_>>()
@@ -1684,8 +1687,10 @@ impl SleepsAndWakesSeats for RunningNexus {
             let mut owed = Vec::new();
             for intent in self.store.successor_intents().unwrap_or_default() {
                 match self.store.metaflow(&intent.address) {
-                    Ok(Some(metaflow)) => match metaflow.state {
-                        flow_ethos::State::Awake(current) if current.0 == intent.predecessor => {
+                    Ok(Some(metaflow)) => match metaflow.permaflow_state {
+                        flow_ethos::PermaflowState::Awake(current)
+                            if current.0 == intent.predecessor =>
+                        {
                             match intent.cause {
                                 SuccessionCause::Refresh | SuccessionCause::Exit => {
                                     refreshes.push(current);
@@ -1695,12 +1700,12 @@ impl SleepsAndWakesSeats for RunningNexus {
                                 }
                             }
                         }
-                        flow_ethos::State::Awake(current) => {
+                        flow_ethos::PermaflowState::Awake(current) => {
                             if !matches!(self.store.address_hold(&current.0), Ok(Some(_))) {
                                 let _ = self.store.forget_successor(&intent.address);
                             }
                         }
-                        flow_ethos::State::Asleep => {}
+                        flow_ethos::PermaflowState::Asleep => {}
                     },
                     Ok(None) => {
                         let _ = self.store.forget_successor(&intent.address);
@@ -1806,8 +1811,8 @@ impl RefreshesMetaflows for RunningNexus {
         self.rest_ended_awake(address);
         let metaflow = match self.store.metaflow(address) {
             Ok(Some(
-                metaflow @ Metaflow {
-                    state: flow_ethos::State::Awake(_),
+                metaflow @ Permaflow {
+                    permaflow_state: flow_ethos::PermaflowState::Awake(_),
                     ..
                 },
             )) => metaflow,
@@ -1824,7 +1829,7 @@ impl RefreshesMetaflows for RunningNexus {
             Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
         };
         // A restart holds the flow's Address as a refresh would.
-        if let flow_ethos::State::Awake(current) = &metaflow.state
+        if let flow_ethos::PermaflowState::Awake(current) = &metaflow.permaflow_state
             && !matches!(
                 crate::store::restart::RecordsRestarts::restart_record(&*self.store, &current.0),
                 Ok(None)
@@ -1832,7 +1837,7 @@ impl RefreshesMetaflows for RunningNexus {
         {
             return Response::RefreshRejected(RefreshRejection::Locked);
         }
-        let flow_ethos::State::Awake(flow_id) = metaflow.state.clone() else {
+        let flow_ethos::PermaflowState::Awake(flow_id) = metaflow.permaflow_state.clone() else {
             return Response::RefreshRejected(RefreshRejection::NotAwake);
         };
         // A flow whose launch is not yet confirmed only holds its Address:
@@ -1901,7 +1906,7 @@ impl RefreshesMetaflows for RunningNexus {
             if let Some(predecessor) = profile.flow_id_option.clone()
                 && matches!(
                     self.store.metaflow(&address),
-                    Ok(Some(metaflow)) if metaflow.state == flow_ethos::State::Awake(predecessor.clone())
+                    Ok(Some(metaflow)) if metaflow.permaflow_state == flow_ethos::PermaflowState::Awake(predecessor.clone())
                 )
                 && !self.launch_known(&profile.launch_request_id.0)
                 && !self.rests_for_closing(&predecessor.0)
@@ -1935,7 +1940,7 @@ pub(crate) trait WaitsForRestToReplace {
     fn refresh_held(
         &self,
         address: &Address,
-        metaflow: Metaflow,
+        metaflow: Permaflow,
         flow_id: FlowId,
         node: FlowNode,
         turn: std::sync::MutexGuard<'_, ()>,
@@ -1966,7 +1971,7 @@ pub(crate) trait WaitsForRestToReplace {
     fn replace_as_ordered(
         &self,
         order: OrderedReplacement,
-        metaflow: Metaflow,
+        metaflow: Permaflow,
         node: FlowNode,
         turn: std::sync::MutexGuard<'_, ()>,
     ) -> AtStop;
@@ -1986,7 +1991,7 @@ impl WaitsForRestToReplace for RunningNexus {
     fn refresh_held(
         &self,
         address: &Address,
-        metaflow: Metaflow,
+        metaflow: Permaflow,
         flow_id: FlowId,
         node: FlowNode,
         turn: std::sync::MutexGuard<'_, ()>,
@@ -2218,7 +2223,7 @@ impl WaitsForRestToReplace for RunningNexus {
     fn replace_as_ordered(
         &self,
         order: OrderedReplacement,
-        metaflow: Metaflow,
+        metaflow: Permaflow,
         node: FlowNode,
         turn: std::sync::MutexGuard<'_, ()>,
     ) -> AtStop {
@@ -2288,7 +2293,7 @@ impl WaitsForRestToReplace for RunningNexus {
                 self.store.metaflow(address),
             ) {
                 (Ok(Some(order)), Ok(Some(metaflow)))
-                    if metaflow.state == flow_ethos::State::Asleep =>
+                    if metaflow.permaflow_state == flow_ethos::PermaflowState::Asleep =>
                 {
                     Some(order)
                 }
@@ -2350,12 +2355,14 @@ impl WaitsForRestToReplace for RunningNexus {
             let mut orphans = Vec::new();
             for order in self.store.ordered_replacements().unwrap_or_default() {
                 match self.store.metaflow(&order.address) {
-                    Ok(Some(metaflow)) => match metaflow.state {
-                        flow_ethos::State::Awake(current) if current.0 == order.predecessor => {
+                    Ok(Some(metaflow)) => match metaflow.permaflow_state {
+                        flow_ethos::PermaflowState::Awake(current)
+                            if current.0 == order.predecessor =>
+                        {
                             resting.push(current);
                         }
-                        flow_ethos::State::Asleep => orphans.push(order.address),
-                        flow_ethos::State::Awake(_) => {
+                        flow_ethos::PermaflowState::Asleep => orphans.push(order.address),
+                        flow_ethos::PermaflowState::Awake(_) => {
                             let _ = self.store.forget_ordered_replacement(&order.address);
                         }
                     },
@@ -2418,8 +2425,8 @@ pub(crate) trait DrainsHeldSeats {
 impl DrainsHeldSeats for RunningNexus {
     fn drain_held(&self, address: Address, lease: &WakingLease<'_>) -> Outcome {
         let flow_id = match self.store.metaflow(&address) {
-            Ok(Some(Metaflow {
-                state: flow_ethos::State::Awake(flow_id),
+            Ok(Some(Permaflow {
+                permaflow_state: flow_ethos::PermaflowState::Awake(flow_id),
                 ..
             })) => flow_id,
             Ok(_) => return Outcome::Failed(Failed_Data::NotAwake),
@@ -2949,8 +2956,8 @@ impl ParksCohort for RunningNexus {
     }
 
     fn reconcile_typed(&self, address: &Address) {
-        let Ok(Some(Metaflow {
-            state: flow_ethos::State::Awake(flow_id),
+        let Ok(Some(Permaflow {
+            permaflow_state: flow_ethos::PermaflowState::Awake(flow_id),
             ..
         })) = self.store.metaflow(address)
         else {
@@ -2967,8 +2974,8 @@ impl ParksCohort for RunningNexus {
     fn recover_typed(&self, addresses: &[Address]) {
         for address in addresses {
             let flow_id = match self.store.metaflow(address) {
-                Ok(Some(Metaflow {
-                    state: flow_ethos::State::Awake(flow_id),
+                Ok(Some(Permaflow {
+                    permaflow_state: flow_ethos::PermaflowState::Awake(flow_id),
                     ..
                 })) => flow_id,
                 _ => continue,
@@ -3132,7 +3139,11 @@ impl WakesInParts for RunningNexus {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.rest_ended_awake(address);
             match self.store.metaflow(address) {
-                Ok(Some(metaflow)) if metaflow.state == flow_ethos::State::Asleep => metaflow,
+                Ok(Some(metaflow))
+                    if metaflow.permaflow_state == flow_ethos::PermaflowState::Asleep =>
+                {
+                    metaflow
+                }
                 Ok(_) => return Err(WakeRefusal::NotAsleep),
                 Err(_) => return Err(WakeRefusal::StoreUnreadable),
             }
@@ -3252,7 +3263,7 @@ impl WakesInParts for RunningNexus {
 
     fn start_fresh(
         &self,
-        metaflow: &Metaflow,
+        metaflow: &Permaflow,
         fresh: FreshContext,
         text: &str,
     ) -> Result<FreshStarted, FreshRefusal> {
@@ -3378,7 +3389,7 @@ impl WakesInParts for RunningNexus {
     fn refresh_successor_first(
         &self,
         flow_id: &str,
-        metaflow: &Metaflow,
+        metaflow: &Permaflow,
         cause: SuccessionCause,
     ) -> AtStop {
         let address = metaflow.address.clone();
@@ -3451,7 +3462,7 @@ impl WakesInParts for RunningNexus {
     fn successor_profile(
         &self,
         flow_id: &str,
-        metaflow: &Metaflow,
+        metaflow: &Permaflow,
         launch_request_id: String,
     ) -> Option<LaunchProfile> {
         let address = metaflow.address.clone();
@@ -3482,7 +3493,7 @@ impl WakesInParts for RunningNexus {
         Some(profile)
     }
 
-    fn successor_composes(&self, flow_id: &str, metaflow: &Metaflow) -> Result<(), KeptAtStop> {
+    fn successor_composes(&self, flow_id: &str, metaflow: &Permaflow) -> Result<(), KeptAtStop> {
         let Some(profile) = self.successor_profile(
             flow_id,
             metaflow,
@@ -3589,8 +3600,10 @@ impl WakesInParts for RunningNexus {
         // gate, and the lock keeps every wake and refresh out since.
         let metaflow = match self.store.metaflow(&address) {
             Ok(Some(metaflow))
-                if metaflow.state
-                    == flow_ethos::State::Awake(flow_ethos::FlowId(intent.predecessor.clone())) =>
+                if metaflow.permaflow_state
+                    == flow_ethos::PermaflowState::Awake(flow_ethos::FlowId(
+                        intent.predecessor.clone(),
+                    )) =>
             {
                 metaflow
             }

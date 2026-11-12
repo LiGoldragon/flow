@@ -10,7 +10,7 @@ use super::{
     AnnouncesLaunchChanges, FlowStore, LaunchChanges, ManagesMetaflowState, StoreError,
     StoredMetaflow,
 };
-use flow_ethos::{Metaflow, State};
+use flow_ethos::{Permaflow, PermaflowState as State};
 use sema_engine::{
     QueryPlan, SinkError, SubscriptionDeliveryMode, SubscriptionEvent, SubscriptionSink,
 };
@@ -44,7 +44,7 @@ pub trait WatchesMetaflows {
     /// asleep one still declared. An undeclared sleeping row is history,
     /// not an Address an ordinary caller can launch; its past is kept but
     /// not listed.
-    fn available_metaflows(&self) -> Result<Vec<Metaflow>, StoreError>;
+    fn available_metaflows(&self) -> Result<Vec<Permaflow>, StoreError>;
 }
 
 impl WatchesMetaflows for FlowStore {
@@ -71,10 +71,10 @@ impl WatchesMetaflows for FlowStore {
         Ok(())
     }
 
-    fn available_metaflows(&self) -> Result<Vec<Metaflow>, StoreError> {
+    fn available_metaflows(&self) -> Result<Vec<Permaflow>, StoreError> {
         let mut available = Vec::new();
         for metaflow in self.list_metaflows()? {
-            if matches!(metaflow.state, State::Awake(_))
+            if matches!(metaflow.permaflow_state, State::Awake(_))
                 || self.metaflow_declaration(&metaflow.address)?.is_some()
             {
                 available.push(metaflow);

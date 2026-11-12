@@ -17,14 +17,14 @@
 
 use super::metaflow::{AddressTaking, SleepsMetaflows, TakesLaunchAddress, WritesTakenAddress};
 use super::{
-    FlowStore, ManagesMetaflowState, MetaflowState, ReadsFlowMemory, StoreError, StoredMetaflow,
+    FlowStore, ManagesMetaflowState, PermaflowState, ReadsFlowMemory, StoreError, StoredMetaflow,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     AtomicCommit, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey,
     SchemaHash, TableDescriptor, TableName,
 };
-use signal_flow::{Address, LaunchProfile, Metaflow, StartRejection};
+use signal_flow::{Address, LaunchProfile, Permaflow, StartRejection};
 
 pub(super) const ADDRESS_HOLD_TABLE_NAME: TableName = TableName::new("flow_nexus_address_holds");
 pub(super) const ADDRESS_HOLD_FAMILY: &str = "flow-nexus-address-hold";
@@ -35,7 +35,7 @@ pub(super) const ADDRESS_HOLD_SCHEMA: &str = "flow-nexus-address-hold-v8";
 pub struct AddressHold {
     pub flow_id: String,
     pub address: Address,
-    pub found: Option<Metaflow>,
+    pub found: Option<Permaflow>,
 }
 
 impl EngineRecord for AddressHold {
@@ -173,7 +173,9 @@ impl HoldsLaunchAddress for FlowStore {
             return Ok(commit);
         };
         // A metaflow another binding or an End changed since is left as it is.
-        if current.metaflow.state != MetaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned())) {
+        if current.metaflow.permaflow_state
+            != PermaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned()))
+        {
             return Ok(commit);
         }
         let queue = current.metaflow.queue;
@@ -181,7 +183,7 @@ impl HoldsLaunchAddress for FlowStore {
             Some(found) => commit.mutate(
                 self.metaflows,
                 StoredMetaflow {
-                    metaflow: Metaflow { queue, ..found },
+                    metaflow: Permaflow { queue, ..found },
                 },
             ),
             None if queue.0.is_empty() => commit.retract(
@@ -191,9 +193,9 @@ impl HoldsLaunchAddress for FlowStore {
             None => commit.mutate(
                 self.metaflows,
                 StoredMetaflow {
-                    metaflow: Metaflow {
+                    metaflow: Permaflow {
                         address: hold.address,
-                        state: MetaflowState::Asleep,
+                        permaflow_state: PermaflowState::Asleep,
                         past: flow_ethos::Past(vec![]),
                         queue,
                     },
@@ -214,7 +216,7 @@ impl HoldsLaunchAddress for FlowStore {
             return Ok(commit);
         };
         let address = metaflow.address.clone();
-        metaflow.state = MetaflowState::Asleep;
+        metaflow.permaflow_state = PermaflowState::Asleep;
         metaflow.past.0.retain(|past| past.0 != flow_id);
         metaflow.past.0.push(flow_ethos::FlowId(flow_id.to_owned()));
         let commit = commit.mutate(self.metaflows, StoredMetaflow { metaflow });
@@ -295,9 +297,11 @@ impl LeavesStaleHold for FlowStore {
             .assert(
                 self.metaflows,
                 StoredMetaflow {
-                    metaflow: Metaflow {
+                    metaflow: Permaflow {
                         address: address.clone(),
-                        state: MetaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned())),
+                        permaflow_state: PermaflowState::Awake(flow_ethos::FlowId(
+                            flow_id.to_owned(),
+                        )),
                         past: flow_ethos::Past(vec![]),
                         queue: flow_ethos::Queue(vec![]),
                     },

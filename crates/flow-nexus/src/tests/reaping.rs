@@ -364,9 +364,11 @@ impl StagesReap for ReapWorld {
         let mut launch = fixture.staged_launch(id, Some(PREDECESSOR));
         // The Address receives as the predecessor before its successor's
         // launch takes it.
-        fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+        fixture.nexus.store.seed_metaflow(signal_flow::Permaflow {
             address: launch.profile.address.clone(),
-            state: flow_ethos::State::Awake(signal_flow::FlowId(PREDECESSOR.into())),
+            permaflow_state: flow_ethos::PermaflowState::Awake(signal_flow::FlowId(
+                PREDECESSOR.into(),
+            )),
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(vec![]),
         });
@@ -2360,9 +2362,9 @@ impl SeatsLaunches for HandoverWorld {
         // names X, as Stop and Launch left 751881's.
         fixture.register_predecessor(STOPPED);
         assert!(fixture.nexus.store.record_stopped(STOPPED).unwrap());
-        fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+        fixture.nexus.store.seed_metaflow(signal_flow::Permaflow {
             address: address.clone(),
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(vec![signal_flow::FlowId(STOPPED.into())]),
             queue: flow_ethos::Queue(vec![]),
         });
@@ -3054,9 +3056,9 @@ fn a_crash_at_each_fresh_start_point_is_recovered_once() {
             .fixture
             .nexus
             .store
-            .seed_metaflow(signal_flow::Metaflow {
+            .seed_metaflow(signal_flow::Permaflow {
                 address: world.address.clone(),
-                state: flow_ethos::State::Asleep,
+                permaflow_state: flow_ethos::PermaflowState::Asleep,
                 past: flow_ethos::Past(vec![]),
                 queue: flow_ethos::Queue(vec![]),
             });

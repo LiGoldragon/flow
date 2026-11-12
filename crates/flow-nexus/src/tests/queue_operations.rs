@@ -13,10 +13,10 @@ use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::reminder::RecordsReminders;
 use crate::store::turn_end::RecordsTurnEnds;
 use crate::store::{FlowStore, ReadsFlowMemory};
-use flow_ethos::State;
+use flow_ethos::PermaflowState;
 use signal_flow::{
     Address, Aspect, DeliveredMessage, DeliveredRequest, DeliveryState, HarnessKind, Message,
-    Metaflow, Model, NativeReceipt, Origin, PrivateSendResponse, Query, Request, RequestRejection,
+    Model, NativeReceipt, Origin, Permaflow, PrivateSendResponse, Query, Request, RequestRejection,
     Response, SendAcceptance, SendRequest, SentBy, TurnEnd, VisibleNativeInput, VisibleSender,
 };
 
@@ -29,9 +29,9 @@ fn at(topic: &str) -> Address {
 }
 
 fn asleep(fixture: &NexusFixture, address: &Address) {
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: address.clone(),
-        state: State::Asleep,
+        permaflow_state: State::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });

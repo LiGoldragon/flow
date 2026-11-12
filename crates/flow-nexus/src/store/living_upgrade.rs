@@ -91,7 +91,7 @@ pub(crate) struct QueueEntryBeforeLiving {
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MetaflowBeforeLiving {
     pub(crate) address: Address,
-    pub(crate) state: flow_ethos::State,
+    pub(crate) state: flow_ethos::PermaflowState,
     pub(crate) past: flow_ethos::Past,
     pub(crate) queue: QueueBeforeLiving,
 }
@@ -164,11 +164,11 @@ impl BecomesLiving for QueueEntryBeforeLiving {
 }
 
 impl BecomesLiving for MetaflowBeforeLiving {
-    type Current = flow_ethos::Metaflow;
-    fn living(self) -> flow_ethos::Metaflow {
-        flow_ethos::Metaflow {
+    type Current = flow_ethos::Permaflow;
+    fn living(self) -> flow_ethos::Permaflow {
+        flow_ethos::Permaflow {
             address: self.address,
-            state: self.state,
+            permaflow_state: self.state,
             past: self.past,
             queue: flow_ethos::Queue(
                 self.queue
@@ -701,7 +701,7 @@ mod tests {
         let metaflow = StoredMetaflowBeforeLiving {
             metaflow: MetaflowBeforeLiving {
                 address: address("upgraded"),
-                state: flow_ethos::State::Asleep,
+                state: flow_ethos::PermaflowState::Asleep,
                 past: flow_ethos::Past(vec![]),
                 queue: QueueBeforeLiving(queue),
             },

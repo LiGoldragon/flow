@@ -50,7 +50,7 @@ pub(crate) mod undecodable_frame;
 use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
-use flow_ethos::State as MetaflowState;
+use flow_ethos::PermaflowState;
 pub(crate) use logical_delivery::RecordsLogicalDeliveries;
 use logical_delivery::{DeclaresLogicalDeliveryTables, LogicalDeliveryTables};
 use metaflow::{TakesLaunchAddress, WritesTakenAddress};
@@ -71,7 +71,7 @@ use std::{
 
 use meta_signal_flow::{
     ConfigurationChange, ConfigurationSnapshot, ConfigureCounters, ConfigureHarnessFlags,
-    ConfigureLeaveOut, ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureOutcome,
+    ConfigureLeaveOut, ConfigureModel, ConfigureNexus, ConfigureOutcome, ConfigurePermaflow,
     ConfigureSendServer, ConfigureThreshold, CountersRefusal, HeartbeatConfig,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -86,7 +86,7 @@ use signal_flow::{
     Address, Aspect, CallerIdentity, CallerResolutionRejection, ComposedLaunch, EndpointSelection,
     FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
     LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, Launched, LeaveOut,
-    Lock, Metaflow, Model, NativeLaunchBinding, NativeLaunchIntent, Origin, Process,
+    Lock, Model, NativeLaunchBinding, NativeLaunchIntent, Origin, Permaflow, Process,
     PromptDeliveryIntent, PromptDeliveryResult, Query, RecipientResolutionRejection,
     RegistrationAcknowledgement, ReplaceRejection, Replaced, Response, RouteReadiness,
     StartRejection,
@@ -683,12 +683,12 @@ impl ReadsNativeOwnerEnvironment for FlowStore {
     }
 }
 
-/// The durable address-indexed Metaflow defined by `flow_ethos::Metaflow`.
+/// The durable address-indexed Permaflow defined by `flow_ethos::Permaflow`.
 /// Its state and queue are separate from native Flow launch records: an
 /// address remains asleep after the process it named is gone.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredMetaflow {
-    pub(crate) metaflow: Metaflow,
+    pub(crate) metaflow: Permaflow,
 }
 
 impl EngineRecord for StoredMetaflow {
@@ -1918,7 +1918,7 @@ pub struct FlowStore {
     pub reminder_changes: LaunchChanges,
     /// Announced at each commit that changes a metaflow's row or its
     /// declaration, once a metaflow subscriber asked Memory for it, and at
-    /// the stop. Metaflow subscribers wait on it.
+    /// the stop. Permaflow subscribers wait on it.
     pub metaflow_changes: LaunchChanges,
     /// Whether Memory announces `metaflow_changes`: subscribed once, at the
     /// first metaflow subscriber.
@@ -2046,7 +2046,7 @@ pub struct ConfiguredFamilies {
     pub thresholds: Vec<ConfigureThreshold>,
     pub default_leave_outs: Vec<ConfigureLeaveOut>,
     pub send_servers: Vec<ConfigureSendServer>,
-    pub metaflows: Vec<ConfigureMetaflow>,
+    pub metaflows: Vec<ConfigurePermaflow>,
     pub investigation: Option<Address>,
     pub default_minutes: i64,
     pub configured_harness_flags: Vec<ConfigureHarnessFlags>,
@@ -3331,7 +3331,7 @@ pub(crate) trait ManagesMetaflowState: Sized {
     ) -> Result<Option<StoredMetaflowLock>, StoreError>;
     fn bound_process(&self, address: &Address) -> Result<Option<Process>, StoreError>;
     fn current_metaflow(&self, address: &Address) -> Result<Response, StoreError>;
-    fn list_metaflows(&self) -> Result<Vec<Metaflow>, StoreError>;
+    fn list_metaflows(&self) -> Result<Vec<Permaflow>, StoreError>;
     fn identify_process(&self, process: Process) -> Result<Response, StoreError>;
     fn release_metaflow_lock(
         &self,
@@ -3498,15 +3498,15 @@ impl ManagesMetaflowState for FlowStore {
     fn current_metaflow(&self, address: &Address) -> Result<Response, StoreError> {
         let current = match self.stored_metaflow(address)? {
             None => signal_flow::Current_Data::Unknown,
-            Some(stored) => match stored.metaflow.state {
-                MetaflowState::Awake(flow_id) => signal_flow::Current_Data::Awake(flow_id),
-                MetaflowState::Asleep => signal_flow::Current_Data::Asleep,
+            Some(stored) => match stored.metaflow.permaflow_state {
+                PermaflowState::Awake(flow_id) => signal_flow::Current_Data::Awake(flow_id),
+                PermaflowState::Asleep => signal_flow::Current_Data::Asleep,
             },
         };
         Ok(Response::Current(current))
     }
 
-    fn list_metaflows(&self) -> Result<Vec<Metaflow>, StoreError> {
+    fn list_metaflows(&self) -> Result<Vec<Permaflow>, StoreError> {
         let rows = self.engine.match_records(QueryPlan::all(self.metaflows))?;
         let marker = rows.database_marker();
         let mut metaflows = rows
@@ -3926,8 +3926,8 @@ impl RegistersExistingFlow for FlowStore {
             .any(|stored| {
                 stored.metaflow.address != address
                     && matches!(
-                        &stored.metaflow.state,
-                        MetaflowState::Awake(current) if current == &flow_node.flow_id
+                        &stored.metaflow.permaflow_state,
+                        PermaflowState::Awake(current) if current == &flow_node.flow_id
                     )
             });
         if already_bound_elsewhere {
@@ -3936,16 +3936,16 @@ impl RegistersExistingFlow for FlowStore {
         let mut metaflow = existing_metaflow
             .as_ref()
             .map(|stored| stored.metaflow.clone())
-            .unwrap_or(Metaflow {
+            .unwrap_or(Permaflow {
                 address: address.clone(),
-                state: MetaflowState::Asleep,
+                permaflow_state: PermaflowState::Asleep,
                 past: flow_ethos::generated::library::Past(Vec::new()),
                 queue: flow_ethos::generated::library::Queue(Vec::new()),
             });
-        let previous_flow = match &metaflow.state {
-            MetaflowState::Awake(current) if current == &flow_node.flow_id => None,
-            MetaflowState::Awake(_) => {
-                let MetaflowState::Awake(current) = &metaflow.state else {
+        let previous_flow = match &metaflow.permaflow_state {
+            PermaflowState::Awake(current) if current == &flow_node.flow_id => None,
+            PermaflowState::Awake(_) => {
+                let PermaflowState::Awake(current) = &metaflow.permaflow_state else {
                     unreachable!();
                 };
                 let Some(previous) = self.flow(&current.0)? else {
@@ -3969,13 +3969,13 @@ impl RegistersExistingFlow for FlowStore {
                     NativeOwnerState::Dead => Some(current.clone()),
                 }
             }
-            MetaflowState::Asleep => None,
+            PermaflowState::Asleep => None,
         };
         if let Some(previous) = &previous_flow {
             metaflow.past.0.push(previous.clone());
         }
         metaflow.past.0.retain(|past| past != &flow_node.flow_id);
-        metaflow.state = MetaflowState::Awake(flow_node.flow_id.clone());
+        metaflow.permaflow_state = PermaflowState::Awake(flow_node.flow_id.clone());
 
         let existing_flow = self.flow(&flow_node.flow_id.0)?;
         if let Some(existing) = &existing_flow {
@@ -6762,7 +6762,7 @@ mod tests {
     fn heartbeat_admission_atomically_advances_and_survives_reopen() {
         use super::{StoredHeartbeatStanding, TracksHeartbeat};
         use crate::heartbeat::DeliveryPurpose;
-        use signal_flow::{Address, Aspect, Message, Metaflow, Model, Request, SentBy};
+        use signal_flow::{Address, Aspect, Message, Model, Permaflow, Request, SentBy};
         let fixture = StoreFixture::new();
         let store = fixture.store();
         let recipient = Address {
@@ -6770,9 +6770,9 @@ mod tests {
             topic: flow_ethos::Topic("heartbeatTest".into()),
             model: Model::Sol,
         };
-        store.seed_metaflow(Metaflow {
+        store.seed_metaflow(Permaflow {
             address: recipient.clone(),
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(Vec::new()),
             queue: flow_ethos::Queue(Vec::new()),
         });
@@ -6864,9 +6864,9 @@ mod tests {
             topic: flow_ethos::Topic("upgradeNotice".into()),
             model: Model::Sol,
         };
-        store.seed_metaflow(flow_ethos::Metaflow {
+        store.seed_metaflow(flow_ethos::Permaflow {
             address: recipient.clone(),
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(Vec::new()),
             queue: flow_ethos::Queue(Vec::new()),
         });
@@ -7059,9 +7059,9 @@ mod tests {
             model: Model::Sol,
         };
         for address in [&recipient, &sender] {
-            store.seed_metaflow(flow_ethos::Metaflow {
+            store.seed_metaflow(flow_ethos::Permaflow {
                 address: address.clone(),
-                state: flow_ethos::State::Asleep,
+                permaflow_state: flow_ethos::PermaflowState::Asleep,
                 past: flow_ethos::Past(Vec::new()),
                 queue: flow_ethos::Queue(Vec::new()),
             });
@@ -7159,9 +7159,9 @@ mod tests {
             topic: flow_ethos::Topic("upgradeNoticeBound".into()),
             model: Model::Sol,
         };
-        store.seed_metaflow(flow_ethos::Metaflow {
+        store.seed_metaflow(flow_ethos::Permaflow {
             address: task_recipient.clone(),
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(Vec::new()),
             queue: flow_ethos::Queue(Vec::new()),
         });
@@ -7207,9 +7207,9 @@ mod tests {
             TaskAnnouncementStatus::Pending(Some(_))
         ));
         drop(rows);
-        store.seed_metaflow(flow_ethos::Metaflow {
+        store.seed_metaflow(flow_ethos::Permaflow {
             address: notice_recipient.clone(),
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(Vec::new()),
             queue: flow_ethos::Queue(Vec::new()),
         });
@@ -7289,9 +7289,9 @@ mod tests {
             model: Model::Sol,
         };
         for address in [&sender, &recipient] {
-            store.seed_metaflow(flow_ethos::Metaflow {
+            store.seed_metaflow(flow_ethos::Permaflow {
                 address: address.clone(),
-                state: flow_ethos::State::Asleep,
+                permaflow_state: flow_ethos::PermaflowState::Asleep,
                 past: flow_ethos::Past(Vec::new()),
                 queue: flow_ethos::Queue(Vec::new()),
             });
@@ -7409,9 +7409,9 @@ mod tests {
             topic: flow_ethos::Topic("upgradeAssignment".into()),
             model: Model::Sol,
         };
-        store.seed_metaflow(flow_ethos::Metaflow {
+        store.seed_metaflow(flow_ethos::Permaflow {
             address: recipient.clone(),
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(Vec::new()),
             queue: flow_ethos::Queue(Vec::new()),
         });
@@ -7487,9 +7487,9 @@ mod tests {
             TaskAnnouncementStatus::Pending(Some(_))
         ));
         drop(refused);
-        store.seed_metaflow(flow_ethos::Metaflow {
+        store.seed_metaflow(flow_ethos::Permaflow {
             address: sender.clone(),
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(Vec::new()),
             queue: flow_ethos::Queue(Vec::new()),
         });
@@ -7554,7 +7554,7 @@ mod tests {
     #[test]
     fn simplified_reply_requires_consumed_input_and_queues_once_to_its_sender() {
         use signal_flow::{
-            Address, Aspect, DeliveryState, Message, Metaflow, Model, NativeReceipt, Request,
+            Address, Aspect, DeliveryState, Message, Model, NativeReceipt, Permaflow, Request,
             SentBy,
         };
         let fixture = StoreFixture::new();
@@ -7570,9 +7570,9 @@ mod tests {
             model: Model::Opus,
         };
         for address in [&source, &recipient] {
-            store.seed_metaflow(Metaflow {
+            store.seed_metaflow(Permaflow {
                 address: address.clone(),
-                state: flow_ethos::State::Asleep,
+                permaflow_state: flow_ethos::PermaflowState::Asleep,
                 past: flow_ethos::Past(Vec::new()),
                 queue: flow_ethos::Queue(Vec::new()),
             });
@@ -7691,9 +7691,9 @@ mod tests {
             topic: flow_ethos::Topic("review".into()),
             model: Model::Sol,
         };
-        store.seed_metaflow(Metaflow {
+        store.seed_metaflow(Permaflow {
             address: second_sender.clone(),
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(Vec::new()),
             queue: flow_ethos::Queue(Vec::new()),
         });
@@ -7767,7 +7767,7 @@ mod tests {
     #[test]
     fn core_presentation_is_queued_as_is_once_and_secondary_gets_only_a_notice() {
         use signal_flow::{
-            Address, Aspect, DeliveryState, Message, Metaflow, Model, NativeReceipt, Request,
+            Address, Aspect, DeliveryState, Message, Model, NativeReceipt, Permaflow, Request,
             SentBy,
         };
         let fixture = StoreFixture::new();
@@ -7788,9 +7788,9 @@ mod tests {
             model: Model::Sonnet,
         };
         for address in [&source, &sender, &book] {
-            store.seed_metaflow(Metaflow {
+            store.seed_metaflow(Permaflow {
                 address: address.clone(),
-                state: flow_ethos::State::Asleep,
+                permaflow_state: flow_ethos::PermaflowState::Asleep,
                 past: flow_ethos::Past(Vec::new()),
                 queue: flow_ethos::Queue(Vec::new()),
             });
@@ -8148,8 +8148,8 @@ mod tests {
             flow_ethos::Past(vec![flow_ethos::FlowId("incumbent".into())])
         );
         assert_eq!(
-            adopted.metaflow.state,
-            flow_ethos::State::Awake(flow_ethos::FlowId("challenger".into()))
+            adopted.metaflow.permaflow_state,
+            flow_ethos::PermaflowState::Awake(flow_ethos::FlowId("challenger".into()))
         );
     }
 
@@ -10264,9 +10264,9 @@ mod tests {
             topic: flow_ethos::Topic("independentIds".into()),
             model: signal_flow::Model::Sol,
         };
-        store.seed_metaflow(flow_ethos::Metaflow {
+        store.seed_metaflow(flow_ethos::Permaflow {
             address: recipient.clone(),
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(Vec::new()),
             queue: flow_ethos::Queue(Vec::new()),
         });
@@ -10484,9 +10484,9 @@ mod tests {
             model: signal_flow::Model::Sol,
         };
         for address in [&requester, &answerer] {
-            store.seed_metaflow(flow_ethos::Metaflow {
+            store.seed_metaflow(flow_ethos::Permaflow {
                 address: address.clone(),
-                state: flow_ethos::State::Asleep,
+                permaflow_state: flow_ethos::PermaflowState::Asleep,
                 past: flow_ethos::Past(Vec::new()),
                 queue: flow_ethos::Queue(Vec::new()),
             });
@@ -10794,9 +10794,9 @@ mod tests {
             topic: flow_ethos::Topic("replacementRecipient".into()),
             model: signal_flow::Model::Sol,
         };
-        previous_store.seed_metaflow(flow_ethos::Metaflow {
+        previous_store.seed_metaflow(flow_ethos::Permaflow {
             address: recipient.clone(),
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(Vec::new()),
             queue: flow_ethos::Queue(Vec::new()),
         });
@@ -10874,9 +10874,9 @@ mod tests {
             topic: flow_ethos::Topic("terminalRecipient".into()),
             model: signal_flow::Model::Sol,
         };
-        store.seed_metaflow(flow_ethos::Metaflow {
+        store.seed_metaflow(flow_ethos::Permaflow {
             address: recipient.clone(),
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(Vec::new()),
             queue: flow_ethos::Queue(Vec::new()),
         });
@@ -11013,9 +11013,9 @@ mod tests {
             topic: flow_ethos::Topic("flowOwnedRequests".into()),
             model: signal_flow::Model::Sol,
         };
-        store.seed_metaflow(flow_ethos::Metaflow {
+        store.seed_metaflow(flow_ethos::Permaflow {
             address: address.clone(),
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(Vec::new()),
             queue: flow_ethos::Queue(Vec::new()),
         });
@@ -11154,7 +11154,9 @@ mod tests {
     fn message_delivery_observation_is_one_global_private_stream_across_ack_archive_and_restart() {
         use super::logical_delivery::{DeliverCallSpec, VerifiedDeliveryLock};
         use crate::store::metaflow::MutatesMetaflows;
-        use signal_flow::{DeliveryState, Lock_Data, Message, Metaflow, Request, Response, SentBy};
+        use signal_flow::{
+            DeliveryState, Lock_Data, Message, Permaflow, Request, Response, SentBy,
+        };
 
         let fixture = StoreFixture::new();
         fixture.configured();
@@ -11169,9 +11171,9 @@ mod tests {
         let ordinary_sender = at("ordinarySender");
         let recipient = at("messageRecipient");
         for sender in [&first_sender, &second_sender, &ordinary_sender] {
-            store.seed_metaflow(Metaflow {
+            store.seed_metaflow(Permaflow {
                 address: sender.clone(),
-                state: flow_ethos::State::Awake(flow_ethos::FlowId(format!(
+                permaflow_state: flow_ethos::PermaflowState::Awake(flow_ethos::FlowId(format!(
                     "{}-flow",
                     sender.topic.0
                 ))),
@@ -11179,9 +11181,9 @@ mod tests {
                 queue: flow_ethos::Queue(Vec::new()),
             });
         }
-        store.seed_metaflow(Metaflow {
+        store.seed_metaflow(Permaflow {
             address: recipient.clone(),
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(Vec::new()),
             queue: flow_ethos::Queue(Vec::new()),
         });

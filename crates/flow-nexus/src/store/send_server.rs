@@ -13,7 +13,7 @@ use super::{FlowStore, NamesLiveFlow, ReadsFlowRows, StoreError};
 use meta_signal_flow::ConfigureSendServer;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{EngineRecord, FamilyName, RecordKey, SchemaHash, TableDescriptor, TableName};
-use signal_flow::{HarnessKind, Metaflow};
+use signal_flow::{HarnessKind, Permaflow};
 
 pub(super) const META_SEND_SERVER_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_send_server_configuration");
@@ -53,11 +53,11 @@ pub(crate) trait NamesThreadMetaflow {
     /// recorded at its Start as `thread_id`; None for an empty or unknown
     /// thread, a thread whose flow is no longer live, or one whose metaflow
     /// is not Awake as that flow.
-    fn thread_metaflow(&self, thread_id: &str) -> Result<Option<Metaflow>, StoreError>;
+    fn thread_metaflow(&self, thread_id: &str) -> Result<Option<Permaflow>, StoreError>;
 }
 
 impl NamesThreadMetaflow for FlowStore {
-    fn thread_metaflow(&self, thread_id: &str) -> Result<Option<Metaflow>, StoreError> {
+    fn thread_metaflow(&self, thread_id: &str) -> Result<Option<Permaflow>, StoreError> {
         if thread_id.is_empty() {
             return Ok(None);
         }

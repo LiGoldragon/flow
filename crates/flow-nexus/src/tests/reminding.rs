@@ -11,7 +11,7 @@ use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::reminder::{RecordsReminders, TASK_REMINDERS};
 use flow_ethos::{Address, Aspect, Model, Request};
-use signal_flow::{Message, Metaflow, PrivateSendResponse, QueueEntry, SentBy};
+use signal_flow::{Message, Permaflow, PrivateSendResponse, QueueEntry, SentBy};
 
 fn at(aspect: Aspect, topic: &str, model: Model) -> Address {
     Address {
@@ -41,9 +41,9 @@ fn a_tasks_last_reminder_sends_its_failure_to_the_tasks_own_sender() {
     let sender = at(Aspect::Psyche, "reminded", Model::Haiku);
     let recipient = at(Aspect::Mind, "remindedWork", Model::Sol);
     for address in [&sender, &recipient] {
-        fixture.nexus.store.seed_metaflow(Metaflow {
+        fixture.nexus.store.seed_metaflow(Permaflow {
             address: address.clone(),
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(vec![]),
         });
@@ -165,9 +165,9 @@ fn archiving_an_ended_task_retracts_its_reminder_atomically() {
     let fixture = NexusFixture::new();
     let sender = at(Aspect::Psyche, "archiving", Model::Haiku);
     let recipient = at(Aspect::Mind, "archivedTask", Model::Sol);
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: recipient.clone(),
-        state: flow_ethos::State::Asleep,
+        permaflow_state: flow_ethos::PermaflowState::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -230,9 +230,9 @@ fn archiving_an_ended_task_retracts_its_reminder_atomically() {
 fn a_task_a_seat_sent_itself_fails_to_it_once_with_no_loop() {
     let fixture = NexusFixture::new();
     let seat = at(Aspect::Mind, "selfTask", Model::Sol);
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: seat.clone(),
-        state: flow_ethos::State::Asleep,
+        permaflow_state: flow_ethos::PermaflowState::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });

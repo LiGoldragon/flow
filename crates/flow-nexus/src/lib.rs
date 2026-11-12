@@ -80,8 +80,8 @@ pub mod observe_configuration;
 pub mod observe_metaflows;
 pub mod observe_sends;
 pub mod peer;
-pub mod permaflow_inventory;
 pub mod performing;
+pub mod permaflow_inventory;
 pub mod place;
 pub mod placed_socket;
 pub mod reporting;
@@ -632,7 +632,7 @@ impl Dispatches for RunningNexus {
         else {
             return Err(signal_flow::HandoverRefusal::UnknownFlow);
         };
-        let flow_ethos::State::Awake(flow_id) = metaflow.state else {
+        let flow_ethos::PermaflowState::Awake(flow_id) = metaflow.permaflow_state else {
             return Err(signal_flow::HandoverRefusal::UnknownFlow);
         };
         Ok(crate::store::handover::HandoverWriter {
@@ -2624,9 +2624,9 @@ mod tests {
             topic: flow_ethos::Topic("retiredTest".into()),
             model: signal_flow::Model::Haiku,
         };
-        let history = signal_flow::Metaflow {
+        let history = signal_flow::Permaflow {
             address: address.clone(),
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(vec![flow_ethos::FlowId("abcdef".into())]),
             queue: flow_ethos::Queue(vec![]),
         };
@@ -2639,8 +2639,8 @@ mod tests {
             fixture.nexus.store.list_metaflows().unwrap(),
             vec![history.clone()]
         );
-        fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
-            state: flow_ethos::State::Awake(flow_ethos::FlowId("123abc".into())),
+        fixture.nexus.store.seed_metaflow(signal_flow::Permaflow {
+            permaflow_state: flow_ethos::PermaflowState::Awake(flow_ethos::FlowId("123abc".into())),
             ..history
         });
         let Response::Listed(listed) = fixture.nexus.dispatch(Query::Metaflows) else {
@@ -2667,9 +2667,9 @@ mod tests {
         // A Send no process stands behind sends as Unbound and is served.
         {
             use crate::store::metaflow::SeedsMetaflow;
-            fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+            fixture.nexus.store.seed_metaflow(signal_flow::Permaflow {
                 address: send.address.clone(),
-                state: flow_ethos::State::Asleep,
+                permaflow_state: flow_ethos::PermaflowState::Asleep,
                 past: flow_ethos::Past(vec![]),
                 queue: flow_ethos::Queue(vec![]),
             });
@@ -4691,9 +4691,11 @@ mod tests {
             .store
             .register_flow_in_role(previous, previous_role)
             .expect("legacy owner row persists without native proof");
-        let original = signal_flow::Metaflow {
+        let original = signal_flow::Permaflow {
             address: address.clone(),
-            state: flow_ethos::State::Awake(flow_ethos::FlowId("historical-owner".into())),
+            permaflow_state: flow_ethos::PermaflowState::Awake(flow_ethos::FlowId(
+                "historical-owner".into(),
+            )),
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(vec![signal_flow::QueueEntry {
                 logical_delivery_id: flow_ethos::LogicalDeliveryId("retained-logical-id".into()),
@@ -4773,9 +4775,9 @@ mod tests {
             delivery: flow_ethos::Delivery::Queue,
             message: signal_flow::Message::Soft(signal_flow::Request::Order("leave queued".into())),
         }];
-        fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+        fixture.nexus.store.seed_metaflow(signal_flow::Permaflow {
             address,
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(original_queue.clone()),
         });
@@ -5372,9 +5374,9 @@ mod tests {
             topic: flow_ethos::Topic("message".into()),
             model: Model::Sol,
         };
-        fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+        fixture.nexus.store.seed_metaflow(signal_flow::Permaflow {
             address: recipient.clone(),
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(vec![]),
         });
@@ -5462,9 +5464,9 @@ mod tests {
             topic: flow_ethos::Topic("message".into()),
             model: Model::Sol,
         };
-        fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+        fixture.nexus.store.seed_metaflow(signal_flow::Permaflow {
             address: recipient.clone(),
-            state: flow_ethos::State::Asleep,
+            permaflow_state: flow_ethos::PermaflowState::Asleep,
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(vec![]),
         });
@@ -6088,7 +6090,7 @@ mod tests {
         let own_root = fixture.directory.path().join("first-workspace");
         fs::create_dir(&own_root).unwrap();
         let declaration =
-            |profile: &LaunchProfile, root_option| meta_signal_flow::ConfigureMetaflow {
+            |profile: &LaunchProfile, root_option| meta_signal_flow::ConfigurePermaflow {
                 address: profile.address.clone(),
                 root_option,
                 system_modules: profile.system_modules.clone(),
@@ -6139,7 +6141,7 @@ mod tests {
             .nexus
             .store
             .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
-                meta_signal_flow::ConfigureMetaflow {
+                meta_signal_flow::ConfigurePermaflow {
                     address: staged.profile.address.clone(),
                     root_option: Some(meta_signal_flow::Root(
                         invalid.to_string_lossy().into_owned(),
@@ -6518,8 +6520,8 @@ mod tests {
                 .store
                 .metaflow(&address)
                 .unwrap()
-                .is_none_or(|metaflow| metaflow.state
-                    != flow_ethos::State::Awake(flow_ethos::FlowId("908786".into()))),
+                .is_none_or(|metaflow| metaflow.permaflow_state
+                    != flow_ethos::PermaflowState::Awake(flow_ethos::FlowId("908786".into()))),
             "the ended flow no longer names the Address"
         );
     }
@@ -6572,7 +6574,7 @@ mod tests {
             .expect("the acknowledged binding took the Address");
         assert_eq!(
             held.state,
-            flow_ethos::State::Awake(flow_ethos::FlowId("908786".into()))
+            flow_ethos::PermaflowState::Awake(flow_ethos::FlowId("908786".into()))
         );
         assert!(
             fixture
@@ -6603,8 +6605,8 @@ mod tests {
             .unwrap()
             .expect("the launch recorded its metaflow");
         assert_eq!(
-            metaflow.state,
-            flow_ethos::State::Awake(started.flow_id.clone())
+            metaflow.permaflow_state,
+            flow_ethos::PermaflowState::Awake(started.flow_id.clone())
         );
         assert!(metaflow.past.0.is_empty());
         assert_eq!(
@@ -7038,7 +7040,7 @@ mod tests {
         use crate::sending::SendsRequests;
         use crate::store::ReadsFlowMemory;
         use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
-        use signal_flow::{Address, Message, Metaflow, Model, Request, SendRequest, SentBy};
+        use signal_flow::{Address, Message, Model, Permaflow, Request, SendRequest, SentBy};
         let fixture = NexusFixture::new();
         bind_existing_caller(&fixture, "a001", "pane-1");
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
@@ -7054,17 +7056,17 @@ mod tests {
         for (held, state) in [
             (
                 sender.clone(),
-                flow_ethos::State::Awake(flow_ethos::FlowId("a001".into())),
+                flow_ethos::PermaflowState::Awake(flow_ethos::FlowId("a001".into())),
             ),
-            (sibling.clone(), flow_ethos::State::Asleep),
-            (field.clone(), flow_ethos::State::Asleep),
-            (elsewhere.clone(), flow_ethos::State::Asleep),
+            (sibling.clone(), flow_ethos::PermaflowState::Asleep),
+            (field.clone(), flow_ethos::PermaflowState::Asleep),
+            (elsewhere.clone(), flow_ethos::PermaflowState::Asleep),
             (
                 address(Aspect::Mind, "core", Model::Astra),
-                flow_ethos::State::Asleep,
+                flow_ethos::PermaflowState::Asleep,
             ),
         ] {
-            fixture.nexus.store.seed_metaflow(Metaflow {
+            fixture.nexus.store.seed_metaflow(Permaflow {
                 address: held,
                 state,
                 past: flow_ethos::Past(vec![]),
@@ -7165,7 +7167,7 @@ mod tests {
     fn a_result_resolves_one_owned_request_id_and_refuses_missing_or_foreign_ids() {
         use crate::store::RecordsLogicalDeliveries;
         use crate::store::metaflow::SeedsMetaflow;
-        use flow_ethos::{ResultPayload, State};
+        use flow_ethos::{PermaflowState as State, ResultPayload};
         use signal_flow::{
             Address, Message, Model, PrivateSendResponse, Refusal, SendableMessage,
             SendableRequest, SentBy,
@@ -7181,9 +7183,9 @@ mod tests {
         let recipient = at("resultRecipient");
         let stranger = at("resultStranger");
         for address in [&sender, &recipient, &stranger] {
-            fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+            fixture.nexus.store.seed_metaflow(signal_flow::Permaflow {
                 address: address.clone(),
-                state: State::Asleep,
+                permaflow_state: State::Asleep,
                 past: flow_ethos::Past(vec![]),
                 queue: flow_ethos::Queue(vec![]),
             });
@@ -7241,7 +7243,7 @@ mod tests {
     fn archive_waits_for_its_answer_then_each_sender_archives_its_own_request() {
         use crate::store::logical_delivery::RecordsLogicalDeliveries;
         use crate::store::metaflow::SeedsMetaflow;
-        use flow_ethos::{ResultPayload, State};
+        use flow_ethos::{PermaflowState as State, ResultPayload};
         use signal_flow::{
             Address, ArchiveRejection, Message, Model, PrivateSendResponse, SendableMessage,
             SendableRequest, SentBy,
@@ -7256,9 +7258,9 @@ mod tests {
         let sender = at("archiveOrderSender");
         let recipient = at("archiveOrderRecipient");
         for address in [&sender, &recipient] {
-            fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+            fixture.nexus.store.seed_metaflow(signal_flow::Permaflow {
                 address: address.clone(),
-                state: State::Asleep,
+                permaflow_state: State::Asleep,
                 past: flow_ethos::Past(vec![]),
                 queue: flow_ethos::Queue(vec![]),
             });
@@ -7365,7 +7367,7 @@ mod tests {
     fn a_done_closes_one_owned_task_id_once() {
         use crate::store::RecordsLogicalDeliveries;
         use crate::store::metaflow::SeedsMetaflow;
-        use flow_ethos::{AnswerableTask, DonePayload, State};
+        use flow_ethos::{AnswerableTask, DonePayload, PermaflowState as State};
         use signal_flow::{
             Address, Message, Model, PrivateSendResponse, Refusal, SendableMessage,
             SendableRequest, SentBy,
@@ -7380,9 +7382,9 @@ mod tests {
         let sender = at("taskSender");
         let recipient = at("taskRecipient");
         for address in [&sender, &recipient] {
-            fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+            fixture.nexus.store.seed_metaflow(signal_flow::Permaflow {
                 address: address.clone(),
-                state: State::Asleep,
+                permaflow_state: State::Asleep,
                 past: flow_ethos::Past(vec![]),
                 queue: flow_ethos::Queue(vec![]),
             });
@@ -7467,7 +7469,7 @@ mod tests {
     #[test]
     fn a_launch_is_composed_from_the_declaration_or_refused_undeclared() {
         use crate::sending::LaunchesDeclared;
-        use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, ConfigureModel};
+        use meta_signal_flow::{ConfigurationChange, ConfigureModel, ConfigurePermaflow};
         use signal_flow::{Address, LaunchRequest, Model};
         let fixture = NexusFixture::new();
         let declared = Address {
@@ -7479,7 +7481,7 @@ mod tests {
             fixture
                 .nexus
                 .dispatch_meta(meta_signal_flow::Query::Configure(
-                    ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+                    ConfigurationChange::Metaflows(vec![ConfigurePermaflow {
                         root_option: None,
                         address: declared.clone(),
                         system_modules: signal_flow::SystemModules(vec![

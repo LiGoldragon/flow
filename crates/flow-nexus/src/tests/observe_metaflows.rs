@@ -6,8 +6,8 @@ use super::NexusFixture;
 use crate::Dispatches;
 use crate::observe_metaflows::ObservesMetaflows;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
-use flow_ethos::State;
-use signal_flow::{Address, Aspect, Metaflow, Model, ObserveSelection, Query, Response};
+use flow_ethos::PermaflowState;
+use signal_flow::{Address, Aspect, Model, ObserveSelection, Permaflow, Query, Response};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
@@ -21,10 +21,10 @@ fn undeclared(topic: &str) -> Address {
     }
 }
 
-fn awake(address: &Address, flow_id: &str) -> Metaflow {
-    Metaflow {
+fn awake(address: &Address, flow_id: &str) -> Permaflow {
+    Permaflow {
         address: address.clone(),
-        state: State::Awake(flow_ethos::FlowId(flow_id.into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId(flow_id.into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     }

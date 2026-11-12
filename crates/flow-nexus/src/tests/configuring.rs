@@ -298,7 +298,7 @@ struct OtherRows {
     models: Vec<ConfigureModel>,
     thresholds: Vec<ConfigureThreshold>,
     flow: Option<FlowNode>,
-    metaflows: Vec<signal_flow::Metaflow>,
+    metaflows: Vec<signal_flow::Permaflow>,
     message_bound: bool,
     message_locked: bool,
 }

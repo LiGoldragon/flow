@@ -383,7 +383,7 @@ impl SettlesRestingCodexSeats for RunningNexus {
 
     fn resting_codex_seat(&self, address: &Address) -> Option<FlowId> {
         let metaflow = self.store.metaflow(address).ok()??;
-        let flow_ethos::State::Awake(flow_id) = metaflow.state else {
+        let flow_ethos::PermaflowState::Awake(flow_id) = metaflow.permaflow_state else {
             return None;
         };
         (!self.waking.is_waking(address)

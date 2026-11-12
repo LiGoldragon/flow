@@ -22,7 +22,7 @@ use crate::store::queue_delivery::{
     PrepareQueueDelivery, QueueDeliveryAttempt,
 };
 use crate::store::reminder::RecordsReminders;
-use flow_ethos::{AnswerableTask, FlowId, State};
+use flow_ethos::{AnswerableTask, FlowId, PermaflowState as State};
 use signal_flow::{
     Address, Aspect, DeliveryState, Message, Model, PrivateSendResponse, Query, QueueEntry,
     Refusal, Request, Response, SendAcceptance, SendableMessage, SendableRequest, SentBy,
@@ -225,9 +225,9 @@ fn resting_seat() -> (NexusFixture, FreshWorld) {
         vec![],
         vec![],
     ));
-    fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+    fixture.nexus.store.seed_metaflow(signal_flow::Permaflow {
         address: psyche_core(),
-        state: State::Asleep,
+        permaflow_state: State::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -397,9 +397,9 @@ fn a_codex_refresh_carries_its_open_requests_to_its_successor() {
     let directory = fixture.directory.path().join("flows/abc123");
     fs::create_dir_all(&directory).unwrap();
     fs::write(directory.join("handover.md"), HANDOVER).unwrap();
-    fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+    fixture.nexus.store.seed_metaflow(signal_flow::Permaflow {
         address: psyche_core(),
-        state: State::Asleep,
+        permaflow_state: State::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -557,9 +557,9 @@ fn a_flow_s_result_to_its_own_order_writes_its_metaflow_once() {
         topic: flow_ethos::Topic("flowNexus".into()),
         model: Model::Opus,
     };
-    store.seed_metaflow(signal_flow::Metaflow {
+    store.seed_metaflow(signal_flow::Permaflow {
         address: at.clone(),
-        state: State::Awake(flow_ethos::FlowId("a11ce5".into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId("a11ce5".into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });

@@ -62,7 +62,7 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
     use crate::sending::SendsRequests;
     use crate::store::FlowStore;
     use crate::store::metaflow::SeedsMetaflow;
-    use signal_flow::{Message, Metaflow, Response, SendRequest};
+    use signal_flow::{Message, Permaflow, Response, SendRequest};
     let fixture = NexusFixture::new();
     bind_existing_caller(&fixture, "a001", "pane-1");
     fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
@@ -71,9 +71,9 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
         topic: flow_ethos::Topic("directTarget".into()),
         model: Model::Sol,
     };
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: target.clone(),
-        state: flow_ethos::State::Asleep,
+        permaflow_state: flow_ethos::PermaflowState::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -168,7 +168,7 @@ fn an_admitted_send_holds_archive_until_its_answer_object_is_released() {
     use crate::store::logical_delivery::RecordsLogicalDeliveries;
     use crate::store::metaflow::SeedsMetaflow;
     use crate::store::queue_delivery::AccountsQueueDelivery;
-    use signal_flow::{Message, Metaflow, PrivateSendResponse, SendRequest};
+    use signal_flow::{Message, Permaflow, PrivateSendResponse, SendRequest};
 
     let fixture = NexusFixture::new();
     bind_existing_caller(&fixture, "a001", "pane-1");
@@ -178,9 +178,9 @@ fn an_admitted_send_holds_archive_until_its_answer_object_is_released() {
         topic: flow_ethos::Topic("answerHoldTarget".into()),
         model: Model::Sol,
     };
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: target.clone(),
-        state: flow_ethos::State::Asleep,
+        permaflow_state: flow_ethos::PermaflowState::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -239,7 +239,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
     use crate::sending::SendsRequests;
     use crate::store::FlowStore;
     use crate::store::metaflow::SeedsMetaflow;
-    use signal_flow::{Message, Metaflow, Response, SendRequest};
+    use signal_flow::{Message, Permaflow, Response, SendRequest};
     use std::io::Write;
     use std::time::{Duration, Instant};
     for (hard, duplicate, privileged) in [
@@ -268,9 +268,11 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
             topic: flow_ethos::Topic("flow".into()),
             model: Model::Sol,
         };
-        fixture.nexus.store.seed_metaflow(Metaflow {
+        fixture.nexus.store.seed_metaflow(Permaflow {
             address: target.clone(),
-            state: flow_ethos::State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+            permaflow_state: flow_ethos::PermaflowState::Awake(flow_ethos::FlowId(
+                CLAUDE_SEAT.into(),
+            )),
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(vec![]),
         });
@@ -459,7 +461,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
     };
     assert!(fixture.nexus.direct_send_lease(&target).is_err());
     assert!(fixture.nexus.store.metaflow(&target).unwrap().is_none());
-    let declaration = meta_signal_flow::ConfigureMetaflow {
+    let declaration = meta_signal_flow::ConfigurePermaflow {
         root_option: None,
         address: target.clone(),
         system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
@@ -494,7 +496,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
         .direct_send_lease(&target)
         .expect("configured address can start");
     let working = fixture.nexus.store.metaflow(&target).unwrap().unwrap();
-    assert_eq!(working.state, flow_ethos::State::Asleep);
+    assert_eq!(working.state, flow_ethos::PermaflowState::Asleep);
     assert!(working.queue.0.is_empty());
     use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
     assert_eq!(
@@ -532,16 +534,16 @@ fn a_task_is_admitted_only_with_minutes_above_zero_and_a_reachable_deadline() {
     use super::NexusFixture;
     use crate::store::logical_delivery::RecordsLogicalDeliveries;
     use crate::store::metaflow::SeedsMetaflow;
-    use signal_flow::{Message, Metaflow, MinutesRefusal, Refusal, SentBy};
+    use signal_flow::{Message, MinutesRefusal, Permaflow, Refusal, SentBy};
     let fixture = NexusFixture::new();
     let target = Address {
         aspect: Aspect::Mind,
         topic: flow_ethos::Topic("minutesTarget".into()),
         model: Model::Sol,
     };
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: target.clone(),
-        state: flow_ethos::State::Asleep,
+        permaflow_state: flow_ethos::PermaflowState::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -723,7 +725,7 @@ impl ServesCliWorld for CliWorld {
         // The recipient: Mind flow Sol, Asleep.
         fixture.nexus.store.seed_metaflow(metaflow(
             Model::Sol,
-            flow_ethos::State::Asleep,
+            flow_ethos::PermaflowState::Asleep,
             vec!["abc123"],
             vec![],
         ));

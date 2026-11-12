@@ -22,8 +22,8 @@ use crate::store::RecordsLaunchOutcome as _;
 use crate::store::handover::HoldsHandovers as _;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows as _};
 use crate::waking::HoldsWakingMetaflows;
-use flow_ethos::State;
-use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, Continuity};
+use flow_ethos::PermaflowState;
+use meta_signal_flow::{ConfigurationChange, ConfigurePermaflow, Continuity};
 use signal_flow::{
     CompositionRefusal, HandoverFault, HandoverUnreadable_Data, Model, Query, Request, Response,
 };
@@ -158,7 +158,7 @@ fn assert_asleep_with_its_queue(
         .metaflow(&address(Model::Sol))
         .unwrap()
         .expect("the metaflow");
-    assert_eq!(metaflow.state, State::Asleep);
+    assert_eq!(metaflow.permaflow_state, State::Asleep);
     assert_eq!(
         metaflow
             .queue
@@ -180,7 +180,7 @@ fn declare(fixture: &NexusFixture, root_option: Option<String>) {
     fixture
         .nexus
         .store
-        .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+        .configure_change(ConfigurationChange::Metaflows(vec![ConfigurePermaflow {
             root_option: root_option.map(meta_signal_flow::Root),
             address: address(Model::Sol),
             system_modules: signal_flow::SystemModules(vec![
@@ -302,7 +302,7 @@ fn assert_predecessor_kept(
         .unwrap()
         .expect("metaflow");
     assert_eq!(
-        metaflow.state,
+        metaflow.permaflow_state,
         State::Awake(flow_ethos::FlowId("abc123".into()))
     );
     assert_eq!(
@@ -402,7 +402,7 @@ fn a_launch_whose_root_cannot_be_resolved_is_refused_naming_its_predecessor() {
     fixture
         .nexus
         .store
-        .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+        .configure_change(ConfigurationChange::Metaflows(vec![ConfigurePermaflow {
             root_option: Some(meta_signal_flow::Root(root.clone())),
             address: profile.address.clone(),
             system_modules: profile.system_modules.clone(),
@@ -843,7 +843,7 @@ fn an_on_demand_seat_whose_successor_is_refused_its_handover_is_not_closed() {
             fixture
                 .nexus
                 .store
-                .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+                .configure_change(ConfigurationChange::Metaflows(vec![ConfigurePermaflow {
                     root_option: Some(meta_signal_flow::Root(root)),
                     address: address(Model::Sol),
                     system_modules: signal_flow::SystemModules(vec![
@@ -892,7 +892,7 @@ fn an_on_demand_seat_whose_successor_is_refused_its_handover_is_not_closed() {
             .unwrap()
             .expect("metaflow");
         assert_eq!(
-            metaflow.state,
+            metaflow.permaflow_state,
             State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
         );
         for name in ["herdr-operations.log", "herdr-calls.log"] {

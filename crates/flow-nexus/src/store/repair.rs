@@ -9,7 +9,7 @@ use meta_signal_flow::{Attempt, Binding, RebindRejected_Data};
 use signal_flow::{Address, FlowId, HerdrRoute};
 
 pub(crate) struct Inspection {
-    pub(crate) metaflow: Metaflow,
+    pub(crate) metaflow: Permaflow,
     pub(crate) binding: Binding,
     pub(crate) lock_vector: Vec<Lock>,
     pub(crate) attempt_vector: Vec<Attempt>,
@@ -132,9 +132,9 @@ impl RepairsMetaflows for FlowStore {
             return Ok(None);
         };
         let metaflow = stored.metaflow;
-        let flow_node_option = match &metaflow.state {
-            MetaflowState::Awake(flow_id) => self.flow_node(&flow_id.0)?,
-            MetaflowState::Asleep => None,
+        let flow_node_option = match &metaflow.permaflow_state {
+            PermaflowState::Awake(flow_id) => self.flow_node(&flow_id.0)?,
+            PermaflowState::Asleep => None,
         };
         let lock_vector = self
             .stored_metaflow_lock(address)?
@@ -177,9 +177,9 @@ impl RepairsMetaflows for FlowStore {
     ) -> Result<Result<FlowId, RebindRejected_Data>, StoreError> {
         Ok(match self.stored_metaflow(address)? {
             None => Err(RebindRejected_Data::UnknownAddress),
-            Some(stored) => match stored.metaflow.state {
-                MetaflowState::Awake(flow_id) => Ok(flow_id),
-                MetaflowState::Asleep => Err(RebindRejected_Data::NotAwake),
+            Some(stored) => match stored.metaflow.permaflow_state {
+                PermaflowState::Awake(flow_id) => Ok(flow_id),
+                PermaflowState::Asleep => Err(RebindRejected_Data::NotAwake),
             },
         })
     }
@@ -225,7 +225,8 @@ impl RepairsMetaflows for FlowStore {
             .0
             .retain(|past| past != &current && past.0 != flow_id);
         stored.metaflow.past.0.push(current);
-        stored.metaflow.state = MetaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned()));
+        stored.metaflow.permaflow_state =
+            PermaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned()));
         // The rebound flow receives from this commit: what the flow it
         // displaced owed at the Address is taken over in it.
         let commit = self

@@ -121,7 +121,7 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             return;
         };
         for metaflow in metaflows {
-            let flow_ethos::State::Awake(flow_id) = metaflow.state else {
+            let flow_ethos::PermaflowState::Awake(flow_id) = metaflow.permaflow_state else {
                 continue;
             };
             let Ok(Some(model_name)) = self.store.flow_model(&flow_id.0) else {

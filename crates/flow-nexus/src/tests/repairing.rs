@@ -17,7 +17,7 @@ use crate::store::queue_delivery::{
 use crate::store::{ManagesMetaflowState, ReadsFlowRoles, ReadsFlowRows, RegistersFlowIdentity};
 use crate::waking::HoldsWakingMetaflows;
 use crate::{Dispatches, DispatchesSerially};
-use flow_ethos::State;
+use flow_ethos::PermaflowState;
 use meta_signal_flow::{
     InspectRejected_Data, Query as MetaQuery, Rebind_Data, RebindRejected_Data, Rebinding,
     Response as MetaResponse, VisibleAttempt, VisibleQueueDeliveryStanding, Withdraw_Data,
@@ -25,7 +25,7 @@ use meta_signal_flow::{
 };
 use signal_flow::{
     Address, Aspect, DeliveryState, HarnessKind, HerdrRoute, HerdrRouteSelection, Lock_Data,
-    Message, Metaflow, Model, QueueEntry, Request, Response, SentBy,
+    Message, Model, Permaflow, QueueEntry, Request, Response, SentBy,
 };
 use std::fs;
 
@@ -54,15 +54,15 @@ fn entry(id: &str) -> QueueEntry {
 /// The Claude seat Awake at the Secondary address, holding `queue`.
 fn awake_seat(fixture: &NexusFixture, queue: Vec<QueueEntry>) {
     claude_seat(fixture, 40_000);
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: seat_address(),
-        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(queue),
     });
 }
 
-fn stored(fixture: &NexusFixture) -> Metaflow {
+fn stored(fixture: &NexusFixture) -> Permaflow {
     fixture
         .nexus
         .store
@@ -119,9 +119,9 @@ fn inspect_answers_the_metaflow_whole() {
         topic: flow_ethos::Topic("core".into()),
         model: Model::Opus,
     };
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: sender.clone(),
-        state: State::Awake(flow_ethos::FlowId("aa034f".into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId("aa034f".into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -183,7 +183,7 @@ fn inspect_answers_the_metaflow_whole() {
     let private = stored(&fixture);
     assert_eq!(inspected.visible_metaflow.address, private.address);
     assert_eq!(
-        inspected.visible_metaflow.state,
+        inspected.visible_metaflow.permaflow_state,
         State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
     );
     assert_eq!(inspected.visible_metaflow.flow_id_vector, private.past.0);
@@ -216,7 +216,7 @@ fn inspect_answers_the_metaflow_whole() {
     let MetaResponse::Inspected(launching) = inspect(&fixture, seat_address()) else {
         panic!("the metaflow is inspected")
     };
-    let State::Awake(launched) = &launching.visible_metaflow.state else {
+    let State::Awake(launched) = &launching.visible_metaflow.permaflow_state else {
         panic!("the launch holds the Address")
     };
     assert_eq!(
@@ -234,9 +234,9 @@ fn inspect_answers_the_metaflow_whole() {
         launching.visible_attempt_vector
     );
 
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: seat_address(),
-        state: State::Asleep,
+        permaflow_state: State::Asleep,
         past: flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.into())]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -381,9 +381,9 @@ fn rebind_flow_makes_another_flow_current() {
     );
 
     // The other flow is another metaflow's current flow: it is not taken.
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: elsewhere(),
-        state: State::Awake(flow_ethos::FlowId("908786".into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId("908786".into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -395,9 +395,9 @@ fn rebind_flow_makes_another_flow_current() {
         stored(&fixture).state,
         State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
     );
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: elsewhere(),
-        state: State::Asleep,
+        permaflow_state: State::Asleep,
         past: flow_ethos::Past(vec![flow_ethos::FlowId("908786".into())]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -405,7 +405,7 @@ fn rebind_flow_makes_another_flow_current() {
     assert_eq!(rebind("908786"), MetaResponse::Rebound(seat_address()));
     let metaflow = stored(&fixture);
     assert_eq!(
-        metaflow.state,
+        metaflow.permaflow_state,
         State::Awake(flow_ethos::FlowId("908786".into()))
     );
     assert_eq!(

@@ -36,12 +36,12 @@ use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, ReadsFlowRo
 use crate::waking::{HoldsWakingMetaflows, SleepsAndWakesSeats};
 use crate::{Dispatches, DispatchesSerially};
 use flow_ethos::Delivery;
-use flow_ethos::State;
+use flow_ethos::PermaflowState;
 use meta_signal_flow::{
-    ConfigurationChange, ConfigureMetaflow, ConfigureThreshold, Continuity, HandoverPolicy,
+    ConfigurationChange, ConfigurePermaflow, ConfigureThreshold, Continuity, HandoverPolicy,
 };
 use signal_flow::{
-    Address, FlowLifecycle, HerdrRouteSelection, Message, Metaflow, Model, Origin, Query,
+    Address, FlowLifecycle, HerdrRouteSelection, Message, Model, Origin, Permaflow, Query,
     RefreshRejection, Refreshed, Refusal, ReplaceRejection, Request, Response, SendRequest, SentBy,
     Unknown_Data,
 };
@@ -70,7 +70,7 @@ fn declare(fixture: &NexusFixture, at: Address) {
     fixture
         .nexus
         .store
-        .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+        .configure_change(ConfigurationChange::Metaflows(vec![ConfigurePermaflow {
             root_option: None,
             address: at,
             system_modules: signal_flow::SystemModules(vec![
@@ -93,9 +93,9 @@ fn declare(fixture: &NexusFixture, at: Address) {
 /// holding `queue`.
 fn awake_seat(fixture: &NexusFixture, queue: Vec<Request>) {
     claude_seat(fixture, 40_000);
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: seat_address(),
-        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(
             queue
@@ -115,7 +115,7 @@ fn awake_seat(fixture: &NexusFixture, queue: Vec<Request>) {
     });
 }
 
-fn stored(fixture: &NexusFixture) -> Metaflow {
+fn stored(fixture: &NexusFixture) -> Permaflow {
     fixture
         .nexus
         .store
@@ -140,7 +140,7 @@ fn lifecycle(fixture: &NexusFixture) -> FlowLifecycle {
         .flow_lifecycle
 }
 
-fn requests(metaflow: &Metaflow) -> Vec<Request> {
+fn requests(metaflow: &Permaflow) -> Vec<Request> {
     metaflow
         .queue
         .0
@@ -185,7 +185,11 @@ fn a_refresh_ends_the_awake_flow_without_a_turn_and_leaves_the_metaflow_asleep()
     );
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
     let metaflow = stored(&fixture);
-    assert_eq!(metaflow.state, State::Asleep, "no successor is started");
+    assert_eq!(
+        metaflow.permaflow_state,
+        State::Asleep,
+        "no successor is started"
+    );
     assert_eq!(
         metaflow.past,
         flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])
@@ -212,9 +216,9 @@ fn a_refresh_of_a_metaflow_not_awake_is_refused_not_awake() {
         PromptFixture::Prompted("w1:p3"),
     );
     claude_seat(&fixture, 40_000);
-    let asleep = Metaflow {
+    let asleep = Permaflow {
         address: seat_address(),
-        state: State::Asleep,
+        permaflow_state: State::Asleep,
         past: flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.into())]),
         queue: flow_ethos::Queue(vec![]),
     };
@@ -291,9 +295,9 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
     // that launch.
     launched_claude_ended_by(&fixture, |_| true);
     super::waking::rested_at_stop(&fixture, ENDING);
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: seat_address(),
-        state: State::Awake(flow_ethos::FlowId(ENDING.into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId(ENDING.into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -606,9 +610,9 @@ fn refreshable_with_staged_successor(
         continuity,
         vec!["spirit-core".into(), "intent-flow".into()],
     );
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: seat_address(),
-        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![signal_flow::QueueEntry {
             logical_delivery_id: flow_ethos::LogicalDeliveryId("refreshing-successor-0".into()),
@@ -658,7 +662,7 @@ fn a_refresh_owed_a_successor_starts_it_before_the_ending_flow_is_reaped() {
         super::reaping::finish_reaps(&fixture);
         let metaflow = stored(&fixture);
         assert_eq!(
-            metaflow.state,
+            metaflow.permaflow_state,
             State::Awake(flow_ethos::FlowId("908786".into())),
             "the successor is Awake: {continuity:?} {delivery:?}"
         );
@@ -949,9 +953,9 @@ fn a_send_to_a_primary_is_accepted_from_a_primary_and_from_a_secondary() {
         model: Model::Astra,
     };
     let target = primary("flow");
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: target.clone(),
-        state: State::Asleep,
+        permaflow_state: State::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -1051,7 +1055,7 @@ fn a_launch_ordered_replace_holds_the_metaflow_and_types_nothing_into_its_predec
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
     let metaflow = stored(&fixture);
     assert_eq!(
-        metaflow.state,
+        metaflow.permaflow_state,
         State::Awake(flow_ethos::FlowId("908786".into()))
     );
     assert_eq!(
@@ -1482,7 +1486,7 @@ fn a_nexus_start_starts_a_successor_owed_after_a_refresh_or_a_replace() {
 
         let metaflow = stored(&fixture);
         assert_eq!(
-            metaflow.state,
+            metaflow.permaflow_state,
             State::Awake(flow_ethos::FlowId("908786".into())),
             "the successor is Awake: {cause:?}"
         );
@@ -1577,7 +1581,7 @@ fn a_self_refresh_of_a_working_seat_waits_for_its_idle_event_and_answers_refresh
     );
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
     let metaflow = stored(&fixture);
-    assert_eq!(metaflow.state, State::Asleep);
+    assert_eq!(metaflow.permaflow_state, State::Asleep);
     assert_eq!(
         metaflow.past,
         flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])

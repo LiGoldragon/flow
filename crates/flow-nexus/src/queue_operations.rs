@@ -319,7 +319,7 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
             if let Err(error) = self.store.force_queue_wake(address) {
                 return Response::Refused(Refusal::Store(error.to_string()));
             }
-            let asleep = metaflow.state == flow_ethos::State::Asleep;
+            let asleep = metaflow.permaflow_state == flow_ethos::PermaflowState::Asleep;
             if !asleep && let Some(lease) = self.waking.hold(address) {
                 let _ = self.drain_all_held(address.clone(), &lease.pushed_at(priority.clone()));
             }
@@ -373,7 +373,7 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
         let now = std::time::SystemTime::now().seconds_since_epoch();
         let mut warm = Vec::new();
         for metaflow in metaflows {
-            let flow_ethos::State::Awake(flow_id) = &metaflow.state else {
+            let flow_ethos::PermaflowState::Awake(flow_id) = &metaflow.permaflow_state else {
                 continue;
             };
             match self.store.flow_is_live(&flow_id.0) {

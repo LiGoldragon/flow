@@ -92,7 +92,12 @@ impl RunsHeartbeat for crate::RunningNexus {
         let metaflows = self.store.list_metaflows()?;
         let awake_metaflows = metaflows
             .iter()
-            .filter(|metaflow| matches!(metaflow.state, flow_ethos::State::Awake(_)))
+            .filter(|metaflow| {
+                matches!(
+                    metaflow.permaflow_state,
+                    flow_ethos::PermaflowState::Awake(_)
+                )
+            })
             .count();
         let purposes = self.store.delivery_purposes()?;
         let mut panes = BTreeSet::new();
@@ -150,7 +155,10 @@ impl RunsHeartbeat for crate::RunningNexus {
                 let metaflow = metaflows
                     .iter()
                     .find(|metaflow| metaflow.address == *address)?;
-                if !matches!(metaflow.state, flow_ethos::State::Awake(_)) {
+                if !matches!(
+                    metaflow.permaflow_state,
+                    flow_ethos::PermaflowState::Awake(_)
+                ) {
                     return None;
                 }
                 let ordinary_queue_length = metaflow

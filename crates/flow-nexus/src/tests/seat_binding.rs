@@ -479,7 +479,7 @@ fn a_real_cli_caller_is_answered_alike_whoever_it_is() {
     use crate::store::send_outcome::RecordsSendOutcomes;
     use crate::store::sent::NamesCodexAppServers;
     use crate::store::{ReadsFlowRoles, ReadsFlowRows};
-    use flow_ethos::State;
+    use flow_ethos::PermaflowState;
     use signal_flow::{Message, Query, Request, Section, SendRequest};
 
     let terra = super::waking::address(Model::Terra);
@@ -668,8 +668,8 @@ fn a_registered_address_process_is_answered_as_any_caller() {
     use crate::store::handover::HoldsHandovers;
     use crate::store::metaflow::SeedsMetaflow;
     use crate::store::{ReadsFlowRows, RegistersFlowIdentity};
-    use flow_ethos::State;
-    use signal_flow::{FlowLifecycle, HarnessKind, Metaflow, Origin, Query, Section, SentBy};
+    use flow_ethos::PermaflowState;
+    use signal_flow::{FlowLifecycle, HarnessKind, Origin, Permaflow, Query, Section, SentBy};
 
     let fixture = NexusFixture::new();
     let address = super::waking::address(Model::Terra);
@@ -701,9 +701,9 @@ fn a_registered_address_process_is_answered_as_any_caller() {
     successor.origin = Origin::Unbound;
     successor.flow_lifecycle = FlowLifecycle::Active;
     fixture.nexus.store.register_flow(successor).unwrap();
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: address.clone(),
-        state: State::Awake(flow_ethos::FlowId("successor".into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId("successor".into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -843,7 +843,7 @@ fn a_known_claude_seat_binds_from_its_named_pane_whoever_asks() {
     fixture.set_agents(vec![claude_agent(&fixture)]);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
-        flow_ethos::State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        flow_ethos::PermaflowState::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         vec![],
         vec![],
     ));

@@ -24,11 +24,11 @@ use crate::store::logical_delivery::{MintsRequestIds, RecordsLogicalDeliveries};
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{AnnouncesLaunchChanges, RecordsFlowLifecycle, RegistersFlowIdentity};
-use flow_ethos::State;
+use flow_ethos::PermaflowState;
 use meta_signal_flow::QueueEvidence;
 use signal_flow::{
-    Address, Aspect, CallerIdentity, FlowNode, HerdrRoute, HerdrRouteSelection, Message, Metaflow,
-    Model, QueueEntry, Request, SentBy,
+    Address, Aspect, CallerIdentity, FlowNode, HerdrRoute, HerdrRouteSelection, Message, Model,
+    Permaflow, QueueEntry, Request, SentBy,
 };
 use std::{
     path::{Path, PathBuf},
@@ -440,18 +440,18 @@ impl SeatsCodexFlows for NexusFixture {
                 },
             )
             .expect("Codex seat registered");
-        self.nexus.store.seed_metaflow(Metaflow {
+        self.nexus.store.seed_metaflow(Permaflow {
             address: at,
-            state: State::Awake(flow_ethos::FlowId(flow_id.into())),
+            permaflow_state: State::Awake(flow_ethos::FlowId(flow_id.into())),
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(vec![]),
         });
     }
 
     fn awake_target(&self) {
-        self.nexus.store.seed_metaflow(Metaflow {
+        self.nexus.store.seed_metaflow(Permaflow {
             address: target(),
-            state: State::Awake(flow_ethos::FlowId("c0ffee".into())),
+            permaflow_state: State::Awake(flow_ethos::FlowId("c0ffee".into())),
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(vec![]),
         });
@@ -648,9 +648,9 @@ fn a_replayed_call_of_a_retired_flow_is_answered_from_its_record_and_a_supersede
             .sleep_metaflow(&sender_b(), "b2b2b2")
             .unwrap()
     );
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: sender_b(),
-        state: State::Awake(flow_ethos::FlowId("b3b3b3".into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId("b3b3b3".into())),
         past: flow_ethos::Past(vec![flow_ethos::FlowId("b2b2b2".into())]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -785,20 +785,20 @@ fn asleep_target() -> Address {
 trait SeatsAsleepTargets {
     /// The metaflow at `at`, Asleep, its last flow the launched abc123.
     fn asleep_at(&self, at: Address);
-    fn stored_at(&self, at: &Address) -> Metaflow;
+    fn stored_at(&self, at: &Address) -> Permaflow;
 }
 
 impl SeatsAsleepTargets for NexusFixture {
     fn asleep_at(&self, at: Address) {
-        self.nexus.store.seed_metaflow(Metaflow {
+        self.nexus.store.seed_metaflow(Permaflow {
             address: at,
-            state: State::Asleep,
+            permaflow_state: State::Asleep,
             past: flow_ethos::Past(vec![flow_ethos::FlowId("abc123".into())]),
             queue: flow_ethos::Queue(vec![]),
         });
     }
 
-    fn stored_at(&self, at: &Address) -> Metaflow {
+    fn stored_at(&self, at: &Address) -> Permaflow {
         self.nexus
             .store
             .metaflow(at)
@@ -1715,9 +1715,9 @@ fn core_primary() -> Address {
 #[test]
 fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
     let fixture = NexusFixture::new();
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: core_primary(),
-        state: State::Asleep,
+        permaflow_state: State::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -1776,9 +1776,9 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
 #[test]
 fn tool_replay_after_archive_answers_archived_without_the_old_id() {
     let fixture = NexusFixture::new();
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: core_primary(),
-        state: State::Asleep,
+        permaflow_state: State::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -1869,9 +1869,9 @@ fn archive_serializes_with_logical_delivery_admission_and_commits_after_the_gate
     use std::time::Duration;
 
     let fixture = NexusFixture::new();
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: core_primary(),
-        state: State::Asleep,
+        permaflow_state: State::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -1942,9 +1942,9 @@ fn archive_serializes_with_logical_delivery_admission_and_commits_after_the_gate
 #[test]
 fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically() {
     let fixture = NexusFixture::new();
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: core_primary(),
-        state: State::Asleep,
+        permaflow_state: State::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -2163,9 +2163,9 @@ impl SeatsAwakeCodexSeat for NexusFixture {
             ),
             Ok(crate::store::FlowRegistration::Registered(_))
         ));
-        self.nexus.store.seed_metaflow(Metaflow {
+        self.nexus.store.seed_metaflow(Permaflow {
             address: seat_at(),
-            state: State::Awake(flow_ethos::FlowId("908786".into())),
+            permaflow_state: State::Awake(flow_ethos::FlowId("908786".into())),
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(
                 queue
@@ -2792,9 +2792,9 @@ fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
     );
 
     let order = from_core(Request::Order("Read the new ruling.".into()));
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: seat_at(),
-        state: State::Awake(flow_ethos::FlowId("908786".into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId("908786".into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![QueueEntry {
             logical_delivery_id: flow_ethos::LogicalDeliveryId("logical-delivery-test".into()),

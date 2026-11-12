@@ -94,7 +94,7 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
             fixture.nexus.store.launch_attempt("topic-request").unwrap(),
             None
         );
-        let declared = meta_signal_flow::ConfigureMetaflow {
+        let declared = meta_signal_flow::ConfigurePermaflow {
             root_option: None,
             address: signal_flow::Address {
                 aspect: Aspect::Mind,

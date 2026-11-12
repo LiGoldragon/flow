@@ -13,10 +13,10 @@ use crate::reporting::RecordsReports;
 use crate::store::metaflow::SeedsMetaflow;
 use crate::store::{FlowStore, ReadsFlowRows};
 use crate::turn_ends::ObservesTurnEnds;
-use flow_ethos::State;
+use flow_ethos::PermaflowState;
 use signal_flow::{
-    BackgroundTaskKind, Event, HarnessKind, HerdrRouteSelection, Metaflow, Model, NativeStop,
-    ObserveSelection, Query, Report_Data, Response, TurnEnd,
+    BackgroundTaskKind, Event, HarnessKind, HerdrRouteSelection, Model, NativeStop,
+    ObserveSelection, Permaflow, Query, Report_Data, Response, TurnEnd,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -33,9 +33,9 @@ fn two_seats(fixture: &NexusFixture) {
         PromptFixture::Prompted("w1:p3"),
     );
     claude_seat(fixture, 40_000);
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: address(Model::Sol),
-        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -51,9 +51,9 @@ fn two_seats(fixture: &NexusFixture) {
         fixture.nexus.store.register_flow(codex),
         Ok(crate::store::FlowRegistration::Registered(_))
     ));
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: address(Model::Luna),
-        state: State::Awake(flow_ethos::FlowId(CODEX_SEAT.into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId(CODEX_SEAT.into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });

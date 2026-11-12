@@ -18,8 +18,8 @@ use crate::store::queue_delivery::{
     AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery,
 };
 use crate::store::send_outcome::RecordsSendOutcomes;
-use flow_ethos::State;
-use signal_flow::{Message, Metaflow, Model, Request, SendAcceptance, SentBy};
+use flow_ethos::PermaflowState;
+use signal_flow::{Message, Model, Permaflow, Request, SendAcceptance, SentBy};
 
 fn ask(fixture: &NexusFixture, text: &str) -> String {
     use datom_codec::{Actualizing, Budget, Datomizable, Potential};
@@ -167,9 +167,9 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
     );
 
     let seat = address(Model::Sol);
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: seat.clone(),
-        state: State::Asleep,
+        permaflow_state: State::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -203,9 +203,9 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
         .expect("metaflow reads")
         .expect("metaflow held")
         .queue;
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: seat.clone(),
-        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         past: flow_ethos::Past(vec![]),
         queue,
     });

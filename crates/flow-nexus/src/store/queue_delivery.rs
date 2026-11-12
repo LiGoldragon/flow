@@ -814,8 +814,8 @@ impl AccountsQueueDelivery for FlowStore {
         };
         if flow_id.is_empty()
             || thread_id.is_empty()
-            || stored.metaflow.state
-                != flow_ethos::State::Awake(flow_ethos::FlowId(flow_id.to_owned()))
+            || stored.metaflow.permaflow_state
+                != flow_ethos::PermaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned()))
         {
             return Err(StoreError::StateInvariant);
         }
@@ -1652,7 +1652,9 @@ mod tests {
     use crate::store::metaflow::SeedsMetaflow;
     use crate::store::metaflow::SleepsMetaflows;
     use flow_defaults::DefaultConfiguration;
-    use flow_ethos::{Aspect, Metaflow, Model, QueueEntry, Request, SentBy, State};
+    use flow_ethos::{
+        Aspect, Model, Permaflow, PermaflowState as State, QueueEntry, Request, SentBy,
+    };
     use std::path::{Path, PathBuf};
 
     fn address() -> Address {
@@ -1689,9 +1691,9 @@ mod tests {
 
     fn seeded(path: &Path, defaults: &DefaultConfiguration) -> FlowStore {
         let store = FlowStore::open_seeded(path, defaults).expect("store opens");
-        store.seed_metaflow(Metaflow {
+        store.seed_metaflow(Permaflow {
             address: address(),
-            state: State::Awake(flow_ethos::FlowId("flow-delivery".into())),
+            permaflow_state: State::Awake(flow_ethos::FlowId("flow-delivery".into())),
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(vec![queued("first"), queued("second")]),
         });
@@ -2120,12 +2122,12 @@ mod tests {
         // The answer is queued at another Address: its row is the caller's,
         // and the answered request's own row is written by the settlement.
         let mut answer_row = super::super::StoredMetaflow {
-            metaflow: Metaflow {
+            metaflow: Permaflow {
                 address: Address {
                     topic: flow_ethos::Topic("answerElsewhere".into()),
                     ..address()
                 },
-                state: State::Asleep,
+                permaflow_state: State::Asleep,
                 past: flow_ethos::Past(vec![]),
                 queue: flow_ethos::Queue(vec![]),
             },
@@ -2490,9 +2492,9 @@ mod tests {
         else {
             panic!("oldest request prepared")
         };
-        store.seed_metaflow(Metaflow {
+        store.seed_metaflow(Permaflow {
             address: address(),
-            state: State::Awake(flow_ethos::FlowId("flow-delivery".into())),
+            permaflow_state: State::Awake(flow_ethos::FlowId("flow-delivery".into())),
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(vec![queued("second"), queued("first")]),
         });
@@ -3029,9 +3031,9 @@ mod tests {
 
         // An attempt that is no longer the oldest is refused, the queue
         // untouched.
-        store.seed_metaflow(Metaflow {
+        store.seed_metaflow(Permaflow {
             address: address(),
-            state: State::Awake(flow_ethos::FlowId("flow-delivery".into())),
+            permaflow_state: State::Awake(flow_ethos::FlowId("flow-delivery".into())),
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(vec![queued("other"), queued("second")]),
         });
@@ -3047,9 +3049,9 @@ mod tests {
         );
 
         // Owner Absent is resolved once and cannot be contradicted later.
-        store.seed_metaflow(Metaflow {
+        store.seed_metaflow(Permaflow {
             address: address(),
-            state: State::Awake(flow_ethos::FlowId("flow-delivery".into())),
+            permaflow_state: State::Awake(flow_ethos::FlowId("flow-delivery".into())),
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(vec![queued("second")]),
         });

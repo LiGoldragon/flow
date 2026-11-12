@@ -11,8 +11,8 @@ use crate::Dispatches;
 use crate::reporting::RecordsReports;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
-use flow_ethos::State;
-use signal_flow::{Event, FlowLifecycle, Metaflow, Model, Report_Data, Response};
+use flow_ethos::PermaflowState;
+use signal_flow::{Event, FlowLifecycle, Model, Permaflow, Report_Data, Response};
 use std::fs;
 
 /// The session the harness goes on in after /clear.
@@ -79,9 +79,9 @@ fn awake_seat(fixture: &NexusFixture) {
         PromptFixture::Prompted("w1:p3"),
     );
     claude_seat(fixture, 40_000);
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: address(Model::Sol),
-        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -116,7 +116,7 @@ fn declare_secondary(fixture: &NexusFixture, continuity: meta_signal_flow::Conti
         .nexus
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
-            meta_signal_flow::ConfigureMetaflow {
+            meta_signal_flow::ConfigurePermaflow {
                 root_option: None,
                 address: address(Model::Sol),
                 system_modules: signal_flow::SystemModules(vec![

@@ -18,7 +18,7 @@
     # callers move explicitly to lib.<system>.mkFlowPackage.
     unconfigured-flow.url = "github:LiGoldragon/flow/d3ab87ee18b1dd30947d5f0089f5abb4bafa80d5";
     # The accepted 0.53.2 Flow, built by its own flake, whose Memory the
-    # request-id migration check evolves. The lock holds its commit, f7d2336,
+    # predecessor-store refusal check refuses. The lock holds its commit, f7d2336,
     # and the flake refuses any other (predecessorRevision below).
     migration-predecessor.url = "github:LiGoldragon/flow";
   };
@@ -381,11 +381,11 @@
             no-inherent-methods = pkgs.runCommand "flow-no-inherent-methods" { src = lawSource; } (
               builtins.readFile ./checks/no-inherent-methods.sh
             );
-            # The accepted 0.53.2's real Memory, evolved and served by this
-            # Flow Nexus, which refuses a malformed policy without writing.
-            request-id-migration-process =
-              processCheck "request-id-migration-process"
-                "store::request_id_migration_process::actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without_writing"
+            # Current production Flow refuses the accepted 0.53.2 stores
+            # without publishing sockets or changing the source bytes.
+            predecessor-store-refusal-process =
+              processCheck "predecessor-store-refusal-process"
+                "store::request_id_migration_process::actual_predecessor_memory_is_refused_without_writing"
                 ''
                   export FLOW_MIGRATION_PREDECESSOR_BIN="${migrationPredecessorPackage}/bin/flow-nexus"
                   export FLOW_MIGRATION_PREDECESSOR_STORE="${migrationPredecessorFixture}/share/request-id-predecessor"
@@ -479,7 +479,7 @@
           # holds, named at run time) can be run by name where a build runs.
           store-proof = pkgs.runCommand "flow-nexus-store-proof" { } ''
             ${context.findTest "binary" context.testBuilds.flow-nexus
-              "store::request_id_migration_process::actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without_writing"
+              "store::request_id_migration_process::actual_predecessor_memory_is_refused_without_writing"
             }
             mkdir -p "$out/bin"
             cp "$binary" "$out/bin/flow-nexus-store-proof"

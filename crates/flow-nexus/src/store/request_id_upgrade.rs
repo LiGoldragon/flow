@@ -80,7 +80,7 @@ impl MemoryDefinition for PriorFlowEvents {
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PriorStoredMetaflow {
-    pub(crate) metaflow: old_flow::Metaflow,
+    pub(crate) metaflow: old_flow::Permaflow,
 }
 impl EngineRecord for PriorStoredMetaflow {
     fn record_key(&self) -> RecordKey {
@@ -100,7 +100,7 @@ impl MemoryDefinition for PriorStoredMetaflow {
 pub(crate) struct PriorAddressHold {
     pub(crate) flow_id: String,
     pub(crate) address: old_flow::Address,
-    pub(crate) found: Option<old_flow::Metaflow>,
+    pub(crate) found: Option<old_flow::Permaflow>,
 }
 impl EngineRecord for PriorAddressHold {
     fn record_key(&self) -> RecordKey {
@@ -957,15 +957,15 @@ impl BecomesCurrentWithRequestId for old_flow::QueueEntry {
     }
 }
 
-impl BecomesCurrentWithRequestIds for old_flow::Metaflow {
-    type Current = flow_ethos::Metaflow;
+impl BecomesCurrentWithRequestIds for old_flow::Permaflow {
+    type Current = flow_ethos::Permaflow;
     fn current_with_request_ids(
         &self,
         request_ids: &std::collections::BTreeMap<String, RequestId>,
-    ) -> Result<flow_ethos::Metaflow, StoreError> {
-        Ok(flow_ethos::Metaflow {
+    ) -> Result<flow_ethos::Permaflow, StoreError> {
+        Ok(flow_ethos::Permaflow {
             address: self.address.current()?,
-            state: recode_unchanged!(&self.state, flow_ethos::State)?,
+            permaflow_state: recode_unchanged!(&self.state, flow_ethos::PermaflowState)?,
             past: flow_ethos::Past(self.past.iter().cloned().map(flow_ethos::FlowId).collect()),
             queue: flow_ethos::Queue(
                 self.queue
@@ -1874,7 +1874,7 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
                 return Err(StoreError::StateInvariant);
             }
         }
-        let queue_is_live = |metaflow: &old_flow::Metaflow| -> Result<(), StoreError> {
+        let queue_is_live = |metaflow: &old_flow::Permaflow| -> Result<(), StoreError> {
             for entry in &metaflow.queue {
                 let current = currents
                     .get(&entry.logical_delivery_id)
@@ -2949,9 +2949,9 @@ mod tests {
                 PriorAddressHold {
                     flow_id: "held-flow".into(),
                     address: recipient.clone(),
-                    found: Some(old_flow::Metaflow {
+                    found: Some(old_flow::Permaflow {
                         address: recipient,
-                        state: old_flow::State::Asleep,
+                        permaflow_state: old_flow::State::Asleep,
                         past: Vec::new(),
                         queue: vec![queue_entry],
                     }),
@@ -3694,9 +3694,9 @@ mod tests {
                 },
             ))
             .expect("old send call stores");
-        let metaflow = old_flow::Metaflow {
+        let metaflow = old_flow::Permaflow {
             address: recipient.clone(),
-            state: old_flow::State::Asleep,
+            permaflow_state: old_flow::State::Asleep,
             past: Vec::new(),
             queue: vec![queue_entry],
         };
@@ -3920,9 +3920,9 @@ mod tests {
                     .assert(Assertion::new(
                         tables.metaflows,
                         PriorStoredMetaflow {
-                            metaflow: old_flow::Metaflow {
+                            metaflow: old_flow::Permaflow {
                                 address: recipient.clone(),
-                                state: old_flow::State::Asleep,
+                                permaflow_state: old_flow::State::Asleep,
                                 past: Vec::new(),
                                 queue: vec![queue_entry.clone()],
                             },
@@ -3935,9 +3935,9 @@ mod tests {
                         PriorAddressHold {
                             flow_id: "flow".into(),
                             address: recipient.clone(),
-                            found: Some(old_flow::Metaflow {
+                            found: Some(old_flow::Permaflow {
                                 address: recipient.clone(),
-                                state: old_flow::State::Asleep,
+                                permaflow_state: old_flow::State::Asleep,
                                 past: Vec::new(),
                                 queue: vec![queue_entry.clone()],
                             }),

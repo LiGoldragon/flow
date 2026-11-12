@@ -217,7 +217,7 @@ fn production_rehearse_success_and_refusal_create_nothing() {
         topic: flow_ethos::Topic("rehearseTest".into()),
         model: Model::Sol,
     };
-    let declaration = meta_signal_flow::ConfigureMetaflow {
+    let declaration = meta_signal_flow::ConfigurePermaflow {
         address: address.clone(),
         root_option: None,
         system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(

@@ -29,11 +29,11 @@ use crate::waking::{
     AnswersWakeRefusal, AtStop, FreshContext, HoldsWakingMetaflows, IdentifiesWakingLease,
     KeptAtStop, PerformsWakeAndDrain, SleepsAndWakesSeats, WakePlan, WakePolicy, WakeRefusal,
 };
-use flow_ethos::{Delivery, State};
+use flow_ethos::{Delivery, PermaflowState as State};
 use signal_flow::{
     Address, Aspect, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
-    HerdrRoute, HerdrRouteSelection, LaunchProfile, Message, Metaflow, Model, NativeLaunchBinding,
-    NativeLaunchIntent, Origin, QueueEntry, Request, SentBy,
+    HerdrRoute, HerdrRouteSelection, LaunchProfile, Message, Model, NativeLaunchBinding,
+    NativeLaunchIntent, Origin, Permaflow, QueueEntry, Request, SentBy,
 };
 use std::fs;
 
@@ -62,8 +62,8 @@ pub(super) fn metaflow(
     state: State,
     past: Vec<&str>,
     queue: Vec<Request>,
-) -> Metaflow {
-    Metaflow {
+) -> Permaflow {
+    Permaflow {
         address: address(model),
         state,
         past: flow_ethos::Past(
@@ -134,7 +134,7 @@ pub(super) fn maintain(fixture: &NexusFixture, address: Address) {
         .nexus
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
-            meta_signal_flow::ConfigureMetaflow {
+            meta_signal_flow::ConfigurePermaflow {
                 root_option: None,
                 address,
                 system_modules: signal_flow::SystemModules(vec![
@@ -154,7 +154,7 @@ pub(super) fn maintain(fixture: &NexusFixture, address: Address) {
         .expect("metaflow declared Maintained");
 }
 
-pub(super) fn stored(fixture: &NexusFixture, model: Model) -> Metaflow {
+pub(super) fn stored(fixture: &NexusFixture, model: Model) -> Permaflow {
     fixture
         .nexus
         .store
@@ -952,9 +952,9 @@ fn a_resting_seat_with_work_queued_is_handed_the_oldest_request_and_stays_awake(
     ]
     .unsent();
     let expected_prompt = queued.clone().prompt_text(&address(Model::Sol));
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: address(Model::Sol),
-        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(queued),
     });
@@ -992,9 +992,9 @@ fn explicit_delivery_hands_over_every_queued_request_in_order() {
     claude_seat(&fixture, 40_000);
     let first = Request::Notice("first".into()).unsent();
     let second = Request::Result(flow_ethos::ResultPayload::Historical("second".into())).unsent();
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: address(Model::Sol),
-        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![first.clone(), second.clone()]),
     });
@@ -1965,9 +1965,9 @@ fn a_simplified_wake_sends_the_first_abrupt_request_without_an_empty_turn() {
         .nexus
         .store
         .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: sender.clone(),
-        state: State::Asleep,
+        permaflow_state: State::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -2039,9 +2039,9 @@ fn a_simplified_startup_leaves_its_second_request_ordered() {
         .nexus
         .store
         .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: sender.clone(),
-        state: State::Asleep,
+        permaflow_state: State::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -2110,9 +2110,9 @@ fn a_simplified_reply_wait_returns_each_durable_acceptance_without_native_input(
     super::bind_existing_caller(&fixture, "a001", "pane-1");
     let launched = active_simplified_claude(&fixture);
     let at = address(Model::Sol);
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: at.clone(),
-        state: State::Awake(flow_ethos::FlowId("abc123".into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId("abc123".into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -2204,18 +2204,18 @@ fn a_held_address_accepts_while_an_independent_recipient_dispatches() {
     let fixture = NexusFixture::new();
     super::bind_existing_caller(&fixture, "a001", "pane-1");
     let held = address(Model::Sol);
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: held.clone(),
-        state: State::Asleep,
+        permaflow_state: State::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
     let mut independent = address(Model::Sol);
     independent.topic = flow_ethos::Topic("independent".into());
     claude_seat(&fixture, 40_000);
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: independent.clone(),
-        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -4651,7 +4651,7 @@ fn a_missing_module_wake_keeps_its_identity_in_the_caller_outcome_and_queue_stat
         .nexus
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
-            meta_signal_flow::ConfigureMetaflow {
+            meta_signal_flow::ConfigurePermaflow {
                 root_option: None,
                 address: at.clone(),
                 system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
@@ -5493,9 +5493,9 @@ fn a_launch_whose_address_another_flow_holds_sends_as_unbound() {
     );
     let owner = fixture.node();
     fixture.nexus.store.register_flow(owner.clone()).unwrap();
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: setup.sender.address.clone(),
-        state: State::Awake(owner.flow_id.clone()),
+        permaflow_state: State::Awake(owner.flow_id.clone()),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -6239,7 +6239,7 @@ fn a_start_starts_no_other_models_seat_first() {
         .nexus
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
-            meta_signal_flow::ConfigureMetaflow {
+            meta_signal_flow::ConfigurePermaflow {
                 root_option: None,
                 address: address(Model::Sol),
                 system_modules: signal_flow::SystemModules(vec![
@@ -6480,7 +6480,7 @@ fn a_simplified_answer_uses_bound_transcript_b_and_never_hook_a() {
         ),
         (sender.clone(), State::Asleep),
     ] {
-        fixture.nexus.store.seed_metaflow(Metaflow {
+        fixture.nexus.store.seed_metaflow(Permaflow {
             address,
             state,
             past: flow_ethos::Past(vec![]),
@@ -6631,9 +6631,9 @@ fn codex_rest_seat(
             vec!["spirit-core".into(), "intent-flow".into()],
         );
     }
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: address(Model::Sol),
-        state: State::Awake(flow_ethos::FlowId("908786".into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId("908786".into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(queue),
     });
@@ -6781,7 +6781,7 @@ fn a_codex_ordered_refresh_of_a_maintained_seat_starts_its_successor_at_its_rest
     let successor = pending.launched.flow_id.clone();
     assert_ne!(successor.0, "abc123");
     let metaflow = stored(&fixture, Model::Sol);
-    assert_eq!(metaflow.state, State::Awake(successor));
+    assert_eq!(metaflow.permaflow_state, State::Awake(successor));
     assert!(metaflow.queue.0.is_empty());
     assert_eq!(
         fixture

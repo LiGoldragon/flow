@@ -113,7 +113,7 @@ fn runtime_tick_admits_due_middle_abrupt_notice_and_wakes_recipient() {
     };
     use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
     use crate::store::{ManagesMetaflowState, SeedsRole};
-    use flow_ethos::{Metaflow, State};
+    use flow_ethos::{Permaflow, PermaflowState as State};
     let fixture = NexusFixture::new();
     let address = address();
     fixture
@@ -143,9 +143,9 @@ fn runtime_tick_admits_due_middle_abrupt_notice_and_wakes_recipient() {
         aspect: Aspect::Field,
         model_name: flow_ethos::ModelName("m".into()),
     });
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: address.clone(),
-        state: State::Awake(flow_ethos::FlowId("fixture-seat".into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId("fixture-seat".into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -221,7 +221,7 @@ fn runtime_tick_drains_due_middle_abrupt_notice_past_threshold_into_the_pane() {
     use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
     use crate::store::queue_delivery::AccountsQueueDelivery;
     use crate::store::{ManagesMetaflowState, SeedsRole};
-    use flow_ethos::{Metaflow, State};
+    use flow_ethos::{Permaflow, PermaflowState as State};
     use signal_flow::CallerIdentity;
 
     let fixture = NexusFixture::new();
@@ -241,9 +241,9 @@ fn runtime_tick_drains_due_middle_abrupt_notice_past_threshold_into_the_pane() {
         aspect: Aspect::Mind,
         model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
     });
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: address.clone(),
-        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -313,9 +313,11 @@ fn reminder_admission_waits_for_handover_gate_before_commit() {
     use signal_flow::{Message, Request};
     let fixture = NexusFixture::new();
     let address = address();
-    fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+    fixture.nexus.store.seed_metaflow(signal_flow::Permaflow {
         address: address.clone(),
-        state: flow_ethos::State::Awake(flow_ethos::FlowId("fixture-seat".into())),
+        permaflow_state: flow_ethos::PermaflowState::Awake(flow_ethos::FlowId(
+            "fixture-seat".into(),
+        )),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -366,9 +368,11 @@ fn reminder_snapshot_closed_before_admission_creates_no_notice() {
     use signal_flow::{Message, Request};
     let fixture = NexusFixture::new();
     let address = address();
-    fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+    fixture.nexus.store.seed_metaflow(signal_flow::Permaflow {
         address: address.clone(),
-        state: flow_ethos::State::Awake(flow_ethos::FlowId("predecessor".into())),
+        permaflow_state: flow_ethos::PermaflowState::Awake(flow_ethos::FlowId(
+            "predecessor".into(),
+        )),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -529,7 +533,7 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
     use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
     use crate::store::{ManagesMetaflowState, SeedsRole};
     use meta_signal_flow::{ConfigurationChange, ConfigureThreshold, HandoverPolicy};
-    use signal_flow::{Address, Aspect, CallerIdentity, Metaflow, Model};
+    use signal_flow::{Address, Aspect, CallerIdentity, Model, Permaflow};
     let fixture = NexusFixture::new();
     let address = Address {
         aspect: Aspect::Mind,
@@ -566,9 +570,9 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
         .store
         .ensure_live_handover(&address, CLAUDE_SEAT)
         .unwrap();
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: address.clone(),
-        state: flow_ethos::State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        permaflow_state: flow_ethos::PermaflowState::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -638,7 +642,7 @@ fn green_keep_cancels_open_warning_timer() {
     use crate::store::metaflow::SeedsMetaflow;
     use crate::store::{ManagesMetaflowState, SeedsRole};
     use meta_signal_flow::{ConfigurationChange, ConfigureThreshold, HandoverPolicy};
-    use signal_flow::{Address, Aspect, CallerIdentity, Known_Data, Metaflow, Model, Touch};
+    use signal_flow::{Address, Aspect, CallerIdentity, Known_Data, Model, Permaflow, Touch};
     let fixture = NexusFixture::new();
     let address = Address {
         aspect: Aspect::Mind,
@@ -675,9 +679,9 @@ fn green_keep_cancels_open_warning_timer() {
         .store
         .ensure_live_handover(&address, CLAUDE_SEAT)
         .unwrap();
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: address.clone(),
-        state: flow_ethos::State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        permaflow_state: flow_ethos::PermaflowState::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -733,13 +737,13 @@ fn atomic_same_expected_reminder_state_rejects_duplicate_admission() {
     use crate::store::handover_reminders::{HandoverReminder, OpensHandoverReminder};
     use crate::store::logical_delivery::RecordsLogicalDeliveries;
     use crate::store::metaflow::SeedsMetaflow;
-    use flow_ethos::{Message, Metaflow, Request, State};
+    use flow_ethos::{Message, Permaflow, PermaflowState as State, Request};
     use signal_flow::PrivateSendResponse;
     let fixture = NexusFixture::new();
     let address = address();
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: address.clone(),
-        state: State::Awake(flow_ethos::FlowId("fixture-seat".into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId("fixture-seat".into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -783,9 +787,11 @@ fn reminder_state_reopens_with_anchored_due_without_duplicate_initial() {
     let address = address();
     use crate::store::logical_delivery::RecordsLogicalDeliveries;
     use crate::store::metaflow::SeedsMetaflow;
-    store.seed_metaflow(flow_ethos::Metaflow {
+    store.seed_metaflow(flow_ethos::Permaflow {
         address: address.clone(),
-        state: flow_ethos::State::Awake(flow_ethos::FlowId("fixture-seat".into())),
+        permaflow_state: flow_ethos::PermaflowState::Awake(flow_ethos::FlowId(
+            "fixture-seat".into(),
+        )),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });

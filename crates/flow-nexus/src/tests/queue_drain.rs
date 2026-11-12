@@ -21,7 +21,7 @@ use crate::store::metaflow::SeedsMetaflow;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::waking::{PerformsWakeAndDrain, ReconcilesQueueDelivery, SettlesStopsAtConfirmation};
 use flow_ethos::Delivery;
-use flow_ethos::State;
+use flow_ethos::PermaflowState;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{
     ProcessIdentity, Query as MetaQuery, QueueDeliveryResolution, QueueResolutionOutcome,
@@ -29,7 +29,7 @@ use meta_signal_flow::{
     VisibleResolveQueueDeliveryRejected,
 };
 use signal_flow::{
-    Address, Aspect, Event, Message, Metaflow, Model, NativePrompt, NativeStop, QueueEntry,
+    Address, Aspect, Event, Message, Model, NativePrompt, NativeStop, Permaflow, QueueEntry,
     Report_Data, Request, Response, SentBy,
 };
 
@@ -77,9 +77,9 @@ fn queue_entry(request: &TestRequest) -> QueueEntry {
 /// The fixture Claude seat Awake at the Secondary address, holding `queue`.
 fn seat(fixture: &NexusFixture, queue: Vec<TestRequest>) {
     claude_seat(fixture, 40_000);
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: address(Model::Sol),
-        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(
             queue
@@ -172,9 +172,9 @@ fn standings(fixture: &NexusFixture) -> Vec<VisibleQueueDeliveryStanding> {
 fn logical_delivery_snapshots_are_sender_filtered_replayable_and_idempotent() {
     let fixture = NexusFixture::new();
     let target = address(Model::Sol);
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: target.clone(),
-        state: State::Asleep,
+        permaflow_state: State::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
@@ -548,9 +548,9 @@ fn a_claude_turn_end_recorded_before_confirmation_is_honoured_at_it() {
     let first = from_core("first-request-body");
     claude_seat(&fixture, 40_000);
     // Not yet confirmed: no metaflow is Awake as the seat.
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: address(Model::Sol),
-        state: State::Asleep,
+        permaflow_state: State::Asleep,
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![queue_entry(&first)]),
     });
@@ -560,9 +560,9 @@ fn a_claude_turn_end_recorded_before_confirmation_is_honoured_at_it() {
     assert_eq!(typed_count(&fixture, "first-request-body"), 0);
 
     // Confirmation records it Awake and notes its recorded turn end.
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: address(Model::Sol),
-        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![queue_entry(&first)]),
     });
@@ -589,9 +589,9 @@ fn a_foreign_stop_before_confirmation_is_not_a_turn_end() {
     claude_seat(&fixture, 40_000);
     // The seat took its first request's prompt: it is in its turn.
     super::waking::claude_prompt_taken(&fixture);
-    fixture.nexus.store.seed_metaflow(Metaflow {
+    fixture.nexus.store.seed_metaflow(Permaflow {
         address: address(Model::Sol),
-        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        permaflow_state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![queue_entry(&first)]),
     });

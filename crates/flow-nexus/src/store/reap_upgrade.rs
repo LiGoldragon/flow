@@ -191,7 +191,7 @@ trait OwnsUpgradedReap {
     fn owned_as_stands(
         self,
         successor: Option<&signal_flow::FlowId>,
-        state: Option<&flow_ethos::State>,
+        state: Option<&flow_ethos::PermaflowState>,
     ) -> PendingReap;
 }
 
@@ -199,16 +199,16 @@ impl OwnsUpgradedReap for PendingReap {
     fn owned_as_stands(
         self,
         successor: Option<&signal_flow::FlowId>,
-        state: Option<&flow_ethos::State>,
+        state: Option<&flow_ethos::PermaflowState>,
     ) -> PendingReap {
         let reap_responsibility = match state {
-            Some(flow_ethos::State::Awake(awake)) if Some(awake) == successor => {
+            Some(flow_ethos::PermaflowState::Awake(awake)) if Some(awake) == successor => {
                 ReapResponsibility::LaunchSuccessor
             }
-            Some(flow_ethos::State::Awake(awake)) => {
+            Some(flow_ethos::PermaflowState::Awake(awake)) => {
                 ReapResponsibility::TakenOver(Responsible(awake.clone()))
             }
-            Some(flow_ethos::State::Asleep) | None => ReapResponsibility::AddressHeld,
+            Some(flow_ethos::PermaflowState::Asleep) | None => ReapResponsibility::AddressHeld,
         };
         PendingReap {
             reap_responsibility,
@@ -358,7 +358,7 @@ impl UpgradesReapMemory for FlowStore {
                     .records()
                     .iter()
                     .find(|stored| stored.metaflow.address == reap.address)
-                    .map(|stored| stored.metaflow.state.clone());
+                    .map(|stored| stored.metaflow.permaflow_state.clone());
                 reap.owned_as_stands(successor.as_ref(), state.as_ref())
             });
             outcomes.push(StoredLaunchOutcome {

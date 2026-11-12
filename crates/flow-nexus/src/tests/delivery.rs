@@ -96,13 +96,13 @@ impl NexusFixture {
             aspect: signal_flow::Aspect::Psyche,
             model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
         });
-        self.nexus.store.seed_metaflow(signal_flow::Metaflow {
+        self.nexus.store.seed_metaflow(signal_flow::Permaflow {
             address: signal_flow::Address {
                 aspect: signal_flow::Aspect::Psyche,
                 topic: flow_ethos::Topic("flow".into()),
                 model: signal_flow::Model::Opus,
             },
-            state: flow_ethos::State::Awake(flow_ethos::FlowId("908786".into())),
+            permaflow_state: flow_ethos::PermaflowState::Awake(flow_ethos::FlowId("908786".into())),
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(vec![]),
         });

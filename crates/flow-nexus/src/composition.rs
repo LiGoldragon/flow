@@ -240,7 +240,7 @@ impl RendersLaunchSection for LaunchProfile {
     fn launch_section(&self, flow_id: Option<&str>) -> String {
         let address = self.address.datomize(Vec::new()).protosize().compact();
         let mut section = format!(
-            "Metaflow: {address}\nModel: {}\nEffort: {}\nFlow ID: {}\nNative binding: pending\n",
+            "Permaflow: {address}\nModel: {}\nEffort: {}\nFlow ID: {}\nNative binding: pending\n",
             self.model_name.0,
             self.effort.0,
             flow_id.unwrap_or("pending"),
@@ -1319,7 +1319,7 @@ pub(crate) mod tests {
             "Carry the bounded task."
         )));
         assert!(composed.system_prompt.system_prompt_text.0.contains(
-            "Metaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
+            "Permaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
         ));
         assert!(!body.0.contains("Role: Field Medium"));
         assert!(!body.0.contains('$'));
@@ -1362,7 +1362,7 @@ pub(crate) mod tests {
                         )
                         .unwrap();
                     let identity = format!(
-                        "Metaflow: {{ {aspect_name} coreTopic {model_name} }}\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
+                        "Permaflow: {{ {aspect_name} coreTopic {model_name} }}\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
                     );
                     assert!(
                         composed

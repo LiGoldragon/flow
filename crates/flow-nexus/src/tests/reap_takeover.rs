@@ -348,7 +348,7 @@ fn a_settle_unrecorded_reap_is_settled_by_its_successors_stop() {
                 .unwrap()
                 .unwrap()
                 .state,
-            flow_ethos::State::Asleep
+            flow_ethos::PermaflowState::Asleep
         );
         assert!(world.row().is_none());
         assert!(replaced_p_by_s(world.outcome()));
@@ -2139,12 +2139,12 @@ fn copy_launch_rows(
     // The metaflow, written through a store over the copy.
     let store = crate::store::FlowStore::open_configured(to).expect("the copy opens");
     use crate::store::metaflow::SeedsMetaflow;
-    store.seed_metaflow(signal_flow::Metaflow {
+    store.seed_metaflow(signal_flow::Permaflow {
         address: address.clone(),
-        state: match stands {
-            "awake as the successor" => flow_ethos::State::Awake(FlowId(SUCCESSOR.into())),
-            "awake as another" => flow_ethos::State::Awake(FlowId(LATER.into())),
-            _ => flow_ethos::State::Asleep,
+        permaflow_state: match stands {
+            "awake as the successor" => flow_ethos::PermaflowState::Awake(FlowId(SUCCESSOR.into())),
+            "awake as another" => flow_ethos::PermaflowState::Awake(FlowId(LATER.into())),
+            _ => flow_ethos::PermaflowState::Asleep,
         },
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
@@ -2170,9 +2170,9 @@ fn an_ordered_launch_after_an_end_takes_the_address_held_reap_over() {
     // was put to sleep.
     {
         let store = &fixture.nexus.store;
-        store.seed_metaflow(signal_flow::Metaflow {
+        store.seed_metaflow(signal_flow::Permaflow {
             address: at.clone(),
-            state: flow_ethos::State::Awake(FlowId("abc123".into())),
+            permaflow_state: flow_ethos::PermaflowState::Awake(FlowId("abc123".into())),
             past: flow_ethos::Past(vec![]),
             queue: flow_ethos::Queue(vec![]),
         });
@@ -2224,7 +2224,8 @@ fn an_ordered_launch_after_an_end_takes_the_address_held_reap_over() {
     let attempts = fixture.nexus.store.faults.attempts().len();
     fixture.nexus.wake_due(at.clone());
     let store = &fixture.nexus.store;
-    let flow_ethos::State::Awake(started) = store.metaflow(&at).unwrap().unwrap().state else {
+    let flow_ethos::PermaflowState::Awake(started) = store.metaflow(&at).unwrap().unwrap().state
+    else {
         panic!("the ordered launch starts; Herdr calls: {}", world.calls());
     };
     assert_ne!(started.0, "abc123");

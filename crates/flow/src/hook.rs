@@ -65,6 +65,52 @@ use signal_flow::{
 };
 use std::{env, io::Read, process::ExitCode};
 
+/// Local diagnostics carry the metadata of a Report, independently of its transport.
+#[derive(datom_codec::Datomizable, datom_codec::Composing)]
+struct HookReportMetadata {
+    flow_id: signal_flow::FlowId,
+    process_option: Option<signal_flow::Process>,
+    hook_event_metadata: HookEventMetadata,
+}
+
+#[derive(datom_codec::Datomizable, datom_codec::Composing)]
+enum HookEventMetadata {
+    Started(Option<signal_flow::NativeSessionId>),
+    ToolUsed(String),
+    Stopped(HookStopMetadata),
+    PromptSubmitted(NativePrompt),
+    Ended(Option<signal_flow::NativeSessionId>),
+    Cleared(Option<signal_flow::NativeSessionId>),
+}
+
+#[derive(datom_codec::Datomizable, datom_codec::Composing)]
+struct HookStopMetadata {
+    native_session_id_option: Option<signal_flow::NativeSessionId>,
+    transcript_path_option: Option<signal_flow::TranscriptPath>,
+    background_work: BackgroundWork,
+}
+
+trait DescribesHookMetadata {
+    fn metadata(&self) -> HookEventMetadata;
+}
+
+impl DescribesHookMetadata for Event {
+    fn metadata(&self) -> HookEventMetadata {
+        match self {
+            Self::Started(session) => HookEventMetadata::Started(session.clone()),
+            Self::ToolUsed(tool) => HookEventMetadata::ToolUsed(tool.clone()),
+            Self::Stopped(stop) => HookEventMetadata::Stopped(HookStopMetadata {
+                native_session_id_option: stop.native_session_id_option.clone(),
+                transcript_path_option: stop.transcript_path_option.clone(),
+                background_work: stop.background_work.clone(),
+            }),
+            Self::PromptSubmitted(prompt) => HookEventMetadata::PromptSubmitted(prompt.clone()),
+            Self::Ended(session) => HookEventMetadata::Ended(session.clone()),
+            Self::Cleared(session) => HookEventMetadata::Cleared(session.clone()),
+        }
+    }
+}
+
 /// One hook invocation: the event Claude Code wrote, the flow it ran in,
 /// and the birth of the harness that ran it.
 struct HarnessHook {
@@ -416,7 +462,15 @@ impl ReportsThroughCli for HarnessHook {
                 );
             }
         };
-        let datom = query.datomize(vec![]).protosize().compact();
+        let Query::Report(report) = &query else {
+            unreachable!("a hook call constructs only a Report");
+        };
+        let metadata = HookReportMetadata {
+            flow_id: report.flow_id.clone(),
+            process_option: report.process_option.clone(),
+            hook_event_metadata: report.event.metadata(),
+        };
+        let datom = metadata.datomize(vec![]).protosize().compact();
         let Some(configuration) = &self.configuration else {
             return (
                 format!(

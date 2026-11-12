@@ -32,3 +32,29 @@ pub struct SeatBirth {
     pub herdr_route: signal_flow::HerdrRoute,
     pub process: signal_flow::Process,
 }
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct RecordedStop {
+    pub native_session_id_option: std::option::Option<signal_flow::NativeSessionId>,
+    pub transcript_path_option: std::option::Option<signal_flow::TranscriptPath>,
+    pub background_work: signal_flow::BackgroundWork,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum RecordedHarnessEvent {
+    Started(std::option::Option<signal_flow::NativeSessionId>),
+    ToolUsed(String),
+    Stopped(RecordedStop),
+    PromptSubmitted(signal_flow::NativePrompt),
+    Ended(std::option::Option<signal_flow::NativeSessionId>),
+    Cleared(std::option::Option<signal_flow::NativeSessionId>),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct FlowEvents {
+    pub flow_id: signal_flow::FlowId,
+    pub recorded_harness_event_vector: std::vec::Vec<RecordedHarnessEvent>,
+}

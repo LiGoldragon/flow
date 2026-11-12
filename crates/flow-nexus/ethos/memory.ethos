@@ -7,11 +7,22 @@
 ; an event of the seat it replaced is told from the seat's own.
 
 Memory
-[ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection FlowId HerdrRoute Process ]
+[ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection FlowId HerdrRoute Process NativeSessionId TranscriptPath BackgroundWork NativePrompt ]
   flow_nexus:[ LaunchedRecord ReplacedRecord ] ]
 [ LaunchOutcome.[ Started.LaunchedRecord
                   Replaced.ReplacedRecord
                   StartRejected.StartRejection
                   ReplaceRejected.ReplaceRejection ]
   Replacement.{ LaunchRequestId Predecessor.String }
-  SeatBirth.{ FlowId HerdrRoute Process } ]
+  SeatBirth.{ FlowId HerdrRoute Process }
+  ; A recorded Stop holds its correlation and background-work metadata.
+  RecordedStop.{ Option<NativeSessionId> Option<TranscriptPath> BackgroundWork }
+  ; Harness metadata in report order, independent of transient transport.
+  RecordedHarnessEvent.[ Started.Option<NativeSessionId>
+                         ToolUsed.String
+                         Stopped.RecordedStop
+                         PromptSubmitted.NativePrompt
+                         Ended.Option<NativeSessionId>
+                         Cleared.Option<NativeSessionId> ]
+  ; One flow's durable metadata; its original key is preserved exactly.
+  FlowEvents.{ FlowId Vector<RecordedHarnessEvent> } ]

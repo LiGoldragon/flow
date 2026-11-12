@@ -986,15 +986,17 @@ impl BecomesCurrentWithRequestIds for old_flow::Metaflow {
 /// A 0.53.2 harness event as 0.53.3 holds it: a Stop carries no background
 /// work, as every v4 Stop was read as its flow's rest.
 impl BecomesCurrent for old_signal::Event {
-    type Current = signal_flow::Event;
-    fn current(&self) -> Result<signal_flow::Event, StoreError> {
+    type Current = super::events::RecordedHarnessEvent;
+    fn current(&self) -> Result<super::events::RecordedHarnessEvent, StoreError> {
         Ok(match self {
-            old_signal::Event::Started(session) => {
-                signal_flow::Event::Started(session.clone().map(signal_flow::NativeSessionId))
+            old_signal::Event::Started(session) => super::events::RecordedHarnessEvent::Started(
+                session.clone().map(signal_flow::NativeSessionId),
+            ),
+            old_signal::Event::ToolUsed(tool) => {
+                super::events::RecordedHarnessEvent::ToolUsed(tool.clone())
             }
-            old_signal::Event::ToolUsed(tool) => signal_flow::Event::ToolUsed(tool.clone()),
             old_signal::Event::Stopped(stop) => {
-                signal_flow::Event::Stopped(signal_flow::NativeStop {
+                super::events::RecordedHarnessEvent::Stopped(super::events::RecordedStop {
                     native_session_id_option: stop
                         .native_session_id_option
                         .clone()
@@ -1003,14 +1005,11 @@ impl BecomesCurrent for old_signal::Event {
                         .transcript_path_option
                         .clone()
                         .map(signal_flow::TranscriptPath),
-                    last_assistant_message_option: signal_flow::LastAssistantMessageOption(
-                        stop.last_assistant_message_option.clone(),
-                    ),
                     background_work: signal_flow::BackgroundWork(Vec::new()),
                 })
             }
             old_signal::Event::PromptSubmitted(prompt) => {
-                signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
+                super::events::RecordedHarnessEvent::PromptSubmitted(signal_flow::NativePrompt {
                     native_session_id_option: prompt
                         .native_session_id_option
                         .clone()
@@ -1019,12 +1018,12 @@ impl BecomesCurrent for old_signal::Event {
                     prompt_sha256: signal_flow::PromptSha256(prompt.prompt_sha256.clone()),
                 })
             }
-            old_signal::Event::Ended(session) => {
-                signal_flow::Event::Ended(session.clone().map(signal_flow::NativeSessionId))
-            }
-            old_signal::Event::Cleared(session) => {
-                signal_flow::Event::Cleared(session.clone().map(signal_flow::NativeSessionId))
-            }
+            old_signal::Event::Ended(session) => super::events::RecordedHarnessEvent::Ended(
+                session.clone().map(signal_flow::NativeSessionId),
+            ),
+            old_signal::Event::Cleared(session) => super::events::RecordedHarnessEvent::Cleared(
+                session.clone().map(signal_flow::NativeSessionId),
+            ),
         })
     }
 }
@@ -1033,8 +1032,8 @@ impl BecomesCurrent for PriorFlowEvents {
     type Current = super::events::FlowEvents;
     fn current(&self) -> Result<super::events::FlowEvents, StoreError> {
         Ok(super::events::FlowEvents {
-            flow_id: self.flow_id.clone(),
-            event_vector: self
+            flow_id: signal_flow::FlowId(self.flow_id.clone()),
+            recorded_harness_event_vector: self
                 .event_vector
                 .iter()
                 .map(BecomesCurrent::current)
@@ -2617,7 +2616,7 @@ mod tests {
     }
 
     /// A 0.53.2 Memory's harness events (events v4) evolve with the rest of
-    /// it into events v5: every stored Stop carries no background work, and
+    /// it into events v6: every stored Stop carries no background work, and
     /// every other event, and their order, is kept.
     #[test]
     fn the_events_migration_converts_a_stored_v4_stop() {
@@ -2687,7 +2686,7 @@ mod tests {
             .expect("events evolution commits");
         let table = engine
             .register_table(flow_events)
-            .expect("events v5 register");
+            .expect("events v6 register");
         let rows = engine
             .match_records(QueryPlan::all(table))
             .expect("events read");
@@ -2697,32 +2696,33 @@ mod tests {
         assert_eq!(
             *row,
             FlowEvents {
-                flow_id: "5a4d0b".into(),
-                event_vector: vec![
-                    signal_flow::Event::Started(Some(signal_flow::NativeSessionId(
-                        "c0ffee00-0000-4000-8000-000000000001".into()
-                    ))),
-                    signal_flow::Event::ToolUsed("Bash".into()),
-                    signal_flow::Event::Stopped(signal_flow::NativeStop {
-                        native_session_id_option: Some(signal_flow::NativeSessionId(
-                            "c0ffee00-0000-4000-8000-000000000001".into()
-                        )),
-                        transcript_path_option: Some(signal_flow::TranscriptPath(
-                            "/t/c0ffee00.jsonl".into()
-                        )),
-                        last_assistant_message_option: signal_flow::LastAssistantMessageOption(
-                            Some("done".into())
-                        ),
-                        background_work: signal_flow::BackgroundWork(vec![]),
-                    }),
-                    signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
-                        native_session_id_option: Some(signal_flow::NativeSessionId(
-                            "c0ffee00-0000-4000-8000-000000000001".into()
-                        )),
-                        prompt_id_option: None,
-                        prompt_sha256: signal_flow::PromptSha256("ab12".into()),
-                    }),
-                    signal_flow::Event::Cleared(None),
+                flow_id: signal_flow::FlowId("5a4d0b".into()),
+                recorded_harness_event_vector: vec![
+                    super::super::events::RecordedHarnessEvent::Started(Some(
+                        signal_flow::NativeSessionId("c0ffee00-0000-4000-8000-000000000001".into())
+                    )),
+                    super::super::events::RecordedHarnessEvent::ToolUsed("Bash".into()),
+                    super::super::events::RecordedHarnessEvent::Stopped(
+                        super::super::events::RecordedStop {
+                            native_session_id_option: Some(signal_flow::NativeSessionId(
+                                "c0ffee00-0000-4000-8000-000000000001".into()
+                            )),
+                            transcript_path_option: Some(signal_flow::TranscriptPath(
+                                "/t/c0ffee00.jsonl".into()
+                            )),
+                            background_work: signal_flow::BackgroundWork(vec![]),
+                        }
+                    ),
+                    super::super::events::RecordedHarnessEvent::PromptSubmitted(
+                        signal_flow::NativePrompt {
+                            native_session_id_option: Some(signal_flow::NativeSessionId(
+                                "c0ffee00-0000-4000-8000-000000000001".into()
+                            )),
+                            prompt_id_option: None,
+                            prompt_sha256: signal_flow::PromptSha256("ab12".into()),
+                        }
+                    ),
+                    super::super::events::RecordedHarnessEvent::Cleared(None),
                 ],
             }
         );

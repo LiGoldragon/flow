@@ -11,6 +11,7 @@ pub mod context;
 pub(crate) mod counters;
 mod created_pane;
 pub mod delivery;
+mod event_upgrade;
 pub mod events;
 pub(crate) mod handover;
 pub(crate) mod handover_configuration;
@@ -1620,6 +1621,8 @@ pub enum StoreError {
     HandoverConfigurationUpgrade(String),
     #[error("0.54.2 Memory upgrade failed: {0}")]
     LivingUpgrade(String),
+    #[error("harness event Memory upgrade failed: {0}")]
+    EventUpgrade(String),
     #[error("heartbeat period must be positive")]
     InvalidHeartbeatPeriod,
     #[error("store path must be an absolute file path")]
@@ -2712,6 +2715,7 @@ impl OpensFlowStore for FlowStore {
                 &logical_delivery::SystemRequestIdDrawer,
             )?;
         }
+        <FlowStore as event_upgrade::UpgradesEventMemory>::upgrade_event_memory(&mut engine)?;
         // What 0.54.2 stored is upgraded before anything is registered.
         <FlowStore as living_upgrade::UpgradesBeforeLiving>::upgrade_running_before_living(
             &mut engine,
@@ -5437,7 +5441,12 @@ pub(crate) trait ReadsFlowMemory {
                     && identity.family().as_str() == family
                     && identity.schema_hash() == schema_hash
             });
+        let before_event_metadata = table_key == "flow_nexus_flow_events"
+            && identity.table_name() == table_key
+            && identity.family().as_str() == events::FLOW_EVENT_FAMILY
+            && identity.schema_hash() == SchemaHash::for_label("flow-nexus-flow-events-v5");
         before_living
+            || before_event_metadata
             || FlowStore::current_flow_family_identity(table_key).is_some_and(
                 |(family, schema_hash)| {
                     let predecessor_handover = table_key == OPTIONAL_HANDOVER_TABLE

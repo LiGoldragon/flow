@@ -5276,7 +5276,19 @@ mod tests {
                 ))),
             meta_signal_flow::Response::EventsRead(meta_signal_flow::EventsRead_Data {
                 flow_id: flow_ethos::FlowId("908786".into()),
-                event_vector: vec![Event::Started(None), Event::ToolUsed("Bash".into()), stop],
+                harness_event_metadata_vector: vec![
+                    Event::Started(None),
+                    Event::ToolUsed("Bash".into()),
+                    stop
+                ]
+                .iter()
+                .map(|event| {
+                    use crate::store::events::{
+                        ProjectsHarnessEventMetadata, ProjectsRecordedHarnessEvent,
+                    };
+                    event.recorded().metadata()
+                })
+                .collect(),
             })
         );
     }

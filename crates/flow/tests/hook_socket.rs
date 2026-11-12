@@ -81,7 +81,7 @@ fn the_hook_reports_only_to_its_typed_socket_configuration() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "Stop\tReport.{ 5a4d0b None Stopped.{ Some.s Some./t/s.jsonl None [] } }\t0\tReported\n"
+        "Stop\t{ 5a4d0b None Stopped.{ Some.s Some./t/s.jsonl [] } }\t0\tReported\n"
     );
     assert!(!runtime.join("flow/flow.sock").exists());
 }

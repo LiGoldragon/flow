@@ -21,6 +21,7 @@ use crate::store::ManagesMetaflowState;
 use crate::store::NamesLiveFlow;
 use crate::store::ReadsLaunchInspectionRecords;
 use crate::store::address_hold::HoldsLaunchAddress;
+use crate::store::events::RecordedHarnessEvent;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::metaflow::TakesLaunchAddress;
 use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
@@ -41,7 +42,7 @@ use crate::{
     },
 };
 use signal_flow::{
-    Address, BindingRefusal, ComposedLaunch, EndpointSelection, Event, FlowLifecycle, FlowNode,
+    Address, BindingRefusal, ComposedLaunch, EndpointSelection, FlowLifecycle, FlowNode,
     HarnessKind, HerdrRoute, HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase,
     LaunchAttemptReservation, LaunchInspection, LaunchProfile, LaunchStatusRejection, Launched,
     NativeLaunchFailure, NativeLaunchIntent, NativeLaunchRefusal, NativeLaunchStage, Origin,
@@ -72,7 +73,7 @@ impl InterpretsLaunchObservations for RunningNexus {
                 events
                     .iter()
                     .filter(|event| {
-                        matches!(event, Event::Stopped(stop)
+                        matches!(event, RecordedHarnessEvent::Stopped(stop)
                 if session.is_empty() || stop.native_session_id_option.as_ref().map(|value| value.0.as_str())
                     .is_none_or(|stopped| stopped == session))
                     })

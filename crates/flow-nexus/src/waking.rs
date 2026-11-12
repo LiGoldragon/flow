@@ -115,7 +115,9 @@ use crate::send_tool::ServesLaunchCalls;
 use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
+use crate::store::events::RecordedHarnessEvent;
 use crate::store::events::RecordsHarnessEvents;
+use crate::store::events::{IdentifiesNativeStop, RecordedStop};
 use crate::store::handover::HoldsHandovers;
 use crate::store::logical_delivery::{
     CorePresentationRoute, RecordsLogicalDeliveries, SimplifiedReplyBinding,
@@ -137,8 +139,8 @@ use crate::store::{
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
 use signal_flow::{
-    Address, AgentState, Event, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
-    Metaflow, NativePrompt, NativeStop, Origin, QueueEntry, Response,
+    Address, AgentState, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
+    Metaflow, NativePrompt, Origin, QueueEntry, Response,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -855,11 +857,12 @@ impl ReadsClaudeDelivery for RunningNexus {
         let Ok(events) = self.store.events(&node.flow_id.0) else {
             return false;
         };
-        if events
-            .unwrap_or_default()
-            .iter()
-            .any(|event| matches!(event, Event::PromptSubmitted(_) | Event::Stopped(_)))
-        {
+        if events.unwrap_or_default().iter().any(|event| {
+            matches!(
+                event,
+                RecordedHarnessEvent::PromptSubmitted(_) | RecordedHarnessEvent::Stopped(_)
+            )
+        }) {
             return false;
         }
         self.claude_transcript(node)
@@ -1021,7 +1024,7 @@ impl QueuesSimplifiedAnswers for RunningNexus {
 /// that session's own transcript, is taken for the flow's.
 pub(crate) trait CorrelatesNativeEvents {
     /// The flow's own Claude turn end.
-    fn correlated_stop(&self, flow_id: &str, stop: &NativeStop) -> bool;
+    fn correlated_stop(&self, flow_id: &str, stop: &impl IdentifiesNativeStop) -> bool;
     /// A prompt the flow's own Claude session took.
     fn correlated_prompt(&self, flow_id: &str, prompt: &NativePrompt) -> bool;
     /// Of the flow's own Stops and submitted prompts, the last recorded is
@@ -1029,21 +1032,17 @@ pub(crate) trait CorrelatesNativeEvents {
     fn turn_end_recorded(&self, flow_id: &str) -> bool;
     /// That last Stop, when the last of the flow's own Stops and submitted
     /// prompts is a Stop.
-    fn last_turn_end(&self, flow_id: &str) -> Option<NativeStop>;
+    fn last_turn_end(&self, flow_id: &str) -> Option<RecordedStop>;
 }
 
 impl CorrelatesNativeEvents for RunningNexus {
-    fn correlated_stop(&self, flow_id: &str, stop: &NativeStop) -> bool {
+    fn correlated_stop(&self, flow_id: &str, stop: &impl IdentifiesNativeStop) -> bool {
         let Ok(Some(node)) = self.store.flow_node(flow_id) else {
             return false;
         };
         let (Some(session), Some(reported)) = (
-            stop.native_session_id_option
-                .as_ref()
-                .map(|value| value.0.as_str()),
-            stop.transcript_path_option
-                .as_ref()
-                .map(|value| value.0.as_str()),
+            stop.native_session().map(|value| value.0.as_str()),
+            stop.transcript_path().map(|value| value.0.as_str()),
         ) else {
             return false;
         };
@@ -1076,7 +1075,7 @@ impl CorrelatesNativeEvents for RunningNexus {
         self.last_turn_end(flow_id).is_some()
     }
 
-    fn last_turn_end(&self, flow_id: &str) -> Option<NativeStop> {
+    fn last_turn_end(&self, flow_id: &str) -> Option<RecordedStop> {
         let Ok(Some(events)) = self.store.events(flow_id) else {
             return None;
         };
@@ -1084,13 +1083,16 @@ impl CorrelatesNativeEvents for RunningNexus {
             .into_iter()
             .rev()
             .find_map(|event| match event {
-                Event::Stopped(stop) => self.correlated_stop(flow_id, &stop).then_some(Some(stop)),
-                Event::PromptSubmitted(prompt) => {
+                RecordedHarnessEvent::Stopped(stop) => {
+                    self.correlated_stop(flow_id, &stop).then_some(Some(stop))
+                }
+                RecordedHarnessEvent::PromptSubmitted(prompt) => {
                     self.correlated_prompt(flow_id, &prompt).then_some(None)
                 }
-                Event::Started(_) | Event::ToolUsed(_) | Event::Ended(_) | Event::Cleared(_) => {
-                    None
-                }
+                RecordedHarnessEvent::Started(_)
+                | RecordedHarnessEvent::ToolUsed(_)
+                | RecordedHarnessEvent::Ended(_)
+                | RecordedHarnessEvent::Cleared(_) => None,
             })
             .flatten()
     }
@@ -3013,13 +3015,15 @@ impl WakesInParts for RunningNexus {
                     .into_iter()
                     .rev()
                     .find_map(|event| match event {
-                        Event::PromptSubmitted(prompt) => Some(signal_flow::NativeReceipt {
-                            harness_kind: harness_kind.clone()?,
-                            native_session_id: prompt.native_session_id_option?,
-                            native_prompt_id: signal_flow::NativePromptId(
-                                prompt.prompt_id_option?.0,
-                            ),
-                        }),
+                        RecordedHarnessEvent::PromptSubmitted(prompt) => {
+                            Some(signal_flow::NativeReceipt {
+                                harness_kind: harness_kind.clone()?,
+                                native_session_id: prompt.native_session_id_option?,
+                                native_prompt_id: signal_flow::NativePromptId(
+                                    prompt.prompt_id_option?.0,
+                                ),
+                            })
+                        }
                         _ => None,
                     })
             });

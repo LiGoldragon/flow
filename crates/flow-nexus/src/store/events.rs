@@ -16,34 +16,97 @@
 //! carrying no background work: a v4 Stop was read as the flow's rest.
 
 use super::{FlowStore, ReadsFlowStore, StoreError};
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+pub use crate::generated::memory::{FlowEvents, RecordedHarnessEvent, RecordedStop};
 use sema_engine::{
     Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,
     RecordKey, Retraction, SchemaHash, TableDescriptor, TableName, TableReference,
 };
 use signal_flow::Event;
+use signal_flow::{FlowId, NativeSessionId, NativeStop, TranscriptPath};
 use std::sync::Mutex;
 
 pub(super) const FLOW_EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_flow_events");
 pub(super) const FLOW_EVENT_FAMILY: &str = "flow-nexus-flow-events";
-pub(super) const FLOW_EVENT_SCHEMA: &str = "flow-nexus-flow-events-v5";
+pub(super) const FLOW_EVENT_SCHEMA: &str = "flow-nexus-flow-events-v6";
 
-/// One flow's harness events, oldest first.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FlowEvents {
-    pub flow_id: String,
-    pub event_vector: Vec<Event>,
+/// The shared ingress boundary: transport is projected before a durable write.
+pub trait ProjectsRecordedHarnessEvent {
+    fn recorded(&self) -> RecordedHarnessEvent;
+}
+
+/// The Memory-to-wire boundary preserves metadata and order.
+pub trait ProjectsHarnessEventMetadata {
+    fn metadata(&self) -> meta_signal_flow::HarnessEventMetadata;
+}
+
+/// The content-free capability needed by one Stop correlation algorithm.
+pub(crate) trait IdentifiesNativeStop {
+    fn native_session(&self) -> Option<&NativeSessionId>;
+    fn transcript_path(&self) -> Option<&TranscriptPath>;
+}
+
+impl IdentifiesNativeStop for NativeStop {
+    fn native_session(&self) -> Option<&NativeSessionId> {
+        self.native_session_id_option.as_ref()
+    }
+    fn transcript_path(&self) -> Option<&TranscriptPath> {
+        self.transcript_path_option.as_ref()
+    }
+}
+
+impl IdentifiesNativeStop for RecordedStop {
+    fn native_session(&self) -> Option<&NativeSessionId> {
+        self.native_session_id_option.as_ref()
+    }
+    fn transcript_path(&self) -> Option<&TranscriptPath> {
+        self.transcript_path_option.as_ref()
+    }
+}
+
+impl ProjectsRecordedHarnessEvent for Event {
+    fn recorded(&self) -> RecordedHarnessEvent {
+        match self {
+            Self::Started(session) => RecordedHarnessEvent::Started(session.clone()),
+            Self::ToolUsed(tool) => RecordedHarnessEvent::ToolUsed(tool.clone()),
+            Self::Stopped(stop) => RecordedHarnessEvent::Stopped(RecordedStop {
+                native_session_id_option: stop.native_session_id_option.clone(),
+                transcript_path_option: stop.transcript_path_option.clone(),
+                background_work: stop.background_work.clone(),
+            }),
+            Self::PromptSubmitted(prompt) => RecordedHarnessEvent::PromptSubmitted(prompt.clone()),
+            Self::Ended(session) => RecordedHarnessEvent::Ended(session.clone()),
+            Self::Cleared(session) => RecordedHarnessEvent::Cleared(session.clone()),
+        }
+    }
+}
+
+impl ProjectsHarnessEventMetadata for RecordedHarnessEvent {
+    fn metadata(&self) -> meta_signal_flow::HarnessEventMetadata {
+        use meta_signal_flow::{HarnessEventMetadata, StopMetadata};
+        match self {
+            Self::Started(session) => HarnessEventMetadata::Started(session.clone()),
+            Self::ToolUsed(tool) => HarnessEventMetadata::ToolUsed(tool.clone()),
+            Self::Stopped(stop) => HarnessEventMetadata::Stopped(StopMetadata {
+                native_session_id_option: stop.native_session_id_option.clone(),
+                transcript_path_option: stop.transcript_path_option.clone(),
+                background_work: stop.background_work.clone(),
+            }),
+            Self::PromptSubmitted(prompt) => HarnessEventMetadata::PromptSubmitted(prompt.clone()),
+            Self::Ended(session) => HarnessEventMetadata::Ended(session.clone()),
+            Self::Cleared(session) => HarnessEventMetadata::Cleared(session.clone()),
+        }
+    }
 }
 
 impl EngineRecord for FlowEvents {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.flow_id.clone())
+        RecordKey::new(self.flow_id.0.clone())
     }
 }
 
 impl MemoryDefinition for FlowEvents {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(5)
+        MemoryVersion::new(6)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -63,6 +126,7 @@ impl DescribesEventTable for FlowEvents {
             SchemaHash::for_label(FLOW_EVENT_SCHEMA),
         )
         .with_predecessor::<super::request_id_upgrade::PriorFlowEvents>()
+        .with_predecessor::<super::event_upgrade::FlowEventsV5>()
     }
 }
 
@@ -108,7 +172,7 @@ pub trait RecordsHarnessEvents {
     fn record_event(&self, flow_id: &str, event: Event) -> Result<EventRecording, StoreError>;
     /// The flow's events, oldest first; `None` when Flow does not hold the
     /// flow, an empty vector when it holds it and nothing was reported.
-    fn events(&self, flow_id: &str) -> Result<Option<Vec<Event>>, StoreError>;
+    fn events(&self, flow_id: &str) -> Result<Option<Vec<RecordedHarnessEvent>>, StoreError>;
 }
 
 trait ReadsEventRow {
@@ -140,13 +204,14 @@ impl RecordsHarnessEvents for FlowStore {
             .append_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let event = event.recorded();
         let row = self.event_row(flow_id)?;
         if row.is_none() && self.flow(flow_id)?.is_none() {
             return Ok(EventRecording::UnknownFlow);
         }
         match row {
             Some(mut row) => {
-                row.event_vector.push(event);
+                row.recorded_harness_event_vector.push(event);
                 self.engine.mutate_keyed(KeyedMutation::new(
                     self.event_tables.events,
                     RecordKey::new(flow_id),
@@ -157,8 +222,8 @@ impl RecordsHarnessEvents for FlowStore {
                 self.engine.assert(Assertion::new(
                     self.event_tables.events,
                     FlowEvents {
-                        flow_id: flow_id.into(),
-                        event_vector: vec![event],
+                        flow_id: FlowId(flow_id.into()),
+                        recorded_harness_event_vector: vec![event],
                     },
                 ))?;
             }
@@ -166,9 +231,9 @@ impl RecordsHarnessEvents for FlowStore {
         Ok(EventRecording::Recorded)
     }
 
-    fn events(&self, flow_id: &str) -> Result<Option<Vec<Event>>, StoreError> {
+    fn events(&self, flow_id: &str) -> Result<Option<Vec<RecordedHarnessEvent>>, StoreError> {
         match self.event_row(flow_id)? {
-            Some(row) => Ok(Some(row.event_vector)),
+            Some(row) => Ok(Some(row.recorded_harness_event_vector)),
             None if self.flow(flow_id)?.is_some() => Ok(Some(Vec::new())),
             None => Ok(None),
         }
@@ -184,8 +249,8 @@ impl RecordsHarnessEvents for FlowStore {
             self.engine.assert(Assertion::new(
                 self.event_tables.events,
                 FlowEvents {
-                    flow_id: flow_id.into(),
-                    event_vector: Vec::new(),
+                    flow_id: FlowId(flow_id.into()),
+                    recorded_harness_event_vector: Vec::new(),
                 },
             ))?;
         }
@@ -210,7 +275,7 @@ impl RecordsHarnessEvents for FlowStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventRecording, RecordsHarnessEvents};
+    use super::{EventRecording, ProjectsRecordedHarnessEvent, RecordsHarnessEvents};
     use crate::store::{FlowStore, OpensFlowStore, RegistersFlowIdentity};
     use signal_flow::{
         EndpointSelection, Event, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
@@ -291,7 +356,15 @@ mod tests {
             );
         }
         let store = FlowStore::open(&path).unwrap();
-        assert_eq!(store.events("5a4d0b").unwrap(), Some(events()));
+        assert_eq!(
+            store.events("5a4d0b").unwrap(),
+            Some(
+                events()
+                    .iter()
+                    .map(ProjectsRecordedHarnessEvent::recorded)
+                    .collect()
+            )
+        );
         assert_eq!(store.events("0a0a0a").unwrap(), None);
     }
 
@@ -324,7 +397,65 @@ mod tests {
         assert_eq!(store.events("0b0b0b").unwrap(), None);
         assert_eq!(
             store.events("5a4d0b").unwrap(),
-            Some(vec![Event::Started(None)])
+            Some(vec![Event::Started(None).recorded()])
+        );
+    }
+    #[test]
+    fn every_assistant_payload_is_removed_before_append_and_after_reopen() {
+        use super::{ReadsEventRow, RecordedHarnessEvent, RecordedStop};
+        use signal_flow::{
+            BackgroundTask, BackgroundTaskId, BackgroundTaskKind, BackgroundTaskStatus,
+            BackgroundWork, Description, NativeSessionId, TranscriptPath,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("events.sema");
+        let work = BackgroundWork(vec![BackgroundTask {
+            background_task_id: BackgroundTaskId("job".into()),
+            background_task_kind: BackgroundTaskKind::Other("future-kind".into()),
+            background_task_status: BackgroundTaskStatus("running".into()),
+            description: Description("metadata description".into()),
+        }]);
+        let expected = RecordedHarnessEvent::Stopped(RecordedStop {
+            native_session_id_option: Some(NativeSessionId("session".into())),
+            transcript_path_option: Some(TranscriptPath("/t/session".into())),
+            background_work: work.clone(),
+        });
+        let marker = "assistant-only-marker-雪";
+        let payloads = [
+            None,
+            Some(String::new()),
+            Some(marker.into()),
+            Some(marker.repeat(16_384)),
+        ];
+        {
+            let store = FlowStore::open(&path).unwrap();
+            store.register_flow(node()).unwrap();
+            for payload in payloads {
+                let event = Event::Stopped(signal_flow::NativeStop {
+                    native_session_id_option: Some(NativeSessionId("session".into())),
+                    transcript_path_option: Some(TranscriptPath("/t/session".into())),
+                    last_assistant_message_option: signal_flow::LastAssistantMessageOption(payload),
+                    background_work: work.clone(),
+                });
+                store.record_event("5a4d0b", event).unwrap();
+                let row = store.event_row("5a4d0b").unwrap().unwrap();
+                assert_eq!(row.recorded_harness_event_vector.last(), Some(&expected));
+                let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&row).unwrap();
+                assert!(
+                    !archive
+                        .windows(marker.len())
+                        .any(|bytes| bytes == marker.as_bytes())
+                );
+            }
+        }
+        let store = FlowStore::open(&path).unwrap();
+        let row = store.event_row("5a4d0b").unwrap().unwrap();
+        assert_eq!(row.recorded_harness_event_vector, vec![expected; 4]);
+        let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&row).unwrap();
+        assert!(
+            !archive
+                .windows(marker.len())
+                .any(|bytes| bytes == marker.as_bytes())
         );
     }
 }

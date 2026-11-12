@@ -748,7 +748,7 @@ rec {
       };
       "flow" = rec {
         crateName = "flow";
-        version = "0.54.5";
+        version = "0.54.6";
         edition = "2024";
         crateBin = [
           {
@@ -817,7 +817,7 @@ rec {
       };
       "flow-defaults" = rec {
         crateName = "flow-defaults";
-        version = "0.54.5";
+        version = "0.54.6";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/flow-defaults; };
         libName = "flow_defaults";
@@ -825,7 +825,7 @@ rec {
       };
       "flow-ethos" = rec {
         crateName = "flow-ethos";
-        version = "0.54.5";
+        version = "0.54.6";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/flow-ethos; };
         libName = "flow_ethos";
@@ -884,7 +884,7 @@ rec {
       };
       "flow-meta" = rec {
         crateName = "flow-meta";
-        version = "0.54.5";
+        version = "0.54.6";
         edition = "2024";
         crateBin = [
           {
@@ -908,7 +908,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow";
+            packageId = "meta-signal-flow 76.0.0";
             features = [ "datom" ];
           }
           {
@@ -945,7 +945,7 @@ rec {
       };
       "flow-native" = rec {
         crateName = "flow-native";
-        version = "0.54.5";
+        version = "0.54.6";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/flow-native; };
         libName = "flow_native";
@@ -959,7 +959,7 @@ rec {
       };
       "flow-nexus" = rec {
         crateName = "flow-nexus";
-        version = "0.54.5";
+        version = "0.54.6";
         edition = "2024";
         crateBin = [
           {
@@ -1022,7 +1022,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow";
+            packageId = "meta-signal-flow 76.0.0";
             features = [ "datom" ];
           }
           {
@@ -1734,7 +1734,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow";
+            packageId = "meta-signal-flow 75.0.0";
           }
           {
             name = "meta-signal-message";
@@ -1783,7 +1783,7 @@ rec {
         };
         resolvedDefaultFeatures = [ "default" ];
       };
-      "meta-signal-flow" = rec {
+      "meta-signal-flow 75.0.0" = rec {
         crateName = "meta-signal-flow";
         version = "75.0.0";
         edition = "2024";
@@ -1792,6 +1792,50 @@ rec {
           url = "https://github.com/LiGoldragon/meta-signal-flow";
           rev = "e192c0d4338cf3b2381bb37ecb3a177283373db5";
           sha256 = "11xvhv27qxqg685a28g6g10mbwwnwbk89dfx7aw3y4s7ffygdf1x";
+        };
+        libName = "meta_signal_flow";
+        dependencies = [
+          {
+            name = "flow-ethos";
+            packageId = "flow-ethos";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+          {
+            name = "signal";
+            packageId = "signal";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "signal-flow";
+            packageId = "signal-flow";
+          }
+        ];
+        buildDependencies = [
+          {
+            name = "ethos-zero";
+            packageId = "ethos-zero";
+          }
+        ];
+        features = {
+          "datom" = [ "dep:datom-codec" "dep:protos" "flow-ethos/datom" "signal-flow/datom" "signal/datom" ];
+        };
+        resolvedDefaultFeatures = [ "default" ];
+      };
+      "meta-signal-flow 76.0.0" = rec {
+        crateName = "meta-signal-flow";
+        version = "76.0.0";
+        edition = "2024";
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/meta-signal-flow";
+          rev = "3b1f6f0bfa77acd751c17a490db6a24cba728520";
+          sha256 = "12wbnkw93rgcaki3phzc82mx5sb38pfw3pys8k253s4q12qlk952";
         };
         libName = "meta_signal_flow";
         dependencies = [

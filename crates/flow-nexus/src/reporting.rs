@@ -25,6 +25,7 @@ use crate::generated::operation::{
 use crate::performing::Performs;
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::events::RecordsHarnessEvents;
+use crate::store::events::{ProjectsHarnessEventMetadata, RecordedHarnessEvent};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::queue_delivery::{AccountsQueueDelivery, ShowsQueueDelivery};
 use crate::store::{ReadsFlowRows, RebindsNativeSession};
@@ -232,7 +233,10 @@ impl RecordsReports for RunningNexus {
         match self.store.events(&flow_id.0) {
             Ok(Some(event_vector)) => meta_signal_flow::Response::EventsRead(EventsRead_Data {
                 flow_id,
-                event_vector,
+                harness_event_metadata_vector: event_vector
+                    .iter()
+                    .map(ProjectsHarnessEventMetadata::metadata)
+                    .collect(),
             }),
             Ok(None) => {
                 meta_signal_flow::Response::ReadEventsRejected(ReadEventsRejected_Data::UnknownFlow)
@@ -345,12 +349,14 @@ impl FollowsClearedSession for RunningNexus {
             .rev()
             .skip(1)
             .find_map(|earlier| match earlier {
-                Event::Cleared(cleared) => Some(
+                RecordedHarnessEvent::Cleared(cleared) => Some(
                     cleared.as_ref().map(|cleared| cleared.0.as_str())
                         == Some(node.session_id.0.as_str()),
                 ),
-                Event::Started(_) | Event::Ended(_) => Some(false),
-                Event::ToolUsed(_) | Event::Stopped(_) | Event::PromptSubmitted(_) => None,
+                RecordedHarnessEvent::Started(_) | RecordedHarnessEvent::Ended(_) => Some(false),
+                RecordedHarnessEvent::ToolUsed(_)
+                | RecordedHarnessEvent::Stopped(_)
+                | RecordedHarnessEvent::PromptSubmitted(_) => None,
             })
             .unwrap_or(false);
         if !cleared_own {

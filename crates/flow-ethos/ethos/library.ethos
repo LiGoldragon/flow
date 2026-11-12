@@ -44,7 +44,7 @@ Library
             Reminder.{ RequestId String } ]
   ; A logical delivery keeps one identity across queue retries and native
   ; submission; the id names the living's request, not a delivery attempt.
-  LogicalDeliveryId.String
+  LogicalDeliveryId.Integer
   ; The selected request kind and routing policy are common to every
   ; consumer of Flow messages.
   Aspect.[ Psyche Mind Field ]
@@ -61,12 +61,14 @@ Library
   ; What the native surface receives after selection: identity and origin
   ; remain observable, but policy and delivery-attempt metadata do not.
   NativeInput.{ LogicalDeliveryId SentBy Message }
-  ; A metaflow is Awake as its current flow or Asleep: a topic never dies,
-  ; it goes idle, its flows turned off.
-  Metaflow.{ Address
-             State.[ Awake.FlowId Asleep ]
-             Past.Vector<FlowId>
-             Queue.Vector<QueueEntry> }
+  ; A permaflow owns its current run, history and durable request queue.
+  Permaflow.{ Address
+              PermaflowState.[ Awake.FlowId Asleep ]
+              Past.Vector<FlowId>
+              Queue.Vector<QueueEntry> }
+  ; A named cohesion informs visibility; it grants no messaging authority.
+  MetaflowName.String
+  Metaflow.{ MetaflowName Vector<Address> }
   ; A lock: the sender's Address, then the Address it holds, until when.
   Lock.{ Address Address Until.Integer }
   Process.{ Pid.Integer Started.Integer }

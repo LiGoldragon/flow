@@ -449,3 +449,17 @@ ran; `checks.<system>.default` is every member's check, beside `cargo-nix`,
 immutable contract pins. After editing a `Cargo.toml` or `Cargo.lock`,
 regenerate `Cargo.nix` with
 `nix run github:LiGoldragon/build-base#crate2nix -- generate`.
+
+## Harness-event metadata in 0.54.6
+
+Ordinary signal-flow60 Report remains transient transport, including its optional
+assistant message. The shared recording boundary projects every Report into
+Memory6 RecordedHarnessEvent before append. ReadEvents uses meta-signal-flow76
+HarnessEventMetadata: Stop has three positions, session option, transcript-path
+option and BackgroundWork. Hook stderr likewise describes metadata and outcome.
+
+Simplified answers still come from the exact bound native transcript and input
+receipt; the hook message is never their source. Existing v5 event rows and
+supported v4-era Memory upgrade before serving, preserving original row keys,
+metadata and order. This is logical removal from current rows, not physical
+erasure of historical database pages or external transcripts.

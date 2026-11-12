@@ -125,3 +125,98 @@ fn an_undecodable_stop_is_refused_visibly_and_reaches_no_nexus() {
         std::io::ErrorKind::WouldBlock
     );
 }
+
+#[test]
+fn assistant_content_is_transport_only_for_every_diagnostic_outcome() {
+    let marker = "hook-assistant-only-marker-雪";
+    for body in [
+        None,
+        Some(String::new()),
+        Some(marker.into()),
+        Some(marker.repeat(16_384)),
+    ] {
+        for outcome in ["success", "transport-error", "invalid-configuration"] {
+            let root = tempfile::tempdir().unwrap();
+            let socket = root.path().join("flow.sock");
+            let receiver = if outcome == "success" {
+                let listener = UnixListener::bind(&socket).unwrap();
+                Some(std::thread::spawn(move || {
+                    let (mut peer, _) = listener.accept().unwrap();
+                    let mut length = [0; 4];
+                    peer.read_exact(&mut length).unwrap();
+                    let mut bytes = vec![0; u32::from_be_bytes(length) as usize];
+                    peer.read_exact(&mut bytes).unwrap();
+                    let query = rkyv::from_bytes::<signal_flow::Query, rkyv::rancor::Error>(&bytes)
+                        .unwrap();
+                    let reply =
+                        rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Response::Reported)
+                            .unwrap();
+                    peer.write_all(&(reply.len() as u32).to_be_bytes()).unwrap();
+                    peer.write_all(&reply).unwrap();
+                    query
+                }))
+            } else {
+                None
+            };
+            let configuration = if outcome == "invalid-configuration" {
+                "invalid".to_owned()
+            } else {
+                format!("{{ {} }}", socket.display())
+            };
+            let mut child = Command::new(env!("CARGO_BIN_EXE_flow-nexus-hook"))
+                .arg(configuration)
+                .env_clear()
+                .env("FLOW_ID", "5a4d0b")
+                .stdin(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut input = serde_json::json!({
+                "hook_event_name": "Stop", "session_id": "session-metadata",
+                "transcript_path": "/t/session-metadata", "background_tasks": [],
+            });
+            if let Some(body) = &body {
+                input["last_assistant_message"] = body.clone().into();
+            }
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.to_string().as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success());
+            let diagnostic = String::from_utf8(output.stderr).unwrap();
+            assert!(
+                !diagnostic.contains(marker),
+                "{outcome}: assistant body reached stderr"
+            );
+            assert!(diagnostic.contains("session-metadata"), "{diagnostic}");
+            assert!(
+                !diagnostic.contains("Report."),
+                "diagnostics serialize metadata, not the transport query"
+            );
+            match outcome {
+                "success" => assert!(diagnostic.ends_with("\t0\tReported\n"), "{diagnostic}"),
+                "transport-error" => assert!(diagnostic.contains("\t2\t"), "{diagnostic}"),
+                "invalid-configuration" => assert!(
+                    diagnostic.ends_with("invalid hook configuration\n"),
+                    "{diagnostic}"
+                ),
+                _ => unreachable!(),
+            }
+            if let Some(receiver) = receiver {
+                let signal_flow::Query::Report(report) = receiver.join().unwrap() else {
+                    panic!("Report")
+                };
+                let signal_flow::Event::Stopped(stop) = report.event else {
+                    panic!("Stop")
+                };
+                assert_eq!(
+                    stop.last_assistant_message_option.0, body,
+                    "ordinary60 body stays unchanged"
+                );
+            }
+        }
+    }
+}

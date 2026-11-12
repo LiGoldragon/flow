@@ -257,3 +257,80 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    use sema_engine::{Assertion, EngineOpen, FamilyName, SchemaVersion, TableDescriptor};
+
+    #[derive(Archive, RkyvSerialize, RkyvDeserialize, Clone)]
+    struct UnsupportedEvents {
+        flow_id: String,
+    }
+    impl EngineRecord for UnsupportedEvents {
+        fn record_key(&self) -> RecordKey {
+            RecordKey::new(self.flow_id.clone())
+        }
+    }
+    impl MemoryDefinition for UnsupportedEvents {
+        fn memory_version() -> MemoryVersion {
+            MemoryVersion::new(5)
+        }
+        fn schema_hash() -> SchemaHash {
+            SchemaHash::for_label("unsupported-event-layout")
+        }
+    }
+
+    #[test]
+    fn unsupported_event_identity_is_refused_before_open_changes_any_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("unsupported.sema");
+        {
+            let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(1))).unwrap();
+            let table = engine
+                .register_table(TableDescriptor::<UnsupportedEvents>::new(
+                    super::super::events::FLOW_EVENT_TABLE_NAME,
+                    FamilyName::new(super::super::events::FLOW_EVENT_FAMILY),
+                    UnsupportedEvents::schema_hash(),
+                ))
+                .unwrap();
+            engine
+                .assert(Assertion::new(
+                    table,
+                    UnsupportedEvents {
+                        flow_id: "untouched".into(),
+                    },
+                ))
+                .unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let descriptor = FlowEvents::descriptor();
+        assert!(
+            Engine::open(EngineOpen::new(&path, SchemaVersion::new(1)).with_family(&descriptor))
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn new_empty_current_event_memory_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("new.sema");
+        for _ in 0..2 {
+            let descriptor = FlowEvents::descriptor();
+            let mut engine = Engine::open(
+                EngineOpen::new(&path, SchemaVersion::new(1)).with_family(&descriptor),
+            )
+            .unwrap();
+            FlowStore::upgrade_event_memory(&mut engine).unwrap();
+            let table = engine.register_table(descriptor).unwrap();
+            assert!(
+                engine
+                    .match_records(sema_engine::QueryPlan::all(table))
+                    .unwrap()
+                    .records()
+                    .is_empty()
+            );
+        }
+    }
+}

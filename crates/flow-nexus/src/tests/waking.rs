@@ -3681,10 +3681,17 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
     );
     let mut hook = UnixStream::connect(&socket).expect("ordinary socket listens");
     hook.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let marker = "SOCKET-HOOK-assistant-marker-雪";
+    let mut event = claude_stop(fixture);
+    let signal_flow::Event::Stopped(stop) = &mut event else {
+        unreachable!()
+    };
+    stop.last_assistant_message_option =
+        signal_flow::LastAssistantMessageOption(Some(marker.repeat(4096)));
     hook.write_query(&signal_flow::Query::Report(signal_flow::Report_Data {
         flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
         process_option: None,
-        event: claude_stop(fixture),
+        event,
     }))
     .unwrap();
     assert_eq!(
@@ -3696,6 +3703,18 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
         hook.read_to_end(&mut rest)
             .expect("the connection closes while the wait still runs"),
         0
+    );
+    use datom_codec::Datomizable;
+    use protos::{Compactable, Protosizable};
+    let metadata = fixture
+        .nexus
+        .read_events(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+        .datomize(vec![])
+        .protosize()
+        .compact();
+    assert!(
+        !metadata.contains(marker),
+        "real Report socket stores and serves metadata alone"
     );
     released.release();
 
@@ -6442,5 +6461,155 @@ fn a_metaflow_put_asleep_for_an_ended_flow_retracts_its_sender_locks() {
             .unwrap()
             .is_none(),
         "the ended sender's lock is retracted"
+    );
+}
+
+/// Hook A is transient; the ended answer B belongs to the exact input receipt
+/// in the bound native transcript and is delivered once.
+#[test]
+fn a_simplified_answer_uses_bound_transcript_b_and_never_hook_a() {
+    use crate::store::ReadsFlowMemory;
+    use crate::store::logical_delivery::SimplifiedReplyBinding;
+    use crate::waking::{QueuesSimplifiedAnswers, SimplifiedAnswer};
+    let fixture = NexusFixture::new();
+    let launched = active_simplified_claude(&fixture);
+    let at = launched.profile.address.clone();
+    let sender = address(Model::Astra);
+    for (address, state) in [
+        (
+            at.clone(),
+            State::Awake(flow_ethos::FlowId("abc123".into())),
+        ),
+        (sender.clone(), State::Asleep),
+    ] {
+        fixture.nexus.store.seed_metaflow(Metaflow {
+            address,
+            state,
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![]),
+        });
+    }
+    let signal_flow::PrivateSendResponse::SendAccepted(input) = fixture
+        .nexus
+        .store
+        .accept_logical_delivery(
+            &at,
+            SentBy::Sender(sender.clone()),
+            Delivery::Wake,
+            Message::MiddleAbrupt(Request::Order("input".into())),
+            None,
+        )
+        .unwrap()
+    else {
+        panic!("input accepted")
+    };
+    fixture
+        .nexus
+        .store
+        .bind_simplified_reply(SimplifiedReplyBinding {
+            flow_id: "abc123".into(),
+            input_delivery_id: input.logical_delivery_id.0.clone(),
+            source: at.clone(),
+            recipient: sender.clone(),
+            completed: false,
+        })
+        .unwrap();
+    let startup = fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue.0;
+    assert!(
+        fixture
+            .nexus
+            .store
+            .settle_wake_startup_receipts(
+                &at,
+                "abc123",
+                &startup,
+                Some(&signal_flow::NativeReceipt {
+                    harness_kind: HarnessKind::Claude,
+                    native_session_id: signal_flow::NativeSessionId(launched.session.clone()),
+                    native_prompt_id: signal_flow::NativePromptId("bound-prompt".into()),
+                })
+            )
+            .unwrap()
+    );
+    let transcript = fixture
+        .directory
+        .path()
+        .join("native-transcripts/claude/-home-li-primary")
+        .join(format!("{}.jsonl", launched.session));
+    let hook_a = "HOOK-A-assistant-only-marker";
+    let transcript_b = "TRANSCRIPT-B-intended-answer";
+    // The Stop arrives first. Neither its content nor an unbound old answer is used.
+    let stop = signal_flow::Event::Stopped(signal_flow::NativeStop {
+        native_session_id_option: Some(signal_flow::NativeSessionId(launched.session.clone())),
+        transcript_path_option: Some(signal_flow::TranscriptPath(
+            transcript.display().to_string(),
+        )),
+        last_assistant_message_option: signal_flow::LastAssistantMessageOption(Some(hook_a.into())),
+        background_work: signal_flow::BackgroundWork(vec![]),
+    });
+    assert_eq!(
+        fixture.nexus.report(signal_flow::Report_Data {
+            flow_id: flow_ethos::FlowId("abc123".into()),
+            process_option: None,
+            event: stop,
+        }),
+        signal_flow::Response::Reported
+    );
+    assert!(matches!(
+        fixture.nexus.queue_simplified_answer("abc123"),
+        SimplifiedAnswer::TurnUnanswered { .. }
+    ));
+    let rows = [
+        serde_json::json!({"type":"user","sessionId":launched.session,"uuid":"bound-prompt","message":{"content":"input"}}),
+        serde_json::json!({"type":"assistant","sessionId":launched.session,"uuid":"answer",
+            "message":{"stop_reason":"end_turn","content":[{"type":"text","text":transcript_b}]}}),
+    ];
+    fs::write(
+        &transcript,
+        rows.iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    assert!(matches!(
+        fixture.nexus.queue_simplified_answer("abc123"),
+        SimplifiedAnswer::Queued { .. }
+    ));
+    assert_eq!(
+        fixture.nexus.queue_simplified_answer("abc123"),
+        SimplifiedAnswer::NoneOwed
+    );
+    let queued = fixture
+        .nexus
+        .store
+        .metaflow(&sender)
+        .unwrap()
+        .unwrap()
+        .queue
+        .0;
+    assert_eq!(queued.len(), 1);
+    assert_eq!(
+        queued[0].message,
+        Message::Soft(Request::Result(flow_ethos::ResultPayload::Historical(
+            transcript_b.into()
+        )))
+    );
+    use datom_codec::Datomizable;
+    use protos::{Compactable, Protosizable};
+    let metadata = fixture
+        .nexus
+        .read_events(flow_ethos::FlowId("abc123".into()))
+        .datomize(vec![])
+        .protosize()
+        .compact();
+    assert!(!metadata.contains(hook_a));
+    assert!(
+        !metadata.contains(transcript_b),
+        "ReadEvents remains metadata-only"
+    );
+    // A regular seat has no simplified binding and receives no automatic answer.
+    assert_eq!(
+        fixture.nexus.queue_simplified_answer("regular-seat"),
+        SimplifiedAnswer::NoneOwed
     );
 }

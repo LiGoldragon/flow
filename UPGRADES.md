@@ -1,3 +1,27 @@
+# 0.54.6: metadata-only harness events
+
+The live meta contract is 76.0.0; old meta75 peers fail the contract greeting.
+Ordinary signal60 Report and its hook transport are unchanged. Use the matching
+0.54.6 meta client for ReadEvents and configuration.
+
+The flow-nexus-flow-events family keeps its table and original keys. Memory6
+wraps those exact strings as FlowId and records only RecordedHarnessEvent.
+A Stop carries session, transcript path and BackgroundWork, with no assistant
+field or compatibility placeholder. Current meta ReadEvents projects this
+Memory into the separately declared wire HarnessEventMetadata.
+
+Before opening, the event descriptor declares both exact predecessor identities:
+v5, flow-nexus-flow-events-v5; and v4, flow-nexus-flow-events-v4. The v5 decoder
+freezes its String row key, six variant tags and original four-field Stop.
+The typed v5 -> v6 upgrade removes the body and atomically replaces that event
+family before registration or service. The existing complete v4-era evolution
+now targets v6 directly in its atomic multi-family change. A current or new
+store is idempotent; unsupported layouts refuse admission.
+
+Only current logical row contents are removed. No physical page, historical
+journal, transcript or backup erasure is claimed. Unrelated families and
+metadata keep their existing meaning and order.
+
 # Flow 0.54.5: connection-owned Agent and Launch subscriptions
 
 Builds on 0.54.4 with unchanged wire contracts and stored format.

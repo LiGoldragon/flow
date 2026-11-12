@@ -279,9 +279,9 @@ const RUNNING_TABLES: &[&str] = &[
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
 // identity and its identity record must both match before a path is resumed.
-// Flow Memory v3 begins with 0.52.0, which opens no earlier store.
-// Restart (0.53.0) adds one family, RestartRecord; 0.53.0 also opens no earlier store.
-pub(crate) const FLOW_SCHEMA_VERSION: u32 = 3;
+// Flow 0.55 starts fresh at Memory v4: integer logical delivery identity
+// and cohesive group configuration are not an upgrade of earlier stores.
+pub(crate) const FLOW_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FlowMemoryEra {
@@ -1790,11 +1790,11 @@ pub enum StoreError {
     StoreHeld { path: String },
     #[error("the store's open could not be staged: {0}")]
     StagedOpen(String),
-    #[error("store {path} is not a recognized Flow Memory v3 store: {reason}")]
+    #[error("store {path} is not a recognized Flow Memory v4 store: {reason}")]
     UnrecognizedMemory { path: String, reason: String },
     /// The store is an earlier Flow's, of Flow Memory `version`: this Flow
     /// opens no earlier store, and leaves it as it is.
-    #[error("store {path} is an earlier Flow's Memory v{version}; this Flow opens Memory v3 alone")]
+    #[error("store {path} is an earlier Flow's Memory v{version}; this Flow opens Memory v4 alone")]
     EarlierMemory { path: String, version: u64 },
 }
 
@@ -5926,7 +5926,7 @@ pub(crate) trait ReadsFlowMemory {
                 .map(|value| value.value())
         };
         // A store an earlier Flow wrote is refused, never upgraded: Flow
-        // Memory v3 begins with 0.52.0.
+        // Memory v4 begins with 0.55.0.
         match version {
             Some(version) if version == u64::from(FLOW_SCHEMA_VERSION) => {}
             Some(version) if version < u64::from(FLOW_SCHEMA_VERSION) => {
@@ -9333,32 +9333,33 @@ mod tests {
         write.commit().expect("meta commits");
     }
 
-    /// A store an earlier Flow wrote is Flow Memory v2: no open upgrades it.
-    /// Each open refuses it typed, as an earlier Flow's store, and leaves it
-    /// byte for byte as it was.
+    /// Every earlier schema, including the accepted 0.54 lineage's v3,
+    /// is refused by both writer paths before any original byte changes.
     #[test]
     fn an_earlier_flows_store_is_refused_and_left_byte_for_byte() {
-        let fixture = StoreFixture::new();
-        fixture.configured();
-        drop(fixture.configured_store());
-        stamp_schema_version(&fixture.path(), 2);
-        let path = fixture.path();
-        let before = std::fs::read(&path).expect("earlier store reads");
-        let entries = directory_entries(&path);
-        let earlier = |error: super::StoreError| match error {
-            super::StoreError::EarlierMemory {
-                path: refused,
-                version,
-            } => {
-                assert_eq!(refused, path.display().to_string());
-                assert_eq!(version, 2);
-            }
-            other => panic!("an earlier store is refused as one: {other:?}"),
-        };
-        earlier(ConfigurationOnlyStore::open(&path).err().expect("refused"));
-        earlier(FlowStore::open_configured(&path).err().expect("refused"));
-        assert_eq!(std::fs::read(&path).expect("earlier store rereads"), before);
-        assert_eq!(directory_entries(&path), entries, "no copy is left");
+        for previous_version in 1..u64::from(super::FLOW_SCHEMA_VERSION) {
+            let fixture = StoreFixture::new();
+            fixture.configured();
+            drop(fixture.configured_store());
+            stamp_schema_version(&fixture.path(), previous_version);
+            let path = fixture.path();
+            let before = std::fs::read(&path).expect("earlier store reads");
+            let entries = directory_entries(&path);
+            let earlier = |error: super::StoreError| match error {
+                super::StoreError::EarlierMemory {
+                    path: refused,
+                    version,
+                } => {
+                    assert_eq!(refused, path.display().to_string());
+                    assert_eq!(version, previous_version);
+                }
+                other => panic!("an earlier store is refused as one: {other:?}"),
+            };
+            earlier(ConfigurationOnlyStore::open(&path).err().expect("refused"));
+            earlier(FlowStore::open_configured(&path).err().expect("refused"));
+            assert_eq!(std::fs::read(&path).expect("earlier store rereads"), before);
+            assert_eq!(directory_entries(&path), entries, "no copy is left");
+        }
     }
 
     /// A Memory v3 store holding a family under the identity an earlier

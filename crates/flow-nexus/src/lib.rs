@@ -80,6 +80,7 @@ pub mod observe_configuration;
 pub mod observe_metaflows;
 pub mod observe_sends;
 pub mod peer;
+pub mod permaflow_inventory;
 pub mod performing;
 pub mod place;
 pub mod placed_socket;

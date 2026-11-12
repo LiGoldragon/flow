@@ -1824,6 +1824,16 @@ impl ConfiguresFromMeta for RunningNexus {
                     meta_signal_flow::ConfigureRejection::LeaveOutNotForHarness,
                 )
             }
+            Err(store::StoreError::MetaflowNameRefused(name)) => {
+                meta_signal_flow::Response::ConfigureRejected(
+                    meta_signal_flow::ConfigureRejection::MetaflowNameRefused(name),
+                )
+            }
+            Err(store::StoreError::UnknownMetaflow(name)) => {
+                meta_signal_flow::Response::ConfigureRejected(
+                    meta_signal_flow::ConfigureRejection::UnknownMetaflow(name),
+                )
+            }
             Err(store::StoreError::TopicRefused(topic)) => {
                 meta_signal_flow::Response::ConfigureRejected(
                     meta_signal_flow::ConfigureRejection::TopicRefused(flow_ethos::Topic(topic)),

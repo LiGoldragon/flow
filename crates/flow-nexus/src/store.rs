@@ -23,6 +23,7 @@ pub(crate) mod launch_cleanup;
 pub(crate) mod living_upgrade;
 pub(crate) mod logical_delivery;
 pub(crate) mod metaflow;
+pub(crate) mod metaflow_cohesion;
 pub(crate) mod metaflow_declaration;
 pub mod metaflow_watch;
 pub(crate) mod nexus_configuration;
@@ -54,6 +55,9 @@ use flow_ethos::PermaflowState;
 pub(crate) use logical_delivery::RecordsLogicalDeliveries;
 use logical_delivery::{DeclaresLogicalDeliveryTables, LogicalDeliveryTables};
 use metaflow::{TakesLaunchAddress, WritesTakenAddress};
+use metaflow_cohesion::{
+    ConfiguresMetaflowCohesions, DescribesMetaflowCohesion, StoredMetaflowCohesion,
+};
 use nexus_configuration::{DescribesNexusConfigurationTable, StoredMetaNexusConfiguration};
 use queue_delivery::{AccountsQueueDelivery, QueueDeliveryPhase};
 use queue_delivery::{DeclaresQueueDeliveryTables, QueueDeliveryTables};
@@ -208,6 +212,7 @@ const CONFIGURATION_ONLY_TABLES: &[&str] = &[
     "flow_nexus_meta_harness_flags_configuration",
     "flow_nexus_meta_heartbeat_configuration",
     "flow_nexus_meta_metaflow_configuration",
+    "flow_nexus_metaflow_cohesions",
     "flow_nexus_meta_protected_address_configuration",
     "flow_nexus_meta_handover_configuration",
     OPTIONAL_HARNESS_HOOK_TABLE,
@@ -245,6 +250,7 @@ const RUNNING_TABLES: &[&str] = &[
     "flow_nexus_queue_delivery_requests",
     "flow_nexus_queue_delivery_attempts",
     "flow_nexus_meta_metaflow_configuration",
+    "flow_nexus_metaflow_cohesions",
     "flow_nexus_meta_model_threshold_configuration",
     "flow_nexus_meta_investigation_configuration",
     "flow_nexus_meta_default_minutes_configuration",
@@ -1776,6 +1782,10 @@ pub enum StoreError {
     LeaveOutNotForHarness,
     #[error("the topic {0} is not an uncapitalized camelCase identifier")]
     TopicRefused(String),
+    #[error("metaflow name is not camelCase: {0:?}")]
+    MetaflowNameRefused(flow_ethos::MetaflowName),
+    #[error("metaflow is not configured: {0:?}")]
+    UnknownMetaflow(flow_ethos::MetaflowName),
     #[error("the default Minutes is refused: {0:?}")]
     MinutesRefused(signal_flow::MinutesRefusal),
     #[error("the counters are refused: {0:?}")]
@@ -1799,6 +1809,7 @@ pub enum StoreError {
 }
 
 pub(crate) struct MetaConfigurationTables {
+    cohesions: TableReference<StoredMetaflowCohesion>,
     handover: TableReference<handover_configuration::StoredHandoverConfiguration>,
     nexus: TableReference<StoredMetaNexusConfiguration>,
     models: TableReference<StoredMetaModelConfiguration>,
@@ -1822,6 +1833,7 @@ trait RegistersMetaConfigurationTables: Sized {
 impl RegistersMetaConfigurationTables for MetaConfigurationTables {
     fn register(engine: &mut Engine) -> Result<Self, StoreError> {
         Ok(Self {
+            cohesions: engine.register_table(StoredMetaflowCohesion::descriptor())?,
             handover: <handover_configuration::StoredHandoverConfiguration as handover_configuration::UpgradesHandoverConfiguration>::upgrade_or_register(engine).map_err(StoreError::HandoverConfigurationUpgrade)?,
             nexus: engine.register_table(StoredMetaNexusConfiguration::descriptor())?,
             models: engine.register_table(StoredMetaModelConfiguration::descriptor())?,
@@ -2047,6 +2059,7 @@ pub struct ConfiguredFamilies {
     pub default_leave_outs: Vec<ConfigureLeaveOut>,
     pub send_servers: Vec<ConfigureSendServer>,
     pub metaflows: Vec<ConfigurePermaflow>,
+    pub cohesive_metaflows: Vec<flow_ethos::Metaflow>,
     pub investigation: Option<Address>,
     pub default_minutes: i64,
     pub configured_harness_flags: Vec<ConfigureHarnessFlags>,
@@ -2074,7 +2087,8 @@ impl CompletesSnapshot for ConfiguredFamilies {
             configured_thresholds: meta_signal_flow::ConfiguredThresholds(self.thresholds),
             default_leave_outs: meta_signal_flow::DefaultLeaveOuts(self.default_leave_outs),
             configured_send_servers: meta_signal_flow::ConfiguredSendServers(self.send_servers),
-            configured_metaflows: meta_signal_flow::ConfiguredMetaflows(self.metaflows),
+            configured_permaflows: meta_signal_flow::ConfiguredPermaflows(self.metaflows),
+            configured_metaflows: meta_signal_flow::ConfiguredMetaflows(self.cohesive_metaflows),
             configured_investigation: meta_signal_flow::ConfiguredInvestigation(self.investigation),
             configured_default_minutes: meta_signal_flow::ConfiguredDefaultMinutes(
                 flow_ethos::Minutes(self.default_minutes),
@@ -2201,6 +2215,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_protected_addresses_descriptor)
                 .with_family(&meta_harness_hook_descriptor)
                 .with_family(&meta_metaflows_descriptor)
+                .with_family(&StoredMetaflowCohesion::descriptor())
                 .with_family(&meta_handover_descriptor),
         )?;
         // The Nexus 0.54.2 declared is upgraded before anything is
@@ -2780,6 +2795,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&reminders_descriptor)
                 .with_family(&successor_intents_descriptor)
                 .with_family(&<metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor())
+                .with_family(&StoredMetaflowCohesion::descriptor())
                 .with_family(&events_descriptor)
                 .with_family(&context_sizes_descriptor)
                 .with_family(&address_holds_descriptor)
@@ -6045,8 +6061,10 @@ pub(crate) trait ReadsFlowMemory {
             .cloned()
             .unwrap_or_else(<handover_configuration::StoredHandoverConfiguration as handover_configuration::DefaultsToUnconfigured>::unconfigured);
         let metaflow_rows = engine.match_records(QueryPlan::all(tables.metaflows))?;
+        let cohesion_rows = engine.match_records(QueryPlan::all(tables.cohesions))?;
         if models_rows.database_marker() != marker
             || metaflow_rows.database_marker() != marker
+            || cohesion_rows.database_marker() != marker
             || thresholds_rows.database_marker() != marker
             || leave_out_rows.database_marker() != marker
             || send_server_rows.database_marker() != marker
@@ -6150,6 +6168,15 @@ pub(crate) trait ReadsFlowMemory {
             send_servers,
             investigation,
             metaflows,
+            cohesive_metaflows: {
+                let mut metaflows = cohesion_rows
+                    .records()
+                    .iter()
+                    .map(|row| row.metaflow.clone())
+                    .collect::<Vec<_>>();
+                metaflows.sort_by(|left, right| left.metaflow_name.cmp(&right.metaflow_name));
+                metaflows
+            },
             default_minutes,
             configured_harness_flags,
             heartbeat,
@@ -6366,7 +6393,7 @@ pub(crate) trait ReadsFlowMemory {
             ConfigurationChange::LeaveOuts(entries) => {
                 entries.iter().map(|entry| &entry.address).collect()
             }
-            ConfigurationChange::Metaflows(entries) => {
+            ConfigurationChange::Permaflows(entries) => {
                 entries.iter().map(|entry| &entry.address).collect()
             }
             ConfigurationChange::HarnessFlags(entries) => {
@@ -6378,6 +6405,9 @@ pub(crate) trait ReadsFlowMemory {
             }
             ConfigurationChange::ProtectedAddresses(addresses) => addresses.iter().collect(),
             ConfigurationChange::Permaflow(entry) => vec![&entry.address],
+            ConfigurationChange::Metaflow(group) => group.address_vector.iter().collect(),
+            ConfigurationChange::Join(join) => vec![&join.address],
+            ConfigurationChange::Leave(leave) => vec![&leave.address],
             _ => Vec::new(),
         };
         if let Some(refused) = addresses
@@ -6387,6 +6417,10 @@ pub(crate) trait ReadsFlowMemory {
             return Err(StoreError::TopicRefused(refused.topic.clone().0));
         }
         match change {
+            ConfigurationChange::Metaflow(group) => tables.set_cohesion(engine, group),
+            ConfigurationChange::Join(join) => tables.join_cohesion(engine, join),
+            ConfigurationChange::Leave(leave) => tables.leave_cohesion(engine, leave),
+            ConfigurationChange::Dissolve(name) => tables.dissolve_cohesion(engine, name),
             ConfigurationChange::HandoverPolicies(policies) => {
                 if policies
                     .iter()
@@ -6573,7 +6607,7 @@ pub(crate) trait ReadsFlowMemory {
                     }
                 })
             }
-            ConfigurationChange::Metaflows(metaflows) => FlowStore::replace_configuration_family(
+            ConfigurationChange::Permaflows(metaflows) => FlowStore::replace_configuration_family(
                 engine,
                 tables.metaflows,
                 metaflows

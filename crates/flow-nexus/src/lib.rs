@@ -42,6 +42,7 @@ pub mod live;
 pub(crate) mod message_projection;
 mod metaflow;
 pub mod model;
+pub mod observation_lifetime;
 pub mod protecting;
 pub mod queue_operations;
 pub mod recovery;
@@ -1454,15 +1455,20 @@ impl ServesConnection for Connection {
             // Reads of launch state never wait behind a running launch.
             Query::LaunchStatus(launch_request_id) => nexus.launch_status(&launch_request_id.0),
             Query::Observe(ObserveSelection::Launch(launch_request_id)) => {
-                let peer = &mut self.peer;
-                return nexus.observe_launch(&launch_request_id.0, &mut |response| {
-                    peer.write_response(response)
+                use crate::observation_lifetime::ServesCancellableObservation;
+                return self.serve_cancellable_observation(nexus, &mut |cancellation, peer| {
+                    nexus.observe_launch(&launch_request_id.0, cancellation, &mut |response| {
+                        peer.write_response(response)
+                    })
                 });
             }
             Query::Observe(ObserveSelection::Agent(flow_id)) => {
-                let peer = &mut self.peer;
-                return nexus
-                    .observe_agent(&flow_id.0, &mut |response| peer.write_response(response));
+                use crate::observation_lifetime::ServesCancellableObservation;
+                return self.serve_cancellable_observation(nexus, &mut |cancellation, peer| {
+                    nexus.observe_agent(&flow_id.0, cancellation, &mut |response| {
+                        peer.write_response(response)
+                    })
+                });
             }
             Query::Observe(ObserveSelection::Undecodable) => {
                 return self.serve_undecodable(nexus);

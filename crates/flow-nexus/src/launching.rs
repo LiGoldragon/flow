@@ -14,6 +14,7 @@ use crate::harness_command::ParsesHarnessFlags;
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::{ChecksComposedLaunch, ObservesNativeLaunchBinding};
 use crate::live::HoldsLiveValue;
+use crate::observation_lifetime::{CancelsObservation, ObservationCancellation};
 use crate::performing::ClassifiesNativeLaunchFailure;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
@@ -1315,6 +1316,7 @@ pub trait ObservesLaunch {
     fn observe_launch(
         &self,
         launch_request_id: &str,
+        cancellation: &ObservationCancellation,
         send: &mut dyn FnMut(&Response) -> Result<(), String>,
     ) -> Result<(), String>;
 }
@@ -1323,12 +1325,14 @@ impl ObservesLaunch for RunningNexus {
     fn observe_launch(
         &self,
         launch_request_id: &str,
+        cancellation: &ObservationCancellation,
         send: &mut dyn FnMut(&Response) -> Result<(), String>,
     ) -> Result<(), String> {
         let changes = self.store.launch_changes.clone();
         let mut sent_phase: Option<LaunchAttemptPhase> = None;
         loop {
             let seen = changes.current();
+            cancellation.check()?;
             if self.stopping.requested() {
                 return Err("the Nexus is stopping".into());
             }
@@ -1344,7 +1348,7 @@ impl ObservesLaunch for RunningNexus {
                 send(&answer)?;
                 sent_phase = Some(phase.clone());
             }
-            changes.after(seen);
+            changes.after_while(seen, &|| cancellation.cause().is_none());
         }
     }
 }

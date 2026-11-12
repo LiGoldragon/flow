@@ -16,6 +16,7 @@ use crate::herdr::HerdrCli;
 use crate::herdr::events::{HerdrCue, HerdrEvents, SubscribesHerdrEvents};
 use crate::herdr::pane::ReadsAgentStatus;
 use crate::herdr::pane::{PaneAgent, WritesPane};
+use crate::observation_lifetime::{CancelsObservation, ObservationCancellation};
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use signal_flow::{
     AgentObservation, AgentState, FlowNode, HerdrRoute, HerdrRouteSelection, Response,
@@ -30,6 +31,7 @@ pub trait ObservesAgent {
     fn observe_agent(
         &self,
         flow_id: &str,
+        cancellation: &ObservationCancellation,
         send: &mut dyn FnMut(&Response) -> Result<(), String>,
     ) -> Result<(), String>;
 }
@@ -151,9 +153,12 @@ impl ObservesAgent for RunningNexus {
     fn observe_agent(
         &self,
         flow_id: &str,
+        cancellation: &ObservationCancellation,
         send: &mut dyn FnMut(&Response) -> Result<(), String>,
     ) -> Result<(), String> {
+        cancellation.check()?;
         let opening = self.agent_observation(flow_id);
+        cancellation.check()?;
         send(&opening)?;
         let Response::AgentObserved(AgentObservation {
             agent_state: mut last,
@@ -178,9 +183,9 @@ impl ObservesAgent for RunningNexus {
             .herdr
             .session_socket(&route.herdr_session_name.0)
             .ok_or("Herdr session socket not found")?;
-        let mut events = PaneEvents::subscribe(&socket, &route.herdr_pane_id.0)?;
+        let mut events = PaneEvents::subscribe(&socket, &route.herdr_pane_id.0, cancellation)?;
         loop {
-            let Some(event) = events.next_event(&self.stopping)? else {
+            let Some(event) = events.next_event(cancellation)? else {
                 // Herdr closed the subscription: the session is gone. The
                 // pane is read once more before the flow is recorded ended.
                 if let Some((node, _)) = self.observable(flow_id)
@@ -237,15 +242,26 @@ struct PaneEvents {
 }
 
 trait ReadsPaneEvents: Sized {
-    fn subscribe(socket: &std::path::Path, pane_id: &str) -> Result<Self, String>;
+    fn subscribe(
+        socket: &std::path::Path,
+        pane_id: &str,
+        cancellation: &ObservationCancellation,
+    ) -> Result<Self, String>;
     /// The next event about this pane; None when Herdr closes the stream,
     /// an error once the Nexus is stopping. The stream and the stop's
     /// descriptor are waited on together, so either wakes the wait.
-    fn next_event(&mut self, stopping: &crate::Stopping) -> Result<Option<PaneEvent>, String>;
+    fn next_event(
+        &mut self,
+        cancellation: &ObservationCancellation,
+    ) -> Result<Option<PaneEvent>, String>;
 }
 
 impl ReadsPaneEvents for PaneEvents {
-    fn subscribe(socket: &std::path::Path, pane_id: &str) -> Result<Self, String> {
+    fn subscribe(
+        socket: &std::path::Path,
+        pane_id: &str,
+        cancellation: &ObservationCancellation,
+    ) -> Result<Self, String> {
         let events = HerdrEvents::subscribe(
             socket,
             "flow-nexus:observe-agent",
@@ -255,6 +271,7 @@ impl ReadsPaneEvents for PaneEvents {
                 {"type": "pane.exited"}
             ]),
             None,
+            Some(cancellation),
         )?;
         Ok(Self {
             pane_id: pane_id.to_owned(),
@@ -262,13 +279,13 @@ impl ReadsPaneEvents for PaneEvents {
         })
     }
 
-    fn next_event(&mut self, stopping: &crate::Stopping) -> Result<Option<PaneEvent>, String> {
-        use crate::HoldsStopRequest;
+    fn next_event(
+        &mut self,
+        cancellation: &ObservationCancellation,
+    ) -> Result<Option<PaneEvent>, String> {
         loop {
-            if stopping.requested() {
-                return Err("the Nexus is stopping".into());
-            }
-            match self.events.next_cue(&[stopping.descriptor()], None)? {
+            cancellation.check()?;
+            match self.events.next_cue(&[], None, Some(cancellation))? {
                 HerdrCue::Event(event) => {
                     if let Some(event) = event.pane_event(&self.pane_id) {
                         return Ok(Some(event));

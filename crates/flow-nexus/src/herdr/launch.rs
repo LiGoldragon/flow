@@ -1536,7 +1536,7 @@ impl AwaitsTitleCue for TitleCues {
             return false;
         };
         loop {
-            match events.next_cue(&[], Some(self.deadline)) {
+            match events.next_cue(&[], Some(self.deadline), None) {
                 Ok(HerdrCue::Event(event)) => {
                     if event.event_pane() != Some(self.pane_id.as_str()) {
                         continue;
@@ -1627,6 +1627,7 @@ impl TitlesClaudeSession for HerdrCli {
                         {"type": "pane.exited"}
                     ]),
                     Some(deadline),
+                    None,
                 )
             })
             .inspect_err(|error| {

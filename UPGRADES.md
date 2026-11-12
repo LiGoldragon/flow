@@ -1,3 +1,18 @@
+# Flow 0.54.5: connection-owned Agent and Launch subscriptions
+
+Builds on 0.54.4 with unchanged wire contracts and stored format.
+
+- Agent and Launch observations own a peer/stop watcher and a shared,
+  typed cancellation. Quiet peer closure and Nexus stop wake Herdr's
+  acknowledgement and event waits and pending Launch condition waits.
+- Buffered upstream events yield to cancellation. Cancellation ends only
+  the observation; actual upstream closure and Gone keep their witnessed
+  exit semantics.
+- Launch cancellation checks share the condition-variable notification
+  mutex, and normal completion uses a separate event to join its watcher.
+
+Rollback to 0.54.4 opens the same memory. Retention policy is unchanged.
+
 # Flow 0.54.4: a Codex proxy reader ends on its first failed read
 
 Builds on 0.54.3, on the same contracts, build base and Message.

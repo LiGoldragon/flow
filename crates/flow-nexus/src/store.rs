@@ -1522,6 +1522,9 @@ pub trait AnnouncesLaunchChanges {
     fn until(&self, seen: u64, deadline: std::time::Instant) -> bool;
     /// Blocks until the count moves past `seen`, then returns the new count.
     fn after(&self, seen: u64) -> u64;
+    /// Checks the continuation predicate under the notification mutex and
+    /// atomically releases it when waiting, so cancellation cannot be lost.
+    fn after_while(&self, seen: u64, continuing: &dyn Fn() -> bool);
     /// Blocks until `holds` answers true, asked now and again at each
     /// announced change, or until `deadline` passes; whether it held.
     fn until_holds(&self, deadline: std::time::Instant, holds: &mut dyn FnMut() -> bool) -> bool {
@@ -1572,6 +1575,16 @@ impl AnnouncesLaunchChanges for LaunchChanges {
             }
         }
         true
+    }
+
+    fn after_while(&self, seen: u64, continuing: &dyn Fn() -> bool) {
+        let (count, changed) = &*self.count;
+        let guard = count.lock().unwrap_or_else(|error| error.into_inner());
+        drop(
+            changed
+                .wait_while(guard, |current| *current == seen && continuing())
+                .unwrap_or_else(|error| error.into_inner()),
+        );
     }
 
     fn after(&self, seen: u64) -> u64 {

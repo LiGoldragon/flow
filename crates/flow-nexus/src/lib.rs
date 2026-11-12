@@ -7674,12 +7674,17 @@ mod tests {
             });
         }
 
+        use crate::store::ReadsFlowRows;
         let fixture = NexusFixture::new();
+        bind_existing_caller(&fixture, "a001", "pane-1");
+        let before = fixture.nexus.store.flow_node("a001").unwrap();
         let (peer, mut client) = UnixStream::pair().unwrap();
         client
             .write_frame(
-                &rkyv::to_bytes::<rkyv::rancor::Error>(&meta_signal_flow_75::Query::Configuration)
-                    .unwrap(),
+                &rkyv::to_bytes::<rkyv::rancor::Error>(&meta_signal_flow_75::Query::Retire(
+                    flow_ethos::FlowId("a001".into()),
+                ))
+                .unwrap(),
             )
             .unwrap();
         let result = Connection {
@@ -7687,10 +7692,27 @@ mod tests {
             process: None,
         }
         .serve_meta(&fixture.nexus);
-        assert!(result.unwrap_err().contains("invalid meta greeting"));
+        assert!(result.unwrap_err().contains("meta greeting refused"));
+        let receipt = rkyv::from_bytes::<signal::HandshakeReceipt, rkyv::rancor::Error>(
+            &client.read_frame().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            receipt,
+            signal::HandshakeReceipt::GreetingRefused(
+                signal::HandshakeRejection::ContractMismatch(
+                    meta_signal_flow::Query::contract_digest()
+                ),
+            )
+        );
         assert!(
             client.read_frame().is_err(),
             "raw legacy queries are closed without dispatch"
+        );
+        assert_eq!(
+            fixture.nexus.store.flow_node("a001").unwrap(),
+            before,
+            "the raw Retire query never takes effect"
         );
     }
 

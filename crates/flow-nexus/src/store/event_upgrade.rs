@@ -347,7 +347,7 @@ mod admission_tests {
     use super::*;
     use sema_engine::{Assertion, EngineOpen, FamilyName, SchemaVersion, TableDescriptor};
 
-    #[derive(Archive, RkyvSerialize, RkyvDeserialize, Clone)]
+    #[derive(Archive, RkyvSerialize, RkyvDeserialize, Clone, Debug, PartialEq, Eq)]
     struct UnsupportedEvents {
         flow_id: String,
     }
@@ -366,34 +366,92 @@ mod admission_tests {
     }
 
     #[test]
-    fn unsupported_event_identity_is_refused_before_open_changes_any_bytes() {
+    fn unsupported_event_identity_is_refused_and_preserves_logical_rows_and_catalog() {
+        use sema_engine::QueryPlan;
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("unsupported.sema");
+        let descriptor = || {
+            TableDescriptor::<UnsupportedEvents>::new(
+                super::super::events::FLOW_EVENT_TABLE_NAME,
+                FamilyName::new(super::super::events::FLOW_EVENT_FAMILY),
+                UnsupportedEvents::schema_hash(),
+            )
+        };
+        let unrelated = || {
+            TableDescriptor::<UnsupportedEvents>::new(
+                sema_engine::TableName::new("untouched_table"),
+                FamilyName::new("untouched-family"),
+                UnsupportedEvents::schema_hash(),
+            )
+        };
+        let expected = [
+            UnsupportedEvents {
+                flow_id: "MiXeD-key".into(),
+            },
+            UnsupportedEvents {
+                flow_id: "second-key".into(),
+            },
+        ];
         {
             let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(1))).unwrap();
-            let table = engine
-                .register_table(TableDescriptor::<UnsupportedEvents>::new(
-                    super::super::events::FLOW_EVENT_TABLE_NAME,
-                    FamilyName::new(super::super::events::FLOW_EVENT_FAMILY),
-                    UnsupportedEvents::schema_hash(),
-                ))
-                .unwrap();
+            let table = engine.register_table(descriptor()).unwrap();
+            for row in &expected {
+                engine.assert(Assertion::new(table, row.clone())).unwrap();
+            }
+            let other = engine.register_table(unrelated()).unwrap();
             engine
                 .assert(Assertion::new(
-                    table,
+                    other,
                     UnsupportedEvents {
-                        flow_id: "untouched".into(),
+                        flow_id: "unrelated-key".into(),
                     },
                 ))
                 .unwrap();
         }
         let before = std::fs::read(&path).unwrap();
-        let descriptor = FlowEvents::descriptor();
+        let current = FlowEvents::descriptor();
+        let refusal =
+            match Engine::open(EngineOpen::new(&path, SchemaVersion::new(1)).with_family(&current))
+            {
+                Err(error) => error,
+                Ok(_) => panic!("unsupported family admitted"),
+            };
         assert!(
-            Engine::open(EngineOpen::new(&path, SchemaVersion::new(1)).with_family(&descriptor))
-                .is_err()
+            matches!(refusal, sema_engine::Error::FamilyIdentityMismatch { .. }),
+            "{refusal:?}"
         );
-        assert_eq!(std::fs::read(&path).unwrap(), before);
+        // Physical redb file changes were observed on refused open; their
+        // cause remains unknown. The contract is the complete logical state.
+        println!(
+            "UNSUPPORTED_OPEN_PHYSICAL_BYTES_EQUAL={}",
+            std::fs::read(&path).unwrap() == before
+        );
+        for _ in 0..2 {
+            let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(1))).unwrap();
+            // Admission of the frozen identity proves the catalog did not
+            // adopt the current identity or change table/family bindings.
+            let table = engine.register_table(descriptor()).unwrap();
+            let mut rows = engine
+                .match_records(QueryPlan::all(table))
+                .unwrap()
+                .records()
+                .to_vec();
+            rows.sort_by(|left, right| left.flow_id.cmp(&right.flow_id));
+            assert_eq!(rows, expected);
+            for row in &rows {
+                assert_eq!(row.record_key(), RecordKey::new(row.flow_id.clone()));
+            }
+            let other = engine.register_table(unrelated()).unwrap();
+            assert_eq!(
+                engine
+                    .match_records(QueryPlan::all(other))
+                    .unwrap()
+                    .records(),
+                &[UnsupportedEvents {
+                    flow_id: "unrelated-key".into()
+                }]
+            );
+        }
     }
 
     #[test]

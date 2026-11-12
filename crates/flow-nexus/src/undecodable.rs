@@ -1,5 +1,7 @@
-//! A frame on the ordinary socket that decodes as no Query, the Report of a
-//! hook built on an earlier contract among them, is refused in this
+//! Every connection greets first. A first frame that is not this
+//! contract's greeting, on the ordinary socket or the meta one, is answered
+//! the typed `GreetingRefused` and recorded here, metadata alone. A frame
+//! after the greeting that decodes as no Query is refused in this
 //! contract's words: `FrameRefused.UndecodableFrame`, naming the calling
 //! process and its seat as Flow read them from the kernel and Herdr, and
 //! the flow bound to that seat when there is one. Nothing in the frame is
@@ -25,20 +27,33 @@ pub trait ReadsOrdinaryFrames {
         process: Option<&Process>,
         caller: Option<CallerProcess>,
     ) -> Result<Query, Box<Response>>;
-}
-
-impl ReadsOrdinaryFrames for RunningNexus {
-    fn ordinary_query(
+    /// Records a first frame that is not this contract's greeting, on the
+    /// ordinary or the meta socket, after its typed refusal was written:
+    /// metadata alone, as `ordinary_query` records a refused Query.
+    fn refused_greeting(
         &self,
-        frame: &[u8],
         process: Option<&Process>,
         caller: Option<CallerProcess>,
-    ) -> Result<Query, Box<Response>> {
-        let decoded = rkyv::from_bytes::<Query, rkyv::rancor::Error>(frame);
-        let error = match decoded {
-            Ok(query) => return Ok(query),
-            Err(error) => error,
-        };
+    ) -> UndecodableFrame;
+}
+
+/// The record a refused frame leaves, metadata alone: the calling process
+/// and its seat as Flow read them from the kernel and Herdr, and the flow
+/// bound to that seat when there is one. Nothing of the frame is kept.
+trait ReadsRefusedCaller {
+    fn refused_caller(
+        &self,
+        process: Option<&Process>,
+        caller: Option<CallerProcess>,
+    ) -> UndecodableFrame;
+}
+
+impl ReadsRefusedCaller for RunningNexus {
+    fn refused_caller(
+        &self,
+        process: Option<&Process>,
+        caller: Option<CallerProcess>,
+    ) -> UndecodableFrame {
         let pane = caller.and_then(|caller| caller.caller_pane(&self.herdr));
         let flow = pane
             .as_ref()
@@ -56,12 +71,28 @@ impl ReadsOrdinaryFrames for RunningNexus {
             ),
             started: flow_ethos::generated::library::Started(0),
         });
-        let refused = UndecodableFrame {
+        UndecodableFrame {
             flow_id_option: flow.map(|node| node.flow_id),
             seat_evidence: self
                 .seat_evidence(pane, native_session.map(|value| value.0))
                 .typed(process),
+        }
+    }
+}
+
+impl ReadsOrdinaryFrames for RunningNexus {
+    fn ordinary_query(
+        &self,
+        frame: &[u8],
+        process: Option<&Process>,
+        caller: Option<CallerProcess>,
+    ) -> Result<Query, Box<Response>> {
+        let decoded = rkyv::from_bytes::<Query, rkyv::rancor::Error>(frame);
+        let error = match decoded {
+            Ok(query) => return Ok(query),
+            Err(error) => error,
         };
+        let refused = self.refused_caller(process, caller);
         eprintln!(
             "flow-nexus: an ordinary frame decoded as no Query ({error}); refused: {refused:?}"
         );
@@ -69,6 +100,21 @@ impl ReadsOrdinaryFrames for RunningNexus {
             eprintln!("flow-nexus: the undecodable frame was not recorded: {store_error}");
         }
         Err(Box::new(Response::FrameRefused(refused)))
+    }
+
+    fn refused_greeting(
+        &self,
+        process: Option<&Process>,
+        caller: Option<CallerProcess>,
+    ) -> UndecodableFrame {
+        let refused = self.refused_caller(process, caller);
+        eprintln!(
+            "flow-nexus: a first frame was not this contract's greeting; refused: {refused:?}"
+        );
+        if let Err(store_error) = self.store.record_undecodable(refused.clone()) {
+            eprintln!("flow-nexus: the refused greeting was not recorded: {store_error}");
+        }
+        refused
     }
 }
 

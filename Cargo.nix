@@ -748,7 +748,7 @@ rec {
       };
       "flow" = rec {
         crateName = "flow";
-        version = "0.54.6";
+        version = "0.54.7";
         edition = "2024";
         crateBin = [
           {
@@ -794,7 +794,7 @@ rec {
           }
           {
             name = "signal-flow";
-            packageId = "signal-flow";
+            packageId = "signal-flow 61.0.0";
             features = [ "datom" ];
           }
         ];
@@ -817,7 +817,7 @@ rec {
       };
       "flow-defaults" = rec {
         crateName = "flow-defaults";
-        version = "0.54.6";
+        version = "0.54.7";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/flow-defaults; };
         libName = "flow_defaults";
@@ -825,7 +825,7 @@ rec {
       };
       "flow-ethos" = rec {
         crateName = "flow-ethos";
-        version = "0.54.6";
+        version = "0.54.7";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/flow-ethos; };
         libName = "flow_ethos";
@@ -884,7 +884,7 @@ rec {
       };
       "flow-meta" = rec {
         crateName = "flow-meta";
-        version = "0.54.6";
+        version = "0.54.7";
         edition = "2024";
         crateBin = [
           {
@@ -908,7 +908,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 76.0.0";
+            packageId = "meta-signal-flow 77.0.0";
             features = [ "datom" ];
           }
           {
@@ -928,7 +928,7 @@ rec {
           }
           {
             name = "signal-flow";
-            packageId = "signal-flow";
+            packageId = "signal-flow 61.0.0";
           }
         ];
         buildDependencies = [
@@ -950,7 +950,7 @@ rec {
       };
       "flow-native" = rec {
         crateName = "flow-native";
-        version = "0.54.6";
+        version = "0.54.7";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/flow-native; };
         libName = "flow_native";
@@ -964,7 +964,7 @@ rec {
       };
       "flow-nexus" = rec {
         crateName = "flow-nexus";
-        version = "0.54.6";
+        version = "0.54.7";
         edition = "2024";
         crateBin = [
           {
@@ -1019,7 +1019,7 @@ rec {
           }
           {
             name = "getrandom";
-            packageId = "getrandom 0.3.4";
+            packageId = "getrandom";
           }
           {
             name = "libc";
@@ -1027,7 +1027,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 76.0.0";
+            packageId = "meta-signal-flow 77.0.0";
             features = [ "datom" ];
           }
           {
@@ -1085,7 +1085,7 @@ rec {
           }
           {
             name = "signal-flow";
-            packageId = "signal-flow";
+            packageId = "signal-flow 61.0.0";
           }
           {
             name = "signal-flow-before-request-ids";
@@ -1113,23 +1113,15 @@ rec {
         ];
         devDependencies = [
           {
-            name = "message-nexus";
-            packageId = "message-nexus";
-          }
-          {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 75.0.0";
-            rename = "meta-signal-flow-75";
+            packageId = "meta-signal-flow 76.0.0";
+            rename = "meta-signal-flow-76";
             features = [ "datom" ];
           }
           {
-            name = "meta-signal-message";
-            packageId = "meta-signal-message";
-            features = [ "datom" ];
-          }
-          {
-            name = "signal-message";
-            packageId = "signal-message";
+            name = "signal-flow";
+            packageId = "signal-flow 60.0.0";
+            rename = "signal-flow-60";
             features = [ "datom" ];
           }
         ];
@@ -1265,7 +1257,7 @@ rec {
         };
         resolvedDefaultFeatures = [ "more_lengths" ];
       };
-      "getrandom 0.3.4" = rec {
+      "getrandom" = rec {
         crateName = "getrandom";
         version = "0.3.4";
         edition = "2021";
@@ -1328,7 +1320,7 @@ rec {
           }
           {
             name = "r-efi";
-            packageId = "r-efi 5.3.0";
+            packageId = "r-efi";
             usesDefaultFeatures = false;
             target = { target, features }: (("uefi" == target."os" or null) && ("efi_rng" == target."getrandom_backend" or null));
           }
@@ -1343,79 +1335,6 @@ rec {
           "wasm_js" = [ "dep:wasm-bindgen" "dep:js-sys" ];
         };
         resolvedDefaultFeatures = [ "std" ];
-      };
-      "getrandom 0.4.3" = rec {
-        crateName = "getrandom";
-        version = "0.4.3";
-        edition = "2024";
-        sha256 = "16b0202fkdwz3p2cyll82dv24ljbn0wiyy829v4lwbkbflyqh3ih";
-        authors = [
-          "The Rand Project Developers"
-        ];
-        dependencies = [
-          {
-            name = "cfg-if";
-            packageId = "cfg-if";
-          }
-          {
-            name = "libc";
-            packageId = "libc";
-            usesDefaultFeatures = false;
-            target = { target, features }: ((("linux" == target."os" or null) || ("android" == target."os" or null)) && (!((("linux" == target."os" or null) && ("" == target."env" or null)) || ("custom" == target."getrandom_backend" or null) || ("linux_raw" == target."getrandom_backend" or null) || ("rdrand" == target."getrandom_backend" or null) || ("rndr" == target."getrandom_backend" or null))));
-          }
-          {
-            name = "libc";
-            packageId = "libc";
-            usesDefaultFeatures = false;
-            target = { target, features }: (("dragonfly" == target."os" or null) || ("freebsd" == target."os" or null) || ("hurd" == target."os" or null) || ("illumos" == target."os" or null) || ("cygwin" == target."os" or null) || (("horizon" == target."os" or null) && ("arm" == target."arch" or null)));
-          }
-          {
-            name = "libc";
-            packageId = "libc";
-            usesDefaultFeatures = false;
-            target = { target, features }: (("haiku" == target."os" or null) || ("redox" == target."os" or null) || ("nto" == target."os" or null) || ("aix" == target."os" or null));
-          }
-          {
-            name = "libc";
-            packageId = "libc";
-            usesDefaultFeatures = false;
-            target = { target, features }: (("ios" == target."os" or null) || ("visionos" == target."os" or null) || ("watchos" == target."os" or null) || ("tvos" == target."os" or null));
-          }
-          {
-            name = "libc";
-            packageId = "libc";
-            usesDefaultFeatures = false;
-            target = { target, features }: (("macos" == target."os" or null) || ("openbsd" == target."os" or null) || ("vita" == target."os" or null) || ("emscripten" == target."os" or null));
-          }
-          {
-            name = "libc";
-            packageId = "libc";
-            usesDefaultFeatures = false;
-            target = { target, features }: ("netbsd" == target."os" or null);
-          }
-          {
-            name = "libc";
-            packageId = "libc";
-            usesDefaultFeatures = false;
-            target = { target, features }: ("solaris" == target."os" or null);
-          }
-          {
-            name = "libc";
-            packageId = "libc";
-            usesDefaultFeatures = false;
-            target = { target, features }: ("vxworks" == target."os" or null);
-          }
-          {
-            name = "r-efi";
-            packageId = "r-efi 6.0.0";
-            usesDefaultFeatures = false;
-            target = { target, features }: (("uefi" == target."os" or null) && ("efi_rng" == target."getrandom_backend" or null));
-          }
-        ];
-        features = {
-          "sys_rng" = [ "dep:rand_core" ];
-          "wasm_js" = [ "dep:wasm-bindgen" "dep:js-sys" ];
-        };
       };
       "hashbrown" = rec {
         crateName = "hashbrown";
@@ -1705,154 +1624,6 @@ rec {
         };
         resolvedDefaultFeatures = [ "alloc" "std" ];
       };
-      "message-defaults" = rec {
-        crateName = "message-defaults";
-        version = "0.24.0";
-        edition = "2024";
-        workspace_member = null;
-        src = pkgs.fetchgit {
-          url = "https://github.com/LiGoldragon/message";
-          rev = "71b5ac0dbab577cd25d3d22fb9d789463162c19d";
-          sha256 = "05j1wskipmb3xan3i211qsydijqckalc06f3629ywkzbnq9kw3ds";
-        };
-        libName = "message_defaults";
-
-      };
-      "message-nexus" = rec {
-        crateName = "message-nexus";
-        version = "0.24.0";
-        edition = "2024";
-        crateBin = [];
-        workspace_member = null;
-        src = pkgs.fetchgit {
-          url = "https://github.com/LiGoldragon/message";
-          rev = "71b5ac0dbab577cd25d3d22fb9d789463162c19d";
-          sha256 = "05j1wskipmb3xan3i211qsydijqckalc06f3629ywkzbnq9kw3ds";
-        };
-        libName = "message_nexus";
-        dependencies = [
-          {
-            name = "flow-ethos";
-            packageId = "flow-ethos";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "getrandom";
-            packageId = "getrandom 0.4.3";
-          }
-          {
-            name = "libc";
-            packageId = "libc";
-          }
-          {
-            name = "message-defaults";
-            packageId = "message-defaults";
-          }
-          {
-            name = "meta-signal-flow";
-            packageId = "meta-signal-flow 75.0.0";
-          }
-          {
-            name = "meta-signal-message";
-            packageId = "meta-signal-message";
-          }
-          {
-            name = "redb";
-            packageId = "redb";
-          }
-          {
-            name = "rkyv";
-            packageId = "rkyv";
-            usesDefaultFeatures = false;
-            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
-          }
-          {
-            name = "rustix";
-            packageId = "rustix";
-            features = [ "net" "time" ];
-          }
-          {
-            name = "sema-engine";
-            packageId = "sema-engine";
-          }
-          {
-            name = "signal-flow";
-            packageId = "signal-flow";
-          }
-          {
-            name = "signal-message";
-            packageId = "signal-message";
-          }
-          {
-            name = "thiserror";
-            packageId = "thiserror";
-          }
-        ];
-        buildDependencies = [
-          {
-            name = "ethos-zero";
-            packageId = "ethos-zero";
-          }
-        ];
-        features = {
-          "datom" = [ "dep:datom-codec" ];
-        };
-        resolvedDefaultFeatures = [ "default" ];
-      };
-      "meta-signal-flow 75.0.0" = rec {
-        crateName = "meta-signal-flow";
-        version = "75.0.0";
-        edition = "2024";
-        workspace_member = null;
-        src = pkgs.fetchgit {
-          url = "https://github.com/LiGoldragon/meta-signal-flow";
-          rev = "e192c0d4338cf3b2381bb37ecb3a177283373db5";
-          sha256 = "11xvhv27qxqg685a28g6g10mbwwnwbk89dfx7aw3y4s7ffygdf1x";
-        };
-        libName = "meta_signal_flow";
-        dependencies = [
-          {
-            name = "datom-codec";
-            packageId = "datom-codec";
-            optional = true;
-          }
-          {
-            name = "flow-ethos";
-            packageId = "flow-ethos";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "protos";
-            packageId = "protos";
-            optional = true;
-          }
-          {
-            name = "rkyv";
-            packageId = "rkyv";
-            usesDefaultFeatures = false;
-            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
-          }
-          {
-            name = "signal";
-            packageId = "signal";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "signal-flow";
-            packageId = "signal-flow";
-          }
-        ];
-        buildDependencies = [
-          {
-            name = "ethos-zero";
-            packageId = "ethos-zero";
-          }
-        ];
-        features = {
-          "datom" = [ "dep:datom-codec" "dep:protos" "flow-ethos/datom" "signal-flow/datom" "signal/datom" ];
-        };
-        resolvedDefaultFeatures = [ "datom" "default" ];
-      };
       "meta-signal-flow 76.0.0" = rec {
         crateName = "meta-signal-flow";
         version = "76.0.0";
@@ -1893,7 +1664,61 @@ rec {
           }
           {
             name = "signal-flow";
-            packageId = "signal-flow";
+            packageId = "signal-flow 60.0.0";
+          }
+        ];
+        buildDependencies = [
+          {
+            name = "ethos-zero";
+            packageId = "ethos-zero";
+          }
+        ];
+        features = {
+          "datom" = [ "dep:datom-codec" "dep:protos" "flow-ethos/datom" "signal-flow/datom" "signal/datom" ];
+        };
+        resolvedDefaultFeatures = [ "datom" "default" ];
+      };
+      "meta-signal-flow 77.0.0" = rec {
+        crateName = "meta-signal-flow";
+        version = "77.0.0";
+        edition = "2024";
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/meta-signal-flow";
+          rev = "e72f5552816477e1acfaab6cd7515bc5f807edff";
+          sha256 = "0xabqrkn86dl252mh6s9g2raw88ppf9c48pwbshis7n3dndhkc43";
+        };
+        libName = "meta_signal_flow";
+        dependencies = [
+          {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            optional = true;
+          }
+          {
+            name = "flow-ethos";
+            packageId = "flow-ethos";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            optional = true;
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+          {
+            name = "signal";
+            packageId = "signal";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "signal-flow";
+            packageId = "signal-flow 61.0.0";
           }
         ];
         buildDependencies = [
@@ -1943,61 +1768,6 @@ rec {
         ];
         features = {
           "datom" = [ "dep:datom-codec" "flow-ethos/datom" "signal-flow/datom" "signal/datom" ];
-        };
-        resolvedDefaultFeatures = [ "datom" "default" ];
-      };
-      "meta-signal-message" = rec {
-        crateName = "meta-signal-message";
-        version = "4.0.2";
-        edition = "2024";
-        workspace_member = null;
-        src = pkgs.fetchgit {
-          url = "https://github.com/LiGoldragon/meta-signal-message";
-          rev = "73b7a8213656f64da64fcc95bdbedc8f98d492c0";
-          sha256 = "113jr3zhr4ggnsdfapg9kjb71hlfisqkq9y9rlv9q848zl295gbr";
-        };
-        libName = "meta_signal_message";
-        dependencies = [
-          {
-            name = "datom-codec";
-            packageId = "datom-codec";
-            optional = true;
-          }
-          {
-            name = "protos";
-            packageId = "protos";
-            optional = true;
-          }
-          {
-            name = "rkyv";
-            packageId = "rkyv";
-            usesDefaultFeatures = false;
-            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
-          }
-          {
-            name = "signal";
-            packageId = "signal";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "signal-message";
-            packageId = "signal-message";
-            usesDefaultFeatures = false;
-          }
-        ];
-        buildDependencies = [
-          {
-            name = "ethos-zero";
-            packageId = "ethos-zero";
-          }
-          {
-            name = "signal-message";
-            packageId = "signal-message";
-            usesDefaultFeatures = false;
-          }
-        ];
-        features = {
-          "datom" = [ "dep:datom-codec" "dep:protos" "signal-message/datom" "signal/datom" ];
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
       };
@@ -2409,7 +2179,7 @@ rec {
         };
         resolvedDefaultFeatures = [ "default" "proc-macro" ];
       };
-      "r-efi 5.3.0" = rec {
+      "r-efi" = rec {
         crateName = "r-efi";
         version = "5.3.0";
         edition = "2018";
@@ -2418,17 +2188,6 @@ rec {
         features = {
           "core" = [ "dep:core" ];
           "examples" = [ "native" ];
-          "rustc-dep-of-std" = [ "core" ];
-        };
-      };
-      "r-efi 6.0.0" = rec {
-        crateName = "r-efi";
-        version = "6.0.0";
-        edition = "2018";
-        sha256 = "1gyrl2k5fyzj9k7kchg2n296z5881lg7070msabid09asp3wkp7q";
-        libName = "r_efi";
-        features = {
-          "core" = [ "dep:core" ];
           "rustc-dep-of-std" = [ "core" ];
         };
       };
@@ -2534,7 +2293,7 @@ rec {
         dependencies = [
           {
             name = "getrandom";
-            packageId = "getrandom 0.3.4";
+            packageId = "getrandom";
             optional = true;
           }
         ];
@@ -3206,7 +2965,7 @@ rec {
         };
         resolvedDefaultFeatures = [ "datom" ];
       };
-      "signal-flow" = rec {
+      "signal-flow 60.0.0" = rec {
         crateName = "signal-flow";
         version = "60.0.0";
         edition = "2024";
@@ -3215,6 +2974,56 @@ rec {
           url = "https://github.com/LiGoldragon/signal-flow";
           rev = "04a72fd35345f63a06352c17f46f997d7fdafaee";
           sha256 = "0lkpi5wfykk30x9b35bia592cs8v83bbmgb6c9nl5dmm44ra693r";
+        };
+        libName = "signal_flow";
+        dependencies = [
+          {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            optional = true;
+          }
+          {
+            name = "flow-ethos";
+            packageId = "flow-ethos";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            optional = true;
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+          {
+            name = "signal";
+            packageId = "signal";
+            usesDefaultFeatures = false;
+          }
+        ];
+        buildDependencies = [
+          {
+            name = "ethos-zero";
+            packageId = "ethos-zero";
+          }
+        ];
+        features = {
+          "datom" = [ "dep:datom-codec" "dep:protos" "flow-ethos/datom" "signal/datom" ];
+        };
+        resolvedDefaultFeatures = [ "datom" "default" ];
+      };
+      "signal-flow 61.0.0" = rec {
+        crateName = "signal-flow";
+        version = "61.0.0";
+        edition = "2024";
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/signal-flow";
+          rev = "4871bb81c1119fe72dc76168a97e1e576411b831";
+          sha256 = "0rwx0bj0rw938q4z53f682ad173q8k3vkxn4jy3shcsq24a2zjhl";
         };
         libName = "signal_flow";
         dependencies = [
@@ -3287,55 +3096,6 @@ rec {
         ];
         features = {
           "datom" = [ "dep:datom-codec" "flow-ethos/datom" "signal/datom" ];
-        };
-        resolvedDefaultFeatures = [ "datom" "default" ];
-      };
-      "signal-message" = rec {
-        crateName = "signal-message";
-        version = "23.0.0";
-        edition = "2024";
-        workspace_member = null;
-        src = pkgs.fetchgit {
-          url = "https://github.com/LiGoldragon/signal-message";
-          rev = "6d82783e35393c9037283cbfd9f98053d22e1b46";
-          sha256 = "1x8pbnzia7siv6lirj0hpy4ynlxclkixaj6zi7zywxak47xrvsgw";
-        };
-        libName = "signal_message";
-        dependencies = [
-          {
-            name = "datom-codec";
-            packageId = "datom-codec";
-            optional = true;
-          }
-          {
-            name = "protos";
-            packageId = "protos";
-            optional = true;
-          }
-          {
-            name = "rkyv";
-            packageId = "rkyv";
-            usesDefaultFeatures = false;
-            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
-          }
-          {
-            name = "signal";
-            packageId = "signal";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "signal-flow";
-            packageId = "signal-flow";
-          }
-        ];
-        buildDependencies = [
-          {
-            name = "ethos-zero";
-            packageId = "ethos-zero";
-          }
-        ];
-        features = {
-          "datom" = [ "dep:datom-codec" "dep:protos" "signal-flow/datom" "signal/datom" ];
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
       };
@@ -3476,7 +3236,7 @@ rec {
           }
           {
             name = "getrandom";
-            packageId = "getrandom 0.3.4";
+            packageId = "getrandom";
             optional = true;
             usesDefaultFeatures = false;
             target = { target, features }: ((target."unix" or false) || (target."windows" or false) || ("wasi" == target."os" or null));

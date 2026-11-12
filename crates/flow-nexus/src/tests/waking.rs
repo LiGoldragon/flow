@@ -438,11 +438,15 @@ fn an_idle_maintained_codex_flow_keeps_its_pane_and_stays_awake() {
         AtStop::Kept(KeptAtStop::ThreadNotResting)
     );
 
+    // Test 5: the thread's coming to rest settles the seat itself, once,
+    // and a Maintained seat with nothing queued stays Idle.
     let thread = fixture.node().session_id;
-    fixture
-        .nexus
-        .codex_events(&thread.0, vec![TurnEvent::Status(ThreadStatus::Idle)]);
-    assert_eq!(fixture.nexus.settle_stopped("908786"), AtStop::Idle);
+    assert_eq!(
+        fixture
+            .nexus
+            .codex_events(&thread.0, vec![TurnEvent::Status(ThreadStatus::Idle)]),
+        Some(AtStop::Idle)
+    );
     assert!(!closes(&fixture), "the idle seat keeps its pane");
     let kept = stored(&fixture, Model::Sol);
     assert_eq!(
@@ -534,19 +538,13 @@ fn an_idle_on_demand_codex_flow_closes_its_harness() {
         vec![],
         vec![],
     ));
+    // Test 4: the thread's rest settles the seat itself; it sleeps.
     let thread = fixture.node().session_id;
-    fixture
-        .nexus
-        .codex_events(&thread.0, vec![TurnEvent::Status(ThreadStatus::Idle)]);
-    // The thread's rest may already have settled the seat; either way it
-    // sleeps.
-    let at_stop = fixture.nexus.settle_stopped("908786");
-    assert!(
-        matches!(
-            &at_stop,
-            AtStop::Slept(_) | AtStop::Kept(KeptAtStop::NotAwake)
-        ),
-        "{at_stop:?}"
+    assert_eq!(
+        fixture
+            .nexus
+            .codex_events(&thread.0, vec![TurnEvent::Status(ThreadStatus::Idle)]),
+        Some(AtStop::Slept(address(Model::Sol)))
     );
     assert!(closes(&fixture), "the idle seat's harness is closed");
     let slept = stored(&fixture, Model::Sol);
@@ -3681,6 +3679,7 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
     );
     let mut hook = UnixStream::connect(&socket).expect("ordinary socket listens");
     hook.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    super::GreetsOrdinarySocket::greet_ordinary(&mut hook);
     let marker = "SOCKET-HOOK-assistant-marker-雪";
     let mut event = claude_stop(fixture);
     let signal_flow::Event::Stopped(stop) = &mut event else {
@@ -6610,5 +6609,240 @@ fn a_simplified_answer_uses_bound_transcript_b_and_never_hook_a() {
     assert_eq!(
         fixture.nexus.queue_simplified_answer("regular-seat"),
         SimplifiedAnswer::NoneOwed
+    );
+}
+
+/// An Awake Codex seat 908786 at Sol with `queue`, declared `continuity`
+/// with a successor that composes; its thread named.
+fn codex_rest_seat(
+    fixture: &NexusFixture,
+    continuity: Option<meta_signal_flow::Continuity>,
+    queue: Vec<signal_flow::QueueEntry>,
+) -> String {
+    fixture.accept_pane_operations(
+        vec![fixture.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.register_with(FlowLifecycle::Active);
+    if let Some(continuity) = continuity {
+        super::refresh_and_compaction::declare_seat(
+            fixture,
+            continuity,
+            vec!["spirit-core".into(), "intent-flow".into()],
+        );
+    }
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: address(Model::Sol),
+        state: State::Awake(flow_ethos::FlowId("908786".into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(queue),
+    });
+    fixture.node().session_id.0
+}
+
+/// Test 1 (Part A): a Refresh ordered while a Codex turn runs is carried
+/// out at the thread's rest with nothing queued.
+#[test]
+fn a_codex_ordered_refresh_with_nothing_queued_is_carried_out_at_its_rest() {
+    use crate::Dispatches;
+    use crate::codex_turns::{SettlesRestingCodexSeats, TurnEvent};
+    use signal_flow::{Query, Response};
+    let fixture = NexusFixture::new();
+    let thread = codex_rest_seat(
+        &fixture,
+        Some(meta_signal_flow::Continuity::OnDemand),
+        vec![],
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .codex_events(&thread, vec![TurnEvent::Started("turn-1".into())]),
+        None,
+        "a turn that starts is no rest"
+    );
+    assert!(matches!(
+        fixture.nexus.dispatch(Query::Refresh(address(Model::Sol))),
+        Response::RefreshQueued(_)
+    ));
+    let at_rest = fixture
+        .nexus
+        .codex_events(&thread, vec![TurnEvent::Completed("turn-1".into())]);
+    assert!(
+        matches!(&at_rest, Some(AtStop::Refreshed(at)) if *at == address(Model::Sol)),
+        "{at_rest:?}"
+    );
+    assert!(closes(&fixture), "the ordered refresh closes the seat");
+}
+
+/// Test 2 (Part A): a Codex seat past its threshold is refreshed at its
+/// rest with nothing queued.
+#[test]
+fn a_codex_seat_past_its_threshold_is_refreshed_at_its_rest_with_nothing_queued() {
+    use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
+    use crate::store::SeedsRole;
+    use crate::store::context::RecordsContextSize;
+    let fixture = NexusFixture::new();
+    let thread = codex_rest_seat(
+        &fixture,
+        Some(meta_signal_flow::Continuity::OnDemand),
+        vec![],
+    );
+    fixture.nexus.store.seed_role(signal_flow::CallerIdentity {
+        flow_id: flow_ethos::FlowId("908786".into()),
+        aspect: signal_flow::Aspect::Mind,
+        model_name: flow_ethos::ModelName("gpt-sol".into()),
+    });
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Thresholds(vec![
+            meta_signal_flow::ConfigureThreshold {
+                model_name: flow_ethos::ModelName("gpt-sol".into()),
+                refresh_threshold: meta_signal_flow::RefreshThreshold(100),
+            },
+        ]))
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .record_context_size("908786", 500)
+        .unwrap();
+    let at_rest = fixture
+        .nexus
+        .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]);
+    assert!(
+        matches!(&at_rest, Some(AtStop::Refreshed(at)) if *at == address(Model::Sol)),
+        "{at_rest:?}"
+    );
+}
+
+/// Test 3 (Part A): a status seen twice is no second rest: a second
+/// Status(Idle) while resting settles nothing.
+#[test]
+fn a_warned_codex_seat_is_refreshed_at_the_rest_after_its_warning() {
+    use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
+    let fixture = NexusFixture::new();
+    let thread = codex_rest_seat(&fixture, None, vec![]);
+    maintain(&fixture, address(Model::Sol));
+    assert_eq!(
+        fixture
+            .nexus
+            .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]),
+        Some(AtStop::Idle)
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]),
+        None,
+        "a second Status(Idle) while resting is no new rest"
+    );
+}
+
+/// Test 6 (Part A): a resting Codex seat with work queued is handed the
+/// oldest request.
+#[test]
+fn a_resting_codex_seat_with_work_queued_is_handed_the_oldest_request() {
+    use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
+    let fixture = NexusFixture::new();
+    let entry = signal_flow::QueueEntry {
+        logical_delivery_id: flow_ethos::LogicalDeliveryId("codex-rest-0".into()),
+        request_id: flow_ethos::RequestId("cr00".into()),
+        sent_by: signal_flow::SentBy::Unknown,
+        delivery: flow_ethos::Delivery::Queue,
+        message: signal_flow::Message::Soft(signal_flow::Request::Order("Oldest.".into())),
+    };
+    let thread = codex_rest_seat(&fixture, None, vec![entry]);
+    maintain(&fixture, address(Model::Sol));
+    // The rest settles the seat with its queue: the oldest request is the
+    // one the Drain takes. With no app-server behind this fixture the
+    // hand-over itself is refused; the send-tool world proves it typed
+    // (`soft_work_queued_while_a_codex_turn_runs_waits_for_its_completion`).
+    let at_rest = fixture
+        .nexus
+        .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]);
+    assert!(
+        matches!(
+            &at_rest,
+            Some(AtStop::Drained(_) | AtStop::Kept(KeptAtStop::DrainRefused(_)))
+        ),
+        "{at_rest:?}"
+    );
+}
+
+/// Test 8 (Part A): an OnDemand Codex seat whose successor cannot be placed
+/// stays Awake, its sleep alone declined, and is told nothing.
+#[test]
+fn an_on_demand_codex_seat_whose_successor_cannot_compose_stays_awake_untold() {
+    use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
+    let fixture = NexusFixture::new();
+    let thread = codex_rest_seat(&fixture, None, vec![]);
+    let at_rest = fixture
+        .nexus
+        .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]);
+    assert_eq!(at_rest, Some(AtStop::Kept(KeptAtStop::SleepUnplaceable)));
+    assert!(!closes(&fixture), "the seat stays Awake");
+    assert!(fixture.typed().is_none(), "no successor-refused notice");
+    assert_eq!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(flow_ethos::FlowId("908786".into()))
+    );
+}
+
+/// Test 9 (ruling 1): the first authoritative Resumed(Idle) after a Nexus
+/// start settles a Codex seat once; a re-subscription's Idle with no turn
+/// seen in between settles nothing; a turn seen running then a Resumed(Idle)
+/// does.
+#[test]
+fn the_first_resumed_idle_after_a_start_settles_a_codex_seat_once() {
+    use crate::codex_turns::{CodexTurns, ThreadStatus, TracksCodexTurns, TurnEvent};
+    let turns = CodexTurns::default();
+    let thread = "resumed-thread";
+    assert!(
+        turns
+            .observe(thread, TurnEvent::Resumed(ThreadStatus::Idle))
+            .rested
+    );
+    assert!(
+        !turns
+            .observe(thread, TurnEvent::Resumed(ThreadStatus::Idle))
+            .rested
+    );
+    turns.observe(thread, TurnEvent::Resumed(ThreadStatus::Unavailable));
+    assert!(
+        !turns
+            .observe(thread, TurnEvent::Resumed(ThreadStatus::Idle))
+            .rested,
+        "a reconnect's Idle after Unknown is no new rest"
+    );
+    turns.observe(thread, TurnEvent::Started("t1".into()));
+    assert!(
+        turns
+            .observe(thread, TurnEvent::Completed("t1".into()))
+            .rested
+    );
+    turns.observe(thread, TurnEvent::Resumed(ThreadStatus::Active));
+    assert!(
+        turns
+            .observe(thread, TurnEvent::Resumed(ThreadStatus::Idle))
+            .rested,
+        "a turn seen running, then Idle, is a rest"
+    );
+    // Through the Nexus: the first Resumed(Idle) settles the seat once.
+    use crate::codex_turns::SettlesRestingCodexSeats;
+    let fixture = NexusFixture::new();
+    let seat = codex_rest_seat(&fixture, None, vec![]);
+    maintain(&fixture, address(Model::Sol));
+    assert_eq!(
+        fixture
+            .nexus
+            .codex_events(&seat, vec![TurnEvent::Resumed(ThreadStatus::Idle)]),
+        Some(AtStop::Idle)
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .codex_events(&seat, vec![TurnEvent::Resumed(ThreadStatus::Idle)]),
+        None
     );
 }

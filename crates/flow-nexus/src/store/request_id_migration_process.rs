@@ -66,6 +66,23 @@ fn own_process() -> signal_flow::Process {
 
 fn socket_query(socket: &Path, query: signal_flow::Query) -> signal_flow::Response {
     let mut peer = UnixStream::connect(socket).expect("current Flow socket connects");
+    // Every ordinary connection greets the current Flow first.
+    {
+        use signal_flow::Contracted;
+        peer.write_frame(
+            &rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Query::greeting())
+                .expect("greeting encodes"),
+        )
+        .expect("greeting writes");
+        let receipt = rkyv::from_bytes::<signal_flow::HandshakeReceipt, rkyv::rancor::Error>(
+            &peer.read_frame().expect("greeting receipt reads"),
+        )
+        .expect("receipt decodes");
+        assert_eq!(
+            receipt,
+            signal_flow::HandshakeReceipt::Greeted(signal_flow::Query::contract_digest())
+        );
+    }
     peer.write_query(&query).expect("socket query writes");
     peer.read_response().expect("socket response reads")
 }

@@ -93,6 +93,17 @@ The
 socket every flow's hook reports to is its launching place's, so a flow
 launched at main keeps reporting to whichever version is main.
 
+Every connection greets first, on both sockets. The client writes its
+contract's Signal greeting (`signal_flow::Query::greeting()` on `flow.sock`,
+`meta_signal_flow::Query::greeting()` on `flow-meta.sock`) and reads the
+receipt; it writes its Query only after `Greeted` names its own digest. A
+first frame that is not this contract's greeting, an older peer's greeting
+or its raw Query among them, is answered `GreetingRefused.ContractMismatch`
+with this contract's digest before anything is decoded, the connection
+ends, and the refusal is recorded, metadata alone, in `Observe.Undecodable`.
+The `flow-nexus` CLI, `flow-nexus-hook` and `flow-nexus-meta` greet; a
+refused greeting is the CLI's error (exit 2) and the hook's `2` line.
+
 A place's two directories are shared with every other Nexus at it and are
 declared by the environment (CriomOS-home declares them as user tmpfiles
 rules): the Nexus finds them, does not start when either is absent, and
@@ -445,8 +456,8 @@ with tests has one check, `checks.<system>.<member>`, which runs the test
 binaries its test build compiled and compiles nothing, and fails when no test
 ran; `checks.<system>.default` is every member's check, beside `cargo-nix`,
 `clippy`, `fmt`, `capsule-witnesses`, the trait-law checks, the
-`message-joint` and `request-id-migration-process` process checks and the
-immutable contract pins. After editing a `Cargo.toml` or `Cargo.lock`,
+`request-id-migration-process` process check and the immutable contract
+pins. After editing a `Cargo.toml` or `Cargo.lock`,
 regenerate `Cargo.nix` with
 `nix run github:LiGoldragon/build-base#crate2nix -- generate`.
 

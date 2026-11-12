@@ -15,7 +15,9 @@ pub use crate::generated::curriculum::{
     ContextProvenance, Outcome as CurriculumOutcome, Query as CurriculumQuery, StartupComposition,
     StartupSelection,
 };
-pub use crate::generated::memory::{LaunchOutcome, Replacement, SeatBirth};
+pub use crate::generated::memory::{
+    LaunchOutcome, PendingHandover, PendingReap, Replacement, SeatBirth, SupersededHandover,
+};
 pub use crate::generated::operation::Outcome as OperationOutcome;
 pub use crate::generated::starter::{LaunchedRecord, ReplacedRecord};
 use crate::herdr::ConfiguresHerdrCli;
@@ -58,6 +60,9 @@ mod fixture_executable;
 /// both outputs fresh. The `datom` feature enables their textual CLI surface.
 #[allow(unexpected_cfgs, clippy::large_enum_variant)]
 pub mod generated;
+pub mod reaping;
+#[cfg(test)]
+mod test_faults;
 #[cfg(feature = "executable-default-configuration")]
 mod executable_default_configuration {
     include!(env!("FLOW_NEXUS_DEFAULT_CONFIGURATION_RS"));
@@ -155,6 +160,12 @@ pub struct RunningNexus {
     pub stopped_at_confirmation: waking::StoppedAtConfirmation,
     /// Flows kept because their successor was refused; see `waking`.
     pub refresh_refusals: waking::RefreshRefusals,
+    /// Predecessors whose reap worker a bearing event asked to arm again;
+    /// the reap supervisor takes them (`reaping`).
+    pub(crate) pane_watch_rearms: reaping::PaneWatchRearms,
+    /// The test build's pane-watch race hooks.
+    #[cfg(test)]
+    pub(crate) pane_watch_hooks: reaping::PaneWatchHooks,
     /// Set once the Nexus is told to stop; see [`StopsNexus`].
     pub stopping: Stopping,
     /// The send-tool responder of the Codex launch running now; see
@@ -623,6 +634,13 @@ impl Dispatches for RunningNexus {
             Ok(writer) => writer,
             Err(error) => return Response::KeepRefused(error),
         };
+        // [PSYCHE-3] (a): the receiving flow's own handover write takes up
+        // the handover owed it first, once, in its own commit.
+        crate::reaping::TakesUpObligations::take_up_at_handover_write(
+            self,
+            &writer.address,
+            &writer.flow_id,
+        );
         let title = request.section.title.clone();
         let touch = match self.handover_touch(&writer.flow_id) {
             Ok(touch) => touch,
@@ -647,6 +665,13 @@ impl Dispatches for RunningNexus {
             Ok(writer) => writer,
             Err(error) => return Response::DropRefused(error),
         };
+        // [PSYCHE-3] (a): the receiving flow's own handover write takes up
+        // the handover owed it first, once, in its own commit.
+        crate::reaping::TakesUpObligations::take_up_at_handover_write(
+            self,
+            &writer.address,
+            &writer.flow_id,
+        );
         let title = request.title.clone();
         let touch = match self.handover_touch(&writer.flow_id) {
             Ok(touch) => touch,
@@ -1082,6 +1107,9 @@ impl OpensRunningNexus for RunningNexus {
             waking: waking::WakingMetaflows::default(),
             stopped_at_confirmation: waking::StoppedAtConfirmation::default(),
             refresh_refusals: waking::RefreshRefusals::default(),
+            pane_watch_rearms: Default::default(),
+            #[cfg(test)]
+            pane_watch_hooks: Default::default(),
             stopping: Stopping::default(),
             launch_calls: send_tool::LaunchCalls::default(),
             codex_turns: codex_turns::CodexTurns::default(),
@@ -1443,6 +1471,13 @@ impl ServesConnection for Connection {
 
     fn serve_ordinary(mut self, nexus: &RunningNexus) -> Result<(), String> {
         use crate::undecodable::ReadsOrdinaryFrames;
+        // Every ordinary connection greets first: nothing is decoded as a
+        // Query before this contract is settled.
+        match self.greet::<signal_flow::Query>(nexus) {
+            Ok(()) => {}
+            Err(GreetingEnd::Refused) => return Err("ordinary greeting refused".into()),
+            Err(GreetingEnd::Transport(error)) => return Err(error),
+        }
         let frame = self.peer.read_frame()?;
         // A frame that decodes as no Query, an earlier hook's Report among
         // them, is refused in this contract's words and recorded.
@@ -1664,7 +1699,11 @@ impl ServesConnection for Connection {
     }
 
     fn serve_meta(mut self, nexus: &RunningNexus) -> Result<(), String> {
-        self.peer.greet_meta()?;
+        match self.greet::<meta_signal_flow::Query>(nexus) {
+            Ok(()) => {}
+            Err(GreetingEnd::Refused) => return Err("meta greeting refused".into()),
+            Err(GreetingEnd::Transport(error)) => return Err(error),
+        }
         let query = self.peer.read_meta_query()?;
         // Every peer is answered alike. The peer is read from the kernel,
         // only for the records that name who asked; nothing in the query
@@ -2312,6 +2351,51 @@ impl AnnouncesReadiness for Readiness {
     }
 }
 
+/// How a greeting that did not settle the contract ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GreetingEnd {
+    /// A typed `GreetingRefused` was written and the refusal recorded,
+    /// metadata alone.
+    Refused,
+    /// The peer went or the frame could not be read; nothing was written.
+    Transport(String),
+}
+
+/// One greeting serves both sockets: the peer's first frame is read as a
+/// Signal `Handshake` and answered `C`'s receipt, before any Query is
+/// decoded. A first frame that is no Handshake is answered the same typed
+/// refusal a mismatched digest is, `GreetingRefused(ContractMismatch(own))`.
+pub trait GreetsPeers {
+    /// Ok only once `Greeted` is written.
+    fn greet<C: signal::Contracted>(&mut self, nexus: &RunningNexus) -> Result<(), GreetingEnd>;
+}
+
+impl GreetsPeers for Connection {
+    fn greet<C: signal::Contracted>(&mut self, nexus: &RunningNexus) -> Result<(), GreetingEnd> {
+        use crate::undecodable::ReadsOrdinaryFrames;
+        let frame = self.peer.read_frame().map_err(GreetingEnd::Transport)?;
+        let receipt = match rkyv::from_bytes::<signal::Handshake, rkyv::rancor::Error>(&frame) {
+            Ok(greeting) => C::receipt(&greeting),
+            Err(_) => signal::HandshakeReceipt::GreetingRefused(
+                signal::HandshakeRejection::ContractMismatch(C::contract_digest()),
+            ),
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&receipt)
+            .map_err(|error| GreetingEnd::Transport(error.to_string()))?;
+        self.peer
+            .write_frame(&bytes)
+            .map_err(GreetingEnd::Transport)?;
+        match receipt {
+            signal::HandshakeReceipt::Greeted(_) => Ok(()),
+            signal::HandshakeReceipt::GreetingRefused(_) => {
+                nexus.refused_greeting(self.process.as_ref(), self.peer.peer_process());
+                let _ = self.peer.shutdown(Shutdown::Both);
+                Err(GreetingEnd::Refused)
+            }
+        }
+    }
+}
+
 /// A Unix stream carries Signal as length-prefixed rkyv frames of at most
 /// 1 MiB.
 pub trait CarriesSignalFrames {
@@ -2323,8 +2407,6 @@ pub trait CarriesSignalFrames {
     fn read_query(&mut self) -> Result<Query, String>;
     fn write_response(&mut self, value: &Response) -> Result<(), String>;
     fn read_response(&mut self) -> Result<Response, String>;
-    /// Settle the meta contract before decoding any query.
-    fn greet_meta(&mut self) -> Result<(), String>;
     fn read_meta_query(&mut self) -> Result<meta_signal_flow::Query, String>;
     fn write_meta_response(&mut self, value: &meta_signal_flow::Response) -> Result<(), String>;
 }
@@ -2366,23 +2448,6 @@ impl CarriesSignalFrames for UnixStream {
             .map_err(|e| e.to_string())
     }
 
-    fn greet_meta(&mut self) -> Result<(), String> {
-        use signal::Contracted;
-        let greeting =
-            rkyv::from_bytes::<signal::Handshake, rkyv::rancor::Error>(&self.read_frame()?)
-                .map_err(|error| format!("invalid meta greeting: {error}"))?;
-        let receipt = meta_signal_flow::Query::receipt(&greeting);
-        self.write_frame(
-            &rkyv::to_bytes::<rkyv::rancor::Error>(&receipt).map_err(|error| error.to_string())?,
-        )?;
-        match receipt {
-            signal::HandshakeReceipt::Greeted(_) => Ok(()),
-            signal::HandshakeReceipt::GreetingRefused(reason) => {
-                Err(format!("meta greeting refused: {reason:?}"))
-            }
-        }
-    }
-
     fn read_meta_query(&mut self) -> Result<meta_signal_flow::Query, String> {
         rkyv::from_bytes::<meta_signal_flow::Query, rkyv::rancor::Error>(&self.read_frame()?)
             .map_err(|e| e.to_string())
@@ -2416,6 +2481,7 @@ mod tests {
     mod open_requests;
     mod queue_drain;
     mod queue_operations;
+    pub(crate) mod reaping;
     mod refresh_and_compaction;
     mod refreshing;
     mod rehearsing;
@@ -3291,6 +3357,8 @@ mod tests {
                 waking: crate::waking::WakingMetaflows::default(),
                 stopped_at_confirmation: crate::waking::StoppedAtConfirmation::default(),
                 refresh_refusals: crate::waking::RefreshRefusals::default(),
+                pane_watch_rearms: Default::default(),
+                pane_watch_hooks: Default::default(),
                 stopping: crate::Stopping::default(),
                 launch_calls: crate::send_tool::LaunchCalls::default(),
                 codex_turns: crate::codex_turns::CodexTurns::default(),
@@ -3324,6 +3392,46 @@ mod tests {
                 ("messaging-build", session_socket),
             ]);
             fixture
+        }
+
+        /// The crash and restart of safeguards-0547.md S1: every in-memory
+        /// state is lost (the gate, the reap workers and their rearm set,
+        /// each Codex thread's turn, any answer not yet written) and only
+        /// the store is durable. The store is closed, its logical state read
+        /// while no Nexus holds it, and a new Nexus opened over the same
+        /// path and the same Herdr fixture. The caller then runs its start:
+        /// `recover_wakes`, and the reap supervisor where it runs one.
+        fn restarted(&mut self) -> crate::tests::reaping::LogicalState {
+            use crate::store::SetsNativeOwnerEnvironmentForTests;
+            let path = self.directory.path().join("flow.sema");
+            let scratch = self.directory.path().join("restart-scratch");
+            let _ = fs::remove_dir_all(&scratch);
+            fs::create_dir(&scratch).expect("restart scratch directory");
+            let placeholder =
+                FlowStore::open(&scratch.join("placeholder.sema")).expect("placeholder store");
+            let closed = std::mem::replace(&mut self.nexus.store, placeholder.into());
+            assert_eq!(
+                std::sync::Arc::strong_count(&closed),
+                1,
+                "nothing else holds the crashed Nexus's store"
+            );
+            drop(closed);
+            let state = crate::tests::reaping::LogicalState::read(&path);
+            let mut store = FlowStore::open(&path).expect("the store reopens after the crash");
+            store.set_native_owner_environment_for_tests(crate::store::NativeOwnerEnvironment {
+                host_id: "isolated-test-host".into(),
+                boot_id: "isolated-test-boot".into(),
+            });
+            self.nexus.store = store.into();
+            self.nexus.dispatch_gate = std::sync::Mutex::new(());
+            self.nexus.waking = crate::waking::WakingMetaflows::default();
+            self.nexus.stopped_at_confirmation = crate::waking::StoppedAtConfirmation::default();
+            self.nexus.refresh_refusals = crate::waking::RefreshRefusals::default();
+            self.nexus.pane_watch_rearms = Default::default();
+            self.nexus.pane_watch_hooks = Default::default();
+            self.nexus.stopping = crate::Stopping::default();
+            self.nexus.codex_turns = crate::codex_turns::CodexTurns::default();
+            state
         }
 
         /// The fixture Herdr's shell function `submitted PANE TEXT`: a
@@ -3576,17 +3684,32 @@ mod tests {
         };
 
         let mut idle = connect();
+        // Garbage as the first frame is no greeting: the typed refusal.
         let mut garbage = connect();
         garbage
             .write_all(&16u32.to_be_bytes())
             .and_then(|_| garbage.write_all(&[0xff; 16]))
             .expect("garbage frame written");
+        assert_eq!(garbage.receipt(), refused_ordinary_greeting());
+        assert!(
+            garbage.read_frame().is_err(),
+            "the refusal ends the connection"
+        );
+        // Garbage after a greeting is a Query refused in this contract's
+        // words.
+        let mut greeted_garbage = connect();
+        greeted_garbage.greet_ordinary();
+        greeted_garbage
+            .write_all(&16u32.to_be_bytes())
+            .and_then(|_| greeted_garbage.write_all(&[0xff; 16]))
+            .expect("garbage frame written");
         assert!(matches!(
-            garbage.read_response(),
+            greeted_garbage.read_response(),
             Ok(Response::FrameRefused(refused)) if refused.flow_id_option.is_none()
         ));
 
         let mut peer = connect();
+        peer.greet_ordinary();
         peer.write_query(&Query::Metaflows)
             .expect("metaflows query written");
         assert!(matches!(
@@ -3594,6 +3717,203 @@ mod tests {
             Response::Listed(_)
         ));
         idle.write_all(&[0]).expect("idle peer still open");
+    }
+
+    /// O1: an ordinary connection is greeted before its Query is decoded,
+    /// and an Observe stream greets once and then streams.
+    #[test]
+    fn an_ordinary_connection_is_greeted_before_its_query_is_decoded() {
+        use super::{CarriesSignalFrames, Connection, ServesConnection};
+        use crate::store::AnnouncesLaunchChanges;
+        use std::net::Shutdown;
+        let fixture = NexusFixture::new();
+        let (peer, mut client) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        std::thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                Connection::accepted(peer)
+                    .unwrap()
+                    .serve_ordinary(&fixture.nexus)
+            });
+            client.greet_ordinary();
+            client.write_query(&Query::Metaflows).unwrap();
+            assert!(matches!(
+                client.read_response().unwrap(),
+                Response::Listed(_)
+            ));
+            assert!(server.join().unwrap().is_ok());
+        });
+        // An Observe stream greets once, then streams.
+        let (peer, mut client) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        std::thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                Connection::accepted(peer)
+                    .unwrap()
+                    .serve_ordinary(&fixture.nexus)
+            });
+            client.greet_ordinary();
+            client
+                .write_query(&Query::Observe(signal_flow::ObserveSelection::Undecodable))
+                .unwrap();
+            assert!(matches!(
+                client.read_response().unwrap(),
+                Response::UndecodableObserved(_)
+            ));
+            client.shutdown(Shutdown::Both).unwrap();
+            fixture.nexus.store.launch_changes.announce();
+            let _ = server.join();
+        });
+    }
+
+    /// O2 and O3: a signal-flow 60 peer, its greeting, its raw Report and its
+    /// raw Bind, and a first frame too short for a greeting, are each refused
+    /// typed before any Query is decoded; nothing takes effect; each leaves
+    /// one record, metadata alone.
+    #[test]
+    fn a_signal_flow_60_peer_is_refused_typed_before_any_query_is_decoded() {
+        use super::{CarriesSignalFrames, Connection, ServesConnection};
+        use crate::store::ManagesMetaflowState;
+        use crate::store::undecodable_frame::RecordsUndecodableFrames;
+        use signal::Contracted;
+        use signal_flow::Process;
+        let fixture = NexusFixture::new();
+        let marker = "REFUSED-FRAME-BODY-MARKER";
+        let report = signal_flow_60::Query::Report(signal_flow_60::Report_Data {
+            flow_id: flow_ethos::FlowId("abcdef".into()),
+            process_option: None,
+            event: signal_flow_60::Event::ToolUsed(marker.into()),
+        });
+        let address = signal_flow::Address {
+            aspect: Aspect::Field,
+            topic: flow_ethos::Topic("bindRefused".into()),
+            model: signal_flow::Model::Sol,
+        };
+        let bind = signal_flow_60::Query::Bind(signal_flow_60::Bind_Data {
+            address: address.clone(),
+            process: Process {
+                pid: flow_ethos::generated::library::Pid(1),
+                started: flow_ethos::generated::library::Started(1),
+            },
+        });
+        let frames: Vec<Vec<u8>> = vec![
+            rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow_60::Query::greeting())
+                .unwrap()
+                .to_vec(),
+            rkyv::to_bytes::<rkyv::rancor::Error>(&report)
+                .unwrap()
+                .to_vec(),
+            rkyv::to_bytes::<rkyv::rancor::Error>(&bind)
+                .unwrap()
+                .to_vec(),
+            vec![1, 2, 3, 4],
+        ];
+        assert_ne!(
+            signal_flow_60::Query::contract_digest(),
+            signal_flow::Query::contract_digest()
+        );
+        let metaflows = fixture.nexus.store.list_metaflows().unwrap();
+        for (index, frame) in frames.into_iter().enumerate() {
+            let (peer, mut client) = UnixStream::pair().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            std::thread::scope(|scope| {
+                let server = scope.spawn(|| {
+                    Connection::accepted(peer)
+                        .unwrap()
+                        .serve_ordinary(&fixture.nexus)
+                });
+                client.write_frame(&frame).unwrap();
+                assert_eq!(
+                    client.receipt(),
+                    refused_ordinary_greeting(),
+                    "frame {index}"
+                );
+                assert!(
+                    client.read_frame().is_err(),
+                    "frame {index}: the connection ends"
+                );
+                assert!(server.join().unwrap().is_err());
+            });
+            let records = fixture.nexus.store.undecodable_frames().unwrap();
+            assert_eq!(records.len(), index + 1, "one record per refusal");
+            let record = rkyv::to_bytes::<rkyv::rancor::Error>(records.last().unwrap()).unwrap();
+            assert!(
+                !record
+                    .windows(marker.len())
+                    .any(|part| part == marker.as_bytes()),
+                "the record keeps nothing of the frame"
+            );
+        }
+        assert_eq!(
+            fixture.nexus.store.list_metaflows().unwrap(),
+            metaflows,
+            "the raw Bind took no effect"
+        );
+    }
+
+    /// O6: the empty connection a stop wakes the ordinary accept loop with
+    /// ends at the greeting read, and the loop returns.
+    #[test]
+    fn a_stop_wakes_the_ordinary_accept_loop_through_the_greeting_read() {
+        use super::{ServesOrdinary, StopsNexus};
+        let fixture = NexusFixture::new();
+        let socket = fixture.directory.path().join("ordinary-stop.sock");
+        std::thread::scope(|scope| {
+            let serving = scope.spawn(|| fixture.nexus.serve_ordinary(&socket));
+            assert!(crate::event_wait::AwaitsPath::appeared_by(
+                socket.as_path(),
+                std::time::Instant::now() + Duration::from_secs(5)
+            ));
+            fixture.nexus.stop(&[socket.as_path()]);
+            let _ = serving.join().expect("the accept loop returns");
+        });
+    }
+
+    /// The receipt a refused ordinary greeting is answered with: this
+    /// contract's own digest.
+    pub(crate) fn refused_ordinary_greeting() -> signal::HandshakeReceipt {
+        use signal::Contracted;
+        signal::HandshakeReceipt::GreetingRefused(signal::HandshakeRejection::ContractMismatch(
+            signal_flow::Query::contract_digest(),
+        ))
+    }
+
+    /// A test peer of the ordinary socket greets as every client does.
+    pub(crate) trait GreetsOrdinarySocket {
+        /// Writes signal-flow's greeting and asserts it is Greeted.
+        fn greet_ordinary(&mut self);
+        /// The receipt frame the Nexus wrote.
+        fn receipt(&mut self) -> signal::HandshakeReceipt;
+    }
+
+    impl GreetsOrdinarySocket for std::os::unix::net::UnixStream {
+        fn greet_ordinary(&mut self) {
+            use super::CarriesSignalFrames;
+            use signal::Contracted;
+            self.write_frame(
+                &rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Query::greeting())
+                    .expect("greeting encodes"),
+            )
+            .expect("greeting written");
+            assert_eq!(
+                self.receipt(),
+                signal::HandshakeReceipt::Greeted(signal_flow::Query::contract_digest())
+            );
+        }
+
+        fn receipt(&mut self) -> signal::HandshakeReceipt {
+            use super::CarriesSignalFrames;
+            rkyv::from_bytes::<signal::HandshakeReceipt, rkyv::rancor::Error>(
+                &self.read_frame().expect("receipt frame"),
+            )
+            .expect("receipt decodes")
+        }
     }
 
     #[test]
@@ -5647,30 +5967,6 @@ mod tests {
             })
         }
 
-        /// The same stand-in after the predecessor's pane has exited: no
-        /// snapshot shows it.
-        fn herdr_after_predecessor_exit(&self, close_status: i32) -> PathBuf {
-            self.herdr_for_replacement_showing(close_status, Vec::new())
-        }
-
-        /// The replacement stand-in with the predecessor's Herdr session
-        /// unreachable: its snapshot fails, while the successor's session
-        /// still answers. Any close is logged.
-        fn herdr_unreachable_for_predecessor(&self) -> PathBuf {
-            let log = self.herdr_for_replacement(0);
-            let body = fs::read_to_string(&self.snapshot_program).expect("Herdr fixture");
-            let body = body.replacen(
-                "case \"$*\" in\n",
-                "case \"$*\" in\n  \"--session messaging-build api snapshot\") echo 'herdr: server unreachable' >&2; exit 1 ;;\n",
-                1,
-            );
-            FixtureExecutable {
-                path: self.snapshot_program.clone(),
-            }
-            .install(&body);
-            log
-        }
-
         fn herdr_for_replacement_showing(
             &self,
             close_status: i32,
@@ -5698,8 +5994,9 @@ mod tests {
                 "type":"session_snapshot"}
             });
             let body = format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  \"--session fixture-session agent get w1:p1\") printf '%s\\n' '{}' ;;\n  *\" api snapshot\") printf '%s\\n' '{}' ;;\n  *\" pane close \"*) exit {} ;;\n  *\" agent read \"*) printf '%s\\n' '› ' ;;\n  *) exit 64 ;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n{}\ncase \"$*\" in\n  \"--session fixture-session agent get w1:p1\") printf '%s\\n' '{}' ;;\n  *\" api snapshot\") printf '%s\\n' '{}' ;;\n  *\" pane close \"*) exit {} ;;\n  *\" agent read \"*) printf '%s\\n' '› ' ;;\n  *) exit 64 ;;\nesac\n",
                 log.display(),
+                self.session_listing(),
                 agent,
                 snapshot,
                 close_status
@@ -6029,132 +6326,6 @@ mod tests {
             )
             .expect("transcript written");
         }
-    }
-
-    #[test]
-    fn a_refused_reap_leaves_neither_flow_routable_until_it_is_retried() {
-        let fixture = NexusFixture::new();
-        fixture.herdr_for_replacement(1);
-        fixture.register_predecessor("fac697");
-        let mut launch = fixture.staged_launch("reap-request", Some("fac697"));
-        launch.stage_to_ambiguity(&fixture.nexus);
-        launch.write_receipt();
-
-        let rejection =
-            signal_flow::ReplaceRejection::ReapRefused(signal_flow::StopRejection::CloseRefused);
-        let refused = Response::ReplaceRejected(rejection.clone());
-        assert_eq!(
-            fixture.nexus.dispatch(Query::Replace(launch.request())),
-            refused
-        );
-        assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Stopped);
-        assert!(!fixture.routable("fac697"));
-        assert!(!fixture.routable("908786"));
-        assert_inspection_outcome(
-            fixture
-                .nexus
-                .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
-                    "reap-request".into(),
-                ))),
-            "reap-request",
-            LaunchStatusOutcome::ReplaceRejected(rejection),
-            Some("908786"),
-        );
-
-        fixture.herdr_for_replacement(0);
-        assert!(matches!(
-            fixture.nexus.dispatch(Query::Replace(launch.request())),
-            Response::Replaced(replaced) if replaced.flow_id.0 == "fac697"
-        ));
-        assert!(!fixture.routable("fac697"));
-        assert!(fixture.routable("908786"));
-    }
-
-    #[test]
-    fn an_unreachable_herdr_refuses_the_reap_instead_of_counting_it_done() {
-        let fixture = NexusFixture::new();
-        fixture.herdr_for_replacement(0);
-        fixture.register_predecessor("fac697");
-        let mut launch = fixture.staged_launch("unreachable-request", Some("fac697"));
-        launch.stage_to_ambiguity(&fixture.nexus);
-        launch.write_receipt();
-
-        let calls = fixture.herdr_unreachable_for_predecessor();
-        let rejection = signal_flow::ReplaceRejection::ReapRefused(
-            signal_flow::StopRejection::RouteUnavailable,
-        );
-        let refused = Response::ReplaceRejected(rejection.clone());
-        assert_eq!(
-            fixture.nexus.dispatch(Query::Replace(launch.request())),
-            refused,
-            "a failed snapshot is not an absent pane"
-        );
-        let logged = fs::read_to_string(&calls).expect("Herdr call log");
-        assert!(logged.contains("api snapshot"), "{logged}");
-        assert!(!logged.contains("pane close"), "{logged}");
-        assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Stopped);
-        assert!(!fixture.routable("908786"));
-        assert_inspection_outcome(
-            fixture
-                .nexus
-                .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
-                    "unreachable-request".into(),
-                ))),
-            "unreachable-request",
-            LaunchStatusOutcome::ReplaceRejected(rejection),
-            Some("908786"),
-        );
-
-        // Herdr answers again and shows the pane: the retry closes it.
-        let calls = fixture.herdr_for_replacement(0);
-        assert!(matches!(
-            fixture.nexus.dispatch(Query::Replace(launch.request())),
-            Response::Replaced(replaced) if replaced.flow_id.0 == "fac697"
-        ));
-        assert!(
-            fs::read_to_string(calls)
-                .expect("Herdr call log")
-                .contains("pane close")
-        );
-        assert!(fixture.routable("908786"));
-    }
-
-    #[test]
-    fn a_predecessor_whose_pane_is_gone_is_already_reaped() {
-        let fixture = NexusFixture::new();
-        // Any close would fail: the reap must not need one.
-        let calls = fixture.herdr_after_predecessor_exit(1);
-        fixture.register_predecessor("fac697");
-        let mut launch = fixture.staged_launch("exited-request", Some("fac697"));
-        launch.stage_to_ambiguity(&fixture.nexus);
-        launch.write_receipt();
-
-        let replaced = fixture.nexus.dispatch(Query::Replace(launch.request()));
-        assert!(
-            matches!(&replaced, Response::Replaced(replaced) if replaced.flow_id.0 == "fac697"),
-            "an absent pane is a completed reap, not ReapRefused: {replaced:?}"
-        );
-        assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Stopped);
-        assert!(!fixture.routable("fac697"));
-        assert!(fixture.routable("908786"));
-        assert_inspection_outcome(
-            fixture
-                .nexus
-                .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
-                    "exited-request".into(),
-                ))),
-            "exited-request",
-            LaunchStatusOutcome::Replaced(match replaced {
-                Response::Replaced(replaced) => replaced,
-                other => panic!("expected replaced outcome, got {other:?}"),
-            }),
-            Some("908786"),
-        );
-        let calls = fs::read_to_string(calls).expect("Herdr call log");
-        assert!(
-            !calls.contains("pane close"),
-            "no close is attempted on an absent pane: {calls}"
-        );
     }
 
     #[test]
@@ -7603,7 +7774,9 @@ mod tests {
         use signal::Contracted;
         for greeting in [
             meta_signal_flow::Query::greeting(),
-            meta_signal_flow_75::Query::greeting(),
+            meta_signal_flow_76::Query::greeting(),
+            // The ordinary 61 greeting is no meta greeting either.
+            signal_flow::Query::greeting(),
         ] {
             let fixture = NexusFixture::new();
             let (peer, mut client) = UnixStream::pair().unwrap();
@@ -7670,6 +7843,10 @@ mod tests {
                         client.read_frame().is_err(),
                         "refusal closes before any Query is decoded"
                     );
+                    // The refusal is recorded as the ordinary socket records
+                    // its own: one record, metadata alone.
+                    use crate::store::undecodable_frame::RecordsUndecodableFrames;
+                    assert_eq!(fixture.nexus.store.undecodable_frames().unwrap().len(), 1);
                 }
             });
         }
@@ -7681,7 +7858,7 @@ mod tests {
         let (peer, mut client) = UnixStream::pair().unwrap();
         client
             .write_frame(
-                &rkyv::to_bytes::<rkyv::rancor::Error>(&meta_signal_flow_75::Query::Retire(
+                &rkyv::to_bytes::<rkyv::rancor::Error>(&meta_signal_flow_76::Query::Retire(
                     flow_ethos::FlowId("a001".into()),
                 ))
                 .unwrap(),

@@ -465,6 +465,21 @@ mod tests {
         }
     }
 
+    /// The fixture Nexus answers the client's greeting as Flow does.
+    fn greeted(peer: &mut std::os::unix::net::UnixStream) {
+        use signal_flow::Contracted;
+        let mut length = [0_u8; 4];
+        peer.read_exact(&mut length).unwrap();
+        let mut frame = vec![0_u8; u32::from_be_bytes(length) as usize];
+        peer.read_exact(&mut frame).unwrap();
+        let greeting =
+            rkyv::from_bytes::<signal_flow::Handshake, rkyv::rancor::Error>(&frame).unwrap();
+        let receipt = rkyv::to_bytes::<rkyv::rancor::Error>(&Query::receipt(&greeting)).unwrap();
+        peer.write_all(&(receipt.len() as u32).to_be_bytes())
+            .unwrap();
+        peer.write_all(&receipt).unwrap();
+    }
+
     #[test]
     fn retirement_eof_and_truncated_frames_are_incomplete() {
         for reply in [Vec::new(), vec![0, 0], vec![0, 0, 0, 8, 1, 2]] {
@@ -473,6 +488,7 @@ mod tests {
             let listener = UnixListener::bind(&socket).unwrap();
             let server = std::thread::spawn(move || {
                 let (mut peer, _) = listener.accept().unwrap();
+                greeted(&mut peer);
                 let mut length = [0_u8; 4];
                 peer.read_exact(&mut length).unwrap();
                 let mut query = vec![0_u8; u32::from_be_bytes(length) as usize];
@@ -501,6 +517,7 @@ mod tests {
         let listener = UnixListener::bind(&socket).unwrap();
         let server = std::thread::spawn(move || {
             let (mut peer, _) = listener.accept().unwrap();
+            greeted(&mut peer);
             let mut length = [0_u8; 4];
             peer.read_exact(&mut length).unwrap();
             let mut query = vec![0_u8; u32::from_be_bytes(length) as usize];
@@ -528,6 +545,7 @@ mod tests {
         );
         let server = std::thread::spawn(move || {
             let (mut peer, _) = listener.accept().unwrap();
+            greeted(&mut peer);
             let mut length = [0_u8; 4];
             peer.read_exact(&mut length).unwrap();
             let mut query = vec![0_u8; u32::from_be_bytes(length) as usize];

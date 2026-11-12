@@ -43,6 +43,89 @@ pub(crate) trait RepairsMetaflows {
     ) -> Result<Result<(), RebindRejected_Data>, StoreError>;
 }
 
+/// The obligations Inspect lists at an Address, read and never written:
+/// each PendingReap at the Address at its standing, each derived owed reap
+/// at `Unrecorded`, the PendingHandover at its refusal, and the derived owed
+/// handover at the refusal its owner's evidence gives now. Missing and
+/// Unknown are each shown as themselves.
+pub(crate) trait InspectsObligations {
+    fn obligations_at(&self, address: &Address) -> Result<Vec<Attempt>, StoreError>;
+}
+
+impl InspectsObligations for FlowStore {
+    fn obligations_at(&self, address: &Address) -> Result<Vec<Attempt>, StoreError> {
+        use super::handover::{HandoverOwnerEvidence, HoldsHandovers, JudgesHandoverOwner};
+        use super::pending_handover::{DerivesOwedHandover, RecordsPendingHandovers};
+        use super::pending_reap::{NamesReapedRecord, RecordsPendingReaps, WritesPendingReap};
+        let mut obligations = Vec::new();
+        for row in self.pending_reaps_at(address)? {
+            let Some(replaced) = self.reaped_record(&row)? else {
+                continue;
+            };
+            let mut reply = self.reap_pending_reply(&replaced);
+            reply.address = row.address.clone();
+            reply.reap_standing = row.reap_standing.clone();
+            obligations.push(Attempt::Reap(reply));
+        }
+        for derived in self.derived_reaps()? {
+            if derived.attempt.launch_profile.address != *address {
+                continue;
+            }
+            let replaced = derived.replaced_record();
+            obligations.push(Attempt::Reap(signal_flow::ReapPending {
+                address: address.clone(),
+                predecessor: signal_flow::Predecessor(replaced.flow_id.clone()),
+                launched: self.launched(&replaced.launched_record),
+                reap_standing: signal_flow::ReapStanding::Unrecorded,
+            }));
+        }
+        if let Some(row) = self.pending_handover(address)? {
+            let session = self
+                .flow_node(&row.successor.0.0)?
+                .map(|node| node.session_id)
+                .unwrap_or(signal_flow::SessionId(String::new()));
+            let mut reply = self.handover_pending_reply(&LaunchedRecord {
+                flow_id: row.successor.0.clone(),
+                session_id: session,
+                origin: Origin::Unbound,
+            });
+            reply.address = row.address.clone();
+            reply.handover_owner = row.handover_owner.clone();
+            reply.handover_close_refusal = row.handover_close_refusal.clone();
+            obligations.push(Attempt::Handover(reply));
+        }
+        if let Some((receiving, _, owner)) = self.derived_handover(address)? {
+            let refusal = match self.handover_memory(address)? {
+                Some(memory) => match self.owner_evidence(&memory, "", &receiving.0) {
+                    HandoverOwnerEvidence::Refused(refusal) => {
+                        signal_flow::HandoverCloseRefusal::Owner(refusal)
+                    }
+                    _ => signal_flow::HandoverCloseRefusal::PersistenceRefused,
+                },
+                None => signal_flow::HandoverCloseRefusal::PersistenceRefused,
+            };
+            let node = self.flow_node(&receiving.0)?;
+            obligations.push(Attempt::Handover(signal_flow::HandoverPending {
+                address: address.clone(),
+                handover_owner: signal_flow::HandoverOwner(FlowId(owner)),
+                launched: Launched {
+                    flow_id: receiving.clone(),
+                    session_id: node
+                        .as_ref()
+                        .map(|node| node.session_id.clone())
+                        .unwrap_or(signal_flow::SessionId(String::new())),
+                    herdr_route_selection: node
+                        .map(|node| node.herdr_route_selection)
+                        .unwrap_or(HerdrRouteSelection::Unavailable),
+                    origin: Origin::Unbound,
+                },
+                handover_close_refusal: refusal,
+            }));
+        }
+        Ok(obligations)
+    }
+}
+
 impl RepairsMetaflows for FlowStore {
     fn inspection(&self, address: &Address) -> Result<Option<Inspection>, StoreError> {
         let Some(stored) = self.stored_metaflow(address)? else {
@@ -75,6 +158,7 @@ impl RepairsMetaflows for FlowStore {
                 attempt_vector.push(Attempt::Launch(stored.attempt.clone()));
             }
         }
+        attempt_vector.extend(self.obligations_at(address)?);
         Ok(Some(Inspection {
             binding: Binding {
                 flow_node_option,

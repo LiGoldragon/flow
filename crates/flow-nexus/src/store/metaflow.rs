@@ -656,6 +656,168 @@ impl SeedsMetaflow for FlowStore {
     }
 }
 
+/// Where a flow stands in its Address's succession, read from the metaflow
+/// row and the AddressHold rows alone: the record its launch writes at
+/// acknowledgement and at confirmation, before any reap or handover. No
+/// obligation, outcome or lifecycle decides it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Succession {
+    /// The Address receives as this flow.
+    Receiving,
+    /// A later flow of its Address's lineage is confirmed: the Address
+    /// receives as `by`, or, Asleep, last received as it.
+    Superseded { address: Address, by: FlowId },
+    /// It holds its Address; its launch is not confirmed.
+    Unconfirmed,
+    /// No metaflow or AddressHold names it, or it was the last flow of an
+    /// Asleep metaflow: it is routed by its lifecycle.
+    Unseated,
+}
+
+/// One reading of every flow's succession, for a scan that asks of many.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SuccessionIndex {
+    successions: std::collections::BTreeMap<String, Succession>,
+}
+
+/// The succession a flow has in an index.
+pub(crate) trait ReadsSuccessionIndex {
+    fn of(&self, flow_id: &str) -> Succession;
+}
+
+impl ReadsSuccessionIndex for SuccessionIndex {
+    fn of(&self, flow_id: &str) -> Succession {
+        self.successions
+            .get(flow_id)
+            .cloned()
+            .unwrap_or(Succession::Unseated)
+    }
+}
+
+/// Which flow an Address receives as, and where any flow stands.
+pub(crate) trait ReadsSuccession {
+    fn succession(&self, flow_id: &str) -> Result<Succession, StoreError>;
+    /// The flow `address` receives as: the flow its metaflow is Awake as,
+    /// or, while that flow's launch is unconfirmed, the flow its hold found
+    /// the metaflow Awake as.
+    fn receiving_flow(&self, address: &Address) -> Result<Option<FlowId>, StoreError>;
+    fn successions(&self) -> Result<SuccessionIndex, StoreError>;
+}
+
+/// The succession every metaflow and hold implies.
+trait ComputesSuccession {
+    fn computed(
+        metaflows: &[Metaflow],
+        holds: &[super::address_hold::AddressHold],
+    ) -> SuccessionIndex;
+    fn receiving_of(
+        metaflow: &Metaflow,
+        holds: &[super::address_hold::AddressHold],
+    ) -> Option<FlowId>;
+}
+
+impl ComputesSuccession for FlowStore {
+    fn receiving_of(
+        metaflow: &Metaflow,
+        holds: &[super::address_hold::AddressHold],
+    ) -> Option<FlowId> {
+        let MetaflowState::Awake(awake) = &metaflow.state else {
+            return None;
+        };
+        let found = holds
+            .iter()
+            .find(|hold| hold.flow_id == awake.0)
+            .map(|hold| hold.found.as_ref().map(|found| found.state.clone()));
+        match found {
+            // Between acknowledgement and confirmation the Address receives
+            // as the flow the hold found it Awake as, if any.
+            Some(Some(MetaflowState::Awake(found))) if found != *awake => Some(found),
+            Some(_) => None,
+            None => Some(awake.clone()),
+        }
+    }
+
+    fn computed(
+        metaflows: &[Metaflow],
+        holds: &[super::address_hold::AddressHold],
+    ) -> SuccessionIndex {
+        let mut successions = std::collections::BTreeMap::new();
+        for metaflow in metaflows {
+            let awake = match &metaflow.state {
+                MetaflowState::Awake(flow_id) => Some(flow_id.clone()),
+                MetaflowState::Asleep => None,
+            };
+            let mut lineage: Vec<FlowId> = Vec::new();
+            for flow_id in metaflow.past.0.iter().cloned().chain(awake.clone()) {
+                lineage.retain(|known| known != &flow_id);
+                lineage.push(flow_id);
+            }
+            let receiving = Self::receiving_of(metaflow, holds);
+            let last = lineage.last().cloned();
+            for (at, flow_id) in lineage.iter().enumerate() {
+                let succession = if Some(flow_id) == receiving.as_ref() {
+                    Succession::Receiving
+                } else if at + 1 < lineage.len() {
+                    // Superseded by the flow the Address receives as now,
+                    // or, Asleep, the last it received as.
+                    match receiving.clone().or_else(|| match &awake {
+                        None => last.clone(),
+                        Some(_) => None,
+                    }) {
+                        Some(by) if by != *flow_id => Succession::Superseded {
+                            address: metaflow.address.clone(),
+                            by,
+                        },
+                        _ => Succession::Unseated,
+                    }
+                } else {
+                    Succession::Unseated
+                };
+                successions.insert(flow_id.0.clone(), succession);
+            }
+        }
+        // A hold is read first: its flow's launch is not confirmed.
+        for hold in holds {
+            successions.insert(hold.flow_id.clone(), Succession::Unconfirmed);
+        }
+        SuccessionIndex { successions }
+    }
+}
+
+impl ReadsSuccession for FlowStore {
+    fn succession(&self, flow_id: &str) -> Result<Succession, StoreError> {
+        Ok(self.successions()?.of(flow_id))
+    }
+
+    fn receiving_flow(&self, address: &Address) -> Result<Option<FlowId>, StoreError> {
+        let Some(metaflow) = self.stored_metaflow(address)?.map(|stored| stored.metaflow) else {
+            return Ok(None);
+        };
+        let holds = self
+            .engine
+            .match_records(QueryPlan::all(self.address_holds))?
+            .records()
+            .to_vec();
+        Ok(Self::receiving_of(&metaflow, &holds))
+    }
+
+    fn successions(&self) -> Result<SuccessionIndex, StoreError> {
+        let metaflows = self
+            .engine
+            .match_records(QueryPlan::all(self.metaflows))?
+            .records()
+            .iter()
+            .map(|stored| stored.metaflow.clone())
+            .collect::<Vec<_>>();
+        let holds = self
+            .engine
+            .match_records(QueryPlan::all(self.address_holds))?
+            .records()
+            .to_vec();
+        Ok(Self::computed(&metaflows, &holds))
+    }
+}
+
 /// The flows a launch remembers, as its Remembering names them: the flows
 /// named one by one, or the metaflow's last flows to a depth, oldest first.
 /// The metaflow's lineage is its past then the flow it is Awake as; the flow

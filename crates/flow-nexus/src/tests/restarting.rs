@@ -2697,6 +2697,8 @@ impl OpensSecondNexus for NexusFixture {
             waking: crate::waking::WakingMetaflows::default(),
             stopped_at_confirmation: crate::waking::StoppedAtConfirmation::default(),
             refresh_refusals: crate::waking::RefreshRefusals::default(),
+            pane_watch_rearms: Default::default(),
+            pane_watch_hooks: Default::default(),
             stopping: crate::Stopping::default(),
             launch_calls: crate::send_tool::LaunchCalls::default(),
             codex_turns: crate::codex_turns::CodexTurns::default(),

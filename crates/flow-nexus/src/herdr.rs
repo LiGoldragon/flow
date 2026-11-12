@@ -1298,3 +1298,272 @@ mod tests {
         }
     }
 }
+
+/// What a fresh Herdr snapshot shows at the pane a reap watches, read for
+/// whether the pane is the predecessor's to close, gone, or another's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReapedPane {
+    /// The recorded pane and terminal run an agent of the recorded harness
+    /// reporting the recorded native session, or reporting none.
+    Present,
+    /// The recorded pane and terminal show no agent.
+    Bare,
+    /// A readable snapshot shows neither the pane nor an agent in it.
+    Absent,
+    /// The pane runs another native session than the predecessor's, or an
+    /// agent of another terminal or harness: it is never closed and not
+    /// counted gone.
+    Occupied,
+    /// Herdr could not be read, or its snapshot carries no agent roster.
+    Unknown,
+}
+
+/// What one cancellable `pane close` came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PaneClose {
+    Closed,
+    Refused(String),
+}
+
+/// Reads a snapshot for the pane a reap watches.
+pub(crate) trait ReadsReapedPane {
+    fn reaped_pane(&self, node: &FlowNode) -> ReapedPane;
+}
+
+impl ReadsReapedPane for serde_json::Value {
+    fn reaped_pane(&self, node: &FlowNode) -> ReapedPane {
+        let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
+            return ReapedPane::Unknown;
+        };
+        let Some(agents) = self
+            .pointer("/result/snapshot/agents")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return ReapedPane::Unknown;
+        };
+        if let Some(agent) = agents
+            .iter()
+            .find(|agent| agent.matches_binding(route, &node.harness_kind))
+        {
+            return match agent
+                .pointer("/agent_session/value")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some(session) if !node.session_id.0.is_empty() && session != node.session_id.0 => {
+                    ReapedPane::Occupied
+                }
+                _ => ReapedPane::Present,
+            };
+        }
+        if agents.iter().any(|agent| {
+            agent.get("pane_id").and_then(serde_json::Value::as_str)
+                == Some(route.herdr_pane_id.0.as_str())
+        }) {
+            return ReapedPane::Occupied;
+        }
+        let shown = self
+            .pointer("/result/snapshot/panes")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|panes| {
+                panes.iter().any(|pane| {
+                    pane.get("pane_id").and_then(serde_json::Value::as_str)
+                        == Some(route.herdr_pane_id.0.as_str())
+                        && pane.get("terminal_id").and_then(serde_json::Value::as_str)
+                            == Some(route.herdr_terminal_id.0.as_str())
+                })
+            });
+        if shown {
+            ReapedPane::Bare
+        } else {
+            ReapedPane::Absent
+        }
+    }
+}
+
+/// Reads Herdr's session listing.
+pub(crate) trait ReadsHerdrListing {
+    fn sessions_in_listing(&self) -> Option<Vec<crate::caller::HerdrSession>>;
+}
+
+impl ReadsHerdrListing for serde_json::Value {
+    fn sessions_in_listing(&self) -> Option<Vec<crate::caller::HerdrSession>> {
+        self.get("sessions")?
+            .as_array()?
+            .iter()
+            .map(|session| {
+                Some(crate::caller::HerdrSession {
+                    name: session.get("name")?.as_str()?.to_owned(),
+                    socket: PathBuf::from(session.get("socket_path")?.as_str()?),
+                })
+            })
+            .collect()
+    }
+}
+
+/// The Herdr calls the reap worker makes, outside the dispatch gate, each
+/// waited on together with the worker's cancellation. A cancelled call's
+/// child is killed and reaped before the call answers.
+pub(crate) trait ReadsHerdrUntilCancelled {
+    /// `herdr <args>` with stdout piped; waits on [stdout, cancellation]
+    /// and reads to EOF, then reaps the child through its pidfd. Ok(None)
+    /// when Herdr could not be run or answered a failure.
+    fn output_until(
+        &self,
+        args: &[&str],
+        cancellation: &crate::observation_lifetime::ObservationCancellation,
+    ) -> Result<Option<Vec<u8>>, crate::observation_lifetime::ObservationCancellationCause>;
+    fn session_socket_until(
+        &self,
+        session: &str,
+        cancellation: &crate::observation_lifetime::ObservationCancellation,
+    ) -> Result<Option<PathBuf>, crate::observation_lifetime::ObservationCancellationCause>;
+    fn pane_presence_until(
+        &self,
+        node: &FlowNode,
+        cancellation: &crate::observation_lifetime::ObservationCancellation,
+    ) -> Result<ReapedPane, crate::observation_lifetime::ObservationCancellationCause>;
+    /// The close the gated reap made in 0.54.6, run through `output_until`.
+    fn close_pane_until(
+        &self,
+        route: &HerdrRoute,
+        cancellation: &crate::observation_lifetime::ObservationCancellation,
+    ) -> Result<PaneClose, crate::observation_lifetime::ObservationCancellationCause>;
+}
+
+impl ReadsHerdrUntilCancelled for HerdrCli {
+    fn output_until(
+        &self,
+        args: &[&str],
+        cancellation: &crate::observation_lifetime::ObservationCancellation,
+    ) -> Result<Option<Vec<u8>>, crate::observation_lifetime::ObservationCancellationCause> {
+        use crate::event_wait::{AwaitsDescriptors, OpensExitDescriptor};
+        use crate::observation_lifetime::CancelsObservation;
+        use std::io::Read;
+        use std::os::fd::AsFd;
+        if let Some(cause) = cancellation.cause() {
+            return Err(cause);
+        }
+        let Ok(mut child) = Command::new(&self.executable)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        else {
+            return Ok(None);
+        };
+        let exited = child.id().exit_descriptor().ok();
+        let cancelled = |child: &mut std::process::Child, cause| {
+            let _ = child.kill();
+            if let Some(exited) = &exited {
+                let _ = [exited.as_fd()].ready(None);
+            }
+            let _ = child.wait();
+            Err(cause)
+        };
+        let mut output = Vec::new();
+        if let Some(mut stdout) = child.stdout.take() {
+            let mut buffer = [0_u8; 8192];
+            while let Ok(ready) = [stdout.as_fd(), cancellation.descriptor()].ready(None) {
+                if ready[1] || cancellation.cause().is_some() {
+                    let cause = cancellation.cause().unwrap_or(
+                        crate::observation_lifetime::ObservationCancellationCause::NexusStopped,
+                    );
+                    return cancelled(&mut child, cause);
+                }
+                match stdout.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => output.extend_from_slice(&buffer[..count]),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+        }
+        // The child closed its stdout; its exit is awaited with the
+        // cancellation, so a child that lingers is still killed and reaped.
+        if let Some(exited) = &exited {
+            match [exited.as_fd(), cancellation.descriptor()].ready(None) {
+                Ok(ready) if ready[1] && !ready[0] => {
+                    let cause = cancellation.cause().unwrap_or(
+                        crate::observation_lifetime::ObservationCancellationCause::NexusStopped,
+                    );
+                    return cancelled(&mut child, cause);
+                }
+                _ => {}
+            }
+        }
+        match child.wait() {
+            Ok(status) if status.success() => Ok(Some(output)),
+            _ => Ok(None),
+        }
+    }
+
+    fn session_socket_until(
+        &self,
+        session: &str,
+        cancellation: &crate::observation_lifetime::ObservationCancellation,
+    ) -> Result<Option<PathBuf>, crate::observation_lifetime::ObservationCancellationCause> {
+        let Some(output) = self.output_until(&["session", "list", "--json"], cancellation)? else {
+            return Ok(None);
+        };
+        Ok(serde_json::from_slice::<serde_json::Value>(&output)
+            .ok()
+            .and_then(|listing| listing.sessions_in_listing())
+            .and_then(|sessions| {
+                sessions
+                    .into_iter()
+                    .find(|listed| listed.name == session)
+                    .map(|listed| listed.socket)
+            }))
+    }
+
+    fn pane_presence_until(
+        &self,
+        node: &FlowNode,
+        cancellation: &crate::observation_lifetime::ObservationCancellation,
+    ) -> Result<ReapedPane, crate::observation_lifetime::ObservationCancellationCause> {
+        let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
+            return Ok(ReapedPane::Unknown);
+        };
+        let Some(output) = self.output_until(
+            &[
+                "--session",
+                route.herdr_session_name.0.as_str(),
+                "api",
+                "snapshot",
+            ],
+            cancellation,
+        )?
+        else {
+            return Ok(ReapedPane::Unknown);
+        };
+        Ok(serde_json::from_slice::<serde_json::Value>(&output)
+            .map(|snapshot| snapshot.reaped_pane(node))
+            .unwrap_or(ReapedPane::Unknown))
+    }
+
+    fn close_pane_until(
+        &self,
+        route: &HerdrRoute,
+        cancellation: &crate::observation_lifetime::ObservationCancellation,
+    ) -> Result<PaneClose, crate::observation_lifetime::ObservationCancellationCause> {
+        Ok(
+            match self.output_until(
+                &[
+                    "--session",
+                    route.herdr_session_name.0.as_str(),
+                    "pane",
+                    "close",
+                    route.herdr_pane_id.0.as_str(),
+                ],
+                cancellation,
+            )? {
+                Some(_) => PaneClose::Closed,
+                None => PaneClose::Refused(format!(
+                    "Herdr refused to close pane {} of {}",
+                    route.herdr_pane_id.0, route.herdr_session_name.0
+                )),
+            },
+        )
+    }
+}

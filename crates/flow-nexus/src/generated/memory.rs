@@ -12,6 +12,18 @@ pub enum LaunchOutcome {
     Replaced(flow_nexus::ReplacedRecord),
     StartRejected(signal_flow::StartRejection),
     ReplaceRejected(signal_flow::ReplaceRejection),
+    ReapPending(flow_nexus::ReplacedRecord),
+    HandoverPending(flow_nexus::LaunchedRecord),
+    HandoverSuperseded(SupersededHandover),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct SupersededHandover {
+    pub address: signal_flow::Address,
+    pub handover_owner: signal_flow::HandoverOwner,
+    pub launched_record: flow_nexus::LaunchedRecord,
+    pub successor: signal_flow::Successor,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -23,6 +35,25 @@ pub struct Predecessor(pub String);
 pub struct Replacement {
     pub launch_request_id: signal_flow::LaunchRequestId,
     pub predecessor: Predecessor,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct PendingReap {
+    pub predecessor: Predecessor,
+    pub launch_request_id: signal_flow::LaunchRequestId,
+    pub address: signal_flow::Address,
+    pub reap_standing: signal_flow::ReapStanding,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct PendingHandover {
+    pub address: signal_flow::Address,
+    pub handover_owner: signal_flow::HandoverOwner,
+    pub successor: signal_flow::Successor,
+    pub launch_request_id: signal_flow::LaunchRequestId,
+    pub handover_close_refusal: signal_flow::HandoverCloseRefusal,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

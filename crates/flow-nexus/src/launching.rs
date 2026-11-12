@@ -30,12 +30,12 @@ use crate::store::{
     AnnouncesLaunchChanges, ReadsCreatedLaunchPane, RecordsCreatedLaunchPane,
     RecordsNativeLaunchBinding,
 };
-use crate::store::{AnswersLaunchOutcome, LaunchedRecord, ReplacedRecord};
+use crate::store::{AnswersLaunchOutcome, LaunchedRecord};
 use crate::store::{ConfiguresFlowStore, NamesConfiguredModel};
 use crate::waking::{RestsEndedAwake, SettlesStopsAtConfirmation};
 use crate::{
     RunningNexus,
-    herdr::{PaneOwnership, PanePresence, launch::AcceptsLaunchRegistration},
+    herdr::{PaneOwnership, launch::AcceptsLaunchRegistration},
     store::{
         LaunchInspectionRecords, LaunchOutcome, ReadsFlowRows, ReadsLaunchAttempt,
         RecordsLaunchOutcome, RecordsReplacement, Replacement, StoreError,
@@ -43,11 +43,10 @@ use crate::{
 };
 use signal_flow::{
     Address, BindingRefusal, ComposedLaunch, EndpointSelection, FlowLifecycle, FlowNode,
-    HarnessKind, HerdrRoute, HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase,
-    LaunchAttemptReservation, LaunchInspection, LaunchProfile, LaunchStatusRejection, Launched,
-    NativeLaunchFailure, NativeLaunchIntent, NativeLaunchRefusal, NativeLaunchStage, Origin,
-    RegistrationAcknowledgement, RegistrationRefusal, ReplaceRejection, Replaced, Response,
-    StartRejection, StopRejection,
+    HarnessKind, HerdrRoute, HerdrRouteSelection, LaunchAttemptPhase, LaunchAttemptReservation,
+    LaunchInspection, LaunchProfile, LaunchStatusRejection, NativeLaunchFailure,
+    NativeLaunchIntent, NativeLaunchRefusal, NativeLaunchStage, Origin,
+    RegistrationAcknowledgement, RegistrationRefusal, ReplaceRejection, Response, StartRejection,
 };
 use std::path::Path;
 
@@ -162,9 +161,6 @@ pub trait LaunchesFlows {
     fn settle(&self, launch_request_id: &str, response: Response) -> Response;
     /// Starts the successor through the Start path, then replaces.
     fn replace(&self, profile: LaunchProfile, origin: Origin) -> Response;
-    /// Stops the predecessor, then closes its pane; only then is the
-    /// successor routable.
-    fn reap(&self, replacement: Replacement, launched: Launched) -> Response;
     /// Answers once: the outcome, else the pending attempt.
     fn launch_status(&self, launch_request_id: &str) -> Response;
     /// Everything a new launch does after Reserve, from the native intent
@@ -646,9 +642,24 @@ impl LaunchesFlows for RunningNexus {
     }
 
     fn settled(&self, profile: &LaunchProfile) -> Option<Response> {
+        use crate::store::pending_reap::{NamesReapedRecord, RecordsPendingReaps};
         let launch_request_id = &profile.launch_request_id;
         let outcome = match self.store.launch_outcome(&launch_request_id.0) {
-            Ok(outcome) => outcome?,
+            Ok(Some(outcome)) => outcome,
+            // A replacement with no outcome whose successor is confirmed owes
+            // its reap: a caller's repeat is no bearing event, so it is
+            // answered as it stands and nothing is written.
+            Ok(None) => {
+                let derived = self.store.derived_reap(&launch_request_id.0).ok()??;
+                let replaced = derived.replaced_record();
+                use crate::generated::starter::NamesLaunchedRoute;
+                return Some(Response::ReapPending(signal_flow::ReapPending {
+                    address: derived.attempt.launch_profile.address.clone(),
+                    predecessor: signal_flow::Predecessor(replaced.flow_id.clone()),
+                    launched: self.store.launched(&replaced.launched_record),
+                    reap_standing: signal_flow::ReapStanding::Unrecorded,
+                }));
+            }
             Err(_) => {
                 return Some(Response::StartRejected(
                     StartRejection::LaunchPersistenceRefused,
@@ -661,9 +672,6 @@ impl LaunchesFlows for RunningNexus {
                 return Some(Response::StartRejected(
                     StartRejection::LaunchRequestConflict,
                 ));
-            }
-            Ok(Some(attempt)) if outcome.awaits_reaping() => {
-                return Some(self.resume_reaping(&launch_request_id.0, attempt));
             }
             Ok(_) => {}
             Err(_) => {
@@ -682,15 +690,27 @@ impl LaunchesFlows for RunningNexus {
         };
         match response {
             Response::Started(started) => match replacement {
-                Some(replacement) => self.reap(replacement, started),
+                // The successor is confirmed and receiving: its reap is owed
+                // in one commit and answered at once.
+                Some(replacement) => {
+                    use crate::reaping::ReapsPredecessors;
+                    self.owe_reap(&replacement, &started)
+                }
                 None => {
-                    // A Started flow stays Started; a failed outcome write
-                    // only leaves LaunchStatus to answer from the attempt.
-                    let _ = self.perform(Self::settled_as(
-                        launch_request_id,
-                        LaunchOutcome::Started(LaunchedRecord::from(&started)),
-                    ));
-                    Response::Started(started)
+                    use crate::reaping::HandsOverGenerations;
+                    let address = match self.store.launch_attempt(launch_request_id) {
+                        Ok(Some(attempt)) => attempt.launch_profile.address,
+                        _ => {
+                            // No attempt names the Address: nothing to hand
+                            // over, and the flow did start.
+                            let _ = self.perform(Self::settled_as(
+                                launch_request_id,
+                                LaunchOutcome::Started(LaunchedRecord::from(&started)),
+                            ));
+                            return Response::Started(started);
+                        }
+                    };
+                    self.settle_fresh(launch_request_id, &address, &started)
                 }
             },
             Response::StartRejected(rejection)
@@ -795,96 +815,6 @@ impl LaunchesFlows for RunningNexus {
         }
         let response = self.start(profile, origin);
         Self::as_replacement(self.settle(&launch_request_id.0, response))
-    }
-
-    fn reap(&self, replacement: Replacement, launched: Launched) -> Response {
-        let refuse = |rejection: ReplaceRejection| {
-            let _ = self.perform(Self::settled_as(
-                &replacement.launch_request_id.0,
-                LaunchOutcome::ReplaceRejected(rejection.clone()),
-            ));
-            Response::ReplaceRejected(rejection)
-        };
-        let node = match self.store.flow_node(&replacement.predecessor.0) {
-            Ok(Some(node)) => node,
-            Ok(None) => return refuse(ReplaceRejection::UnknownPredecessor),
-            Err(_) => {
-                return refuse(ReplaceRejection::ReapRefused(
-                    StopRejection::PersistenceRefused,
-                ));
-            }
-        };
-        let address = self
-            .store
-            .launch_attempt(&replacement.launch_request_id.0)
-            .ok()
-            .flatten()
-            .map(|attempt| attempt.launch_profile.address);
-        let Some(address) = address else {
-            return refuse(ReplaceRejection::UnknownPredecessor);
-        };
-        // The predecessor stops receiving first: Stopped is what
-        // ResolveRecipient and Deliver refuse.
-        if node.flow_lifecycle != FlowLifecycle::Stopped
-            && self.perform(Operation::Record(Record_Data::Stopped(flow_ethos::FlowId(
-                replacement.predecessor.0.clone(),
-            )))) != Outcome::Recorded
-        {
-            return refuse(ReplaceRejection::ReapRefused(
-                StopRejection::PersistenceRefused,
-            ));
-        }
-        // A predecessor whose pane Herdr confirms gone is already reaped;
-        // a pane that exists is closed, and its failed close refuses. When
-        // Herdr cannot be read the pane may still be open: the reap is
-        // refused as retryable and the successor stays unroutable.
-        match self.herdr.pane_presence(&node) {
-            PanePresence::Absent => {}
-            PanePresence::Unknown => {
-                return refuse(ReplaceRejection::ReapRefused(
-                    StopRejection::RouteUnavailable,
-                ));
-            }
-            PanePresence::Present | PanePresence::Bare => {
-                if self.perform(Operation::Close(node)) != Outcome::Closed {
-                    return refuse(ReplaceRejection::ReapRefused(StopRejection::CloseRefused));
-                }
-            }
-        }
-        let replaced = Replaced {
-            flow_id: flow_ethos::FlowId(replacement.predecessor.0.clone()),
-            launched,
-        };
-        // Close the predecessor generation before the durable outcome releases
-        // the successor to routing.  Reaping is retried after a crash; the
-        // handover transition is idempotent for the same successor identity.
-        {
-            use crate::store::handover::HoldsHandovers;
-            if self
-                .store
-                .close_handover_for_successor(
-                    &address,
-                    &replacement.predecessor.0,
-                    &replaced.launched.flow_id.0,
-                )
-                .is_err()
-            {
-                return refuse(ReplaceRejection::ReapRefused(
-                    StopRejection::PersistenceRefused,
-                ));
-            }
-        }
-        // The Replaced outcome is what releases the successor to routing.
-        if self.perform(Self::settled_as(
-            &replacement.launch_request_id.0,
-            LaunchOutcome::Replaced(ReplacedRecord::from(&replaced)),
-        )) != Outcome::Recorded
-        {
-            return Response::ReplaceRejected(ReplaceRejection::ReapRefused(
-                StopRejection::PersistenceRefused,
-            ));
-        }
-        Response::Replaced(replaced)
     }
 
     fn launch_status(&self, launch_request_id: &str) -> Response {
@@ -1228,7 +1158,6 @@ impl DescribesLaunchInspection for LaunchInspectionRecords {
 
 /// Helpers of the launch verbs that are not themselves wire operations.
 pub(crate) trait ResumesReplacement {
-    fn resume_reaping(&self, launch_request_id: &str, attempt: LaunchAttempt) -> Response;
     fn as_replacement(response: Response) -> Response;
     /// The Record operation that stores what a launch request came to.
     fn settled_as(launch_request_id: &str, launch_outcome: LaunchOutcome) -> Operation;
@@ -1249,28 +1178,6 @@ impl ResumesReplacement for RunningNexus {
                 native_launch_failure: NativeLaunchFailure::AdapterRefused,
             },
         }))
-    }
-
-    fn resume_reaping(&self, launch_request_id: &str, attempt: LaunchAttempt) -> Response {
-        let replacement = match self.store.replacement(launch_request_id) {
-            Ok(Some(replacement)) => replacement,
-            _ => {
-                return Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
-                    StartRejection::LaunchPersistenceRefused,
-                ));
-            }
-        };
-        let Some(binding) = attempt.native_launch_binding_option else {
-            return Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
-                StartRejection::LaunchPersistenceRefused,
-            ));
-        };
-        match self.perform(Operation::Confirm(binding.flow_id)) {
-            Outcome::Started(started) => self.reap(replacement, started),
-            _ => Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
-                StartRejection::LaunchPersistenceRefused,
-            )),
-        }
     }
 
     fn settled_as(launch_request_id: &str, launch_outcome: LaunchOutcome) -> Operation {

@@ -17,9 +17,6 @@
     # The public default remains the last unconfigured Flow artifact while
     # callers move explicitly to lib.<system>.mkFlowPackage.
     unconfigured-flow.url = "github:LiGoldragon/flow/d3ab87ee18b1dd30947d5f0089f5abb4bafa80d5";
-    # The Message Nexus the joint check runs beside the real Flow Nexus.
-    message.url = "github:LiGoldragon/message/71b5ac0dbab577cd25d3d22fb9d789463162c19d";
-    message.inputs.base.follows = "base";
     # The accepted 0.53.2 Flow, built by its own flake, whose Memory the
     # request-id migration check evolves. The lock holds its commit, f7d2336,
     # and the flake refuses any other (predecessorRevision below).
@@ -38,12 +35,11 @@
       base,
       curriculum,
       unconfigured-flow,
-      message,
       migration-predecessor,
     }:
     let
       lib = base.inputs.nixpkgs.lib;
-      version = "0.54.6";
+      version = "0.54.7";
       forSystems = function: lib.genAttrs base.lib.systems function;
       # The revision the process checks bind their binaries to, given to the
       # test at run time: the committed revision, or the dirty one a working
@@ -385,21 +381,6 @@
             no-inherent-methods = pkgs.runCommand "flow-no-inherent-methods" { src = lawSource; } (
               builtins.readFile ./checks/no-inherent-methods.sh
             );
-            # The real Flow Nexus and the real Message Nexus share one durable
-            # delivery ledger.
-            message-joint =
-              processCheck "message-joint"
-                "store::message_joint::real_flow_and_message_share_the_durable_delivery_ledger"
-                ''
-                  export FLOW_MESSAGE_JOINT_FLOW_BIN="${flowNexus}"
-                  export FLOW_MESSAGE_JOINT_MESSAGE_BIN="${
-                    message.packages.${system}.message-nexus
-                  }/bin/message-nexus"
-                  export FLOW_MESSAGE_JOINT_FLOW_REV="${sourceRevision}"
-                  export FLOW_MESSAGE_JOINT_SOURCE_REV="${sourceRevision}"
-                  export FLOW_MESSAGE_JOINT_MESSAGE_REV="71b5ac0dbab577cd25d3d22fb9d789463162c19d"
-                  sha256sum "$FLOW_MESSAGE_JOINT_FLOW_BIN" "$FLOW_MESSAGE_JOINT_MESSAGE_BIN"
-                '';
             # The accepted 0.53.2's real Memory, evolved and served by this
             # Flow Nexus, which refuses a malformed policy without writing.
             request-id-migration-process =
@@ -417,10 +398,10 @@
             flow-request-id-immutable-contract-pins =
               pkgs.runCommand "flow-request-id-immutable-contract-pins" { nativeBuildInputs = [ pkgs.gnugrep ]; }
                 ''
-                  grep -F 'rev = "04a72fd"' ${./Cargo.toml}
-                  grep -F 'rev = "3b1f6f0bfa77acd751c17a490db6a24cba728520"' ${./Cargo.toml}
-                  grep -F 'signal-flow?rev=04a72fd#04a72fd35345f63a06352c17f46f997d7fdafaee' ${./Cargo.lock}
-                  grep -F 'meta-signal-flow?rev=3b1f6f0bfa77acd751c17a490db6a24cba728520#3b1f6f0bfa77acd751c17a490db6a24cba728520' ${./Cargo.lock}
+                  grep -F 'rev = "4871bb8"' ${./Cargo.toml}
+                  grep -F 'rev = "e72f5552816477e1acfaab6cd7515bc5f807edff"' ${./Cargo.toml}
+                  grep -F 'signal-flow?rev=4871bb8#4871bb81c1119fe72dc76168a97e1e576411b831' ${./Cargo.lock}
+                  grep -F 'meta-signal-flow?rev=e72f5552816477e1acfaab6cd7515bc5f807edff#e72f5552816477e1acfaab6cd7515bc5f807edff' ${./Cargo.lock}
                   touch "$out"
                 '';
 

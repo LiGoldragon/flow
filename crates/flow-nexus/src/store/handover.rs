@@ -7,8 +7,8 @@ use super::{FlowStore, ReadsFlowMemory, StoreError};
 use crate::handover_observation::{ObservesHandoverRetirement, RetirementSubscription};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,
-    RecordKey, SchemaHash, TableDescriptor, TableName, TableReference,
+    Assertion, AtomicCommit, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition,
+    MemoryVersion, QueryPlan, RecordKey, SchemaHash, TableDescriptor, TableName, TableReference,
 };
 use signal_flow::{
     Address, ArchiveCommitted, HandoverArchiveIdentity, HandoverGenerationKey, HandoverRefusal,
@@ -166,6 +166,9 @@ pub trait HoldsHandovers {
         title: signal_flow::Title,
         touch: Touch,
     ) -> Result<Touch, HandoverRefusal>;
+    /// The generation `predecessor` held closed for `successor` in its own
+    /// write: `handover_closing` written and announced alone.
+    #[cfg(test)]
     fn close_handover_for_successor(
         &self,
         address: &Address,
@@ -628,73 +631,22 @@ impl HoldsHandovers for FlowStore {
         Ok(touch)
     }
 
+    #[cfg(test)]
     fn close_handover_for_successor(
         &self,
         address: &Address,
         predecessor: &str,
         successor: &str,
     ) -> Result<(), StoreError> {
-        let _gate = self
-            .handover_write_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(mut row) = self.handover_row(address)? else {
-            if predecessor == successor {
-                return Ok(());
-            }
-            let closed = ClosedHandover {
-                generation: 0,
-                predecessor: predecessor.into(),
-                successor: successor.into(),
-                sections: Vec::new(),
-                touch: None,
-            };
-            self.write_handover(HandoverMemory {
-                address: address.clone(),
-                current: Vec::new(),
-                touch: None,
-                generation: 1,
-                current_flow_id: Some(successor.into()),
-                closed: vec![closed.clone()],
-            })?;
-            self.handover_observations
-                .change(RetirementChange::GenerationClosed(
-                    closed.generation_key(address),
-                ));
-            self.reminder_changes.announce();
-            return Ok(());
-        };
-        if predecessor == successor {
+        let closing = self
+            .handover_closing(address, predecessor, successor)
+            .map_err(|_| StoreError::StateInvariant)?;
+        if !closing.moves() {
             return Ok(());
         }
-        if row.current_flow_id.as_deref() == Some(successor) {
-            return Ok(());
-        }
-        if let Some(owner) = row.current_flow_id.as_deref()
-            && owner != predecessor
-        {
-            return Err(StoreError::StateInvariant);
-        }
-        let sections = row.current.clone();
-        let touch = row.touch.take();
-        let closed = ClosedHandover {
-            generation: row.generation,
-            predecessor: predecessor.into(),
-            successor: successor.into(),
-            sections: sections.clone(),
-            touch,
-        };
-        row.closed.push(closed.clone());
-        row.current = sections;
-        row.touch = None;
-        row.current_flow_id = Some(successor.into());
-        row.generation += 1;
-        self.write_handover(row)?;
-        self.handover_observations
-            .change(RetirementChange::GenerationClosed(
-                closed.generation_key(address),
-            ));
-        self.reminder_changes.announce();
+        let commit = closing.written(self, self.engine.begin_atomic_commit());
+        self.engine.commit_atomic(commit)?;
+        closing.announce(self);
         Ok(())
     }
 }
@@ -767,5 +719,341 @@ trait BecomesHandoverRefusal {
 impl BecomesHandoverRefusal for StoreError {
     fn handover_refusal(self) -> HandoverRefusal {
         HandoverRefusal::Store(self.to_string())
+    }
+}
+
+/// What the handover row's owner is, judged for a succession from
+/// `predecessor` to `successor`: none, either of the two, a flow whose row
+/// says it ended, or a refusal that keeps live, missing and unknown apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HandoverOwnerEvidence {
+    Unowned,
+    Predecessor,
+    Successor,
+    /// The owner's row is read and says Stopped, Retired or Exited.
+    Ended(String),
+    /// Live (Pending or Active), Missing (no row) or Unknown (unread).
+    Refused(signal_flow::HandoverOwnerRefusal),
+}
+
+/// Judges the handover row's owner from its flow row alone, so a missing
+/// row and an unread one stay apart.
+pub(crate) trait JudgesHandoverOwner {
+    fn owner_evidence(
+        &self,
+        row: &HandoverMemory,
+        predecessor: &str,
+        successor: &str,
+    ) -> HandoverOwnerEvidence;
+    /// The flow row a judgement reads: an owner or a predecessor.
+    fn judged_flow(&self, flow_id: &str) -> Result<Option<super::FlowRecord>, StoreError>;
+    /// The lifecycle that row records.
+    fn judged_lifecycle(
+        &self,
+        flow_id: &str,
+    ) -> Result<Option<signal_flow::FlowLifecycle>, StoreError>;
+}
+
+impl JudgesHandoverOwner for FlowStore {
+    fn owner_evidence(
+        &self,
+        row: &HandoverMemory,
+        predecessor: &str,
+        successor: &str,
+    ) -> HandoverOwnerEvidence {
+        use super::NamesLiveFlow;
+        use signal_flow::HandoverOwnerRefusal;
+        let Some(owner) = row.current_flow_id.as_deref() else {
+            return HandoverOwnerEvidence::Unowned;
+        };
+        if owner == successor {
+            return HandoverOwnerEvidence::Successor;
+        }
+        if owner == predecessor {
+            return HandoverOwnerEvidence::Predecessor;
+        }
+        let flow_id = || flow_ethos::FlowId(owner.to_owned());
+        match self.judged_flow(owner) {
+            Ok(Some(flow)) if flow.lifecycle.is_live() => {
+                HandoverOwnerEvidence::Refused(HandoverOwnerRefusal::Live(flow_id()))
+            }
+            Ok(Some(_)) => HandoverOwnerEvidence::Ended(owner.to_owned()),
+            Ok(None) => HandoverOwnerEvidence::Refused(HandoverOwnerRefusal::Missing(flow_id())),
+            Err(_) => HandoverOwnerEvidence::Refused(HandoverOwnerRefusal::Unknown(flow_id())),
+        }
+    }
+
+    fn judged_flow(&self, flow_id: &str) -> Result<Option<super::FlowRecord>, StoreError> {
+        #[cfg(test)]
+        if crate::test_faults::InjectsCrashes::refused_now(
+            &self.faults,
+            crate::test_faults::RefusedWrite::FlowRead,
+        ) {
+            return Err(StoreError::StateInvariant);
+        }
+        super::ReadsFlowStore::flow(self, flow_id)
+    }
+
+    fn judged_lifecycle(
+        &self,
+        flow_id: &str,
+    ) -> Result<Option<signal_flow::FlowLifecycle>, StoreError> {
+        use super::FlowLifecycle;
+        Ok(self.judged_flow(flow_id)?.map(|flow| match flow.lifecycle {
+            FlowLifecycle::Pending => signal_flow::FlowLifecycle::Pending,
+            FlowLifecycle::Active => signal_flow::FlowLifecycle::Active,
+            FlowLifecycle::Stopped => signal_flow::FlowLifecycle::Stopped,
+            FlowLifecycle::Retired => signal_flow::FlowLifecycle::Retired,
+            FlowLifecycle::Exited => signal_flow::FlowLifecycle::Exited,
+        }))
+    }
+}
+
+/// The generation a succession closes, judged under the handover write
+/// gate and held there until its commit is written: the row it leaves and
+/// the generation it closed, or nothing when nothing moves.
+pub(crate) struct HandoverClosing<'gate> {
+    _gate: Option<std::sync::MutexGuard<'gate, ()>>,
+    moved: Option<MovedHandover>,
+}
+
+struct MovedHandover {
+    row: HandoverMemory,
+    existing: bool,
+    closed: ClosedHandover,
+}
+
+/// Judges and writes a generation's closing.
+pub(crate) trait ClosesHandovers {
+    /// The closing of `address`'s generation for `successor`, `predecessor`
+    /// being the flow the Address received as before it. The closed
+    /// generation names its real owner, the row's owner when it names one.
+    /// Ok and empty when nothing moves; refused when the owner is live,
+    /// missing or unread, or the row cannot be read.
+    fn handover_closing(
+        &self,
+        address: &Address,
+        predecessor: &str,
+        successor: &str,
+    ) -> Result<HandoverClosing<'_>, signal_flow::HandoverCloseRefusal>;
+    /// A closing that moves nothing.
+    fn nothing_closing(&self) -> HandoverClosing<'_>;
+}
+
+impl ClosesHandovers for FlowStore {
+    fn handover_closing(
+        &self,
+        address: &Address,
+        predecessor: &str,
+        successor: &str,
+    ) -> Result<HandoverClosing<'_>, signal_flow::HandoverCloseRefusal> {
+        use signal_flow::HandoverCloseRefusal;
+        let gate = self
+            .handover_write_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let nothing = |gate| HandoverClosing {
+            _gate: Some(gate),
+            moved: None,
+        };
+        let row = self
+            .handover_row(address)
+            .map_err(|_| HandoverCloseRefusal::PersistenceRefused)?;
+        let Some(mut row) = row else {
+            if predecessor == successor || predecessor.is_empty() {
+                return Ok(nothing(gate));
+            }
+            let closed = ClosedHandover {
+                generation: 0,
+                predecessor: predecessor.into(),
+                successor: successor.into(),
+                sections: Vec::new(),
+                touch: None,
+            };
+            return Ok(HandoverClosing {
+                _gate: Some(gate),
+                moved: Some(MovedHandover {
+                    row: HandoverMemory {
+                        address: address.clone(),
+                        current: Vec::new(),
+                        touch: None,
+                        generation: 1,
+                        current_flow_id: Some(successor.into()),
+                        closed: vec![closed.clone()],
+                    },
+                    existing: false,
+                    closed,
+                }),
+            });
+        };
+        let owner = match self.owner_evidence(&row, predecessor, successor) {
+            HandoverOwnerEvidence::Successor => return Ok(nothing(gate)),
+            HandoverOwnerEvidence::Refused(refusal) => {
+                return Err(HandoverCloseRefusal::Owner(refusal));
+            }
+            HandoverOwnerEvidence::Unowned => predecessor.to_owned(),
+            HandoverOwnerEvidence::Predecessor => predecessor.to_owned(),
+            HandoverOwnerEvidence::Ended(owner) => owner,
+        };
+        if owner == successor || owner.is_empty() {
+            return Ok(nothing(gate));
+        }
+        let sections = row.current.clone();
+        let touch = row.touch.take();
+        let closed = ClosedHandover {
+            generation: row.generation,
+            predecessor: owner,
+            successor: successor.into(),
+            sections: sections.clone(),
+            touch,
+        };
+        row.closed.push(closed.clone());
+        row.current = sections;
+        row.touch = None;
+        row.current_flow_id = Some(successor.into());
+        row.generation += 1;
+        Ok(HandoverClosing {
+            _gate: Some(gate),
+            moved: Some(MovedHandover {
+                row,
+                existing: true,
+                closed,
+            }),
+        })
+    }
+
+    fn nothing_closing(&self) -> HandoverClosing<'_> {
+        HandoverClosing {
+            _gate: None,
+            moved: None,
+        }
+    }
+}
+
+/// What a closing adds to its commit, and announces after it.
+pub(crate) trait WritesHandoverClosing {
+    /// Whether it closes a generation.
+    #[cfg(test)]
+    fn moves(&self) -> bool;
+    fn written(&self, store: &FlowStore, commit: AtomicCommit) -> AtomicCommit;
+    /// The generation closed and the reminder change, after the commit.
+    fn announce(&self, store: &FlowStore);
+}
+
+impl WritesHandoverClosing for HandoverClosing<'_> {
+    #[cfg(test)]
+    fn moves(&self) -> bool {
+        self.moved.is_some()
+    }
+
+    fn written(&self, store: &FlowStore, commit: AtomicCommit) -> AtomicCommit {
+        match &self.moved {
+            Some(moved) if moved.existing => commit.mutate(store.handovers, moved.row.clone()),
+            Some(moved) => commit.assert(store.handovers, moved.row.clone()),
+            None => commit,
+        }
+    }
+
+    fn announce(&self, store: &FlowStore) {
+        if let Some(moved) = &self.moved {
+            store
+                .handover_observations
+                .change(RetirementChange::GenerationClosed(
+                    moved.closed.generation_key(&moved.row.address),
+                ));
+            store.reminder_changes.announce();
+        }
+    }
+}
+
+/// The supersession a launch's settlement adds to its commit: every
+/// earlier obligation at the Address whose handover this launch takes over.
+pub(crate) trait SupersedesObligations {
+    /// A PendingHandover at `address` naming another successor than `by`
+    /// is retracted, its launch's outcome rewritten `HandoverSuperseded`;
+    /// with `keeps_row` the row is left for the caller to replace in the
+    /// same commit. A PendingReap at `address` whose standing is
+    /// `HandoverRefused` and whose successor is not `by` is retracted, its
+    /// launch's outcome rewritten `Replaced`. Any other PendingReap stays.
+    fn superseding(
+        &self,
+        address: &Address,
+        by: &signal_flow::FlowId,
+        commit: AtomicCommit,
+        keeps_row: bool,
+    ) -> Result<AtomicCommit, StoreError>;
+}
+
+impl SupersedesObligations for FlowStore {
+    fn superseding(
+        &self,
+        address: &Address,
+        by: &signal_flow::FlowId,
+        commit: AtomicCommit,
+        keeps_row: bool,
+    ) -> Result<AtomicCommit, StoreError> {
+        use super::pending_handover::RecordsPendingHandovers;
+        use super::pending_reap::{RecordsPendingReaps, WritesPendingReap};
+        use super::{LaunchOutcome, RecordsLaunchOutcome, WritesLaunchOutcome};
+        let mut commit = commit;
+        let mut superseded = false;
+        if let Some(row) = self.pending_handover(address)?
+            && row.successor.0 != *by
+        {
+            superseded = true;
+            if let Some(
+                LaunchOutcome::HandoverPending(launched) | LaunchOutcome::Started(launched),
+            ) = self.launch_outcome(&row.launch_request_id.0)?
+            {
+                commit = self.outcome_written(
+                    &row.launch_request_id.0,
+                    LaunchOutcome::HandoverSuperseded(
+                        crate::generated::memory::SupersededHandover {
+                            address: address.clone(),
+                            handover_owner: row.handover_owner.clone(),
+                            launched_record: launched,
+                            successor: signal_flow::Successor(by.clone()),
+                        },
+                    ),
+                    commit,
+                )?;
+            }
+            if !keeps_row {
+                commit = commit.retract(
+                    self.pending_handovers,
+                    RecordKey::new(Self::address_record_key(address)),
+                );
+            }
+        }
+        for row in self.pending_reaps_at(address)? {
+            if !matches!(
+                row.reap_standing,
+                signal_flow::ReapStanding::HandoverRefused(_)
+            ) {
+                continue;
+            }
+            let Some(replaced) = self.reaped_record(&row)? else {
+                continue;
+            };
+            if replaced.launched_record.flow_id == *by {
+                continue;
+            }
+            superseded = true;
+            commit = self.outcome_written(
+                &row.launch_request_id.0,
+                LaunchOutcome::Replaced(replaced),
+                commit,
+            )?;
+            commit = commit.retract(
+                self.pending_reaps,
+                RecordKey::new(row.predecessor.0.clone()),
+            );
+        }
+        #[cfg(test)]
+        if superseded {
+            crate::test_faults::InjectsCrashes::attempted(&self.faults, "Superseding");
+        }
+        let _ = superseded;
+        Ok(commit)
     }
 }

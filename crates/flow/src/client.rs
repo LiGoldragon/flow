@@ -20,6 +20,45 @@ pub trait CallsFlowNexus {
     fn call(&self, invocation: &Invocation, each: &mut dyn FnMut(Response)) -> Result<(), String>;
 }
 
+/// Every ordinary connection greets first: signal-flow's greeting is
+/// written and the receipt read before any Query.
+pub trait GreetsFlowNexus {
+    /// Writes signal-flow's greeting and reads the receipt. Ok on Greeted
+    /// with this contract's digest; any other receipt is the call's error
+    /// and nothing more is written.
+    fn greet_flow(&mut self) -> Result<(), String>;
+}
+
+impl GreetsFlowNexus for UnixStream {
+    fn greet_flow(&mut self) -> Result<(), String> {
+        use signal_flow::Contracted;
+        let greeting =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&Query::greeting()).map_err(|e| e.to_string())?;
+        self.write_all(&(greeting.len() as u32).to_be_bytes())
+            .map_err(|e| e.to_string())?;
+        self.write_all(&greeting).map_err(|e| e.to_string())?;
+        let mut length = [0; 4];
+        self.read_exact(&mut length).map_err(|e| e.to_string())?;
+        let length = u32::from_be_bytes(length) as usize;
+        if length > 1024 * 1024 {
+            return Err("Signal frame exceeds 1 MiB".into());
+        }
+        let mut frame = vec![0; length];
+        self.read_exact(&mut frame).map_err(|e| e.to_string())?;
+        let receipt =
+            rkyv::from_bytes::<signal_flow::HandshakeReceipt, rkyv::rancor::Error>(&frame)
+                .map_err(|error| format!("ordinary greeting unreadable: {error}"))?;
+        match receipt {
+            signal_flow::HandshakeReceipt::Greeted(digest)
+                if digest == Query::contract_digest() =>
+            {
+                Ok(())
+            }
+            receipt => Err(format!("ordinary greeting refused: {receipt:?}")),
+        }
+    }
+}
+
 pub trait TextualizesFlowReply {
     fn textualize_reply(&self, reply: &Response) -> String;
 }
@@ -29,6 +68,7 @@ impl CallsFlowNexus for FlowClient {
         let query = &invocation.query;
         let mut peer = UnixStream::connect(&invocation.ordinary_socket_path.0)
             .map_err(|error| error.to_string())?;
+        peer.greet_flow()?;
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(query).map_err(|e| e.to_string())?;
         peer.write_all(&(bytes.len() as u32).to_be_bytes())
             .map_err(|e| e.to_string())?;

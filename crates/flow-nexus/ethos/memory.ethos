@@ -5,15 +5,38 @@
 ; it reaps. SeatBirth is the seat a restart bound: the route it runs in and
 ; the birth of its harness process, kept after the restart's record goes, so
 ; an event of the seat it replaced is told from the seat's own.
+;
+; What a launch still owes once its flow is confirmed and receiving is
+; kept as an obligation beside its outcome, each fact once. A PendingReap
+; is the reap a replacement owes its predecessor, keyed by the predecessor:
+; its pane closed and the Address's handover handed on; its successor is
+; read through its launch's outcome, never copied here. A PendingHandover
+; is the handover a fresh launch owes at its Address, one at most per
+; Address. Which flow an Address receives as is read from the metaflow and
+; its AddressHold, never from an obligation.
 
 Memory
-[ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection FlowId HerdrRoute Process NativeSessionId TranscriptPath BackgroundWork NativePrompt ]
+[ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection FlowId HerdrRoute Process NativeSessionId TranscriptPath BackgroundWork NativePrompt Address ReapStanding HandoverCloseRefusal HandoverOwner Successor ]
   flow_nexus:[ LaunchedRecord ReplacedRecord ] ]
 [ LaunchOutcome.[ Started.LaunchedRecord
                   Replaced.ReplacedRecord
                   StartRejected.StartRejection
-                  ReplaceRejected.ReplaceRejection ]
+                  ReplaceRejected.ReplaceRejection
+                  ; The successor is confirmed and receiving; its predecessor's
+                  ; PendingReap stands.
+                  ReapPending.ReplacedRecord
+                  ; Started fresh; the PendingHandover at its Address names
+                  ; this launch.
+                  HandoverPending.LaunchedRecord
+                  ; Final: a later launch at the Address took the handover over.
+                  HandoverSuperseded.SupersededHandover ]
+  SupersededHandover.{ Address HandoverOwner LaunchedRecord Successor }
   Replacement.{ LaunchRequestId Predecessor.String }
+  ; The reap a predecessor is owed, keyed by the predecessor's FlowId.
+  PendingReap.{ Predecessor LaunchRequestId Address ReapStanding }
+  ; The handover owed at an Address to the flow a fresh launch made its
+  ; receiving flow, keyed by the Address: one at most per Address.
+  PendingHandover.{ Address HandoverOwner Successor LaunchRequestId HandoverCloseRefusal }
   SeatBirth.{ FlowId HerdrRoute Process }
   ; A recorded Stop holds its correlation and background-work metadata.
   RecordedStop.{ Option<NativeSessionId> Option<TranscriptPath> BackgroundWork }

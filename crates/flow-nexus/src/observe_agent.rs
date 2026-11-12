@@ -229,7 +229,7 @@ impl LocatesHerdrSession for HerdrCli {
 
 /// What Herdr said of the observed pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum PaneEvent {
+pub(crate) enum PaneEvent {
     Status(String),
     Gone,
 }
@@ -305,7 +305,7 @@ impl ReadsPaneEvents for PaneEvents {
 }
 
 /// A Herdr stream event, read as what it says of one pane.
-trait ReadsPaneEvent {
+pub(crate) trait ReadsPaneEvent {
     /// Herdr 0.8.2 names events `pane_closed` on the stream and
     /// `pane.closed` in its schema; both spellings are read.
     fn pane_event(&self, pane_id: &str) -> Option<PaneEvent>;

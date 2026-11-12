@@ -519,6 +519,12 @@ impl ProjectsInspection for crate::store::repair::Inspection {
                     meta_signal_flow::Attempt::Launch(launch) => {
                         meta_signal_flow::VisibleAttempt::Launch(launch)
                     }
+                    meta_signal_flow::Attempt::Reap(reap) => {
+                        meta_signal_flow::VisibleAttempt::Reap(reap)
+                    }
+                    meta_signal_flow::Attempt::Handover(handover) => {
+                        meta_signal_flow::VisibleAttempt::Handover(handover)
+                    }
                 })
                 .collect(),
             restart_record_option: value.restart_record_option,

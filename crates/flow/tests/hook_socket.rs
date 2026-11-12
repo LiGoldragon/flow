@@ -6,6 +6,31 @@ use std::{
     process::{Command, Stdio},
 };
 
+/// Reads the client's first frame as the Signal greeting and answers it as
+/// Flow does: `Greeted` with this contract's digest, or, refusing, the typed
+/// `GreetingRefused`. True when the frame was signal-flow's greeting.
+fn answer_greeting(peer: &mut std::os::unix::net::UnixStream, greet: bool) -> bool {
+    use signal_flow::Contracted;
+    let mut length = [0; 4];
+    peer.read_exact(&mut length).expect("greeting length");
+    let mut frame = vec![0; u32::from_be_bytes(length) as usize];
+    peer.read_exact(&mut frame).expect("greeting");
+    let greeting = rkyv::from_bytes::<signal_flow::Handshake, rkyv::rancor::Error>(&frame)
+        .expect("the first frame is a greeting");
+    let receipt = if greet {
+        signal_flow::Query::receipt(&greeting)
+    } else {
+        signal_flow::HandshakeReceipt::GreetingRefused(
+            signal_flow::HandshakeRejection::ContractMismatch(signal_flow::ContractDigest(0)),
+        )
+    };
+    let reply = rkyv::to_bytes::<rkyv::rancor::Error>(&receipt).expect("receipt encodes");
+    peer.write_all(&(reply.len() as u32).to_be_bytes())
+        .and_then(|_| peer.write_all(&reply))
+        .expect("receipt written");
+    greeting == signal_flow::Query::greeting()
+}
+
 #[test]
 fn the_hook_reports_only_to_its_typed_socket_configuration() {
     let root = tempfile::tempdir().expect("temporary root");
@@ -22,6 +47,7 @@ fn the_hook_reports_only_to_its_typed_socket_configuration() {
     let (received, receiving) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let (mut peer, _) = listener.accept().expect("the hook's client connects");
+        assert!(answer_greeting(&mut peer, true), "the hook greets first");
         let mut length = [0; 4];
         peer.read_exact(&mut length).expect("query length");
         let mut query = vec![0; u32::from_be_bytes(length) as usize];
@@ -142,6 +168,7 @@ fn assistant_content_is_transport_only_for_every_diagnostic_outcome() {
                 let listener = UnixListener::bind(&socket).unwrap();
                 Some(std::thread::spawn(move || {
                     let (mut peer, _) = listener.accept().unwrap();
+                    assert!(answer_greeting(&mut peer, true));
                     let mut length = [0; 4];
                     peer.read_exact(&mut length).unwrap();
                     let mut bytes = vec![0; u32::from_be_bytes(length) as usize];
@@ -219,4 +246,43 @@ fn assistant_content_is_transport_only_for_every_diagnostic_outcome() {
             }
         }
     }
+}
+
+/// O4: against a Nexus that refuses its greeting the hook writes no Report,
+/// prints its `2` line and exits 0, never blocking the turn.
+#[test]
+fn the_hook_stops_at_a_refused_greeting() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let socket = root.path().join("flow.sock");
+    let listener = UnixListener::bind(&socket).expect("fixture binds");
+    let refusing = std::thread::spawn(move || {
+        let (mut peer, _) = listener.accept().expect("the hook connects");
+        assert!(answer_greeting(&mut peer, false));
+        let mut rest = Vec::new();
+        peer.read_to_end(&mut rest).expect("the hook closes");
+        rest
+    });
+    let mut hook = Command::new(env!("CARGO_BIN_EXE_flow-nexus-hook"))
+        .arg(format!("{{ {} }}", socket.display()))
+        .env_clear()
+        .env("FLOW_ID", "5a4d0b")
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("flow-nexus-hook runs");
+    hook.stdin
+        .take()
+        .expect("hook stdin")
+        .write_all(
+            br#"{"hook_event_name":"Stop","session_id":"s","transcript_path":"/t/s.jsonl","background_tasks":[]}"#,
+        )
+        .expect("event written");
+    let output = hook.wait_with_output().expect("flow-nexus-hook ends");
+    assert!(output.status.success(), "{output:?}");
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains("\t2\t"), "{diagnostic}");
+    assert!(
+        refusing.join().expect("fixture answered").is_empty(),
+        "no Report after a refused greeting"
+    );
 }

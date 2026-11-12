@@ -1,3 +1,87 @@
+# Flow 0.54.7: every Codex rest settles; routing follows the succession; a reap is owed at once and finished outside the dispatch gate; every connection greets
+
+Contracts: signal-flow 61.0.0 (4871bb8) and meta-signal-flow 77.0.0
+(e72f555), on build base 1283af6. **The stored format changes.**
+
+- **Every Codex rest settles.** A Codex thread's coming to rest settles its
+  flow as a Claude Stop does, whatever is queued: an ordered replacement or a
+  due refresh is carried out, a Maintained seat stays Awake, an OnDemand seat
+  sleeps. The first authoritative `Resumed(Idle)` after a Nexus start settles
+  once; a later one, after a reconnect, settles nothing unless a turn was seen
+  running between. An OnDemand seat whose successor cannot be placed or
+  composed is kept (`SleepUnplaceable`, `SleepUncomposable`), untold.
+- **Routing follows the Address's succession.** Which flow an Address
+  receives as is read from the metaflow row and its AddressHold alone. The
+  successor's confirmation is the one commit that switches it; the
+  predecessor is refused `Superseded.<successor>` (meta `DeliveryRejection`
+  and `CommandRejection`), an unconfirmed launch `Unconfirmed`. No held
+  successor remains (`held_successor` is gone).
+- **A reap is owed at once.** A Replace, a replacing Launch and a Refresh
+  whose successor starts answer
+  `ReapPending.{ <Address> <Predecessor> <Launched> Owed }` as soon as the reap
+  is durable (W3: the predecessor `Stopped`, the outcome `ReapPending`, a
+  PendingReap). Its Herdr steps run outside the dispatch gate in its worker,
+  which subscribes, snapshots, closes once and settles on Herdr's own event,
+  revalidating under the gate first; the outcome then reads `Replaced`. A
+  pane running another native session is never closed; a route not recorded
+  settles nothing by itself. A pending reap is retried only at its successor's
+  next rest (store only; it rearms the worker), the worker's own Herdr events
+  and the Nexus start.
+- **A fresh start's handover is an obligation.** A Start or fresh Launch
+  whose handover cannot move answers `HandoverPending` and is taken up at its
+  flow's next rest, its own `Keep`/`Drop`, or the start; a later launch at the
+  Address supersedes it (`HandoverSuperseded`, final). A missing owner or
+  predecessor stands typed; no event retries it.
+- **Inspect** lists each pending reap and handover at the Address (meta
+  `Attempt.Reap`, `Attempt.Handover`), the derived ones included, Missing and
+  Unknown typed.
+- **The ordinary socket greets** through the Signal Handshake before any
+  Query is decoded, as the meta socket has since 0.54.6. A signal-flow 60
+  peer (its greeting, or its raw Query, as the 0.54.6 CLI and hook send it)
+  is answered `GreetingRefused.ContractMismatch(<61 digest>)` and recorded in
+  `Observe.Undecodable`, metadata alone; the meta socket now answers and
+  records a first frame that is no Handshake the same way. The CLI, the hook
+  and every in-repository ordinary peer greet.
+- **The Message interoperability check is retired** with the dependency
+  surface only it needed (message-nexus, signal-message, meta-signal-message,
+  meta-signal-flow 75).
+
+## Memory
+
+| Family | Table | 0.54.6 | 0.54.7 |
+|---|---|---|---|
+| flow-nexus-launch-outcome | flow_nexus_launch_outcomes | v9 | v10: `ReapPending`, `HandoverPending`, `HandoverSuperseded`; no `ReapRefused` |
+| flow-nexus-pending-reap | flow_nexus_pending_reaps | absent | v1 |
+| flow-nexus-pending-handover | flow_nexus_pending_handovers | absent | v1 |
+| flow-nexus-flow | flow_nexus_flows | v6 | v6; a refused reap's predecessor still live is recorded Stopped |
+
+The open upgrades a 0.54.6 store in one atomic multi-family evolution, before
+any family is registered: the outcome family v9 to v10, the two new families
+registered, each live predecessor of a refused reap recorded Stopped. A v9
+`ReplaceRejected(ReapRefused(r))` becomes `ReapPending` with a PendingReap
+(`RouteUnavailable` to `HerdrUnavailable`, `CloseRefused` to `CloseRefused`,
+any other to `Owed`); every other outcome maps to itself; no PendingHandover
+is written (one owed by derivation is taken up at its flow's first rest). A
+refused reap whose launch has no attempt, binding or replacement refuses the
+upgrade, typed (`ReapUpgrade`), and nothing is written. A v9 family holding
+no row owes nothing: its identity alone is upgraded (an evolution of no row
+would be an empty commit) and the two obligation families are registered
+empty. The obligation families are not declared to the open, which would
+register them before the evolution does. A 0.53.2-era store is evolved by its
+request-id step, then by this one. A current or new store is idempotent.
+
+**Rollback is the restore of the pre-deploy store copy.** 0.54.6 declares the
+launch-outcome family at v9 and refuses a v10 store at open
+(`FamilyIdentityMismatch`); a refused open, as in 0.54.6, is claimed to leave
+the logical rows and the catalog unchanged, never the file's bytes.
+
+## Deploy
+
+The daemon, both clients, the hook and energy-nexus's translator move in one
+generation: a 0.54.6 hook's raw Report is refused at the greeting by 0.54.7,
+and 0.54.7's greeting is refused by 0.54.6. A Stop reported across the switch
+is lost; that flow's rest is seen at its next Stop.
+
 # 0.54.6: metadata-only harness events
 
 The live meta contract is 76.0.0; old meta75 peers fail the contract greeting.

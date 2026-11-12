@@ -751,10 +751,19 @@ fn a_maintained_seat_refreshed_with_nothing_queued_starts_its_successor_first() 
         fixture.nexus.store.flow_model(CLAUDE_SEAT).unwrap()
     );
 
-    assert_eq!(
-        fixture.nexus.settle_stopped(CLAUDE_SEAT),
-        AtStop::Refreshed(seat_address())
+    // The successor started first; the predecessor's reap is owed, and its
+    // worker closes the pane and hands the generation on.
+    let at_stop = fixture.nexus.settle_stopped(CLAUDE_SEAT);
+    assert!(
+        matches!(
+            &at_stop,
+            AtStop::ReapPending(pending)
+                if pending.address == seat_address()
+                    && pending.reap_standing == signal_flow::ReapStanding::Owed
+        ),
+        "{at_stop:?}"
     );
+    super::reaping::finish_reaps(&fixture);
     let metaflow = seat_metaflow_now(&fixture);
     assert_eq!(
         metaflow.state,
@@ -883,10 +892,19 @@ fn an_on_demand_seat_refreshed_with_a_waking_request_starts_its_successor_first(
         fixture.nexus.store.flow_model(CLAUDE_SEAT).unwrap()
     );
 
-    assert_eq!(
-        fixture.nexus.settle_stopped(CLAUDE_SEAT),
-        AtStop::Refreshed(seat_address())
+    // The successor started first; the predecessor's reap is owed, and its
+    // worker closes the pane and hands the generation on.
+    let at_stop = fixture.nexus.settle_stopped(CLAUDE_SEAT);
+    assert!(
+        matches!(
+            &at_stop,
+            AtStop::ReapPending(pending)
+                if pending.address == seat_address()
+                    && pending.reap_standing == signal_flow::ReapStanding::Owed
+        ),
+        "{at_stop:?}"
     );
+    super::reaping::finish_reaps(&fixture);
     assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
     assert!(closed(&fixture), "the predecessor's pane is closed");
     let metaflow = seat_metaflow_now(&fixture);

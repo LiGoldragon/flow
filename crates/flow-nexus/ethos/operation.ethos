@@ -74,9 +74,9 @@
 ; types (memory.ethos), named through the Nexus crate.
 
 Operation
-[ signal_flow:[ FlowId LaunchRequestId FlowNode CallerIdentity LaunchProfile ComposedLaunch Origin LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request QueueEntry LogicalDeliveryId ContextRefusal CompositionRefusal LeaveOutRefusal NativeSessionId HarnessSpawnRefusal NativeLaunchRefusal ]
+[ signal_flow:[ FlowId LaunchRequestId FlowNode CallerIdentity LaunchProfile ComposedLaunch Origin LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request QueueEntry LogicalDeliveryId ContextRefusal CompositionRefusal LeaveOutRefusal NativeSessionId HarnessSpawnRefusal NativeLaunchRefusal ReapStanding HandoverCloseRefusal ]
   meta_signal_flow:[ Root RestartRecord ]
-  flow_nexus:[ LaunchOutcome Replacement SeatBirth ] ]
+  flow_nexus:[ LaunchOutcome Replacement SeatBirth PendingReap PendingHandover SupersededHandover LaunchedRecord ReplacedRecord ] ]
 [ Compose.LaunchProfile
   Reserve.{ ComposedLaunch Origin }
   Record.[ Intent.NativeLaunchIntent
@@ -96,7 +96,26 @@ Operation
            Asleep.{ Address FlowId }
            Awoken.{ Address FlowId DeliveredCount.Integer }
            Restart.RestartRecord
-           Rebound.SeatBirth ]
+           Rebound.SeatBirth
+           ; One commit: the predecessor Stopped (when live), the ReapPending
+           ; outcome, the PendingReap, and the supersession at its Address.
+           ReapOwed.{ PendingReap ReplacedRecord }
+           ; The PendingReap's standing rewritten.
+           ReapRefused.{ FlowId ReapStanding }
+           ; One commit: the generation closed (when still owed), Replaced,
+           ; the PendingReap retracted.
+           Reaped.FlowId
+           ; One commit: the HandoverPending outcome, the PendingHandover, and
+           ; the supersession at its Address.
+           HandoverOwed.{ PendingHandover LaunchedRecord }
+           ; The PendingHandover's refusal rewritten.
+           HandoverRefused.{ Address HandoverCloseRefusal }
+           ; One commit: the generation closed, Started, the PendingHandover
+           ; retracted.
+           HandedOver.Address
+           ; One commit: the generation closed (when any moves), Started, and
+           ; the supersession at its Address.
+           StartedHandedOver.LaunchedRecord ]
   Register.{ FlowNode CallerIdentity }
   Confirm.FlowId
   Open.{ ComposedLaunch Root }

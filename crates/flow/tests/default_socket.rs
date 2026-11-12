@@ -21,6 +21,31 @@ fn client(runtime: &Path, configuration_home: &Path, other: &Path, arguments: &[
         .expect("client runs")
 }
 
+/// Reads the client's first frame as the Signal greeting and answers it as
+/// Flow does: `Greeted` with this contract's digest, or, refusing, the typed
+/// `GreetingRefused`. True when the frame was signal-flow's greeting.
+fn answer_greeting(peer: &mut std::os::unix::net::UnixStream, greet: bool) -> bool {
+    use signal_flow::Contracted;
+    let mut length = [0; 4];
+    peer.read_exact(&mut length).expect("greeting length");
+    let mut frame = vec![0; u32::from_be_bytes(length) as usize];
+    peer.read_exact(&mut frame).expect("greeting");
+    let greeting = rkyv::from_bytes::<signal_flow::Handshake, rkyv::rancor::Error>(&frame)
+        .expect("the first frame is a greeting");
+    let receipt = if greet {
+        signal_flow::Query::receipt(&greeting)
+    } else {
+        signal_flow::HandshakeReceipt::GreetingRefused(
+            signal_flow::HandshakeRejection::ContractMismatch(signal_flow::ContractDigest(0)),
+        )
+    };
+    let reply = rkyv::to_bytes::<rkyv::rancor::Error>(&receipt).expect("receipt encodes");
+    peer.write_all(&(reply.len() as u32).to_be_bytes())
+        .and_then(|_| peer.write_all(&reply))
+        .expect("receipt written");
+    greeting == signal_flow::Query::greeting()
+}
+
 #[test]
 fn the_client_reaches_only_the_socket_of_the_place_its_configuration_names() {
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
@@ -47,6 +72,7 @@ fn the_client_reaches_only_the_socket_of_the_place_its_configuration_names() {
     }
     let answering = std::thread::spawn(move || {
         let (mut peer, _) = listener.accept().expect("the selected client connects");
+        assert!(answer_greeting(&mut peer, true), "the client greets first");
         let mut length = [0; 4];
         peer.read_exact(&mut length).expect("query length");
         let mut query = vec![0; u32::from_be_bytes(length) as usize];
@@ -136,5 +162,41 @@ fn a_missing_configuration_is_refused_naming_its_path() {
             .expect_err("nothing falls back to main")
             .kind(),
         std::io::ErrorKind::WouldBlock
+    );
+}
+
+/// O4: against a Nexus that refuses its greeting the CLI writes no Query,
+/// says why and exits 2.
+#[test]
+fn the_flow_cli_stops_at_a_refused_greeting() {
+    let runtime = tempfile::tempdir().expect("temporary runtime directory");
+    let configuration = tempfile::tempdir().expect("temporary configuration home");
+    std::fs::create_dir_all(configuration.path().join("nexus")).expect("nexus configuration");
+    std::fs::write(
+        configuration.path().join("nexus/flow-nexus.datom"),
+        "{ main }\n",
+    )
+    .expect("the configuration names main");
+    let main = runtime.path().join("nexus/main");
+    std::fs::create_dir_all(&main).expect("the place's runtime directory");
+    let listener = UnixListener::bind(main.join("flow.sock")).expect("fixture binds");
+    let other = runtime.path().join("other.sock");
+    let refusing = std::thread::spawn(move || {
+        let (mut peer, _) = listener.accept().expect("the client connects");
+        assert!(answer_greeting(&mut peer, false));
+        // Nothing more arrives: the client ends at the refusal.
+        let mut rest = Vec::new();
+        peer.read_to_end(&mut rest).expect("the client closes");
+        rest
+    });
+    let output = client(runtime.path(), configuration.path(), &other, &["Metaflows"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("ordinary greeting refused"),
+        "{output:?}"
+    );
+    assert!(
+        refusing.join().expect("fixture answered").is_empty(),
+        "no second frame after a refused greeting"
     );
 }

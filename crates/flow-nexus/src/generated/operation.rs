@@ -73,6 +73,34 @@ pub struct Record_Data_Awoken_Data {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Record_Data_ReapOwed_Data {
+    pub pending_reap: flow_nexus::PendingReap,
+    pub replaced_record: flow_nexus::ReplacedRecord,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Record_Data_ReapRefused_Data {
+    pub flow_id: signal_flow::FlowId,
+    pub reap_standing: signal_flow::ReapStanding,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Record_Data_HandoverOwed_Data {
+    pub pending_handover: flow_nexus::PendingHandover,
+    pub launched_record: flow_nexus::LaunchedRecord,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Record_Data_HandoverRefused_Data {
+    pub address: signal_flow::Address,
+    pub handover_close_refusal: signal_flow::HandoverCloseRefusal,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Record_Data {
     Intent(signal_flow::NativeLaunchIntent),
     Binding(signal_flow::NativeLaunchBinding),
@@ -92,6 +120,13 @@ pub enum Record_Data {
     Awoken(Record_Data_Awoken_Data),
     Restart(meta_signal_flow::RestartRecord),
     Rebound(flow_nexus::SeatBirth),
+    ReapOwed(Record_Data_ReapOwed_Data),
+    ReapRefused(Record_Data_ReapRefused_Data),
+    Reaped(signal_flow::FlowId),
+    HandoverOwed(Record_Data_HandoverOwed_Data),
+    HandoverRefused(Record_Data_HandoverRefused_Data),
+    HandedOver(signal_flow::Address),
+    StartedHandedOver(flow_nexus::LaunchedRecord),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

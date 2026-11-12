@@ -46,13 +46,8 @@ tungstenite = "0.28"
 [build-dependencies]
 ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "1976e45" }
 [dev-dependencies]
-message-nexus = { git = "https://github.com/LiGoldragon/message", rev = "71b5ac0" }
-# Both contracts with datom, as Message's CLIs build them and the build
-# base's set holds them, so each has one build and its optional
-# dependencies resolve here. The joint test reads only signal-message.
-signal-message = { git = "https://github.com/LiGoldragon/signal-message", rev = "6d82783", features = ["datom"] }
-meta-signal-message = { git = "https://github.com/LiGoldragon/meta-signal-message", rev = "73b7a82", features = ["datom"] }
-
-# The Message test fixture keeps meta75; resolve its datom attachments in
-# this workspace as the base's named datom set requires.
-meta-signal-flow-75 = { package = "meta-signal-flow", git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "e192c0d", features = ["datom"] }
+# The published signal-flow 60, whose peers the ordinary greeting refuses and
+# whose launch outcomes the 0.54.7 Memory step upgrades from.
+signal-flow-60 = { package = "signal-flow", git = "https://github.com/LiGoldragon/signal-flow", rev = "04a72fd", features = ["datom"] }
+# The published meta-signal-flow 76, whose peers the meta greeting refuses.
+meta-signal-flow-76 = { package = "meta-signal-flow", git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "3b1f6f0bfa77acd751c17a490db6a24cba728520", features = ["datom"] }

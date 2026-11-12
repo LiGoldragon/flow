@@ -5,6 +5,8 @@
 //! into its typed, durable records.
 
 use crate::store::delivery::RegistersDeliveryTables;
+#[cfg(test)]
+use crate::test_faults;
 pub(crate) mod address_hold;
 pub mod compaction;
 pub mod context;
@@ -20,15 +22,16 @@ pub(crate) mod kept_answer;
 pub(crate) mod launch_cleanup;
 pub(crate) mod living_upgrade;
 pub(crate) mod logical_delivery;
-#[cfg(test)]
-mod message_joint;
 pub(crate) mod metaflow;
 pub(crate) mod metaflow_declaration;
 pub mod metaflow_watch;
 pub(crate) mod nexus_configuration;
 pub(crate) mod opened_thread;
 pub(crate) mod ordered_replacement;
+pub(crate) mod pending_handover;
+pub(crate) mod pending_reap;
 pub(crate) mod queue_delivery;
+pub(crate) mod reap_upgrade;
 pub mod reminder;
 pub(crate) mod repair;
 #[cfg(test)]
@@ -163,6 +166,10 @@ const OPTIONAL_TURN_END_TABLE: &str = "flow_nexus_turn_ends";
 /// Added in 0.54.3; an earlier store keeps no answer and holds no reminder.
 const OPTIONAL_KEPT_ANSWER_TABLE: &str = "flow_nexus_kept_answers";
 const OPTIONAL_SCHEDULED_REMINDER_TABLE: &str = "flow_nexus_scheduled_reminders";
+/// Added in 0.54.7, with the launch-outcome family's v10; a 0.54.6 store
+/// owes no reap and no handover as a row.
+const OPTIONAL_PENDING_REAP_TABLE: &str = "flow_nexus_pending_reaps";
+const OPTIONAL_PENDING_HANDOVER_TABLE: &str = "flow_nexus_pending_handovers";
 /// Added in 0.53.3; a 0.53.2 store names no harness hook.
 const OPTIONAL_HARNESS_HOOK_TABLE: &str = "flow_nexus_meta_harness_hook_configuration";
 const META_HARNESS_HOOK_CONFIGURATION_TABLE_NAME: TableName =
@@ -266,6 +273,8 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_HARNESS_HOOK_TABLE,
     OPTIONAL_KEPT_ANSWER_TABLE,
     OPTIONAL_SCHEDULED_REMINDER_TABLE,
+    OPTIONAL_PENDING_REAP_TABLE,
+    OPTIONAL_PENDING_HANDOVER_TABLE,
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -1411,9 +1420,124 @@ pub trait AnswersLaunchOutcome {
     fn response(&self, store: &FlowStore) -> Response;
     /// The outcome as LaunchStatus reports it.
     fn status_outcome(&self, store: &FlowStore) -> signal_flow::LaunchStatusOutcome;
-    /// A refused reap leaves the predecessor Stopped and the successor held;
-    /// it is the one outcome a repeated Replace takes up again.
-    fn awaits_reaping(&self) -> bool;
+}
+
+/// The obligation replies a pending outcome reads as, from the row that
+/// owes it: a reap from its PendingReap, a handover from its
+/// PendingHandover. A row no longer standing reads as what its launch's
+/// own records still say.
+pub(crate) trait NamesPendingReplies {
+    fn reap_pending_reply(&self, replaced: &ReplacedRecord) -> signal_flow::ReapPending;
+    fn handover_pending_reply(&self, launched: &LaunchedRecord) -> signal_flow::HandoverPending;
+    fn handover_superseded_reply(
+        &self,
+        superseded: &crate::generated::memory::SupersededHandover,
+    ) -> signal_flow::HandoverSuperseded;
+    /// The Address a launched flow's launch names.
+    fn launched_address(&self, flow_id: &str) -> Option<Address>;
+}
+
+impl NamesPendingReplies for FlowStore {
+    fn reap_pending_reply(&self, replaced: &ReplacedRecord) -> signal_flow::ReapPending {
+        use pending_reap::RecordsPendingReaps;
+        let row = self.pending_reap(&replaced.flow_id.0).ok().flatten();
+        let address = row
+            .as_ref()
+            .map(|row| row.address.clone())
+            .or_else(|| self.launched_address(&replaced.launched_record.flow_id.0))
+            .unwrap_or_else(|| Address {
+                aspect: flow_ethos::Aspect::Psyche,
+                topic: flow_ethos::Topic(String::new()),
+                model: signal_flow::Model::Haiku,
+            });
+        signal_flow::ReapPending {
+            address,
+            predecessor: signal_flow::Predecessor(replaced.flow_id.clone()),
+            launched: self.launched(&replaced.launched_record),
+            reap_standing: row
+                .map(|row| row.reap_standing)
+                .unwrap_or(signal_flow::ReapStanding::Unrecorded),
+        }
+    }
+
+    fn handover_pending_reply(&self, launched: &LaunchedRecord) -> signal_flow::HandoverPending {
+        use pending_handover::RecordsPendingHandovers;
+        let row = self.pending_handovers().ok().and_then(|rows| {
+            rows.into_iter()
+                .find(|row| row.successor.0 == launched.flow_id)
+        });
+        let address = row
+            .as_ref()
+            .map(|row| row.address.clone())
+            .or_else(|| self.launched_address(&launched.flow_id.0))
+            .unwrap_or_else(|| Address {
+                aspect: flow_ethos::Aspect::Psyche,
+                topic: flow_ethos::Topic(String::new()),
+                model: signal_flow::Model::Haiku,
+            });
+        let (owner, refusal) = match row {
+            Some(row) => (row.handover_owner, row.handover_close_refusal),
+            None => (
+                signal_flow::HandoverOwner(launched.flow_id.clone()),
+                signal_flow::HandoverCloseRefusal::PersistenceRefused,
+            ),
+        };
+        signal_flow::HandoverPending {
+            address,
+            handover_owner: owner,
+            launched: self.launched(launched),
+            handover_close_refusal: refusal,
+        }
+    }
+
+    fn handover_superseded_reply(
+        &self,
+        superseded: &crate::generated::memory::SupersededHandover,
+    ) -> signal_flow::HandoverSuperseded {
+        signal_flow::HandoverSuperseded {
+            address: superseded.address.clone(),
+            handover_owner: superseded.handover_owner.clone(),
+            launched: self.launched(&superseded.launched_record),
+            successor: superseded.successor.clone(),
+        }
+    }
+
+    fn launched_address(&self, flow_id: &str) -> Option<Address> {
+        self.launch_requests_bound_to(flow_id)
+            .ok()?
+            .into_iter()
+            .find_map(|id| self.launch_attempt(&id).ok().flatten())
+            .map(|attempt| attempt.launch_profile.address)
+    }
+}
+
+/// Adds a launch's outcome to a commit, as a new row or over the one it has.
+pub(crate) trait WritesLaunchOutcome {
+    fn outcome_written(
+        &self,
+        launch_request_id: &str,
+        outcome: LaunchOutcome,
+        commit: sema_engine::AtomicCommit,
+    ) -> Result<sema_engine::AtomicCommit, StoreError>;
+}
+
+impl WritesLaunchOutcome for FlowStore {
+    fn outcome_written(
+        &self,
+        launch_request_id: &str,
+        outcome: LaunchOutcome,
+        commit: sema_engine::AtomicCommit,
+    ) -> Result<sema_engine::AtomicCommit, StoreError> {
+        let stored = StoredLaunchOutcome {
+            launch_request_id: launch_request_id.into(),
+            launch_outcome: outcome,
+        };
+        Ok(if self.launch_outcome(launch_request_id)?.is_some() {
+            commit.mutate(self.launch_outcomes, stored)
+        } else {
+            commit.assert(self.launch_outcomes, stored)
+        })
+    }
 }
 
 /// A kept launch made a wire `Launched` again, with its flow's route as
@@ -1445,6 +1569,15 @@ impl AnswersLaunchOutcome for LaunchOutcome {
             }),
             Self::StartRejected(rejection) => Response::StartRejected(rejection.clone()),
             Self::ReplaceRejected(rejection) => Response::ReplaceRejected(rejection.clone()),
+            Self::ReapPending(replaced) => {
+                Response::ReapPending(store.reap_pending_reply(replaced))
+            }
+            Self::HandoverPending(launched) => {
+                Response::HandoverPending(store.handover_pending_reply(launched))
+            }
+            Self::HandoverSuperseded(superseded) => {
+                Response::HandoverSuperseded(store.handover_superseded_reply(superseded))
+            }
         }
     }
 
@@ -1463,19 +1596,23 @@ impl AnswersLaunchOutcome for LaunchOutcome {
             Self::ReplaceRejected(rejection) => {
                 signal_flow::LaunchStatusOutcome::ReplaceRejected(rejection.clone())
             }
+            Self::ReapPending(replaced) => {
+                signal_flow::LaunchStatusOutcome::ReapPending(store.reap_pending_reply(replaced))
+            }
+            Self::HandoverPending(launched) => signal_flow::LaunchStatusOutcome::HandoverPending(
+                store.handover_pending_reply(launched),
+            ),
+            Self::HandoverSuperseded(superseded) => {
+                signal_flow::LaunchStatusOutcome::HandoverSuperseded(
+                    store.handover_superseded_reply(superseded),
+                )
+            }
         }
-    }
-
-    fn awaits_reaping(&self) -> bool {
-        matches!(
-            self,
-            Self::ReplaceRejected(ReplaceRejection::ReapRefused(_))
-        )
     }
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredLaunchOutcome {
+pub(crate) struct StoredLaunchOutcome {
     launch_request_id: String,
     launch_outcome: LaunchOutcome,
 }
@@ -1488,16 +1625,16 @@ impl EngineRecord for StoredLaunchOutcome {
 
 impl MemoryDefinition for StoredLaunchOutcome {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(9)
+        MemoryVersion::new(10)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-launch-outcome-v9")
+        SchemaHash::for_label("flow-nexus-launch-outcome-v10")
     }
 }
 
-/// A launch request that replaces a predecessor. While it stands without a
-/// Replaced outcome, the flow its launch binds is held out of routing.
+/// A launch request that replaces a predecessor. Its successor receives
+/// from its confirmation on; the reap it owes is a PendingReap.
 impl EngineRecord for Replacement {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.launch_request_id.clone().0)
@@ -1623,6 +1760,8 @@ pub enum StoreError {
     LivingUpgrade(String),
     #[error("harness event Memory upgrade failed: {0}")]
     EventUpgrade(String),
+    #[error("0.54.6 launch-outcome Memory upgrade refused: {0}")]
+    ReapUpgrade(String),
     #[error("heartbeat period must be positive")]
     InvalidHeartbeatPeriod,
     #[error("store path must be an absolute file path")]
@@ -1731,6 +1870,8 @@ pub struct FlowStore {
     launch_attempts: TableReference<StoredLaunchAttempt>,
     launch_panes: TableReference<StoredLaunchPane>,
     launch_outcomes: TableReference<StoredLaunchOutcome>,
+    pending_reaps: TableReference<crate::generated::memory::PendingReap>,
+    pending_handovers: TableReference<crate::generated::memory::PendingHandover>,
     replacements: TableReference<Replacement>,
     roles: TableReference<StoredRole>,
     meta_configuration_tables: MetaConfigurationTables,
@@ -1766,6 +1907,9 @@ pub struct FlowStore {
     pub(crate) fail_next_closed_handover_read: Mutex<bool>,
     #[cfg(test)]
     pub(crate) fail_next_retirement_completion_read: Mutex<bool>,
+    /// The test build's crash and refusal switches.
+    #[cfg(test)]
+    pub(crate) faults: crate::test_faults::StoreFaults,
     pub launch_changes: LaunchChanges,
     /// Announced at every change a reminder's due time or a handover
     /// warning can follow: a reminder held or closed, a context size
@@ -2386,13 +2530,11 @@ pub trait RecordsLaunchOutcome {
     fn launch_outcome(&self, launch_request_id: &str) -> Result<Option<LaunchOutcome>, StoreError>;
 }
 
-/// Marks a launch request as the replacement of a predecessor, and answers
-/// whether a flow is a successor still held out of routing.
+/// Marks a launch request as the replacement of a predecessor.
 pub trait RecordsReplacement {
     fn record_replacement(&self, replacement: Replacement) -> Result<(), StoreError>;
     fn withdraw_replacement(&self, launch_request_id: &str) -> Result<(), StoreError>;
     fn replacement(&self, launch_request_id: &str) -> Result<Option<Replacement>, StoreError>;
-    fn held_successor(&self, flow_id: &str) -> Result<bool, StoreError>;
 }
 
 pub trait ReadsLaunchAttempt {
@@ -2537,11 +2679,16 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-launch-pane"),
             SchemaHash::for_label("flow-nexus-launch-pane-v1"),
         );
-        let launch_outcomes_descriptor = TableDescriptor::<StoredLaunchOutcome>::new(
-            FLOW_LAUNCH_OUTCOME_TABLE_NAME,
-            FamilyName::new("flow-nexus-launch-outcome"),
-            StoredLaunchOutcome::schema_hash(),
-        );
+        let launch_outcomes_descriptor =
+            <FlowStore as reap_upgrade::DescribesReapUpgrade>::launch_outcome_descriptor();
+        // The two obligation families are not declared to the open: a
+        // declared family the catalog lacks is registered by the open
+        // itself, and the 0.54.6 upgrade registers them in its own
+        // evolution. Each is registered after the upgrade, new or existing.
+        let pending_reaps_descriptor =
+            <crate::generated::memory::PendingReap as pending_reap::DescribesPendingReapTable>::descriptor();
+        let pending_handovers_descriptor =
+            <crate::generated::memory::PendingHandover as pending_handover::DescribesPendingHandoverTable>::descriptor();
         let replacements_descriptor = TableDescriptor::<Replacement>::new(
             FLOW_REPLACEMENT_TABLE_NAME,
             FamilyName::new("flow-nexus-replacement"),
@@ -2720,6 +2867,9 @@ impl OpensFlowStore for FlowStore {
         <FlowStore as living_upgrade::UpgradesBeforeLiving>::upgrade_running_before_living(
             &mut engine,
         )?;
+        // What 0.54.6 stored of a refused reap is upgraded, in one evolution,
+        // before anything is registered.
+        <FlowStore as reap_upgrade::UpgradesReapMemory>::upgrade_reap_memory(&mut engine)?;
 
         let flows = engine.register_table(flows_descriptor)?;
         let native_owner_proofs = engine.register_table(native_owner_proofs_descriptor)?;
@@ -2733,6 +2883,8 @@ impl OpensFlowStore for FlowStore {
         let launch_attempts = engine.register_table(launch_attempts_descriptor)?;
         let launch_panes = engine.register_table(launch_panes_descriptor)?;
         let launch_outcomes = engine.register_table(launch_outcomes_descriptor)?;
+        let pending_reaps = engine.register_table(pending_reaps_descriptor)?;
+        let pending_handovers = engine.register_table(pending_handovers_descriptor)?;
         let replacements = engine.register_table(replacements_descriptor)?;
         let roles = engine.register_table(roles_descriptor)?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
@@ -2795,6 +2947,8 @@ impl OpensFlowStore for FlowStore {
             launch_attempts,
             launch_panes,
             launch_outcomes,
+            pending_reaps,
+            pending_handovers,
             replacements,
             roles,
             meta_configuration_tables,
@@ -2830,6 +2984,8 @@ impl OpensFlowStore for FlowStore {
             fail_next_closed_handover_read: Mutex::new(false),
             #[cfg(test)]
             fail_next_retirement_completion_read: Mutex::new(false),
+            #[cfg(test)]
+            faults: Default::default(),
             launch_changes: LaunchChanges::default(),
             reminder_changes: LaunchChanges::default(),
             metaflow_changes: LaunchChanges::default(),
@@ -2906,6 +3062,12 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-launch-outcome"),
             StoredLaunchOutcome::schema_hash(),
         ))?;
+        let pending_reaps = engine.register_table(
+            <crate::generated::memory::PendingReap as pending_reap::DescribesPendingReapTable>::descriptor(),
+        )?;
+        let pending_handovers = engine.register_table(
+            <crate::generated::memory::PendingHandover as pending_handover::DescribesPendingHandoverTable>::descriptor(),
+        )?;
         let replacements = engine.register_table(TableDescriptor::new(
             FLOW_REPLACEMENT_TABLE_NAME,
             FamilyName::new("flow-nexus-replacement"),
@@ -3002,6 +3164,8 @@ impl OpensFlowStore for FlowStore {
             launch_attempts,
             launch_panes,
             launch_outcomes,
+            pending_reaps,
+            pending_handovers,
             replacements,
             roles,
             meta_configuration_tables,
@@ -3037,6 +3201,8 @@ impl OpensFlowStore for FlowStore {
             fail_next_closed_handover_read: Mutex::new(false),
             #[cfg(test)]
             fail_next_retirement_completion_read: Mutex::new(false),
+            #[cfg(test)]
+            faults: Default::default(),
             launch_changes: LaunchChanges::default(),
             reminder_changes: LaunchChanges::default(),
             metaflow_changes: LaunchChanges::default(),
@@ -3927,6 +4093,7 @@ impl ReadsFlowRoles for FlowStore {
         herdr_pane_id: &str,
     ) -> Result<Vec<FlowNode>, StoreError> {
         let mut nodes = Vec::new();
+        let successions = metaflow::ReadsSuccession::successions(self)?;
         for node in self.flow_nodes()? {
             let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
                 continue;
@@ -3934,7 +4101,10 @@ impl ReadsFlowRoles for FlowStore {
             if route.herdr_session_name.0 != herdr_session_name
                 || route.herdr_pane_id.0 != herdr_pane_id
                 || !node.flow_lifecycle.is_live()
-                || self.held_successor(&node.flow_id.0)?
+                || matches!(
+                    metaflow::ReadsSuccessionIndex::of(&successions, &node.flow_id.0),
+                    metaflow::Succession::Superseded { .. }
+                )
             {
                 continue;
             }
@@ -4095,6 +4265,11 @@ impl RecordsRegistrationAcknowledgement for FlowStore {
         stored.attempt.registration_acknowledgement_option = Some(acknowledgement);
         self.engine
             .commit_atomic(commit.mutate(self.launch_attempts, stored))?;
+        #[cfg(test)]
+        test_faults::InjectsCrashes::crash_if_armed(
+            &self.faults,
+            test_faults::CrashPoint::AfterAcknowledgement,
+        );
         self.launch_changes.announce();
         Ok(true)
     }
@@ -4390,6 +4565,47 @@ impl RecordsLaunchOutcome for FlowStore {
     }
 }
 
+/// Writes a test fixture makes as an older Nexus, an outside event or a
+/// crash could leave them.
+#[cfg(test)]
+pub(crate) trait AltersFlowRowsForTests {
+    /// The flow's Herdr route is recorded no more: its row reads
+    /// Unavailable.
+    fn forget_route(&self, flow_id: &str);
+    /// The flow's row records it Exited, as its own pane's going would.
+    fn mark_exited(&self, flow_id: &str);
+    /// The hold `flow_id` has is given back, W2', in one commit.
+    fn give_back_hold(&self, flow_id: &str);
+}
+
+#[cfg(test)]
+impl AltersFlowRowsForTests for FlowStore {
+    fn forget_route(&self, flow_id: &str) {
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .retract(self.herdr_routes, RecordKey::new(flow_id));
+        self.engine.commit_atomic(commit).expect("route forgotten");
+    }
+
+    fn mark_exited(&self, flow_id: &str) {
+        let mut flow = self.flow(flow_id).expect("flow read").expect("flow row");
+        flow.lifecycle = FlowLifecycle::Exited;
+        let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
+        self.engine
+            .commit_atomic(commit)
+            .expect("flow marked Exited");
+        self.launch_changes.announce();
+    }
+
+    fn give_back_hold(&self, flow_id: &str) {
+        let commit = self
+            .given_back(flow_id, self.engine.begin_atomic_commit())
+            .expect("hold read");
+        self.engine.commit_atomic(commit).expect("hold given back");
+    }
+}
+
 impl RecordsReplacement for FlowStore {
     fn record_replacement(&self, replacement: Replacement) -> Result<(), StoreError> {
         if self
@@ -4426,29 +4642,6 @@ impl RecordsReplacement for FlowStore {
             [replacement] => Ok(Some(replacement.clone())),
             _ => Err(StoreError::StateInvariant),
         }
-    }
-
-    fn held_successor(&self, flow_id: &str) -> Result<bool, StoreError> {
-        for replacement in self
-            .engine
-            .match_records(QueryPlan::all(self.replacements))?
-            .records()
-        {
-            if matches!(
-                self.launch_outcome(&replacement.launch_request_id.0)?,
-                Some(LaunchOutcome::Replaced(_))
-            ) {
-                continue;
-            }
-            let bound = self
-                .launch_attempt(&replacement.launch_request_id.0)?
-                .and_then(|attempt| attempt.native_launch_binding_option)
-                .is_some_and(|binding| binding.flow_id.0 == flow_id);
-            if bound {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 }
 
@@ -4593,10 +4786,13 @@ impl ReadsFlowStore for FlowStore {
                 RecipientResolutionRejection::UnknownFlow,
             ));
         };
-        if node.session_id.0.is_empty()
-            || !node.flow_lifecycle.is_live()
-            || self.held_successor(flow_id)?
-        {
+        // A flow its Address has moved past, or one whose launch is not yet
+        // confirmed, is no recipient: its Address receives as another flow.
+        let succeeded = matches!(
+            metaflow::ReadsSuccession::succession(self, flow_id)?,
+            metaflow::Succession::Superseded { .. } | metaflow::Succession::Unconfirmed
+        );
+        if node.session_id.0.is_empty() || !node.flow_lifecycle.is_live() || succeeded {
             return Ok(Response::RecipientResolutionRejected(
                 RecipientResolutionRejection::FlowUnavailable,
             ));
@@ -5040,6 +5236,11 @@ impl WritesFlowStore for FlowStore {
         }
         if written {
             self.engine.commit_atomic(commit)?;
+            #[cfg(test)]
+            test_faults::InjectsCrashes::crash_if_armed(
+                &self.faults,
+                test_faults::CrashPoint::AfterConfirm,
+            );
         }
         let herdr_route_selection = self
             .flow_node(flow_id)?
@@ -5302,6 +5503,14 @@ pub(crate) trait ReadsFlowMemory {
                 scheduled_reminder::SCHEDULED_REMINDER_FAMILY,
                 scheduled_reminder::SCHEDULED_REMINDER_SCHEMA,
             ),
+            "flow_nexus_pending_reaps" => (
+                pending_reap::PENDING_REAP_FAMILY,
+                pending_reap::PENDING_REAP_SCHEMA,
+            ),
+            "flow_nexus_pending_handovers" => (
+                pending_handover::PENDING_HANDOVER_FAMILY,
+                pending_handover::PENDING_HANDOVER_SCHEMA,
+            ),
             "flow_nexus_meta_leave_out_configuration" => {
                 return Some((
                     "flow-nexus-meta-leave-out-configuration",
@@ -5377,6 +5586,11 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-logical-delivery-event-v6",
             )),
             "flow_nexus_metaflows" => Some(("flow-nexus-metaflow", "flow-nexus-metaflow-v7")),
+            // Unchanged from 0.53.2 until 0.54.7 kept pending reaps apart.
+            "flow_nexus_launch_outcomes" => Some((
+                "flow-nexus-launch-outcome",
+                reap_upgrade::LAUNCH_OUTCOME_SCHEMA_V9,
+            )),
             "flow_nexus_address_holds" => {
                 Some(("flow-nexus-address-hold", "flow-nexus-address-hold-v6"))
             }
@@ -5445,8 +5659,15 @@ pub(crate) trait ReadsFlowMemory {
             && identity.table_name() == table_key
             && identity.family().as_str() == events::FLOW_EVENT_FAMILY
             && identity.schema_hash() == SchemaHash::for_label("flow-nexus-flow-events-v5");
+        // The launch outcomes as 0.54.6 wrote them, upgraded on open.
+        let before_pending_reaps = table_key == "flow_nexus_launch_outcomes"
+            && identity.table_name() == table_key
+            && identity.family().as_str() == "flow-nexus-launch-outcome"
+            && identity.schema_hash()
+                == SchemaHash::for_label(reap_upgrade::LAUNCH_OUTCOME_SCHEMA_V9);
         before_living
             || before_event_metadata
+            || before_pending_reaps
             || FlowStore::current_flow_family_identity(table_key).is_some_and(
                 |(family, schema_hash)| {
                     let predecessor_handover = table_key == OPTIONAL_HANDOVER_TABLE
@@ -5486,6 +5707,8 @@ pub(crate) trait ReadsFlowMemory {
                     || *name == OPTIONAL_TURN_END_TABLE
                     || *name == OPTIONAL_KEPT_ANSWER_TABLE
                     || *name == OPTIONAL_SCHEDULED_REMINDER_TABLE
+                    || *name == OPTIONAL_PENDING_REAP_TABLE
+                    || *name == OPTIONAL_PENDING_HANDOVER_TABLE
                     || *name == OPTIONAL_HARNESS_HOOK_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
                     || *name == OPTIONAL_DELIVER_CALL_TABLE

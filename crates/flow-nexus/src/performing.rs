@@ -820,6 +820,72 @@ impl PerformsInParts for RunningNexus {
                     Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
                 }
             }
+            // The obligation records: each one commit (`store::pending_reap`,
+            // `store::pending_handover`), the generation it closes judged
+            // where the record needs one.
+            Record_Data::ReapOwed(owed) => {
+                use crate::store::pending_reap::RecordsPendingReaps;
+                self.store
+                    .reap_owed(owed.pending_reap, owed.replaced_record)
+                    .recorded()
+            }
+            Record_Data::ReapRefused(refused) => {
+                use crate::store::pending_reap::RecordsPendingReaps;
+                self.store
+                    .reap_refused(&refused.flow_id.0, refused.reap_standing)
+                    .recorded()
+            }
+            Record_Data::Reaped(flow_id) => {
+                use crate::reaping::ReapsPredecessors;
+                match self.settle_reap(&flow_id.0) {
+                    Some(Response::Replaced(_)) => Outcome::Recorded,
+                    _ => Outcome::Failed(Failed_Data::StoreRefused),
+                }
+            }
+            Record_Data::HandoverOwed(owed) => {
+                use crate::store::pending_handover::RecordsPendingHandovers;
+                self.store
+                    .handover_owed(owed.pending_handover, owed.launched_record)
+                    .recorded()
+            }
+            Record_Data::HandoverRefused(refused) => {
+                use crate::store::pending_handover::RecordsPendingHandovers;
+                self.store
+                    .handover_refused(&refused.address, refused.handover_close_refusal)
+                    .recorded()
+            }
+            Record_Data::HandedOver(address) => {
+                use crate::reaping::HandsOverGenerations;
+                match self.retry_handover(&address) {
+                    Some(Response::Started(_)) => Outcome::Recorded,
+                    _ => Outcome::Failed(Failed_Data::StoreRefused),
+                }
+            }
+            Record_Data::StartedHandedOver(launched) => {
+                use crate::reaping::HandsOverGenerations;
+                use crate::store::ReadsLaunchAttempt;
+                let Some((launch_request_id, address)) = self
+                    .store
+                    .launch_requests_bound_to(&launched.flow_id.0)
+                    .ok()
+                    .and_then(|mut ids| ids.pop())
+                    .and_then(|id| {
+                        self.store
+                            .launch_attempt(&id)
+                            .ok()
+                            .flatten()
+                            .map(|attempt| (id, attempt.launch_profile.address))
+                    })
+                else {
+                    return Outcome::Failed(Failed_Data::StoreRefused);
+                };
+                use crate::generated::starter::NamesLaunchedRoute;
+                let started = self.store.launched(&launched);
+                match self.settle_fresh(&launch_request_id, &address, &started) {
+                    Response::Started(_) => Outcome::Recorded,
+                    _ => Outcome::Failed(Failed_Data::StoreRefused),
+                }
+            }
         }
     }
 }

@@ -6,11 +6,11 @@
         "nixpkgs": "nixpkgs"
       },
       "locked": {
-        "lastModified": 1794462503,
-        "narHash": "sha256-NJGtL//c4edEoOYIXJtMSlZogXFaNjftO43TtTzXmUM=",
+        "lastModified": 1794478318,
+        "narHash": "sha256-orX/8uEW929DDLvwgtd1JV2qHZRQNNx5D+bxUBdxRUg=",
         "owner": "LiGoldragon",
         "repo": "build-base",
-        "rev": "1e0d3efbdf71a9c957cf63dfe04d95c916704022",
+        "rev": "1283af69da15436214e56ca6e42ce2d91fff293e",
         "type": "github"
       },
       "original": {
@@ -221,27 +221,6 @@
         "type": "github"
       }
     },
-    "message": {
-      "inputs": {
-        "base": [
-          "base"
-        ]
-      },
-      "locked": {
-        "lastModified": 1794361380,
-        "narHash": "sha256-ug0+E7brT+6TMMMZwKiaDMvYvMYhiDis6mPVG6fmQRY=",
-        "owner": "LiGoldragon",
-        "repo": "message",
-        "rev": "71b5ac0dbab577cd25d3d22fb9d789463162c19d",
-        "type": "github"
-      },
-      "original": {
-        "owner": "LiGoldragon",
-        "repo": "message",
-        "rev": "71b5ac0dbab577cd25d3d22fb9d789463162c19d",
-        "type": "github"
-      }
-    },
     "migration-predecessor": {
       "inputs": {
         "crane": "crane",
@@ -331,7 +310,6 @@
       "inputs": {
         "base": "base",
         "curriculum": "curriculum",
-        "message": "message",
         "migration-predecessor": "migration-predecessor",
         "unconfigured-flow": "unconfigured-flow_2"
       }

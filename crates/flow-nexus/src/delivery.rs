@@ -31,9 +31,10 @@ use crate::compacting::WatchesCompactions;
 use crate::generated::operation::{Operation, Record_Data};
 use crate::herdr::pane::{Interruption, NamesKeys, PaneAgent, Placement, Submission, WritesPane};
 use crate::performing::Performs;
+use crate::store::ReadsFlowRows;
 use crate::store::context::JudgesCompaction;
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
-use crate::store::{ReadsFlowRows, RecordsReplacement};
+use crate::store::metaflow::{ReadsSuccession, Succession};
 use crate::submission::{SeatSubmission, WitnessesSubmissions};
 use crate::waking::{HoldsWakingMetaflows, IdentifiesWakingLease, WakingLease};
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
@@ -49,7 +50,7 @@ use signal_flow::{
 };
 
 /// Why a flow cannot be written to, before its pane is looked at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetRefusal {
     UnknownFlow,
     FlowStopped,
@@ -57,6 +58,10 @@ pub enum TargetRefusal {
     FlowExited,
     RouteUnavailable,
     PersistenceRefused,
+    /// The flow's Address receives as this later flow.
+    Superseded(signal_flow::FlowId),
+    /// The flow's launch holds its Address unconfirmed.
+    Unconfirmed,
 }
 
 impl From<TargetRefusal> for DeliveryRejection {
@@ -68,6 +73,8 @@ impl From<TargetRefusal> for DeliveryRejection {
             TargetRefusal::FlowExited => Self::FlowExited,
             TargetRefusal::RouteUnavailable => Self::RouteUnavailable,
             TargetRefusal::PersistenceRefused => Self::PersistenceRefused,
+            TargetRefusal::Superseded(by) => Self::Superseded(by),
+            TargetRefusal::Unconfirmed => Self::Unconfirmed,
         }
     }
 }
@@ -82,6 +89,8 @@ impl From<TargetRefusal> for CommandRejection {
             TargetRefusal::RouteUnavailable => Self::RouteUnavailable,
             // Nothing was typed; Command has no store to refuse.
             TargetRefusal::PersistenceRefused => Self::NotDelivered,
+            TargetRefusal::Superseded(by) => Self::Superseded(by),
+            TargetRefusal::Unconfirmed => Self::Unconfirmed,
         }
     }
 }
@@ -114,9 +123,13 @@ impl FindsDeliveryTarget for RunningNexus {
             FlowLifecycle::Retired => return Err(TargetRefusal::FlowRetired),
             FlowLifecycle::Exited => return Err(TargetRefusal::FlowExited),
         }
-        match self.store.held_successor(flow_id) {
-            Ok(false) => {}
-            Ok(true) => return Err(TargetRefusal::RouteUnavailable),
+        // Which flow an Address receives as is read from the record its
+        // launch writes at confirmation, never from a pending reap or
+        // handover.
+        match self.store.succession(flow_id) {
+            Ok(Succession::Receiving | Succession::Unseated) => {}
+            Ok(Succession::Superseded { by, .. }) => return Err(TargetRefusal::Superseded(by)),
+            Ok(Succession::Unconfirmed) => return Err(TargetRefusal::Unconfirmed),
             Err(_) => return Err(TargetRefusal::PersistenceRefused),
         }
         let profile = self

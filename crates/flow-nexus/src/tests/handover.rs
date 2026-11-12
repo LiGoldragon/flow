@@ -25,8 +25,7 @@ use crate::waking::HoldsWakingMetaflows;
 use flow_ethos::State;
 use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, Continuity};
 use signal_flow::{
-    CompositionRefusal, HandoverFault, HandoverUnreadable_Data, Model, Query, Refreshed, Request,
-    Response,
+    CompositionRefusal, HandoverFault, HandoverUnreadable_Data, Model, Query, Request, Response,
 };
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -261,13 +260,17 @@ fn refreshed(left: Left<'_>, root_option: Option<String>) -> (NexusFixture, Fres
 /// starts, with `left` under the ending flow abc123.
 fn refreshed_first_turn(left: Left<'_>) -> String {
     let (fixture, world, response) = refreshed(left, None);
-    assert_eq!(
-        response,
-        Response::Refreshed(Refreshed {
-            address: address(Model::Sol),
-            flow_id: flow_ethos::FlowId("abc123".into()),
-        }),
-        "Herdr calls: {}",
+    // A refresh whose successor started answers its predecessor's reap
+    // pending: the successor runs and receives now.
+    assert!(
+        matches!(
+            &response,
+            Response::ReapPending(pending)
+                if pending.address == address(Model::Sol)
+                    && pending.predecessor.0.0 == "abc123"
+                    && pending.reap_standing == signal_flow::ReapStanding::Owed
+        ),
+        "{response:?}; Herdr calls: {}",
         world.calls()
     );
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());

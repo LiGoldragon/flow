@@ -25,8 +25,7 @@ use crate::store::reminder::RecordsReminders;
 use flow_ethos::{AnswerableTask, FlowId, State};
 use signal_flow::{
     Address, Aspect, DeliveryState, Message, Model, PrivateSendResponse, Query, QueueEntry,
-    Refreshed, Refusal, Request, Response, SendAcceptance, SendableMessage, SendableRequest,
-    SentBy,
+    Refusal, Request, Response, SendAcceptance, SendableMessage, SendableRequest, SentBy,
 };
 use std::fs;
 
@@ -273,13 +272,17 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
         .expect("the Task's reminder is held");
     assert!(deadline.due.is_some(), "{deadline:?}");
 
-    assert_eq!(
-        fixture.nexus.dispatch(Query::Refresh(at.clone())),
-        Response::Refreshed(Refreshed {
-            address: at.clone(),
-            flow_id: flow_ethos::FlowId("abc123".into()),
-        }),
-        "Herdr calls: {}",
+    let refreshed = fixture.nexus.dispatch(Query::Refresh(at.clone()));
+    // The successor started; its predecessor's reap is pending.
+    assert!(
+        matches!(
+            &refreshed,
+            Response::ReapPending(pending)
+                if pending.address == at
+                    && pending.predecessor.0.0 == "abc123"
+                    && pending.reap_standing == signal_flow::ReapStanding::Owed
+        ),
+        "{refreshed:?}; Herdr calls: {}",
         world.calls()
     );
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
@@ -348,13 +351,17 @@ fn a_successor_with_nothing_open_is_given_no_open_requests_line() {
     let at = address(Model::Sol);
     assert_eq!(store.open_requests(&at).unwrap(), Vec::new());
 
-    assert_eq!(
-        fixture.nexus.dispatch(Query::Refresh(at.clone())),
-        Response::Refreshed(Refreshed {
-            address: at.clone(),
-            flow_id: FlowId("abc123".into()),
-        }),
-        "Herdr calls: {}",
+    let refreshed = fixture.nexus.dispatch(Query::Refresh(at.clone()));
+    // The successor started; its predecessor's reap is pending.
+    assert!(
+        matches!(
+            &refreshed,
+            Response::ReapPending(pending)
+                if pending.address == at
+                    && pending.predecessor.0.0 == "abc123"
+                    && pending.reap_standing == signal_flow::ReapStanding::Owed
+        ),
+        "{refreshed:?}; Herdr calls: {}",
         world.calls()
     );
     let first = world

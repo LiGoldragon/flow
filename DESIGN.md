@@ -249,22 +249,50 @@ one away. Each answers `Configured.[ Replaced Unchanged ]`, a Harness while no
 Nexus is declared `Unconfigured`. The family-whole `Configure` stays.
 
 `Replace` carries a `StartRequest` whose profile names the predecessor. The
-successor launches through the one Start path; on `Started` the predecessor is
-recorded `Stopped` (so `ResolveRecipient` and `Deliver` refuse it), then its
-exact pane is closed, and only the `Replaced` outcome releases the successor
-to routing. Until then the successor is held: `ResolveRecipient` answers
-`FlowUnavailable` and `Deliver` answers `RouteUnavailable`. A predecessor whose
-pane a readable Herdr snapshot shows absent is already reaped: it is recorded
-`Stopped`, nothing is closed, and `Replaced` releases the successor. When Herdr
-cannot be read, or shows the pane under another binding, the pane may still be
-open: that is `ReplaceRejected.ReapRefused.RouteUnavailable`, nothing is
-closed, and the successor stays held. A close that fails on a pane that exists
-is `ReplaceRejected.ReapRefused.CloseRefused`. Either refusal leaves neither
-flow routable, and a repeated `Replace` of the same request takes the reap up
-again.
+successor launches through the one Start path. From the successor's
+confirmation its Address receives as it: the metaflow row with its
+AddressHold is the one record that names the receiving flow, and the
+confirmation is the one commit that switches it. Until the confirmation the
+hold makes the predecessor receiving and the successor `Unconfirmed`; from it
+the predecessor is `Superseded` and `Vet`, `Deliver` and `Command` refuse it
+so (`Superseded.<successor>`), `ResolveRecipient` answers `FlowUnavailable`.
+No obligation, outcome or lifecycle decides routing, so no later write can
+hold a confirmed successor out of it.
+
+The reap is then owed in one commit, W3: the predecessor recorded `Stopped`,
+the outcome `ReapPending`, and a PendingReap row at `Owed`; the Replace answers
+`ReapPending.{ <Address> <Predecessor> <Launched> Owed }` at once, before any
+Herdr call. The reap's Herdr steps run outside the dispatch gate, in its
+worker (`reaping`): one per PendingReap whose pane step is owed, armed by a
+supervisor woken only by launch changes. The worker subscribes to Herdr's
+`pane.closed`/`pane.exited` first, then reads the predecessor's pane, closes
+it once while it is still the predecessor's, and waits for Herdr to show it
+gone. Then, under the gate, it revalidates (its cancellation, the row and its
+launch, the predecessor's route) and settles: the Address's receiving flow,
+read afresh, decides the handover, closed for the successor only while the
+Address still receives as it; the outcome becomes `Replaced` and the row goes.
+A stale worker writes nothing; no worker write is a routing write. A pane
+running another native session is never closed and not counted gone; a route
+that is not recorded settles nothing by itself, only independent evidence
+(the predecessor's row `Retired` or `Exited`) does. A refused close, an unread
+Herdr or a refused settlement leaves the reap at its typed `ReapStanding`,
+taken up at the successor's next rest (which calls no Herdr: it writes what
+the store owes and rearms the worker) or the next start; `Inspect` lists it.
+A missing predecessor stands as `PredecessorMissing` and no event retries it.
+
+A fresh launch settles its Address's handover in its own commit:
+`StartedHandedOver` when the handover row's owner has ended or nothing moves,
+else `HandoverOwed`, a PendingHandover at its refusal and the answer
+`HandoverPending`. Its next rest, its own `Keep` or `Drop`, and the next start
+take it up. Every settlement of a launch that made its flow the receiving one
+supersedes the obligations it takes over at the Address: an earlier
+PendingHandover becomes `HandoverSuperseded`, a reap whose only step left was
+the handover becomes `Replaced`. An owner that no flow row names stands as
+`Owner.Missing` until a repair act is designed.
 
 Every launch request settles into one stored outcome — `Started`, `Replaced`,
-`StartRejected`, or `ReplaceRejected` — once an attempt was reserved for it.
+`StartRejected`, `ReplaceRejected`, `ReapPending`, `HandoverPending` or
+`HandoverSuperseded` — once an attempt was reserved for it.
 `LaunchStatus` answers a known request with one `LaunchInspected`: its durable
 attempt, optional settled outcome, and current recorded `FlowNode` or explicit
 absence. A request with neither attempt nor outcome is unknown; an outcome

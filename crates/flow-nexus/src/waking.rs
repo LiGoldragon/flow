@@ -467,6 +467,10 @@ pub enum AtStop {
     /// A restart ordered while the seat worked was carried out at this
     /// idle event: its harness closed, its own session resumed and bound.
     Restarted(Address),
+    /// The seat was due a refresh and its successor started and is
+    /// confirmed: the Address receives as the successor now, and the
+    /// predecessor's reap is owed, settled on the events that follow.
+    ReapPending(Box<signal_flow::ReapPending>),
     /// The seat stays as it is, for the reason named.
     Kept(KeptAtStop),
 }
@@ -517,6 +521,14 @@ pub enum KeptAtStop {
     SuccessorUncomposable(Box<Outcome>),
     /// A restart holds the flow: nothing is settled at a Stop of it.
     Restarting,
+    /// An OnDemand seat with nothing queued was not closed: no declaration
+    /// or launch names the context its next wake would start. Only its
+    /// sleep is declined; it stays Awake.
+    SleepUnplaceable,
+    /// An OnDemand seat with nothing queued was not closed: the successor
+    /// its next wake would start does not compose. Only its sleep is
+    /// declined; it stays Awake.
+    SleepUncomposable(Box<Outcome>),
 }
 
 /// Whether the seat was kept because its successor could not be placed,
@@ -739,6 +751,8 @@ impl StartsUnbound for RunningNexus {
         // Nexus's own promoter, which needs the gate to do it.
         match response {
             Response::Started(launched) => Ok(launched.flow_id),
+            // The flow started and receives; only its handover is owed.
+            Response::HandoverPending(pending) => Ok(pending.launched.flow_id),
             Response::StartRejected(rejection) => Err(FreshRefusal::Rejected(rejection)),
             _ => Err(FreshRefusal::Failed(Failed_Data::Unstarted)),
         }
@@ -1453,6 +1467,16 @@ impl SleepsAndWakesSeats for RunningNexus {
             AtStop::Restarted(_) => {
                 eprintln!("flow-nexus: flow {flow_id} restarted at its idle event");
             }
+            // The successor runs and receives; what queued meanwhile is
+            // handed to it.
+            AtStop::ReapPending(pending) => {
+                eprintln!(
+                    "flow-nexus: flow {flow_id} refreshed at its rest; its successor {} runs; its reap is {:?}",
+                    pending.launched.flow_id.0, pending.reap_standing
+                );
+                self.refresh_refusals.clear(flow_id);
+                self.wake_due(pending.address.clone());
+            }
             AtStop::Idle | AtStop::Drained(_) => {}
         }
         // The recipient of an answer queued at this rest is woken off the
@@ -1617,6 +1641,10 @@ impl SleepsAndWakesSeats for RunningNexus {
         // A restart an earlier Nexus left is taken up first, so a seat it
         // binds is handed its queue below.
         crate::restarting::RestartsFlows::recover_restarts(self);
+        // What a launch owed when the last Nexus stopped is written now, in
+        // the store alone: a derived reap's W3, a confirmed fresh launch's
+        // settlement. A pane still there is the reap worker's.
+        crate::reaping::TakesUpObligations::recover_obligations(self);
         // What an earlier Nexus left queued for an Awake seat is handed
         // over now, each address's whole queue as one payload.
         let awake = {
@@ -1694,6 +1722,13 @@ impl SleepsAndWakesSeats for RunningNexus {
                     );
                     // What queued meanwhile is handed to the successor.
                     self.wake_due(address);
+                }
+                AtStop::ReapPending(pending) => {
+                    eprintln!(
+                        "flow-nexus: flow {predecessor} replaced by the successor it was owed; its reap is {:?}",
+                        pending.reap_standing
+                    );
+                    self.wake_due(pending.address.clone());
                 }
                 kept => {
                     eprintln!(
@@ -1983,6 +2018,17 @@ impl WaitsForRestToReplace for RunningNexus {
             drop(lock);
             self.wake_deferred();
             return match replaced {
+                // The successor runs; its predecessor's reap is pending.
+                AtStop::ReapPending(pending) => {
+                    if pending.reap_standing != signal_flow::ReapStanding::Owed {
+                        eprintln!(
+                            "flow-nexus: flow {} refreshed; its successor {} runs; its reap is pending: {:?}",
+                            flow_id.0, pending.launched.flow_id.0, pending.reap_standing
+                        );
+                    }
+                    self.wake_due(address.clone());
+                    Response::ReapPending(*pending)
+                }
                 AtStop::Refreshed(_) => {
                     eprintln!(
                         "flow-nexus: flow {flow_id} refreshed; {:?} {} {:?} runs its successor",
@@ -3145,17 +3191,9 @@ impl WakesInParts for RunningNexus {
                 return Err(WakeRefusal::StartRejected(rejection));
             }
         };
+        // Its handover was settled with its launch (`settle`), as any fresh
+        // start's is.
         let flow_id = started.flow_id;
-        if let Some(predecessor) = metaflow.past.0.last() {
-            use crate::store::handover::HoldsHandovers;
-            if self
-                .store
-                .close_handover_for_successor(address, &predecessor.0, &flow_id.0)
-                .is_err()
-            {
-                return Err(WakeRefusal::StoreUnreadable);
-            }
-        }
         let _turn = self
             .dispatch_gate
             .lock()
@@ -3384,11 +3422,10 @@ impl WakesInParts for RunningNexus {
         };
         self.settle_owed(&address, &response);
         match response {
-            Response::Replaced(_) => {
-                // The launching reap closes the handover before recording
-                // Replaced; this response is already past that durable point.
-                AtStop::Refreshed(address)
-            }
+            Response::Replaced(_) => AtStop::Refreshed(address),
+            // The successor is confirmed and receiving; its predecessor's
+            // reap is owed.
+            Response::ReapPending(pending) => AtStop::ReapPending(Box::new(pending)),
             response => AtStop::Kept(KeptAtStop::RefreshLaunchRefused(Box::new(response))),
         }
     }
@@ -3504,9 +3541,7 @@ impl WakesInParts for RunningNexus {
 
     fn settle_owed(&self, address: &Address, response: &Response) {
         match response {
-            Response::LaunchPending(_)
-            | Response::StartAmbiguous(_)
-            | Response::ReplaceRejected(signal_flow::ReplaceRejection::ReapRefused(_)) => {}
+            Response::LaunchPending(_) | Response::StartAmbiguous(_) => {}
             _ => {
                 let _ = self.store.forget_successor(address);
             }
@@ -3577,6 +3612,7 @@ impl WakesInParts for RunningNexus {
                 self.settle_owed(&address, &response);
                 match response {
                     Response::Replaced(_) => AtStop::Refreshed(address),
+                    Response::ReapPending(pending) => AtStop::ReapPending(Box::new(pending)),
                     response => AtStop::Kept(KeptAtStop::RefreshLaunchRefused(Box::new(response))),
                 }
             }
@@ -3650,6 +3686,10 @@ impl WakesInParts for RunningNexus {
         if self.waking.is_waking(&address) {
             return AtStop::Kept(KeptAtStop::Waking);
         }
+        // The flow's rest bears on what its launch still owes: each reap it
+        // follows and the handover at its Address, taken up once, in the
+        // store alone; a reap's pane step is the worker's, armed again here.
+        crate::reaping::TakesUpObligations::take_up_at_rest(self, flow_id);
         // A seat is refreshed at this idle event once it is past its
         // threshold, or once it was sent its handover warning, or wrote a
         // handover qualified for the warning window, whether or not it rests
@@ -3798,7 +3838,12 @@ impl WakesInParts for RunningNexus {
             Continuity::OnDemand if !closable => AtStop::Idle,
             // Its successor is composed at its next wake: the seat is
             // closed only once that successor composes now.
+            // Only its sleep is declined then: no successor was refused.
             Continuity::OnDemand => match self.successor_composes(flow_id, &metaflow) {
+                Err(KeptAtStop::RefreshUnplaceable) => AtStop::Kept(KeptAtStop::SleepUnplaceable),
+                Err(KeptAtStop::SuccessorUncomposable(outcome)) => {
+                    AtStop::Kept(KeptAtStop::SleepUncomposable(outcome))
+                }
                 Err(kept) => AtStop::Kept(kept),
                 Ok(()) => match self.close_at_rest(flow_id, &node) {
                     Ok(()) => AtStop::Slept(address),

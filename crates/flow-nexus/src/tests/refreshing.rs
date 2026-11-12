@@ -642,14 +642,20 @@ fn a_refresh_owed_a_successor_starts_it_before_the_ending_flow_is_reaped() {
         (Continuity::OnDemand, flow_ethos::Delivery::Wake),
     ] {
         let (fixture, _) = refreshable_with_successor(continuity.clone(), delivery.clone());
-        assert_eq!(
-            fixture.nexus.dispatch(Query::Refresh(seat_address())),
-            Response::Refreshed(Refreshed {
-                address: seat_address(),
-                flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
-            }),
-            "{continuity:?} {delivery:?}"
+        // The successor started and receives; the ending flow's reap is owed
+        // and answered pending at once, and its worker closes its pane.
+        let refreshed = fixture.nexus.dispatch(Query::Refresh(seat_address()));
+        assert!(
+            matches!(
+                &refreshed,
+                Response::ReapPending(pending)
+                    if pending.address == seat_address()
+                        && pending.predecessor.0.0 == CLAUDE_SEAT
+                        && pending.reap_standing == signal_flow::ReapStanding::Owed
+            ),
+            "{continuity:?} {delivery:?}: {refreshed:?}"
         );
+        super::reaping::finish_reaps(&fixture);
         let metaflow = stored(&fixture);
         assert_eq!(
             metaflow.state,
@@ -1026,46 +1032,21 @@ fn a_launch_ordered_replace_holds_the_metaflow_and_types_nothing_into_its_predec
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
     drop(held);
 
-    // The predecessor's close announces itself, then waits for the test.
-    let closing = fixture.directory.path().join("close-reached");
-    let release = Latch::closed(fixture.directory.path().join("close-released"));
-    let script = fs::read_to_string(&fixture.snapshot_program).expect("fixture Herdr");
-    let pattern = "  *\" pane close \"*) exit 0 ;;";
-    assert!(script.contains(pattern), "{script}");
-    FixtureExecutable {
-        path: fixture.snapshot_program.clone(),
-    }
-    .install(&script.replacen(
-        pattern,
-        &format!(
-            "  *\" pane close \"*) : > '{closing}'; : < '{release}'; exit 0 ;;",
-            closing = closing.display(),
-            release = release.path.display(),
-        ),
-        1,
-    ));
-
-    let replaced = std::thread::scope(|scope| {
-        let replacing = scope.spawn(|| fixture.nexus.dispatch(Query::Replace(profile.clone())));
-        assert!(
-            closing.appeared_by(std::time::Instant::now() + Duration::from_secs(20)),
-            "the reap never ran"
-        );
-        assert!(
-            fixture.nexus.waking.is_waking(&seat_address()),
-            "the replacement holds the metaflow"
-        );
-        let draining = scope.spawn(|| fixture.nexus.drain_awake(&seat_address()));
-        // The drain waits on the gate the replacement holds; it runs once
-        // the close is released, and the typing check below covers it.
-        release.release();
-        draining.join().expect("drain asked");
-        replacing.join().expect("replace answered")
-    });
-
+    // The Replace answers once its successor is confirmed and the reap is
+    // owed: no Herdr call of the reap runs in it, and a drain asked after it
+    // hands the queue to the successor, never the predecessor.
+    let replaced = fixture.nexus.dispatch(Query::Replace(profile.clone()));
     assert!(
-        matches!(&replaced, Response::Replaced(replaced) if replaced.flow_id.0 == CLAUDE_SEAT),
+        matches!(&replaced, Response::ReapPending(pending)
+            if pending.predecessor.0.0 == CLAUDE_SEAT
+                && pending.reap_standing == signal_flow::ReapStanding::Owed),
         "{replaced:?}"
+    );
+    assert!(
+        !fs::read_to_string(fixture.directory.path().join("herdr-calls.log"))
+            .unwrap_or_default()
+            .contains("pane close w1:p3"),
+        "the reap's close is its worker's, outside the Replace"
     );
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
     let metaflow = stored(&fixture);
@@ -1083,6 +1064,12 @@ fn a_launch_ordered_replace_holds_the_metaflow_and_types_nothing_into_its_predec
         "nothing is typed into the predecessor"
     );
     assert!(!fixture.nexus.waking.is_waking(&seat_address()));
+    super::reaping::finish_reaps(&fixture);
+    assert_eq!(
+        typing_calls(&fixture),
+        Vec::<String>::new(),
+        "nothing is typed into the predecessor while its reap settles"
+    );
 }
 
 /// A timer created by the production scheduler remains durable while an
@@ -1187,12 +1174,15 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
         1,
     ));
 
-    let (replaced, warning_id) = std::thread::scope(|scope| {
+    // The Replace answers once the reap is owed; the predecessor's close is
+    // its worker's, and the warning is admitted while that close runs.
+    let replaced = fixture.nexus.dispatch(Query::Replace(profile.clone()));
+    let warning_id = std::thread::scope(|scope| {
         // Scope joins its children after this closure returns or unwinds.
         // Keep the release guard inside the closure so an assertion releases
         // the fixture's native close before that join can wait on it.
         let _release_before_join = ReleasesFixtureOnDrop(&release);
-        let replacing = scope.spawn(|| fixture.nexus.dispatch(Query::Replace(profile.clone())));
+        let reaping = scope.spawn(|| super::reaping::finish_reaps(&fixture));
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         assert!(
             closing.appeared_by(deadline),
@@ -1241,13 +1231,14 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
         assert_eq!(typing_calls(&fixture).len(), predecessor_calls);
         release.release();
         reminding.join().expect("reminder tick completed");
-        (replacing.join().expect("replacement answered"), warning_id)
+        reaping.join().expect("the reap settled");
+        warning_id
     });
 
-    let Response::Replaced(replaced) = replaced else {
+    let Response::ReapPending(replaced) = replaced else {
         panic!("replacement answered: {replaced:?}")
     };
-    assert_eq!(replaced.flow_id.0, CLAUDE_SEAT);
+    assert_eq!(replaced.predecessor.0.0, CLAUDE_SEAT);
     let successor_flow_id = replaced.launched.flow_id;
     assert_ne!(successor_flow_id.0, CLAUDE_SEAT);
     assert_eq!(
@@ -1446,7 +1437,7 @@ fn a_launch_ordered_replace_owes_its_successor_until_it_is_confirmed() {
         .unwrap();
     let replaced = fixture.nexus.dispatch(Query::Replace(profile));
     assert!(
-        matches!(&replaced, Response::Replaced(replaced) if replaced.flow_id.0 == CLAUDE_SEAT),
+        matches!(&replaced, Response::ReapPending(pending) if pending.predecessor.0.0 == CLAUDE_SEAT),
         "{replaced:?}"
     );
     assert_eq!(
@@ -1486,6 +1477,8 @@ fn a_nexus_start_starts_a_successor_owed_after_a_refresh_or_a_replace() {
         );
 
         fixture.nexus.recover_wakes();
+        // The reap the start owed is its worker's.
+        super::reaping::finish_reaps(&fixture);
 
         let metaflow = stored(&fixture);
         assert_eq!(

@@ -10,6 +10,10 @@ use std::sync::{Arc, Mutex};
 pub enum ObservationCancellationCause {
     PeerClosed,
     NexusStopped,
+    /// The obligation a reap worker watched for was retracted or taken over.
+    ObligationRetracted,
+    /// A bearing event asked for the reap worker to be armed again.
+    Rearmed,
 }
 
 pub struct ObservationCancellation {
@@ -209,6 +213,10 @@ mod tests {
             match expected {
                 ObservationCancellationCause::PeerClosed => drop(client),
                 ObservationCancellationCause::NexusStopped => stopping.request(),
+                ObservationCancellationCause::ObligationRetracted
+                | ObservationCancellationCause::Rearmed => {
+                    unreachable!("a connection's lifetime is never retracted or rearmed")
+                }
             }
             received.recv_timeout(Duration::from_secs(3)).unwrap();
             watcher.join().unwrap();

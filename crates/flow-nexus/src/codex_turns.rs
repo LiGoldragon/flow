@@ -15,23 +15,27 @@
 //! registration or Bind, or before a Nexus restart) is not missed. A thread
 //! with no such evidence is never taken for resting.
 //!
-//! A thread's rest settles its flow as a `Stopped` report settles a Claude
-//! flow (`SleepsAndWakesSeats::settle_stopped`): the oldest queued request
-//! is handed to its thread, which is then `Delivered`, so the next request
-//! waits for a turn that ends after it; with nothing queued the seat stays
-//! Awake in its pane. Settlement takes
-//! the dispatch gate and reads the thread's turn under it, so a completion
-//! seen twice, or by two connections, types once.
+//! A thread's coming to rest settles its flow as a `Stopped` report settles
+//! a Claude flow (`SleepsAndWakesSeats::settle_stopped`): the oldest queued
+//! request is handed over, and the thread is then `Delivered`, so the next
+//! request waits for a turn that ends after it; with nothing queued, an
+//! ordered replacement or a due refresh is carried out, a Maintained seat
+//! stays Awake in its pane, an OnDemand seat sleeps. Settlement takes the
+//! dispatch gate and reads the thread's turn under it, so a completion seen
+//! twice, or by two connections, types once.
 //!
 //! The state is memory only. A Nexus that starts again reads each live
-//! thread's status from its responder's `thread/resume`.
+//! thread's status from its responder's `thread/resume`. The first
+//! authoritative `Resumed(Idle)` a thread shows after a Nexus start settles
+//! its seat once; a later one, after a reconnect, settles nothing unless a
+//! turn was seen running in between.
 
 use crate::RunningNexus;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use crate::turn_ends::RecordsTurnEnd;
-use crate::waking::{HoldsWakingMetaflows, NotesStopsAtConfirmation, SleepsAndWakesSeats};
+use crate::waking::{AtStop, HoldsWakingMetaflows, NotesStopsAtConfirmation, SleepsAndWakesSeats};
 use signal_flow::{Address, FlowId, FlowNode, HarnessKind};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -85,6 +89,9 @@ const REMEMBERED_TURNS: usize = 64;
 struct ThreadState {
     turn: ThreadTurn,
     completed: VecDeque<String>,
+    /// Whether this Nexus process has read a `Resumed(Idle)` of the thread:
+    /// the first one after a start settles, a later one alone does not.
+    resumed: bool,
 }
 
 impl Default for ThreadState {
@@ -92,6 +99,7 @@ impl Default for ThreadState {
         Self {
             turn: ThreadTurn::Unknown,
             completed: VecDeque::new(),
+            resumed: false,
         }
     }
 }
@@ -170,6 +178,9 @@ impl TracksCodexTurns for CodexTurns {
         let state = threads.entry(thread.to_owned()).or_default();
         let was_resting = state.turn == ThreadTurn::Resting;
         let mut ended = false;
+        // Whether this event's rest is a rest the seat settles at; only a
+        // re-subscription's Idle with no turn seen in between is not.
+        let mut settles = true;
         match event {
             TurnEvent::Started(turn) => {
                 // A start read after its own completion changes nothing.
@@ -208,9 +219,15 @@ impl TracksCodexTurns for CodexTurns {
                 }
             }
             TurnEvent::Resumed(ThreadStatus::Idle) => {
+                // The first authoritative status since this Nexus started.
+                let first = !state.resumed;
+                state.resumed = true;
                 // Work typed and not yet begun is not read as ended.
                 if state.turn != ThreadTurn::Delivered {
+                    let ran = matches!(state.turn, ThreadTurn::Running(_));
                     state.turn = ThreadTurn::Resting;
+                    // A re-subscription's Idle after Unknown is no new rest.
+                    settles = first || ran;
                 }
             }
             TurnEvent::Status(ThreadStatus::Active) | TurnEvent::Resumed(ThreadStatus::Active) => {
@@ -222,7 +239,7 @@ impl TracksCodexTurns for CodexTurns {
             | TurnEvent::Resumed(ThreadStatus::Unavailable) => state.turn = ThreadTurn::Unknown,
         }
         TurnObservation {
-            rested: !was_resting && state.turn == ThreadTurn::Resting,
+            rested: !was_resting && state.turn == ThreadTurn::Resting && settles,
             ended,
         }
     }
@@ -250,8 +267,9 @@ impl TracksCodexTurns for CodexTurns {
 pub trait SettlesRestingCodexSeats {
     /// Off the dispatch gate, from a responder: applies the events under
     /// the gate, then settles the Codex flow on the thread once if they
-    /// left it resting with work queued.
-    fn codex_events(&self, thread: &str, events: Vec<TurnEvent>);
+    /// brought it to rest, or left it resting with work queued; what the
+    /// settlement did, or None when nothing was settled.
+    fn codex_events(&self, thread: &str, events: Vec<TurnEvent>) -> Option<AtStop>;
     /// Under the dispatch gate, as a launch holding it reads its own
     /// connection: applies the events, and notes the flow on the thread to
     /// be settled once the gate is given back when they left it resting.
@@ -264,31 +282,35 @@ pub trait SettlesRestingCodexSeats {
     /// Whether the flow is a Codex flow whose thread's events show it in a
     /// turn, or holding work Flow typed that has not begun.
     fn codex_in_turn(&self, flow_id: &str) -> bool;
-    /// The Codex flow a metaflow is Awake as, when its launch is confirmed,
-    /// no wake holds it, work is queued for it and its thread rests: the
-    /// flow whose settlement hands the oldest queued request over.
+    /// The Codex flow a metaflow is Awake as, its launch confirmed, no wake
+    /// holding it, its thread resting: the flow whose rest is settled.
     fn resting_codex_seat(&self, address: &Address) -> Option<FlowId>;
 }
 
 impl SettlesRestingCodexSeats for RunningNexus {
-    fn codex_events(&self, thread: &str, events: Vec<TurnEvent>) {
+    fn codex_events(&self, thread: &str, events: Vec<TurnEvent>) -> Option<AtStop> {
         if events.is_empty() {
-            return;
+            return None;
         }
         let (seat, ended) = {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let ended = events
+            let observed = events
                 .into_iter()
                 .map(|event| self.codex_turns.observe(thread, event))
-                .filter(|observed| observed.ended)
-                .count();
+                .collect::<Vec<_>>();
+            let ended = observed.iter().filter(|observed| observed.ended).count();
+            let rested = observed.iter().any(|observed| observed.rested);
             let flow = self.codex_flow_on(thread);
+            // A rest settles once whatever is queued; queued work at an
+            // event that finds the thread already resting is drained.
             let seat = flow.as_ref().and_then(|node| {
                 let metaflow = self.store.metaflow_awake_as(&node.flow_id.0).ok()??;
-                self.resting_codex_seat(&metaflow.address)
+                (rested || !metaflow.queue.0.is_empty())
+                    .then(|| self.resting_codex_seat(&metaflow.address))
+                    .flatten()
             });
             (seat, flow.map(|node| (node.flow_id, ended)))
         };
@@ -301,9 +323,7 @@ impl SettlesRestingCodexSeats for RunningNexus {
         }
         // Settled as a Stop is: off the gate, which it takes, reading the
         // thread's turn again under it.
-        if let Some(flow_id) = seat {
-            self.settle_stopped(&flow_id.0);
-        }
+        seat.map(|flow_id| self.settle_stopped(&flow_id.0))
     }
 
     fn observe_codex_events(&self, thread: &str, events: Vec<TurnEvent>) {
@@ -366,8 +386,7 @@ impl SettlesRestingCodexSeats for RunningNexus {
         let flow_ethos::State::Awake(flow_id) = metaflow.state else {
             return None;
         };
-        (!metaflow.queue.0.is_empty()
-            && !self.waking.is_waking(address)
+        (!self.waking.is_waking(address)
             && matches!(self.store.address_hold(&flow_id.0), Ok(None))
             && self.codex_resting(&flow_id.0))
         .then_some(flow_id)

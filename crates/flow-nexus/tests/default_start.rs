@@ -237,6 +237,24 @@ fn meta_call(place: &Place, query: &meta_signal_flow::Query) -> meta_signal_flow
 fn metaflows_listed(place: &Place) -> bool {
     let mut ordinary =
         UnixStream::connect(place.ordinary_socket()).expect("the ordinary socket listens");
+    // Every ordinary connection greets first.
+    {
+        use signal_flow::Contracted;
+        ordinary
+            .write_frame(
+                &rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Query::greeting())
+                    .expect("greeting encodes"),
+            )
+            .expect("greeting written");
+        let receipt = rkyv::from_bytes::<signal_flow::HandshakeReceipt, rkyv::rancor::Error>(
+            &ordinary.read_frame().expect("greeting receipt"),
+        )
+        .expect("receipt decodes");
+        assert_eq!(
+            receipt,
+            signal_flow::HandshakeReceipt::Greeted(signal_flow::Query::contract_digest())
+        );
+    }
     ordinary
         .write_query(&signal_flow::Query::Metaflows)
         .expect("Metaflows written");

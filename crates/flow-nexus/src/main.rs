@@ -154,6 +154,13 @@ fn main() -> ExitCode {
         // One connection per live Codex thread answers its send-tool calls.
         let send_tool_nexus = &nexus;
         scope.spawn(move || send_tool_nexus.serve_send_tool(scope));
+        // One reap worker per pending reap whose pane step is owed takes the
+        // reap's Herdr steps outside the dispatch gate.
+        let reap_nexus = &nexus;
+        scope.spawn(move || {
+            use flow_nexus::reaping::ServesReapedPaneWatches;
+            reap_nexus.serve_reaped_pane_watches(scope)
+        });
         // Work the last Nexus owed is taken up while the sockets serve:
         // queued deliveries are reconciled, every successor owed is started
         // or resumed, and every metaflow due a wake is woken.

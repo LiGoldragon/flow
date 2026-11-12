@@ -4063,6 +4063,23 @@ impl RegistersExistingFlow for FlowStore {
             Some(_) => commit.mutate(self.metaflows, StoredMetaflow { metaflow }),
             None => commit.assert(self.metaflows, StoredMetaflow { metaflow }),
         };
+        // The adopted flow is the Address's receiving flow from this commit:
+        // what the flow it displaced owed there is taken over in it.
+        commit = pending_reap::ReassignsPendingReaps::reaps_reassigned(
+            self,
+            &address,
+            Some(&flow_node.flow_id),
+            commit,
+        )?
+        .commit;
+        #[cfg(test)]
+        {
+            use crate::test_faults::{InjectsCrashes, RefusedWrite};
+            self.faults.attempted("Adoption");
+            if self.faults.refused_now(RefusedWrite::Adoption) {
+                return Err(StoreError::StateInvariant);
+            }
+        }
         self.engine.commit_atomic(commit)?;
         // The Nexus's Codex responder set follows this signal. An adopted
         // seat was committed without announcing it, so no connection ever
@@ -4576,6 +4593,12 @@ pub(crate) trait AltersFlowRowsForTests {
     fn mark_exited(&self, flow_id: &str);
     /// The hold `flow_id` has is given back, W2', in one commit.
     fn give_back_hold(&self, flow_id: &str);
+    /// The flow's row records no native session.
+    fn forget_session(&self, flow_id: &str);
+    /// The flow's harness process was adopted and has since died: a native
+    /// owner proof of this host and boot whose process start no longer
+    /// matches, for the flow's own harness and session.
+    fn prove_owner_dead(&self, flow_id: &str);
 }
 
 #[cfg(test)]
@@ -4603,6 +4626,52 @@ impl AltersFlowRowsForTests for FlowStore {
             .given_back(flow_id, self.engine.begin_atomic_commit())
             .expect("hold read");
         self.engine.commit_atomic(commit).expect("hold given back");
+    }
+
+    fn forget_session(&self, flow_id: &str) {
+        let mut flow = self.flow(flow_id).expect("flow read").expect("flow row");
+        flow.thread_id = None;
+        let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
+        self.engine
+            .commit_atomic(commit)
+            .expect("flow's session forgotten");
+    }
+
+    fn prove_owner_dead(&self, flow_id: &str) {
+        let flow = self.flow(flow_id).expect("flow read").expect("flow row");
+        let environment = self
+            .native_owner_environment()
+            .expect("the test host and boot");
+        let record = NativeOwnerProofRecord {
+            flow_id: flow_id.to_owned(),
+            proof: NativeOwnerProof {
+                process_id: i64::from(std::process::id()),
+                process_user_id: i64::from(
+                    fs::metadata(format!("/proc/{}", std::process::id()))
+                        .expect("own process")
+                        .uid(),
+                ),
+                // A start this process never had: the adopted harness ended.
+                process_start_token: "0".into(),
+                host_id: environment.host_id,
+                boot_id: environment.boot_id,
+                harness_kind: flow.harness_kind.clone(),
+                native_session_id: flow.thread_id.clone().expect("the flow's session"),
+            },
+        };
+        let commit = match self.native_owner_proof_record(flow_id).expect("proof read") {
+            Some(_) => self
+                .engine
+                .begin_atomic_commit()
+                .mutate(self.native_owner_proofs, record),
+            None => self
+                .engine
+                .begin_atomic_commit()
+                .assert(self.native_owner_proofs, record),
+        };
+        self.engine
+            .commit_atomic(commit)
+            .expect("owner proof written");
     }
 }
 
@@ -5000,11 +5069,11 @@ impl RecordsFlowLifecycle for FlowStore {
         };
         flow.lifecycle = FlowLifecycle::Stopped;
         // A flow that ends before its launch was confirmed gives back the
-        // Address it held; a confirmed one puts its metaflow to sleep.
+        // Address it held; a confirmed one puts its metaflow to sleep, and
+        // what it owed there is reassigned in the same commit.
         let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
-        self.engine
-            .commit_atomic(self.ended_at_address(flow_id, commit)?)?;
-        self.launch_changes.announce();
+        let commit = self.ended_at_address(flow_id, commit)?;
+        self.flow_end_committed(commit)?;
         Ok(true)
     }
 
@@ -5024,9 +5093,8 @@ impl RecordsFlowLifecycle for FlowStore {
             flow_id,
             self.engine.begin_atomic_commit().mutate(self.flows, flow),
         )?;
-        self.engine
-            .commit_atomic(self.ended_at_address(flow_id, commit)?)?;
-        self.launch_changes.announce();
+        let commit = self.ended_at_address(flow_id, commit)?;
+        self.flow_end_committed(commit)?;
         Ok(true)
     }
 
@@ -5065,10 +5133,35 @@ impl RecordsFlowLifecycle for FlowStore {
             }
             _ => commit,
         };
-        self.engine
-            .commit_atomic(self.ended_at_address(flow_id, commit)?)?;
-        self.launch_changes.announce();
+        let commit = self.ended_at_address(flow_id, commit)?;
+        self.flow_end_committed(commit)?;
         Ok(true)
+    }
+}
+
+/// The one commit every end of a flow lands with, and its announcement.
+trait CommitsFlowEnd {
+    fn flow_end_committed(&self, commit: sema_engine::AtomicCommit) -> Result<(), StoreError>;
+}
+
+impl CommitsFlowEnd for FlowStore {
+    fn flow_end_committed(&self, commit: sema_engine::AtomicCommit) -> Result<(), StoreError> {
+        #[cfg(test)]
+        {
+            use crate::test_faults::{InjectsCrashes, RefusedWrite};
+            self.faults.attempted("FlowEnded");
+            if self.faults.refused_now(RefusedWrite::FlowEnded) {
+                return Err(StoreError::StateInvariant);
+            }
+        }
+        self.engine.commit_atomic(commit)?;
+        #[cfg(test)]
+        crate::test_faults::InjectsCrashes::crash_if_armed(
+            &self.faults,
+            crate::test_faults::CrashPoint::AfterFlowEnded,
+        );
+        self.launch_changes.announce();
+        Ok(())
     }
 }
 

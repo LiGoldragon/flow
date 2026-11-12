@@ -35,6 +35,9 @@ pub(crate) enum CrashPoint {
     AfterHandedOver,
     /// K12: the reap worker saw the pane gone, before it takes the gate.
     WatchAfterGone,
+    /// A flow's end (Stopped, Retired or Exited) landed, with the
+    /// reassignment of what it owed, before its announcement.
+    AfterFlowEnded,
 }
 
 /// The writes a refusal switch fails once.
@@ -56,6 +59,21 @@ pub(crate) enum RefusedWrite {
     HandoverRewrite,
     /// HandedOver.
     HandedOver,
+    /// The end of a flow: Stopped, Retired or Exited, with its reassignment.
+    FlowEnded,
+    /// An adoption of an existing seat (MetaBindExisting), with its
+    /// reassignment.
+    Adoption,
+    /// A Bind of a metaflow to a process or a launched flow, with its
+    /// reassignment.
+    MetaflowBind,
+    /// A repair that rebinds an Address's current flow, with its
+    /// reassignment.
+    CurrentFlowRebind,
+    /// A Record.Asleep of an ended flow's metaflow, with its reassignment.
+    MetaflowSleep,
+    /// The reap supervisor's read of the pending reaps in its next pass.
+    PassRead,
 }
 
 /// The armed switches of one store, each fired once.

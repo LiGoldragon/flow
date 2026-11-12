@@ -16,11 +16,35 @@
 //! launch's acknowledgement, confirmation, give-back and end alone.
 //!
 //! A pane is counted gone only on a positively observed absence: the
-//! worker's own snapshot or Herdr's own close event. A route recorded
-//! Unavailable is no observation; it keeps the reap at `HerdrUnavailable`
-//! and settles it only on independent evidence that the predecessor's
-//! resource is closed or retired, its row `Retired` or `Exited`. A pane
-//! running another native session is never closed and not counted gone.
+//! worker's own snapshot, with both its agent roster and its pane list, or
+//! Herdr's own close event. A route recorded Unavailable is no
+//! observation; it keeps the reap at `HerdrUnavailable` and settles it only
+//! on independent evidence that the predecessor's resource is closed or
+//! retired, its row `Retired` or `Exited`.
+//!
+//! One close rule serves every worker, whoever owes its reap: the
+//! predecessor's recorded pane is closed only when a fresh read shows it
+//! `PaneOwnership::Owned` (its harness reports the recorded session, or a
+//! Codex foreground process resumes the recorded thread) or `Bare` (the
+//! recorded pane and terminal with no agent on them). `Foreign`, `Unproven`
+//! and `Unidentified` are never closed and not counted gone; `Absent`
+//! settles; `Unknown` neither closes nor settles. Two boundaries are taken
+//! knowingly. The snapshot-to-close race: between the read and the close
+//! the pane can change (a new harness started in its shell), and Herdr
+//! offers no compare-and-close, so the close is made on the read's
+//! evidence, as every other close Flow makes is. The Bare-shell boundary:
+//! a Bare pane at the predecessor's own terminal is closed even when a
+//! person works in its plain shell, since a harness that exits leaves its
+//! pane Bare and Herdr announces no going for it.
+//!
+//! Who owes a reap is recorded on its row (`ReapResponsibility`) and
+//! follows the Address's receiving flow: the commit that ends a flow, and
+//! the one that makes another flow the receiving one, reassigns it
+//! (store `reaps_reassigned`). A worker is armed for one identity, the
+//! row's launch and its responsibility; a reassignment cancels it
+//! (`ObligationReassigned`), or, if it revalidates first, finds itself
+//! stale (`Stale`) and writes nothing; the pass arms one worker under the
+//! new identity.
 //!
 //! Every action answers an event: a launch, the successor's rest, the
 //! receiving flow's own handover write, the Nexus start, a Herdr event,
@@ -31,9 +55,9 @@
 
 use crate::HoldsStopRequest;
 use crate::RunningNexus;
-use crate::generated::memory::Predecessor;
+use crate::generated::memory::{Predecessor, ReapResponsibility};
 use crate::herdr::{
-    PaneClose, ReadsHerdrUntilCancelled, ReapedPane,
+    PaneClose, PaneOwnership, ReadsHerdrUntilCancelled,
     events::{HerdrCue, HerdrEvents, SubscribesHerdrEvents},
 };
 use crate::observation_lifetime::{
@@ -44,7 +68,9 @@ use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::handover::{ClosesHandovers, HoldsHandovers, JudgesHandoverOwner};
 use crate::store::metaflow::{ReadsSuccession, SleepsMetaflows};
 use crate::store::pending_handover::RecordsPendingHandovers;
-use crate::store::pending_reap::{DerivedReap, NamesReapedRecord, RecordsPendingReaps};
+use crate::store::pending_reap::{
+    DerivedReap, JudgesReapStep, NamesReapedRecord, ReapOwner, ReapStep, RecordsPendingReaps,
+};
 use crate::store::{
     AnnouncesLaunchChanges, LaunchedRecord, NamesLiveFlow, ReadsFlowRows, ReadsLaunchAttempt,
     RecordsFlowLifecycle, RecordsLaunchOutcome, RecordsReplacement, ReplacedRecord, Replacement,
@@ -145,20 +171,6 @@ impl HoldsRearms for PaneWatchRearms {
     }
 }
 
-/// Whether a reap's pane step is the worker's to take.
-trait JudgesPaneStep {
-    fn pane_step_owed(&self) -> bool;
-}
-
-impl JudgesPaneStep for ReapStanding {
-    fn pane_step_owed(&self) -> bool {
-        matches!(
-            self,
-            ReapStanding::Owed | ReapStanding::HerdrUnavailable | ReapStanding::CloseRefused
-        )
-    }
-}
-
 /// Independent evidence that a predecessor's resource is closed or retired:
 /// its row records it Retired or Exited, written by another event than this
 /// reap.
@@ -208,6 +220,7 @@ impl ReapsPredecessors for RunningNexus {
             launch_request_id: launch_request_id.clone(),
             address: address.clone(),
             reap_standing: standing.clone(),
+            reap_responsibility: ReapResponsibility::LaunchSuccessor,
         };
         match self.store.reap_owed(row, replaced.clone()) {
             Ok(()) => {
@@ -262,10 +275,10 @@ impl ReapsPredecessors for RunningNexus {
                 .find(|derived| derived.replacement.predecessor.0 == predecessor)?;
             return Some(self.owe_derived_reap(&derived));
         };
-        match &row.reap_standing {
+        match row.reap_standing.reap_step() {
             // [PSYCHE-2]: stands as typed state; no event retries it.
-            ReapStanding::PredecessorMissing => Some(self.reap_reply(&row)),
-            ReapStanding::PredecessorUnknown => {
+            ReapStep::Stands => Some(self.reap_reply(&row)),
+            ReapStep::PredecessorReading => {
                 let standing = match self.store.judged_lifecycle(predecessor) {
                     Ok(Some(lifecycle)) => {
                         if lifecycle.is_live() && self.store.record_stopped(predecessor).is_err() {
@@ -284,10 +297,8 @@ impl ReapsPredecessors for RunningNexus {
             }
             // The pane was already witnessed gone: step 3 again, in the
             // store alone.
-            ReapStanding::HandoverRefused(_) | ReapStanding::SettleUnrecorded => {
-                self.settle_reap(predecessor)
-            }
-            ReapStanding::Owed | ReapStanding::HerdrUnavailable | ReapStanding::CloseRefused => {
+            ReapStep::StoreSettlement => self.settle_reap(predecessor),
+            ReapStep::PaneClose => {
                 // A predecessor whose route is not recorded has no pane to
                 // watch: only independent evidence settles it.
                 if let Ok(Some(node)) = self.store.flow_node(predecessor)
@@ -301,7 +312,6 @@ impl ReapsPredecessors for RunningNexus {
                 self.rearm(predecessor);
                 Some(self.reap_reply(&row))
             }
-            ReapStanding::Unrecorded => Some(self.reap_reply(&row)),
         }
     }
 
@@ -609,30 +619,114 @@ impl NamesHandoverReply for RunningNexus {
     }
 }
 
+/// The fresh launch a receiving flow has no outcome for: a crash after its
+/// confirmation, or its C1 and C2 both refused.
+trait FindsUnsettledFreshLaunch {
+    /// The receiving flow of `address` and its fresh launch, when the
+    /// launch's outcome, its Replacement and the flow's hold each read
+    /// absent and the flow is past Pending; None on any read refused.
+    fn unsettled_fresh_launch(&self, address: &Address) -> Option<(String, Launched)>;
+}
+
+impl FindsUnsettledFreshLaunch for RunningNexus {
+    fn unsettled_fresh_launch(&self, address: &Address) -> Option<(String, Launched)> {
+        let Ok(Some(receiving)) = self.store.receiving_flow(address) else {
+            return None;
+        };
+        let Ok(Some(launch_request_id)) = self
+            .store
+            .launch_requests_bound_to(&receiving.0)
+            .map(|mut ids| ids.pop())
+        else {
+            return None;
+        };
+        if !matches!(self.store.launch_outcome(&launch_request_id), Ok(None))
+            || !matches!(self.store.replacement(&launch_request_id), Ok(None))
+            || !matches!(self.store.address_hold(&receiving.0), Ok(None))
+        {
+            return None;
+        }
+        let Ok(Some(node)) = self.store.flow_node(&receiving.0) else {
+            return None;
+        };
+        if node.flow_lifecycle == FlowLifecycle::Pending {
+            return None;
+        }
+        Some((
+            launch_request_id,
+            Launched {
+                flow_id: node.flow_id.clone(),
+                session_id: node.session_id.clone(),
+                herdr_route_selection: node.herdr_route_selection.clone(),
+                origin: node.origin.clone(),
+            },
+        ))
+    }
+}
+
+/// The predecessors of the pending reaps `owner` owes, as their rows read
+/// now; empty when they cannot be read.
+trait ReadsOwedReaps {
+    fn reaps_owed_by(&self, owner: &ReapOwner, address: Option<&Address>) -> BTreeSet<String>;
+}
+
+impl ReadsOwedReaps for RunningNexus {
+    fn reaps_owed_by(&self, owner: &ReapOwner, address: Option<&Address>) -> BTreeSet<String> {
+        self.store
+            .pending_reaps()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| address.is_none_or(|address| &row.address == address))
+            .filter(|row| matches!(self.store.reap_owner(row), Ok(Some(found)) if found == *owner))
+            .map(|row| row.predecessor.0)
+            .collect()
+    }
+}
+
 impl TakesUpObligations for RunningNexus {
     fn take_up_at_rest(&self, flow_id: &str) {
-        // Each PendingReap whose launch names this flow as successor.
-        let reaps = self.store.pending_reaps().unwrap_or_default();
-        for row in reaps {
-            let follows = self
-                .store
-                .reaped_record(&row)
-                .ok()
-                .flatten()
-                .is_some_and(|replaced| replaced.launched_record.flow_id.0 == flow_id);
-            if follows && let Some(answer) = self.retry_reap(&row.predecessor.0) {
-                Self::log_obligation(flow_id, &answer);
-            }
-        }
-        // The derived owed reap bound to it.
+        let resting = ReapOwner::Flow(FlowId(flow_id.to_owned()));
+        // The reaps this flow owed before its own settlement, if any, runs:
+        // a row that settlement takes over gets its worker from the
+        // takeover itself and is not rearmed here.
+        let owed = self.reaps_owed_by(&resting, None);
+        // a. Its own unrecorded settlement, once: W3 for its derived reap,
+        // or C1/C2 for its fresh launch with no outcome. Either carries the
+        // takeover of what its Address owes.
+        let mut settled_fresh = false;
         for derived in self.store.derived_reaps().unwrap_or_default() {
             if derived.successor.0 == flow_id {
                 let answer = self.owe_derived_reap(&derived);
                 Self::log_obligation(flow_id, &answer);
             }
         }
-        // The handover at its Address, when it is the receiving flow.
-        if let Ok(Some(metaflow)) = self.store.metaflow_awake_as(flow_id)
+        let awake = self.store.metaflow_awake_as(flow_id).ok().flatten();
+        if let Some(metaflow) = &awake
+            && let Some((launch_request_id, launched)) =
+                self.unsettled_fresh_launch(&metaflow.address)
+            && launched.flow_id.0 == flow_id
+        {
+            settled_fresh = true;
+            let answer = self.settle_fresh(&launch_request_id, &metaflow.address, &launched);
+            Self::log_obligation(flow_id, &answer);
+        }
+        // b. Each PendingReap this flow owes: its successor's, or one it
+        // took over.
+        for predecessor in &owed {
+            let still_owed = self
+                .store
+                .pending_reap(predecessor)
+                .ok()
+                .flatten()
+                .is_some_and(|row| matches!(self.store.reap_owner(&row), Ok(Some(found)) if found == resting));
+            if still_owed && let Some(answer) = self.retry_reap(predecessor) {
+                Self::log_obligation(flow_id, &answer);
+            }
+        }
+        // c. The handover at its Address, when it is the receiving flow;
+        // one settlement attempt per rest, so not after (a) ran one.
+        if !settled_fresh
+            && let Some(metaflow) = &awake
             && let Some(answer) = self.retry_handover(&metaflow.address)
         {
             Self::log_obligation(flow_id, &answer);
@@ -667,36 +761,34 @@ impl TakesUpObligations for RunningNexus {
         let metaflows =
             crate::store::ManagesMetaflowState::list_metaflows(&*self.store).unwrap_or_default();
         for metaflow in metaflows {
-            let Ok(Some(receiving)) = self.store.receiving_flow(&metaflow.address) else {
-                continue;
-            };
-            let Ok(Some(launch_request_id)) = self
-                .store
-                .launch_requests_bound_to(&receiving.0)
-                .map(|mut ids| ids.pop())
+            let Some((launch_request_id, launched)) =
+                self.unsettled_fresh_launch(&metaflow.address)
             else {
                 continue;
             };
-            if !matches!(self.store.launch_outcome(&launch_request_id), Ok(None))
-                || !matches!(self.store.replacement(&launch_request_id), Ok(None))
-                || !matches!(self.store.address_hold(&receiving.0), Ok(None))
-            {
-                continue;
-            }
-            let Ok(Some(node)) = self.store.flow_node(&receiving.0) else {
-                continue;
-            };
-            if node.flow_lifecycle == FlowLifecycle::Pending {
-                continue;
-            }
-            let launched = Launched {
-                flow_id: node.flow_id.clone(),
-                session_id: node.session_id.clone(),
-                herdr_route_selection: node.herdr_route_selection.clone(),
-                origin: node.origin.clone(),
-            };
             let answer = self.settle_fresh(&launch_request_id, &metaflow.address, &launched);
-            Self::log_obligation(&receiving.0, &answer);
+            Self::log_obligation(&launched.flow_id.0, &answer);
+        }
+        // The Nexus start is the bearing event of what no flow owes: each
+        // reap its Address holds is taken up once, in the store alone, with
+        // no Herdr call. A store-only settlement (its worker's own commit
+        // was refused) is settled from the closure its standing records; a
+        // predecessor that could not be read is read once more. A refusal
+        // is no event: nothing retries it before a later bearing event, and
+        // Unknown and Missing stand unless this read changes them. A row
+        // whose pane step is owed is the supervisor's first pass's.
+        for predecessor in self.reaps_owed_by(&ReapOwner::Address, None) {
+            let Ok(Some(row)) = self.store.pending_reap(&predecessor) else {
+                continue;
+            };
+            let answer = match row.reap_standing.reap_step() {
+                ReapStep::StoreSettlement => self.settle_reap(&predecessor),
+                ReapStep::PredecessorReading => self.retry_reap(&predecessor),
+                ReapStep::PaneClose | ReapStep::Stands => None,
+            };
+            if let Some(answer) = answer {
+                Self::log_obligation(&predecessor, &answer);
+            }
         }
     }
 }
@@ -726,20 +818,38 @@ impl LogsObligation for RunningNexus {
     }
 }
 
-/// What a worker was armed for: the row's launch and the route it watches.
+/// What a worker was armed for: its identity, the row's launch and who
+/// owes it, and the route it watches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ArmedReap {
     pub(crate) launch_request_id: signal_flow::LaunchRequestId,
+    /// Who owed the row when the worker was armed.
+    pub(crate) reap_responsibility: ReapResponsibility,
     /// The route recorded for the predecessor when the worker was armed;
     /// None when its row records none.
     pub(crate) route: Option<HerdrRoute>,
 }
 
+/// Whether a row is the obligation a worker was armed for.
+trait IdentifiesArmedReap {
+    fn armed_for(&self, row: &PendingReap) -> bool;
+}
+
+impl IdentifiesArmedReap for ArmedReap {
+    fn armed_for(&self, row: &PendingReap) -> bool {
+        row.launch_request_id == self.launch_request_id
+            && row.reap_responsibility == self.reap_responsibility
+    }
+}
+
 /// How a worker ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PaneWatchEnd {
-    /// It took the gate and acted, or found its obligation gone.
+    /// It took the gate and acted.
     Acted,
+    /// It revalidated and found its obligation settled, retracted or owed
+    /// by another: it wrote nothing.
+    Stale,
     Cancelled(ObservationCancellationCause),
     Lapsed(PaneWatchLapse),
 }
@@ -759,6 +869,9 @@ pub(crate) enum PaneWatchLapse {
     RouteUnrecorded,
     /// The worker thread panicked; its join answered Err.
     Panicked,
+    /// Its revalidation could not read the row: nothing was written, and
+    /// the obligation keeps its standing until a bearing event rearms it.
+    StoreUnreadable,
 }
 
 /// The serial of one worker the supervisor spawned, counted from zero over
@@ -782,7 +895,13 @@ enum PaneWatchEntry<'scope> {
         cancellation: Arc<ObservationCancellation>,
         thread: ScopedJoinHandle<'scope, PaneWatchEnd>,
     },
-    Lapsed(PaneWatchLapse),
+    /// A worker that ended with its obligation standing, and what it was
+    /// armed for: armed again only by a bearing event's rearm, or by a
+    /// reassignment that gives its row another identity.
+    Lapsed {
+        armed: ArmedReap,
+        lapse: PaneWatchLapse,
+    },
 }
 
 /// The supervisor's entries, one per obligation, keyed by predecessor, and
@@ -901,22 +1020,22 @@ impl<'scope> PassesPaneWatches<'scope> for ReapedPaneWatches<'scope> {
     where
         'env: 'scope,
     {
-        // An unreadable store is no evidence of retraction.
-        let rows = match nexus.store.pending_reaps() {
-            Ok(rows) => rows,
-            Err(error) => {
-                eprintln!("flow-nexus: the pending reaps could not be read: {error}");
-                return;
+        #[cfg(test)]
+        nexus.pane_watch_hooks.at_pass();
+        let rows = nexus.store.pending_reaps();
+        #[cfg(test)]
+        let rows = {
+            use crate::test_faults::{InjectsCrashes, RefusedWrite};
+            if nexus.store.faults.refused_now(RefusedWrite::PassRead) {
+                Err(crate::store::StoreError::StateInvariant)
+            } else {
+                rows
             }
         };
-        let wanted: BTreeMap<String, PendingReap> = rows
-            .into_iter()
-            .filter(|row| row.reap_standing.pane_step_owed())
-            .map(|row| (row.predecessor.0.clone(), row))
-            .collect();
-        // Each worker that announced its completion is joined first. A
-        // completion naming a handle already joined, by a cancellation,
-        // names no entry and joins nothing.
+        // Each worker that announced its completion is joined first, whether
+        // or not the store can be read now: its thread has ended, and its
+        // handle is reclaimed at once. A completion naming a handle already
+        // joined, by a cancellation, names no entry and joins nothing.
         let completed = self.completions.try_iter().collect::<Vec<_>>();
         for worker in completed {
             let key = worker.predecessor.clone();
@@ -924,40 +1043,103 @@ impl<'scope> PassesPaneWatches<'scope> for ReapedPaneWatches<'scope> {
                 Some(PaneWatchEntry::Watching { worker: entry, .. }) if *entry == worker => {}
                 _ => continue,
             }
-            let Some(PaneWatchEntry::Watching { thread, .. }) = self.watches.remove(&key) else {
+            let Some(PaneWatchEntry::Watching { thread, armed, .. }) = self.watches.remove(&key)
+            else {
                 continue;
             };
             let end = nexus.join_pane_watch(&worker, thread);
+            // A row read absent is settled or retracted; one read standing,
+            // or not read at all, keeps its standing as lapsed or unknown
+            // until a bearing event.
+            let stands = match &rows {
+                Ok(rows) => rows.iter().any(|row| row.predecessor.0 == key),
+                Err(_) => true,
+            };
             let lapse = match end {
-                PaneWatchEnd::Cancelled(_) => None,
-                PaneWatchEnd::Acted if !wanted.contains_key(&key) => None,
+                PaneWatchEnd::Cancelled(_) | PaneWatchEnd::Stale => None,
+                PaneWatchEnd::Acted if !stands => None,
                 PaneWatchEnd::Acted => Some(PaneWatchLapse::ActedRowStands),
                 PaneWatchEnd::Lapsed(lapse) => Some(lapse),
             };
             if let Some(lapse) = lapse {
                 eprintln!(
-                    "flow-nexus: the pane watch of {key} lapsed: {lapse:?}; it is armed again at its successor's next rest"
+                    "flow-nexus: the pane watch of {key} lapsed: {lapse:?}; it is armed again at its owner's next bearing event"
                 );
-                self.watches.insert(key, PaneWatchEntry::Lapsed(lapse));
+                self.watches
+                    .insert(key, PaneWatchEntry::Lapsed { armed, lapse });
             }
         }
-        // Retraction: a watching entry no longer wanted, or whose row names
-        // another launch, is cancelled and joined.
+        // An unreadable store is no evidence of retraction or reassignment.
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(error) => {
+                eprintln!("flow-nexus: the pending reaps could not be read: {error}");
+                return;
+            }
+        };
+        // A row whose owner is Missing is nobody's: no worker is armed for
+        // it and nothing settles it. An owner that cannot be read is no
+        // evidence of anything, as an unreadable store is not.
+        let mut wanted: BTreeMap<String, PendingReap> = BTreeMap::new();
+        for row in rows {
+            if row.reap_standing.reap_step() != ReapStep::PaneClose {
+                continue;
+            }
+            match nexus.store.reap_owner(&row) {
+                Ok(Some(_)) => {
+                    wanted.insert(row.predecessor.0.clone(), row);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!(
+                        "flow-nexus: the owner of the reap of {} could not be read: {error}",
+                        row.predecessor.0
+                    );
+                    return;
+                }
+            }
+        }
+        // Retraction: a watching entry no longer wanted is cancelled and
+        // joined; one whose row names another launch, or is owed by another
+        // than it was armed for, is cancelled as reassigned and joined, and
+        // the arming below arms one worker under the row's identity now. A
+        // lapsed entry no longer wanted, or reassigned, goes too.
         let retracted = self
             .watches
             .iter()
             .filter_map(|(key, entry)| match (entry, wanted.get(key)) {
-                (PaneWatchEntry::Watching { .. }, None) => Some(key.clone()),
+                (PaneWatchEntry::Watching { .. }, None) => Some((
+                    key.clone(),
+                    ObservationCancellationCause::ObligationRetracted,
+                )),
                 (PaneWatchEntry::Watching { armed, .. }, Some(row))
                     if row.launch_request_id != armed.launch_request_id =>
                 {
-                    Some(key.clone())
+                    Some((
+                        key.clone(),
+                        ObservationCancellationCause::ObligationRetracted,
+                    ))
                 }
-                (PaneWatchEntry::Lapsed(_), None) => Some(key.clone()),
+                (PaneWatchEntry::Watching { armed, .. }, Some(row)) if !armed.armed_for(row) => {
+                    Some((
+                        key.clone(),
+                        ObservationCancellationCause::ObligationReassigned,
+                    ))
+                }
+                (PaneWatchEntry::Lapsed { .. }, None) => Some((
+                    key.clone(),
+                    ObservationCancellationCause::ObligationRetracted,
+                )),
+                (PaneWatchEntry::Lapsed { armed, .. }, Some(row)) if !armed.armed_for(row) => {
+                    Some((
+                        key.clone(),
+                        ObservationCancellationCause::ObligationReassigned,
+                    ))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
-        for key in retracted {
+        for (key, cause) in retracted {
             match self.watches.remove(&key) {
                 Some(PaneWatchEntry::Watching {
                     worker,
@@ -965,10 +1147,14 @@ impl<'scope> PassesPaneWatches<'scope> for ReapedPaneWatches<'scope> {
                     thread,
                     ..
                 }) => {
-                    cancellation.cancel(ObservationCancellationCause::ObligationRetracted);
+                    cancellation.cancel(cause);
+                    #[cfg(test)]
+                    if cause == ObservationCancellationCause::ObligationReassigned {
+                        nexus.pane_watch_hooks.reassignment_cancelled();
+                    }
                     nexus.join_pane_watch(&worker, thread);
                 }
-                Some(PaneWatchEntry::Lapsed(_)) | None => {}
+                Some(PaneWatchEntry::Lapsed { .. }) | None => {}
             }
         }
         // A rearm asked by a bearing event cancels a waiting worker and
@@ -988,7 +1174,7 @@ impl<'scope> PassesPaneWatches<'scope> for ReapedPaneWatches<'scope> {
                         nexus.join_pane_watch(&worker, thread);
                     }
                 }
-                Some(PaneWatchEntry::Lapsed(lapse)) if rearmed => {
+                Some(PaneWatchEntry::Lapsed { lapse, .. }) if rearmed => {
                     eprintln!(
                         "flow-nexus: the pane watch of {key}, lapsed {lapse:?}, is armed again"
                     );
@@ -1005,6 +1191,7 @@ impl<'scope> PassesPaneWatches<'scope> for ReapedPaneWatches<'scope> {
             });
             let armed = ArmedReap {
                 launch_request_id: row.launch_request_id.clone(),
+                reap_responsibility: row.reap_responsibility.clone(),
                 route,
             };
             let cancellation =
@@ -1041,7 +1228,7 @@ impl<'scope> PassesPaneWatches<'scope> for ReapedPaneWatches<'scope> {
                 end
             });
             #[cfg(test)]
-            nexus.pane_watch_hooks.worker_spawned(&worker);
+            nexus.pane_watch_hooks.worker_spawned(&worker, &armed);
             self.watches.insert(
                 key.clone(),
                 PaneWatchEntry::Watching {
@@ -1143,10 +1330,12 @@ impl WatchesReapedPane for RunningNexus {
             }
         };
         // 4. Then the opening snapshot, and one close of a pane still the
-        // predecessor's.
-        match self.herdr.pane_presence_until(&node, cancellation) {
+        // predecessor's own, by the one close rule (module doc). The close
+        // is made on this read's evidence: a pane that changes between the
+        // read and the close (the snapshot-to-close race) is closed as read.
+        match self.herdr.pane_ownership_until(&node, cancellation) {
             Err(cause) => return PaneWatchEnd::Cancelled(cause),
-            Ok(ReapedPane::Absent) => {
+            Ok(PaneOwnership::Absent) => {
                 #[cfg(test)]
                 crate::test_faults::InjectsCrashes::crash_if_armed(
                     &self.store.faults,
@@ -1154,10 +1343,10 @@ impl WatchesReapedPane for RunningNexus {
                 );
                 return self.worker_act(predecessor, armed, cancellation);
             }
-            // Another session's pane is never closed, nor counted gone: the
-            // worker waits for its own going.
-            Ok(ReapedPane::Occupied) => {}
-            Ok(ReapedPane::Unknown) => {
+            // A pane not proven the predecessor's own is never closed, nor
+            // counted gone: the worker waits for its own going.
+            Ok(PaneOwnership::Foreign | PaneOwnership::Unproven | PaneOwnership::Unidentified) => {}
+            Ok(PaneOwnership::Unknown) => {
                 if let Err(end) = self.worker_rewrite(
                     predecessor,
                     armed,
@@ -1167,7 +1356,10 @@ impl WatchesReapedPane for RunningNexus {
                     return end;
                 }
             }
-            Ok(ReapedPane::Present | ReapedPane::Bare) => {
+            // Owned, or Bare: a Bare pane at the predecessor's terminal is
+            // closed even when a person works in its plain shell (the
+            // Bare-shell boundary), as every other close of a Flow's pane is.
+            Ok(PaneOwnership::Owned | PaneOwnership::Bare) => {
                 match self.herdr.close_pane_until(&route, cancellation) {
                     Err(cause) => return PaneWatchEnd::Cancelled(cause),
                     Ok(PaneClose::Closed) => {
@@ -1215,9 +1407,11 @@ impl WatchesReapedPane for RunningNexus {
                     }
                 }
                 Ok(HerdrCue::Closed) => {
-                    return match self.herdr.pane_presence_until(&node, cancellation) {
+                    return match self.herdr.pane_ownership_until(&node, cancellation) {
                         Err(cause) => PaneWatchEnd::Cancelled(cause),
-                        Ok(ReapedPane::Absent) => self.worker_act(predecessor, armed, cancellation),
+                        Ok(PaneOwnership::Absent) => {
+                            self.worker_act(predecessor, armed, cancellation)
+                        }
                         Ok(_) => PaneWatchEnd::Lapsed(PaneWatchLapse::StreamClosedPanePresent),
                     };
                 }
@@ -1233,6 +1427,8 @@ impl WatchesReapedPane for RunningNexus {
         cancellation: &ObservationCancellation,
         standing: ReapStanding,
     ) -> Result<(), PaneWatchEnd> {
+        #[cfg(test)]
+        self.pane_watch_hooks.before_revalidation(armed);
         let _turn = self
             .dispatch_gate
             .lock()
@@ -1252,6 +1448,8 @@ impl WatchesReapedPane for RunningNexus {
         armed: &ArmedReap,
         cancellation: &ObservationCancellation,
     ) -> PaneWatchEnd {
+        #[cfg(test)]
+        self.pane_watch_hooks.before_revalidation(armed);
         let _turn = self
             .dispatch_gate
             .lock()
@@ -1285,11 +1483,14 @@ impl RevalidatesWorker for RunningNexus {
         if let Some(cause) = cancellation.cause() {
             return Err(PaneWatchEnd::Cancelled(cause));
         }
-        // b. The row still stands and names the launch the worker was armed
-        // for; otherwise the worker is stale and writes nothing.
+        // b. The row still stands, names the launch the worker was armed
+        // for and is owed by whom it was armed for; otherwise the worker is
+        // stale and writes nothing. A row that cannot be read is no
+        // evidence either way: the worker lapses, writing nothing.
         match self.store.pending_reap(predecessor) {
-            Ok(Some(row)) if row.launch_request_id == armed.launch_request_id => {}
-            _ => return Err(PaneWatchEnd::Acted),
+            Ok(Some(row)) if armed.armed_for(&row) => {}
+            Ok(_) => return Err(PaneWatchEnd::Stale),
+            Err(_) => return Err(PaneWatchEnd::Lapsed(PaneWatchLapse::StoreUnreadable)),
         }
         // c. The predecessor's row still names the route watched.
         let recorded = self
@@ -1322,6 +1523,94 @@ impl RevalidatesWorker for RunningNexus {
 #[cfg(test)]
 pub(crate) type SupervisorHook = Box<dyn FnOnce(&RunningNexus) + Send>;
 
+/// One point a test holds a thread at: armed, the next thread to arrive
+/// is counted and waits there until it is released. Each wait is bounded
+/// by the test's own deadline; nothing sleeps.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct HeldPoint {
+    state: Mutex<HeldPointState>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct HeldPointState {
+    armed: bool,
+    arrivals: usize,
+    released: bool,
+}
+
+#[cfg(test)]
+pub(crate) trait HoldsAtPoint {
+    /// The next arrival waits at the point.
+    fn arm(&self);
+    /// Called by the thread at the point: waits there when armed.
+    fn arrive(&self);
+    /// Waits, bounded, until `count` threads have arrived armed.
+    fn arrived_by(&self, count: usize, deadline: std::time::Instant) -> bool;
+    /// Lets the waiting thread go on.
+    fn release(&self);
+}
+
+#[cfg(test)]
+impl HoldsAtPoint for HeldPoint {
+    fn arm(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.armed = true;
+        state.released = false;
+    }
+
+    fn arrive(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.armed {
+            return;
+        }
+        state.armed = false;
+        state.arrivals += 1;
+        self.changed.notify_all();
+        while !state.released {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    fn arrived_by(&self, count: usize, deadline: std::time::Instant) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while state.arrivals < count {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                return false;
+            };
+            state = self
+                .changed
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+        true
+    }
+
+    fn release(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.released = true;
+        self.changed.notify_all();
+    }
+}
+
 /// Test-build hooks the pane-watch races are proved with.
 #[cfg(test)]
 #[derive(Default)]
@@ -1333,19 +1622,36 @@ pub(crate) struct PaneWatchHooks {
     /// Every worker the supervisor spawned, and every one it joined.
     pub(crate) spawned: Mutex<Vec<PaneWatchWorkerIdentity>>,
     pub(crate) joined: Mutex<Vec<PaneWatchWorkerIdentity>>,
+    /// What each spawned worker was armed for, in spawn order.
+    pub(crate) armed: Mutex<Vec<(PaneWatchWorkerIdentity, ArmedReap)>>,
     pub(crate) worker_join: std::sync::Condvar,
     /// Panics a worker at its next event, once.
     pub(crate) panic_at_event: std::sync::atomic::AtomicBool,
     /// How many workers announced their completion, and its announcement.
     pub(crate) workers_ended: Mutex<usize>,
     pub(crate) worker_end: std::sync::Condvar,
+    /// A worker, its cue consumed, before it takes the gate to revalidate;
+    /// and what each worker that arrived there was armed for.
+    pub(crate) revalidation_hold: HeldPoint,
+    pub(crate) revalidation_arrivals: Mutex<Vec<ArmedReap>>,
+    /// The supervisor at the entry of its next pass, before it reads.
+    pub(crate) pass_hold: HeldPoint,
+    /// How many workers the pass cancelled as reassigned, counted after
+    /// the cancel and before the join.
+    pub(crate) reassignments_cancelled: Mutex<usize>,
+    pub(crate) reassignment_cancel: std::sync::Condvar,
 }
 
 #[cfg(test)]
 pub(crate) trait RunsPaneWatchHooks {
     fn between_check_and_wait(&self, nexus: &RunningNexus);
     fn at_event(&self);
-    fn worker_spawned(&self, worker: &PaneWatchWorkerIdentity);
+    fn at_pass(&self);
+    fn before_revalidation(&self, armed: &ArmedReap);
+    fn reassignment_cancelled(&self);
+    /// Waits, bounded, until `count` workers were cancelled as reassigned.
+    fn reassignments_cancelled_by(&self, count: usize, deadline: std::time::Instant) -> bool;
+    fn worker_spawned(&self, worker: &PaneWatchWorkerIdentity, armed: &ArmedReap);
     fn worker_ended(&self);
     fn worker_joined(&self, worker: &PaneWatchWorkerIdentity, end: &PaneWatchEnd);
     /// Waits, bounded, until `count` workers have announced their completion.
@@ -1367,11 +1673,53 @@ impl RunsPaneWatchHooks for PaneWatchHooks {
         }
     }
 
-    fn worker_spawned(&self, worker: &PaneWatchWorkerIdentity) {
+    fn at_pass(&self) {
+        self.pass_hold.arrive();
+    }
+
+    fn before_revalidation(&self, armed: &ArmedReap) {
+        self.revalidation_arrivals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(armed.clone());
+        self.revalidation_hold.arrive();
+    }
+
+    fn reassignment_cancelled(&self) {
+        *self
+            .reassignments_cancelled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
+        self.reassignment_cancel.notify_all();
+    }
+
+    fn reassignments_cancelled_by(&self, count: usize, deadline: std::time::Instant) -> bool {
+        let mut cancelled = self
+            .reassignments_cancelled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while *cancelled < count {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                return false;
+            };
+            cancelled = self
+                .reassignment_cancel
+                .wait_timeout(cancelled, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+        true
+    }
+
+    fn worker_spawned(&self, worker: &PaneWatchWorkerIdentity, armed: &ArmedReap) {
         self.spawned
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(worker.clone());
+        self.armed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((worker.clone(), armed.clone()));
     }
 
     fn worker_joined(&self, worker: &PaneWatchWorkerIdentity, end: &PaneWatchEnd) {

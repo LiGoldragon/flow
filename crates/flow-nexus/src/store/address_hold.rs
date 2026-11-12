@@ -91,7 +91,12 @@ pub(crate) trait HoldsLaunchAddress {
     /// `flow_id` ended: its hold is given back when it has one; otherwise a
     /// metaflow Awake as it is recorded Asleep, the flow joining Past, and
     /// every lock that metaflow holds as a sender is retracted, so a
-    /// recipient is never held by a sender that has ended.
+    /// recipient is never held by a sender that has ended. In that same
+    /// commit every pending reap the ended flow owed at the Address is
+    /// reassigned to the Address (`reaps_reassigned`): a row whose pane
+    /// was witnessed gone is finished, one whose pane step is owed is held
+    /// by the Address, with no Herdr call. A flow that only held the
+    /// Address, or is Awake nowhere, owns no reap and reassigns none.
     fn ended_at_address(
         &self,
         flow_id: &str,
@@ -213,6 +218,11 @@ impl HoldsLaunchAddress for FlowStore {
         metaflow.past.0.retain(|past| past.0 != flow_id);
         metaflow.past.0.push(flow_ethos::FlowId(flow_id.to_owned()));
         let commit = commit.mutate(self.metaflows, StoredMetaflow { metaflow });
+        // This commit puts the Address to sleep: what the ended flow owed
+        // there is reassigned in it, to the Address, read now under the
+        // caller's dispatch-gate hold.
+        use super::pending_reap::ReassignsPendingReaps;
+        let commit = self.reaps_reassigned(&address, None, commit)?.commit;
         self.sender_locks_released(&address, commit)
     }
 

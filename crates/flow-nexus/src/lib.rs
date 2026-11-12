@@ -546,19 +546,31 @@ impl Dispatches for RunningNexus {
                 let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
                     return Response::StopRejected(signal_flow::StopRejection::RouteUnavailable);
                 };
-                if !matches!(
-                    self.herdr.pane_presence(&node),
-                    herdr::PanePresence::Present | herdr::PanePresence::Bare
-                ) {
-                    return Response::StopRejected(signal_flow::StopRejection::RouteUnavailable);
-                }
-                // No write is left half-typed into a pane as it closes.
-                let closed = {
-                    let _lease = self.pane_leases.hold(route);
-                    self.perform(Operation::Close(node.clone()))
-                };
-                if closed != Outcome::Closed {
-                    return Response::StopRejected(signal_flow::StopRejection::CloseRefused);
+                match self.herdr.pane_presence(&node) {
+                    herdr::PanePresence::Present | herdr::PanePresence::Bare => {
+                        // No write is left half-typed into a pane as it
+                        // closes.
+                        let closed = {
+                            let _lease = self.pane_leases.hold(route);
+                            self.perform(Operation::Close(node.clone()))
+                        };
+                        if closed != Outcome::Closed {
+                            return Response::StopRejected(
+                                signal_flow::StopRejection::CloseRefused,
+                            );
+                        }
+                    }
+                    // Positively gone: the route is recorded and a readable
+                    // snapshot, with its roster and its pane list, shows
+                    // neither the binding nor the pane. The flow is recorded
+                    // Stopped with no close, so a Stop retried after its
+                    // record was refused re-runs the end and what it owes.
+                    herdr::PanePresence::Absent => {}
+                    herdr::PanePresence::Unknown => {
+                        return Response::StopRejected(
+                            signal_flow::StopRejection::RouteUnavailable,
+                        );
+                    }
                 }
                 if self.perform(Operation::Record(Record_Data::Stopped(flow_id.clone())))
                     != Outcome::Recorded
@@ -2481,6 +2493,7 @@ mod tests {
     mod open_requests;
     mod queue_drain;
     mod queue_operations;
+    mod reap_takeover;
     pub(crate) mod reaping;
     mod refresh_and_compaction;
     mod refreshing;
@@ -3587,13 +3600,29 @@ mod tests {
         }
     }
 
+    /// The pane list a Herdr snapshot carries beside `agents`: every pane
+    /// an agent is shown in, as Herdr lists each pane it holds.
+    fn panes_of(agents: &[serde_json::Value]) -> Vec<serde_json::Value> {
+        agents
+            .iter()
+            .filter_map(|agent| {
+                Some(serde_json::json!({
+                    "pane_id": agent.get("pane_id")?,
+                    "terminal_id": agent.get("terminal_id")?,
+                }))
+            })
+            .collect()
+    }
+
     impl ControlsHerdrSnapshot for NexusFixture {
         fn set_agents(&self, agents: Vec<serde_json::Value>) {
+            let panes = panes_of(&agents);
             let snapshot = serde_json::json!({
                 "id":"cli:api:snapshot",
                 "result":{
                     "snapshot":{
                         "agents":agents,
+                        "panes":panes,
                         "protocol":20,
                         "version":"0.8.2"
                     },

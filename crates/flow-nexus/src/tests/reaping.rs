@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 
 pub(crate) const PREDECESSOR: &str = "fac697";
 pub(crate) const SUCCESSOR: &str = "908786";
-const PREDECESSOR_PANE: &str = "w1:p3";
+pub(super) const PREDECESSOR_PANE: &str = "w1:p3";
 
 /// Every row of every Flow family, sorted by key, and every catalog entry,
 /// read from the closed store with no Nexus over it: the logical-rows-and-
@@ -295,6 +295,17 @@ pub(crate) enum PaneShown {
     Occupied,
     /// Herdr cannot be read.
     Unreadable,
+    /// The predecessor's own Codex agent reports no session, and the pane's
+    /// foreground process is the one `foreground.pid` names: Owned when it
+    /// resumes the recorded thread, Foreign when another, Unproven when
+    /// none.
+    SessionUnreported,
+    /// A Claude agent at the predecessor's pane: another harness.
+    OtherHarness,
+    /// The recorded pane and terminal with no agent on them.
+    Bare,
+    /// A snapshot that carries its roster and no pane list.
+    NoPaneList,
 }
 
 /// One world of a replacement: the predecessor fac697 at w1:p3 in the
@@ -308,7 +319,7 @@ pub(super) struct ReapWorld {
 }
 
 /// The files the fake Herdr reads, each in the fixture's directory.
-trait NamesHerdrFiles {
+pub(super) trait NamesHerdrFiles {
     fn file(&self, name: &str) -> PathBuf;
 }
 
@@ -325,6 +336,9 @@ pub(super) trait StagesReap {
     fn show(&self, shown: PaneShown);
     /// The exit status of the next `pane close`.
     fn close_exits(&self, status: i32);
+    /// The process `pane process-info` shows in the predecessor's
+    /// foreground.
+    fn foreground(&self, pid: u32);
     /// Makes the next snapshot, or close, block until killed.
     fn block_snapshot(&self, block: bool);
     fn block_close(&self, block: bool);
@@ -378,30 +392,74 @@ impl StagesReap for ReapWorld {
         world.install_herdr();
         world.show(PaneShown::Present);
         world.close_exits(0);
+        world.foreground(1);
         world
     }
 
     fn show(&self, shown: PaneShown) {
-        let mut agents = vec![self.fixture.successor_agent()];
+        // The successor's own pane is shown until a test takes it away.
+        let mut agents = if self.fixture.file("successor-gone").exists() {
+            vec![]
+        } else {
+            vec![self.fixture.successor_agent()]
+        };
+        let mut bare = None;
         match shown {
             PaneShown::Present => agents.push(self.fixture.current_agent()),
-            PaneShown::Absent => {}
+            PaneShown::Absent | PaneShown::NoPaneList => {}
             PaneShown::Occupied => {
                 let mut other = self.fixture.current_agent();
                 other["agent_session"]["value"] = "another-native-session".into();
                 agents.push(other);
+            }
+            PaneShown::SessionUnreported => {
+                let mut unreported = self.fixture.current_agent();
+                unreported
+                    .as_object_mut()
+                    .expect("an agent object")
+                    .remove("agent_session");
+                agents.push(unreported);
+            }
+            PaneShown::OtherHarness => {
+                let mut claude = self.fixture.current_agent();
+                claude["agent"] = "claude".into();
+                claude["agent_session"] = serde_json::json!({
+                    "source":"herdr:claude","agent":"claude","kind":"id","value":"another-claude"
+                });
+                agents.push(claude);
+            }
+            PaneShown::Bare => {
+                let predecessor = self.fixture.current_agent();
+                bare = Some(serde_json::json!({
+                    "pane_id": predecessor["pane_id"],
+                    "terminal_id": predecessor["terminal_id"],
+                }));
             }
             PaneShown::Unreadable => {
                 fs::write(self.fixture.file("snapshot.json"), "unreadable").unwrap();
                 return;
             }
         }
-        let snapshot = serde_json::json!({
-            "id":"cli:api:snapshot",
-            "result":{"snapshot":{"agents":agents,"protocol":20,"version":"0.8.2"},
-            "type":"session_snapshot"}
-        });
+        let mut panes = super::panes_of(&agents);
+        panes.extend(bare);
+        let snapshot = if shown == PaneShown::NoPaneList {
+            serde_json::json!({
+                "id":"cli:api:snapshot",
+                "result":{"snapshot":{"agents":agents,"protocol":20,"version":"0.8.2"},
+                "type":"session_snapshot"}
+            })
+        } else {
+            serde_json::json!({
+                "id":"cli:api:snapshot",
+                "result":{"snapshot":{"agents":agents,"panes":panes,"protocol":20,"version":"0.8.2"},
+                "type":"session_snapshot"}
+            })
+        };
         fs::write(self.fixture.file("snapshot.json"), snapshot.to_string()).unwrap();
+    }
+
+    fn foreground(&self, pid: u32) {
+        fs::write(self.fixture.file("foreground.pid"), pid.to_string()).unwrap();
     }
 
     fn close_exits(&self, status: i32) {
@@ -523,7 +581,7 @@ impl InstallsReapHerdr for ReapWorld {
             reply = file("gate-probe.reply"),
         );
         let body = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\n[ \"$1 $2 $3\" = \"session list --json\" ] && {{ cat '{sessions}'; exit 0; }}\ncase \"$*\" in\n  \"--session fixture-session agent get w1:p1\") printf '%s\\n' '{agent}' ;;\n  *\" api snapshot\") {probe}; [ -e '{block_snapshot}' ] && exec sleep 600; [ \"$(cat '{snapshot}')\" = unreadable ] && exit 1; cat '{snapshot}' ;;\n  *\" pane close \"*) {probe}; [ -e '{block_close}' ] && exec sleep 600; exit \"$(cat '{close}')\" ;;\n  *\" agent read \"*) printf '%s\\n' '› ' ;;\n  *) exit 64 ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\n[ \"$1 $2 $3\" = \"session list --json\" ] && {{ cat '{sessions}'; exit 0; }}\ncase \"$*\" in\n  \"--session fixture-session agent get w1:p1\") printf '%s\\n' '{agent}' ;;\n  *\" api snapshot\") {probe}; [ -e '{block_snapshot}' ] && exec sleep 600; [ \"$(cat '{snapshot}')\" = unreadable ] && exit 1; cat '{snapshot}' ;;\n  *\" pane close \"*) {probe}; [ -e '{block_close}' ] && exec sleep 600; exit \"$(cat '{close}')\" ;;\n  *\" pane process-info \"*) printf '{{\"result\":{{\"process_info\":{{\"pane_id\":\"%s\",\"foreground_processes\":[{{\"pid\":%s}}]}}}}}}\\n' \"$6\" \"$(cat '{foreground}')\" ;;\n  *\" agent read \"*) printf '%s\\n' '› ' ;;\n  *) exit 64 ;;\nesac\n",
             log = self.log.display(),
             sessions = file("herdr-sessions.json"),
             agent = agent,
@@ -532,6 +590,7 @@ impl InstallsReapHerdr for ReapWorld {
             snapshot = file("snapshot.json"),
             block_close = file("block-close"),
             close = file("close-status"),
+            foreground = file("foreground.pid"),
         );
         FixtureExecutable {
             path: self.fixture.snapshot_program.clone(),
@@ -684,6 +743,7 @@ pub(super) fn finish_reaps(fixture: &NexusFixture) {
             &row.predecessor.0,
             &ArmedReap {
                 launch_request_id: row.launch_request_id.clone(),
+                reap_responsibility: row.reap_responsibility.clone(),
                 route,
             },
             &cancellation,
@@ -725,25 +785,25 @@ impl ReadsLaunchedSuccessor for ReapWorld {
     }
 }
 
-fn is_reap_pending(response: &Response, standing: ReapStanding) -> bool {
+pub(super) fn is_reap_pending(response: &Response, standing: ReapStanding) -> bool {
     matches!(response, Response::ReapPending(pending)
         if pending.predecessor.0.0 == PREDECESSOR
             && pending.launched.flow_id.0 == SUCCESSOR
             && pending.reap_standing == standing)
 }
 
-fn vetted(response: &meta_signal_flow::Response) -> bool {
+pub(super) fn vetted(response: &meta_signal_flow::Response) -> bool {
     matches!(response, meta_signal_flow::Response::Vetted)
 }
 
-fn delivery_rejected(
+pub(super) fn delivery_rejected(
     response: &meta_signal_flow::Response,
     rejection: meta_signal_flow::DeliveryRejection,
 ) -> bool {
     matches!(response, meta_signal_flow::Response::DeliveryRejected(found) if *found == rejection)
 }
 
-fn inspect(world: &ReapWorld) -> Vec<meta_signal_flow::VisibleAttempt> {
+pub(super) fn inspect(world: &ReapWorld) -> Vec<meta_signal_flow::VisibleAttempt> {
     match world
         .fixture
         .nexus
@@ -755,7 +815,7 @@ fn inspect(world: &ReapWorld) -> Vec<meta_signal_flow::VisibleAttempt> {
     }
 }
 
-fn inspected_reap(world: &ReapWorld) -> Option<ReapStanding> {
+pub(super) fn inspected_reap(world: &ReapWorld) -> Option<ReapStanding> {
     inspect(world)
         .into_iter()
         .find_map(|attempt| match attempt {

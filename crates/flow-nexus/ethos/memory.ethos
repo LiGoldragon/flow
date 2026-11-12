@@ -10,7 +10,9 @@
 ; kept as an obligation beside its outcome, each fact once. A PendingReap
 ; is the reap a replacement owes its predecessor, keyed by the predecessor:
 ; its pane closed and the Address's handover handed on; its successor is
-; read through its launch's outcome, never copied here. A PendingHandover
+; read through its launch's outcome, never copied here, and who owes it is
+; recorded with it: the successor, a later flow that took it over, or the
+; Address when nothing receives there. A PendingHandover
 ; is the handover a fresh launch owes at its Address, one at most per
 ; Address. Which flow an Address receives as is read from the metaflow and
 ; its AddressHold, never from an obligation.
@@ -32,8 +34,20 @@ Memory
                   HandoverSuperseded.SupersededHandover ]
   SupersededHandover.{ Address HandoverOwner LaunchedRecord Successor }
   Replacement.{ LaunchRequestId Predecessor.String }
-  ; The reap a predecessor is owed, keyed by the predecessor's FlowId.
-  PendingReap.{ Predecessor LaunchRequestId Address ReapStanding }
+  ; The reap a predecessor is owed, keyed by the predecessor's FlowId; its
+  ; successor is read through its launch's outcome; its responsibility says
+  ; whose bearing events take it up.
+  PendingReap.{ Predecessor LaunchRequestId Address ReapStanding ReapResponsibility }
+  ; Who owes a pending reap: the flow its Address receives as, or the
+  ; Address itself when nothing receives there. LaunchSuccessor is the
+  ; successor its launch's outcome names; W3 writes it.
+  ReapResponsibility.[ LaunchSuccessor
+                       ; A later flow receiving at the Address took it over.
+                       TakenOver.Responsible
+                       ; No flow receives at the Address: the row's own
+                       ; Address holds it.
+                       AddressHeld ]
+  Responsible.FlowId
   ; The handover owed at an Address to the flow a fresh launch made its
   ; receiving flow, keyed by the Address: one at most per Address.
   PendingHandover.{ Address HandoverOwner Successor LaunchRequestId HandoverCloseRefusal }

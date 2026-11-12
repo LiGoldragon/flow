@@ -25,7 +25,9 @@ use super::{
     FLOW_LAUNCH_OUTCOME_TABLE_NAME, FlowLifecycle, FlowRecord, FlowStore, LaunchOutcome,
     StoreError, StoredLaunchAttempt, StoredLaunchOutcome,
 };
-use crate::generated::memory::{PendingHandover, PendingReap, Predecessor, Replacement};
+use crate::generated::memory::{
+    PendingHandover, PendingReap, Predecessor, ReapResponsibility, Replacement, Responsible,
+};
 use crate::generated::starter::{LaunchedRecord, ReplacedRecord};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -173,8 +175,45 @@ impl UpgradesLaunchOutcome for StoredLaunchOutcomeV9 {
                 launch_request_id: signal_flow::LaunchRequestId(id),
                 address: attempt.attempt.launch_profile.address.clone(),
                 reap_standing,
+                // Owed by the successor until the evolution reads where
+                // its Address stands (`owned_as_stands`).
+                reap_responsibility: ReapResponsibility::LaunchSuccessor,
             }),
         ))
+    }
+}
+
+/// Who owes an upgraded reap, by the state of its Address's metaflow.
+trait OwnsUpgradedReap {
+    /// `LaunchSuccessor` when the metaflow is Awake as the successor;
+    /// `TakenOver` by another flow it is Awake as; `AddressHeld` when it is
+    /// Asleep or has no row.
+    fn owned_as_stands(
+        self,
+        successor: Option<&signal_flow::FlowId>,
+        state: Option<&flow_ethos::State>,
+    ) -> PendingReap;
+}
+
+impl OwnsUpgradedReap for PendingReap {
+    fn owned_as_stands(
+        self,
+        successor: Option<&signal_flow::FlowId>,
+        state: Option<&flow_ethos::State>,
+    ) -> PendingReap {
+        let reap_responsibility = match state {
+            Some(flow_ethos::State::Awake(awake)) if Some(awake) == successor => {
+                ReapResponsibility::LaunchSuccessor
+            }
+            Some(flow_ethos::State::Awake(awake)) => {
+                ReapResponsibility::TakenOver(Responsible(awake.clone()))
+            }
+            Some(flow_ethos::State::Asleep) | None => ReapResponsibility::AddressHeld,
+        };
+        PendingReap {
+            reap_responsibility,
+            ..self
+        }
     }
 }
 
@@ -269,6 +308,13 @@ impl UpgradesReapMemory for FlowStore {
             sema_engine::FamilyName::new("flow-nexus-flow"),
             FlowRecord::schema_hash(),
         ))?;
+        let metaflows =
+            engine.register_table(sema_engine::TableDescriptor::<super::StoredMetaflow>::new(
+                super::METAFLOW_TABLE_NAME,
+                sema_engine::FamilyName::new("flow-nexus-metaflow"),
+                super::StoredMetaflow::schema_hash(),
+            ))?;
+        let metaflow_rows = engine.match_records(QueryPlan::all(metaflows))?;
         let attempt_rows = engine.match_records(QueryPlan::all(attempts))?;
         let replacement_rows = engine.match_records(QueryPlan::all(replacements))?;
         let flow_rows = engine.match_records(QueryPlan::all(flows))?;
@@ -298,6 +344,23 @@ impl UpgradesReapMemory for FlowStore {
                 .clone()
                 .upgraded(replacement_of(&id), attempt_of(&id))
                 .map_err(refused)?;
+            // The successor that 0.54.6 held out of routing may have ended
+            // since: the row is owed as its Address stands now, read in
+            // this same evolution (the invariant of `reaps_reassigned`).
+            let reap = reap.map(|reap| {
+                let successor = match &outcome {
+                    LaunchOutcome::ReapPending(replaced) => {
+                        Some(replaced.launched_record.flow_id.clone())
+                    }
+                    _ => None,
+                };
+                let state = metaflow_rows
+                    .records()
+                    .iter()
+                    .find(|stored| stored.metaflow.address == reap.address)
+                    .map(|stored| stored.metaflow.state.clone());
+                reap.owned_as_stands(successor.as_ref(), state.as_ref())
+            });
             outcomes.push(StoredLaunchOutcome {
                 launch_request_id: id,
                 launch_outcome: outcome,

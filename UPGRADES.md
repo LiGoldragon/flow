@@ -34,8 +34,43 @@ Contracts: signal-flow 61.0.0 (4871bb8) and meta-signal-flow 77.0.0
   next rest (store only; it rearms the worker), the worker's own Herdr events
   and the Nexus start. Each worker announces its own completion as its thread
   leaves its body, by return or unwind, and the supervisor joins that worker
-  on it, once; a lapsed worker so ends with no store change and is not armed
-  again by its own completion.
+  on it, once, whether or not that pass can read the store; a lapsed worker
+  so ends with no store change and is not armed again by its own completion.
+- **A pending reap outlives its successor.** Who owes a reap is recorded on
+  its row (`ReapResponsibility`: `LaunchSuccessor`, `TakenOver.<Flow>`,
+  `AddressHeld`) and follows the Address's receiving flow. Every commit that
+  changes it reassigns the reaps there: the successor's end (Stop, Retire,
+  Exited by a delivery, a wake, a refresh or an observation), a later
+  launch's settlement (W3, `StartedHandedOver`, `HandoverOwed`, revalidated
+  against the Address's receiving flow in the same commit), an adoption, a
+  Bind, a rebind, a wake's `Awoken`, a `Record.Asleep` and the forgetting of
+  an ended binding. A row whose pane was witnessed gone (`SettleUnrecorded`,
+  `HandoverRefused`) is finished in that commit, `Replaced`, with no Herdr
+  call and no generation; a pane-owed or `PredecessorUnknown` row moves to the
+  new owner and its worker is re-armed under it; a reassigned worker is
+  cancelled (`ObligationReassigned`) or, revalidating first, ends `Stale`,
+  writing nothing. A `LaunchSuccessor` row whose outcome is not `ReapPending`
+  has a Missing owner: nothing moves, arms or settles it. The Nexus start
+  settles a store-only row the Address holds and reads an unknown predecessor
+  the Address holds once, with no Herdr call and no retry.
+- **One close rule for every reap.** A predecessor's pane is closed only when
+  a fresh read shows it `Owned` (its session, or a Codex foreground `resume`
+  of its thread) or `Bare`; `Foreign`, `Unproven` and `Unidentified` are never
+  closed; `Absent` settles only from a snapshot carrying its pane list, and a
+  snapshot without one is `Unknown`, everywhere `PanePresence` is read too.
+  The close is made on the read's evidence (the snapshot-to-close race), and
+  a `Bare` pane at the predecessor's terminal is closed even when a person
+  works in its plain shell (the Bare-shell boundary).
+- **Stop records a positively gone pane.** A Stop of a live flow whose
+  recorded pane a readable snapshot shows `Absent` records `Stopped` with no
+  close, where it answered `RouteUnavailable`; a route not recorded, or a
+  snapshot that proves nothing, still answers `RouteUnavailable`. Such a flow
+  is recorded Stopped, not Exited, so a Maintained metaflow is owed no
+  successor for it.
+- **Two paths take the dispatch gate.** An ordered replacement started after
+  its flow ended (`start_ordered`) starts and settles under the gate, as
+  every other start does, and a kept Claude seat's compaction runs under the
+  hold that drained it.
 - **A fresh start's handover is an obligation.** A Start or fresh Launch
   whose handover cannot move answers `HandoverPending` and is taken up at its
   flow's next rest, its own `Keep`/`Drop`, or the start; a later launch at the
@@ -60,7 +95,7 @@ Contracts: signal-flow 61.0.0 (4871bb8) and meta-signal-flow 77.0.0
 | Family | Table | 0.54.6 | 0.54.7 |
 |---|---|---|---|
 | flow-nexus-launch-outcome | flow_nexus_launch_outcomes | v9 | v10: `ReapPending`, `HandoverPending`, `HandoverSuperseded`; no `ReapRefused` |
-| flow-nexus-pending-reap | flow_nexus_pending_reaps | absent | v1 |
+| flow-nexus-pending-reap | flow_nexus_pending_reaps | absent | v2: `ReapResponsibility` (a v1 store of an earlier 0.54.7 candidate build is refused at open) |
 | flow-nexus-pending-handover | flow_nexus_pending_handovers | absent | v1 |
 | flow-nexus-flow | flow_nexus_flows | v6 | v6; a refused reap's predecessor still live is recorded Stopped |
 
@@ -69,7 +104,10 @@ any family is registered: the outcome family v9 to v10, the two new families
 registered, each live predecessor of a refused reap recorded Stopped. A v9
 `ReplaceRejected(ReapRefused(r))` becomes `ReapPending` with a PendingReap
 (`RouteUnavailable` to `HerdrUnavailable`, `CloseRefused` to `CloseRefused`,
-any other to `Owed`); every other outcome maps to itself; no PendingHandover
+any other to `Owed`), owed as its Address stands in the same evolution
+(`LaunchSuccessor` when the metaflow is Awake as the successor, `TakenOver` by
+another flow it is Awake as, `AddressHeld` when Asleep or absent); every other
+outcome maps to itself; no PendingHandover
 is written (one owed by derivation is taken up at its flow's first rest). A
 refused reap whose launch has no attempt, binding or replacement refuses the
 upgrade, typed (`ReapUpgrade`), and nothing is written. A v9 family holding

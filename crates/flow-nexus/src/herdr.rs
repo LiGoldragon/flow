@@ -608,21 +608,13 @@ impl ReadsHerdrPanes for HerdrCli {
         }) {
             return PanePresence::Unknown;
         }
-        let shown = snapshot
-            .pointer("/result/snapshot/panes")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|panes| {
-                panes.iter().any(|pane| {
-                    pane.get("pane_id").and_then(serde_json::Value::as_str)
-                        == Some(route.herdr_pane_id.0.as_str())
-                        && pane.get("terminal_id").and_then(serde_json::Value::as_str)
-                            == Some(route.herdr_terminal_id.0.as_str())
-                })
-            });
-        if shown {
-            return PanePresence::Bare;
+        // Gone is judged only from a snapshot that lists its panes: one
+        // without a pane list proves nothing of the pane.
+        match snapshot.shows_pane(route) {
+            Some(true) => PanePresence::Bare,
+            Some(false) => PanePresence::Absent,
+            None => PanePresence::Unknown,
         }
-        PanePresence::Absent
     }
 
     fn pane_ownership(&self, node: &FlowNode) -> PaneOwnership {
@@ -635,44 +627,11 @@ impl ReadsHerdrPanes for HerdrCli {
         let Some(snapshot) = self.snapshot(route) else {
             return PaneOwnership::Unknown;
         };
-        let Some(agents) = snapshot
-            .pointer("/result/snapshot/agents")
-            .and_then(serde_json::Value::as_array)
-        else {
-            return PaneOwnership::Unknown;
-        };
-        if let Some(agent) = agents
-            .iter()
-            .find(|agent| agent.matches_binding(route, &node.harness_kind))
-        {
-            return match (
-                agent
-                    .pointer("/agent_session/value")
-                    .and_then(serde_json::Value::as_str),
-                &node.harness_kind,
-            ) {
-                (Some(session), _) if session == node.session_id.0 => PaneOwnership::Owned,
-                (Some(_), _) => PaneOwnership::Foreign,
-                (None, HarnessKind::Codex) => {
-                    match self.foreground_resumes(route, &node.session_id.0) {
-                        Some(true) => PaneOwnership::Owned,
-                        Some(false) => PaneOwnership::Unproven,
-                        None => PaneOwnership::Unknown,
-                    }
-                }
-                (None, HarnessKind::Claude) => PaneOwnership::Unproven,
-            };
-        }
-        if agents.iter().any(|agent| {
-            agent.get("pane_id").and_then(serde_json::Value::as_str)
-                == Some(route.herdr_pane_id.0.as_str())
-        }) {
-            return PaneOwnership::Foreign;
-        }
-        match self.pane_presence(node) {
-            PanePresence::Bare => PaneOwnership::Bare,
-            PanePresence::Absent => PaneOwnership::Absent,
-            PanePresence::Present | PanePresence::Unknown => PaneOwnership::Unknown,
+        let judged: Result<PaneOwnership, std::convert::Infallible> =
+            snapshot.ownership_in(node, route, &mut |route| Ok(self.foreground_threads(route)));
+        match judged {
+            Ok(ownership) => ownership,
+            Err(never) => match never {},
         }
     }
 
@@ -709,45 +668,16 @@ impl ReadsHerdrPanes for HerdrCli {
 
     fn foreground_processes(&self, route: &HerdrRoute) -> Option<Vec<ForegroundProcess>> {
         use crate::herdr::launch::RunsHerdr;
-        let processes = self
-            .run_json(&[
-                "--session".into(),
-                route.herdr_session_name.clone().0,
-                "pane".into(),
-                "process-info".into(),
-                "--pane".into(),
-                route.herdr_pane_id.clone().0,
-            ])
-            .ok()?;
-        let information = processes.pointer("/result/process_info")?;
-        if information
-            .get("pane_id")
-            .and_then(serde_json::Value::as_str)
-            != Some(route.herdr_pane_id.0.as_str())
-        {
-            return None;
-        }
-        let foreground = information
-            .get("foreground_processes")
-            .and_then(serde_json::Value::as_array)?;
-        Some(
-            foreground
-                .iter()
-                .filter_map(|process| {
-                    let process_id = u32::try_from(process.get("pid")?.as_u64()?).ok()?;
-                    let cmdline = fs::read(format!("/proc/{process_id}/cmdline")).ok()?;
-                    let arguments = cmdline
-                        .split(|byte| *byte == 0)
-                        .filter(|argument| !argument.is_empty())
-                        .map(|argument| String::from_utf8_lossy(argument).into_owned())
-                        .collect();
-                    Some(ForegroundProcess {
-                        process_id,
-                        arguments,
-                    })
-                })
-                .collect(),
-        )
+        self.run_json(&[
+            "--session".into(),
+            route.herdr_session_name.clone().0,
+            "pane".into(),
+            "process-info".into(),
+            "--pane".into(),
+            route.herdr_pane_id.clone().0,
+        ])
+        .ok()?
+        .foreground_processes_of(route)
     }
 
     fn refresh_route(&self, mut node: FlowNode) -> FlowNode {
@@ -1299,25 +1229,6 @@ mod tests {
     }
 }
 
-/// What a fresh Herdr snapshot shows at the pane a reap watches, read for
-/// whether the pane is the predecessor's to close, gone, or another's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReapedPane {
-    /// The recorded pane and terminal run an agent of the recorded harness
-    /// reporting the recorded native session, or reporting none.
-    Present,
-    /// The recorded pane and terminal show no agent.
-    Bare,
-    /// A readable snapshot shows neither the pane nor an agent in it.
-    Absent,
-    /// The pane runs another native session than the predecessor's, or an
-    /// agent of another terminal or harness: it is never closed and not
-    /// counted gone.
-    Occupied,
-    /// Herdr could not be read, or its snapshot carries no agent roster.
-    Unknown,
-}
-
 /// What one cancellable `pane close` came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PaneClose {
@@ -1325,58 +1236,163 @@ pub(crate) enum PaneClose {
     Refused(String),
 }
 
-/// Reads a snapshot for the pane a reap watches.
-pub(crate) trait ReadsReapedPane {
-    fn reaped_pane(&self, node: &FlowNode) -> ReapedPane;
+/// The read of the threads a pane's foreground processes resume: None when
+/// Herdr's process information cannot be read; its error is the reader's
+/// own (a cancellation, for the reap worker).
+pub(crate) type ForegroundThreadsRead<'read, E> =
+    dyn FnMut(&HerdrRoute) -> Result<Option<BTreeSet<String>>, E> + 'read;
+
+/// Judges, from one Herdr snapshot, whether a Flow's recorded pane is
+/// still that Flow's own (`PaneOwnership`). The one judgment every close
+/// of a Flow's pane takes: `HerdrCli::pane_ownership` under the gate, and
+/// the reap worker's cancellable read outside it.
+pub(crate) trait JudgesPaneOwnership {
+    /// Whether the snapshot lists the recorded pane and terminal among its
+    /// panes; None when it carries no pane list.
+    fn shows_pane(&self, route: &HerdrRoute) -> Option<bool>;
+    /// The ownership of `node`'s pane at `route`, its native session
+    /// recorded. `foreground` reads the threads the pane's foreground
+    /// processes resume, only for a binding agent that reports no session
+    /// (a Codex TUI resumed remotely reports none); its None is Herdr
+    /// unread. Bare and Absent are judged from this same snapshot, and a
+    /// snapshot without its agent roster or its pane list is Unknown.
+    fn ownership_in<E>(
+        &self,
+        node: &FlowNode,
+        route: &HerdrRoute,
+        foreground: &mut ForegroundThreadsRead<'_, E>,
+    ) -> Result<PaneOwnership, E>;
 }
 
-impl ReadsReapedPane for serde_json::Value {
-    fn reaped_pane(&self, node: &FlowNode) -> ReapedPane {
-        let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
-            return ReapedPane::Unknown;
-        };
-        let Some(agents) = self
-            .pointer("/result/snapshot/agents")
+impl JudgesPaneOwnership for serde_json::Value {
+    fn shows_pane(&self, route: &HerdrRoute) -> Option<bool> {
+        self.pointer("/result/snapshot/panes")
             .and_then(serde_json::Value::as_array)
-        else {
-            return ReapedPane::Unknown;
-        };
-        if let Some(agent) = agents
-            .iter()
-            .find(|agent| agent.matches_binding(route, &node.harness_kind))
-        {
-            return match agent
-                .pointer("/agent_session/value")
-                .and_then(serde_json::Value::as_str)
-            {
-                Some(session) if !node.session_id.0.is_empty() && session != node.session_id.0 => {
-                    ReapedPane::Occupied
-                }
-                _ => ReapedPane::Present,
-            };
-        }
-        if agents.iter().any(|agent| {
-            agent.get("pane_id").and_then(serde_json::Value::as_str)
-                == Some(route.herdr_pane_id.0.as_str())
-        }) {
-            return ReapedPane::Occupied;
-        }
-        let shown = self
-            .pointer("/result/snapshot/panes")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|panes| {
+            .map(|panes| {
                 panes.iter().any(|pane| {
                     pane.get("pane_id").and_then(serde_json::Value::as_str)
                         == Some(route.herdr_pane_id.0.as_str())
                         && pane.get("terminal_id").and_then(serde_json::Value::as_str)
                             == Some(route.herdr_terminal_id.0.as_str())
                 })
-            });
-        if shown {
-            ReapedPane::Bare
-        } else {
-            ReapedPane::Absent
+            })
+    }
+
+    fn ownership_in<E>(
+        &self,
+        node: &FlowNode,
+        route: &HerdrRoute,
+        foreground: &mut ForegroundThreadsRead<'_, E>,
+    ) -> Result<PaneOwnership, E> {
+        let Some(agents) = self
+            .pointer("/result/snapshot/agents")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return Ok(PaneOwnership::Unknown);
+        };
+        if let Some(agent) = agents
+            .iter()
+            .find(|agent| agent.matches_binding(route, &node.harness_kind))
+        {
+            if node.session_id.0.is_empty() {
+                return Ok(PaneOwnership::Unidentified);
+            }
+            return Ok(
+                match (
+                    agent
+                        .pointer("/agent_session/value")
+                        .and_then(serde_json::Value::as_str),
+                    &node.harness_kind,
+                ) {
+                    (Some(session), _) if session == node.session_id.0 => PaneOwnership::Owned,
+                    (Some(_), _) => PaneOwnership::Foreign,
+                    // A Codex TUI resumed remotely reports no session: its
+                    // foreground `resume <thread>` is the proof.
+                    (None, HarnessKind::Codex) => match foreground(route)? {
+                        None => PaneOwnership::Unknown,
+                        Some(threads) if threads.contains(&node.session_id.0) => {
+                            PaneOwnership::Owned
+                        }
+                        Some(threads) if !threads.is_empty() => PaneOwnership::Foreign,
+                        Some(_) => PaneOwnership::Unproven,
+                    },
+                    // A Claude agent that reports no session may be a new
+                    // `claude` started in the shell after the Flow's own
+                    // exited, before its hook reported.
+                    (None, HarnessKind::Claude) => PaneOwnership::Unproven,
+                },
+            );
         }
+        if agents.iter().any(|agent| {
+            agent.get("pane_id").and_then(serde_json::Value::as_str)
+                == Some(route.herdr_pane_id.0.as_str())
+        }) {
+            return Ok(PaneOwnership::Foreign);
+        }
+        Ok(match self.shows_pane(route) {
+            None => PaneOwnership::Unknown,
+            Some(true) => PaneOwnership::Bare,
+            Some(false) => PaneOwnership::Absent,
+        })
+    }
+}
+
+/// Reads Herdr's `pane process-info` answer for one pane.
+pub(crate) trait ReadsForegroundProcesses {
+    /// The pane's foreground processes and their kernel-read command
+    /// lines; None when the answer is not this pane's.
+    fn foreground_processes_of(&self, route: &HerdrRoute) -> Option<Vec<ForegroundProcess>>;
+    /// Every thread a foreground process of the pane resumes.
+    fn foreground_threads_of(&self, route: &HerdrRoute) -> Option<BTreeSet<String>>;
+}
+
+impl ReadsForegroundProcesses for serde_json::Value {
+    fn foreground_processes_of(&self, route: &HerdrRoute) -> Option<Vec<ForegroundProcess>> {
+        let information = self.pointer("/result/process_info")?;
+        if information
+            .get("pane_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(route.herdr_pane_id.0.as_str())
+        {
+            return None;
+        }
+        let foreground = information
+            .get("foreground_processes")
+            .and_then(serde_json::Value::as_array)?;
+        Some(
+            foreground
+                .iter()
+                .filter_map(|process| {
+                    let process_id = u32::try_from(process.get("pid")?.as_u64()?).ok()?;
+                    let cmdline = fs::read(format!("/proc/{process_id}/cmdline")).ok()?;
+                    let arguments = cmdline
+                        .split(|byte| *byte == 0)
+                        .filter(|argument| !argument.is_empty())
+                        .map(|argument| String::from_utf8_lossy(argument).into_owned())
+                        .collect();
+                    Some(ForegroundProcess {
+                        process_id,
+                        arguments,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    fn foreground_threads_of(&self, route: &HerdrRoute) -> Option<BTreeSet<String>> {
+        self.foreground_processes_of(route).map(|processes| {
+            processes
+                .into_iter()
+                .flat_map(|process| {
+                    process
+                        .arguments
+                        .windows(2)
+                        .filter(|pair| pair[0] == "resume" && !pair[1].is_empty())
+                        .map(|pair| pair[1].clone())
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        })
     }
 }
 
@@ -1417,11 +1433,24 @@ pub(crate) trait ReadsHerdrUntilCancelled {
         session: &str,
         cancellation: &crate::observation_lifetime::ObservationCancellation,
     ) -> Result<Option<PathBuf>, crate::observation_lifetime::ObservationCancellationCause>;
-    fn pane_presence_until(
+    /// `PaneOwnership` of the predecessor's recorded pane, from one
+    /// cancellable snapshot judged by `ownership_in`; its foreground read,
+    /// made only for a binding agent reporting no session, is a cancellable
+    /// `pane process-info`. A route not recorded, or a Herdr unread, is
+    /// Unknown.
+    fn pane_ownership_until(
         &self,
         node: &FlowNode,
         cancellation: &crate::observation_lifetime::ObservationCancellation,
-    ) -> Result<ReapedPane, crate::observation_lifetime::ObservationCancellationCause>;
+    ) -> Result<PaneOwnership, crate::observation_lifetime::ObservationCancellationCause>;
+    /// The threads the pane's foreground processes resume, read through
+    /// `output_until`; Ok(None) when Herdr's process information cannot be
+    /// read.
+    fn foreground_threads_until(
+        &self,
+        route: &HerdrRoute,
+        cancellation: &crate::observation_lifetime::ObservationCancellation,
+    ) -> Result<Option<BTreeSet<String>>, crate::observation_lifetime::ObservationCancellationCause>;
     /// The close the gated reap made in 0.54.6, run through `output_until`.
     fn close_pane_until(
         &self,
@@ -1517,13 +1546,13 @@ impl ReadsHerdrUntilCancelled for HerdrCli {
             }))
     }
 
-    fn pane_presence_until(
+    fn pane_ownership_until(
         &self,
         node: &FlowNode,
         cancellation: &crate::observation_lifetime::ObservationCancellation,
-    ) -> Result<ReapedPane, crate::observation_lifetime::ObservationCancellationCause> {
+    ) -> Result<PaneOwnership, crate::observation_lifetime::ObservationCancellationCause> {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
-            return Ok(ReapedPane::Unknown);
+            return Ok(PaneOwnership::Unknown);
         };
         let Some(output) = self.output_until(
             &[
@@ -1535,11 +1564,51 @@ impl ReadsHerdrUntilCancelled for HerdrCli {
             cancellation,
         )?
         else {
-            return Ok(ReapedPane::Unknown);
+            return Ok(PaneOwnership::Unknown);
         };
-        Ok(serde_json::from_slice::<serde_json::Value>(&output)
-            .map(|snapshot| snapshot.reaped_pane(node))
-            .unwrap_or(ReapedPane::Unknown))
+        let Ok(snapshot) = serde_json::from_slice::<serde_json::Value>(&output) else {
+            return Ok(PaneOwnership::Unknown);
+        };
+        if node.session_id.0.is_empty() {
+            // No session is recorded to prove ownership by; a pane gone is
+            // still told from one present.
+            return Ok(
+                match snapshot.ownership_in(node, route, &mut |_| Ok(None))? {
+                    PaneOwnership::Absent => PaneOwnership::Absent,
+                    PaneOwnership::Unknown => PaneOwnership::Unknown,
+                    _ => PaneOwnership::Unidentified,
+                },
+            );
+        }
+        snapshot.ownership_in(node, route, &mut |route| {
+            self.foreground_threads_until(route, cancellation)
+        })
+    }
+
+    fn foreground_threads_until(
+        &self,
+        route: &HerdrRoute,
+        cancellation: &crate::observation_lifetime::ObservationCancellation,
+    ) -> Result<Option<BTreeSet<String>>, crate::observation_lifetime::ObservationCancellationCause>
+    {
+        let Some(output) = self.output_until(
+            &[
+                "--session",
+                route.herdr_session_name.0.as_str(),
+                "pane",
+                "process-info",
+                "--pane",
+                route.herdr_pane_id.0.as_str(),
+            ],
+            cancellation,
+        )?
+        else {
+            return Ok(None);
+        };
+        let Ok(processes) = serde_json::from_slice::<serde_json::Value>(&output) else {
+            return Ok(None);
+        };
+        Ok(processes.foreground_threads_of(route))
     }
 
     fn close_pane_until(

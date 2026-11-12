@@ -972,9 +972,11 @@ pub(crate) trait SupersedesObligations {
     /// A PendingHandover at `address` naming another successor than `by`
     /// is retracted, its launch's outcome rewritten `HandoverSuperseded`;
     /// with `keeps_row` the row is left for the caller to replace in the
-    /// same commit. A PendingReap at `address` whose standing is
-    /// `HandoverRefused` and whose successor is not `by` is retracted, its
-    /// launch's outcome rewritten `Replaced`. Any other PendingReap stays.
+    /// same commit. The PendingReaps at `address` are taken over by `by`
+    /// (`reaps_reassigned`), but only while the Address, read in this same
+    /// call, receives as `by`: a stale or out-of-turn supersession
+    /// reassigns nothing. The caller holds the dispatch gate, as every
+    /// settlement does.
     fn superseding(
         &self,
         address: &Address,
@@ -993,7 +995,7 @@ impl SupersedesObligations for FlowStore {
         keeps_row: bool,
     ) -> Result<AtomicCommit, StoreError> {
         use super::pending_handover::RecordsPendingHandovers;
-        use super::pending_reap::{RecordsPendingReaps, WritesPendingReap};
+        use super::pending_reap::ReassignsPendingReaps;
         use super::{LaunchOutcome, RecordsLaunchOutcome, WritesLaunchOutcome};
         let mut commit = commit;
         let mut superseded = false;
@@ -1025,29 +1027,12 @@ impl SupersedesObligations for FlowStore {
                 );
             }
         }
-        for row in self.pending_reaps_at(address)? {
-            if !matches!(
-                row.reap_standing,
-                signal_flow::ReapStanding::HandoverRefused(_)
-            ) {
-                continue;
-            }
-            let Some(replaced) = self.reaped_record(&row)? else {
-                continue;
-            };
-            if replaced.launched_record.flow_id == *by {
-                continue;
-            }
-            superseded = true;
-            commit = self.outcome_written(
-                &row.launch_request_id.0,
-                LaunchOutcome::Replaced(replaced),
-                commit,
-            )?;
-            commit = commit.retract(
-                self.pending_reaps,
-                RecordKey::new(row.predecessor.0.clone()),
-            );
+        // Revalidated in this call: only the flow the Address receives as
+        // now takes its reaps over.
+        if super::metaflow::ReadsSuccession::receiving_flow(self, address)?.as_ref() == Some(by) {
+            let reassigned = self.reaps_reassigned(address, Some(by), commit)?;
+            superseded |= reassigned.moved > 0;
+            commit = reassigned.commit;
         }
         #[cfg(test)]
         if superseded {

@@ -14,6 +14,9 @@ pub enum ObservationCancellationCause {
     ObligationRetracted,
     /// A bearing event asked for the reap worker to be armed again.
     Rearmed,
+    /// The obligation a reap worker watched for is owed by another than the
+    /// one it was armed for: an end or a later succession reassigned it.
+    ObligationReassigned,
 }
 
 pub struct ObservationCancellation {
@@ -214,7 +217,8 @@ mod tests {
                 ObservationCancellationCause::PeerClosed => drop(client),
                 ObservationCancellationCause::NexusStopped => stopping.request(),
                 ObservationCancellationCause::ObligationRetracted
-                | ObservationCancellationCause::Rearmed => {
+                | ObservationCancellationCause::Rearmed
+                | ObservationCancellationCause::ObligationReassigned => {
                     unreachable!("a connection's lifetime is never retracted or rearmed")
                 }
             }

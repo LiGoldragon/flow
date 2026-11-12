@@ -2,12 +2,26 @@
 //! its successor is confirmed and receiving.
 //!
 //! A PendingReap is keyed by the predecessor and names the launch whose
-//! successor it follows, the Address, and where the reap stands. Its
-//! successor is read through that launch's outcome, never copied here. The
-//! row is written by W3 (`reap_owed`), its standing rewritten by
-//! `reap_refused`, and it is retracted by `reaped` or by a later launch's
-//! supersession at its Address. Every write announces `launch_changes`
-//! after its commit; the reap worker's supervisor wakes on it.
+//! successor it follows, the Address, where the reap stands, and who owes
+//! it. Its successor is read through that launch's outcome, never copied
+//! here. The row is written by W3 (`reap_owed`), its standing rewritten by
+//! `reap_refused`, and it is retracted by `reaped` or by a reassignment.
+//! Every write announces `launch_changes` after its commit; the reap
+//! worker's supervisor wakes on it.
+//!
+//! Who owes a reap follows the Address's receiving flow. W3 writes
+//! `LaunchSuccessor`: the successor its launch's outcome names. Every
+//! commit that changes which flow the Address receives as carries
+//! `reaps_reassigned` for it: the end of a flow (`ended_at_address`), the
+//! settlement of a launch that made a flow the receiving one
+//! (`superseding`, in W3, C1 and C2), and the adoption, binding, rebinding,
+//! sleep and forgetting of a metaflow. A row whose pane step is owed or
+//! whose predecessor is to be read again becomes `TakenOver` by the new
+//! receiving flow, or `AddressHeld` when nothing receives there; a row
+//! whose pane was already witnessed gone is finished in that commit from
+//! the evidence its standing records, with no Herdr call; a row that stands
+//! as typed state is untouched. The one exception runs from a launch's
+//! confirmation (W2) to its settlement, which owes the reassignment.
 //!
 //! The derived owed reap is the obligation no row records but the rows
 //! imply: a Replacement whose launch has no outcome and whose attempt is
@@ -20,7 +34,7 @@ use super::{
     AnnouncesLaunchChanges, FlowLifecycle, FlowStore, LaunchOutcome, NamesLiveFlow, ReadsFlowStore,
     ReadsLaunchAttempt, RecordsLaunchOutcome, StoreError, WritesLaunchOutcome,
 };
-use crate::generated::memory::{PendingReap, Replacement};
+use crate::generated::memory::{PendingReap, ReapResponsibility, Replacement, Responsible};
 use crate::generated::starter::{LaunchedRecord, ReplacedRecord};
 use sema_engine::{
     AtomicCommit, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey,
@@ -30,7 +44,10 @@ use signal_flow::{Address, LaunchAttempt, ReapStanding};
 
 pub(super) const PENDING_REAP_TABLE_NAME: TableName = TableName::new("flow_nexus_pending_reaps");
 pub(super) const PENDING_REAP_FAMILY: &str = "flow-nexus-pending-reap";
-pub(super) const PENDING_REAP_SCHEMA: &str = "flow-nexus-pending-reap-v1";
+/// v2 carries `ReapResponsibility`. The family is new in 0.54.7, so no v1
+/// store was ever released: a v1 store from an earlier candidate build is
+/// refused at open by its family identity.
+pub(super) const PENDING_REAP_SCHEMA: &str = "flow-nexus-pending-reap-v2";
 
 impl EngineRecord for PendingReap {
     fn record_key(&self) -> RecordKey {
@@ -40,7 +57,7 @@ impl EngineRecord for PendingReap {
 
 impl MemoryDefinition for PendingReap {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
+        MemoryVersion::new(2)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -60,6 +77,83 @@ impl DescribesPendingReapTable for PendingReap {
             PendingReap::schema_hash(),
         )
     }
+}
+
+/// The step a pending reap still owes, as its standing says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReapStep {
+    /// The predecessor's pane is still to be closed or seen gone: the
+    /// worker's (`Owed`, `HerdrUnavailable`, `CloseRefused`).
+    PaneClose,
+    /// The pane was positively witnessed gone; only the store commit is
+    /// owed (`HandoverRefused`, `SettleUnrecorded`). Its closure evidence is
+    /// the standing itself: the worker reaches its settlement only after
+    /// its own `Absent` snapshot, Herdr's own Gone, or a `Retired` or
+    /// `Exited` predecessor. Whatever takes it up makes no Herdr call.
+    StoreSettlement,
+    /// The predecessor's row is to be read again (`PredecessorUnknown`).
+    PredecessorReading,
+    /// Stands as typed state; no event takes it [PSYCHE-2]
+    /// (`PredecessorMissing`; `Unrecorded` is an answer, never a row).
+    Stands,
+}
+
+/// The step a reap's standing owes.
+pub(crate) trait JudgesReapStep {
+    fn reap_step(&self) -> ReapStep;
+}
+
+impl JudgesReapStep for ReapStanding {
+    fn reap_step(&self) -> ReapStep {
+        match self {
+            ReapStanding::Owed | ReapStanding::HerdrUnavailable | ReapStanding::CloseRefused => {
+                ReapStep::PaneClose
+            }
+            ReapStanding::HandoverRefused(_) | ReapStanding::SettleUnrecorded => {
+                ReapStep::StoreSettlement
+            }
+            ReapStanding::PredecessorUnknown => ReapStep::PredecessorReading,
+            ReapStanding::PredecessorMissing | ReapStanding::Unrecorded => ReapStep::Stands,
+        }
+    }
+}
+
+/// Who owes a pending reap, read from its row and, for `LaunchSuccessor`,
+/// its launch's outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReapOwner {
+    /// A flow: its bearing events take the reap up.
+    Flow(signal_flow::FlowId),
+    /// The row's own Address: no flow receives there.
+    Address,
+}
+
+/// How a reassigning commit left the reaps at its Address.
+pub(crate) struct ReassignedReaps {
+    /// The commit with the reassignments added.
+    pub(crate) commit: AtomicCommit,
+    /// How many rows it rewrites or finishes; an announcement is owed
+    /// after the commit when any.
+    pub(crate) moved: usize,
+}
+
+/// The one reassignment rule both paths add to a commit: the end of a flow
+/// and the commit that makes another flow the Address's receiving one.
+pub(crate) trait ReassignsPendingReaps {
+    /// Every PendingReap at `address` whose owner is not `receiving_after`
+    /// (the Address's receiving flow as this commit leaves it) is
+    /// reassigned in `commit`, as its step decides: `PaneClose` and
+    /// `PredecessorReading` rows become `TakenOver` by that flow, or
+    /// `AddressHeld` when it is None; `StoreSettlement` rows are finished,
+    /// their outcome `Replaced` and the row retracted, with no generation
+    /// closed; `Stands` rows are untouched. A row whose owner is Missing is
+    /// left untouched, logged. A store read refused refuses the commit.
+    fn reaps_reassigned(
+        &self,
+        address: &Address,
+        receiving_after: Option<&signal_flow::FlowId>,
+        commit: AtomicCommit,
+    ) -> Result<ReassignedReaps, StoreError>;
 }
 
 /// A Replacement whose launch has no outcome and whose attempt is bound to
@@ -112,6 +206,11 @@ pub(crate) trait RecordsPendingReaps {
     /// The successor a PendingReap follows, read through its launch's
     /// outcome.
     fn reaped_record(&self, row: &PendingReap) -> Result<Option<ReplacedRecord>, StoreError>;
+    /// Who owes the reap. Ok(Some): the owner. Ok(None): a
+    /// `LaunchSuccessor` row whose launch outcome is positively absent or
+    /// not `ReapPending`; its owner is Missing and is never taken for the
+    /// Address. Err: the store could not be read.
+    fn reap_owner(&self, row: &PendingReap) -> Result<Option<ReapOwner>, StoreError>;
     /// W3, one commit: the predecessor Stopped when its row is live and the
     /// standing is `Owed`, the outcome `ReapPending`, the PendingReap, and
     /// the supersession at its Address.
@@ -204,6 +303,23 @@ impl RecordsPendingReaps for FlowStore {
         })
     }
 
+    fn reap_owner(&self, row: &PendingReap) -> Result<Option<ReapOwner>, StoreError> {
+        Ok(match &row.reap_responsibility {
+            ReapResponsibility::LaunchSuccessor => {
+                match self.launch_outcome(&row.launch_request_id.0)? {
+                    Some(LaunchOutcome::ReapPending(replaced)) => {
+                        Some(ReapOwner::Flow(replaced.launched_record.flow_id))
+                    }
+                    _ => None,
+                }
+            }
+            ReapResponsibility::TakenOver(Responsible(flow_id)) => {
+                Some(ReapOwner::Flow(flow_id.clone()))
+            }
+            ReapResponsibility::AddressHeld => Some(ReapOwner::Address),
+        })
+    }
+
     fn reap_owed(&self, pending: PendingReap, replaced: ReplacedRecord) -> Result<(), StoreError> {
         #[cfg(test)]
         {
@@ -213,6 +329,12 @@ impl RecordsPendingReaps for FlowStore {
                 return Err(StoreError::StateInvariant);
             }
         }
+        // W3 creates a reap and never reassigns one: its row is owed by the
+        // successor its outcome names, whatever the operand carries.
+        let pending = PendingReap {
+            reap_responsibility: ReapResponsibility::LaunchSuccessor,
+            ..pending
+        };
         let predecessor = pending.predecessor.0.clone();
         let mut commit = self.engine.begin_atomic_commit();
         // The predecessor is recorded Stopped in the write that owes its
@@ -339,5 +461,83 @@ impl WritesPendingReap for FlowStore {
             .into_iter()
             .filter(|row| &row.address == address)
             .collect())
+    }
+}
+
+impl ReassignsPendingReaps for FlowStore {
+    fn reaps_reassigned(
+        &self,
+        address: &Address,
+        receiving_after: Option<&signal_flow::FlowId>,
+        commit: AtomicCommit,
+    ) -> Result<ReassignedReaps, StoreError> {
+        let wanted = match receiving_after {
+            Some(flow_id) => ReapOwner::Flow(flow_id.clone()),
+            None => ReapOwner::Address,
+        };
+        let mut commit = commit;
+        let mut moved = 0;
+        for row in self.pending_reaps_at(address)? {
+            let Some(owner) = self.reap_owner(&row)? else {
+                // The row and its ReapPending outcome are written in one
+                // commit (W3), so a Missing owner is a broken store
+                // invariant: nothing settles or moves it.
+                eprintln!(
+                    "flow-nexus: the reap of {} at {address:?} has no owner its launch {} names; it is left as it stands",
+                    row.predecessor.0, row.launch_request_id.0
+                );
+                continue;
+            };
+            if owner == wanted {
+                continue;
+            }
+            match row.reap_standing.reap_step() {
+                ReapStep::Stands => {}
+                ReapStep::StoreSettlement => {
+                    let Some(replaced) = self.reaped_record(&row)? else {
+                        eprintln!(
+                            "flow-nexus: the reap of {} at {address:?} names no outcome to finish; it is left as it stands",
+                            row.predecessor.0
+                        );
+                        continue;
+                    };
+                    // Finished from the closure its standing records. No
+                    // generation is written: the flow it was owed to no
+                    // longer receives, and the handover row stays for the
+                    // next launch's own settlement to close from its owner.
+                    commit = self.outcome_written(
+                        &row.launch_request_id.0,
+                        LaunchOutcome::Replaced(replaced),
+                        commit,
+                    )?;
+                    commit = commit.retract(
+                        self.pending_reaps,
+                        RecordKey::new(row.predecessor.0.clone()),
+                    );
+                    moved += 1;
+                }
+                ReapStep::PaneClose | ReapStep::PredecessorReading => {
+                    let reap_responsibility = match receiving_after {
+                        Some(flow_id) => {
+                            ReapResponsibility::TakenOver(Responsible(flow_id.clone()))
+                        }
+                        None => ReapResponsibility::AddressHeld,
+                    };
+                    commit = commit.mutate(
+                        self.pending_reaps,
+                        PendingReap {
+                            reap_responsibility,
+                            ..row
+                        },
+                    );
+                    moved += 1;
+                }
+            }
+        }
+        #[cfg(test)]
+        if moved > 0 {
+            crate::test_faults::InjectsCrashes::attempted(&self.faults, "ReapsReassigned");
+        }
+        Ok(ReassignedReaps { commit, moved })
     }
 }

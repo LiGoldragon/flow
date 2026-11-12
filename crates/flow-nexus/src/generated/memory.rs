@@ -44,7 +44,20 @@ pub struct PendingReap {
     pub launch_request_id: signal_flow::LaunchRequestId,
     pub address: signal_flow::Address,
     pub reap_standing: signal_flow::ReapStanding,
+    pub reap_responsibility: ReapResponsibility,
 }
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum ReapResponsibility {
+    LaunchSuccessor,
+    TakenOver(Responsible),
+    AddressHeld,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Responsible(pub signal_flow::FlowId);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]

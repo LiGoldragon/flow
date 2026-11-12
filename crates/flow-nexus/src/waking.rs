@@ -2318,9 +2318,21 @@ impl WaitsForRestToReplace for RunningNexus {
         let mut profile = launch.launch_profile;
         profile.flow_id_option = None;
         let launch_request_id = profile.launch_request_id.clone();
-        let response = self.start(profile, launch.origin);
-        let response = self.settle(&launch_request_id.0, response);
-        let _ = self.store.forget_ordered_replacement(&order.address);
+        // The start, its settlement (which takes over what the Address
+        // owes) and the order's forgetting run under the dispatch gate, as
+        // every other start's do; the gate is released before the deferred
+        // wakes, which need it.
+        let response = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let response = self.start(profile, launch.origin);
+            let response = self.settle(&launch_request_id.0, response);
+            let _ = self.store.forget_ordered_replacement(&order.address);
+            response
+        };
+        self.wake_deferred();
         eprintln!(
             "flow-nexus: flow {} ended before it rested; the Launch ordered for it starts: {response:?}",
             order.predecessor
@@ -3535,13 +3547,17 @@ impl WakesInParts for RunningNexus {
             ) {
                 let _ = self.perform(Operation::Drain(address));
             }
-        }
-        if compact {
-            let compacted = self.command(meta_signal_flow::CommandRequest {
-                flow_id: signal_flow::FlowId(flow_id.to_owned()),
-                harness_command_kind: meta_signal_flow::HarnessCommandKind::Compact,
-            });
-            eprintln!("flow-nexus: the kept flow {flow_id}, past its threshold: {compacted:?}");
+            // The compaction types into the pane and may record the flow
+            // Exited when its pane is gone: it runs under the same gate hold,
+            // as a meta Command does (the gate is not reentrant, and
+            // `command` takes none itself).
+            if compact {
+                let compacted = self.command(meta_signal_flow::CommandRequest {
+                    flow_id: signal_flow::FlowId(flow_id.to_owned()),
+                    harness_command_kind: meta_signal_flow::HarnessCommandKind::Compact,
+                });
+                eprintln!("flow-nexus: the kept flow {flow_id}, past its threshold: {compacted:?}");
+            }
         }
     }
 

@@ -226,11 +226,30 @@ impl RepairsMetaflows for FlowStore {
             .retain(|past| past != &current && past.0 != flow_id);
         stored.metaflow.past.0.push(current);
         stored.metaflow.state = MetaflowState::Awake(flow_ethos::FlowId(flow_id.to_owned()));
-        self.engine.commit_atomic(
-            self.engine
-                .begin_atomic_commit()
-                .mutate(self.metaflows, stored),
+        // The rebound flow receives from this commit: what the flow it
+        // displaced owed at the Address is taken over in it.
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .mutate(self.metaflows, stored);
+        let reassigned = super::pending_reap::ReassignsPendingReaps::reaps_reassigned(
+            self,
+            address,
+            Some(&flow_ethos::FlowId(flow_id.to_owned())),
+            commit,
         )?;
+        #[cfg(test)]
+        {
+            use crate::test_faults::{InjectsCrashes, RefusedWrite};
+            self.faults.attempted("CurrentFlowRebind");
+            if self.faults.refused_now(RefusedWrite::CurrentFlowRebind) {
+                return Err(StoreError::StateInvariant);
+            }
+        }
+        self.engine.commit_atomic(reassigned.commit)?;
+        if reassigned.moved > 0 {
+            super::AnnouncesLaunchChanges::announce(&self.launch_changes);
+        }
         Ok(Ok(()))
     }
 }

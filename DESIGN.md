@@ -267,18 +267,58 @@ worker (`reaping`): one per PendingReap whose pane step is owed, armed by a
 supervisor woken only by launch changes. The worker subscribes to Herdr's
 `pane.closed`/`pane.exited` first, then reads the predecessor's pane, closes
 it once while it is still the predecessor's, and waits for Herdr to show it
-gone. Then, under the gate, it revalidates (its cancellation, the row and its
-launch, the predecessor's route) and settles: the Address's receiving flow,
-read afresh, decides the handover, closed for the successor only while the
-Address still receives as it; the outcome becomes `Replaced` and the row goes.
-A stale worker writes nothing; no worker write is a routing write. A pane
-running another native session is never closed and not counted gone; a route
-that is not recorded settles nothing by itself, only independent evidence
-(the predecessor's row `Retired` or `Exited`) does. A refused close, an unread
-Herdr or a refused settlement leaves the reap at its typed `ReapStanding`,
-taken up at the successor's next rest (which calls no Herdr: it writes what
-the store owes and rearms the worker) or the next start; `Inspect` lists it.
-A missing predecessor stands as `PredecessorMissing` and no event retries it.
+gone. Then, under the gate, it revalidates (its cancellation, the row, its
+launch and who owes it, the predecessor's route) and settles: the Address's
+receiving flow, read afresh, decides the handover, closed for the successor
+only while the Address still receives as it; the outcome becomes `Replaced`
+and the row goes. A stale worker writes nothing; no worker write is a routing
+write. A route that is not recorded settles nothing by itself, only
+independent evidence (the predecessor's row `Retired` or `Exited`) does.
+
+One close rule serves every reap worker: the predecessor's recorded pane is
+closed only when a fresh read shows it `Owned` (its harness reports the
+recorded session, or, a Codex TUI reporting none, a foreground process of
+the pane runs `resume <recorded thread>`) or `Bare` (the recorded pane and
+terminal with no agent). `Foreign`, `Unproven` and `Unidentified` are never
+closed and not counted gone; the worker waits for Herdr's own Gone. `Absent`
+settles, and only from a snapshot that carries both its agent roster and its
+pane list; a snapshot without its pane list is `Unknown`, which closes and
+settles nothing. Two boundaries are taken knowingly, in every close Flow
+makes. The snapshot-to-close race: the pane can change between the read and
+the close, and Herdr has no compare-and-close, so the close is made on the
+read's evidence. The Bare-shell boundary: a `Bare` pane at the predecessor's
+own terminal is closed even when a person works in its plain shell, because a
+harness that exits leaves its pane `Bare` and Herdr announces no going for it.
+
+Who owes a reap is recorded on its row (`ReapResponsibility`): the successor
+its launch's outcome names (`LaunchSuccessor`, what W3 writes), a later flow
+that took it over (`TakenOver`), or the Address itself when nothing receives
+there (`AddressHeld`). It follows the Address's receiving flow: every commit
+that changes which flow the Address receives as carries the reassignment of
+the reaps there, under the dispatch gate. The successor's end (`Stop`,
+`Retire`, an `Exited` recorded by a delivery, a wake, a refresh or an
+observation) puts the Address to sleep and gives what the ended flow owed to
+the Address; the settlement of a launch that made another flow the receiving
+one (W3, `StartedHandedOver`, `HandoverOwed`) gives it to that flow, but only
+while the Address, read in that commit, receives as it; an adoption, a Bind,
+a rebind, a wake's `Awoken`, a `Record.Asleep` and the forgetting of an ended
+binding do the same. A row whose pane was already witnessed gone is finished
+in that commit from the closure its standing records (`Replaced`, no
+generation, no Herdr call); a row whose pane step is owed is taken over, and
+its worker, cancelled as reassigned (or, revalidating first, stale), is
+followed by one worker under the new owner; a row standing as typed state is
+untouched. A row whose `LaunchSuccessor` names no `ReapPending` outcome has a
+Missing owner, never the Address: nothing moves or settles it. A pending
+reap is taken up by its owner's bearing events: its rest (which calls no
+Herdr), the end of the owner, the worker's own Herdr events, and the Nexus
+start for what the Address holds, which settles a store-only row and reads an
+unknown predecessor once, with no Herdr call and no retry. A retried `Stop`
+whose recorded pane is positively `Absent` records `Stopped` with no close, so
+an end whose commit was refused is run again; a route not recorded, or a
+snapshot that proves nothing, answers `RouteUnavailable` as before. A refused
+close, an unread Herdr or a refused settlement leaves the reap at its typed
+`ReapStanding`; `Inspect` lists it. A missing predecessor stands as
+`PredecessorMissing` and no event retries it.
 
 A fresh launch settles its Address's handover in its own commit:
 `StartedHandedOver` when the handover row's owner has ended or nothing moves,
@@ -286,8 +326,8 @@ else `HandoverOwed`, a PendingHandover at its refusal and the answer
 `HandoverPending`. Its next rest, its own `Keep` or `Drop`, and the next start
 take it up. Every settlement of a launch that made its flow the receiving one
 supersedes the obligations it takes over at the Address: an earlier
-PendingHandover becomes `HandoverSuperseded`, a reap whose only step left was
-the handover becomes `Replaced`. An owner that no flow row names stands as
+PendingHandover becomes `HandoverSuperseded`, and the reaps there are taken
+over as above. An owner that no flow row names stands as
 `Owner.Missing` until a repair act is designed.
 
 Every launch request settles into one stored outcome — `Started`, `Replaced`,

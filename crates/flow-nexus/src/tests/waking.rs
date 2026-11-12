@@ -5569,7 +5569,7 @@ fn launch_pane_agent(session: Option<&str>) -> serde_json::Value {
 
 /// A process whose command line resumes `thread`, as a Codex TUI attached
 /// to it runs; killed when dropped.
-struct ResumingProcess(std::process::Child);
+pub(super) struct ResumingProcess(pub(super) std::process::Child);
 
 impl Drop for ResumingProcess {
     fn drop(&mut self) {
@@ -5578,7 +5578,7 @@ impl Drop for ResumingProcess {
     }
 }
 
-trait SpawnsResumingProcess {
+pub(super) trait SpawnsResumingProcess {
     fn resuming(thread: &str) -> ResumingProcess;
 }
 

@@ -1,6 +1,7 @@
 //! Ordinary metaflow mutations. The connection supplies the witnessed peer;
 //! the serial dispatcher holds exclusion across authorization and mutation.
 use super::logical_delivery::{RecordsLogicalDeliveries, VerifiedDeliveryLock};
+use super::pending_reap::ReassignsPendingReaps;
 use super::*;
 use crate::sending::AdmitsSendPayload;
 use crate::sending::RefusesUnidentified;
@@ -100,6 +101,7 @@ impl MutatesMetaflows for FlowStore {
             return Ok(Response::Refused(Refusal::unidentified(binding.process)));
         }
         let address = binding.address.clone();
+        let binding_address = address.clone();
         let bindings = self
             .engine
             .match_records(QueryPlan::all(self.metaflow_processes))?;
@@ -163,7 +165,22 @@ impl MutatesMetaflows for FlowStore {
         } else {
             commit.mutate(self.metaflow_processes, binding)
         };
-        self.engine.commit_atomic(commit)?;
+        // The bound flow is the Address's receiving flow from this commit,
+        // a process binding's among them: what the flow it displaced owed
+        // there is taken over in it.
+        let reassigned = self.reaps_reassigned(&binding_address, Some(&flow_id), commit)?;
+        #[cfg(test)]
+        {
+            use crate::test_faults::{InjectsCrashes, RefusedWrite};
+            self.faults.attempted("MetaflowBind");
+            if self.faults.refused_now(RefusedWrite::MetaflowBind) {
+                return Err(StoreError::StateInvariant);
+            }
+        }
+        self.engine.commit_atomic(reassigned.commit)?;
+        if reassigned.moved > 0 {
+            self.launch_changes.announce();
+        }
         Ok(Response::Bound(flow_id))
     }
 
@@ -293,7 +310,21 @@ impl SleepsMetaflows for FlowStore {
             .begin_atomic_commit()
             .mutate(self.metaflows, stored);
         let commit = self.sender_locks_released(address, commit)?;
-        self.engine.commit_atomic(commit)?;
+        // The Address receives as nobody from this commit: what the ended
+        // flow owed there is held by the Address, in it.
+        let reassigned = self.reaps_reassigned(address, None, commit)?;
+        #[cfg(test)]
+        {
+            use crate::test_faults::{InjectsCrashes, RefusedWrite};
+            self.faults.attempted("MetaflowSleep");
+            if self.faults.refused_now(RefusedWrite::MetaflowSleep) {
+                return Err(StoreError::StateInvariant);
+            }
+        }
+        self.engine.commit_atomic(reassigned.commit)?;
+        if reassigned.moved > 0 {
+            self.launch_changes.announce();
+        }
         Ok(true)
     }
 
@@ -313,7 +344,15 @@ impl SleepsMetaflows for FlowStore {
             address,
             taken.written(self, self.engine.begin_atomic_commit()),
         )?;
-        self.engine.commit_atomic(commit)?;
+        // The woken flow receives from this commit: what another flow owed
+        // at the Address is taken over in it (its own launch's settlement
+        // took it over already when it is that launch's flow).
+        let flow = FlowId(flow_id.to_owned());
+        let reassigned = self.reaps_reassigned(address, Some(&flow), commit)?;
+        self.engine.commit_atomic(reassigned.commit)?;
+        if reassigned.moved > 0 {
+            self.launch_changes.announce();
+        }
         Ok(true)
     }
 
@@ -577,7 +616,13 @@ impl ForgetsEndedBindings for FlowStore {
         if self.stored_metaflow_lock(address)?.is_some() {
             commit = commit.retract(self.metaflow_locks, RecordKey::new(key));
         }
-        self.engine.commit_atomic(commit)?;
+        // The Address receives as nobody once its metaflow is forgotten:
+        // what the binding owed there is held by the Address, in this commit.
+        let reassigned = self.reaps_reassigned(address, None, commit)?;
+        self.engine.commit_atomic(reassigned.commit)?;
+        if reassigned.moved > 0 {
+            self.launch_changes.announce();
+        }
         Ok(true)
     }
 }

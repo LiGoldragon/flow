@@ -77,7 +77,9 @@ Contracts: signal-flow 61.0.0 (4871bb8) and meta-signal-flow 77.0.0
 - **A fresh start's handover is an obligation.** A Start or fresh Launch
   whose handover cannot move answers `HandoverPending` and is taken up at its
   flow's next rest, its own `Keep`/`Drop`, or the start; a later launch at the
-  Address supersedes it (`HandoverSuperseded`, final). A missing owner or
+  Address supersedes it (`HandoverSuperseded`, final), while that launch's
+  flow is the one the Address receives as: a stale settlement supersedes
+  nothing. A missing owner or
   predecessor stands typed; no event retries it.
 - **Inspect** lists each pending reap and handover at the Address (meta
   `Attempt.Reap`, `Attempt.Handover`), the derived ones included, Missing and

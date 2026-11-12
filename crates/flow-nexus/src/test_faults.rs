@@ -79,6 +79,8 @@ pub(crate) enum RefusedWrite {
     BindingForget,
     /// The reap supervisor's read of the pending reaps in its next pass.
     PassRead,
+    /// The superseding read of the Address's current receiver.
+    SupersedingRead,
 }
 
 /// The armed switches of one store, each fired once.

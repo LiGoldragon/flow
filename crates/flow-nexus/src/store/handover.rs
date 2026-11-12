@@ -969,14 +969,18 @@ impl WritesHandoverClosing for HandoverClosing<'_> {
 /// The supersession a launch's settlement adds to its commit: every
 /// earlier obligation at the Address whose handover this launch takes over.
 pub(crate) trait SupersedesObligations {
-    /// A PendingHandover at `address` naming another successor than `by`
-    /// is retracted, its launch's outcome rewritten `HandoverSuperseded`;
-    /// with `keeps_row` the row is left for the caller to replace in the
-    /// same commit. The PendingReaps at `address` are taken over by `by`
-    /// (`reaps_reassigned`), but only while the Address, read in this same
-    /// call, receives as `by`: a stale or out-of-turn supersession
-    /// reassigns nothing. The caller holds the dispatch gate, as every
-    /// settlement does.
+    /// The supersession is the Address's current receiver's alone: the
+    /// Address is read in this call, and unless it receives as `by` the
+    /// commit is returned as it came, so a stale or out-of-turn `by` (a
+    /// derived reap materialized after its successor ended) retracts,
+    /// rewrites and reassigns nothing. While it receives as `by`, a
+    /// PendingHandover at `address` naming another successor is retracted,
+    /// its launch's outcome rewritten `HandoverSuperseded`; with
+    /// `keeps_row` the row is left for the caller to replace in the same
+    /// commit. The PendingReaps at `address` are taken over by `by`
+    /// (`reaps_reassigned`). A receiver that cannot be read refuses the
+    /// commit. The caller holds the dispatch gate, as every settlement
+    /// does.
     fn superseding(
         &self,
         address: &Address,
@@ -997,6 +1001,18 @@ impl SupersedesObligations for FlowStore {
         use super::pending_handover::RecordsPendingHandovers;
         use super::pending_reap::ReassignsPendingReaps;
         use super::{LaunchOutcome, RecordsLaunchOutcome, WritesLaunchOutcome};
+        #[cfg(test)]
+        if crate::test_faults::InjectsCrashes::refused_now(
+            &self.faults,
+            crate::test_faults::RefusedWrite::SupersedingRead,
+        ) {
+            return Err(StoreError::StateInvariant);
+        }
+        // Read under the caller's gate: only the flow the Address receives
+        // as now supersedes what stands there.
+        if super::metaflow::ReadsSuccession::receiving_flow(self, address)?.as_ref() != Some(by) {
+            return Ok(commit);
+        }
         let mut commit = commit;
         let mut superseded = false;
         if let Some(row) = self.pending_handover(address)?
@@ -1027,13 +1043,9 @@ impl SupersedesObligations for FlowStore {
                 );
             }
         }
-        // Revalidated in this call: only the flow the Address receives as
-        // now takes its reaps over.
-        if super::metaflow::ReadsSuccession::receiving_flow(self, address)?.as_ref() == Some(by) {
-            let reassigned = self.reaps_reassigned(address, Some(by), commit)?;
-            superseded |= reassigned.moved > 0;
-            commit = reassigned.commit;
-        }
+        let reassigned = self.reaps_reassigned(address, Some(by), commit)?;
+        superseded |= reassigned.moved > 0;
+        commit = reassigned.commit;
         #[cfg(test)]
         if superseded {
             crate::test_faults::InjectsCrashes::attempted(&self.faults, "Superseding");

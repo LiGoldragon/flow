@@ -330,7 +330,11 @@ else `HandoverOwed`, a PendingHandover at its refusal and the answer
 take it up. Every settlement of a launch that made its flow the receiving one
 supersedes the obligations it takes over at the Address: an earlier
 PendingHandover becomes `HandoverSuperseded`, and the reaps there are taken
-over as above. An owner that no flow row names stands as
+over as above. The supersession is the current receiver's alone: it reads
+the Address in its own commit, and a settlement whose flow no longer
+receives there (a derived W3 written after its successor ended) supersedes
+nothing, so the receiving flow's own PendingHandover and outcome stand. A
+receiver that cannot be read refuses the commit. An owner that no flow row names stands as
 `Owner.Missing` until a repair act is designed.
 
 Every launch request settles into one stored outcome — `Started`, `Replaced`,

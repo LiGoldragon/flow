@@ -18,7 +18,7 @@ use super::reaping::{
 };
 use crate::Dispatches;
 use crate::generated::memory::{
-    PendingReap, Predecessor, ReapResponsibility, Replacement, Responsible,
+    PendingHandover, PendingReap, Predecessor, ReapResponsibility, Replacement, Responsible,
 };
 use crate::observation_lifetime::ObservationCancellationCause;
 use crate::reaping::{
@@ -2479,6 +2479,194 @@ fn a_derived_reap_whose_successor_ended_is_born_owed_by_the_receiving_flow_and_s
     let again = world.attempt_count();
     world.rest(LATER);
     assert_eq!(attempted(&world, again, "Reaped"), 0);
+}
+
+/// M, the flow that receives at A after N.
+const LAST: &str = "b8b8b8";
+
+/// A fresh launch `id` of `flow` at A whose C1 is refused: `flow` receives
+/// there, and its own PendingHandover stands durable under its
+/// `HandoverPending` outcome; that row.
+fn owes_its_own_handover(world: &ReapWorld, id: &str, flow: &str) -> PendingHandover {
+    use crate::store::pending_handover::RecordsPendingHandovers;
+    let store = &world.fixture.nexus.store;
+    store.faults.refuse_next(RefusedWrite::StartedSettle);
+    let launched = world.confirmed_at_address(id, flow, None);
+    let answer = world.settled(id, launched);
+    assert!(matches!(answer, Response::HandoverPending(_)), "{answer:?}");
+    assert_eq!(
+        store.receiving_flow(&world.address()).unwrap(),
+        Some(FlowId(flow.into()))
+    );
+    let row = store
+        .pending_handover(&world.address())
+        .unwrap()
+        .expect("its own PendingHandover");
+    assert_eq!(row.successor.0.0, flow);
+    assert!(
+        matches!(store.launch_outcome(id).unwrap(),
+            Some(LaunchOutcome::HandoverPending(launched)) if launched.flow_id.0 == flow),
+        "{:?}",
+        store.launch_outcome(id).unwrap()
+    );
+    row
+}
+
+/// The handover work at A as it stands: the PendingHandover and the
+/// outcome of each named launch.
+fn handover_work(
+    world: &ReapWorld,
+    launches: &[&str],
+) -> (Option<PendingHandover>, Vec<Option<LaunchOutcome>>) {
+    use crate::store::pending_handover::RecordsPendingHandovers;
+    let store = &world.fixture.nexus.store;
+    (
+        store.pending_handover(&world.address()).unwrap(),
+        launches
+            .iter()
+            .map(|id| store.launch_outcome(id).unwrap())
+            .collect(),
+    )
+}
+
+/// Astra vh7l, the exact regression: W3 refused for S, S ended, N receiving
+/// with its own durable PendingHandover; the start's recovery of S's
+/// derived reap supersedes nothing for the ended S. N's PendingHandover and
+/// its `HandoverPending` outcome are unchanged, the reap is born owed by N,
+/// delivery goes to N alone, and N's next rest, its next bearing event,
+/// settles its own handover.
+#[test]
+fn a_derived_reap_of_an_ended_successor_leaves_the_receiving_flows_own_handover_as_it_stood() {
+    use crate::store::pending_handover::RecordsPendingHandovers;
+    let mut world = ReapWorld::staged("derived-keeps-handover");
+    successor_ended_before_w3(&world);
+    let owed = owes_its_own_handover(&world, "later-launch", LATER);
+    let before = handover_work(&world, &["later-launch"]);
+    world.show(PaneShown::Absent);
+    world.fixture.restarted();
+    let from = world.attempt_count();
+    recovered(&world);
+    assert_eq!(world.owner(), Some(taken_over_by(LATER)));
+    assert!(pending_p_by_s(world.outcome()));
+    assert_eq!(
+        handover_work(&world, &["later-launch"]),
+        before,
+        "N's PendingHandover and outcome are unchanged"
+    );
+    assert_eq!(
+        attempted(&world, from, "Superseding"),
+        0,
+        "the ended S supersedes nothing: {:?}",
+        world.attempts_since(from)
+    );
+    assert!(vetted(&world.vet(LATER)), "N is delivered to");
+    assert!(delivery_rejected(
+        &world.vet(SUCCESSOR),
+        meta_signal_flow::DeliveryRejection::FlowStopped
+    ));
+    assert!(!vetted(&world.vet(PREDECESSOR)));
+    let from = world.attempt_count();
+    world.rest(LATER);
+    assert_eq!(
+        attempted(&world, from, "HandedOver"),
+        1,
+        "{:?}",
+        world.attempts_since(from)
+    );
+    let store = &world.fixture.nexus.store;
+    assert_eq!(store.pending_handover(&world.address()).unwrap(), None);
+    assert!(
+        matches!(store.launch_outcome("later-launch").unwrap(),
+            Some(LaunchOutcome::Started(launched)) if launched.flow_id.0 == LATER),
+        "{:?}",
+        store.launch_outcome("later-launch").unwrap()
+    );
+    assert!(
+        world
+            .generations()
+            .iter()
+            .any(|(_, successor)| successor == LATER),
+        "N's handover moved: {:?} (owed by {:?})",
+        world.generations(),
+        owed.handover_owner
+    );
+    assert!(
+        !world
+            .generations()
+            .iter()
+            .any(|(_, successor)| successor == SUCCESSOR),
+        "no generation to S: {:?}",
+        world.generations()
+    );
+}
+
+/// Astra vh7l: a failed read of the current receiver during superseding
+/// refuses the derived W3's whole commit. No PendingReap is written (the
+/// reap stays derived, P Active), N's PendingHandover and outcome stand as
+/// they were; the next start writes the row owed by N, still leaving N's
+/// handover work as it stood.
+#[test]
+fn a_refused_receiver_read_in_superseding_refuses_the_commit_and_leaves_both_rows() {
+    let mut world = ReapWorld::staged("derived-superseding-read");
+    successor_ended_before_w3(&world);
+    let _ = owes_its_own_handover(&world, "later-launch", LATER);
+    let before = handover_work(&world, &["later-launch"]);
+    world.show(PaneShown::Absent);
+    world.fixture.restarted();
+    world
+        .fixture
+        .nexus
+        .store
+        .faults
+        .refuse_next(RefusedWrite::SupersedingRead);
+    let from = world.attempt_count();
+    recovered(&world);
+    assert_eq!(attempted(&world, from, "ReapOwed"), 1);
+    assert!(world.row().is_none(), "no PendingReap was written");
+    assert_eq!(world.outcome(), None, "the reap stays derived");
+    assert_eq!(world.lifecycle(PREDECESSOR), FlowLifecycle::Active);
+    assert_eq!(handover_work(&world, &["later-launch"]), before);
+    world.fixture.restarted();
+    recovered(&world);
+    assert_eq!(world.owner(), Some(taken_over_by(LATER)));
+    assert!(pending_p_by_s(world.outcome()));
+    assert_eq!(handover_work(&world, &["later-launch"]), before);
+}
+
+/// Astra vh7l, stale recovery after another succession: S ended before
+/// W3, then N received with its own PendingHandover, then N ended and M
+/// received, superseding N's handover with its own. Recovering S's derived
+/// reap changes neither N's nor M's handover work, and the reap is owned
+/// by M.
+#[test]
+fn a_stale_derived_reap_after_two_successions_changes_no_handover_work_and_is_owned_by_the_last() {
+    let mut world = ReapWorld::staged("derived-two-successions");
+    successor_ended_before_w3(&world);
+    let _ = owes_its_own_handover(&world, "later-launch", LATER);
+    let store = &world.fixture.nexus.store;
+    store.mark_exited(LATER);
+    assert!(store.sleep_metaflow(&world.address(), LATER).unwrap());
+    assert_eq!(store.receiving_flow(&world.address()).unwrap(), None);
+    let last = owes_its_own_handover(&world, "last-launch", LAST);
+    assert!(
+        matches!(store.launch_outcome("later-launch").unwrap(),
+            Some(LaunchOutcome::HandoverSuperseded(superseded))
+                if superseded.successor.0.0 == LAST),
+        "M superseded N's handover: {:?}",
+        store.launch_outcome("later-launch").unwrap()
+    );
+    let before = handover_work(&world, &["later-launch", "last-launch"]);
+    assert_eq!(before.0.as_ref(), Some(&last));
+    world.show(PaneShown::Absent);
+    world.fixture.restarted();
+    recovered(&world);
+    assert_eq!(world.owner(), Some(taken_over_by(LAST)));
+    assert!(pending_p_by_s(world.outcome()));
+    assert_eq!(
+        handover_work(&world, &["later-launch", "last-launch"]),
+        before,
+        "neither N's nor M's handover work changed"
+    );
 }
 
 /// so5u, a transient predecessor read refused during the start's derived

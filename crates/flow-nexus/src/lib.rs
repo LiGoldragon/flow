@@ -7501,9 +7501,11 @@ mod tests {
     }
     #[test]
     fn agent_connection_cancellation_releases_quiet_and_unanswered_subscriptions_without_exit() {
+        use crate::HoldsStopRequest;
         use crate::event_wait::AwaitsDescriptors;
         use crate::observation_lifetime::ServesCancellableObservation;
-        use std::io::{BufRead, BufReader};
+        use crate::observe_agent::ObservesAgent;
+        use std::io::{BufRead, BufReader, Read, Write};
         use std::os::fd::AsFd;
         use std::sync::mpsc;
         for acknowledged in [false, true] {
@@ -7581,6 +7583,8 @@ mod tests {
 
     #[test]
     fn pending_launch_connection_releases_on_peer_close_or_stop() {
+        use crate::HoldsStopRequest;
+        use crate::launching::ObservesLaunch;
         use crate::observation_lifetime::ServesCancellableObservation;
         use std::sync::mpsc;
         for stop in [false, true] {
@@ -7633,7 +7637,8 @@ mod tests {
     fn agent_subscription_delivers_state_and_genuine_gone_records_exit() {
         use crate::event_wait::AwaitsDescriptors;
         use crate::observation_lifetime::ServesCancellableObservation;
-        use std::io::{BufRead, BufReader};
+        use crate::observe_agent::ObservesAgent;
+        use std::io::{BufRead, BufReader, Write};
         use std::os::fd::AsFd;
         use std::sync::mpsc;
         let fixture = NexusFixture::new();

@@ -349,6 +349,14 @@ impl SleepsMetaflows for FlowStore {
         // took it over already when it is that launch's flow).
         let flow = FlowId(flow_id.to_owned());
         let reassigned = self.reaps_reassigned(address, Some(&flow), commit)?;
+        #[cfg(test)]
+        {
+            use crate::test_faults::{InjectsCrashes, RefusedWrite};
+            self.faults.attempted("MetaflowAwaken");
+            if self.faults.refused_now(RefusedWrite::MetaflowAwaken) {
+                return Err(StoreError::StateInvariant);
+            }
+        }
         self.engine.commit_atomic(reassigned.commit)?;
         if reassigned.moved > 0 {
             self.launch_changes.announce();
@@ -619,6 +627,14 @@ impl ForgetsEndedBindings for FlowStore {
         // The Address receives as nobody once its metaflow is forgotten:
         // what the binding owed there is held by the Address, in this commit.
         let reassigned = self.reaps_reassigned(address, None, commit)?;
+        #[cfg(test)]
+        {
+            use crate::test_faults::{InjectsCrashes, RefusedWrite};
+            self.faults.attempted("BindingForget");
+            if self.faults.refused_now(RefusedWrite::BindingForget) {
+                return Err(StoreError::StateInvariant);
+            }
+        }
         self.engine.commit_atomic(reassigned.commit)?;
         if reassigned.moved > 0 {
             self.launch_changes.announce();

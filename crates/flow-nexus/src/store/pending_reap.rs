@@ -9,8 +9,13 @@
 //! Every write announces `launch_changes` after its commit; the reap
 //! worker's supervisor wakes on it.
 //!
-//! Who owes a reap follows the Address's receiving flow. W3 writes
-//! `LaunchSuccessor`: the successor its launch's outcome names. Every
+//! Who owes a reap follows the Address's receiving flow. W3 chooses it from
+//! the Address's current succession in the commit that writes the row:
+//! `LaunchSuccessor`, the successor its launch's outcome names, while the
+//! Address receives as it; `TakenOver` by the flow it receives as instead;
+//! `AddressHeld` when nothing receives there. A derived reap written after
+//! its successor ended is born owed by the Address's present, never by that
+//! successor, whose replacement stays the history its outcome records. Every
 //! commit that changes which flow the Address receives as carries
 //! `reaps_reassigned` for it: the end of a flow (`ended_at_address`), the
 //! settlement of a launch that made a flow the receiving one
@@ -212,8 +217,10 @@ pub(crate) trait RecordsPendingReaps {
     /// Address. Err: the store could not be read.
     fn reap_owner(&self, row: &PendingReap) -> Result<Option<ReapOwner>, StoreError>;
     /// W3, one commit: the predecessor Stopped when its row is live and the
-    /// standing is `Owed`, the outcome `ReapPending`, the PendingReap, and
-    /// the supersession at its Address.
+    /// standing is `Owed`, the outcome `ReapPending`, the PendingReap owed
+    /// as the Address's current succession reads (`born_responsibility`),
+    /// and the supersession at its Address. A succession that cannot be
+    /// read refuses the commit.
     fn reap_owed(&self, pending: PendingReap, replaced: ReplacedRecord) -> Result<(), StoreError>;
     /// The PendingReap's standing rewritten; false when no row stands.
     fn reap_refused(&self, predecessor: &str, standing: ReapStanding) -> Result<bool, StoreError>;
@@ -329,14 +336,13 @@ impl RecordsPendingReaps for FlowStore {
                 return Err(StoreError::StateInvariant);
             }
         }
-        // W3 creates a reap and never reassigns one: its row is owed by the
-        // successor its outcome names, whatever the operand carries.
-        let pending = PendingReap {
-            reap_responsibility: ReapResponsibility::LaunchSuccessor,
-            ..pending
-        };
         let predecessor = pending.predecessor.0.clone();
+        // The Address's current succession, read under the caller's
+        // dispatch gate: the row is born owed by whoever receives there as
+        // this commit leaves it, whatever the operand carries.
+        let receiving = super::metaflow::ReadsSuccession::receiving_flow(self, &pending.address)?;
         let mut commit = self.engine.begin_atomic_commit();
+        let mut ends_receiving = false;
         // The predecessor is recorded Stopped in the write that owes its
         // reap, so no point stands between the two. A row that could not be
         // read, or that no flow names, records no Stopped.
@@ -347,7 +353,16 @@ impl RecordsPendingReaps for FlowStore {
             flow.lifecycle = FlowLifecycle::Stopped;
             commit = commit.mutate(self.flows, flow);
             commit = self.ended_at_address(&predecessor, commit)?;
+            // A receiving predecessor holds no hold: its end puts the
+            // Address to sleep in this commit.
+            ends_receiving = receiving.as_ref().is_some_and(|flow| flow.0 == predecessor);
         }
+        let receiving_after = if ends_receiving { None } else { receiving };
+        let pending = PendingReap {
+            reap_responsibility: receiving_after
+                .born_responsibility(&replaced.launched_record.flow_id),
+            ..pending
+        };
         commit = self.outcome_written(
             &pending.launch_request_id.0,
             LaunchOutcome::ReapPending(replaced.clone()),
@@ -427,6 +442,27 @@ impl RecordsPendingReaps for FlowStore {
         closing.announce(self);
         self.launch_changes.announce();
         Ok(())
+    }
+}
+
+/// Who owes a reap at its birth, from the flow its Address receives as when
+/// W3 commits.
+trait ChoosesBornResponsibility {
+    /// `LaunchSuccessor` when the Address receives as the successor the
+    /// launch's outcome names; `TakenOver` by another flow it receives as;
+    /// `AddressHeld` when nothing receives there. An ended successor the
+    /// Address no longer receives as owes nothing: it stays only the
+    /// history its outcome records.
+    fn born_responsibility(self, successor: &signal_flow::FlowId) -> ReapResponsibility;
+}
+
+impl ChoosesBornResponsibility for Option<signal_flow::FlowId> {
+    fn born_responsibility(self, successor: &signal_flow::FlowId) -> ReapResponsibility {
+        match self {
+            Some(flow_id) if flow_id == *successor => ReapResponsibility::LaunchSuccessor,
+            Some(flow_id) => ReapResponsibility::TakenOver(Responsible(flow_id)),
+            None => ReapResponsibility::AddressHeld,
+        }
     }
 }
 

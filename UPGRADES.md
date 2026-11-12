@@ -38,9 +38,12 @@ Contracts: signal-flow 61.0.0 (4871bb8) and meta-signal-flow 77.0.0
   so ends with no store change and is not armed again by its own completion.
 - **A pending reap outlives its successor.** Who owes a reap is recorded on
   its row (`ReapResponsibility`: `LaunchSuccessor`, `TakenOver.<Flow>`,
-  `AddressHeld`) and follows the Address's receiving flow. Every commit that
-  changes it reassigns the reaps there: the successor's end (Stop, Retire,
-  Exited by a delivery, a wake, a refresh or an observation), a later
+  `AddressHeld`), chosen by W3 from the Address's current succession in the
+  commit that writes the row, so a reap derived after its successor ended is
+  born owed by the flow the Address receives as, or by the Address, never by
+  that ended successor. It follows the Address's receiving flow. Every commit
+  that changes it reassigns the reaps there: the successor's end (Stop,
+  Retire, Exited by a delivery, a wake, a refresh or an observation), a later
   launch's settlement (W3, `StartedHandedOver`, `HandoverOwed`, revalidated
   against the Address's receiving flow in the same commit), an adoption, a
   Bind, a rebind, a wake's `Awoken`, a `Record.Asleep` and the forgetting of

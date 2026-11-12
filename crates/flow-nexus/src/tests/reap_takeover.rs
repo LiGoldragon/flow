@@ -2267,3 +2267,445 @@ fn an_ordered_launch_after_an_end_takes_the_address_held_reap_over() {
         "{generations:?}"
     );
 }
+
+/// Sol's sequence to its fourth step (4vqk, twl7): W2 confirms S replacing
+/// P, W3 is refused, so no row and no outcome stand, and S is Stopped
+/// before its rest, its end commit finding no row to reassign. The Replace
+/// is left derived, with P still Active.
+fn successor_ended_before_w3(world: &ReapWorld) {
+    world
+        .fixture
+        .nexus
+        .store
+        .faults
+        .refuse_next(RefusedWrite::ReapOwing);
+    assert!(is_reap_pending(&world.replace(), ReapStanding::Unrecorded));
+    assert_eq!(
+        world.stop(SUCCESSOR),
+        Response::Stopped(FlowId(SUCCESSOR.into()))
+    );
+    assert!(world.row().is_none());
+    assert_eq!(world.outcome(), None);
+    assert_eq!(world.lifecycle(PREDECESSOR), FlowLifecycle::Active);
+}
+
+/// The start's obligation recovery, under the gate as `recover_wakes` runs
+/// it.
+fn recovered(world: &ReapWorld) {
+    world.fixture.nexus.recover_obligations();
+}
+
+/// How many times `name` was attempted from `from` on.
+fn attempted(world: &ReapWorld, from: usize, name: &str) -> usize {
+    world
+        .attempts_since(from)
+        .iter()
+        .filter(|attempt| *attempt == name)
+        .count()
+}
+
+/// so5u, the Address Asleep: the derived reap of a successor that ended
+/// before W3 is born held by the Address, never owed by the stopped S. The
+/// worker sees P positively absent and its settlement is refused once: the
+/// row stands at SettleUnrecorded, still the Address's. The next start
+/// settles it once, in the store alone: no close, no Herdr call, no
+/// generation to S.
+#[test]
+fn a_derived_reap_whose_successor_ended_is_born_held_by_the_address_and_settled_by_the_next_start()
+{
+    let mut world = ReapWorld::staged("derived-asleep");
+    successor_ended_before_w3(&world);
+    assert_eq!(
+        world
+            .fixture
+            .nexus
+            .store
+            .receiving_flow(&world.address())
+            .unwrap(),
+        None
+    );
+    world.show(PaneShown::Absent);
+    world.fixture.restarted();
+    recovered(&world);
+    assert_eq!(world.owner(), Some(ReapResponsibility::AddressHeld));
+    assert_eq!(world.standing(), Some(ReapStanding::Owed));
+    assert_eq!(world.lifecycle(PREDECESSOR), FlowLifecycle::Stopped);
+    assert!(pending_p_by_s(world.outcome()));
+    world
+        .fixture
+        .nexus
+        .store
+        .faults
+        .refuse_next(RefusedWrite::ReapSettle);
+    with_supervisor(&world.fixture, || {
+        world.until("the refused settlement", &mut || {
+            world.standing() == Some(ReapStanding::SettleUnrecorded)
+        });
+        assert!(
+            world
+                .fixture
+                .nexus
+                .pane_watch_hooks
+                .workers_joined_by(1, deadline()),
+            "the worker acted and was joined"
+        );
+    });
+    assert_eq!(world.owner(), Some(ReapResponsibility::AddressHeld));
+    assert_eq!(
+        world.closes(),
+        0,
+        "a positively absent pane is never closed"
+    );
+    let calls = world.predecessor_calls();
+    world.fixture.restarted();
+    let from = world.attempt_count();
+    recovered(&world);
+    assert!(world.row().is_none(), "the start settled it");
+    assert!(replaced_p_by_s(world.outcome()));
+    assert_eq!(attempted(&world, from, "Reaped"), 1, "settled once");
+    assert_eq!(world.closes(), 0, "no second close");
+    assert_eq!(world.predecessor_calls(), calls, "no Herdr call");
+    assert!(
+        !world
+            .generations()
+            .contains(&(PREDECESSOR.to_owned(), SUCCESSOR.to_owned())),
+        "no generation to S: {:?}",
+        world.generations()
+    );
+    world.fixture.restarted();
+    let again = world.attempt_count();
+    recovered(&world);
+    assert_eq!(
+        attempted(&world, again, "Reaped"),
+        0,
+        "nothing left to settle"
+    );
+}
+
+/// so5u, N receiving: S ended before W3 and N took the Address before the
+/// start materialized the derived reap. The row is born owed by N; after
+/// the worker's refused settlement it stands at SettleUnrecorded, N's, and
+/// N's next rest settles it once, in the store alone, with no generation
+/// to S. N's own handover obligation is left as it stood.
+#[test]
+fn a_derived_reap_whose_successor_ended_is_born_owed_by_the_receiving_flow_and_settled_at_its_rest()
+{
+    use crate::store::pending_handover::RecordsPendingHandovers;
+    let mut world = ReapWorld::staged("derived-later");
+    successor_ended_before_w3(&world);
+    let launched = world.confirmed_at_address("later-launch", LATER, None);
+    let _ = world.settled("later-launch", launched);
+    assert_eq!(
+        world
+            .fixture
+            .nexus
+            .store
+            .receiving_flow(&world.address())
+            .unwrap(),
+        Some(FlowId(LATER.into()))
+    );
+    let handover = world
+        .fixture
+        .nexus
+        .store
+        .pending_handover(&world.address())
+        .unwrap();
+    let later_outcome = world
+        .fixture
+        .nexus
+        .store
+        .launch_outcome("later-launch")
+        .unwrap();
+    world.show(PaneShown::Absent);
+    world.fixture.restarted();
+    recovered(&world);
+    assert_eq!(world.owner(), Some(taken_over_by(LATER)));
+    assert!(pending_p_by_s(world.outcome()));
+    assert_eq!(
+        world
+            .fixture
+            .nexus
+            .store
+            .pending_handover(&world.address())
+            .unwrap(),
+        handover,
+        "N's handover obligation is left as it stood"
+    );
+    assert_eq!(
+        world
+            .fixture
+            .nexus
+            .store
+            .launch_outcome("later-launch")
+            .unwrap(),
+        later_outcome
+    );
+    world
+        .fixture
+        .nexus
+        .store
+        .faults
+        .refuse_next(RefusedWrite::ReapSettle);
+    with_supervisor(&world.fixture, || {
+        world.until("the refused settlement", &mut || {
+            world.standing() == Some(ReapStanding::SettleUnrecorded)
+        });
+        assert!(
+            world
+                .fixture
+                .nexus
+                .pane_watch_hooks
+                .workers_joined_by(1, deadline()),
+            "the worker acted and was joined"
+        );
+    });
+    assert_eq!(world.owner(), Some(taken_over_by(LATER)));
+    let calls = world.predecessor_calls();
+    let from = world.attempt_count();
+    world.rest(LATER);
+    assert!(world.row().is_none(), "N's rest settled it");
+    assert!(replaced_p_by_s(world.outcome()));
+    assert_eq!(attempted(&world, from, "Reaped"), 1, "settled once");
+    assert_eq!(world.closes(), 0);
+    assert_eq!(world.predecessor_calls(), calls, "no Herdr call");
+    assert!(
+        !world
+            .generations()
+            .iter()
+            .any(|(_, successor)| successor == SUCCESSOR),
+        "no generation to S: {:?}",
+        world.generations()
+    );
+    let again = world.attempt_count();
+    world.rest(LATER);
+    assert_eq!(attempted(&world, again, "Reaped"), 0);
+}
+
+/// so5u, a transient predecessor read refused during the start's derived
+/// recovery: the row is born owed by the Address's reachable current flow
+/// N, typed PredecessorUnknown, with no worker and P left as it stood. N's
+/// next rest reads P again, records it Stopped, and the worker settles the
+/// reap once.
+#[test]
+fn a_predecessor_read_refused_in_derived_recovery_leaves_the_row_typed_under_the_current_owner() {
+    let mut world = ReapWorld::staged("derived-unknown");
+    successor_ended_before_w3(&world);
+    let launched = world.confirmed_at_address("unknown-launch", LATER, None);
+    let _ = world.settled("unknown-launch", launched);
+    world.show(PaneShown::Absent);
+    world.fixture.restarted();
+    world
+        .fixture
+        .nexus
+        .store
+        .faults
+        .refuse_next(RefusedWrite::FlowRead);
+    recovered(&world);
+    assert_eq!(world.owner(), Some(taken_over_by(LATER)));
+    assert_eq!(world.standing(), Some(ReapStanding::PredecessorUnknown));
+    assert_eq!(world.lifecycle(PREDECESSOR), FlowLifecycle::Active);
+    assert!(pending_p_by_s(world.outcome()));
+    with_supervisor(&world.fixture, || {
+        world.two_passes();
+        assert!(world.armed().is_empty(), "no worker for a typed Unknown");
+        world.rest(LATER);
+        assert_eq!(world.lifecycle(PREDECESSOR), FlowLifecycle::Stopped);
+        world.until("the reap settled", &mut || world.row().is_none());
+    });
+    assert!(replaced_p_by_s(world.outcome()));
+    assert_eq!(world.closes(), 0);
+    assert!(
+        world
+            .armed()
+            .iter()
+            .all(|armed| armed.reap_responsibility == taken_over_by(LATER))
+    );
+}
+
+/// A third row S owes at A, for a predecessor that names no flow:
+/// `PredecessorMissing`, which stands as typed state; its key.
+fn standing_row(world: &ReapWorld) -> String {
+    let store = &world.fixture.nexus.store;
+    let third = "5ec0d1".to_owned();
+    store
+        .reap_owed(
+            PendingReap {
+                predecessor: Predecessor(third.clone()),
+                launch_request_id: signal_flow::LaunchRequestId("third-launch".into()),
+                address: world.address(),
+                reap_standing: ReapStanding::PredecessorMissing,
+                reap_responsibility: ReapResponsibility::LaunchSuccessor,
+            },
+            crate::generated::starter::ReplacedRecord {
+                flow_id: FlowId(third.clone()),
+                launched_record: crate::generated::starter::LaunchedRecord {
+                    flow_id: FlowId(SUCCESSOR.into()),
+                    session_id: signal_flow::SessionId(String::new()),
+                    origin: signal_flow::Origin::Unbound,
+                },
+            },
+        )
+        .unwrap();
+    third
+}
+
+/// Every row at an Address, keyed by predecessor, as it stands.
+fn rows_at(world: &ReapWorld, address: &signal_flow::Address) -> Vec<PendingReap> {
+    use crate::store::pending_reap::WritesPendingReap;
+    world.fixture.nexus.store.pending_reaps_at(address).unwrap()
+}
+
+/// Record.Awoken of A as N over an ended S carries the reassignment of the
+/// mixed rows S owed there in its own commit: the pane-owed row TakenOver
+/// by N, the store-only row finished, the typed row untouched. Refused, it
+/// leaves the metaflow and every row as they stood.
+#[test]
+fn an_awakening_reassigns_the_mixed_rows_in_its_own_commit() {
+    for refused in [true, false] {
+        let label = format!("refused: {refused}");
+        let world = ReapWorld::staged(&format!("awaken-{refused}"));
+        let second = second_row(&world);
+        let third = standing_row(&world);
+        let store = &world.fixture.nexus.store;
+        let address = world.address();
+        store.mark_exited(SUCCESSOR);
+        let before = store.metaflow(&address).unwrap();
+        let rows = rows_at(&world, &address);
+        if refused {
+            store.faults.refuse_next(RefusedWrite::MetaflowAwaken);
+        }
+        let awoken = store.awaken_metaflow(&address, LATER, 0);
+        if refused {
+            assert!(awoken.is_err(), "{label}: {awoken:?}");
+            assert_eq!(store.metaflow(&address).unwrap(), before, "{label}");
+            assert_eq!(rows_at(&world, &address), rows, "{label}");
+            assert!(pending_p_by_s(world.outcome()), "{label}");
+            continue;
+        }
+        assert!(awoken.unwrap(), "{label}");
+        assert_eq!(
+            store.receiving_flow(&address).unwrap(),
+            Some(FlowId(LATER.into()))
+        );
+        assert_eq!(world.owner(), Some(taken_over_by(LATER)));
+        assert!(store.pending_reap(&second).unwrap().is_none());
+        assert!(matches!(
+            store.launch_outcome("second-launch").unwrap(),
+            Some(LaunchOutcome::Replaced(_))
+        ));
+        let standing = store.pending_reap(&third).unwrap().expect("the typed row");
+        assert_eq!(standing.reap_standing, ReapStanding::PredecessorMissing);
+        assert_eq!(
+            standing.reap_responsibility,
+            ReapResponsibility::LaunchSuccessor
+        );
+    }
+}
+
+/// The forgetting of an Address held only through an ended binding carries
+/// the reassignment of the mixed rows its bound flow owed there in its own
+/// commit: the pane-owed row held by the Address, the store-only row
+/// finished, the typed row untouched. Refused, it leaves the metaflow, its
+/// binding and every row as they stood.
+#[test]
+fn forgetting_an_ended_binding_reassigns_the_mixed_rows_in_its_own_commit() {
+    use crate::store::metaflow::{ForgetsEndedBindings, MutatesMetaflows};
+    use crate::store::{ManagesMetaflowState, ReadsFlowMemory};
+    for refused in [true, false] {
+        let label = format!("refused: {refused}");
+        let world = ReapWorld::staged(&format!("forget-{refused}"));
+        let store = &world.fixture.nexus.store;
+        let mut address = world.address();
+        address.topic = flow_ethos::Topic("forgotten".into());
+        let mut peer = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("peer process");
+        let process =
+            crate::store::FlowStore::process_identity_for_pid(peer.id()).expect("the peer");
+        let bound = match store.bind_metaflow(
+            signal_flow::Bind_Data {
+                address: address.clone(),
+                process,
+            },
+            None,
+        ) {
+            Ok(Response::Bound(flow_id)) => flow_id,
+            other => panic!("{label}: {other:?}"),
+        };
+        let owed = |predecessor: &str, standing: ReapStanding| {
+            store
+                .reap_owed(
+                    PendingReap {
+                        predecessor: Predecessor(predecessor.into()),
+                        launch_request_id: signal_flow::LaunchRequestId(format!(
+                            "{predecessor}-launch"
+                        )),
+                        address: address.clone(),
+                        reap_standing: standing,
+                        reap_responsibility: ReapResponsibility::LaunchSuccessor,
+                    },
+                    crate::generated::starter::ReplacedRecord {
+                        flow_id: FlowId(predecessor.into()),
+                        launched_record: crate::generated::starter::LaunchedRecord {
+                            flow_id: FlowId("b0b0b0".into()),
+                            session_id: signal_flow::SessionId(String::new()),
+                            origin: signal_flow::Origin::Unbound,
+                        },
+                    },
+                )
+                .unwrap();
+        };
+        owed("f00001", ReapStanding::Owed);
+        owed("f00002", ReapStanding::Owed);
+        assert!(
+            store
+                .reap_refused("f00002", ReapStanding::SettleUnrecorded)
+                .unwrap()
+        );
+        owed("f00003", ReapStanding::PredecessorMissing);
+        let held_by_binding = ReapResponsibility::TakenOver(Responsible(bound.clone()));
+        for row in rows_at(&world, &address) {
+            assert_eq!(
+                row.reap_responsibility, held_by_binding,
+                "{label}: born owed by the binding"
+            );
+        }
+        peer.kill().expect("peer killed");
+        peer.wait().expect("peer reaped");
+        let before = store.metaflow(&address).unwrap();
+        let rows = rows_at(&world, &address);
+        if refused {
+            store.faults.refuse_next(RefusedWrite::BindingForget);
+        }
+        let forgotten = store.forget_ended_binding(&address, &bound.0);
+        if refused {
+            assert!(forgotten.is_err(), "{label}: {forgotten:?}");
+            assert_eq!(store.metaflow(&address).unwrap(), before, "{label}");
+            assert!(store.bound_process(&address).unwrap().is_some(), "{label}");
+            assert_eq!(rows_at(&world, &address), rows, "{label}");
+            continue;
+        }
+        assert!(forgotten.unwrap(), "{label}");
+        assert_eq!(store.metaflow(&address).unwrap(), None);
+        assert_eq!(
+            store
+                .pending_reap("f00001")
+                .unwrap()
+                .map(|row| row.reap_responsibility),
+            Some(ReapResponsibility::AddressHeld)
+        );
+        assert!(store.pending_reap("f00002").unwrap().is_none());
+        assert!(matches!(
+            store.launch_outcome("f00002-launch").unwrap(),
+            Some(LaunchOutcome::Replaced(_))
+        ));
+        assert_eq!(
+            store
+                .pending_reap("f00003")
+                .unwrap()
+                .map(|row| row.reap_responsibility),
+            Some(held_by_binding)
+        );
+    }
+}

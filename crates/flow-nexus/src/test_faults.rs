@@ -72,6 +72,11 @@ pub(crate) enum RefusedWrite {
     CurrentFlowRebind,
     /// A Record.Asleep of an ended flow's metaflow, with its reassignment.
     MetaflowSleep,
+    /// A Record.Awoken of a metaflow as a flow, with its reassignment.
+    MetaflowAwaken,
+    /// The forgetting of an Address held only through an ended binding,
+    /// with its reassignment.
+    BindingForget,
     /// The reap supervisor's read of the pending reaps in its next pass.
     PassRead,
 }

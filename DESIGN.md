@@ -291,9 +291,12 @@ own terminal is closed even when a person works in its plain shell, because a
 harness that exits leaves its pane `Bare` and Herdr announces no going for it.
 
 Who owes a reap is recorded on its row (`ReapResponsibility`): the successor
-its launch's outcome names (`LaunchSuccessor`, what W3 writes), a later flow
-that took it over (`TakenOver`), or the Address itself when nothing receives
-there (`AddressHeld`). It follows the Address's receiving flow: every commit
+its launch's outcome names (`LaunchSuccessor`), a later flow that took it over
+(`TakenOver`), or the Address itself when nothing receives there
+(`AddressHeld`). W3 chooses it from the Address's current succession in the
+commit that writes the row: a derived reap written after its successor ended
+is born owed by the flow the Address receives as, or by the Address, never by
+that successor, which stays only the history its outcome records. It follows the Address's receiving flow: every commit
 that changes which flow the Address receives as carries the reassignment of
 the reaps there, under the dispatch gate. The successor's end (`Stop`,
 `Retire`, an `Exited` recorded by a delivery, a wake, a refresh or an

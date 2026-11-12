@@ -455,8 +455,9 @@ trait OpensCodexProxy {
 }
 
 /// Starts the proxy and sends its WebSocket upgrade; the reader thread
-/// hands the upgrade, then every frame, to `sink` until the sink refuses or
-/// the proxy closes.
+/// hands the upgrade, then every frame, to `sink` until the sink refuses,
+/// the proxy closes, or a read fails. A failed read is final: the socket
+/// fails every later read at once, so the failure is handed on once.
 pub(crate) trait SpawnsCodexProxy {
     fn spawn_proxy(
         &self,
@@ -554,10 +555,6 @@ impl SpawnsCodexProxy for CodexAdapter {
                 Some(config),
             );
             loop {
-                // A read error is final: the socket answers every later read
-                // with the same error at once, so the reader reports it once
-                // and ends, as it does on Close.
-                let mut ended = false;
                 let event = match socket.read() {
                     Ok(Message::Text(message)) => match serde_json::from_str(message.as_ref()) {
                         Ok(message) => ProxyEvent::Reply(Ok(message)),
@@ -580,15 +577,16 @@ impl SpawnsCodexProxy for CodexAdapter {
                     )),
                     Ok(Message::Frame(_)) => continue,
                     Err(error) => {
-                        ended = true;
-                        ProxyEvent::Reply(Err(CodexAdapterUnavailable::Protocol(error.to_string())))
+                        let _ = sink(ProxyEvent::Reply(Err(CodexAdapterUnavailable::Protocol(
+                            error.to_string(),
+                        ))));
+                        return;
                     }
                 };
-                let closed = ended
-                    || matches!(
-                        event,
-                        ProxyEvent::Reply(Err(CodexAdapterUnavailable::Closed))
-                    );
+                let closed = matches!(
+                    event,
+                    ProxyEvent::Reply(Err(CodexAdapterUnavailable::Closed))
+                );
                 if !sink(event) || closed {
                     return;
                 }
@@ -2430,6 +2428,41 @@ mod tests {
             1_048_576
         );
         assert_eq!(long.len(), 9);
+    }
+
+    /// A proxy that exits after its WebSocket upgrade, as one whose
+    /// app-server refused its thread and was closed: the reader hands on
+    /// the upgrade and one failed read, then ends, so its channel
+    /// disconnects instead of filling without bound.
+    #[test]
+    fn a_proxy_exiting_after_its_upgrade_ends_its_reader_after_one_error() {
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("codex");
+        FixtureExecutable {
+            path: executable.clone(),
+        }
+        .install(
+            "#!/bin/sh\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\nexit 0\n",
+        );
+        let (sender, events) = mpsc::channel();
+        let ProxyChild { mut child, .. } = adapter_at(executable)
+            .spawn_proxy(move |event| sender.send(event).is_ok())
+            .expect("the proxy starts");
+        let wait = Duration::from_secs(5);
+        assert!(matches!(
+            events.recv_timeout(wait),
+            Ok(ProxyEvent::Upgraded)
+        ));
+        assert!(matches!(
+            events.recv_timeout(wait),
+            Ok(ProxyEvent::Reply(Err(CodexAdapterUnavailable::Protocol(_))))
+        ));
+        assert!(matches!(
+            events.recv_timeout(wait),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        ));
+        let _ = child.wait();
     }
 
     #[test]

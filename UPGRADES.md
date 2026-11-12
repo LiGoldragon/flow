@@ -1,3 +1,23 @@
+# Flow 0.54.4: a Codex proxy reader ends on its first failed read
+
+Builds on 0.54.3, on the same contracts, build base and Message.
+
+- The reader thread of a Codex app-server proxy (`codex.rs`,
+  `SpawnsCodexProxy::spawn_proxy`) hands on a failed WebSocket read once
+  and ends, as it ends on Close. A proxy that exited after its upgrade
+  fails every later read at once, and the reader had sent each failure
+  into the responder's unbounded channel, without end: the Nexus grew to
+  25G on ouranos on 2026-11-11, from a Codex flow whose thread its
+  app-server did not hold (primary `flows/5e88e5/leak-findings.md`). Every
+  connection goes through this reader, so the send tool's reconnects, the
+  launch-serving connection and each request session are covered alike.
+  Witness: `a_proxy_exiting_after_its_upgrade_ends_its_reader_after_one_error`.
+
+## Stored format
+
+No stored format changes. Rollback to 0.54.3 is clean: 0.54.3 opens the
+memory 0.54.4 wrote.
+
 # Flow 0.54.3: answers routed, Living, Remind, a Report's harness birth, one Herdr session
 
 Builds on 0.54.2, after Psyche core Fable's rulings on the 0.54.2 questions

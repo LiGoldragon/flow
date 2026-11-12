@@ -107,7 +107,9 @@ impl LogicalState {
     }
 }
 
-/// The Herdr socket the reap worker subscribes on.
+/// The Herdr socket the reap worker subscribes on; a clone is a handle on
+/// the same socket.
+#[derive(Clone)]
 pub(crate) struct HerdrEventsServer {
     shared: Arc<EventsShared>,
 }
@@ -619,11 +621,15 @@ impl ProbesGate for GateProbe {
 }
 
 /// Runs the reap supervisor for the duration of `body`, then stops the
-/// Nexus and joins it; the ends of every worker it joined.
+/// Nexus and joins it; the ends of every worker it joined. Every worker
+/// this supervisor spawned is joined exactly once.
 pub(super) fn with_supervisor(
     fixture: &NexusFixture,
     body: impl FnOnce(),
 ) -> Vec<(String, PaneWatchEnd)> {
+    let hooks = &fixture.nexus.pane_watch_hooks;
+    hooks.spawned.lock().unwrap().clear();
+    hooks.joined.lock().unwrap().clear();
     std::thread::scope(|scope| {
         let nexus = &fixture.nexus;
         let supervisor = scope.spawn(move || nexus.serve_reaped_pane_watches(scope));
@@ -640,7 +646,12 @@ pub(super) fn with_supervisor(
         drop(stops);
         supervisor.join().expect("the supervisor returns");
     });
-    fixture.nexus.pane_watch_hooks.ends.lock().unwrap().clone()
+    let mut spawned = hooks.spawned.lock().unwrap().clone();
+    let mut joined = hooks.joined.lock().unwrap().clone();
+    spawned.sort();
+    joined.sort();
+    assert_eq!(joined, spawned, "every worker is joined exactly once");
+    hooks.ends.lock().unwrap().clone()
 }
 
 /// The older tests' way to see a pending reap settled: the reap worker run
@@ -1450,6 +1461,140 @@ fn a_stop_between_the_check_and_the_wait_is_not_lost() {
         let supervisor = scope.spawn(|| nexus.serve_reaped_pane_watches(scope));
         supervisor.join().expect("the supervisor returns");
     });
+}
+
+/// Lifecycle: a worker that lapses with no store change is joined by its
+/// own completion, with no other event; the wake re-arms nothing.
+#[test]
+fn a_lapsed_worker_is_joined_by_its_own_completion() {
+    use crate::reaping::RunsPaneWatchHooks;
+    let world = ReapWorld::staged("own-completion");
+    world.show(PaneShown::Occupied);
+    let hooks = &world.fixture.nexus.pane_watch_hooks;
+    let ends = with_supervisor(&world.fixture, || {
+        assert!(is_reap_pending(&world.replace(), ReapStanding::Owed));
+        world
+            .events
+            .wait_for("the subscription", |subscribed, _| subscribed >= 1);
+        let attempts = world.fixture.nexus.store.faults.attempts().len();
+        world.events.close_streams();
+        assert!(
+            hooks.workers_joined_by(1, Instant::now() + Duration::from_secs(20)),
+            "the lapsed worker is joined by its own completion"
+        );
+        assert_eq!(
+            world.fixture.nexus.store.faults.attempts().len(),
+            attempts,
+            "the lapse changed no store row"
+        );
+        for _ in 0..3 {
+            world.fixture.nexus.store.launch_changes.announce();
+        }
+    });
+    assert_eq!(
+        ends,
+        vec![(
+            PREDECESSOR.to_owned(),
+            PaneWatchEnd::Lapsed(PaneWatchLapse::StreamClosedPanePresent)
+        )]
+    );
+    assert_eq!(hooks.spawned.lock().unwrap().len(), 1, "nothing re-armed");
+    assert_eq!(world.events.subscriptions(), 1);
+    assert_eq!(world.standing(), Some(ReapStanding::Owed));
+}
+
+/// Lifecycle, fault-injected order: a worker's completion lands after the
+/// supervisor's pass and before its wait; it is queued and joined, not
+/// lost.
+#[test]
+fn a_completion_between_the_pass_and_the_wait_is_not_lost() {
+    use crate::reaping::RunsPaneWatchHooks;
+    let world = ReapWorld::staged("completion-race");
+    world.show(PaneShown::Occupied);
+    let hooks = &world.fixture.nexus.pane_watch_hooks;
+    let ends = with_supervisor(&world.fixture, || {
+        assert!(is_reap_pending(&world.replace(), ReapStanding::Owed));
+        world
+            .events
+            .wait_for("the subscription", |subscribed, _| subscribed >= 1);
+        let events = world.events.clone();
+        *hooks.between.lock().unwrap() = Some(Box::new(move |nexus| {
+            events.close_streams();
+            assert!(
+                nexus
+                    .pane_watch_hooks
+                    .workers_ended_by(1, Instant::now() + Duration::from_secs(20)),
+                "the worker completes between the pass and the wait"
+            );
+        }));
+        world.fixture.nexus.store.launch_changes.announce();
+        assert!(
+            hooks.workers_joined_by(1, Instant::now() + Duration::from_secs(20)),
+            "the completion announced in the window is joined"
+        );
+        assert!(hooks.between.lock().unwrap().is_none());
+    });
+    assert_eq!(
+        ends,
+        vec![(
+            PREDECESSOR.to_owned(),
+            PaneWatchEnd::Lapsed(PaneWatchLapse::StreamClosedPanePresent)
+        )]
+    );
+    assert_eq!(hooks.spawned.lock().unwrap().len(), 1, "nothing re-armed");
+}
+
+/// Lifecycle: a worker cancelled by a rearm is joined once; its completion,
+/// drained after, joins no other worker, and the worker armed in its place
+/// keeps watching and acts.
+#[test]
+fn a_rearmed_worker_is_joined_once_and_its_late_completion_joins_no_other() {
+    let world = ReapWorld::staged("rearmed-once");
+    world.show(PaneShown::Occupied);
+    let hooks = &world.fixture.nexus.pane_watch_hooks;
+    let ends = with_supervisor(&world.fixture, || {
+        assert!(is_reap_pending(&world.replace(), ReapStanding::Owed));
+        world
+            .events
+            .wait_for("the subscription", |subscribed, _| subscribed >= 1);
+        {
+            let _turn = world.fixture.nexus.dispatch_gate.lock().unwrap();
+            world.fixture.nexus.take_up_at_rest(SUCCESSOR);
+        }
+        world
+            .events
+            .wait_for("the rearmed subscription", |subscribed, _| subscribed >= 2);
+        // Two passes in turn: the second runs wholly after the rearm's own
+        // pass, so it has drained the first worker's completion.
+        for _ in 0..2 {
+            let (passed, pass) = std::sync::mpsc::channel();
+            *hooks.between.lock().unwrap() = Some(Box::new(move |_| {
+                let _ = passed.send(());
+            }));
+            world.fixture.nexus.store.launch_changes.announce();
+            pass.recv_timeout(Duration::from_secs(20))
+                .expect("a supervisor pass");
+        }
+        assert_eq!(
+            hooks.joined.lock().unwrap().len(),
+            1,
+            "the first worker's late completion joins no other"
+        );
+        world.events.emit_gone(PREDECESSOR_PANE);
+        world.until("the reap settled", &mut || world.standing().is_none());
+    });
+    assert_eq!(hooks.spawned.lock().unwrap().len(), 2);
+    assert!(
+        ends.iter().any(|(_, end)| *end
+            == PaneWatchEnd::Cancelled(
+                crate::observation_lifetime::ObservationCancellationCause::Rearmed
+            )),
+        "{ends:?}"
+    );
+    assert!(
+        ends.iter().any(|(_, end)| *end == PaneWatchEnd::Acted),
+        "{ends:?}"
+    );
 }
 
 /// W7: a stream closed with the pane present lapses the watch; unrelated

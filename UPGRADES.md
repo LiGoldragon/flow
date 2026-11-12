@@ -32,7 +32,10 @@ Contracts: signal-flow 61.0.0 (4871bb8) and meta-signal-flow 77.0.0
   pane running another native session is never closed; a route not recorded
   settles nothing by itself. A pending reap is retried only at its successor's
   next rest (store only; it rearms the worker), the worker's own Herdr events
-  and the Nexus start.
+  and the Nexus start. Each worker announces its own completion as its thread
+  leaves its body, by return or unwind, and the supervisor joins that worker
+  on it, once; a lapsed worker so ends with no store change and is not armed
+  again by its own completion.
 - **A fresh start's handover is an obligation.** A Start or fresh Launch
   whose handover cannot move answers `HandoverPending` and is taken up at its
   flow's next rest, its own `Keep`/`Drop`, or the start; a later launch at the

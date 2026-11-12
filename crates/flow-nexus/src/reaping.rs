@@ -23,8 +23,9 @@
 //! running another native session is never closed and not counted gone.
 //!
 //! Every action answers an event: a launch, the successor's rest, the
-//! receiving flow's own handover write, the Nexus start, a Herdr event or
-//! the worker's opening snapshot. Nothing schedules itself; a refused write
+//! receiving flow's own handover write, the Nexus start, a Herdr event,
+//! the worker's opening snapshot, or a worker's own completion, on which
+//! the supervisor joins that worker. Nothing schedules itself; a refused write
 //! is no event; a missing owner or predecessor stands as typed state and
 //! no event retries it.
 
@@ -54,7 +55,7 @@ use signal_flow::{
     HerdrRoute, HerdrRouteSelection, Launched, ReapStanding, Replaced, Response,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{Scope, ScopedJoinHandle};
 
 /// The three steps of a reap, the first and last under the dispatch gate
@@ -760,26 +761,104 @@ pub(crate) enum PaneWatchLapse {
     Panicked,
 }
 
+/// The serial of one worker the supervisor spawned, counted from zero over
+/// the supervisor's life.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct PaneWatchSpawnSerial(u64);
+
+/// One worker: the predecessor it watches for and the spawn that made it.
+/// Its completion names it, so the supervisor joins that very handle and
+/// no later worker armed for the same predecessor.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct PaneWatchWorkerIdentity {
+    pub(crate) predecessor: String,
+    pub(crate) spawn: PaneWatchSpawnSerial,
+}
+
 enum PaneWatchEntry<'scope> {
     Watching {
         armed: ArmedReap,
+        worker: PaneWatchWorkerIdentity,
         cancellation: Arc<ObservationCancellation>,
         thread: ScopedJoinHandle<'scope, PaneWatchEnd>,
     },
     Lapsed(PaneWatchLapse),
 }
 
-/// The supervisor's entries, one per obligation, keyed by predecessor.
-#[derive(Default)]
+/// The supervisor's entries, one per obligation, keyed by predecessor, and
+/// the queue each worker announces its completion on.
 pub(crate) struct ReapedPaneWatches<'scope> {
     watches: BTreeMap<String, PaneWatchEntry<'scope>>,
-    /// The end of each worker joined, for the tests' witness.
-    ended: Vec<(String, PaneWatchEnd)>,
+    /// Each worker's identity, sent as the last thing its thread does.
+    completed: mpsc::Sender<PaneWatchWorkerIdentity>,
+    completions: mpsc::Receiver<PaneWatchWorkerIdentity>,
+    next_spawn: PaneWatchSpawnSerial,
+}
+
+impl Default for ReapedPaneWatches<'_> {
+    fn default() -> Self {
+        let (completed, completions) = mpsc::channel();
+        Self {
+            watches: BTreeMap::new(),
+            completed,
+            completions,
+            next_spawn: PaneWatchSpawnSerial::default(),
+        }
+    }
+}
+
+/// A worker's completion, announced when its thread leaves its body, by
+/// return or by unwind: its identity is queued, then `launch_changes` is
+/// announced, the event the supervisor waits on. The queue is filled before
+/// the announcement and the supervisor reads its count before it drains the
+/// queue, so a completion landing between the supervisor's drain and its
+/// wait moves the count past what it saw and its wait returns at once.
+struct PaneWatchCompletion<'env> {
+    worker: PaneWatchWorkerIdentity,
+    completed: mpsc::Sender<PaneWatchWorkerIdentity>,
+    nexus: &'env RunningNexus,
+}
+
+impl Drop for PaneWatchCompletion<'_> {
+    fn drop(&mut self) {
+        // The receiver lives until the supervisor has joined every worker.
+        let _ = self.completed.send(self.worker.clone());
+        self.nexus.store.launch_changes.announce();
+        #[cfg(test)]
+        self.nexus.pane_watch_hooks.worker_ended();
+    }
+}
+
+/// The one way a worker's handle is joined: the join is the proof it ended.
+trait JoinsPaneWatch {
+    fn join_pane_watch(
+        &self,
+        worker: &PaneWatchWorkerIdentity,
+        thread: ScopedJoinHandle<'_, PaneWatchEnd>,
+    ) -> PaneWatchEnd;
+}
+
+impl JoinsPaneWatch for RunningNexus {
+    fn join_pane_watch(
+        &self,
+        worker: &PaneWatchWorkerIdentity,
+        thread: ScopedJoinHandle<'_, PaneWatchEnd>,
+    ) -> PaneWatchEnd {
+        let end = thread
+            .join()
+            .unwrap_or(PaneWatchEnd::Lapsed(PaneWatchLapse::Panicked));
+        #[cfg(test)]
+        self.pane_watch_hooks.worker_joined(worker, &end);
+        #[cfg(not(test))]
+        let _ = worker;
+        end
+    }
 }
 
 pub trait ServesReapedPaneWatches {
     /// One supervisor for the Nexus's life: arms one worker per PendingReap
-    /// whose pane step is owed, woken only by `launch_changes`.
+    /// whose pane step is owed, woken only by `launch_changes`, which every
+    /// obligation write, every rearm and every worker's completion announce.
     fn serve_reaped_pane_watches<'scope, 'env>(&'env self, scope: &'scope Scope<'scope, 'env>);
 }
 
@@ -814,10 +893,7 @@ pub(crate) trait PassesPaneWatches<'scope> {
     fn pass<'env>(&mut self, nexus: &'env RunningNexus, scope: &'scope Scope<'scope, 'env>)
     where
         'env: 'scope;
-    fn stop_all(&mut self);
-    /// Every worker end joined so far.
-    #[cfg(test)]
-    fn ends(&self) -> &[(String, PaneWatchEnd)];
+    fn stop_all(&mut self, nexus: &RunningNexus);
 }
 
 impl<'scope> PassesPaneWatches<'scope> for ReapedPaneWatches<'scope> {
@@ -838,25 +914,20 @@ impl<'scope> PassesPaneWatches<'scope> for ReapedPaneWatches<'scope> {
             .filter(|row| row.reap_standing.pane_step_owed())
             .map(|row| (row.predecessor.0.clone(), row))
             .collect();
-        // Finished workers are joined first.
-        let finished = self
-            .watches
-            .iter()
-            .filter_map(|(key, entry)| match entry {
-                PaneWatchEntry::Watching { thread, .. } if thread.is_finished() => {
-                    Some(key.clone())
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        for key in finished {
+        // Each worker that announced its completion is joined first. A
+        // completion naming a handle already joined, by a cancellation,
+        // names no entry and joins nothing.
+        let completed = self.completions.try_iter().collect::<Vec<_>>();
+        for worker in completed {
+            let key = worker.predecessor.clone();
+            match self.watches.get(&key) {
+                Some(PaneWatchEntry::Watching { worker: entry, .. }) if *entry == worker => {}
+                _ => continue,
+            }
             let Some(PaneWatchEntry::Watching { thread, .. }) = self.watches.remove(&key) else {
                 continue;
             };
-            let end = thread
-                .join()
-                .unwrap_or(PaneWatchEnd::Lapsed(PaneWatchLapse::Panicked));
-            self.ended.push((key.clone(), end.clone()));
+            let end = nexus.join_pane_watch(&worker, thread);
             let lapse = match end {
                 PaneWatchEnd::Cancelled(_) => None,
                 PaneWatchEnd::Acted if !wanted.contains_key(&key) => None,
@@ -889,15 +960,13 @@ impl<'scope> PassesPaneWatches<'scope> for ReapedPaneWatches<'scope> {
         for key in retracted {
             match self.watches.remove(&key) {
                 Some(PaneWatchEntry::Watching {
+                    worker,
                     cancellation,
                     thread,
                     ..
                 }) => {
                     cancellation.cancel(ObservationCancellationCause::ObligationRetracted);
-                    let end = thread
-                        .join()
-                        .unwrap_or(PaneWatchEnd::Lapsed(PaneWatchLapse::Panicked));
-                    self.ended.push((key, end));
+                    nexus.join_pane_watch(&worker, thread);
                 }
                 Some(PaneWatchEntry::Lapsed(_)) | None => {}
             }
@@ -909,16 +978,14 @@ impl<'scope> PassesPaneWatches<'scope> for ReapedPaneWatches<'scope> {
             match self.watches.get(key) {
                 Some(PaneWatchEntry::Watching { .. }) if rearmed => {
                     if let Some(PaneWatchEntry::Watching {
+                        worker,
                         cancellation,
                         thread,
                         ..
                     }) = self.watches.remove(key)
                     {
                         cancellation.cancel(ObservationCancellationCause::Rearmed);
-                        let end = thread
-                            .join()
-                            .unwrap_or(PaneWatchEnd::Lapsed(PaneWatchLapse::Panicked));
-                        self.ended.push((key.clone(), end));
+                        nexus.join_pane_watch(&worker, thread);
                     }
                 }
                 Some(PaneWatchEntry::Lapsed(lapse)) if rearmed => {
@@ -950,20 +1017,36 @@ impl<'scope> PassesPaneWatches<'scope> for ReapedPaneWatches<'scope> {
                         continue;
                     }
                 };
+            let worker = PaneWatchWorkerIdentity {
+                predecessor: key.clone(),
+                spawn: self.next_spawn,
+            };
+            self.next_spawn = PaneWatchSpawnSerial(self.next_spawn.0 + 1);
             let worker_cancellation = cancellation.clone();
             let worker_armed = armed.clone();
-            let predecessor = key.clone();
+            let completion = PaneWatchCompletion {
+                worker: worker.clone(),
+                completed: self.completed.clone(),
+                nexus,
+            };
             let thread = scope.spawn(move || {
-                let end =
-                    nexus.watch_reaped_pane(&predecessor, &worker_armed, &worker_cancellation);
-                #[cfg(test)]
-                nexus.pane_watch_hooks.worker_ended();
+                // Announced once the body has made its end, or as it unwinds.
+                let completion = completion;
+                let end = nexus.watch_reaped_pane(
+                    &completion.worker.predecessor,
+                    &worker_armed,
+                    &worker_cancellation,
+                );
+                drop(completion);
                 end
             });
+            #[cfg(test)]
+            nexus.pane_watch_hooks.worker_spawned(&worker);
             self.watches.insert(
                 key.clone(),
                 PaneWatchEntry::Watching {
                     armed,
+                    worker,
                     cancellation,
                     thread,
                 },
@@ -971,25 +1054,17 @@ impl<'scope> PassesPaneWatches<'scope> for ReapedPaneWatches<'scope> {
         }
     }
 
-    fn stop_all(&mut self) {
+    fn stop_all(&mut self, nexus: &RunningNexus) {
         for entry in self.watches.values() {
             if let PaneWatchEntry::Watching { cancellation, .. } = entry {
                 cancellation.cancel(ObservationCancellationCause::NexusStopped);
             }
         }
-        for (key, entry) in std::mem::take(&mut self.watches) {
-            if let PaneWatchEntry::Watching { thread, .. } = entry {
-                let end = thread
-                    .join()
-                    .unwrap_or(PaneWatchEnd::Lapsed(PaneWatchLapse::Panicked));
-                self.ended.push((key, end));
+        for entry in std::mem::take(&mut self.watches).into_values() {
+            if let PaneWatchEntry::Watching { worker, thread, .. } = entry {
+                nexus.join_pane_watch(&worker, thread);
             }
         }
-    }
-
-    #[cfg(test)]
-    fn ends(&self) -> &[(String, PaneWatchEnd)] {
-        &self.ended
     }
 }
 
@@ -1007,9 +1082,7 @@ impl ServesReapedPaneWatches for RunningNexus {
             self.pane_watch_hooks.between_check_and_wait(self);
             changes.after_while(seen, &|| !self.stopping.requested());
         }
-        watches.stop_all();
-        #[cfg(test)]
-        self.pane_watch_hooks.record_ends(watches.ends());
+        watches.stop_all(self);
     }
 }
 
@@ -1131,7 +1204,7 @@ impl WatchesReapedPane for RunningNexus {
                 }
                 Ok(HerdrCue::Event(event)) => {
                     #[cfg(test)]
-                    self.pane_watch_hooks.at_event(self);
+                    self.pane_watch_hooks.at_event();
                     if event.pane_event(&route.herdr_pane_id.0) == Some(PaneEvent::Gone) {
                         #[cfg(test)]
                         crate::test_faults::InjectsCrashes::crash_if_armed(
@@ -1253,13 +1326,17 @@ pub(crate) type SupervisorHook = Box<dyn FnOnce(&RunningNexus) + Send>;
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct PaneWatchHooks {
-    /// Runs between the supervisor's stop check and its wait, once.
+    /// Runs between the supervisor's pass and its wait, once.
     pub(crate) between: Mutex<Option<SupervisorHook>>,
-    /// Every worker end the supervisor joined, once it returned.
+    /// Every worker end the supervisor joined, as it joined it.
     pub(crate) ends: Mutex<Vec<(String, PaneWatchEnd)>>,
+    /// Every worker the supervisor spawned, and every one it joined.
+    pub(crate) spawned: Mutex<Vec<PaneWatchWorkerIdentity>>,
+    pub(crate) joined: Mutex<Vec<PaneWatchWorkerIdentity>>,
+    pub(crate) worker_join: std::sync::Condvar,
     /// Panics a worker at its next event, once.
     pub(crate) panic_at_event: std::sync::atomic::AtomicBool,
-    /// How many worker bodies returned, and its announcement.
+    /// How many workers announced their completion, and its announcement.
     pub(crate) workers_ended: Mutex<usize>,
     pub(crate) worker_end: std::sync::Condvar,
 }
@@ -1267,11 +1344,14 @@ pub(crate) struct PaneWatchHooks {
 #[cfg(test)]
 pub(crate) trait RunsPaneWatchHooks {
     fn between_check_and_wait(&self, nexus: &RunningNexus);
-    fn record_ends(&self, ends: &[(String, PaneWatchEnd)]);
-    fn at_event(&self, nexus: &RunningNexus);
+    fn at_event(&self);
+    fn worker_spawned(&self, worker: &PaneWatchWorkerIdentity);
     fn worker_ended(&self);
-    /// Waits, bounded, until `count` worker bodies have returned.
+    fn worker_joined(&self, worker: &PaneWatchWorkerIdentity, end: &PaneWatchEnd);
+    /// Waits, bounded, until `count` workers have announced their completion.
     fn workers_ended_by(&self, count: usize, deadline: std::time::Instant) -> bool;
+    /// Waits, bounded, until `count` workers have been joined.
+    fn workers_joined_by(&self, count: usize, deadline: std::time::Instant) -> bool;
 }
 
 #[cfg(test)]
@@ -1287,11 +1367,41 @@ impl RunsPaneWatchHooks for PaneWatchHooks {
         }
     }
 
-    fn record_ends(&self, ends: &[(String, PaneWatchEnd)]) {
+    fn worker_spawned(&self, worker: &PaneWatchWorkerIdentity) {
+        self.spawned
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(worker.clone());
+    }
+
+    fn worker_joined(&self, worker: &PaneWatchWorkerIdentity, end: &PaneWatchEnd) {
         self.ends
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .extend(ends.iter().cloned());
+            .push((worker.predecessor.clone(), end.clone()));
+        self.joined
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(worker.clone());
+        self.worker_join.notify_all();
+    }
+
+    fn workers_joined_by(&self, count: usize, deadline: std::time::Instant) -> bool {
+        let mut joined = self
+            .joined
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while joined.len() < count {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                return false;
+            };
+            joined = self
+                .worker_join
+                .wait_timeout(joined, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+        true
     }
 
     fn worker_ended(&self) {
@@ -1320,12 +1430,12 @@ impl RunsPaneWatchHooks for PaneWatchHooks {
         true
     }
 
-    fn at_event(&self, nexus: &RunningNexus) {
+    fn at_event(&self) {
         if self
             .panic_at_event
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
-            nexus.store.launch_changes.announce();
+            // The unwind itself announces the worker's completion.
             panic!("flow-nexus test panic in a pane watch");
         }
     }

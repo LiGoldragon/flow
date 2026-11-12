@@ -2,7 +2,12 @@
 
 The live meta contract is 76.0.0; old meta75 peers fail the contract greeting.
 Ordinary signal60 Report and its hook transport are unchanged. Use the matching
-0.54.6 meta client for ReadEvents and configuration.
+0.54.6 meta client for ReadEvents and configuration. Each meta connection first
+sends the existing Signal Handshake, receives its HandshakeReceipt, and sends
+its Query only after Greeted names the matching digest. The server sends a
+typed GreetingRefused to a meta75 greeting before decoding any Query. Legacy
+raw-query connections fail greeting decoding and close. All in-repository meta
+writers follow this sequence; the ordinary socket keeps its existing framing.
 
 The flow-nexus-flow-events family keeps its table and original keys. Memory6
 wraps those exact strings as FlowId and records only RecordedHarnessEvent.

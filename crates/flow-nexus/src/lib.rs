@@ -7523,6 +7523,82 @@ mod tests {
     }
 
     #[test]
+    fn matching_meta_cli_reads_configuration_and_populated_metadata_over_the_server() {
+        use crate::store::events::RecordsHarnessEvents;
+        use signal_flow::Event;
+        let fixture = NexusFixture::new();
+        bind_existing_caller(&fixture, "a001", "pane-1");
+        fixture
+            .nexus
+            .store
+            .record_event(
+                "a001",
+                Event::Stopped(signal_flow::NativeStop {
+                    native_session_id_option: Some(signal_flow::NativeSessionId(
+                        "cli-session".into(),
+                    )),
+                    transcript_path_option: Some(signal_flow::TranscriptPath(
+                        "/fixture/cli-transcript".into(),
+                    )),
+                    last_assistant_message_option: signal_flow::LastAssistantMessageOption(Some(
+                        "CLI_BODY_MUST_BE_ABSENT".into(),
+                    )),
+                    background_work: signal_flow::BackgroundWork(vec![]),
+                }),
+            )
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = directory.path().join("runtime");
+        let configuration = directory.path().join("configuration");
+        let socket = runtime.join("nexus/main/flow-meta.sock");
+        fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        fs::create_dir_all(configuration.join("nexus")).unwrap();
+        fs::write(configuration.join("nexus/flow-nexus.datom"), "{ main }").unwrap();
+        let listener = UnixListener::bind(&socket).unwrap();
+        let binary = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("flow-nexus-meta");
+        std::thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                for _ in 0..2 {
+                    let (peer, _) = listener.accept().unwrap();
+                    Connection {
+                        peer,
+                        process: None,
+                    }
+                    .serve_meta(&fixture.nexus)
+                    .unwrap();
+                }
+            });
+            for query in ["Configuration", "ReadEvents.a001"] {
+                let output = std::process::Command::new(&binary)
+                    .env_clear()
+                    .env("XDG_RUNTIME_DIR", &runtime)
+                    .env("XDG_CONFIG_HOME", &configuration)
+                    .arg(query)
+                    .output()
+                    .expect("matching actual meta CLI runs");
+                assert!(output.status.success(), "{output:?}");
+                let text = String::from_utf8(output.stdout).unwrap();
+                if query == "Configuration" {
+                    assert!(text.starts_with("Configuration."), "{text}");
+                } else {
+                    assert!(text.starts_with("EventsRead."), "{text}");
+                    assert!(
+                        text.contains("cli-session") && text.contains("/fixture/cli-transcript"),
+                        "{text}"
+                    );
+                    assert!(!text.contains("CLI_BODY_MUST_BE_ABSENT"), "{text}");
+                    println!("MATCHED_META_CLI_POPULATED_READ_EVENTS={text}");
+                }
+            }
+            server.join().unwrap();
+        });
+    }
+
+    #[test]
     fn meta_connection_settles_contract_before_decoding_queries() {
         use signal::Contracted;
         for greeting in [

@@ -11,7 +11,7 @@
     # which ethos-zero 22 requires and which keeps every form): the capsule runs its own
     # Curriculum Nexus from it.
     curriculum = {
-      url = "github:LiGoldragon/Curriculum/478cbc51878921a0668278120aacca0031a72f92";
+      url = "github:LiGoldragon/Curriculum";
       flake = false;
     };
     # The public default remains the last unconfigured Flow artifact while

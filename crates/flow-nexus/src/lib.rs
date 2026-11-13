@@ -3358,10 +3358,10 @@ mod tests {
                 composer: Live::holding(LaunchComposer::with_context(
                     crate::context::ContextComposer(std::sync::Arc::new(FixtureComposer::from(
                         &[
-                            ("spirit-core", "Spirit body."),
-                            ("intent-flow", "Intent body."),
-                            ("operation-main-flow", "Main flow body."),
-                            ("knowledge-flow", "Knowledge body."),
+                            ("spirit:core:0", "Spirit body."),
+                            ("intent:flow:0", "Intent body."),
+                            ("operation:main-flow:0", "Main flow body."),
+                            ("knowledge:flow:0", "Knowledge body."),
                         ][..],
                     ))),
                 )),
@@ -5903,11 +5903,11 @@ mod tests {
             let profile = LaunchProfile {
                 launch_request_id: signal_flow::LaunchRequestId(launch_request_id.into()),
                 system_modules: signal_flow::SystemModules(vec![
-                    signal_flow::ModuleIdentity("spirit-core".into()),
-                    signal_flow::ModuleIdentity("intent-flow".into()),
+                    signal_flow::ModuleIdentity("spirit:core:0".into()),
+                    signal_flow::ModuleIdentity("intent:flow:0".into()),
                 ]),
                 user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-                    "operation-main-flow".into(),
+                    "operation:main-flow:0".into(),
                 )]),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
@@ -7482,10 +7482,10 @@ mod tests {
                         root_option: None,
                         address: declared.clone(),
                         system_modules: signal_flow::SystemModules(vec![
-                            signal_flow::ModuleIdentity("spirit-core".into())
+                            signal_flow::ModuleIdentity("spirit:core:0".into())
                         ]),
                         user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-                            "knowledge-flow".into()
+                            "knowledge:flow:0".into()
                         )]),
                         flow_kind: signal_flow::FlowKind::Regular,
                         tool_set: signal_flow::ToolSet::Default,
@@ -7523,11 +7523,11 @@ mod tests {
         assert_eq!(profile.address, declared);
         assert_eq!(
             profile.system_modules.0,
-            vec![signal_flow::ModuleIdentity("spirit-core".to_owned())]
+            vec![signal_flow::ModuleIdentity("spirit:core:0".to_owned())]
         );
         assert_eq!(
             profile.user_modules.0,
-            vec![signal_flow::ModuleIdentity("knowledge-flow".to_owned())]
+            vec![signal_flow::ModuleIdentity("knowledge:flow:0".to_owned())]
         );
         assert_eq!(
             profile.model_name,

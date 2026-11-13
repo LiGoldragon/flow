@@ -28,7 +28,7 @@ impl RehearsalFixture for Fixture {
         let profile = LaunchProfile {
             launch_request_id: signal_flow::LaunchRequestId("request-fixture".into()),
             system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
-                "spirit:core".into(),
+                "spirit:core:0".into(),
             )]),
             user_modules: signal_flow::UserModules(vec![]),
             remembering: Remembering::Predecessors(signal_flow::RememberingDepth(0)),
@@ -221,10 +221,10 @@ fn production_rehearse_success_and_refusal_create_nothing() {
         address: address.clone(),
         root_option: None,
         system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
-            "spirit-core".into(),
+            "spirit:core:0".into(),
         )]),
         user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-            "operation-main-flow".into(),
+            "operation:main-flow:0".into(),
         )]),
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: ToolSet::Default,

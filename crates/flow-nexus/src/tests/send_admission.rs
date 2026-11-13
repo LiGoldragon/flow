@@ -463,7 +463,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
         root_option: None,
         address: target.clone(),
         system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
-            "spirit-core".into(),
+            "spirit:core:0".into(),
         )]),
         user_modules: signal_flow::UserModules(vec![]),
         flow_kind: signal_flow::FlowKind::Regular,

@@ -407,9 +407,7 @@ impl ValidatesLaunchProfile for LaunchProfile {
         }
         let identities_valid = |identities: &[signal_flow::ModuleIdentity]| {
             let mut seen = HashSet::new();
-            // An identity is `type:subject`, or a hyphenated name not yet
-            // in that form: lowercase letters, digits and hyphens on each
-            // side of at most one colon, neither side empty.
+            // An identity names its kind, topic and explicit canonical decimal version.
             let part = |part: &str| {
                 !part.is_empty()
                     && part.bytes().all(|byte| {
@@ -417,10 +415,12 @@ impl ValidatesLaunchProfile for LaunchProfile {
                     })
             };
             identities.iter().all(|identity| {
-                let well_formed = match identity.0.split_once(':') {
-                    Some((kind, subject)) => part(kind) && part(subject),
-                    None => part(&identity.0),
-                };
+                let fields = identity.0.split(':').collect::<Vec<_>>();
+                let well_formed = matches!(fields.as_slice(), [kind, topic, version]
+                    if part(kind) && part(topic)
+                        && !version.is_empty()
+                        && (*version == "0" || !version.starts_with('0'))
+                        && version.bytes().all(|byte| byte.is_ascii_digit()));
                 well_formed && seen.insert(identity)
             })
         };
@@ -838,22 +838,16 @@ pub struct FreshSeat {
     pub prompt: String,
 }
 
-/// Where a context module goes, by its kind: the type before the colon of
-/// `type:subject`, or before the first hyphen of a name not yet in that
-/// form. Spirit and intent sit in the system prompt; every other kind
-/// (vision, knowledge, compensation, inquiry, operation, …) goes to the
-/// first message with the raw records of the flows the launch remembers.
+/// Where a context module goes, by the kind of its explicit
+/// `kind:topic:number` identity. Spirit and intent sit in the system prompt;
+/// every other kind goes to the first message with the remembered raw records.
 pub(crate) trait PlacesModuleByKind {
     fn placed_in_system_prompt(&self) -> bool;
 }
 
 impl PlacesModuleByKind for str {
     fn placed_in_system_prompt(&self) -> bool {
-        let kind = match self.split_once(':') {
-            Some((kind, _)) => kind,
-            None => self.split('-').next().unwrap_or(self),
-        };
-        matches!(kind, "spirit" | "intent")
+        matches!(self.split(':').next(), Some("spirit" | "intent"))
     }
 }
 
@@ -915,12 +909,12 @@ pub(crate) mod tests {
         LaunchProfile {
             launch_request_id: signal_flow::LaunchRequestId("launch-42".into()),
             system_modules: signal_flow::SystemModules(vec![
-                signal_flow::ModuleIdentity("spirit-core".into()),
-                signal_flow::ModuleIdentity("intent-flow".into()),
+                signal_flow::ModuleIdentity("spirit:core:0".into()),
+                signal_flow::ModuleIdentity("intent:flow:0".into()),
             ]),
             user_modules: signal_flow::UserModules(vec![
-                signal_flow::ModuleIdentity("operation-main-flow".into()),
-                signal_flow::ModuleIdentity("knowledge-flow".into()),
+                signal_flow::ModuleIdentity("operation:main-flow:0".into()),
+                signal_flow::ModuleIdentity("knowledge:flow:0".into()),
             ]),
             address: Address {
                 aspect: Aspect::Field,
@@ -943,10 +937,10 @@ pub(crate) mod tests {
         LaunchComposer::with_context(crate::context::ContextComposer(std::sync::Arc::new(
             FixtureComposer::from(
                 &[
-                    ("spirit-core", "Spirit body."),
-                    ("intent-flow", "Intent body."),
-                    ("operation-main-flow", "Main flow body."),
-                    ("knowledge-flow", "Knowledge body."),
+                    ("spirit:core:0", "Spirit body."),
+                    ("intent:flow:0", "Intent body."),
+                    ("operation:main-flow:0", "Main flow body."),
+                    ("knowledge:flow:0", "Knowledge body."),
                 ][..],
             ),
         )))
@@ -956,10 +950,10 @@ pub(crate) mod tests {
         LaunchComposer::with_presentation_prompt(
             crate::context::ContextComposer(std::sync::Arc::new(FixtureComposer::from(
                 &[
-                    ("spirit-core", "Spirit body."),
-                    ("intent-flow", "Intent body."),
-                    ("operation-main-flow", "Main flow body."),
-                    ("knowledge-flow", "Knowledge body."),
+                    ("spirit:core:0", "Spirit body."),
+                    ("intent:flow:0", "Intent body."),
+                    ("operation:main-flow:0", "Main flow body."),
+                    ("knowledge:flow:0", "Knowledge body."),
                 ][..],
             ))),
             prompt,
@@ -974,10 +968,10 @@ pub(crate) mod tests {
     fn remembered_flows_raw_records_follow_the_user_modules_in_the_first_message() {
         let mut context = FixtureComposer::from(
             &[
-                ("spirit-core", "Spirit body."),
-                ("intent-flow", "Intent body."),
-                ("operation-main-flow", "Main flow body."),
-                ("knowledge-flow", "Knowledge body."),
+                ("spirit:core:0", "Spirit body."),
+                ("intent:flow:0", "Intent body."),
+                ("operation:main-flow:0", "Main flow body."),
+                ("knowledge:flow:0", "Knowledge body."),
             ][..],
         );
         context.records.insert(
@@ -1128,7 +1122,7 @@ pub(crate) mod tests {
     /// A composer holding one large knowledge module per size.
     fn large(sizes: &[usize]) -> (LaunchComposer, Vec<String>) {
         let names = (0..sizes.len())
-            .map(|index| format!("knowledge-large-{index}"))
+            .map(|index| format!("knowledge:large-{index}:0"))
             .collect::<Vec<_>>();
         let bodies = sizes
             .iter()
@@ -1136,8 +1130,8 @@ pub(crate) mod tests {
             .map(|(index, size)| char::from(b'a' + index as u8).to_string().repeat(*size))
             .collect::<Vec<_>>();
         let mut modules = vec![
-            ("spirit-core", "Spirit body.".to_owned()),
-            ("intent-flow", "Intent body.".to_owned()),
+            ("spirit:core:0", "Spirit body.".to_owned()),
+            ("intent:flow:0", "Intent body.".to_owned()),
         ];
         for (name, body) in names.iter().zip(&bodies) {
             modules.push((name.as_str(), body.clone()));
@@ -1169,11 +1163,11 @@ pub(crate) mod tests {
             )
             .unwrap();
         let body = &composed.first_prompt_payload.first_prompt_body;
-        assert!(body.0.starts_with("These are your skills, given here; do not reload them.\n\nModule IDs: operation-main-flow, knowledge-flow\n"));
-        assert!(body.0.contains("\n<!-- module: knowledge-flow -->\nKnowledge body.\n<!-- end-module: knowledge-flow -->\n"));
+        assert!(body.0.starts_with("These are your skills, given here; do not reload them.\n\nModule IDs: operation:main-flow:0, knowledge:flow:0\n"));
+        assert!(body.0.contains("\n<!-- module: knowledge:flow:0 -->\nKnowledge body.\n<!-- end-module: knowledge:flow:0 -->\n"));
         assert!(
             body.0
-                .ends_with("<!-- end-module: knowledge-flow -->\n\nCarry the bounded task.")
+                .ends_with("<!-- end-module: knowledge:flow:0 -->\n\nCarry the bounded task.")
         );
         assert_eq!(body.0.matches("Main flow body.").count(), 1);
         assert!(!body.0.contains("Spirit body."));
@@ -1184,7 +1178,7 @@ pub(crate) mod tests {
                 .0,
             body.0
         );
-        assert!(!body.0.contains("Skill tool") && !body.0.contains("/operation-main-flow"));
+        assert!(!body.0.contains("Skill tool") && !body.0.contains("/operation:main-flow:0"));
     }
 
     #[test]
@@ -1203,10 +1197,10 @@ pub(crate) mod tests {
         assert!(
             system
                 .0
-                .contains("<!-- module: spirit-core -->\nSpirit body.\n")
+                .contains("<!-- module: spirit:core:0 -->\nSpirit body.\n")
         );
         assert!(system.0.ends_with(
-            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
+            "<!-- end-module: intent:flow:0 -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
         ));
         assert!(!system.0.contains("Knowledge body."));
         let body = &composed.first_prompt_payload.first_prompt_body;
@@ -1229,7 +1223,7 @@ pub(crate) mod tests {
         let carried = composed.carrying_flow_id("a1b2c3");
         let system = &carried.system_prompt.system_prompt_text;
         assert!(system.0.ends_with(
-            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
+            "<!-- end-module: intent:flow:0 -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
         ));
         assert_eq!(carried.first_prompt_payload, composed.first_prompt_payload);
         // A launch with no predecessor and no memory gains the section.
@@ -1250,7 +1244,7 @@ pub(crate) mod tests {
         assert!(
             bare.system_prompt
                 .system_prompt_text
-                .0.ends_with("<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\n")
+                .0.ends_with("<!-- end-module: intent:flow:0 -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\n")
         );
         assert!(!system.0.contains("This flow belongs to metaflow"));
     }
@@ -1313,7 +1307,7 @@ pub(crate) mod tests {
         let body = &composed.first_prompt_payload.first_prompt_body;
         assert!(body.0.starts_with("These are your skills"));
         assert!(body.0.ends_with(concat!(
-            "<!-- end-module: knowledge-flow -->\n\n# Flow launch\n\n",
+            "<!-- end-module: knowledge:flow:0 -->\n\n# Flow launch\n\n",
             "Harness: Codex\n",
             "Herdr session: messaging-build\nRemote control: app-server endpoint\n\n",
             "Carry the bounded task."
@@ -1472,8 +1466,8 @@ pub(crate) mod tests {
             )
             .unwrap();
         let system = &composed.system_prompt.system_prompt_text;
-        assert!(system.0.contains("<!-- module: operation-main-flow -->"));
-        assert!(system.0.contains("<!-- module: knowledge-flow -->"));
+        assert!(system.0.contains("<!-- module: operation:main-flow:0 -->"));
+        assert!(system.0.contains("<!-- module: knowledge:flow:0 -->"));
         assert!(composed.first_prompt_payload.first_prompt_body.0.is_empty());
         assert!(composed.first_prompt_payload.prompt_part_vector.is_empty());
     }
@@ -1565,14 +1559,14 @@ pub(crate) mod tests {
     fn modules_are_placed_by_kind_spirit_and_intent_in_the_system_prompt() {
         let context = FixtureComposer::from(
             &[
-                ("spirit:core", "Spirit body."),
-                ("intent:flow", "Intent body."),
-                ("vision:flow", "Vision body."),
-                ("knowledge:flow", "Knowledge body."),
-                ("compensation:truth", "Compensation body."),
-                ("inquiry:flow", "Inquiry body."),
-                ("spirit-legacy", "Legacy spirit body."),
-                ("operation-main-flow", "Main flow body."),
+                ("spirit:core:0", "Spirit body."),
+                ("intent:flow:0", "Intent body."),
+                ("vision:flow:0", "Vision body."),
+                ("knowledge:flow:0", "Knowledge body."),
+                ("compensation:truth:0", "Compensation body."),
+                ("inquiry:flow:0", "Inquiry body."),
+                ("spirit:legacy:0", "Legacy spirit body."),
+                ("operation:main-flow:0", "Main flow body."),
             ][..],
         );
         let composer = LaunchComposer::with_context(crate::context::ContextComposer(
@@ -1580,16 +1574,16 @@ pub(crate) mod tests {
         ));
         let mut profile = fixture_profile();
         profile.system_modules = signal_flow::SystemModules(vec![
-            signal_flow::ModuleIdentity("spirit:core".into()),
-            signal_flow::ModuleIdentity("vision:flow".into()),
-            signal_flow::ModuleIdentity("spirit-legacy".into()),
+            signal_flow::ModuleIdentity("spirit:core:0".into()),
+            signal_flow::ModuleIdentity("vision:flow:0".into()),
+            signal_flow::ModuleIdentity("spirit:legacy:0".into()),
         ]);
         profile.user_modules = signal_flow::UserModules(vec![
-            signal_flow::ModuleIdentity("intent:flow".into()),
-            signal_flow::ModuleIdentity("knowledge:flow".into()),
-            signal_flow::ModuleIdentity("compensation:truth".into()),
-            signal_flow::ModuleIdentity("inquiry:flow".into()),
-            signal_flow::ModuleIdentity("operation-main-flow".into()),
+            signal_flow::ModuleIdentity("intent:flow:0".into()),
+            signal_flow::ModuleIdentity("knowledge:flow:0".into()),
+            signal_flow::ModuleIdentity("compensation:truth:0".into()),
+            signal_flow::ModuleIdentity("inquiry:flow:0".into()),
+            signal_flow::ModuleIdentity("operation:main-flow:0".into()),
         ]);
         let composed = composer
             .compose(
@@ -1625,19 +1619,20 @@ pub(crate) mod tests {
         let composer = LaunchComposer::with_context(crate::context::ContextComposer(
             std::sync::Arc::new(FixtureComposer::from(
                 &[
-                    ("spirit-core", "Spirit body."),
-                    ("intent-large", large_intent.as_str()),
-                    ("knowledge-small", "Knowledge body."),
+                    ("spirit:core:0", "Spirit body."),
+                    ("intent:large:0", large_intent.as_str()),
+                    ("knowledge:small:0", "Knowledge body."),
                 ][..],
             )),
         ));
         let mut profile = fixture_profile();
         profile.system_modules = signal_flow::SystemModules(vec![
-            signal_flow::ModuleIdentity("spirit-core".into()),
-            signal_flow::ModuleIdentity("intent-large".into()),
+            signal_flow::ModuleIdentity("spirit:core:0".into()),
+            signal_flow::ModuleIdentity("intent:large:0".into()),
         ]);
-        profile.user_modules =
-            signal_flow::UserModules(vec![signal_flow::ModuleIdentity("knowledge-small".into())]);
+        profile.user_modules = signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+            "knowledge:small:0".into(),
+        )]);
         let composed = composer
             .compose(
                 crate::composition::HarnessedProfile {
@@ -1675,6 +1670,90 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn module_identities_require_an_explicit_canonical_version() {
+        let composer = fixture_composer();
+        for identity in [
+            "spirit-core",
+            "spirit:core",
+            "spirit:core:",
+            "spirit:core:01",
+            "spirit:core:-1",
+            "spirit:core:+1",
+            "spirit:core:latest",
+            "spirit:core:1:2",
+            "spirit::0",
+            ":core:0",
+            "Spirit:core:0",
+            "spirit:core:١",
+        ] {
+            for system in [true, false] {
+                let mut profile = fixture_profile();
+                let modules = if system {
+                    &mut profile.system_modules.0
+                } else {
+                    &mut profile.user_modules.0
+                };
+                modules[0] = signal_flow::ModuleIdentity(identity.into());
+                assert_eq!(
+                    composer.compose(
+                        HarnessedProfile {
+                            remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
+                            harness_kind: HarnessKind::Claude,
+                            launch_profile: profile,
+                        },
+                        Vec::<LeaveOut>::new(),
+                    ),
+                    Err(CompositionError::InvalidProfileField(if system {
+                        CompositionRefusal::InvalidSystemModules
+                    } else {
+                        CompositionRefusal::InvalidUserModules
+                    })),
+                    "{identity} in system={system}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn composition_selects_the_named_version_without_latest_resolution() {
+        let context = FixtureComposer::from(
+            &[
+                ("spirit:core:0", "SYSTEM_ZERO"),
+                ("knowledge:flow:0", "VERSION_ZERO"),
+                ("knowledge:flow:1", "VERSION_ONE"),
+            ][..],
+        );
+        let composer = LaunchComposer::with_context(crate::context::ContextComposer(
+            std::sync::Arc::new(context),
+        ));
+        for (identity, wanted, other) in [
+            ("knowledge:flow:0", "VERSION_ZERO", "VERSION_ONE"),
+            ("knowledge:flow:1", "VERSION_ONE", "VERSION_ZERO"),
+        ] {
+            let mut profile = fixture_profile();
+            profile.system_modules = signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
+                "spirit:core:0".into(),
+            )]);
+            profile.user_modules =
+                signal_flow::UserModules(vec![signal_flow::ModuleIdentity(identity.into())]);
+            let composed = composer
+                .compose(
+                    HarnessedProfile {
+                        remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
+                        harness_kind: HarnessKind::Claude,
+                        launch_profile: profile,
+                    },
+                    Vec::<LeaveOut>::new(),
+                )
+                .unwrap();
+            let body = &composed.first_prompt_payload.first_prompt_body.0;
+            assert!(body.contains(wanted));
+            assert!(!body.contains(other));
+            assert!(body.contains(identity));
+        }
+    }
+
+    #[test]
     fn a_profile_naming_no_valid_identities_is_refused_before_composition() {
         let composer = fixture_composer();
         type ProfileChange = fn(&mut LaunchProfile);
@@ -1692,13 +1771,13 @@ pub(crate) mod tests {
                 profile
                     .user_modules
                     .0
-                    .push(signal_flow::ModuleIdentity("knowledge-flow".into()))
+                    .push(signal_flow::ModuleIdentity("knowledge:flow:0".into()))
             }),
             (CompositionRefusal::InvalidUserModules, |profile| {
                 profile
                     .user_modules
                     .0
-                    .push(signal_flow::ModuleIdentity("spirit-core".into()))
+                    .push(signal_flow::ModuleIdentity("spirit:core:0".into()))
             }),
             // A Remembering of no flows names the field it refuses.
             (CompositionRefusal::InvalidRemembering, |profile| {

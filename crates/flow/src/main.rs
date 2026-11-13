@@ -276,7 +276,7 @@ mod tests {
         let client = FlowClient;
         let Query::Start(request) = client
             .parse_query([
-                "Start.{ request-7 [ spirit-core intent-flow ] [ operation-main-flow compensation-behavior ] Custom.[ 1b8ac0 ] { Field flow Astra } gpt-6-astra medium Some.836818 messaging-build Some.[ SkillTool WorkflowTool ] Regular Default «Carry this bounded launch request.» }".into(),
+                "Start.{ request-7 [ spirit:core:0 intent:flow:0 ] [ operation:main-flow:0 compensation:behavior:0 ] Custom.[ 1b8ac0 ] { Field flow Astra } gpt-6-astra medium Some.836818 messaging-build Some.[ SkillTool WorkflowTool ] Regular Default «Carry this bounded launch request.» }".into(),
             ]
             .into_iter())
             .expect("typed Start parses")
@@ -294,7 +294,7 @@ mod tests {
                 .iter()
                 .map(|identity| identity.0.as_str())
                 .collect::<Vec<_>>(),
-            ["spirit-core", "intent-flow"]
+            ["spirit:core:0", "intent:flow:0"]
         );
         assert_eq!(
             request
@@ -303,7 +303,7 @@ mod tests {
                 .iter()
                 .map(|identity| identity.0.as_str())
                 .collect::<Vec<_>>(),
-            ["operation-main-flow", "compensation-behavior"]
+            ["operation:main-flow:0", "compensation:behavior:0"]
         );
         assert_eq!(
             request.leave_outs_option,
@@ -325,7 +325,7 @@ mod tests {
         assert!(
             client
                 .parse_query([
-                    "Start.{ request-7 [ { Vision/flowNexus.md 54c08e7190360a308e560935c120c69b81c4aacb4975751a4841912b599f4f5a } ] [ operation-main-flow ] Predecessors.0 { Field flow Astra } gpt-6-astra medium None messaging-build None Regular Default «Launch.» }".into(),
+                    "Start.{ request-7 [ { Vision/flowNexus.md 54c08e7190360a308e560935c120c69b81c4aacb4975751a4841912b599f4f5a } ] [ operation:main-flow:0 ] Predecessors.0 { Field flow Astra } gpt-6-astra medium None messaging-build None Regular Default «Launch.» }".into(),
                 ]
                 .into_iter())
                 .is_err()
@@ -335,7 +335,7 @@ mod tests {
                 .parse_query(
                     [
                         "--system-modules".into(),
-                        "[ spirit-core ]".into(),
+                        "[ spirit:core:0 ]".into(),
                         "ResolveRecipient.fac697".into(),
                     ]
                     .into_iter()
@@ -362,7 +362,7 @@ mod tests {
             ))
         );
         let Query::Replace(request) = client
-            .parse_query(["Replace.{ request-8 [ spirit-core ] [] Predecessors.1 { Field flow Astra } opus-5-5 high Some.fac697 messaging-build None Regular Default «Carry on from fac697.» }".into()].into_iter())
+            .parse_query(["Replace.{ request-8 [ spirit:core:0 ] [] Predecessors.1 { Field flow Astra } opus-5-5 high Some.fac697 messaging-build None Regular Default «Carry on from fac697.» }".into()].into_iter())
             .expect("typed Replace parses")
         else {
             panic!("Replace fixture must remain a Replace query")

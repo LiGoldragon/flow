@@ -1444,7 +1444,7 @@ fn declared(fixture: &NexusFixture, system_modules: &[&str], root_option: Option
                         .collect(),
                 ),
                 user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-                    "operation-main-flow".into(),
+                    "operation:main-flow:0".into(),
                 )]),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
@@ -1458,12 +1458,12 @@ fn declared(fixture: &NexusFixture, system_modules: &[&str], root_option: Option
 
 /// abc123's launch declared as it was launched: it composes.
 fn declared_composable(fixture: &NexusFixture) {
-    declared(fixture, &["spirit-core", "intent-flow"], None);
+    declared(fixture, &["spirit:core:0", "intent:flow:0"], None);
 }
 
 /// abc123's metaflow declared naming a module Curriculum does not hold.
 fn declared_uncomposable(fixture: &NexusFixture) {
-    declared(fixture, &["vision:absent"], None);
+    declared(fixture, &["vision:absent:0"], None);
 }
 
 fn harness_flags(fixture: &NexusFixture, flags: &str) {
@@ -1544,7 +1544,7 @@ fn restart_root_refused_old_harness_untouched() {
     let absent = fixture.directory.path().join("absent-root");
     declared(
         &fixture,
-        &["spirit-core", "intent-flow"],
+        &["spirit:core:0", "intent:flow:0"],
         Some(absent.to_string_lossy().into_owned()),
     );
 
@@ -2658,11 +2658,11 @@ impl OpensSecondNexus for NexusFixture {
                     root_option: None,
                     address: address(Model::Sol),
                     system_modules: signal_flow::SystemModules(vec![
-                        signal_flow::ModuleIdentity("spirit-core".into()),
-                        signal_flow::ModuleIdentity("intent-flow".into()),
+                        signal_flow::ModuleIdentity("spirit:core:0".into()),
+                        signal_flow::ModuleIdentity("intent:flow:0".into()),
                     ]),
                     user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-                        "operation-main-flow".into(),
+                        "operation:main-flow:0".into(),
                     )]),
                     flow_kind: signal_flow::FlowKind::Regular,
                     tool_set: signal_flow::ToolSet::Default,
@@ -2684,10 +2684,10 @@ impl OpensSecondNexus for NexusFixture {
                 crate::context::ContextComposer(std::sync::Arc::new(
                     crate::context::FixtureComposer::from(
                         &[
-                            ("spirit-core", "Spirit body."),
-                            ("intent-flow", "Intent body."),
-                            ("operation-main-flow", "Main flow body."),
-                            ("knowledge-flow", "Knowledge body."),
+                            ("spirit:core:0", "Spirit body."),
+                            ("intent:flow:0", "Intent body."),
+                            ("operation:main-flow:0", "Main flow body."),
+                            ("knowledge:flow:0", "Knowledge body."),
                         ][..],
                     ),
                 )),
@@ -3238,10 +3238,10 @@ impl SocketCurriculum {
         };
         let bodies = FixtureComposer::from(
             &[
-                ("spirit-core", "Spirit body."),
-                ("intent-flow", "Intent body."),
-                ("operation-main-flow", "Main flow body."),
-                ("knowledge-flow", "Knowledge body."),
+                ("spirit:core:0", "Spirit body."),
+                ("intent:flow:0", "Intent body."),
+                ("operation:main-flow:0", "Main flow body."),
+                ("knowledge:flow:0", "Knowledge body."),
             ][..],
         );
         match bodies.compose_flow_context(&request) {

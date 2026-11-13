@@ -88,11 +88,11 @@ mod tests {
         LaunchProfile {
             launch_request_id: signal_flow::LaunchRequestId("launch-title".into()),
             system_modules: signal_flow::SystemModules(vec![
-                signal_flow::ModuleIdentity("spirit-core".into()),
-                signal_flow::ModuleIdentity("intent-flow".into()),
+                signal_flow::ModuleIdentity("spirit:core:0".into()),
+                signal_flow::ModuleIdentity("intent:flow:0".into()),
             ]),
             user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-                "operation-main-flow".into(),
+                "operation:main-flow:0".into(),
             )]),
             address: signal_flow::Address {
                 aspect,

@@ -168,7 +168,7 @@ pub(super) fn declare_seat(
                     .collect(),
             ),
             user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-                "operation-main-flow".into(),
+                "operation:main-flow:0".into(),
             )]),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
@@ -319,7 +319,7 @@ fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_fl
     declare_seat(
         &fixture,
         Continuity::OnDemand,
-        vec!["spirit-core".into(), "intent-flow".into()],
+        vec!["spirit:core:0".into(), "intent:flow:0".into()],
     );
     seat_metaflow(
         &fixture,
@@ -390,7 +390,7 @@ fn a_seat_past_its_threshold_shown_working_is_refreshed_at_its_stop() {
     declare_seat(
         &fixture,
         Continuity::OnDemand,
-        vec!["spirit-core".into(), "intent-flow".into()],
+        vec!["spirit:core:0".into(), "intent:flow:0".into()],
     );
     seat_metaflow(
         &fixture,
@@ -433,7 +433,7 @@ fn a_stop_with_live_background_work_past_the_threshold_refreshes() {
     declare_seat(
         &fixture,
         Continuity::OnDemand,
-        vec!["spirit-core".into(), "intent-flow".into()],
+        vec!["spirit:core:0".into(), "intent:flow:0".into()],
     );
     seat_metaflow(
         &fixture,
@@ -497,7 +497,7 @@ fn a_busy_flow_is_warned_and_then_refreshed_at_its_next_stop() {
     declare_seat(
         &fixture,
         Continuity::OnDemand,
-        vec!["spirit-core".into(), "intent-flow".into()],
+        vec!["spirit:core:0".into(), "intent:flow:0".into()],
     );
     seat_metaflow(&fixture, vec![]);
     fixture
@@ -651,7 +651,7 @@ fn an_idle_on_demand_seat_is_refreshed_only_past_its_threshold() {
         declare_seat(
             &fixture,
             Continuity::OnDemand,
-            vec!["spirit-core".into(), "intent-flow".into()],
+            vec!["spirit:core:0".into(), "intent:flow:0".into()],
         );
         seat_metaflow(&fixture, vec![]);
         fixture
@@ -688,7 +688,7 @@ fn a_maintained_seat_refreshed_with_nothing_queued_starts_its_successor_first() 
     declare_seat(
         &fixture,
         Continuity::Maintained,
-        vec!["spirit-core".into(), "intent-flow".into()],
+        vec!["spirit:core:0".into(), "intent:flow:0".into()],
     );
     seat_metaflow(&fixture, vec![]);
     owe_staged_successor(&fixture);
@@ -826,7 +826,7 @@ fn an_on_demand_seat_refreshed_with_a_waking_request_starts_its_successor_first(
     declare_seat(
         &fixture,
         Continuity::OnDemand,
-        vec!["spirit-core".into(), "intent-flow".into()],
+        vec!["spirit:core:0".into(), "intent:flow:0".into()],
     );
     let mut waking = seat_metaflow_with(vec![Request::Order("For the successor.".into())]);
     waking.queue.0[0].delivery = flow_ethos::Delivery::Wake;
@@ -1150,7 +1150,7 @@ fn unconfirmed_successor_keeps_predecessor_unreaped() {
     declare_seat(
         &fixture,
         Continuity::Maintained,
-        vec!["spirit-core".into(), "intent-flow".into()],
+        vec!["spirit:core:0".into(), "intent:flow:0".into()],
     );
     seat_metaflow(&fixture, vec![]);
     owe_staged_successor(&fixture);
@@ -1215,10 +1215,10 @@ fn fable_seat_past_its_threshold(fixture: &NexusFixture, protected: Vec<Address>
             root_option: None,
             address: fable_address("core"),
             system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
-                "spirit-core".into(),
+                "spirit:core:0".into(),
             )]),
             user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-                "operation-main-flow".into(),
+                "operation:main-flow:0".into(),
             )]),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,

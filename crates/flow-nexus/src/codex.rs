@@ -2211,8 +2211,8 @@ mod tests {
             launch_profile: signal_flow::LaunchProfile {
                 launch_request_id: signal_flow::LaunchRequestId("launch-malformed".into()),
                 system_modules: signal_flow::SystemModules(vec![
-                    signal_flow::ModuleIdentity("spirit-core".into()),
-                    signal_flow::ModuleIdentity("intent-flow".into()),
+                    signal_flow::ModuleIdentity("spirit:core:0".into()),
+                    signal_flow::ModuleIdentity("intent:flow:0".into()),
                 ]),
                 user_modules: signal_flow::UserModules(vec![]),
                 address: signal_flow::Address {

@@ -40,7 +40,7 @@ use std::fs;
 #[test]
 fn a_wake_refusal_notice_keeps_the_missing_module_identity() {
     let refusal = signal_flow::ContextRefusal::ModuleMissing(Some(signal_flow::ModuleIdentity(
-        "vision:absent".into(),
+        "vision:absent:0".into(),
     )));
     assert_eq!(
         WakeRefusal::StartRejected(signal_flow::StartRejection::ContextRefused(refusal.clone()))
@@ -138,11 +138,11 @@ pub(super) fn maintain(fixture: &NexusFixture, address: Address) {
                 root_option: None,
                 address,
                 system_modules: signal_flow::SystemModules(vec![
-                    signal_flow::ModuleIdentity("spirit-core".into()),
-                    signal_flow::ModuleIdentity("intent-flow".into()),
+                    signal_flow::ModuleIdentity("spirit:core:0".into()),
+                    signal_flow::ModuleIdentity("intent:flow:0".into()),
                 ]),
                 user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-                    "operation-main-flow".into(),
+                    "operation:main-flow:0".into(),
                 )]),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
@@ -480,7 +480,7 @@ fn an_idle_on_demand_claude_flow_closes_its_harness_and_keeps_its_address() {
     super::refresh_and_compaction::declare_seat(
         &fixture,
         meta_signal_flow::Continuity::OnDemand,
-        vec!["spirit-core".into(), "intent-flow".into()],
+        vec!["spirit:core:0".into(), "intent:flow:0".into()],
     );
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
@@ -530,7 +530,7 @@ fn an_idle_on_demand_codex_flow_closes_its_harness() {
     super::refresh_and_compaction::declare_seat(
         &fixture,
         meta_signal_flow::Continuity::OnDemand,
-        vec!["spirit-core".into(), "intent-flow".into()],
+        vec!["spirit:core:0".into(), "intent:flow:0".into()],
     );
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
@@ -1350,11 +1350,11 @@ fn last_launch_context() -> WakePlan {
     WakePlan::Fresh(FreshContext {
         herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
         system_modules: signal_flow::SystemModules(vec![
-            signal_flow::ModuleIdentity("spirit-core".into()),
-            signal_flow::ModuleIdentity("intent-flow".into()),
+            signal_flow::ModuleIdentity("spirit:core:0".into()),
+            signal_flow::ModuleIdentity("intent:flow:0".into()),
         ]),
         user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-            "operation-main-flow".into(),
+            "operation:main-flow:0".into(),
         )]),
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
@@ -1400,12 +1400,12 @@ fn a_fresh_wake_composes_modules_and_queued_work_in_the_first_prompt() {
         tool_set: signal_flow::ToolSet::Default,
         herdr_session_name: "fixture-session".into(),
         system_modules: signal_flow::SystemModules(vec![
-            signal_flow::ModuleIdentity("spirit-core".into()),
-            signal_flow::ModuleIdentity("intent-flow".into()),
+            signal_flow::ModuleIdentity("spirit:core:0".into()),
+            signal_flow::ModuleIdentity("intent:flow:0".into()),
         ]),
         user_modules: signal_flow::UserModules(vec![
-            signal_flow::ModuleIdentity("operation-main-flow".into()),
-            signal_flow::ModuleIdentity("knowledge-flow".into()),
+            signal_flow::ModuleIdentity("operation:main-flow:0".into()),
+            signal_flow::ModuleIdentity("knowledge:flow:0".into()),
         ]),
         leave_outs_option: None,
         prompt: text.clone(),
@@ -1627,11 +1627,11 @@ fn launched_claude_ended_by_with(
     let profile = LaunchProfile {
         launch_request_id: signal_flow::LaunchRequestId("launched-request".into()),
         system_modules: signal_flow::SystemModules(vec![
-            signal_flow::ModuleIdentity("spirit-core".into()),
-            signal_flow::ModuleIdentity("intent-flow".into()),
+            signal_flow::ModuleIdentity("spirit:core:0".into()),
+            signal_flow::ModuleIdentity("intent:flow:0".into()),
         ]),
         user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-            "operation-main-flow".into(),
+            "operation:main-flow:0".into(),
         )]),
         flow_kind: flow_kind.clone(),
         tool_set: if flow_kind == signal_flow::FlowKind::Simplified {
@@ -4230,11 +4230,11 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
     let profile = LaunchProfile {
         launch_request_id: signal_flow::LaunchRequestId("old-codex-request".into()),
         system_modules: signal_flow::SystemModules(vec![
-            signal_flow::ModuleIdentity("spirit-core".into()),
-            signal_flow::ModuleIdentity("intent-flow".into()),
+            signal_flow::ModuleIdentity("spirit:core:0".into()),
+            signal_flow::ModuleIdentity("intent:flow:0".into()),
         ]),
         user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-            "operation-main-flow".into(),
+            "operation:main-flow:0".into(),
         )]),
         address: address(Model::Sol),
         model_name: flow_ethos::ModelName("fixture-model".into()),
@@ -4655,7 +4655,7 @@ fn a_missing_module_wake_keeps_its_identity_in_the_caller_outcome_and_queue_stat
                 root_option: None,
                 address: at.clone(),
                 system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
-                    "vision:absent".into(),
+                    "vision:absent:0".into(),
                 )]),
                 user_modules: signal_flow::UserModules(vec![]),
                 flow_kind: signal_flow::FlowKind::Regular,
@@ -4686,7 +4686,7 @@ fn a_missing_module_wake_keeps_its_identity_in_the_caller_outcome_and_queue_stat
         panic!("the request is accepted")
     };
     let refusal = signal_flow::ContextRefusal::ModuleMissing(Some(signal_flow::ModuleIdentity(
-        "vision:absent".into(),
+        "vision:absent:0".into(),
     )));
 
     assert_eq!(
@@ -4830,11 +4830,11 @@ impl SetsUpFirstTurnSend for NexusFixture {
         let sender = LaunchProfile {
             launch_request_id: signal_flow::LaunchRequestId("first-turn-send".into()),
             system_modules: signal_flow::SystemModules(vec![
-                signal_flow::ModuleIdentity("spirit-core".into()),
-                signal_flow::ModuleIdentity("intent-flow".into()),
+                signal_flow::ModuleIdentity("spirit:core:0".into()),
+                signal_flow::ModuleIdentity("intent:flow:0".into()),
             ]),
             user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-                "operation-main-flow".into(),
+                "operation:main-flow:0".into(),
             )]),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
@@ -6243,11 +6243,11 @@ fn a_start_starts_no_other_models_seat_first() {
                 root_option: None,
                 address: address(Model::Sol),
                 system_modules: signal_flow::SystemModules(vec![
-                    signal_flow::ModuleIdentity("spirit-core".into()),
-                    signal_flow::ModuleIdentity("intent-flow".into()),
+                    signal_flow::ModuleIdentity("spirit:core:0".into()),
+                    signal_flow::ModuleIdentity("intent:flow:0".into()),
                 ]),
                 user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-                    "operation-main-flow".into(),
+                    "operation:main-flow:0".into(),
                 )]),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
@@ -6628,7 +6628,7 @@ fn codex_rest_seat(
         super::refresh_and_compaction::declare_seat(
             fixture,
             continuity,
-            vec!["spirit-core".into(), "intent-flow".into()],
+            vec!["spirit:core:0".into(), "intent:flow:0".into()],
         );
     }
     fixture.nexus.store.seed_metaflow(Metaflow {

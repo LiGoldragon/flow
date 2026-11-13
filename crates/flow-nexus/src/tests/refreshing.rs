@@ -74,11 +74,11 @@ fn declare(fixture: &NexusFixture, at: Address) {
             root_option: None,
             address: at,
             system_modules: signal_flow::SystemModules(vec![
-                signal_flow::ModuleIdentity("spirit-core".into()),
-                signal_flow::ModuleIdentity("intent-flow".into()),
+                signal_flow::ModuleIdentity("spirit:core:0".into()),
+                signal_flow::ModuleIdentity("intent:flow:0".into()),
             ]),
             user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-                "operation-main-flow".into(),
+                "operation:main-flow:0".into(),
             )]),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
@@ -604,7 +604,7 @@ fn refreshable_with_staged_successor(
     declare_seat(
         &fixture,
         continuity,
-        vec!["spirit-core".into(), "intent-flow".into()],
+        vec!["spirit:core:0".into(), "intent:flow:0".into()],
     );
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: seat_address(),
@@ -989,7 +989,7 @@ fn a_launch_to_an_awake_metaflow_names_the_replace_of_its_flow() {
     declare_seat(
         &fixture,
         Continuity::OnDemand,
-        vec!["spirit-core".into(), "intent-flow".into()],
+        vec!["spirit:core:0".into(), "intent:flow:0".into()],
     );
     awake_seat(&fixture, vec![]);
     let Ok(Query::Replace(profile)) = fixture.nexus.declared_launch(signal_flow::LaunchRequest {
@@ -1658,7 +1658,7 @@ fn a_replacing_launch_of_a_working_seat_answers_launch_pending_and_waits() {
     declare_seat(
         &fixture,
         Continuity::OnDemand,
-        vec!["spirit-core".into(), "intent-flow".into()],
+        vec!["spirit:core:0".into(), "intent:flow:0".into()],
     );
     awake_seat(&fixture, vec![]);
     super::waking::claude_prompt_taken(&fixture);

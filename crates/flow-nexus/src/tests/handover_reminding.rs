@@ -465,7 +465,7 @@ fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
         declare_seat(
             &fixture,
             Continuity::OnDemand,
-            vec!["spirit-core".into(), "intent-flow".into()],
+            vec!["spirit:core:0".into(), "intent:flow:0".into()],
         );
         seat_metaflow(&fixture, vec![]);
         fixture

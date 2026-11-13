@@ -365,7 +365,7 @@ mod tests {
                     model: Model::Sol,
                 },
                 system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
-                    "spirit-core".into(),
+                    "spirit:core:0".into(),
                 )]),
                 user_modules: signal_flow::UserModules(vec![]),
                 flow_kind: FlowKind::Regular,

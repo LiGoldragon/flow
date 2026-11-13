@@ -184,11 +184,11 @@ fn declare(fixture: &NexusFixture, root_option: Option<String>) {
             root_option: root_option.map(meta_signal_flow::Root),
             address: address(Model::Sol),
             system_modules: signal_flow::SystemModules(vec![
-                signal_flow::ModuleIdentity("spirit-core".into()),
-                signal_flow::ModuleIdentity("intent-flow".into()),
+                signal_flow::ModuleIdentity("spirit:core:0".into()),
+                signal_flow::ModuleIdentity("intent:flow:0".into()),
             ]),
             user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-                "operation-main-flow".into(),
+                "operation:main-flow:0".into(),
             )]),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
@@ -834,7 +834,7 @@ fn an_on_demand_seat_whose_successor_is_refused_its_handover_is_not_closed() {
         declare_seat(
             &fixture,
             Continuity::OnDemand,
-            vec!["spirit-core".into(), "intent-flow".into()],
+            vec!["spirit:core:0".into(), "intent:flow:0".into()],
         );
         let fault = if gone_root {
             let gone = tempfile::tempdir().unwrap();
@@ -847,11 +847,11 @@ fn an_on_demand_seat_whose_successor_is_refused_its_handover_is_not_closed() {
                     root_option: Some(meta_signal_flow::Root(root)),
                     address: address(Model::Sol),
                     system_modules: signal_flow::SystemModules(vec![
-                        signal_flow::ModuleIdentity("spirit-core".into()),
-                        signal_flow::ModuleIdentity("intent-flow".into()),
+                        signal_flow::ModuleIdentity("spirit:core:0".into()),
+                        signal_flow::ModuleIdentity("intent:flow:0".into()),
                     ]),
                     user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-                        "operation-main-flow".into(),
+                        "operation:main-flow:0".into(),
                     )]),
                     flow_kind: signal_flow::FlowKind::Regular,
                     tool_set: signal_flow::ToolSet::Default,

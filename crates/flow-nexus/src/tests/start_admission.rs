@@ -102,7 +102,7 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
                 model: Model::Sol,
             },
             system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
-                "spirit-core".into(),
+                "spirit:core:0".into(),
             )]),
             user_modules: signal_flow::UserModules(vec![]),
             flow_kind: signal_flow::FlowKind::Regular,

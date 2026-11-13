@@ -420,7 +420,7 @@ impl ComposesFlowContext for FixtureComposer {
                     ),
                     source_revision: crate::generated::curriculum::SourceRevision("0".repeat(40)),
                     source_relative_path: crate::generated::curriculum::SourceRelativePath(
-                        format!("{identity}.md", identity = identity.0),
+                        format!("{}.md", identity.0.replace(':', "/")),
                     ),
                     source_sha256: crate::generated::curriculum::SourceSha256(digest(body)),
                     body_sha256: crate::generated::curriculum::BodySha256(digest(body)),
@@ -493,6 +493,18 @@ mod tests {
     /// Records Flow did not ask for, or whose payload digest differs, are
     /// refused.
     #[test]
+    fn fixture_provenance_names_the_versioned_source_path() {
+        let request = request();
+        let composition = fixture().compose_flow_context(&request).unwrap();
+        for row in composition.context_provenance_vector {
+            assert_eq!(
+                row.source_relative_path.0,
+                format!("{}.md", row.module_identity.0.replace(':', "/")),
+            );
+        }
+    }
+
+    #[test]
     fn records_not_asked_for_or_not_matching_their_digest_are_refused() {
         use sha2::{Digest, Sha256};
         let composer = fixture();
@@ -530,18 +542,18 @@ mod tests {
             harness_kind: HarnessKind::Claude,
             system_modules: signal_flow::SystemModules(vec![
                 signal_flow::ModuleIdentity(
-                    crate::generated::curriculum::ModuleIdentity("spirit-core".into()).0,
+                    crate::generated::curriculum::ModuleIdentity("spirit:core:0".into()).0,
                 ),
                 signal_flow::ModuleIdentity(
-                    crate::generated::curriculum::ModuleIdentity("intent-flow".into()).0,
+                    crate::generated::curriculum::ModuleIdentity("intent:flow:0".into()).0,
                 ),
             ]),
             user_modules: signal_flow::UserModules(vec![
                 signal_flow::ModuleIdentity(
-                    crate::generated::curriculum::ModuleIdentity("operation-main-flow".into()).0,
+                    crate::generated::curriculum::ModuleIdentity("operation:main-flow:0".into()).0,
                 ),
                 signal_flow::ModuleIdentity(
-                    crate::generated::curriculum::ModuleIdentity("knowledge-flow".into()).0,
+                    crate::generated::curriculum::ModuleIdentity("knowledge:flow:0".into()).0,
                 ),
             ]),
             remembered_flows: crate::generated::starter::RememberedFlows(vec![]),
@@ -551,13 +563,13 @@ mod tests {
     fn fixture() -> FixtureComposer {
         FixtureComposer::from(
             &[
-                ("spirit-core", "Spirit body."),
-                ("intent-flow", "Intent body."),
+                ("spirit:core:0", "Spirit body."),
+                ("intent:flow:0", "Intent body."),
                 (
-                    "operation-main-flow",
+                    "operation:main-flow:0",
                     "Main flow body.\n\nSecond paragraph.",
                 ),
-                ("knowledge-flow", "Knowledge body."),
+                ("knowledge:flow:0", "Knowledge body."),
             ][..],
         )
     }
@@ -571,7 +583,7 @@ mod tests {
         assert_eq!(verified.user_segments().len(), 2);
         assert_eq!(verified.user_segments().concat(), user_text.0);
         assert!(verified.user_segments()[0].starts_with(CONTEXT_OPENING));
-        assert!(verified.user_segments()[1].starts_with("\n<!-- module: knowledge-flow -->\n"));
+        assert!(verified.user_segments()[1].starts_with("\n<!-- module: knowledge:flow:0 -->\n"));
         assert!(verified.system_text().contains("Spirit body."));
         assert_eq!(verified.address(), request.address);
     }
@@ -605,11 +617,11 @@ mod tests {
         let mut composition = fixture().compose_flow_context(&request).unwrap();
         composition
             .context_provenance_vector
-            .retain(|row| row.module_identity.0 != "knowledge-flow");
+            .retain(|row| row.module_identity.0 != "knowledge:flow:0");
         assert_eq!(
             VerifiedContext::verified(&request, composition),
             Err(ContextRefusal::ModuleMissing(Some(
-                signal_flow::ModuleIdentity("knowledge-flow".into())
+                signal_flow::ModuleIdentity("knowledge:flow:0".into())
             )))
         );
     }

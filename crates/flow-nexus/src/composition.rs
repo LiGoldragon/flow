@@ -1810,10 +1810,9 @@ pub(crate) mod tests {
     #[test]
     fn a_missing_identity_refuses_the_launch_with_its_identity() {
         let mut profile = fixture_profile();
-        profile
-            .user_modules
-            .0
-            .push(signal_flow::ModuleIdentity("knowledge:unknown-module:0".into()));
+        profile.user_modules.0.push(signal_flow::ModuleIdentity(
+            "knowledge:unknown-module:0".into(),
+        ));
         assert_eq!(
             fixture_composer().compose(
                 crate::composition::HarnessedProfile {
@@ -1824,7 +1823,9 @@ pub(crate) mod tests {
                 Vec::<signal_flow::LeaveOut>::new(),
             ),
             Err(CompositionError::Context(ContextRefusal::ModuleMissing(
-                Some(signal_flow::ModuleIdentity("knowledge:unknown-module:0".into()))
+                Some(signal_flow::ModuleIdentity(
+                    "knowledge:unknown-module:0".into()
+                ))
             )))
         );
     }

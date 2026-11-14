@@ -65,12 +65,20 @@ impl PreflightsRefreshCallers for FlowStore {
                 })
                 .transpose()
         };
+        // Sema registers an empty family in the catalog before its first
+        // assertion materializes the redb row table. Only that absence is
+        // empty; every other table/decode failure still refuses the open.
+        let historical_rows =
+            |name: &str| match read.open_table(redb::TableDefinition::<String, &[u8]>::new(name)) {
+                Ok(rows) => Ok(Some(rows)),
+                Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+                Err(error) => Err(failed(&error)),
+            };
         let mut open = Vec::new();
         let orders = super::ordered_replacement::ORDERED_REPLACEMENT_TABLE_NAME.as_str();
-        if schema(orders)? == Some(OrderedReplacementV1::schema_hash()) {
-            let rows = read
-                .open_table(redb::TableDefinition::<String, &[u8]>::new(orders))
-                .map_err(|error| failed(&error))?;
+        if schema(orders)? == Some(OrderedReplacementV1::schema_hash())
+            && let Some(rows) = historical_rows(orders)?
+        {
             for entry in rows.iter().map_err(|error| failed(&error))? {
                 let (_, bytes) = entry.map_err(|error| failed(&error))?;
                 let row =
@@ -83,12 +91,10 @@ impl PreflightsRefreshCallers for FlowStore {
         }
         let intents = super::successor::SUCCESSOR_INTENT_TABLE_NAME.as_str();
         let intent_schema = schema(intents)?;
-        if intent_schema == Some(SuccessorIntentV3::schema_hash())
-            || intent_schema == Some(SuccessorIntentV4::schema_hash())
+        if (intent_schema == Some(SuccessorIntentV3::schema_hash())
+            || intent_schema == Some(SuccessorIntentV4::schema_hash()))
+            && let Some(rows) = historical_rows(intents)?
         {
-            let rows = read
-                .open_table(redb::TableDefinition::<String, &[u8]>::new(intents))
-                .map_err(|error| failed(&error))?;
             for entry in rows.iter().map_err(|error| failed(&error))? {
                 let (_, bytes) = entry.map_err(|error| failed(&error))?;
                 let row = if intent_schema == Some(SuccessorIntentV3::schema_hash()) {
@@ -457,9 +463,13 @@ mod tests {
                 .insert(name, registration.value())
                 .unwrap();
             let definition = redb::TableDefinition::<String, &[u8]>::new(name);
-            let source_rows = read.open_table(definition).unwrap();
+            write.delete_table(definition).unwrap();
+            let source_rows = match read.open_table(definition) {
+                Ok(rows) => rows,
+                Err(redb::TableError::TableDoesNotExist(_)) => continue,
+                Err(error) => panic!("cannot read predecessor family: {error}"),
+            };
             let mut target_rows = write.open_table(definition).unwrap();
-            target_rows.retain(|_, _| false).unwrap();
             for row in source_rows.iter().unwrap() {
                 let (key, bytes) = row.unwrap();
                 target_rows.insert(key.value(), bytes.value()).unwrap();
@@ -592,6 +602,75 @@ mod tests {
                             b"preflight precedes staging cleanup"
                         );
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn real_opener_upgrades_registered_historical_families_without_row_tables() {
+        use crate::store::OpensFlowStore as _;
+        let fixture = crate::tests::configuring::ConfiguredStore::new();
+        let directory = tempfile::tempdir().unwrap();
+        let predecessor = directory.path().join("predecessor.sema");
+        store_before(&predecessor, &[], &[]);
+        graft_predecessor_families(&predecessor, fixture.path());
+        for _ in 0..2 {
+            let store = FlowStore::open_configured(fixture.path()).unwrap();
+            assert!(
+                store
+                    .engine
+                    .match_records(QueryPlan::all(store.ordered_replacements))
+                    .unwrap()
+                    .records()
+                    .is_empty()
+            );
+            assert!(
+                store
+                    .engine
+                    .match_records(QueryPlan::all(store.successor_intents))
+                    .unwrap()
+                    .records()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn real_openers_preserve_historical_row_decode_failures_without_writing() {
+        use crate::store::{ConfigurationOnlyStore, ConfiguresOnlyStore as _, OpensFlowStore as _};
+        for name in [
+            super::super::ordered_replacement::ORDERED_REPLACEMENT_TABLE_NAME.as_str(),
+            super::super::successor::SUCCESSOR_INTENT_TABLE_NAME.as_str(),
+        ] {
+            let fixture = crate::tests::configuring::ConfiguredStore::new();
+            let directory = tempfile::tempdir().unwrap();
+            let predecessor = directory.path().join("predecessor.sema");
+            store_before(&predecessor, &[], &[]);
+            graft_predecessor_families(&predecessor, fixture.path());
+            {
+                let database = redb::Database::open(fixture.path()).unwrap();
+                let write = database.begin_write().unwrap();
+                write
+                    .open_table(redb::TableDefinition::<String, &[u8]>::new(name))
+                    .unwrap()
+                    .insert("corrupt".to_owned(), b"invalid archive".as_slice())
+                    .unwrap();
+                write.commit().unwrap();
+            }
+            let before = std::fs::read(fixture.path()).unwrap();
+            let openers: [FlowMemoryOpener; 3] = [
+                |path| FlowStore::open_configured(path).map(drop),
+                |path| FlowStore::open_configured_in_place(path).map(drop),
+                |path| ConfigurationOnlyStore::open(path).map(drop),
+            ];
+            for open in openers {
+                for _ in 0..2 {
+                    assert!(matches!(
+                        open(fixture.path()),
+                        Err(StoreError::RefreshCallerUpgradeFailed(_))
+                    ));
+                    assert_eq!(std::fs::read(fixture.path()).unwrap(), before);
                 }
             }
         }

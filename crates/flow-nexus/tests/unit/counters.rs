@@ -90,10 +90,15 @@ fn counters(fixture: &NexusFixture) -> String {
         .rfind(" { ")
         .expect("the snapshot ends with a struct");
     // The counters and the two request bounds; the HarnessHook, the
-    // warning lane's two empty families, its empty recovery text and the
+    // warning lane's two empty families, the seeded recovery text and the
     // ended-turn retention follow.
+    use crate::store::handover_configuration::SeedsSuccessorRecoveryText;
+    let tail = format!(
+        " Unconfigured [] [] «{}» 64",
+        meta_signal_flow::SuccessorRecoveryText::initial().0
+    );
     snapshot[open + 1..snapshot.len() - 2]
-        .trim_end_matches(" Unconfigured [] [] «» 64")
+        .trim_end_matches(tail.as_str())
         .to_owned()
 }
 

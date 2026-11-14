@@ -62,6 +62,15 @@ fn configured(place: &Place, root: &Path) {
     config
         .configure_change(ConfigurationChange::Nexus(nexus_configuration(root)))
         .expect("whole typed Nexus configuration commits");
+    config
+        .configure_change(ConfigurationChange::HarnessHookEvents(vec![
+            meta_signal_flow::HarnessHookEvent::SessionStart,
+            meta_signal_flow::HarnessHookEvent::PostToolUse,
+            meta_signal_flow::HarnessHookEvent::UserPromptSubmit,
+            meta_signal_flow::HarnessHookEvent::Stop,
+            meta_signal_flow::HarnessHookEvent::SessionEnd,
+        ]))
+        .expect("these hook command fixtures explicitly select every event");
 }
 
 /// Every hook command a Claude flow is launched with.

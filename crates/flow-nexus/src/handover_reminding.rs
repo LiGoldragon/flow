@@ -100,6 +100,7 @@ impl RemindsHandoverCallers for crate::RunningNexus {
         use crate::store::ReadsFlowRows;
         use crate::store::context::JudgesThreshold;
         use crate::store::context::{NamesFlowModel, RecordsContextSize};
+        use crate::store::context_warnings::ReadsContextWarningConfiguration;
         use crate::store::handover::HoldsHandovers;
         use crate::store::handover_configuration::ReadsHandoverConfiguration;
         use crate::store::handover_reminders::{
@@ -127,6 +128,9 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             let Ok(Some(model_name)) = self.store.flow_model(&flow_id.0) else {
                 continue;
             };
+            if !matches!(self.store.context_warning_policy(&model_name), Ok(None)) {
+                continue;
+            }
             let Some(policy) = policies.iter().find(|p| p.model_name.0 == model_name) else {
                 continue;
             };
@@ -211,6 +215,9 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             let Ok(Some(model_name)) = self.store.flow_model(flow_id) else {
                 continue;
             };
+            if !matches!(self.store.context_warning_policy(&model_name), Ok(None)) {
+                continue;
+            }
             let Ok(configuration) = self.store.handover_policies() else {
                 continue;
             };

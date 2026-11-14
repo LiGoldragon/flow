@@ -45,6 +45,7 @@ pub mod compacting;
 pub mod composition;
 mod connection_adapter;
 pub mod context;
+pub(crate) mod context_warnings;
 pub mod delivery;
 pub(crate) mod emission;
 pub mod event_wait;
@@ -233,6 +234,22 @@ impl crate::handover::YieldsHandover for MemoryHandoverSource {
                 signal_flow::HandoverFault::Unreadable(error.to_string()),
             ),
         }
+    }
+}
+
+impl crate::composition::ReadsSuccessorRecovery for MemoryHandoverSource {
+    fn successor_intent(
+        &self,
+        address: &signal_flow::Address,
+    ) -> Result<Option<crate::generated::memory::SuccessorIntent>, StoreError> {
+        use crate::store::successor::OwesSuccessors;
+        self.0.successor_intent(address)
+    }
+    fn successor_recovery_text(
+        &self,
+    ) -> Result<meta_signal_flow::SuccessorRecoveryText, StoreError> {
+        use crate::store::handover_configuration::ReadsHandoverConfiguration;
+        self.0.successor_recovery_text()
     }
 }
 
@@ -1635,6 +1652,7 @@ impl OpensRunningNexus for RunningNexus {
                 .with_source_root(&configured.source_root)
                 .with_codex_endpoints(configured.codex_endpoints.clone())
                 .with_harness_hook(&snapshot.configured_harness_hook.0)
+                .with_harness_hook_events(snapshot.configured_harness_hook_events.0.clone())
                 .with_ordinary_socket(&ordinary_socket),
             // A launch's context is composed by the Curriculum Nexus at the
             // socket the configuration names.
@@ -1699,13 +1717,15 @@ trait ComposesFromConfiguration {
 
 impl ComposesFromConfiguration for ConfiguredRunner {
     fn composer(&self, store: Arc<FlowStore>) -> LaunchComposer {
+        let handover_source = Arc::new(MemoryHandoverSource(store));
         LaunchComposer::with_presentation_prompt(
             context::ContextComposer(std::sync::Arc::new(CurriculumComposer::at(
                 &self.curriculum_nexus_path,
             ))),
             self.presentation_prompt_option.clone(),
+            handover_source.clone(),
         )
-        .with_handover_source(Arc::new(MemoryHandoverSource(store)))
+        .with_handover_source(handover_source)
     }
 }
 
@@ -1754,6 +1774,12 @@ impl AppliesConfiguration for RunningNexus {
             );
             self.codex_endpoints
                 .replace(configured.codex_endpoints.clone());
+        }
+        if before.is_none_or(|before| {
+            before.configured_harness_hook_events != now.configured_harness_hook_events
+        }) {
+            self.herdr
+                .configure_harness_hook_events(&now.configured_harness_hook_events.0);
         }
         if composing_changed {
             self.composer
@@ -2120,6 +2146,11 @@ impl ConfiguresFromMeta for RunningNexus {
                 }
                 echo
             }
+            Err(store::StoreError::ContextWarningConfigurationRefused(reason)) => {
+                meta_signal_flow::Output::ConfigureRefused(
+                    meta_signal_flow::ConfigureRefusal::ContextWarningConfigurationRefused(reason),
+                )
+            }
             Err(store::StoreError::DuplicateConfigurationEntry) => {
                 meta_signal_flow::Output::ConfigureRefused(
                     meta_signal_flow::ConfigureRefusal::DuplicateEntry,
@@ -2173,11 +2204,6 @@ impl ConfiguresFromMeta for RunningNexus {
             Err(store::StoreError::EndedTurnRetentionRefused) => {
                 meta_signal_flow::Output::ConfigureRefused(
                     meta_signal_flow::ConfigureRefusal::EndedTurnRetentionRefused,
-                )
-            }
-            Err(store::StoreError::ConfigurationFamilyUnheld) => {
-                meta_signal_flow::Output::ConfigureRefused(
-                    meta_signal_flow::ConfigureRefusal::StoreRefused,
                 )
             }
             Err(store::StoreError::AnnouncementTriesRefused) => {
@@ -3715,8 +3741,9 @@ mod tests {
                 host_id: "isolated-test-host".into(),
                 boot_id: "isolated-test-boot".into(),
             });
+            let store = Arc::new(store);
             let nexus = RunningNexus {
-                store: store.into(),
+                store: store.clone(),
                 codex_endpoints: Live::holding(codex_endpoints.clone()),
                 herdr: HerdrCli::at(snapshot_program.clone(), flows_root)
                     .with_codex_endpoints(codex_endpoints),
@@ -3729,6 +3756,7 @@ mod tests {
                             ("knowledge:flow:0", "Knowledge body."),
                         ][..],
                     ))),
+                    Arc::new(crate::composition::FixtureSuccessorRecovery::default()),
                 )),
                 dispatch_gate: std::sync::Mutex::new(()),
                 pane_leases: crate::delivery::lease::PaneLeases::default(),

@@ -1155,23 +1155,14 @@ mod tests {
                 replacement_order: order,
             });
         }
+        // The successor intent the hand type declared is the v3 format,
+        // frozen in `successor_upgrade` since v4 added the emergency cause.
+        use super::super::successor_upgrade::{SuccessionCauseV3, SuccessorIntentV3};
         for (frozen_cause, cause) in [
-            (
-                frozen::SuccessionCause::Refresh,
-                generated::SuccessionCause::Refresh,
-            ),
-            (
-                frozen::SuccessionCause::Exit,
-                generated::SuccessionCause::Exit,
-            ),
-            (
-                frozen::SuccessionCause::Ordered,
-                generated::SuccessionCause::Ordered,
-            ),
-            (
-                frozen::SuccessionCause::Replace,
-                generated::SuccessionCause::Replace,
-            ),
+            (frozen::SuccessionCause::Refresh, SuccessionCauseV3::Refresh),
+            (frozen::SuccessionCause::Exit, SuccessionCauseV3::Exit),
+            (frozen::SuccessionCause::Ordered, SuccessionCauseV3::Ordered),
+            (frozen::SuccessionCause::Replace, SuccessionCauseV3::Replace),
         ] {
             frozen::SuccessorIntent {
                 address: Address::sample("succeeded"),
@@ -1179,7 +1170,7 @@ mod tests {
                 cause: frozen_cause,
                 launch_request_id: "launch-s".into(),
             }
-            .archives_alike(&generated::SuccessorIntent {
+            .archives_alike(&SuccessorIntentV3 {
                 address: Address::sample("succeeded"),
                 predecessor: generated::Predecessor("flow-old".into()),
                 succession_cause: cause,

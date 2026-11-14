@@ -4,6 +4,7 @@
 //! declaration changes nothing. The running Nexus takes a replaced value at
 //! once, without a restart, and a subscription sees it.
 
+use super::handover_configuration::APPROVED_RECOVERY_TEXT;
 use crate::generated::operation::{Operation, Outcome};
 use crate::live::HoldsLiveValue;
 use crate::performing::Performs;
@@ -615,6 +616,9 @@ fn each_family_is_its_last_declaration() {
     assert_eq!(
         snapshot(&reopened),
         ConfigurationSnapshot {
+            successor_recovery_text: meta_signal_flow::SuccessorRecoveryText(
+                APPROVED_RECOVERY_TEXT.into()
+            ),
             configured_nexus: nexus_before,
             configured_models: meta_signal_flow::ConfiguredModels(models),
             configured_thresholds: meta_signal_flow::ConfiguredThresholds(thresholds),
@@ -652,16 +656,13 @@ fn each_family_is_its_last_declaration() {
             configured_announcement_tries: meta_signal_flow::ConfiguredAnnouncementTries(
                 meta_signal_flow::TryBound(3)
             ),
+            configured_context_warning_policies: meta_signal_flow::ConfiguredContextWarningPolicies(
+                vec![]
+            ),
+            configured_harness_hook_events: meta_signal_flow::ConfiguredHarnessHookEvents(vec![]),
             configured_harness_hook: meta_signal_flow::ConfiguredHarnessHook(
                 meta_signal_flow::HarnessHookConfiguration::Unconfigured
             ),
-            configured_context_warning_policies: meta_signal_flow::ConfiguredContextWarningPolicies(
-                Vec::new()
-            ),
-            configured_harness_hook_events: meta_signal_flow::ConfiguredHarnessHookEvents(
-                Vec::new()
-            ),
-            successor_recovery_text: meta_signal_flow::SuccessorRecoveryText(String::new()),
             configured_ended_turn_retention: meta_signal_flow::ConfiguredEndedTurnRetention(
                 meta_signal_flow::TurnRetentionBound(crate::store::SEEDED_ENDED_TURN_RETENTION)
             ),
@@ -1013,7 +1014,9 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     let nexus = fixture.open();
     let seeded = ask(&nexus, "Configuration");
     assert!(
-        seeded.ends_with(" None 30 None [] { 1 3 1 } 64 3 Unconfigured [] [] «» 64 }"),
+        seeded.ends_with(&format!(
+            " None 30 None [] {{ 1 3 1 }} 64 3 Unconfigured [] [] «{APPROVED_RECOVERY_TEXT}» 64 }}"
+        )),
         "seeded at 30: {seeded}"
     );
     assert_eq!(
@@ -1042,14 +1045,18 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     }
     let declared = ask(&nexus, "Configuration");
     assert!(
-        declared.ends_with(" None 45 None [] { 1 3 1 } 64 3 Unconfigured [] [] «» 64 }"),
+        declared.ends_with(&format!(
+            " None 45 None [] {{ 1 3 1 }} 64 3 Unconfigured [] [] «{APPROVED_RECOVERY_TEXT}» 64 }}"
+        )),
         "{declared}"
     );
     drop(nexus);
     let reopened = fixture.open();
     let kept = ask(&reopened, "Configuration");
     assert!(
-        kept.ends_with(" None 45 None [] { 1 3 1 } 64 3 Unconfigured [] [] «» 64 }"),
+        kept.ends_with(&format!(
+            " None 45 None [] {{ 1 3 1 }} 64 3 Unconfigured [] [] «{APPROVED_RECOVERY_TEXT}» 64 }}"
+        )),
         "kept across a reopen: {kept}"
     );
 }
@@ -1086,7 +1093,9 @@ fn configured_counters_are_kept_across_a_reopen() {
     let reopened = fixture.open();
     let kept = ask(&reopened, "Configuration");
     assert!(
-        kept.ends_with(" None 30 None [] { 120 45 300 } 64 3 Unconfigured [] [] «» 64 }"),
+        kept.ends_with(&format!(
+            " None 30 None [] {{ 120 45 300 }} 64 3 Unconfigured [] [] «{APPROVED_RECOVERY_TEXT}» 64 }}"
+        )),
         "kept across a reopen: {kept}"
     );
     assert_eq!(
@@ -1904,4 +1913,660 @@ fn the_configuration_open_upgrades_a_v6_store_too() {
     );
     drop(configuration);
     assert_eq!(retired_rows(fixture.path()), 0);
+}
+
+#[test]
+fn warning_configuration_is_validated_persisted_and_removed_per_model() {
+    use crate::context_warnings::tests::fixture_policy;
+    use meta_signal_flow::{ContextWarningConfigurationRefusal, HarnessHookEvent, Removal};
+
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let initial = snapshot(&nexus);
+    assert!(initial.configured_context_warning_policies.0.is_empty());
+    assert!(initial.configured_harness_hook_events.0.is_empty());
+    let policy = fixture_policy();
+    configures(
+        &nexus,
+        ConfigurationChange::ContextWarningPolicy(policy.clone()),
+    );
+    let mut other = policy.clone();
+    other.model_name = signal_flow::ModelName("another-model".into());
+    configures(
+        &nexus,
+        ConfigurationChange::ContextWarningPolicy(other.clone()),
+    );
+    let mut replacement = policy.clone();
+    replacement.context_warning_limit.warning_tokens.0 += 1;
+    configures(
+        &nexus,
+        ConfigurationChange::ContextWarningPolicy(replacement.clone()),
+    );
+    let before_refusal = snapshot(&nexus);
+    let mut invalid = policy.clone();
+    invalid.context_warning_limit.warning_tokens.0 = 0;
+    assert_eq!(
+        configure(&nexus, ConfigurationChange::ContextWarningPolicy(invalid)),
+        MetaResponse::ConfigureRefused(ConfigureRefusal::ContextWarningConfigurationRefused(
+            ContextWarningConfigurationRefusal::InvalidWarningTokens,
+        )),
+    );
+    assert_eq!(snapshot(&nexus), before_refusal);
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::HarnessHookEvents(vec![
+                HarnessHookEvent::Stop,
+                HarnessHookEvent::Stop
+            ])
+        ),
+        MetaResponse::ConfigureRefused(ConfigureRefusal::ContextWarningConfigurationRefused(
+            ContextWarningConfigurationRefusal::DuplicateHookEvent,
+        )),
+    );
+    assert_eq!(snapshot(&nexus), before_refusal);
+    let hooks = vec![HarnessHookEvent::PostToolUse, HarnessHookEvent::Stop];
+    configures(
+        &nexus,
+        ConfigurationChange::HarnessHookEvents(hooks.clone()),
+    );
+    let expected = snapshot(&nexus);
+    assert_eq!(
+        expected.configured_context_warning_policies.0,
+        vec![other.clone(), replacement]
+    );
+    assert_eq!(expected.configured_harness_hook_events.0, hooks);
+    drop(nexus);
+    let reopened = fixture.open();
+    assert_eq!(snapshot(&reopened), expected);
+    assert!(matches!(
+        reopened.dispatch_meta(meta_signal_flow::Input::Remove(Removal::ContextWarning(
+            policy.model_name
+        ))),
+        MetaResponse::Removed(_),
+    ));
+    assert_eq!(
+        snapshot(&reopened).configured_context_warning_policies.0,
+        vec![other]
+    );
+    configures(
+        &reopened,
+        ConfigurationChange::HarnessHookEvents(Vec::new()),
+    );
+    assert!(
+        snapshot(&reopened)
+            .configured_harness_hook_events
+            .0
+            .is_empty()
+    );
+}
+
+/// Pure store/operation fixtures: no harness is launched and no submission
+/// stands for receipt. Dispatch custody is explicit at each operation.
+#[test]
+fn warning_admission_binds_actual_delivery_and_survives_reopen_and_policy_removal() {
+    use crate::context_warnings::tests::fixture_policy;
+    use crate::generated::memory::WarningStageState;
+    use crate::generated::operation::{
+        ContextWarning_Data, Record_Data, Record_Data_Context_Data, Tokens,
+    };
+    use crate::store::SeedsRole;
+    use crate::store::context_warnings::ReadsContextWarningProgress;
+    use crate::store::metaflow::SleepsMetaflows;
+    use crate::store::repair::RepairsMetaflows;
+    use meta_signal_flow::WarningStage;
+
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let flow_id = ConfiguredStore::flow_node().flow_id;
+    let mut policy = fixture_policy();
+    policy.context_usage_projection =
+        meta_signal_flow::ContextUsageProjection::ClaudeCompletedInputWithCache;
+    policy
+        .context_warning_limit
+        .context_boundary_evidence
+        .harness_kind = HarnessKind::Claude;
+    nexus.store.seed_role(signal_flow::CallerIdentity {
+        flow_id: flow_id.clone(),
+        aspect: Aspect::Field,
+        model_name: policy.model_name.clone(),
+    });
+    assert_eq!(
+        nexus
+            .store
+            .rebind_current_flow(&ConfiguredStore::message(), &flow_id.0)
+            .unwrap(),
+        Ok(())
+    );
+    configures(
+        &nexus,
+        ConfigurationChange::ContextWarningPolicy(policy.clone()),
+    );
+    let notice = {
+        let _dispatch = nexus.dispatch_gate.lock().unwrap();
+        assert_eq!(
+            nexus.perform(Operation::Record(Record_Data::Context(
+                Record_Data_Context_Data {
+                    flow_id: flow_id.clone(),
+                    tokens: Tokens(180_000),
+                }
+            ))),
+            Outcome::Recorded
+        );
+        let Outcome::ContextWarningAdmitted(id) =
+            nexus.perform(Operation::ContextWarning(ContextWarning_Data {
+                flow_id: flow_id.clone(),
+                tokens: Tokens(180_000),
+            }))
+        else {
+            panic!("crossing admits one notice")
+        };
+        id
+    };
+    let progress = nexus.store.warning_progress(&flow_id.0).unwrap().unwrap();
+    for row in &progress.warning_stage_progress_vector {
+        assert_eq!(
+            row.warning_stage_state,
+            if row.warning_stage == WarningStage::Emergency {
+                WarningStageState::Admitted(notice.clone())
+            } else {
+                WarningStageState::Passed
+            }
+        );
+    }
+    let queue = nexus
+        .store
+        .metaflow(&ConfiguredStore::message())
+        .unwrap()
+        .unwrap()
+        .queue
+        .0;
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].logical_delivery_id, notice);
+    assert_eq!(
+        queue[0].message,
+        flow_ethos::Message::HardAbrupt(flow_ethos::Request::Notice(
+            policy
+                .warning_boundary_vector
+                .iter()
+                .find(|row| row.warning_stage == WarningStage::Emergency)
+                .unwrap()
+                .warning_text
+                .0
+                .clone()
+        ))
+    );
+    let before = store_bytes(&fixture);
+    {
+        let _dispatch = nexus.dispatch_gate.lock().unwrap();
+        assert_eq!(
+            nexus.perform(Operation::ContextWarning(ContextWarning_Data {
+                flow_id: flow_id.clone(),
+                tokens: Tokens(180_000),
+            })),
+            Outcome::ContextWarningUnchanged
+        );
+    }
+    assert_eq!(store_bytes(&fixture), before);
+    assert!(matches!(
+        nexus.dispatch_meta(meta_signal_flow::Input::Remove(
+            meta_signal_flow::Removal::ContextWarning(policy.model_name.clone())
+        )),
+        MetaResponse::Removed(_)
+    ));
+    assert_eq!(
+        nexus.store.warning_progress(&flow_id.0).unwrap(),
+        Some(progress.clone())
+    );
+    drop(nexus);
+    let reopened = fixture.open();
+    configures(&reopened, ConfigurationChange::ContextWarningPolicy(policy));
+    let _dispatch = reopened.dispatch_gate.lock().unwrap();
+    assert_eq!(
+        reopened.perform(Operation::ContextWarning(ContextWarning_Data {
+            flow_id: flow_id.clone(),
+            tokens: Tokens(180_000),
+        })),
+        Outcome::ContextWarningUnchanged
+    );
+    assert_eq!(
+        reopened.store.warning_progress(&flow_id.0).unwrap(),
+        Some(progress)
+    );
+    assert_eq!(
+        reopened
+            .store
+            .metaflow(&ConfiguredStore::message())
+            .unwrap()
+            .unwrap()
+            .queue
+            .0
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn dispatch_orders_rebind_and_transport_free_warning_admission_both_ways() {
+    use crate::context_warnings::{ObservesContextWithDispatch, tests::fixture_policy};
+    use crate::store::SeedsRole;
+    use crate::store::context::RecordsContextSize;
+    use crate::store::context_warnings::ReadsContextWarningProgress;
+    use crate::store::metaflow::SleepsMetaflows;
+    use crate::store::repair::RepairsMetaflows;
+
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let node = ConfiguredStore::flow_node();
+    let mut policy = fixture_policy();
+    policy.context_usage_projection =
+        meta_signal_flow::ContextUsageProjection::ClaudeCompletedInputWithCache;
+    policy
+        .context_warning_limit
+        .context_boundary_evidence
+        .harness_kind = HarnessKind::Claude;
+    nexus.store.seed_role(signal_flow::CallerIdentity {
+        flow_id: node.flow_id.clone(),
+        aspect: Aspect::Field,
+        model_name: policy.model_name.clone(),
+    });
+    configures(&nexus, ConfigurationChange::ContextWarningPolicy(policy));
+    let mut successor = node.clone();
+    successor.flow_id = flow_ethos::FlowId("fresh-warning-flow".into());
+    successor.session_id = signal_flow::SessionId("fresh-warning-session".into());
+    if let HerdrRouteSelection::Available(route) = &mut successor.herdr_route_selection {
+        route.herdr_pane_id = signal_flow::HerdrPaneId("w1:p4".into());
+        route.herdr_agent_name = signal_flow::HerdrAgentName("warning-successor".into());
+        route.herdr_terminal_id = signal_flow::HerdrTerminalId("warning-successor-terminal".into());
+    }
+    successor.origin = Origin::Flow(FlowOrigin {
+        flow_id: successor.flow_id.clone(),
+        session_id: successor.session_id.clone(),
+    });
+    assert!(matches!(
+        nexus.store.register_flow(successor.clone()).unwrap(),
+        crate::store::FlowRegistration::Registered(_)
+    ));
+    assert_eq!(
+        nexus
+            .store
+            .rebind_current_flow(&ConfiguredStore::message(), &node.flow_id.0)
+            .unwrap(),
+        Ok(())
+    );
+
+    // Rebind owns dispatch first. The observation has already captured the
+    // old native node, then waits for that turn; it records and admits nothing.
+    std::thread::scope(|scope| {
+        let dispatch = nexus.dispatch_gate.lock().unwrap();
+        let (entered, ready) = std::sync::mpsc::channel();
+        let nexus = &nexus;
+        let node = &node;
+        let observer = scope.spawn(move || {
+            entered.send(()).unwrap();
+            let _dispatch = nexus.dispatch_gate.lock().unwrap();
+            nexus.observe_context_with_dispatch(node, 180_000);
+        });
+        ready.recv().unwrap();
+        assert_eq!(
+            nexus
+                .store
+                .rebind_current_flow(&ConfiguredStore::message(), &successor.flow_id.0)
+                .unwrap(),
+            Ok(())
+        );
+        drop(dispatch);
+        observer.join().unwrap();
+    });
+    assert_eq!(nexus.store.context_size(&node.flow_id.0).unwrap(), None);
+    assert_eq!(nexus.store.warning_progress(&node.flow_id.0).unwrap(), None);
+    assert!(
+        nexus
+            .store
+            .metaflow(&ConfiguredStore::message())
+            .unwrap()
+            .unwrap()
+            .queue
+            .0
+            .is_empty()
+    );
+
+    // Admission owns dispatch first. Rebind waits, and the single committed
+    // Notice is identified by the old FlowId's terminal stage record.
+    assert_eq!(
+        nexus
+            .store
+            .rebind_current_flow(&ConfiguredStore::message(), &node.flow_id.0)
+            .unwrap(),
+        Ok(())
+    );
+    std::thread::scope(|scope| {
+        let dispatch = nexus.dispatch_gate.lock().unwrap();
+        let (entered, ready) = std::sync::mpsc::channel();
+        let nexus = &nexus;
+        let successor = &successor;
+        let rebind = scope.spawn(move || {
+            entered.send(()).unwrap();
+            let _dispatch = nexus.dispatch_gate.lock().unwrap();
+            assert_eq!(
+                nexus
+                    .store
+                    .rebind_current_flow(&ConfiguredStore::message(), &successor.flow_id.0)
+                    .unwrap(),
+                Ok(())
+            );
+        });
+        ready.recv().unwrap();
+        nexus.observe_context_with_dispatch(&node, 180_000);
+        drop(dispatch);
+        rebind.join().unwrap();
+    });
+    let progress = nexus
+        .store
+        .warning_progress(&node.flow_id.0)
+        .unwrap()
+        .unwrap();
+    let queue = nexus
+        .store
+        .metaflow(&ConfiguredStore::message())
+        .unwrap()
+        .unwrap()
+        .queue
+        .0;
+    assert_eq!(queue.len(), 1);
+    assert!(
+        progress
+            .warning_stage_progress_vector
+            .iter()
+            .any(|row| row.warning_stage_state
+                == crate::generated::memory::WarningStageState::Admitted(
+                    queue[0].logical_delivery_id.clone()
+                ))
+    );
+    assert_eq!(
+        nexus.store.warning_progress(&successor.flow_id.0).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn warning_refresh_requires_qualified_middle_handover_or_emergency_and_respects_protection() {
+    use crate::context_warnings::tests::fixture_policy;
+    use crate::store::SeedsRole;
+    use crate::store::context::{JudgesThreshold, RecordsContextSize, ThresholdStanding};
+    use crate::store::handover::HoldsHandovers;
+    use crate::store::repair::RepairsMetaflows;
+
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let id = ConfiguredStore::flow_node().flow_id;
+    let address = ConfiguredStore::message();
+    let policy = fixture_policy();
+    nexus.store.seed_role(signal_flow::CallerIdentity {
+        flow_id: id.clone(),
+        aspect: Aspect::Field,
+        model_name: policy.model_name.clone(),
+    });
+    assert_eq!(
+        nexus.store.rebind_current_flow(&address, &id.0).unwrap(),
+        Ok(())
+    );
+    configures(&nexus, ConfigurationChange::ContextWarningPolicy(policy));
+    for tokens in [100_000, 150_000, 179_999] {
+        nexus.store.record_context_size(&id.0, tokens).unwrap();
+        assert!(matches!(
+            nexus.store.threshold_standing(&id.0).unwrap(),
+            ThresholdStanding::Below { .. }
+        ));
+    }
+    nexus.store.ensure_live_handover(&address, &id.0).unwrap();
+    let write = |tokens| {
+        nexus
+            .store
+            .keep_handover(
+                &address,
+                &address,
+                signal_flow::Section {
+                    title: signal_flow::Title("warning fixture".into()),
+                    description: signal_flow::Description("measured handover".into()),
+                    body: signal_flow::Body("fixture; no native successor proof".into()),
+                },
+                signal_flow::Touch::Known(signal_flow::Known_Data {
+                    flow_id: id.clone(),
+                    tokens: signal_flow::Tokens(tokens),
+                    timestamp: signal_flow::Timestamp(10),
+                }),
+            )
+            .unwrap();
+    };
+    write(149_999);
+    assert!(matches!(
+        nexus.store.threshold_standing(&id.0).unwrap(),
+        ThresholdStanding::Below { .. }
+    ));
+    write(150_000);
+    assert!(matches!(
+        nexus.store.threshold_standing(&id.0).unwrap(),
+        ThresholdStanding::Past { .. }
+    ));
+    configures(
+        &nexus,
+        ConfigurationChange::ProtectedAddresses(vec![address.clone()]),
+    );
+    assert!(matches!(
+        nexus.store.threshold_standing(&id.0).unwrap(),
+        ThresholdStanding::Protected { .. }
+    ));
+    configures(&nexus, ConfigurationChange::ProtectedAddresses(vec![]));
+    write(100_000);
+    nexus.store.record_context_size(&id.0, 180_000).unwrap();
+    assert!(matches!(
+        nexus.store.threshold_standing(&id.0).unwrap(),
+        ThresholdStanding::Past { .. }
+    ));
+}
+
+#[test]
+fn recovery_text_is_seeded_configured_preserved_by_other_setters_and_reopened() {
+    use crate::store::handover_configuration::{
+        ReadsHandoverConfiguration, SeedsSuccessorRecoveryText,
+    };
+    use meta_signal_flow::SuccessorRecoveryText;
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    assert_eq!(
+        snapshot(&nexus).successor_recovery_text,
+        SuccessorRecoveryText::initial()
+    );
+    let changed = SuccessorRecoveryText("Changed recovery guidance.".into());
+    configures(
+        &nexus,
+        ConfigurationChange::SuccessorRecoveryText(changed.clone()),
+    );
+    {
+        use crate::store::AnnouncesLaunchChanges;
+        let before = nexus.configuration_changes.current();
+        configures(
+            &nexus,
+            ConfigurationChange::SuccessorRecoveryText(changed.clone()),
+        );
+        assert_eq!(
+            nexus.configuration_changes.current(),
+            before,
+            "equal configuration is unchanged"
+        );
+    }
+    let refresh_model = flow_ethos::ModelName("recoveryModel".into());
+    configures(
+        &nexus,
+        ConfigurationChange::Refresh(ConfigureThreshold {
+            model_name: refresh_model.clone(),
+            refresh_threshold: meta_signal_flow::RefreshThreshold(123456),
+        }),
+    );
+    assert!(matches!(
+        nexus.dispatch_meta(meta_signal_flow::Input::Remove(
+            meta_signal_flow::Removal::Refresh(refresh_model)
+        )),
+        MetaResponse::Removed(_)
+    ));
+    assert_eq!(snapshot(&nexus).successor_recovery_text, changed);
+
+    for other in [
+        ConfigurationChange::HandoverPolicies(vec![]),
+        ConfigurationChange::HandoverArchive(meta_signal_flow::generated::signal::Path(
+            "/archive/new".into(),
+        )),
+        ConfigurationChange::HandoverCount(3),
+        ConfigurationChange::PublicationDeadline(meta_signal_flow::Duration(12345)),
+    ] {
+        configures(&nexus, other);
+        assert_eq!(snapshot(&nexus).successor_recovery_text, changed);
+        assert_eq!(nexus.store.successor_recovery_text().unwrap(), changed);
+    }
+    // A negative count is refused before anything is written; this Flow
+    // answers the store's refusal as Refused, as it does for every
+    // handover-configuration refusal.
+    assert!(matches!(
+        configure(&nexus, ConfigurationChange::HandoverCount(-1)),
+        MetaResponse::Refused(_)
+    ));
+    assert_eq!(snapshot(&nexus).successor_recovery_text, changed);
+    drop(nexus);
+    let nexus = fixture.open();
+    assert_eq!(snapshot(&nexus).successor_recovery_text, changed);
+    configures(
+        &nexus,
+        ConfigurationChange::SuccessorRecoveryText(SuccessorRecoveryText(String::new())),
+    );
+    drop(nexus);
+    assert_eq!(snapshot(&fixture.open()).successor_recovery_text.0, "");
+}
+
+#[test]
+fn recovery_configuration_subscription_announces_the_new_value() {
+    use crate::observe_configuration::ObservesConfiguration;
+    use crate::store::AnnouncesLaunchChanges;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let disconnected = AtomicBool::new(false);
+    let (sent, received) = std::sync::mpsc::channel();
+    let changed = meta_signal_flow::SuccessorRecoveryText("Subscribed recovery guidance.".into());
+    std::thread::scope(|scope| {
+        let observer = scope.spawn(|| {
+            nexus.observe_configuration(&disconnected, &mut |response| {
+                sent.send(response.clone())
+                    .map_err(|error| error.to_string())
+            })
+        });
+        let MetaResponse::Configuration(initial) = received
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+        else {
+            panic!("initial snapshot")
+        };
+        assert_ne!(initial.successor_recovery_text, changed);
+        configures(
+            &nexus,
+            ConfigurationChange::SuccessorRecoveryText(changed.clone()),
+        );
+        let MetaResponse::Configuration(current) = received
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+        else {
+            panic!("changed snapshot")
+        };
+        assert_eq!(current.successor_recovery_text, changed);
+        disconnected.store(true, Ordering::Release);
+        nexus.configuration_changes.announce();
+        assert!(observer.join().unwrap().is_err());
+    });
+}
+
+#[test]
+fn one_live_store_value_reaches_both_composers_without_reconstructing_the_source() {
+    use crate::composition::{ComposesInRoot, HandoverRoot, LaunchComposer, OpensLaunchComposer};
+    use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let profile = crate::composition::tests::fixture_profile();
+    nexus
+        .store
+        .owe_successor(SuccessorIntent {
+            address: profile.address.clone(),
+            predecessor: crate::generated::memory::Predecessor(
+                profile.flow_id_option.as_ref().unwrap().0.clone(),
+            ),
+            succession_cause: SuccessionCause::EmergencyRefreshWithoutHandover(
+                crate::generated::memory::EmergencyRefreshWithoutHandover_Data {
+                    flow_id: profile.flow_id_option.clone().unwrap(),
+                    transcript_path_option: None,
+                },
+            ),
+            launch_request_id: profile.launch_request_id.clone(),
+        })
+        .unwrap();
+    let source = std::sync::Arc::new(crate::MemoryHandoverSource(nexus.store.clone()));
+    let modules = [
+        ("spirit:core:0", "Spirit body."),
+        ("intent:flow:0", "Intent body."),
+        ("operation:main-flow:0", "Main flow body."),
+        ("knowledge:flow:0", "Knowledge body."),
+    ];
+    let composer = LaunchComposer::with_context(
+        crate::context::ContextComposer(std::sync::Arc::new(
+            crate::context::FixtureComposer::from(&modules[..]),
+        )),
+        source.clone(),
+    )
+    .with_handover_source(source);
+    let root = tempfile::tempdir().unwrap();
+    for text in ["Live initial guidance.", "Live changed guidance."] {
+        configures(
+            &nexus,
+            ConfigurationChange::SuccessorRecoveryText(meta_signal_flow::SuccessorRecoveryText(
+                text.into(),
+            )),
+        );
+        for kind in [
+            signal_flow::FlowKind::Regular,
+            signal_flow::FlowKind::Simplified,
+        ] {
+            for brief in ["", "Continue."] {
+                let mut next = profile.clone();
+                next.flow_kind = kind.clone();
+                next.instruction_prompt.0 = brief.into();
+                let composed =
+                    composer
+                        .compose_in_root(
+                            crate::composition::HarnessedProfile {
+                                remembered_flows: crate::generated::starter::RememberedFlows(
+                                    Vec::new(),
+                                ),
+                                harness_kind: HarnessKind::Claude,
+                                launch_profile: next,
+                            },
+                            Vec::<signal_flow::LeaveOut>::new(),
+                            HandoverRoot::At(root.path()),
+                            &[],
+                        )
+                        .unwrap();
+                assert!(
+                    composed
+                        .first_prompt_payload
+                        .first_prompt_body
+                        .0
+                        .contains(text)
+                );
+                assert!(
+                    composed
+                        .first_prompt_payload
+                        .first_prompt_body
+                        .0
+                        .contains("1b8ac0")
+                );
+            }
+        }
+    }
 }

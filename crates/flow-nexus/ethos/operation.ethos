@@ -116,6 +116,9 @@ Operation
            ; One commit: the generation closed (when any moves), Started, and
            ; the supersession at its Address.
            StartedHandedOver.LaunchedRecord ]
+  ; Judge a successfully recorded native observation under dispatch; admit
+  ; the notice and its terminal warning stages in one store commit.
+  ContextWarning.{ FlowId Tokens }
   Register.{ FlowNode CallerIdentity }
   Confirm.FlowId
   Open.{ ComposedLaunch Root }
@@ -132,6 +135,8 @@ Operation
 [ Composed.ComposedLaunch
   Reserved.{ LaunchAttemptReservation Option<FlowId> }
   Recorded
+  ContextWarningAdmitted.LogicalDeliveryId
+  ContextWarningUnchanged
   Registered.FlowNode
   Started.Launched
   Opened.HerdrPaneBinding

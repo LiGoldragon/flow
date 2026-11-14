@@ -473,14 +473,23 @@ impl ReadsUsageLines for str {
             if entry.get("isSidechain").and_then(Value::as_bool) == Some(true) {
                 return None;
             }
+            if entry.get("type").and_then(Value::as_str) != Some("assistant") {
+                return None;
+            }
             let usage = entry.get("message")?.get("usage")?;
-            let tokens = |key: &str| usage.get(key).and_then(Value::as_i64).unwrap_or(0);
-            usage.get("input_tokens")?;
-            Some(
-                tokens("input_tokens")
-                    + tokens("cache_read_input_tokens")
-                    + tokens("cache_creation_input_tokens"),
-            )
+            let input = usage.get("input_tokens")?.as_i64()?;
+            let cache_read = match usage.get("cache_read_input_tokens") {
+                None => 0,
+                Some(value) => value.as_i64()?,
+            };
+            let cache_creation = match usage.get("cache_creation_input_tokens") {
+                None => 0,
+                Some(value) => value.as_i64()?,
+            };
+            if input < 0 || cache_read < 0 || cache_creation < 0 {
+                return None;
+            }
+            input.checked_add(cache_read)?.checked_add(cache_creation)
         })
     }
 }
@@ -843,6 +852,29 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn persisted_context_ignores_incomplete_invalid_and_sidechain_usage() {
+        use super::ReadsUsageLines;
+        let last = r#"{"type":"assistant","message":{"usage":{"input_tokens":12,"cache_read_input_tokens":30,"cache_creation_input_tokens":8}}}"#;
+        assert_eq!(last.last_context_tokens(), Some(50));
+        for pending in [
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":90"#,
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":"unknown"}}}"#,
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":-1}}}"#,
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":9223372036854775807,"cache_read_input_tokens":1}}}"#,
+            r#"{"type":"assistant","isSidechain":true,"message":{"usage":{"input_tokens":90}}}"#,
+            r#"{"type":"user","message":{"usage":{"input_tokens":90}}}"#,
+        ] {
+            assert_eq!(pending.last_context_tokens(), None);
+            assert_eq!(format!("{last}\n{pending}").last_context_tokens(), Some(50));
+        }
+        let completed = r#"{"type":"assistant","message":{"usage":{"input_tokens":90}}}"#;
+        assert_eq!(
+            format!("{last}\n{completed}").last_context_tokens(),
+            Some(90)
+        );
     }
 
     /// A session's transcript is found under its project, by its session

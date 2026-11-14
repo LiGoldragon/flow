@@ -2,6 +2,11 @@ use super::configuring::ConfiguredStore;
 use crate::store::{ConfiguresOnlyStore, ManagesMetaflowState, OpensFlowStore};
 use meta_signal_flow::ConfigurationChange;
 
+/// The approved emergency recovery wording, written out here apart from
+/// the seed that stores it, so a change to the seed is seen by the tests
+/// that hold it to this text.
+pub(crate) const APPROVED_RECOVERY_TEXT: &str = "Your predecessor reached its emergency context threshold and was refreshed at rest without writing a handover. Recover what your open requests need from its transcript before you continue.";
+
 fn policy() -> meta_signal_flow::HandoverPolicy {
     meta_signal_flow::HandoverPolicy {
         model_name: flow_ethos::ModelName("claude-opus-5-5".into()),

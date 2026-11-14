@@ -10,6 +10,7 @@ use crate::test_faults;
 pub(crate) mod address_hold;
 pub mod compaction;
 pub mod context;
+pub(crate) mod context_warnings;
 pub(crate) mod counters;
 mod created_pane;
 pub mod delivery;
@@ -50,6 +51,7 @@ pub(crate) mod send_server;
 pub(crate) mod sent;
 mod staged_open;
 pub(crate) mod successor;
+pub(crate) mod successor_upgrade;
 pub(crate) mod turn_end;
 pub(crate) mod undecodable_frame;
 pub(crate) use crate::generated::memory::{
@@ -69,6 +71,10 @@ pub(crate) use crate::generated::memory::{
     StoredMetaflowLock, StoredRole,
 };
 use address_hold::HoldsLaunchAddress;
+use context_warnings::{
+    ConfiguresContextWarnings, ContextWarningConfigurationTables, DescribesWarningRecord,
+    HookConfigurationOrigin, ProjectsWarningPolicy, RegistersContextWarningConfiguration,
+};
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
 use flow_ethos::State as MetaflowState;
@@ -1570,6 +1576,8 @@ pub enum StoreError {
     HandoverConfigurationRefused(meta_signal_flow::HandoverConfigurationRefusal),
     #[error("handover configuration upgrade failed: {0}")]
     HandoverConfigurationUpgrade(String),
+    #[error("successor intent upgrade failed: {0}")]
+    SuccessorIntentUpgrade(String),
     #[error("0.54.2 Memory upgrade failed: {0}")]
     LivingUpgrade(String),
     #[error("harness event Memory upgrade failed: {0}")]
@@ -1610,8 +1618,8 @@ pub enum StoreError {
     NexusUnconfigured,
     #[error("a negative ended-turn retention is refused")]
     EndedTurnRetentionRefused,
-    #[error("this Flow holds no table for that configuration family")]
-    ConfigurationFamilyUnheld,
+    #[error("context warning configuration refused: {0:?}")]
+    ContextWarningConfigurationRefused(meta_signal_flow::ContextWarningConfigurationRefusal),
     #[error("store {path} is held by another open; its lock cannot be acquired")]
     StoreHeld { path: String },
     #[error("the store's open could not be staged: {0}")]
@@ -1625,6 +1633,7 @@ pub enum StoreError {
 }
 
 pub(crate) struct MetaConfigurationTables {
+    context_warnings: ContextWarningConfigurationTables,
     handover: TableReference<handover_configuration::StoredHandoverConfiguration>,
     nexus: TableReference<StoredMetaNexusConfiguration>,
     models: TableReference<StoredMetaModelConfiguration>,
@@ -1642,14 +1651,16 @@ pub(crate) struct MetaConfigurationTables {
 }
 
 trait RegistersMetaConfigurationTables: Sized {
-    fn register(engine: &mut Engine) -> Result<Self, StoreError>;
+    fn register(engine: &mut Engine, origin: HookConfigurationOrigin) -> Result<Self, StoreError>;
 }
 
 impl RegistersMetaConfigurationTables for MetaConfigurationTables {
-    fn register(engine: &mut Engine) -> Result<Self, StoreError> {
+    fn register(engine: &mut Engine, origin: HookConfigurationOrigin) -> Result<Self, StoreError> {
+        let nexus = engine.register_table(StoredMetaNexusConfiguration::descriptor())?;
         Ok(Self {
+            context_warnings: ContextWarningConfigurationTables::register(engine, origin)?,
             handover: <handover_configuration::StoredHandoverConfiguration as handover_configuration::UpgradesHandoverConfiguration>::upgrade_or_register(engine).map_err(StoreError::HandoverConfigurationUpgrade)?,
-            nexus: engine.register_table(StoredMetaNexusConfiguration::descriptor())?,
+            nexus,
             models: engine.register_table(StoredMetaModelConfiguration::descriptor())?,
             thresholds: engine.register_table(StoredMetaThresholdConfiguration::descriptor())?,
             send_servers: engine.register_table(
@@ -1705,6 +1716,7 @@ pub struct FlowStore {
     delivery_tables: DeliveryTables,
     event_tables: events::EventTables,
     context_sizes: TableReference<context::FlowContextSize>,
+    warning_progress: TableReference<context_warnings::ContextWarningProgress>,
     address_holds: TableReference<address_hold::AddressHold>,
     opened_threads: TableReference<opened_thread::OpenedLaunchThread>,
     send_calls: TableReference<crate::generated::send_tool::SendCall>,
@@ -1879,10 +1891,13 @@ pub struct ConfiguredFamilies {
     pub heartbeat: Option<HeartbeatConfig>,
     pub protected_addresses: Vec<Address>,
     pub harness_hook: meta_signal_flow::HarnessHookConfiguration,
+    pub context_warning_policies: Vec<meta_signal_flow::ContextWarningPolicy>,
+    pub harness_hook_events: Vec<meta_signal_flow::HarnessHookEvent>,
     pub handover_policies: meta_signal_flow::HandoverPoliciesConfiguration,
     pub handover_archive: meta_signal_flow::HandoverArchiveConfiguration,
     pub handover_count: meta_signal_flow::HandoverCountConfiguration,
     pub publication_deadline: meta_signal_flow::Duration,
+    pub successor_recovery_text: meta_signal_flow::SuccessorRecoveryText,
     pub request_id_draws: meta_signal_flow::DrawBound,
     pub announcement_tries: meta_signal_flow::TryBound,
     pub ended_turn_retention: meta_signal_flow::TurnRetentionBound,
@@ -1896,6 +1911,7 @@ pub trait CompletesSnapshot {
 impl CompletesSnapshot for ConfiguredFamilies {
     fn with_counters(self, counters: ConfigureCounters) -> ConfigurationSnapshot {
         ConfigurationSnapshot {
+            successor_recovery_text: self.successor_recovery_text,
             configured_nexus: meta_signal_flow::ConfiguredNexus(self.nexus),
             configured_models: meta_signal_flow::ConfiguredModels(self.models),
             configured_thresholds: meta_signal_flow::ConfiguredThresholds(self.thresholds),
@@ -1932,16 +1948,12 @@ impl CompletesSnapshot for ConfiguredFamilies {
                 self.announcement_tries,
             ),
             configured_harness_hook: meta_signal_flow::ConfiguredHarnessHook(self.harness_hook),
-            // The context-warning, hook-event and recovery-text families of
-            // meta-signal-flow 80 to 82 are the warning lane's; this Flow
-            // holds none of them and reports them empty.
             configured_context_warning_policies: meta_signal_flow::ConfiguredContextWarningPolicies(
-                Vec::new(),
+                self.context_warning_policies,
             ),
             configured_harness_hook_events: meta_signal_flow::ConfiguredHarnessHookEvents(
-                Vec::new(),
+                self.harness_hook_events,
             ),
-            successor_recovery_text: meta_signal_flow::SuccessorRecoveryText(String::new()),
             configured_ended_turn_retention: meta_signal_flow::ConfiguredEndedTurnRetention(
                 self.ended_turn_retention,
             ),
@@ -2063,10 +2075,12 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let configuration = engine.register_table(configuration_descriptor)?;
         let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
         let delivery_configuration = engine.register_table(delivery_configuration_descriptor)?;
+        let nexus = engine.register_table(meta_nexus_descriptor)?;
         let meta_configuration_tables = MetaConfigurationTables {
+            context_warnings: ContextWarningConfigurationTables::register(&mut engine, if recognized { HookConfigurationOrigin::ExistingStore } else { HookConfigurationOrigin::NewStore })?,
             handover: <handover_configuration::StoredHandoverConfiguration as handover_configuration::UpgradesHandoverConfiguration>::upgrade_or_register(&mut engine)
                 .map_err(StoreError::HandoverConfigurationUpgrade)?,
-            nexus: engine.register_table(meta_nexus_descriptor)?,
+            nexus,
             models: engine.register_table(meta_models_descriptor)?,
             thresholds: engine.register_table(meta_thresholds_descriptor)?,
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
@@ -2752,12 +2766,15 @@ impl OpensFlowStore for FlowStore {
         let replacements = engine.register_table(replacements_descriptor)?;
         let roles = engine.register_table(roles_descriptor)?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
-        let meta_configuration_tables = MetaConfigurationTables::register(&mut engine)?;
+        let meta_configuration_tables =
+            MetaConfigurationTables::register(&mut engine, HookConfigurationOrigin::ExistingStore)?;
         if FlowStore::meta_configuration_snapshot(&engine, &meta_configuration_tables)?.is_none() {
             return Err(StoreError::NotConfigured);
         }
         let event_tables =
             <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
+        let warning_progress =
+            engine.register_table(context_warnings::ContextWarningProgress::descriptor())?;
         let context_sizes = engine.register_table(context_sizes_descriptor)?;
         let address_holds = engine.register_table(address_holds_descriptor)?;
         let opened_threads = engine.register_table(opened_threads_descriptor)?;
@@ -2765,7 +2782,7 @@ impl OpensFlowStore for FlowStore {
         let launch_cleanups = engine.register_table(launch_cleanups_descriptor)?;
         let compactions = engine.register_table(compactions_descriptor)?;
         let reminders = engine.register_table(reminders_descriptor)?;
-        let successor_intents = engine.register_table(successor_intents_descriptor)?;
+        let successor_intents = <successor::SuccessorIntent as successor_upgrade::UpgradesSuccessorIntent>::upgrade_or_register(&mut engine).map_err(StoreError::SuccessorIntentUpgrade)?;
         let queue_delivery =
             QueueDeliveryTables::register(&mut engine, queue_delivery_descriptors)?;
         let send_outcomes = SendOutcomeTables::register(&mut engine, send_outcome_descriptors)?;
@@ -2819,6 +2836,7 @@ impl OpensFlowStore for FlowStore {
             delivery_tables,
             event_tables,
             context_sizes,
+            warning_progress,
             address_holds,
             opened_threads,
             send_calls,
@@ -2873,6 +2891,11 @@ impl OpensFlowStore for FlowStore {
     }
 
     fn open_seeded(path: &Path, defaults: &DefaultConfiguration) -> Result<Self, StoreError> {
+        let origin = if path.exists() {
+            HookConfigurationOrigin::ExistingStore
+        } else {
+            HookConfigurationOrigin::NewStore
+        };
         let mut engine = Engine::open(EngineOpen::new(path, SchemaVersion::new(1)))?;
         let flows = engine.register_table(TableDescriptor::new(
             FLOW_TABLE_NAME,
@@ -2948,9 +2971,11 @@ impl OpensFlowStore for FlowStore {
             StoredLaunchAttempt::schema_hash(),
         ))?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
-        let meta_configuration_tables = MetaConfigurationTables::register(&mut engine)?;
+        let meta_configuration_tables = MetaConfigurationTables::register(&mut engine, origin)?;
         let event_tables =
             <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
+        let warning_progress =
+            engine.register_table(context_warnings::ContextWarningProgress::descriptor())?;
         let context_sizes = engine.register_table(
             <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor(),
         )?;
@@ -3036,6 +3061,7 @@ impl OpensFlowStore for FlowStore {
             delivery_tables,
             event_tables,
             context_sizes,
+            warning_progress,
             address_holds,
             opened_threads,
             send_calls,
@@ -5293,7 +5319,7 @@ impl WritesFlowStore for FlowStore {
 }
 
 /// Store identity, catalogue validation and committed-record operations.
-pub(crate) trait ReadsFlowMemory {
+pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
     fn aspect_key(aspect: &Aspect) -> &'static str {
         match aspect {
             Aspect::Psyche => "Psyche",
@@ -5384,6 +5410,17 @@ pub(crate) trait ReadsFlowMemory {
 
     fn current_flow_family_identity(table_name: &str) -> Option<(&'static str, SchemaHash)> {
         let (family, version) = match table_name {
+            context_warnings::POLICY_TABLE => (
+                context_warnings::POLICY_FAMILY,
+                context_warnings::POLICY_SCHEMA,
+            ),
+            context_warnings::HOOK_TABLE => {
+                (context_warnings::HOOK_FAMILY, context_warnings::HOOK_SCHEMA)
+            }
+            context_warnings::PROGRESS_TABLE => (
+                context_warnings::PROGRESS_FAMILY,
+                context_warnings::PROGRESS_SCHEMA,
+            ),
             "flow_nexus_flows" => return Some(("flow-nexus-flow", FlowRecord::schema_hash())),
             "flow_nexus_state" => ("flow-nexus-state", "flow-nexus-state-v2"),
             "flow_nexus_configuration" => {
@@ -5567,7 +5604,7 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_meta_handover_configuration" => (
                 "flow-nexus-handover-configuration",
-                "flow-nexus-handover-configuration-v2",
+                "flow-nexus-handover-configuration-v3",
             ),
             "flow_nexus_handovers" => (handover::HANDOVER_FAMILY, handover::HANDOVER_SCHEMA),
             "flow_nexus_handover_reminders" => (
@@ -5719,15 +5756,22 @@ pub(crate) trait ReadsFlowMemory {
                 let (family, schema_hash) = FlowStore::metaflow_declaration_v6_identity();
                 identity.family().as_str() == family && identity.schema_hash() == schema_hash
             };
-        before_living
+        let before_recovery_cause = table_key == successor::SUCCESSOR_INTENT_TABLE_NAME.as_str()
+            && identity.table_name() == table_key
+            && identity.family().as_str() == successor::SUCCESSOR_INTENT_FAMILY
+            && identity.schema_hash() == SchemaHash::for_label("flow-nexus-successor-intent-v3");
+        before_recovery_cause
+            || before_living
             || before_event_metadata
             || before_pending_reaps
             || before_leave_outs
             || FlowStore::current_flow_family_identity(table_key).is_some_and(
                 |(family, schema_hash)| {
                     let predecessor_handover = table_key == OPTIONAL_HANDOVER_TABLE
-                        && identity.schema_hash()
-                            == SchemaHash::for_label("flow-nexus-handover-configuration-v1");
+                        && (identity.schema_hash()
+                            == SchemaHash::for_label("flow-nexus-handover-configuration-v1")
+                            || identity.schema_hash()
+                                == SchemaHash::for_label("flow-nexus-handover-configuration-v2"));
                     identity.table_name() == table_key
                         && identity.family().as_str() == family
                         && (identity.schema_hash() == schema_hash || predecessor_handover)
@@ -5742,6 +5786,9 @@ pub(crate) trait ReadsFlowMemory {
         let is = |tables: &[&str]| {
             actual.iter().all(|name| {
                 tables.contains(&name.as_str())
+                    || name == context_warnings::POLICY_TABLE
+                    || name == context_warnings::HOOK_TABLE
+                    || name == context_warnings::PROGRESS_TABLE
                     || *name == RETIRED_LEAVE_OUT_TABLE
                     || *name == OPTIONAL_HANDOVER_TABLE
                     || *name == OPTIONAL_HANDOVER_RUNTIME_TABLE
@@ -5981,6 +6028,9 @@ pub(crate) trait ReadsFlowMemory {
         engine: &Engine,
         tables: &MetaConfigurationTables,
     ) -> Result<Option<ConfiguredFamilies>, StoreError> {
+        let policy_rows = engine.match_records(QueryPlan::all(tables.context_warnings.policies))?;
+        let hook_event_rows =
+            engine.match_records(QueryPlan::all(tables.context_warnings.hooks))?;
         let nexus_rows = engine.match_records(QueryPlan::all(tables.nexus))?;
         let handover_rows = engine.match_records(QueryPlan::all(tables.handover))?;
         let marker = nexus_rows.database_marker();
@@ -6021,6 +6071,8 @@ pub(crate) trait ReadsFlowMemory {
             || protected_address_rows.database_marker() != marker
             || harness_hook_rows.database_marker() != marker
             || turn_retention_rows.database_marker() != marker
+            || policy_rows.database_marker() != marker
+            || hook_event_rows.database_marker() != marker
             || engine.current_database_marker()? != marker
         {
             return Err(StoreError::ConfigurationReadViewChanged);
@@ -6102,6 +6154,17 @@ pub(crate) trait ReadsFlowMemory {
             .map(|stored| stored.address.clone())
             .collect::<Vec<_>>();
         protected_addresses.sort_by_key(FlowStore::address_record_key);
+        let mut context_warning_policies = policy_rows
+            .records()
+            .iter()
+            .map(ProjectsWarningPolicy::policy)
+            .collect::<Vec<_>>();
+        context_warning_policies.sort_by(|left, right| left.model_name.cmp(&right.model_name));
+        let harness_hook_events = match hook_event_rows.records() {
+            [] => Vec::new(),
+            [row] => row.0.clone(),
+            _ => return Err(StoreError::StateInvariant),
+        };
         Ok(Some(ConfiguredFamilies {
             nexus,
             models,
@@ -6114,10 +6177,13 @@ pub(crate) trait ReadsFlowMemory {
             heartbeat,
             protected_addresses,
             harness_hook,
+            context_warning_policies,
+            harness_hook_events,
             handover_policies: handover.handover_policies_configuration,
             handover_archive: handover.handover_archive_configuration,
             handover_count: handover.handover_count_configuration,
             publication_deadline: handover.duration,
+            successor_recovery_text: handover.successor_recovery_text,
             request_id_draws: meta_signal_flow::DrawBound(request_id_draws),
             announcement_tries: meta_signal_flow::TryBound(announcement_tries),
             ended_turn_retention,
@@ -6297,6 +6363,11 @@ pub(crate) trait ReadsFlowMemory {
         removal: meta_signal_flow::Removal,
     ) -> Result<ConfigurationCommit, StoreError> {
         match removal {
+            meta_signal_flow::Removal::ContextWarning(model) => Self::remove_configuration_entry(
+                engine,
+                tables.context_warnings.policies,
+                RecordKey::new(model.0),
+            ),
             meta_signal_flow::Removal::Permaflow(address) => FlowStore::remove_configuration_entry(
                 engine,
                 tables.metaflows,
@@ -6313,9 +6384,6 @@ pub(crate) trait ReadsFlowMemory {
                 FlowStore::edit_harness_profiles(engine, tables, |profiles| {
                     profiles.retain(|profile| profile.harness_kind != harness_kind)
                 })
-            }
-            meta_signal_flow::Removal::ContextWarning(_) => {
-                Err(StoreError::ConfigurationFamilyUnheld)
             }
         }
     }
@@ -6506,6 +6574,28 @@ pub(crate) trait ReadsFlowMemory {
             return Err(StoreError::TopicRefused(refused.topic.clone().0));
         }
         match change {
+            ConfigurationChange::ContextWarningPolicy(policy) => {
+                Self::configure_policy(engine, &tables.context_warnings, policy)
+            }
+            ConfigurationChange::HarnessHookEvents(events) => {
+                Self::configure_hooks(engine, &tables.context_warnings, events)
+            }
+            ConfigurationChange::SuccessorRecoveryText(text) => {
+                let old = engine
+                    .match_records(QueryPlan::all(tables.handover))?
+                    .records()
+                    .first()
+                    .cloned()
+                    .ok_or(StoreError::StateInvariant)?;
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.handover,
+                    vec![handover_configuration::StoredHandoverConfiguration {
+                        successor_recovery_text: text,
+                        ..old
+                    }],
+                )
+            }
             ConfigurationChange::HandoverPolicies(policies) => {
                 if policies
                     .iter()
@@ -6547,6 +6637,7 @@ pub(crate) trait ReadsFlowMemory {
                         handover_archive_configuration: old.handover_archive_configuration,
                         handover_count_configuration: old.handover_count_configuration,
                         duration: old.duration,
+                        successor_recovery_text: old.successor_recovery_text,
                     }],
                 )
             }
@@ -6566,6 +6657,7 @@ pub(crate) trait ReadsFlowMemory {
                             meta_signal_flow::HandoverArchiveConfiguration::Configured(path),
                         handover_count_configuration: old.handover_count_configuration,
                         duration: old.duration,
+                        successor_recovery_text: old.successor_recovery_text,
                     }],
                 )
             }
@@ -6590,6 +6682,7 @@ pub(crate) trait ReadsFlowMemory {
                         handover_count_configuration:
                             meta_signal_flow::HandoverCountConfiguration::Configured(count),
                         duration: old.duration,
+                        successor_recovery_text: old.successor_recovery_text,
                     }],
                 )
             }
@@ -6613,6 +6706,7 @@ pub(crate) trait ReadsFlowMemory {
                         handover_archive_configuration: old.handover_archive_configuration,
                         handover_count_configuration: old.handover_count_configuration,
                         duration,
+                        successor_recovery_text: old.successor_recovery_text,
                     }],
                 )
             }
@@ -6769,12 +6863,6 @@ pub(crate) trait ReadsFlowMemory {
                         turn_retention_bound: bound,
                     }],
                 )
-            }
-            // The warning lane's families: this Flow holds no table for them.
-            ConfigurationChange::ContextWarningPolicy(_)
-            | ConfigurationChange::HarnessHookEvents(_)
-            | ConfigurationChange::SuccessorRecoveryText(_) => {
-                Err(StoreError::ConfigurationFamilyUnheld)
             }
             // The default Minutes meets the rule a Task's Minutes meets at
             // admission, from now, before anything is written.
@@ -9990,6 +10078,9 @@ mod tests {
                 .iter()
                 .chain(
                     [
+                        super::context_warnings::POLICY_TABLE,
+                        super::context_warnings::HOOK_TABLE,
+                        super::context_warnings::PROGRESS_TABLE,
                         super::OPTIONAL_REQUEST_ID_TABLE,
                         super::OPTIONAL_STORE_IDENTITY_TABLE,
                         super::OPTIONAL_DELIVER_CALL_TABLE,

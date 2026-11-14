@@ -123,6 +123,43 @@ pub struct StoredMetaThresholdConfiguration {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct StoredContextWarningPolicy {
+    pub model_name: signal_flow::ModelName,
+    pub context_warning_limit: meta_signal_flow::ContextWarningLimit,
+    pub context_usage_projection: meta_signal_flow::ContextUsageProjection,
+    pub warning_boundary_vector: std::vec::Vec<meta_signal_flow::WarningBoundary>,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct StoredHarnessHookEvents(
+    pub std::vec::Vec<meta_signal_flow::HarnessHookEvent>,
+);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ContextWarningProgress {
+    pub flow_id: signal_flow::FlowId,
+    pub warning_stage_progress_vector: std::vec::Vec<WarningStageProgress>,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct WarningStageProgress {
+    pub warning_stage: meta_signal_flow::WarningStage,
+    pub warning_stage_state: WarningStageState,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum WarningStageState {
+    Unreached,
+    Passed,
+    Admitted(signal_flow::LogicalDeliveryId),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct StoredMetaSendServerConfiguration {
     pub configure_send_server: meta_signal_flow::ConfigureSendServer,
 }
@@ -189,6 +226,7 @@ pub struct StoredHandoverConfiguration {
     pub handover_archive_configuration: meta_signal_flow::HandoverArchiveConfiguration,
     pub handover_count_configuration: meta_signal_flow::HandoverCountConfiguration,
     pub duration: meta_signal_flow::Duration,
+    pub successor_recovery_text: meta_signal_flow::SuccessorRecoveryText,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -863,11 +901,19 @@ pub struct Reminder {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct EmergencyRefreshWithoutHandover_Data {
+    pub flow_id: signal_flow::FlowId,
+    pub transcript_path_option: std::option::Option<signal_flow::TranscriptPath>,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum SuccessionCause {
     Refresh,
     Exit,
     Ordered,
     Replace,
+    EmergencyRefreshWithoutHandover(EmergencyRefreshWithoutHandover_Data),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

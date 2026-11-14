@@ -1405,9 +1405,7 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
                     .collect()
             })
             .map_err(|_| {
-                meta_signal_flow::Output::ReadSendOutcomesRejected(
-                    meta_signal_flow::ReadSendOutcomesRejected_Data::StoreRefused,
-                )
+                meta_signal_flow::Output::ReadSendOutcomesRejected
             })
     }
 
@@ -1426,7 +1424,7 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
             })
             .map_err(|error| {
                 meta_signal_flow::Output::ObserveLegacyArchiveRejected(
-                    meta_signal_flow::StoreRefusal::Store(error.to_string()),
+                    meta_signal_flow::StoreFailure(error.to_string()),
                 )
             })
     }
@@ -1436,9 +1434,7 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         address: &signal_flow::Address,
     ) -> Result<meta_signal_flow::DebugSnapshot, meta_signal_flow::Output> {
         self.nexus.store.debug_snapshot(address).map_err(|error| {
-            meta_signal_flow::Output::Refused(meta_signal_flow::StoreRefusal::Store(
-                error.to_string(),
-            ))
+            meta_signal_flow::Output::Refused(meta_signal_flow::StoreFailure(error.to_string()))
         })
     }
 
@@ -2152,6 +2148,16 @@ impl ConfiguresFromMeta for RunningNexus {
                     meta_signal_flow::ConfigureRefusal::RequestIdDrawsRefused,
                 )
             }
+            Err(store::StoreError::EndedTurnRetentionRefused) => {
+                meta_signal_flow::Output::ConfigureRefused(
+                    meta_signal_flow::ConfigureRefusal::EndedTurnRetentionRefused,
+                )
+            }
+            Err(store::StoreError::ConfigurationFamilyUnheld) => {
+                meta_signal_flow::Output::ConfigureRefused(
+                    meta_signal_flow::ConfigureRefusal::StoreRefused,
+                )
+            }
             Err(store::StoreError::AnnouncementTriesRefused) => {
                 meta_signal_flow::Output::ConfigureRefused(
                     meta_signal_flow::ConfigureRefusal::AnnouncementTriesRefused,
@@ -2163,9 +2169,9 @@ impl ConfiguresFromMeta for RunningNexus {
                     meta_signal_flow::ConfigureRefusal::StoreRefused,
                 )
             }
-            Err(error) => meta_signal_flow::Output::Refused(meta_signal_flow::StoreRefusal::Store(
-                error.to_string(),
-            )),
+            Err(error) => {
+                meta_signal_flow::Output::Refused(meta_signal_flow::StoreFailure(error.to_string()))
+            }
         }
     }
 }
@@ -2478,9 +2484,9 @@ impl AnswersOnMeta for Output {
             }
             Output::Refused(refusal) => meta_signal_flow::Output::OrdinaryRefused(refusal),
             // Neither answers anything else.
-            other => meta_signal_flow::Output::Refused(meta_signal_flow::StoreRefusal::Store(
-                format!("unexpected answer {other:?}"),
-            )),
+            other => meta_signal_flow::Output::Refused(meta_signal_flow::StoreFailure(format!(
+                "unexpected answer {other:?}"
+            ))),
         }
     }
 }

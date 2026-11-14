@@ -38,6 +38,104 @@ use signal_flow::{ReapStanding, StartRejection, StopRejection};
 /// The launch-outcome family's schema label in 0.54.6.
 pub(crate) const LAUNCH_OUTCOME_SCHEMA_V9: &str = "flow-nexus-launch-outcome-v9";
 
+/// `CompositionRefusal` as signal-flow 51.0.0 to 63.0.0 archived it: the
+/// thirteen variants before the two recovery refusals 64.0.0 appends, whose
+/// payload widens every rejection that holds one.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CompositionRefusalV9 {
+    InvalidLaunchRequestId,
+    InvalidModelName,
+    InvalidEffort,
+    InvalidToolSet,
+    InvalidHerdrSessionName,
+    InvalidSystemModules,
+    InvalidPromptModules,
+    InvalidRemembering,
+    InexactModel,
+    Unconfigured,
+    PresentationUnavailable,
+    Unrecorded,
+    HandoverUnreadable(signal_flow::HandoverUnreadable_Data),
+}
+
+/// `StartRejection` as 0.54.6 stored it, holding the CompositionRefusal of
+/// its day: the v9 layout is kept whole, whatever signal-flow appends.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StartRejectionV9 {
+    CompositionRefused(CompositionRefusalV9),
+    MalformedHarnessFlags(signal_flow::HarnessFlagsRefusal),
+    LaunchRequestConflict,
+    LaunchPersistenceRefused,
+    NativeLaunchRefused(signal_flow::NativeLaunchRefusal),
+    BindingRefused(signal_flow::BindingRefusal),
+    RegistrationRefused(signal_flow::RegistrationRefusal),
+    IntentPersistenceRefused,
+    OriginUnavailable,
+    AddressAwake,
+    ContextRefused(signal_flow::ContextRefusal),
+    LeaveOutRefused(signal_flow::LeaveOutRefusal),
+    HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
+    ModelRefused(signal_flow::ModelRefusal),
+    Undeclared,
+    TopicRefused(signal_flow::Topic),
+}
+
+impl From<CompositionRefusalV9> for signal_flow::CompositionRefusal {
+    fn from(refusal: CompositionRefusalV9) -> Self {
+        use signal_flow::CompositionRefusal as Current;
+        match refusal {
+            CompositionRefusalV9::InvalidLaunchRequestId => Current::InvalidLaunchRequestId,
+            CompositionRefusalV9::InvalidModelName => Current::InvalidModelName,
+            CompositionRefusalV9::InvalidEffort => Current::InvalidEffort,
+            CompositionRefusalV9::InvalidToolSet => Current::InvalidToolSet,
+            CompositionRefusalV9::InvalidHerdrSessionName => Current::InvalidHerdrSessionName,
+            CompositionRefusalV9::InvalidSystemModules => Current::InvalidSystemModules,
+            CompositionRefusalV9::InvalidPromptModules => Current::InvalidPromptModules,
+            CompositionRefusalV9::InvalidRemembering => Current::InvalidRemembering,
+            CompositionRefusalV9::InexactModel => Current::InexactModel,
+            CompositionRefusalV9::Unconfigured => Current::Unconfigured,
+            CompositionRefusalV9::PresentationUnavailable => Current::PresentationUnavailable,
+            CompositionRefusalV9::Unrecorded => Current::Unrecorded,
+            CompositionRefusalV9::HandoverUnreadable(unreadable) => {
+                Current::HandoverUnreadable(unreadable)
+            }
+        }
+    }
+}
+
+impl From<StartRejectionV9> for StartRejection {
+    fn from(rejection: StartRejectionV9) -> Self {
+        match rejection {
+            StartRejectionV9::CompositionRefused(refusal) => {
+                StartRejection::CompositionRefused(refusal.into())
+            }
+            StartRejectionV9::MalformedHarnessFlags(refusal) => {
+                StartRejection::MalformedHarnessFlags(refusal)
+            }
+            StartRejectionV9::LaunchRequestConflict => StartRejection::LaunchRequestConflict,
+            StartRejectionV9::LaunchPersistenceRefused => StartRejection::LaunchPersistenceRefused,
+            StartRejectionV9::NativeLaunchRefused(refusal) => {
+                StartRejection::NativeLaunchRefused(refusal)
+            }
+            StartRejectionV9::BindingRefused(refusal) => StartRejection::BindingRefused(refusal),
+            StartRejectionV9::RegistrationRefused(refusal) => {
+                StartRejection::RegistrationRefused(refusal)
+            }
+            StartRejectionV9::IntentPersistenceRefused => StartRejection::IntentPersistenceRefused,
+            StartRejectionV9::OriginUnavailable => StartRejection::OriginUnavailable,
+            StartRejectionV9::AddressAwake => StartRejection::AddressAwake,
+            StartRejectionV9::ContextRefused(refusal) => StartRejection::ContextRefused(refusal),
+            StartRejectionV9::LeaveOutRefused(refusal) => StartRejection::LeaveOutRefused(refusal),
+            StartRejectionV9::HarnessSpawnRefused(refusal) => {
+                StartRejection::HarnessSpawnRefused(refusal)
+            }
+            StartRejectionV9::ModelRefused(refusal) => StartRejection::ModelRefused(refusal),
+            StartRejectionV9::Undeclared => StartRejection::Undeclared,
+            StartRejectionV9::TopicRefused(topic) => StartRejection::TopicRefused(topic),
+        }
+    }
+}
+
 /// `ReplaceRejection` as 0.54.6 stored it: six variants, `ReapRefused`
 /// among them.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -45,7 +143,7 @@ pub(crate) enum ReplaceRejectionV9 {
     PredecessorAbsent,
     UnknownPredecessor,
     PredecessorStopped,
-    LaunchRefused(StartRejection),
+    LaunchRefused(StartRejectionV9),
     ReapRefused(StopRejection),
     Locked,
 }
@@ -55,7 +153,7 @@ pub(crate) enum ReplaceRejectionV9 {
 pub(crate) enum LaunchOutcomeV9 {
     Started(LaunchedRecord),
     Replaced(ReplacedRecord),
-    StartRejected(StartRejection),
+    StartRejected(StartRejectionV9),
     ReplaceRejected(ReplaceRejectionV9),
 }
 
@@ -125,7 +223,7 @@ impl UpgradesLaunchOutcome for StoredLaunchOutcomeV9 {
                 return Ok((LaunchOutcome::Replaced(record), None));
             }
             LaunchOutcomeV9::StartRejected(rejection) => {
-                return Ok((LaunchOutcome::StartRejected(rejection), None));
+                return Ok((LaunchOutcome::StartRejected(rejection.into()), None));
             }
             LaunchOutcomeV9::ReplaceRejected(rejection) => rejection,
         };
@@ -141,7 +239,7 @@ impl UpgradesLaunchOutcome for StoredLaunchOutcomeV9 {
                 return refused(ReplaceRejection::PredecessorStopped);
             }
             ReplaceRejectionV9::LaunchRefused(start) => {
-                return refused(ReplaceRejection::LaunchRefused(start));
+                return refused(ReplaceRejection::LaunchRefused(start.into()));
             }
             ReplaceRejectionV9::Locked => return refused(ReplaceRejection::Locked),
             ReplaceRejectionV9::ReapRefused(stop) => stop,

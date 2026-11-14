@@ -460,6 +460,14 @@ mod tests {
             configured_harness_hook: meta_signal_flow::ConfiguredHarnessHook(
                 meta_signal_flow::HarnessHookConfiguration::Unconfigured,
             ),
+            configured_context_warning_policies: meta_signal_flow::ConfiguredContextWarningPolicies(
+                vec![],
+            ),
+            configured_harness_hook_events: meta_signal_flow::ConfiguredHarnessHookEvents(vec![]),
+            successor_recovery_text: meta_signal_flow::SuccessorRecoveryText(String::new()),
+            configured_ended_turn_retention: meta_signal_flow::ConfiguredEndedTurnRetention(
+                meta_signal_flow::TurnRetentionBound(64),
+            ),
         };
         let printed = Output::Configuration(snapshot)
             .datomize(vec![])

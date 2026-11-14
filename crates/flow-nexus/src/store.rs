@@ -63,6 +63,7 @@ pub(crate) use crate::generated::memory::{
     FlowStoreConfiguration, FlowStoreState, NextFlowNumber, StoredLaunchAttempt,
     StoredMetaDefaultMinutesConfiguration, StoredMetaHarnessFlagsConfiguration,
     StoredMetaHarnessHookConfiguration, StoredMetaHeartbeatConfiguration,
+    StoredMetaTurnRetentionConfiguration,
     StoredMetaInvestigationConfiguration, StoredMetaModelConfiguration,
     StoredMetaProtectedAddressConfiguration, StoredMetaRequestPolicyConfiguration,
     StoredMetaThresholdConfiguration, StoredMetaflow, StoredMetaflowLock, StoredRole,
@@ -195,6 +196,18 @@ const META_HARNESS_HOOK_CONFIGURATION_TABLE_NAME: TableName =
 const META_HARNESS_HOOK_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-harness-hook-configuration";
 const META_HARNESS_HOOK_CONFIGURATION_SCHEMA: &str =
     "flow-nexus-meta-harness-hook-configuration-v1";
+/// Added with meta-signal-flow 83: a store written before it declares no
+/// ended-turn retention, and holds the seed.
+const OPTIONAL_TURN_RETENTION_TABLE: &str = "flow_nexus_meta_turn_retention_configuration";
+const META_TURN_RETENTION_CONFIGURATION_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_meta_turn_retention_configuration");
+const META_TURN_RETENTION_CONFIGURATION_FAMILY: &str =
+    "flow-nexus-meta-turn-retention-configuration";
+const META_TURN_RETENTION_CONFIGURATION_SCHEMA: &str =
+    "flow-nexus-meta-turn-retention-configuration-v1";
+/// The ended Codex turn ids one thread's turn ledger keeps until Configure
+/// declares otherwise.
+pub(crate) const SEEDED_ENDED_TURN_RETENTION: i64 = 64;
 const OPTIONAL_REQUEST_ID_TABLE: &str = "flow_nexus_request_ids";
 const OPTIONAL_STORE_IDENTITY_TABLE: &str = "flow_nexus_store_identity";
 const OPTIONAL_DELIVER_CALL_TABLE: &str = "flow_nexus_deliver_calls";
@@ -232,6 +245,7 @@ const CONFIGURATION_ONLY_TABLES: &[&str] = &[
     "flow_nexus_meta_protected_address_configuration",
     "flow_nexus_meta_handover_configuration",
     OPTIONAL_HARNESS_HOOK_TABLE,
+    OPTIONAL_TURN_RETENTION_TABLE,
 ];
 /// The tables a running store holds, all of them.
 const RUNNING_TABLES: &[&str] = &[
@@ -295,6 +309,7 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_SCHEDULED_REMINDER_TABLE,
     OPTIONAL_PENDING_REAP_TABLE,
     OPTIONAL_PENDING_HANDOVER_TABLE,
+    OPTIONAL_TURN_RETENTION_TABLE,
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -922,6 +937,36 @@ impl DescribesHarnessHookTable for StoredMetaHarnessHookConfiguration {
             META_HARNESS_HOOK_CONFIGURATION_TABLE_NAME,
             FamilyName::new(META_HARNESS_HOOK_CONFIGURATION_FAMILY),
             SchemaHash::for_label(META_HARNESS_HOOK_CONFIGURATION_SCHEMA),
+        )
+    }
+}
+
+impl EngineRecord for StoredMetaTurnRetentionConfiguration {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new("turn-retention")
+    }
+}
+
+impl MemoryDefinition for StoredMetaTurnRetentionConfiguration {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(META_TURN_RETENTION_CONFIGURATION_SCHEMA)
+    }
+}
+
+trait DescribesTurnRetentionTable {
+    fn descriptor() -> TableDescriptor<StoredMetaTurnRetentionConfiguration>;
+}
+
+impl DescribesTurnRetentionTable for StoredMetaTurnRetentionConfiguration {
+    fn descriptor() -> TableDescriptor<StoredMetaTurnRetentionConfiguration> {
+        TableDescriptor::new(
+            META_TURN_RETENTION_CONFIGURATION_TABLE_NAME,
+            FamilyName::new(META_TURN_RETENTION_CONFIGURATION_FAMILY),
+            SchemaHash::for_label(META_TURN_RETENTION_CONFIGURATION_SCHEMA),
         )
     }
 }
@@ -1563,6 +1608,10 @@ pub enum StoreError {
     AnnouncementTriesRefused,
     #[error("no Nexus is declared")]
     NexusUnconfigured,
+    #[error("a negative ended-turn retention is refused")]
+    EndedTurnRetentionRefused,
+    #[error("this Flow holds no table for that configuration family")]
+    ConfigurationFamilyUnheld,
     #[error("store {path} is held by another open; its lock cannot be acquired")]
     StoreHeld { path: String },
     #[error("the store's open could not be staged: {0}")]
@@ -1589,6 +1638,7 @@ pub(crate) struct MetaConfigurationTables {
     heartbeat: TableReference<StoredMetaHeartbeatConfiguration>,
     protected_addresses: TableReference<StoredMetaProtectedAddressConfiguration>,
     harness_hook: TableReference<StoredMetaHarnessHookConfiguration>,
+    turn_retention: TableReference<StoredMetaTurnRetentionConfiguration>,
 }
 
 trait RegistersMetaConfigurationTables: Sized {
@@ -1617,6 +1667,8 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             protected_addresses: engine
                 .register_table(StoredMetaProtectedAddressConfiguration::descriptor())?,
             harness_hook: engine.register_table(StoredMetaHarnessHookConfiguration::descriptor())?,
+            turn_retention: engine
+                .register_table(StoredMetaTurnRetentionConfiguration::descriptor())?,
             metaflows: engine.register_table(
                 <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor(),
             )?,
@@ -1833,6 +1885,7 @@ pub struct ConfiguredFamilies {
     pub publication_deadline: meta_signal_flow::Duration,
     pub request_id_draws: meta_signal_flow::DrawBound,
     pub announcement_tries: meta_signal_flow::TryBound,
+    pub ended_turn_retention: meta_signal_flow::TurnRetentionBound,
 }
 
 pub trait CompletesSnapshot {
@@ -1879,6 +1932,18 @@ impl CompletesSnapshot for ConfiguredFamilies {
                 self.announcement_tries,
             ),
             configured_harness_hook: meta_signal_flow::ConfiguredHarnessHook(self.harness_hook),
+            // The context-warning, hook-event and recovery-text families of
+            // meta-signal-flow 80 to 82 are the warning lane's; this Flow
+            // holds none of them and reports them empty.
+            configured_context_warning_policies:
+                meta_signal_flow::ConfiguredContextWarningPolicies(Vec::new()),
+            configured_harness_hook_events: meta_signal_flow::ConfiguredHarnessHookEvents(
+                Vec::new(),
+            ),
+            successor_recovery_text: meta_signal_flow::SuccessorRecoveryText(String::new()),
+            configured_ended_turn_retention: meta_signal_flow::ConfiguredEndedTurnRetention(
+                self.ended_turn_retention,
+            ),
         }
     }
 }
@@ -1951,6 +2016,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let meta_protected_addresses_descriptor =
             StoredMetaProtectedAddressConfiguration::descriptor();
         let meta_harness_hook_descriptor = StoredMetaHarnessHookConfiguration::descriptor();
+        let meta_turn_retention_descriptor = StoredMetaTurnRetentionConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         let meta_metaflows_descriptor = <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor();
         // Family identities are part of the open request, so Engine validates
@@ -1973,6 +2039,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_heartbeat_descriptor)
                 .with_family(&meta_protected_addresses_descriptor)
                 .with_family(&meta_harness_hook_descriptor)
+                .with_family(&meta_turn_retention_descriptor)
                 .with_family(&meta_metaflows_descriptor)
                 .with_family(&meta_handover_descriptor),
         )?;
@@ -2009,6 +2076,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             heartbeat: engine.register_table(meta_heartbeat_descriptor)?,
             protected_addresses: engine.register_table(meta_protected_addresses_descriptor)?,
             harness_hook: engine.register_table(meta_harness_hook_descriptor)?,
+            turn_retention: engine.register_table(meta_turn_retention_descriptor)?,
             metaflows: engine.register_table(meta_metaflows_descriptor)?,
         };
         if !recognized {
@@ -5394,6 +5462,10 @@ pub(crate) trait ReadsFlowMemory {
                 META_HARNESS_HOOK_CONFIGURATION_FAMILY,
                 META_HARNESS_HOOK_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_meta_turn_retention_configuration" => (
+                META_TURN_RETENTION_CONFIGURATION_FAMILY,
+                META_TURN_RETENTION_CONFIGURATION_SCHEMA,
+            ),
             "flow_nexus_meta_protected_address_configuration" => (
                 META_PROTECTED_ADDRESS_CONFIGURATION_FAMILY,
                 META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA,
@@ -5693,6 +5765,7 @@ pub(crate) trait ReadsFlowMemory {
                     || *name == OPTIONAL_PENDING_REAP_TABLE
                     || *name == OPTIONAL_PENDING_HANDOVER_TABLE
                     || *name == OPTIONAL_HARNESS_HOOK_TABLE
+                    || *name == OPTIONAL_TURN_RETENTION_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
                     || *name == OPTIONAL_DELIVER_CALL_TABLE
                     || *name == OPTIONAL_STORE_IDENTITY_TABLE
@@ -5928,6 +6001,7 @@ pub(crate) trait ReadsFlowMemory {
         let protected_address_rows =
             engine.match_records(QueryPlan::all(tables.protected_addresses))?;
         let harness_hook_rows = engine.match_records(QueryPlan::all(tables.harness_hook))?;
+        let turn_retention_rows = engine.match_records(QueryPlan::all(tables.turn_retention))?;
         let handover = handover_rows
             .records()
             .first()
@@ -5945,6 +6019,7 @@ pub(crate) trait ReadsFlowMemory {
             || heartbeat_rows.database_marker() != marker
             || protected_address_rows.database_marker() != marker
             || harness_hook_rows.database_marker() != marker
+            || turn_retention_rows.database_marker() != marker
             || engine.current_database_marker()? != marker
         {
             return Err(StoreError::ConfigurationReadViewChanged);
@@ -5967,6 +6042,12 @@ pub(crate) trait ReadsFlowMemory {
         let investigation = match investigation_rows.records() {
             [] => None,
             [stored] => Some(stored.address.clone()),
+            _ => return Err(StoreError::StateInvariant),
+        };
+        // A Memory no EndedTurnRetention was declared in holds the seed.
+        let ended_turn_retention = match turn_retention_rows.records() {
+            [] => meta_signal_flow::TurnRetentionBound(SEEDED_ENDED_TURN_RETENTION),
+            [stored] if stored.turn_retention_bound.0 >= 0 => stored.turn_retention_bound,
             _ => return Err(StoreError::StateInvariant),
         };
         let harness_hook = match harness_hook_rows.records() {
@@ -6038,6 +6119,7 @@ pub(crate) trait ReadsFlowMemory {
             publication_deadline: handover.duration,
             request_id_draws: meta_signal_flow::DrawBound(request_id_draws),
             announcement_tries: meta_signal_flow::TryBound(announcement_tries),
+            ended_turn_retention,
         }))
     }
 
@@ -6230,6 +6312,9 @@ pub(crate) trait ReadsFlowMemory {
                 FlowStore::edit_harness_profiles(engine, tables, |profiles| {
                     profiles.retain(|profile| profile.harness_kind != harness_kind)
                 })
+            }
+            meta_signal_flow::Removal::ContextWarning(_) => {
+                Err(StoreError::ConfigurationFamilyUnheld)
             }
         }
     }
@@ -6671,6 +6756,24 @@ pub(crate) trait ReadsFlowMemory {
                     tables.harness_hook,
                     vec![StoredMetaHarnessHookConfiguration { path: harness_hook }],
                 )
+            }
+            ConfigurationChange::EndedTurnRetention(bound) => {
+                if bound < meta_signal_flow::TurnRetentionBound(0) {
+                    return Err(StoreError::EndedTurnRetentionRefused);
+                }
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.turn_retention,
+                    vec![StoredMetaTurnRetentionConfiguration {
+                        turn_retention_bound: bound,
+                    }],
+                )
+            }
+            // The warning lane's families: this Flow holds no table for them.
+            ConfigurationChange::ContextWarningPolicy(_)
+            | ConfigurationChange::HarnessHookEvents(_)
+            | ConfigurationChange::SuccessorRecoveryText(_) => {
+                Err(StoreError::ConfigurationFamilyUnheld)
             }
             // The default Minutes meets the rule a Task's Minutes meets at
             // admission, from now, before anything is written.

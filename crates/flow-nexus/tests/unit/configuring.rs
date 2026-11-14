@@ -655,6 +655,15 @@ fn each_family_is_its_last_declaration() {
             configured_harness_hook: meta_signal_flow::ConfiguredHarnessHook(
                 meta_signal_flow::HarnessHookConfiguration::Unconfigured
             ),
+            configured_context_warning_policies:
+                meta_signal_flow::ConfiguredContextWarningPolicies(Vec::new()),
+            configured_harness_hook_events: meta_signal_flow::ConfiguredHarnessHookEvents(
+                Vec::new()
+            ),
+            successor_recovery_text: meta_signal_flow::SuccessorRecoveryText(String::new()),
+            configured_ended_turn_retention: meta_signal_flow::ConfiguredEndedTurnRetention(
+                meta_signal_flow::TurnRetentionBound(crate::store::SEEDED_ENDED_TURN_RETENTION)
+            ),
         }
     );
     // An empty declaration empties the family.

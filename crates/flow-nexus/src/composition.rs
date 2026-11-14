@@ -45,6 +45,22 @@ pub enum CompositionError {
     LeaveOut(LeaveOutRefusal),
     #[error("the Psyche core presentation prompt is unavailable: {0}")]
     PresentationPromptUnavailable(String),
+    #[error("successor recovery could not be read for {predecessor:?} at {address:?}: {reason}")]
+    RecoveryUnavailable {
+        address: Address,
+        predecessor: signal_flow::FlowId,
+        reason: String,
+    },
+    #[error(
+        "successor recovery predecessor does not match {expected_predecessor:?} at {address:?}"
+    )]
+    RecoveryPredecessorMismatch {
+        address: Address,
+        recorded_address: Address,
+        expected_predecessor: signal_flow::FlowId,
+        intent_predecessor: signal_flow::FlowId,
+        recovery_predecessor: signal_flow::FlowId,
+    },
     #[error("the handover of {predecessor} could not be read: {fault:?}")]
     HandoverUnreadable {
         predecessor: String,

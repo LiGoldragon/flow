@@ -329,6 +329,46 @@ impl Performs for RunningNexus {
                             signal_flow::CompositionRefusal::PresentationUnavailable,
                         ))
                     }
+                    Err(CompositionError::RecoveryUnavailable {
+                        address,
+                        predecessor,
+                        reason,
+                    }) => {
+                        let refusal = signal_flow::CompositionRefusal::RecoveryUnavailable(
+                            signal_flow::RecoveryUnavailable_Data {
+                                address,
+                                flow_id: predecessor,
+                                string: reason,
+                            },
+                        );
+                        eprintln!(
+                            "flow-nexus: launch {request} not composed: {refusal:?}",
+                            request = request.0
+                        );
+                        Outcome::Failed(Failed_Data::CompositionRefused(refusal))
+                    }
+                    Err(CompositionError::RecoveryPredecessorMismatch {
+                        address,
+                        recorded_address,
+                        expected_predecessor,
+                        intent_predecessor,
+                        recovery_predecessor,
+                    }) => {
+                        let refusal = signal_flow::CompositionRefusal::RecoveryPredecessorMismatch(
+                            signal_flow::RecoveryPredecessorMismatch_Data {
+                                first_address: address,
+                                second_address: recorded_address,
+                                first_flow_id: expected_predecessor,
+                                second_flow_id: intent_predecessor,
+                                third_flow_id: recovery_predecessor,
+                            },
+                        );
+                        eprintln!(
+                            "flow-nexus: launch {request} not composed: {refusal:?}",
+                            request = request.0
+                        );
+                        Outcome::Failed(Failed_Data::CompositionRefused(refusal))
+                    }
                     Err(CompositionError::HandoverUnreadable { predecessor, fault }) => {
                         eprintln!(
                             "flow-nexus: launch {request} not composed: the handover of {predecessor} could not be read: {fault:?}",

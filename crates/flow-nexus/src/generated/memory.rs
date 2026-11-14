@@ -172,6 +172,12 @@ pub struct StoredMetaHarnessHookConfiguration {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct StoredMetaTurnRetentionConfiguration {
+    pub turn_retention_bound: meta_signal_flow::TurnRetentionBound,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct StoredMetaProtectedAddressConfiguration {
     pub address: signal_flow::Address,
 }

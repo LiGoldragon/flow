@@ -2117,6 +2117,23 @@ fn a_v9_store_with_a_refused_reap_upgrades_in_one_commit() {
         rkyv::from_bytes::<ReplaceRejectionV9, rkyv::rancor::Error>(&bytes).unwrap(),
         ReplaceRejectionV9::ReapRefused(signal_flow::StopRejection::CloseRefused)
     );
+    // Its refused launch keeps signal-flow 60's width: the recovery
+    // refusals signal-flow 64 appends widen the current rejection, never
+    // the v9 one.
+    let published = signal_flow_60::ReplaceRejection::LaunchRefused(
+        signal_flow_60::StartRejection::CompositionRefused(
+            signal_flow_60::CompositionRefusal::Unrecorded,
+        ),
+    );
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&published).unwrap();
+    assert_eq!(
+        rkyv::from_bytes::<ReplaceRejectionV9, rkyv::rancor::Error>(&bytes).unwrap(),
+        ReplaceRejectionV9::LaunchRefused(
+            crate::store::reap_upgrade::StartRejectionV9::CompositionRefused(
+                crate::store::reap_upgrade::CompositionRefusalV9::Unrecorded
+            )
+        )
+    );
     {
         let mut engine = evolving_engine(&path);
         crate::store::FlowStore::upgrade_reap_memory(&mut engine).expect("the upgrade lands");

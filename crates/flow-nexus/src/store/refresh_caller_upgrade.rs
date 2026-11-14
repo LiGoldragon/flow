@@ -25,7 +25,7 @@ use super::ordered_replacement::{
     DescribesOrderedReplacementTable, OrderedLaunch, OrderedReplacement, ReplacementOrder,
 };
 use super::successor::{DescribesSuccessorIntentTable, SuccessionCause, SuccessorIntent};
-use super::successor_upgrade::{SuccessionCauseV4, SuccessorIntentV4};
+use super::successor_upgrade::{SuccessionCauseV4, SuccessorIntentV3, SuccessorIntentV4};
 use super::{FlowStore, ReadsFlowMemory as _, StoreError};
 use crate::generated::memory::Predecessor;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -34,6 +34,85 @@ use sema_engine::{
     SchemaHash, UpgradeFrom, UpgradeOutcome,
 };
 use signal_flow::{Address, LaunchRequestId};
+
+/// Reads the callerless refresh boundary through the already validated,
+/// read-only store transaction, before an opener registers or upgrades any
+/// family. In particular, v3 successions must be inspected before the
+/// recovery step would turn them into v4.
+pub(crate) trait PreflightsRefreshCallers {
+    fn preflight_refresh_callers(read: &redb::ReadTransaction) -> Result<(), StoreError>;
+}
+
+impl PreflightsRefreshCallers for FlowStore {
+    fn preflight_refresh_callers(read: &redb::ReadTransaction) -> Result<(), StoreError> {
+        use redb::ReadableTable as _;
+        let failed = |error: &dyn std::fmt::Display| {
+            StoreError::RefreshCallerUpgradeFailed(error.to_string())
+        };
+        let catalog = read
+            .open_table(super::SEMA_CATALOG_TABLE)
+            .map_err(|error| failed(&error))?;
+        let schema = |name: &str| -> Result<Option<SchemaHash>, StoreError> {
+            catalog
+                .get(name)
+                .map_err(|error| failed(&error))?
+                .map(|bytes| {
+                    rkyv::from_bytes::<sema_engine::TableRegistration, rkyv::rancor::Error>(
+                        bytes.value(),
+                    )
+                    .map(|registration| registration.identity().schema_hash())
+                    .map_err(|error| failed(&error))
+                })
+                .transpose()
+        };
+        let mut open = Vec::new();
+        let orders = super::ordered_replacement::ORDERED_REPLACEMENT_TABLE_NAME.as_str();
+        if schema(orders)? == Some(OrderedReplacementV1::schema_hash()) {
+            let rows = read
+                .open_table(redb::TableDefinition::<String, &[u8]>::new(orders))
+                .map_err(|error| failed(&error))?;
+            for entry in rows.iter().map_err(|error| failed(&error))? {
+                let (_, bytes) = entry.map_err(|error| failed(&error))?;
+                let row =
+                    rkyv::from_bytes::<OrderedReplacementV1, rkyv::rancor::Error>(bytes.value())
+                        .map_err(|error| failed(&error))?;
+                if let Decision::Refused(refusal) = OrderedReplacement::upgrade_from(row) {
+                    open.push(refusal);
+                }
+            }
+        }
+        let intents = super::successor::SUCCESSOR_INTENT_TABLE_NAME.as_str();
+        let intent_schema = schema(intents)?;
+        if intent_schema == Some(SuccessorIntentV3::schema_hash())
+            || intent_schema == Some(SuccessorIntentV4::schema_hash())
+        {
+            let rows = read
+                .open_table(redb::TableDefinition::<String, &[u8]>::new(intents))
+                .map_err(|error| failed(&error))?;
+            for entry in rows.iter().map_err(|error| failed(&error))? {
+                let (_, bytes) = entry.map_err(|error| failed(&error))?;
+                let row = if intent_schema == Some(SuccessorIntentV3::schema_hash()) {
+                    let before =
+                        rkyv::from_bytes::<SuccessorIntentV3, rkyv::rancor::Error>(bytes.value())
+                            .map_err(|error| failed(&error))?;
+                    let Decision::Ready(row) = SuccessorIntentV4::upgrade_from(before);
+                    row
+                } else {
+                    rkyv::from_bytes::<SuccessorIntentV4, rkyv::rancor::Error>(bytes.value())
+                        .map_err(|error| failed(&error))?
+                };
+                if let Decision::Refused(refusal) = SuccessorIntent::upgrade_from(row) {
+                    open.push(refusal);
+                }
+            }
+        }
+        if open.is_empty() {
+            Ok(())
+        } else {
+            Err(StoreError::RefreshCallerUpgrade(open))
+        }
+    }
+}
 
 /// The ordered-replacement family's schema label until this step.
 pub(crate) const ORDERED_REPLACEMENT_SCHEMA_V1: &str = "flow-nexus-ordered-replacement-v1";
@@ -270,7 +349,7 @@ mod tests {
     };
     use crate::store::ordered_replacement::NamesOrderedLaunch as _;
     use crate::store::successor_upgrade::{
-        DescribesSuccessorIntentV4Table as _, SuccessorIntentV3,
+        DescribesSuccessorIntentV4Table as _, SuccessionCauseV3,
     };
     use sema_engine::{
         Assertion, EngineOpen, FamilyName, QueryPlan, SchemaVersion, TableDescriptor,
@@ -355,6 +434,201 @@ mod tests {
                 .with_family(&OrderedReplacement::descriptor()),
         )
         .unwrap()
+    }
+
+    /// Carries the actual predecessor registrations and archived rows into
+    /// a complete recognized Flow Memory v3 fixture, without running an
+    /// upgrade while preparing the fixture.
+    fn graft_predecessor_families(source: &std::path::Path, target: &std::path::Path) {
+        use redb::{ReadableDatabase as _, ReadableTable as _};
+        let source = redb::ReadOnlyDatabase::open(source).unwrap();
+        let read = source.begin_read().unwrap();
+        let catalog = read.open_table(super::super::SEMA_CATALOG_TABLE).unwrap();
+        let target = redb::Database::open(target).unwrap();
+        let write = target.begin_write().unwrap();
+        for name in [
+            super::super::ordered_replacement::ORDERED_REPLACEMENT_TABLE_NAME.as_str(),
+            super::super::successor::SUCCESSOR_INTENT_TABLE_NAME.as_str(),
+        ] {
+            let registration = catalog.get(name).unwrap().unwrap();
+            write
+                .open_table(super::super::SEMA_CATALOG_TABLE)
+                .unwrap()
+                .insert(name, registration.value())
+                .unwrap();
+            let definition = redb::TableDefinition::<String, &[u8]>::new(name);
+            let source_rows = read.open_table(definition).unwrap();
+            let mut target_rows = write.open_table(definition).unwrap();
+            target_rows.retain(|_, _| false).unwrap();
+            for row in source_rows.iter().unwrap() {
+                let (key, bytes) = row.unwrap();
+                target_rows.insert(key.value(), bytes.value()).unwrap();
+            }
+        }
+        write.commit().unwrap();
+    }
+
+    /// Before recovery, Ordered was already a callerless refresh. The real
+    /// open must inventory it and queued v1 refreshes before any migration
+    /// or staging cleanup, not merely before the final caller upgrade.
+    #[test]
+    fn real_openers_refuse_every_historical_refresh_before_any_write() {
+        use crate::store::staged_open::{StagedOpen, StagesOpen as _};
+        use crate::store::{ConfigurationOnlyStore, ConfiguresOnlyStore as _, OpensFlowStore as _};
+        for schema in [
+            SuccessorIntentV3::schema_hash(),
+            SuccessorIntentV4::schema_hash(),
+        ] {
+            let fixture = crate::tests::configuring::ConfiguredStore::new();
+            let directory = tempfile::tempdir().unwrap();
+            let predecessor = directory.path().join("predecessor.sema");
+            let orders = [
+                order_v1("queuedFirst", "flow-q1", ReplacementOrderV1::Refresh),
+                order_v1("queuedSecond", "flow-q2", ReplacementOrderV1::Refresh),
+            ];
+            let intent = intent_v4(
+                "owedOrdered",
+                "flow-s1",
+                "launch-s1",
+                SuccessionCauseV4::Ordered,
+            );
+            if schema == SuccessorIntentV3::schema_hash() {
+                let mut engine =
+                    Engine::open(EngineOpen::new(&predecessor, SchemaVersion::new(1))).unwrap();
+                let order_table = engine.register_table(orders_v1_descriptor()).unwrap();
+                for order in &orders {
+                    engine
+                        .assert(Assertion::new(order_table, order.clone()))
+                        .unwrap();
+                }
+                let intent_table = engine
+                    .register_table(TableDescriptor::<SuccessorIntentV3>::new(
+                        super::super::successor::SUCCESSOR_INTENT_TABLE_NAME,
+                        FamilyName::new(super::super::successor::SUCCESSOR_INTENT_FAMILY),
+                        schema,
+                    ))
+                    .unwrap();
+                engine
+                    .assert(Assertion::new(
+                        intent_table,
+                        SuccessorIntentV3 {
+                            address: intent.address.clone(),
+                            predecessor: intent.predecessor.clone(),
+                            succession_cause: SuccessionCauseV3::Ordered,
+                            launch_request_id: intent.launch_request_id.clone(),
+                        },
+                    ))
+                    .unwrap();
+            } else {
+                store_before(&predecessor, &orders, std::slice::from_ref(&intent));
+            }
+            graft_predecessor_families(&predecessor, fixture.path());
+            let sentinel = fixture.path().with_file_name(format!(
+                "{}preflight-sentinel",
+                StagedOpen::copy_prefix(fixture.path()).unwrap()
+            ));
+            std::fs::write(&sentinel, b"preflight precedes staging cleanup").unwrap();
+            let before = std::fs::read(fixture.path()).unwrap();
+            let expected = vec![
+                OpenRefreshWithoutCaller::QueuedRefresh {
+                    address: orders[0].address.clone(),
+                    predecessor: orders[0].predecessor.clone(),
+                },
+                OpenRefreshWithoutCaller::QueuedRefresh {
+                    address: orders[1].address.clone(),
+                    predecessor: orders[1].predecessor.clone(),
+                },
+                OpenRefreshWithoutCaller::OrderedSuccession {
+                    address: intent.address.clone(),
+                    predecessor: intent.predecessor.clone(),
+                    launch_request_id: intent.launch_request_id.clone(),
+                },
+            ];
+            let openers: [fn(&std::path::Path) -> Result<(), StoreError>; 3] = [
+                |path| FlowStore::open_configured(path).map(drop),
+                |path| FlowStore::open_configured_in_place(path).map(drop),
+                |path| ConfigurationOnlyStore::open(path).map(drop),
+            ];
+            for open in openers {
+                for _ in 0..2 {
+                    let Err(StoreError::RefreshCallerUpgrade(found)) = open(fixture.path()) else {
+                        panic!("the real opener must refuse before writing");
+                    };
+                    assert_eq!(found, expected);
+                    assert_eq!(
+                        std::fs::read(fixture.path()).unwrap(),
+                        before,
+                        "every catalog registration, row and marker stays byte for byte unchanged"
+                    );
+                    assert_eq!(
+                        std::fs::read(&sentinel).unwrap(),
+                        b"preflight precedes staging cleanup"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn real_opener_upgrades_a_v3_predecessor_without_open_refreshes() {
+        use crate::store::OpensFlowStore as _;
+        let fixture = crate::tests::configuring::ConfiguredStore::new();
+        let directory = tempfile::tempdir().unwrap();
+        let predecessor = directory.path().join("predecessor.sema");
+        let order = order_v1("queuedRestart", "flow-r", ReplacementOrderV1::Restart);
+        let intent = SuccessorIntentV3 {
+            address: address("owedThreshold"),
+            predecessor: Predecessor("flow-t".into()),
+            succession_cause: SuccessionCauseV3::Refresh,
+            launch_request_id: LaunchRequestId("launch-t".into()),
+        };
+        {
+            let mut engine =
+                Engine::open(EngineOpen::new(&predecessor, SchemaVersion::new(1))).unwrap();
+            let orders = engine.register_table(orders_v1_descriptor()).unwrap();
+            engine
+                .assert(Assertion::new(orders, order.clone()))
+                .unwrap();
+            let intents = engine
+                .register_table(TableDescriptor::<SuccessorIntentV3>::new(
+                    super::super::successor::SUCCESSOR_INTENT_TABLE_NAME,
+                    FamilyName::new(super::super::successor::SUCCESSOR_INTENT_FAMILY),
+                    SuccessorIntentV3::schema_hash(),
+                ))
+                .unwrap();
+            engine
+                .assert(Assertion::new(intents, intent.clone()))
+                .unwrap();
+        }
+        graft_predecessor_families(&predecessor, fixture.path());
+        for _ in 0..2 {
+            let store = FlowStore::open_configured(fixture.path()).unwrap();
+            let orders = store
+                .engine
+                .match_records(QueryPlan::all(store.ordered_replacements))
+                .unwrap();
+            assert_eq!(
+                orders.records(),
+                &[OrderedReplacement {
+                    address: order.address.clone(),
+                    predecessor: order.predecessor.clone(),
+                    replacement_order: ReplacementOrder::Restart,
+                }]
+            );
+            let intents = store
+                .engine
+                .match_records(QueryPlan::all(store.successor_intents))
+                .unwrap();
+            assert_eq!(
+                intents.records(),
+                &[SuccessorIntent {
+                    address: intent.address.clone(),
+                    predecessor: intent.predecessor.clone(),
+                    succession_cause: SuccessionCause::Refresh,
+                    launch_request_id: intent.launch_request_id.clone(),
+                }]
+            );
+        }
     }
 
     /// The step refuses while a Refresh is open, naming each one it meets:

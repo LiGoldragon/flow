@@ -3,9 +3,9 @@
 //! external call and observes its outcome.
 
 use crate::generated::emission::{
-    AgentStatus, AgentTarget, AgentWait, CurriculumExchange, Emittable, FlowIdentityClaim, Focus,
-    HerdrCommand, HerdrSessionCommand, MetadataSource, OutputSource, Printout, ProcessReply,
-    ScreenFormat, Stderr, Stdout,
+    AgentStatus, AgentTarget, AgentWait, ClaudeSessionStart, CodexTitle, CurriculumExchange,
+    Emittable, FlowIdentityClaim, Focus, HarnessCommandLine, HerdrCommand, HerdrSessionCommand,
+    MetadataSource, OutputSource, Printout, ProcessReply, ScreenFormat, Stderr, Stdout,
 };
 use crate::herdr::HerdrCli;
 use crate::herdr::launch::NamesHerdrHarness;
@@ -130,7 +130,7 @@ impl SpeaksHerdr for HerdrSessionCommand {
                     words.extend(["--executable".into(), executable.0.clone()]);
                 }
                 words.push("--".into());
-                words.extend(start.harness_command_line.0.iter().cloned());
+                words.extend(start.harness_command_line.harness_words());
                 words
             }
             HerdrSessionCommand::WaitForAgent(wait) => {
@@ -243,6 +243,87 @@ impl SpeaksHerdr for AgentWait {
         }
         words.extend(["--timeout".into(), self.milliseconds.0.to_string()]);
         words
+    }
+}
+
+/// The words of a harness's own command line, as Herdr types them into the
+/// pane after the program.
+pub(crate) trait SpeaksHarness {
+    fn harness_words(&self) -> Vec<String>;
+}
+
+impl SpeaksHarness for HarnessCommandLine {
+    fn harness_words(&self) -> Vec<String> {
+        use crate::generated::starter::RendersLeanStart;
+        match self {
+            HarnessCommandLine::Claude(claude) => {
+                let mut words = vec![
+                    "--settings".to_owned(),
+                    claude.claude_settings.0.clone(),
+                    "--remote-control".into(),
+                    claude.session_title.0.clone(),
+                    // Claude Code 2.1.294's session name: "Set a display name
+                    // for this session (shown in the prompt box, /resume
+                    // picker, and terminal title)". A headless probe with
+                    // `--disable-slash-commands` recorded it as the same
+                    // `custom-title` and `agent-name` transcript records
+                    // `/rename` writes.
+                    "--name".into(),
+                    claude.session_title.0.clone(),
+                    "--system-prompt-file".into(),
+                    claude.system_prompt_file.0.clone(),
+                ];
+                words.extend(claude.claude_session_start.harness_words());
+                words.extend([
+                    "--model".into(),
+                    claude.model_name.0.clone(),
+                    "--effort".into(),
+                    claude.effort.0.clone(),
+                ]);
+                words.extend(claude.lean_start.arguments());
+                words.extend(claude.configured_harness_arguments.0.iter().cloned());
+                words
+            }
+            HarnessCommandLine::Codex(codex) => {
+                let mut words = vec![
+                    "--remote".to_owned(),
+                    format!("unix://{}", codex.codex_socket.0),
+                    "--model".into(),
+                    codex.model_name.0.clone(),
+                    "-c".into(),
+                    format!("model_reasoning_effort={}", codex.effort.0),
+                    "-c".into(),
+                ];
+                words.extend(codex.codex_title.harness_words());
+                words.extend(codex.lean_start.arguments());
+                words.extend(codex.configured_harness_arguments.0.iter().cloned());
+                if let Some(thread) = &codex.native_session_id_option {
+                    words.extend(["resume".into(), thread.0.clone()]);
+                }
+                words
+            }
+        }
+    }
+}
+
+impl SpeaksHarness for ClaudeSessionStart {
+    fn harness_words(&self) -> Vec<String> {
+        match self {
+            ClaudeSessionStart::Unchosen => Vec::new(),
+            ClaudeSessionStart::Chosen(session) => vec!["--session-id".into(), session.0.clone()],
+            ClaudeSessionStart::Resumed(session) => vec!["--resume".into(), session.0.clone()],
+        }
+    }
+}
+
+/// The Codex TUI's terminal title items: the thread title alone. The items
+/// codex-tui 0.161.0-alpha.2 accepts in `[tui].terminal_title` include
+/// `project-name`, `current-dir`, `run-state` and `thread-title`.
+impl SpeaksHarness for CodexTitle {
+    fn harness_words(&self) -> Vec<String> {
+        match self {
+            CodexTitle::ThreadTitle => vec!["tui.terminal_title=[\"thread-title\"]".into()],
+        }
     }
 }
 

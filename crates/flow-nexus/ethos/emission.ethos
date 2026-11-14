@@ -7,8 +7,9 @@
 
 Emission
 [ signal_flow:[ HerdrSessionName HerdrAgentName HerdrWorkspaceId HerdrPaneId
-                HarnessKind LaunchRequestId NativeSessionId ]
-  flow_ethos:[ KeyName ]
+                HarnessKind LaunchRequestId NativeSessionId Effort ]
+  flow_ethos:[ KeyName ModelName ]
+  :flow_nexus:generated:starter:LeanStart
   flow_nexus:[ CurriculumQuery CurriculumOutcome ] ]
 [ ; Herdr's command line: one `herdr` process.
   Herdr.HerdrCommand
@@ -55,8 +56,21 @@ Emission
   ; Wait until the agent shows any of these states, or the time passes.
   AgentWait.{ Vector<AgentStatus> Milliseconds }
   CodexExecutable.String
-  ; The harness's own command line, as Herdr types it into the pane.
-  HarnessCommandLine.Vector<String>
+  ; The harness's own command line, as Herdr types it into the pane after
+  ; the program.
+  HarnessCommandLine.[ Claude.ClaudeCommandLine Codex.CodexCommandLine ]
+  ; Claude: its settings document, the title it is named and
+  ; remote-controlled by, the file its system prompt is read from, the
+  ; session it starts or resumes, its model and effort, the parts it starts
+  ; without, and the configured arguments.
+  ClaudeCommandLine.{ ClaudeSettings.String SessionTitle.String SystemPromptFile.String ClaudeSessionStart ModelName Effort LeanStart ConfiguredHarnessArguments }
+  ClaudeSessionStart.[ Unchosen Chosen.NativeSessionId Resumed.NativeSessionId ]
+  ; Codex: the app-server socket it attaches to, its model and effort, the
+  ; terminal title it shows, the parts it starts without, the configured
+  ; arguments, and the opened thread it resumes.
+  CodexCommandLine.{ CodexSocket.String ModelName Effort CodexTitle.[ ThreadTitle ] LeanStart ConfiguredHarnessArguments Option<NativeSessionId> }
+  ; The arguments the configuration adds, as a person wrote them.
+  ConfiguredHarnessArguments.Vector<String>
   Printout.{ Stdout.String Stderr.String }
   ; Unstarted: the process could not be run. Cancelled: the observation
   ; it served was cancelled while it ran, and the process was ended.

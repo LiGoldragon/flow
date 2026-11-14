@@ -1,3 +1,21 @@
+# Flow 0.56.2: Flow's external calls are typed Emissions generated from Ethos
+
+Contracts: signal-flow 63.0.0 and meta-signal-flow 79.0.0, unchanged from
+0.56.1. **Neither the wire nor the stored format changes**; clients need no
+repin and no upgrade runs.
+
+- **Seven external calls are typed Emissions.** Herdr's command line, the
+  Curriculum query, the flow-id claim, the harness's own command line (Claude's
+  or Codex's), the handover archive's Git commands, the prompt written on
+  Herdr's socket and the line typed into a Claude pane before its harness are
+  each a type generated from `crates/flow-nexus/ethos/emission.ethos`, and
+  `crates/flow-nexus/src/emission.rs` runs them. Before, each was assembled
+  from string literals where it was used.
+- **Behaviour is unchanged.** The same commands, queries and prompts are issued
+  as in 0.56.1; the gate and the capsule show no change in what any request
+  answers.
+- No stored format or wire changes.
+
 # Flow 0.56.1: a Codex fresh wake carries its first prompt's batch; a Send whose wake kept its batch is accepted Uncertain
 
 Contracts: signal-flow 63.0.0 and meta-signal-flow 79.0.0, unchanged from

@@ -122,7 +122,7 @@ impl LocatesNativeTranscripts for HerdrCli {
 /// The production Herdr roster reader.
 pub struct HerdrCli {
     pub(crate) executable: PathBuf,
-    flow_id_executable: PathBuf,
+    pub(crate) flow_id_executable: PathBuf,
     /// The flows directory under the configured source root.
     pub(crate) flows_root: crate::live::Live<PathBuf>,
     pub(crate) codex_endpoints: crate::live::Live<CodexEndpoints>,

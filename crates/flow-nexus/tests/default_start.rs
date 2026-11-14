@@ -102,13 +102,28 @@ fn place_argument(place: &Place) -> String {
 /// Starts the Nexus in its place with `environment` added to an otherwise
 /// empty environment and the notify socket systemd would give it.
 fn start(home: &Path, place: &Place, environment: &[(&str, &str)]) -> (StartedNexus, UnixDatagram) {
+    start_daemon(
+        Path::new(env!("CARGO_BIN_EXE_flow-nexus-daemon")),
+        home,
+        place,
+        environment,
+    )
+}
+
+/// Starts the given daemon executable as `start` starts this crate's.
+fn start_daemon(
+    daemon: &Path,
+    home: &Path,
+    place: &Place,
+    environment: &[(&str, &str)],
+) -> (StartedNexus, UnixDatagram) {
     let notify_directory = tempfile::tempdir().expect("notify directory");
     let notify_path = notify_directory.path().join("notify.sock");
     let notify = UnixDatagram::bind(&notify_path).expect("the notify socket binds");
     notify
         .set_read_timeout(Some(EVENT_WAIT))
         .expect("the notify socket gives up eventually");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_flow-nexus-daemon"));
+    let mut command = Command::new(daemon);
     command
         .env_clear()
         .env("HOME", home)
@@ -133,7 +148,11 @@ fn start(home: &Path, place: &Place, environment: &[(&str, &str)]) -> (StartedNe
 /// Starts the Nexus and returns once it announced READY=1: both sockets
 /// bound.
 fn start_ready(home: &Path, place: &Place, environment: &[(&str, &str)]) -> StartedNexus {
-    let (mut nexus, notify) = start(home, place, environment);
+    ready(start(home, place, environment))
+}
+
+/// Waits for the started Nexus's READY=1.
+fn ready((mut nexus, notify): (StartedNexus, UnixDatagram)) -> StartedNexus {
     let mut message = [0_u8; 64];
     match notify.recv(&mut message) {
         Ok(length) => assert_eq!(&message[..length], b"READY=1"),
@@ -736,9 +755,14 @@ fn each_socket_appears_at_its_name_only_listening() {
     assert!(leftovers.iter().all(|leftover| leftover.exists()));
 }
 
-#[cfg(feature = "executable-default-configuration")]
+/// The configured package's daemon is built against this crate's library and
+/// test build, never compiled with them again: its check runs this one test
+/// against that daemon, named by FLOW_NEXUS_CONFIGURED_DAEMON.
 #[test]
+#[ignore = "run by the configured package's check, against its daemon"]
 fn configured_executable_seeds_only_its_fresh_typed_nexus_row() {
+    let daemon = std::env::var_os("FLOW_NEXUS_CONFIGURED_DAEMON")
+        .expect("FLOW_NEXUS_CONFIGURED_DAEMON names the configured daemon");
     let home = tempfile::tempdir().expect("temporary home");
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
     let state = tempfile::tempdir().expect("dedicated state directory");
@@ -746,7 +770,7 @@ fn configured_executable_seeds_only_its_fresh_typed_nexus_row() {
 
     // A fresh memory: the Nexus starts with the configuration built into it,
     // and binds and announces readiness before anything is configured.
-    let nexus = start_ready(home.path(), &place, &[]);
+    let nexus = ready(start_daemon(Path::new(&daemon), home.path(), &place, &[]));
     assert!(metaflows_listed(&place));
     assert!(nexus.terminate().success());
 

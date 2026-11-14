@@ -9,7 +9,6 @@
 use datom_codec::Datomizable;
 use flow_nexus::CarriesSignalFrames;
 use flow_nexus::place::{FindsPlace, LaysOutPlace, Place, PlaceName};
-use translator::place_file::{PlaceFile, WritesPlaceFile};
 use flow_nexus::store::ConfiguresOnlyStore;
 use protos::{Compactable, Protosizable};
 use std::{
@@ -20,6 +19,7 @@ use std::{
     sync::mpsc,
     time::Duration,
 };
+use translator::place_file::{PlaceFile, WritesPlaceFile};
 
 /// How long a test waits for any one event before it fails.
 const EVENT_WAIT: Duration = Duration::from_secs(120);
@@ -503,9 +503,7 @@ fn a_live_nexus_socket_is_never_taken_over() {
 
     // A second Nexus at the same Runtime, with memory of its own.
     let intruding = Place {
-        state: flow_nexus::place::State(
-            other_state.path().to_string_lossy().into_owned(),
-        ),
+        state: flow_nexus::place::State(other_state.path().to_string_lossy().into_owned()),
         ..place.clone()
     };
     configured(&intruding, home.path());
@@ -832,10 +830,18 @@ fn a_place_without_a_place_file_lies_at_its_defaults() {
     let place = Place {
         place_name: PlaceName("main".into()),
         runtime: flow_nexus::place::Runtime(
-            runtime.path().join("nexus/main").to_string_lossy().into_owned(),
+            runtime
+                .path()
+                .join("nexus/main")
+                .to_string_lossy()
+                .into_owned(),
         ),
         state: flow_nexus::place::State(
-            state.path().join("nexus/main").to_string_lossy().into_owned(),
+            state
+                .path()
+                .join("nexus/main")
+                .to_string_lossy()
+                .into_owned(),
         ),
     };
     for directory in [place.runtime_directory(), place.state_directory()] {

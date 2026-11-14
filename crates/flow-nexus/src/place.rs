@@ -5,15 +5,13 @@
 //! no file the place lies at its defaults, `$XDG_RUNTIME_DIR/nexus/<place-name>`
 //! and `$XDG_STATE_HOME/nexus/<place-name>`.
 
-use flow_ethos::place::{
-    ConfigurationFile, LocatesConfiguration, NamesPlaceSockets, PlaceSockets,
-};
+use flow_ethos::place::{ConfigurationFile, LocatesConfiguration, NamesPlaceSockets, PlaceSockets};
 use std::path::{Path, PathBuf};
-pub use translator::placement::{
-    NexusName, Place, PlaceFileRefusal, PlaceName, PlaceResolutionError, Runtime, State,
-};
 use translator::place_file::{
     ConfigurationHome, LocatesConfigurationHome, LocatesPlaceFile, ReadsPlaceFile,
+};
+pub use translator::placement::{
+    NexusName, Place, PlaceFileRefusal, PlaceName, PlaceResolutionError, Runtime, State,
 };
 
 /// What a place lays out on disk.
@@ -89,8 +87,7 @@ impl FindsPlace for PlaceName {
 #[cfg(test)]
 mod tests {
     use super::{
-        FindsPlace, LaysOutPlace, Place, PlaceFileRefusal, PlaceName, PlaceRefusal, Runtime,
-        State,
+        FindsPlace, LaysOutPlace, Place, PlaceFileRefusal, PlaceName, PlaceRefusal, Runtime, State,
     };
     use std::path::Path;
     use translator::place_file::{

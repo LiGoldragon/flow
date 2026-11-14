@@ -469,23 +469,41 @@ fn predecessor_start_argument(runtime: &Path, store: &Path) -> String {
     )
 }
 
-/// The current Flow's place: its sockets in `runtime`, its memory, a
-/// `flow.sema`, in the store's directory.
-fn place_argument(runtime: &Path, store: &Path) -> String {
+/// The current Flow's place, `main`: its sockets in `runtime`, its memory,
+/// a `flow.sema`, in the store's directory, written to its place file under
+/// `home`'s configuration home; the Nexus is started with the place's name.
+fn place_argument(home: &Path, runtime: &Path, store: &Path) -> String {
+    use crate::place::{FindsPlace, Place, PlaceName, Runtime, State};
+    use translator::place_file::{
+        ConfigurationHome, LocatesConfigurationHome, LocatesPlaceFile, WritesPlaceFile,
+    };
     assert_eq!(
         store.file_name().and_then(|name| name.to_str()),
         Some("flow.sema"),
         "a place keeps its memory as flow.sema"
     );
-    format!(
-        "{{ main «{}» «{}» }}",
-        runtime.display(),
-        store.parent().expect("the store has a directory").display(),
-    )
+    let place = Place {
+        place_name: PlaceName("main".into()),
+        runtime: Runtime(runtime.to_string_lossy().into_owned()),
+        state: State(
+            store
+                .parent()
+                .expect("the store has a directory")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    };
+    ConfigurationHome::under(None, Some(home.as_os_str()))
+        .expect("the configuration home")
+        .place_file(&PlaceName::nexus_name(), &place.place_name)
+        .expect("the place file")
+        .write_place(&place)
+        .expect("the place file is written");
+    place.place_name.0
 }
 
 fn spawn_flow(binary: &Path, home: &Path, runtime: &Path, store: &Path) -> FlowChild {
-    spawn_with(binary, home, runtime, place_argument(runtime, store))
+    spawn_with(binary, home, runtime, place_argument(home, runtime, store))
 }
 
 fn spawn_predecessor(binary: &Path, home: &Path, runtime: &Path, store: &Path) -> FlowChild {

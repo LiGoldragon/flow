@@ -222,6 +222,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethos-zero"
+version = "29.0.0"
+source = "git+https://github.com/LiGoldragon/ethos-zero?rev=f23eacf#f23eacf338a90ce4a6dea011554724fa6488fcc9"
+dependencies = [
+ "datom-codec",
+ "prettyplease",
+ "proc-macro2",
+ "protos",
+ "quote",
+ "rkyv",
+ "syn 3.0.5",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -277,7 +291,7 @@ dependencies = [
  "datom-codec",
  "ethos-zero 27.0.0",
  "flow-ethos",
- "meta-signal-flow 80.0.0",
+ "meta-signal-flow 81.0.0",
  "protos",
  "rkyv",
  "signal",
@@ -307,7 +321,7 @@ dependencies = [
  "getrandom",
  "libc",
  "meta-signal-flow 77.0.0",
- "meta-signal-flow 80.0.0",
+ "meta-signal-flow 81.0.0",
  "meta-signal-flow-before-request-ids",
  "notify",
  "protos",
@@ -513,11 +527,11 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-flow"
-version = "80.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=1c7597e107304740b922ec5a36c011c40fffe676#1c7597e107304740b922ec5a36c011c40fffe676"
+version = "81.0.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=cf65bbd7a3829d0f18438b8538128ca7242f659f#cf65bbd7a3829d0f18438b8538128ca7242f659f"
 dependencies = [
  "datom-codec",
- "ethos-zero 27.0.0",
+ "ethos-zero 29.0.0",
  "flow-ethos",
  "protos",
  "rkyv",

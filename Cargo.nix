@@ -826,6 +826,58 @@ rec {
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
       };
+      "ethos-zero 29.0.0" = rec {
+        crateName = "ethos-zero";
+        version = "29.0.0";
+        edition = "2024";
+        crateBin = [];
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/ethos-zero";
+          rev = "f23eacf338a90ce4a6dea011554724fa6488fcc9";
+          sha256 = "15wh2r0ljqvjqrh8hc8av4p8210nsdyl9iwhb5zh6k467r59ymm8";
+        };
+        libName = "ethos_zero";
+        dependencies = [
+          {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            features = [ "rkyv" ];
+          }
+          {
+            name = "prettyplease";
+            packageId = "prettyplease";
+          }
+          {
+            name = "proc-macro2";
+            packageId = "proc-macro2";
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            features = [ "rkyv" ];
+          }
+          {
+            name = "quote";
+            packageId = "quote";
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+          {
+            name = "syn";
+            packageId = "syn 3.0.5";
+            features = [ "full" ];
+          }
+        ];
+        features = {
+          "default" = [ "datom" ];
+        };
+        resolvedDefaultFeatures = [ "datom" "default" ];
+      };
       "fastrand" = rec {
         crateName = "fastrand";
         version = "2.5.0";
@@ -1012,7 +1064,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 80.0.0";
+            packageId = "meta-signal-flow 81.0.0";
             features = [ "datom" ];
           }
           {
@@ -1131,7 +1183,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 80.0.0";
+            packageId = "meta-signal-flow 81.0.0";
             features = [ "datom" ];
           }
           {
@@ -1787,15 +1839,15 @@ rec {
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
       };
-      "meta-signal-flow 80.0.0" = rec {
+      "meta-signal-flow 81.0.0" = rec {
         crateName = "meta-signal-flow";
-        version = "80.0.0";
+        version = "81.0.0";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-flow";
-          rev = "1c7597e107304740b922ec5a36c011c40fffe676";
-          sha256 = "1bv9z7gq20hj7x0d01jzdqwgcfr4i8gbvc217hh83jivw6ln9xnk";
+          rev = "cf65bbd7a3829d0f18438b8538128ca7242f659f";
+          sha256 = "0fv789mfwh5iczji8438i0ivbygacgv2ickang2yx5y92k96n10d";
         };
         libName = "meta_signal_flow";
         dependencies = [
@@ -1833,7 +1885,7 @@ rec {
         buildDependencies = [
           {
             name = "ethos-zero";
-            packageId = "ethos-zero 27.0.0";
+            packageId = "ethos-zero 29.0.0";
           }
         ];
         features = {

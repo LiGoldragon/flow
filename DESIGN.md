@@ -586,6 +586,26 @@ At its start the Nexus wakes every metaflow due a wake, so a Nexus that died
 between the commit and the wake leaves none owed. A wake already running for
 the metaflow absorbs the request: it drains what arrives during it.
 
+A wake resumes the metaflow's last flow, where its model's resumption
+allows, instead of starting a fresh one. `Configure.Resumptions` declares,
+per native model, a `CacheWarmth` in minutes (how long the model's prompt
+cache stays warm) and a `ResumeCeiling` in tokens; the family is replaced
+whole, as Thresholds is. A wake resumes when the last turn end recorded for
+the Address is the last flow's own and ended under CacheWarmth minutes ago,
+and the context size recorded at that flow's last Stop (or from its Codex
+thread's token usage) is below ResumeCeiling. A model with no entry, a
+missing turn end or size, a Retired flow, a Simplified run, or a flow with
+no native session wakes fresh. A resume composes the launch a fresh wake
+would compose, on the flow's own model and with no prompt, opens a pane,
+starts the harness on the flow's own session (`--resume <session>`, or a
+Codex TUI's `resume <thread>`) as Restart's resume does, verifies the seat
+as a restart verifies it, and binds it in one write (`Record.Resumed`): the
+flow Active again under its own FlowId, its route and SeatBirth the new
+seat's, its Address Awake as it and out of Past. The drain that follows
+every wake then hands it its queue, oldest first, through the ordinary
+delivery custody. A resume that does not bind discards the pane it opened,
+and the wake starts a fresh flow as below.
+
 A wake's fresh flow takes the queued batch in its first prompt. Its launch
 answers `Started` once that prompt is submitted, and Claude may write it to
 the transcript later; a batch whose receipt is not yet seen leaves the queue

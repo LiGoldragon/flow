@@ -430,6 +430,23 @@
                                              flow-capsule/waking-seat)))
     (println "skip | scenario 20's seat in configure.datom: no configure.datom beside this file")))
 
+;; Scenarios 21 and 22 read a resume from the harness's command line: Claude
+;; started on the flow's own session with `--resume <session>`.
+(check "a command line resuming the session reads as resumed"
+       (flow-capsule/resumed-on? ["/bin/claude --model claude-haiku-5-5 --resume 1f2e-77 --name x"] "1f2e-77"))
+(check "a fresh session, or another session resumed, does not"
+       (and (not (flow-capsule/resumed-on? ["/bin/claude --session-id 1f2e-77"] "1f2e-77"))
+            (not (flow-capsule/resumed-on? ["/bin/claude --resume 9a9a-00"] "1f2e-77"))
+            (not (flow-capsule/resumed-on? ["/bin/claude --resume 1f2e-77"] nil))))
+;; configure.datom declares the Haiku model's resumption, where the file is
+;; beside this one.
+(let [datoms (fs/file (fs/parent (fs/canonicalize *file*)) "configure.datom")]
+  (if (fs/exists? datoms)
+    (check "configure.datom declares claude-haiku-5-5's resumption"
+           (some #(str/starts-with? % "Configure.Resumptions.[ { claude-haiku-5-5 ")
+                 (str/split-lines (slurp datoms))))
+    (println "skip | the resumption in configure.datom: no configure.datom beside this file")))
+
 ;; Every wait of the capsule answers its event: it arms its sources, asks its
 ;; question once armed, and asks again only when an event arrives; the
 ;; deadline bounds the wait for the next event and nothing else.

@@ -209,7 +209,9 @@ identified and sends through Message; confirmation keeps it, so the seat,
 of any Model and either harness, stays Awake in its pane when its turn ends
 with nothing queued, and work queued for it is handed into that pane; once
 its pane is gone (closed by the living, crashed, or replaced) the metaflow is
-Asleep and a queued request wakes a fresh flow for it, and a launch refused,
+Asleep and a queued request wakes it: its last flow resumed on its own
+session when its model's `Configure.Resumptions` entry finds that flow's
+cache still warm and its context below the ceiling, a fresh flow otherwise; and a launch refused,
 or a flow that ends, before confirmation gives the metaflow back as it found
 it; a Start whose Address a live seat holds, or another unsettled launch
 names, answers `StartRejected.AddressAwake`. A metaflow is Awake or Asleep:

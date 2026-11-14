@@ -1,7 +1,19 @@
 # Flow 0.55.0: a permaflow carries its leave-outs; one value of one permaflow changed alone
 
 Contracts: signal-flow 62.0.0 (37e99d3) and meta-signal-flow 78.0.0
-(ac7db8a), on build base 306abea. **The stored format changes.**
+(37467de), on build base 221ccab. **The stored format changes.**
+
+- **A warm permaflow woken resumes its last flow.**
+  `Configure.Resumptions.[ { <native model> <CacheWarmth minutes> <ResumeCeiling tokens> } ]`,
+  one entry per native model, replaced whole as Thresholds is, and read in
+  the snapshot as `ConfiguredResumptions`. A wake resumes the last flow, the
+  same FlowId on its own native session, when that flow's turn end is the
+  Address's last, under CacheWarmth minutes ago, and its recorded context is
+  below ResumeCeiling; otherwise it starts a fresh flow, as every wake did.
+  A model with no entry never resumes, so a deployment that declares none
+  wakes as before. Memory gains one configuration table,
+  `flow_nexus_meta_model_resumption_configuration`, registered empty in an
+  earlier store; nothing stored changes shape.
 
 - **A Configure answers its change.** Every Configure answers
   `Configured.<the change it was given>`, echoed whole, whether or not

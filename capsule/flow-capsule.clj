@@ -1579,7 +1579,28 @@
     (str/replace-first line seat (str "{ { " aspect " " topic " " model " } [ spirit:core " missing-module " ]"))))
 
 (defn restore-configuration! []
-  [(flow-meta (configure-line "Metaflows")) (flow-meta (configure-line "Thresholds"))])
+  [(flow-meta (configure-line "Metaflows")) (flow-meta (configure-line "Thresholds"))
+   (flow-meta (configure-line "Resumptions"))])
+
+(defn flow-command-lines
+  "The command lines of the live processes carrying one flow identity: its
+  harness among them, as Herdr started it."
+  [flow-id]
+  (vec
+   (keep (fn [dir]
+           (let [pid (str (fs/file-name dir))
+                 env (try (slurp (str dir "/environ")) (catch Exception _ ""))]
+             (when (and (re-matches #"\d+" pid)
+                        (str/includes? env (str "FLOW_ID=" flow-id "\u0000")))
+               (try (str/trim (str/replace (slurp (str dir "/cmdline")) "\u0000" " "))
+                    (catch Exception _ nil)))))
+         (fs/list-dir "/proc"))))
+
+(defn resumed-on?
+  "Whether one of the command lines resumes the native session: Claude's
+  `--resume <session>`."
+  [command-lines native]
+  (boolean (and native (some #(str/includes? % (str "--resume " native)) command-lines))))
 
 (defn stops-of [flow-id]
   (count (heads-named "Stopped" (read-datom (flow-meta (str "ReadEvents." flow-id))))))
@@ -1733,7 +1754,10 @@
 
    ["20 two requests queued to an asleep Regular seat reach it on its wake as one vector, oldest first"
     (fn []
-      (let [asleep (watch 150 #(let [m (current waking-seat)]
+      ;; A fresh wake's first prompt carries the vector: its model's
+      ;; resumption is declared away for this scenario, then restored.
+      (let [fresh-only (flow-meta "Configure.Resumptions.[]")
+            asleep (watch 150 #(let [m (current waking-seat)]
                                  (when (and (= :asleep (:state m)) (empty? (:queue m))) m)))
             pane (sender-pane)
             first-sent (send-to waking-seat "Queue" "Soft.Notice.«First of two. Tag w1.»" pane)
@@ -1751,14 +1775,69 @@
                                      (when (and t (every? (fn [id] (str/includes? t id)) ids)) t))))
             _ (keep-text! "scenario-20-pane.txt" (or shown (some-> woken-pane (pane-text "recent-unwrapped"))))
             ordered (boolean (and shown (= 2 (count ids))
-                                  (< (str/index-of shown (first ids)) (str/index-of shown (second ids)))))]
-        {:reply (str "Queue: " first-sent " / Wake: " second-sent)
-         :pass (boolean (and asleep woke (= 2 (count ids)) (= ids (mapv :id entries))
+                                  (< (str/index-of shown (first ids)) (str/index-of shown (second ids)))))
+            restored (restore-configuration!)]
+        {:reply (str "Resumptions: " fresh-only " / Queue: " first-sent " / Wake: " second-sent
+                     " / restore: " restored)
+         :pass (boolean (and (str/starts-with? fresh-only "Configured.")
+                             asleep woke (= 2 (count ids)) (= ids (mapv :id entries))
                              (every? #(and (:sender %) (:priority %)) entries) ordered))
          :watched (str waking-seat " Asleep with an empty queue before " (boolean asleep) ", woken as " woke
                        "; first turn's vector " (pr-str entries) "; pane " woken-pane
                        " shows both ids oldest first " ordered
-                       ", its text kept as scenario-20-pane.txt")}))]])
+                       ", its text kept as scenario-20-pane.txt")}))]
+
+   ["21 a warm Regular seat woken resumes its last flow: the same FlowId, --resume <session>, its queue typed in"
+    (fn []
+      ;; Warm for an hour, so the scenarios before leave it warm; the
+      ;; ceiling is configure.datom's.
+      (let [warm (flow-meta "Configure.Resumptions.[ { claude-haiku-5-5 60 150000 } ]")
+            asleep (watch 150 #(let [m (current waking-seat)]
+                                 (when (and (= :asleep (:state m)) (empty? (:queue m))) m)))
+            last-flow (some-> asleep :past last str)
+            sent (send-to waking-seat "Wake" (str "Soft.Order.«" brief " Tag r1.»") (sender-pane))
+            woke (some-> (watch 90 #(awake-flow waking-seat)) str)
+            native (native-session (inspect waking-seat))
+            command-lines (if woke (flow-command-lines woke) [])
+            resumed (resumed-on? command-lines native)
+            logged (when woke (await-log-line 30 (str "flow " woke " resumed on its own session")))
+            typed (transcript-holds waking-seat "Tag r1" 90)
+            _ (keep-text! "scenario-21-command-lines.txt" (str/join "\n" command-lines))
+            restored (restore-configuration!)]
+        {:reply (str "Resumptions: " warm " / Wake: " sent " / restore: " restored)
+         :pass (boolean (and (str/starts-with? warm "Configured.") asleep last-flow
+                             (str/starts-with? sent "SendAccepted.")
+                             (= woke last-flow) resumed logged typed))
+         :watched (str waking-seat " Asleep after flow " last-flow ", woken as " woke
+                       (if (= woke last-flow) " (the same FlowId)" " (another FlowId)")
+                       "; native session " native "; a process of " woke
+                       (if resumed " runs --resume " " lacks --resume ") native
+                       " (scenario-21-command-lines.txt); log: " logged
+                       "; Tag r1 typed into the resumed session " (boolean typed))}))]
+
+   ["22 a Regular seat woken past its resume ceiling starts a fresh flow"
+    (fn []
+      ;; Warm, but a ceiling no session's context is below.
+      (let [ceiling (flow-meta "Configure.Resumptions.[ { claude-haiku-5-5 60 1000 } ]")
+            asleep (watch 150 #(let [m (current waking-seat)]
+                                 (when (and (= :asleep (:state m)) (empty? (:queue m))) m)))
+            last-flow (some-> asleep :past last str)
+            sent (send-to waking-seat "Wake" (str "Soft.Order.«" brief " Tag r2.»") (sender-pane))
+            woke (some-> (watch 90 #(awake-flow waking-seat)) str)
+            native (native-session (inspect waking-seat))
+            command-lines (if woke (flow-command-lines woke) [])
+            fresh-line (when last-flow
+                         (await-log-line 30 (str "flow " last-flow " not resumed: AtCeiling")))
+            m (current waking-seat)
+            restored (restore-configuration!)]
+        {:reply (str "Resumptions: " ceiling " / Wake: " sent " / restore: " restored)
+         :pass (boolean (and (str/starts-with? ceiling "Configured.") asleep last-flow
+                             (str/starts-with? sent "SendAccepted.")
+                             woke (not= woke last-flow) (some #{last-flow} (map str (:past m)))
+                             (not (resumed-on? command-lines native)) fresh-line))
+         :watched (str waking-seat " Asleep after flow " last-flow ", woken as " woke
+                       (if (= woke last-flow) " (the same FlowId)" " (a new FlowId)")
+                       ", Past " (:past m) "; log: " fresh-line)}))]])
 
 (def codex-quaternary "{ Mind test Terra }")
 

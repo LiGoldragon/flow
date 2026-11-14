@@ -6,8 +6,11 @@
 ; @CODEX_MODEL@ for { Mind test Terra }; the next endpoint names no
 ; models. Message names no running executable. Each permaflow carries
 ; its leave-outs, after its workspace, of the harness its Model runs on.
+; A Regular seat on claude-haiku-5-5 woken within five minutes of its last
+; turn, its context under 150000 tokens, resumes its last flow.
 Configure.Nexus.{ @SOURCE_ROOT@ { @CODEX_CLIENT@ @CODEX_HOME@ @CODEX_SOCKET@ [ @CODEX_MODEL@ ] } { @CAPSULE_RUNTIME@/no-codex-client @CAPSULE_RUNTIME@/codex-next @CAPSULE_RUNTIME@/codex-next.sock [] } [ { Claude [ / «!» # ] [ esc esc ] [ enter ] } { Codex [ / «!» ] [ esc ] [] } ] [ Psyche ] @CAPSULE_RUNTIME@/message.sock @CAPSULE_RUNTIME@/no-message-nexus @CURRICULUM_SOCKET@ 60 None default }
 Configure.Models.[ { Fable claude-haiku-5-5 } { Opus claude-haiku-5-5 } { Sonnet claude-haiku-5-5 } { Haiku claude-haiku-5-5 } { Terra @CODEX_MODEL@ } ]
 Configure.Thresholds.[ { claude-haiku-5-5 200000 } { @CODEX_MODEL@ 200000 } ]
+Configure.Resumptions.[ { claude-haiku-5-5 5 150000 } ]
 Configure.DefaultMinutes.30
 Configure.Metaflows.[ { { Psyche test Opus } None [ ClaudeAiConnectors ExplorePlanAgents WorkflowTool SkillTool BundledSkills ScheduleWakeupTool ReportFindingsTool ListAgentsTool CronTools DeferredTools ClaudeMd GitInstructions ] [ spirit:core:0 intent:models:0 ] [] Simplified Explicit.[] Maintained «» [] } { { Psyche test Sonnet } None [ ClaudeAiConnectors ExplorePlanAgents WorkflowTool SkillTool BundledSkills ScheduleWakeupTool ReportFindingsTool ListAgentsTool CronTools DeferredTools ClaudeMd GitInstructions ] [ spirit:core:0 intent:models:0 ] [] Regular Default OnDemand «» [] } { { Psyche test Haiku } None [ ClaudeAiConnectors ExplorePlanAgents WorkflowTool SkillTool BundledSkills ScheduleWakeupTool ReportFindingsTool ListAgentsTool CronTools DeferredTools ClaudeMd GitInstructions ] [ spirit:core:0 intent:models:0 ] [] Simplified Explicit.[] OnDemand «» [] } { { Mind test Terra } None [ CodexAgentsMd CodexSkillListing CodexCollaborationMode CodexEnvironmentContext CodexPermissions CodexDeveloperInstructions ] [ spirit:core:0 intent:models:0 ] [] Simplified Explicit.[] OnDemand «» [] } ]

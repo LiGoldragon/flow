@@ -604,7 +604,7 @@ impl VerifiesResumedSeat for RunningNexus {
             working_directory: meta_signal_flow::WorkingDirectory(working_directory),
         };
         let node = self
-            .verified_seat_node(&pane.herdr_session_name.0, &record.address, &binding)
+            .verified_seat_node(&pane.herdr_session_name.0, record.address, &binding)
             .map_err(|reason| match reason {
                 FlowBindingRefusalReason::SessionMismatch
                 | FlowBindingRefusalReason::NativeIdentityMismatch => RestartFailure::BindMismatch,

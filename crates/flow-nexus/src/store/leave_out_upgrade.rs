@@ -192,6 +192,38 @@ impl TakesLeaveOuts for ConfigureMetaflowV6 {
     }
 }
 
+/// The fold, named in the daemon's log: one line for each permaflow that
+/// took leave-outs and one for each entry dropped, with why.
+pub(crate) trait AnnouncesLeaveOutFold {
+    fn announce(&self);
+}
+
+impl AnnouncesLeaveOutFold for LeaveOutFold {
+    fn announce(&self) {
+        for (address, harness_kind) in &self.folded {
+            eprintln!(
+                "flow-nexus: store upgrade: {address:?} takes its leave-outs on {harness_kind:?} into its permaflow"
+            );
+        }
+        for (address, harness_kind, reason) in &self.dropped {
+            let why = match reason {
+                LeaveOutDropped::NoPermaflow => {
+                    "no permaflow is declared at its Address".to_owned()
+                }
+                LeaveOutDropped::OtherHarness(harness) => {
+                    format!("its permaflow's Model runs on {harness:?}")
+                }
+                LeaveOutDropped::HarnessUnknown => {
+                    "its permaflow's harness cannot be derived".to_owned()
+                }
+            };
+            eprintln!(
+                "flow-nexus: store upgrade: the leave-outs of {address:?} on {harness_kind:?} are dropped: {why}"
+            );
+        }
+    }
+}
+
 /// The startup step, run before the permaflow family is registered.
 pub(crate) trait UpgradesLeaveOutMemory {
     /// Upgrades a v6 store in one evolution; a current or new store is
@@ -323,17 +355,8 @@ impl UpgradesLeaveOutMemory for FlowStore {
                     None => LeaveOutDropped::HarnessUnknown,
                 },
             };
-            eprintln!(
-                "flow-nexus: store upgrade: the leave-outs of {address:?} on {harness_kind:?} are dropped ({reason:?}): {:?}",
-                entry.leave_out.leave_outs.0
-            );
             fold.dropped
                 .push((address.clone(), harness_kind.clone(), reason));
-        }
-        for (address, harness_kind) in &fold.folded {
-            eprintln!(
-                "flow-nexus: store upgrade: the leave-outs of {address:?} on {harness_kind:?} are its permaflow's"
-            );
         }
         let mut evolution = engine
             .begin_atomic_evolution()

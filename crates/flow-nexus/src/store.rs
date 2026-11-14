@@ -2175,9 +2175,13 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         )?;
         // The permaflows 0.54.7 declared take their leave-outs, in one
         // evolution, before the family is registered.
-        <FlowStore as leave_out_upgrade::UpgradesLeaveOutMemory>::upgrade_leave_out_memory(
-            &mut engine,
-        )?;
+        {
+            use leave_out_upgrade::AnnouncesLeaveOutFold;
+            <FlowStore as leave_out_upgrade::UpgradesLeaveOutMemory>::upgrade_leave_out_memory(
+                &mut engine,
+            )?
+            .announce();
+        }
         let state = engine.register_table(state_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
         let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
@@ -2845,9 +2849,13 @@ impl OpensFlowStore for FlowStore {
         <FlowStore as reap_upgrade::UpgradesReapMemory>::upgrade_reap_memory(&mut engine)?;
         // The permaflows 0.54.7 declared take their leave-outs, in one
         // evolution, before anything is registered.
-        <FlowStore as leave_out_upgrade::UpgradesLeaveOutMemory>::upgrade_leave_out_memory(
-            &mut engine,
-        )?;
+        {
+            use leave_out_upgrade::AnnouncesLeaveOutFold;
+            <FlowStore as leave_out_upgrade::UpgradesLeaveOutMemory>::upgrade_leave_out_memory(
+                &mut engine,
+            )?
+            .announce();
+        }
 
         let flows = engine.register_table(flows_descriptor)?;
         let native_owner_proofs = engine.register_table(native_owner_proofs_descriptor)?;
@@ -3277,7 +3285,9 @@ pub enum ConfigurationEdit {
 pub(crate) trait ManagesMetaflowState: Sized {
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
     /// Replace one configuration family whole with its declaration, or
-    /// change one declaration alone.
+    /// change one declaration alone, with no context composer: the tests'
+    /// declaration. The meta socket declares through `edit_configuration`.
+    #[cfg(test)]
     fn configure_change(&self, change: ConfigurationChange)
     -> Result<ConfigureOutcome, StoreError>;
     /// A Configure or a Remove, committed. A module an Amend adds is first
@@ -3331,10 +3341,10 @@ impl ManagesMetaflowState for FlowStore {
         Ok(Some(families.with_counters(self.counters()?)))
     }
 
-    /// The counters are the running store's; every other family is
-    /// declared as a configuration-only store declares it. Declared with no
-    /// context composer, a module an Amend adds cannot be resolved: the
-    /// meta socket declares through `edit_configuration` with the Nexus's.
+    /// Declared with no context composer, a module an Amend adds cannot be
+    /// resolved: the meta socket declares through `edit_configuration` with
+    /// the Nexus's.
+    #[cfg(test)]
     fn configure_change(
         &self,
         change: ConfigurationChange,
@@ -3345,6 +3355,8 @@ impl ManagesMetaflowState for FlowStore {
         )
     }
 
+    /// The counters are the running store's; every other family is
+    /// declared as a configuration-only store declares it.
     fn edit_configuration(
         &self,
         edit: ConfigurationEdit,

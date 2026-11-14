@@ -1353,25 +1353,33 @@ fn each_amend_changes_exactly_its_one_value_and_nothing_else() {
     let steps: Vec<(Change, Box<dyn Fn(&mut ConfigureMetaflow)>)> = vec![
         (
             Change::Purpose(meta_signal_flow::Purpose("Alpha after".into())),
-            Box::new(|row| row.purpose = meta_signal_flow::Purpose("Alpha after".into())),
+            Box::new(|row: &mut ConfigureMetaflow| {
+                row.purpose = meta_signal_flow::Purpose("Alpha after".into())
+            }),
         ),
         (
             Change::Workspace(Some(meta_signal_flow::Root("/srv/alpha".into()))),
-            Box::new(|row| row.root_option = Some(meta_signal_flow::Root("/srv/alpha".into()))),
+            Box::new(|row: &mut ConfigureMetaflow| {
+                row.root_option = Some(meta_signal_flow::Root("/srv/alpha".into()))
+            }),
         ),
         (
             Change::Kind(signal_flow::FlowKind::Simplified),
-            Box::new(|row| row.flow_kind = signal_flow::FlowKind::Simplified),
+            Box::new(|row: &mut ConfigureMetaflow| {
+                row.flow_kind = signal_flow::FlowKind::Simplified
+            }),
         ),
         (
             Change::Continuity(meta_signal_flow::Continuity::Maintained),
-            Box::new(|row| row.continuity = meta_signal_flow::Continuity::Maintained),
+            Box::new(|row: &mut ConfigureMetaflow| {
+                row.continuity = meta_signal_flow::Continuity::Maintained
+            }),
         ),
         (
             Change::Add(Element::SystemModule(signal_flow::ModuleIdentity(
                 "intent:flow:0".into(),
             ))),
-            Box::new(|row| {
+            Box::new(|row: &mut ConfigureMetaflow| {
                 row.system_modules
                     .0
                     .push(signal_flow::ModuleIdentity("intent:flow:0".into()))
@@ -1381,7 +1389,7 @@ fn each_amend_changes_exactly_its_one_value_and_nothing_else() {
             Change::Add(Element::PromptModule(signal_flow::ModuleIdentity(
                 "operation:main-flow:0".into(),
             ))),
-            Box::new(|row| {
+            Box::new(|row: &mut ConfigureMetaflow| {
                 row.user_modules
                     .0
                     .push(signal_flow::ModuleIdentity("operation:main-flow:0".into()))
@@ -1389,7 +1397,7 @@ fn each_amend_changes_exactly_its_one_value_and_nothing_else() {
         ),
         (
             Change::Add(Element::LeaveOut(signal_flow::LeaveOut::CodexSkillListing)),
-            Box::new(|row| {
+            Box::new(|row: &mut ConfigureMetaflow| {
                 row.leave_outs
                     .0
                     .push(signal_flow::LeaveOut::CodexSkillListing)
@@ -1399,7 +1407,7 @@ fn each_amend_changes_exactly_its_one_value_and_nothing_else() {
             Change::Remove(Element::PromptModule(signal_flow::ModuleIdentity(
                 "knowledge:flow:0".into(),
             ))),
-            Box::new(|row| {
+            Box::new(|row: &mut ConfigureMetaflow| {
                 row.user_modules
                     .0
                     .retain(|held| held.0 != "knowledge:flow:0")
@@ -1409,7 +1417,7 @@ fn each_amend_changes_exactly_its_one_value_and_nothing_else() {
             Change::Remove(Element::SystemModule(signal_flow::ModuleIdentity(
                 "spirit:core:0".into(),
             ))),
-            Box::new(|row| {
+            Box::new(|row: &mut ConfigureMetaflow| {
                 row.system_modules
                     .0
                     .retain(|held| held.0 != "spirit:core:0")
@@ -1417,7 +1425,7 @@ fn each_amend_changes_exactly_its_one_value_and_nothing_else() {
         ),
         (
             Change::Remove(Element::LeaveOut(signal_flow::LeaveOut::CodexAgentsMd)),
-            Box::new(|row| {
+            Box::new(|row: &mut ConfigureMetaflow| {
                 row.leave_outs
                     .0
                     .retain(|held| held != &signal_flow::LeaveOut::CodexAgentsMd)
@@ -1425,7 +1433,7 @@ fn each_amend_changes_exactly_its_one_value_and_nothing_else() {
         ),
         (
             Change::Workspace(None),
-            Box::new(|row| row.root_option = None),
+            Box::new(|row: &mut ConfigureMetaflow| row.root_option = None),
         ),
     ];
     for (change, apply) in steps {
@@ -1863,12 +1871,11 @@ fn a_v6_store_folds_each_permaflow_s_leave_outs_and_names_what_it_drops() {
     // Every other field of every permaflow is as 0.54.7 declared it.
     let metaflows = snapshot(&nexus).configured_metaflows.0;
     for declared in v6_permaflows() {
-        let mut upgraded = metaflows
+        let upgraded = metaflows
             .iter()
             .find(|row| row.address == declared.address)
-            .expect("each permaflow stays")
-            .clone();
-        upgraded.leave_outs = signal_flow::LeaveOuts(Vec::new());
+            .expect("each permaflow stays");
+        assert_eq!(upgraded.root_option, declared.root_option);
         assert_eq!(upgraded.purpose, declared.purpose);
         assert_eq!(upgraded.system_modules, declared.system_modules);
         assert_eq!(upgraded.records, declared.records);

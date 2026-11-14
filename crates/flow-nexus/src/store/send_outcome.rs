@@ -57,8 +57,8 @@ impl MemoryDefinition for StoredSendOutcome {
 }
 
 pub(crate) struct SendOutcomeTables {
-    counter: TableReference<SendOutcomeCounter>,
-    outcomes: TableReference<StoredSendOutcome>,
+    pub(super) counter: TableReference<SendOutcomeCounter>,
+    pub(super) outcomes: TableReference<StoredSendOutcome>,
     write_gate: Mutex<()>,
 }
 

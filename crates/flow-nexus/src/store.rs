@@ -23,6 +23,8 @@ pub(crate) mod launch_cleanup;
 pub(crate) mod leave_out_upgrade;
 pub(crate) mod living_upgrade;
 pub(crate) mod logical_delivery;
+#[cfg(test)]
+mod memory_digest;
 pub(crate) mod metaflow;
 pub(crate) mod metaflow_declaration;
 pub mod metaflow_watch;

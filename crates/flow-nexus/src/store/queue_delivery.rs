@@ -267,9 +267,9 @@ pub enum PrepareQueueDelivery {
 }
 
 pub(crate) struct QueueDeliveryTables {
-    counter: TableReference<DeliveryCounter>,
-    requests: TableReference<StoredDeliveryRequest>,
-    attempts: TableReference<QueueDeliveryAttempt>,
+    pub(super) counter: TableReference<DeliveryCounter>,
+    pub(super) requests: TableReference<StoredDeliveryRequest>,
+    pub(super) attempts: TableReference<QueueDeliveryAttempt>,
 }
 
 pub(crate) type QueueDeliveryDescriptors = (

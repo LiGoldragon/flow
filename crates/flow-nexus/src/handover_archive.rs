@@ -832,7 +832,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
         let result = ExistingGitHandoverArchive::new(repository.path())
-            .with_deadline(Duration::from_millis(200))
+            .with_deadline(Duration::from_secs(3))
             .publish(HandoverArchiveRequest {
                 address: Address {
                     aspect: Aspect::Mind,

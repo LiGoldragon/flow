@@ -270,7 +270,8 @@ impl UpgradesHandoverConfiguration for StoredHandoverConfiguration {
         if stored_v1 {
             engine
                 .upgrade_table::<StoredHandoverConfigurationV1, StoredHandoverConfigurationV2>(
-                    <StoredHandoverConfigurationV2 as DescribesHandoverConfigurationV2>::descriptor(),
+                    <StoredHandoverConfigurationV2 as DescribesHandoverConfigurationV2>::descriptor(
+                    ),
                 )
                 .settled()?;
         }
@@ -547,12 +548,16 @@ mod tests {
         (
             "4b813404",
             "unconfigured",
-            include_bytes!("../../tests/unit/historical-v1-handover/4b813404/stores/unconfigured.sema"),
+            include_bytes!(
+                "../../tests/unit/historical-v1-handover/4b813404/stores/unconfigured.sema"
+            ),
         ),
         (
             "4b813404",
             "empty-policy",
-            include_bytes!("../../tests/unit/historical-v1-handover/4b813404/stores/empty-policy.sema"),
+            include_bytes!(
+                "../../tests/unit/historical-v1-handover/4b813404/stores/empty-policy.sema"
+            ),
         ),
         (
             "4b813404",
@@ -564,12 +569,16 @@ mod tests {
         (
             "b0331a84",
             "unconfigured",
-            include_bytes!("../../tests/unit/historical-v1-handover/b0331a84/stores/unconfigured.sema"),
+            include_bytes!(
+                "../../tests/unit/historical-v1-handover/b0331a84/stores/unconfigured.sema"
+            ),
         ),
         (
             "b0331a84",
             "empty-policy",
-            include_bytes!("../../tests/unit/historical-v1-handover/b0331a84/stores/empty-policy.sema"),
+            include_bytes!(
+                "../../tests/unit/historical-v1-handover/b0331a84/stores/empty-policy.sema"
+            ),
         ),
         (
             "b0331a84",
@@ -706,7 +715,8 @@ mod tests {
             ConfigurationOnlyStore, ConfiguresOnlyStore, FlowStore, ManagesMetaflowState,
             OpensFlowStore,
         };
-        let rows = redb::TableDefinition::<String, &[u8]>::new(super::super::OPTIONAL_HANDOVER_TABLE);
+        let rows =
+            redb::TableDefinition::<String, &[u8]>::new(super::super::OPTIONAL_HANDOVER_TABLE);
         for (producer, store, bytes) in HISTORICAL_V1_STORES {
             let directory = tempfile::tempdir().unwrap();
             let produced = directory.path().join("produced.sema");
@@ -739,7 +749,10 @@ mod tests {
                 write
                     .open_table(super::super::SEMA_CATALOG_TABLE)
                     .unwrap()
-                    .insert(super::super::OPTIONAL_HANDOVER_TABLE, registration.as_slice())
+                    .insert(
+                        super::super::OPTIONAL_HANDOVER_TABLE,
+                        registration.as_slice(),
+                    )
                     .unwrap();
                 write
                     .open_table(rows)
@@ -770,9 +783,11 @@ mod tests {
                 "{producer} {store}"
             );
             configuration
-                .configure_change(meta_signal_flow::ConfigurationChange::SuccessorRecoveryText(
-                    SuccessorRecoveryText("Configured after the historical upgrade.".into()),
-                ))
+                .configure_change(
+                    meta_signal_flow::ConfigurationChange::SuccessorRecoveryText(
+                        SuccessorRecoveryText("Configured after the historical upgrade.".into()),
+                    ),
+                )
                 .unwrap();
             drop(configuration);
             for _ in 0..2 {
@@ -780,8 +795,7 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{producer} {store} reopens: {error}"));
                 let snapshot = running.configuration_snapshot().unwrap().unwrap();
                 assert_eq!(
-                    snapshot.successor_recovery_text.0,
-                    "Configured after the historical upgrade.",
+                    snapshot.successor_recovery_text.0, "Configured after the historical upgrade.",
                     "{producer} {store}"
                 );
                 assert_eq!(

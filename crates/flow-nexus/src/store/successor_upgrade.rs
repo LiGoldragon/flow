@@ -1,6 +1,6 @@
 //! The exact v3 successor archive upgrades to v4; old Refresh stays plain.
-use super::successor::{DescribesSuccessorIntentTable, SuccessionCause, SuccessorIntent};
 use super::ReadsFlowMemory as _;
+use super::successor::{DescribesSuccessorIntentTable, SuccessionCause, SuccessorIntent};
 use crate::generated::memory::Predecessor;
 use rkyv::{Archive, Deserialize, Serialize};
 use sema_engine::{

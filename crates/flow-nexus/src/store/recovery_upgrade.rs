@@ -26,7 +26,9 @@
 use super::reap_upgrade::{StartRejectionV9, StoredLaunchOutcomeV9};
 use super::successor::SuccessorIntent;
 use super::successor_upgrade::{SuccessorIntentV3, UpgradesSuccessorIntent};
-use super::{FLOW_LAUNCH_OUTCOME_TABLE_NAME, FlowStore, LaunchOutcome, StoreError, StoredLaunchOutcome};
+use super::{
+    FLOW_LAUNCH_OUTCOME_TABLE_NAME, FlowStore, LaunchOutcome, StoreError, StoredLaunchOutcome,
+};
 use crate::generated::memory::SupersededHandover;
 use crate::generated::starter::{LaunchedRecord, ReplacedRecord};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -239,9 +241,9 @@ mod tests {
                     handover_fault: signal_flow::HandoverFault::RootUnresolved,
                 }),
             )),
-            LaunchOutcomeV10::StartRejected(StartRejectionV9::TopicRefused(
-                signal_flow::Topic("badTopic".into()),
-            )),
+            LaunchOutcomeV10::StartRejected(StartRejectionV9::TopicRefused(signal_flow::Topic(
+                "badTopic".into(),
+            ))),
             LaunchOutcomeV10::ReplaceRejected(ReplaceRejectionV10::LaunchRefused(
                 StartRejectionV9::CompositionRefused(CompositionRefusalV9::Unrecorded),
             )),

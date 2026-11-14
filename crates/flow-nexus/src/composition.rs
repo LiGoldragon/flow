@@ -1122,18 +1122,18 @@ impl ProfilesFreshSeat for FreshSeat {
 pub(crate) mod tests {
     use super::{
         ComposesInRoot, ComposesLaunch, ComposesPresentationRole, ComposesVerifiedContext,
-        CompositionError, FitsOneMessage, FixtureSuccessorRecovery, HandoverRoot,
-        HarnessedProfile, LaunchComposer, OpensLaunchComposer, ReadsEmergencyPredecessor,
-        ReadsVerifiedContext, SplitsStartupMessage,
+        CompositionError, FitsOneMessage, FixtureSuccessorRecovery, HandoverRoot, HarnessedProfile,
+        LaunchComposer, OpensLaunchComposer, ReadsEmergencyPredecessor, ReadsVerifiedContext,
+        SplitsStartupMessage,
     };
     use crate::context::FixtureComposer;
     use crate::handover::{Handover, YieldsHandover};
-    use std::path::Path;
-    use std::sync::Arc;
     use signal_flow::{
         Address, Aspect, CompositionRefusal, ContextRefusal, HarnessKind, LaunchProfile, LeaveOut,
         Model, Remembering,
     };
+    use std::path::Path;
+    use std::sync::Arc;
 
     /// A launch profile and a composer holding its modules, for tests.
     pub(crate) fn fixture_profile() -> LaunchProfile {
@@ -2375,7 +2375,10 @@ pub(crate) mod tests {
             "recovr",
         ]
         .iter()
-        .map(|value| text.find(value).unwrap_or_else(|| panic!("{value} in {text}")))
+        .map(|value| {
+            text.find(value)
+                .unwrap_or_else(|| panic!("{value} in {text}"))
+        })
         .collect();
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
 
@@ -2384,11 +2387,12 @@ pub(crate) mod tests {
             predecessor: signal_flow::FlowId("predec".into()),
             reason: "the intent read failed".into(),
         };
-        let expected = CompositionRefusal::RecoveryUnavailable(signal_flow::RecoveryUnavailable_Data {
-            address: recovery_address("launchAddress"),
-            flow_id: signal_flow::FlowId("predec".into()),
-            string: "the intent read failed".into(),
-        });
+        let expected =
+            CompositionRefusal::RecoveryUnavailable(signal_flow::RecoveryUnavailable_Data {
+                address: recovery_address("launchAddress"),
+                flow_id: signal_flow::FlowId("predec".into()),
+                string: "the intent read failed".into(),
+            });
         assert_eq!(
             Failed_Data::from(unavailable),
             Failed_Data::CompositionRefused(expected.clone())
@@ -2396,7 +2400,10 @@ pub(crate) mod tests {
         let text = expected.datomize(Vec::new()).protosize().compact();
         let positions: Vec<usize> = ["launchAddress", "predec", "the intent read failed"]
             .iter()
-            .map(|value| text.find(value).unwrap_or_else(|| panic!("{value} in {text}")))
+            .map(|value| {
+                text.find(value)
+                    .unwrap_or_else(|| panic!("{value} in {text}"))
+            })
             .collect();
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
     }
@@ -2518,7 +2525,9 @@ pub(crate) mod tests {
         fn successor_recovery_text(
             &self,
         ) -> Result<meta_signal_flow::SuccessorRecoveryText, crate::store::StoreError> {
-            Ok(meta_signal_flow::SuccessorRecoveryText("Configured.".into()))
+            Ok(meta_signal_flow::SuccessorRecoveryText(
+                "Configured.".into(),
+            ))
         }
     }
 
@@ -2566,7 +2575,10 @@ pub(crate) mod tests {
             "the recovery text could not be read".into(),
         );
         let sources: [(Arc<dyn super::ReadsSuccessorRecovery>, String); 2] = [
-            (Arc::new(UnreadableSuccessorIntent), intent_failure.to_string()),
+            (
+                Arc::new(UnreadableSuccessorIntent),
+                intent_failure.to_string(),
+            ),
             (
                 Arc::new(UnreadableRecoveryText(intent.clone())),
                 text_failure.to_string(),

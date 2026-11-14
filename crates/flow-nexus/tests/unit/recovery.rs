@@ -21,7 +21,10 @@ fn emergency_intent(
     profile: &LaunchProfile,
     path: Option<signal_flow::TranscriptPath>,
 ) -> SuccessorIntent {
-    let predecessor = profile.flow_id_option.clone().expect("a successor's profile");
+    let predecessor = profile
+        .flow_id_option
+        .clone()
+        .expect("a successor's profile");
     SuccessorIntent {
         address: profile.address.clone(),
         predecessor: Predecessor(predecessor.0.clone()),
@@ -53,7 +56,11 @@ fn memory_composer(store: &Arc<FlowStore>) -> LaunchComposer {
     .with_handover_source(source)
 }
 
-fn composed_body(composer: &LaunchComposer, profile: LaunchProfile, root: HandoverRoot<'_>) -> String {
+fn composed_body(
+    composer: &LaunchComposer,
+    profile: LaunchProfile,
+    root: HandoverRoot<'_>,
+) -> String {
     composer
         .compose_in_root(
             HarnessedProfile {
@@ -122,7 +129,9 @@ fn an_owed_emergency_intent_with_its_path_reads_back_whole_across_reopens() {
     for _ in 0..2 {
         let store = FlowStore::open_configured(fixture.path()).expect("reopened store");
         assert_eq!(
-            store.successor_intent(&profile.address).expect("intent read"),
+            store
+                .successor_intent(&profile.address)
+                .expect("intent read"),
             Some(intent.clone())
         );
     }

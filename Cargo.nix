@@ -774,6 +774,58 @@ rec {
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
       };
+      "ethos-zero 28.0.0" = rec {
+        crateName = "ethos-zero";
+        version = "28.0.0";
+        edition = "2024";
+        crateBin = [];
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/ethos-zero";
+          rev = "970459d100ddee5f62a76c05642ecfabefba6329";
+          sha256 = "1iymm3vjsxslkfp1gih72shiav8gk0bkrra1ix3ka9iyg578ldcf";
+        };
+        libName = "ethos_zero";
+        dependencies = [
+          {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            features = [ "rkyv" ];
+          }
+          {
+            name = "prettyplease";
+            packageId = "prettyplease";
+          }
+          {
+            name = "proc-macro2";
+            packageId = "proc-macro2";
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            features = [ "rkyv" ];
+          }
+          {
+            name = "quote";
+            packageId = "quote";
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+          {
+            name = "syn";
+            packageId = "syn 3.0.5";
+            features = [ "full" ];
+          }
+        ];
+        features = {
+          "default" = [ "datom" ];
+        };
+        resolvedDefaultFeatures = [ "datom" "default" ];
+      };
       "fastrand" = rec {
         crateName = "fastrand";
         version = "2.5.0";
@@ -3029,8 +3081,8 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal-curriculum-nexus";
-          rev = "4358aa1c2bcba273fe18037ab7e99ebb117a9a47";
-          sha256 = "1awfjf2vcs09vyhyc2x259wvwzd1dnn6a8c3pqbfvdc97n5znnj3";
+          rev = "4202d8bade73179be646b588498ae55e5687d1e8";
+          sha256 = "0911rq0kmmm4p6gw5xzak74lgi7zh41ai7phz1frmp913spwcp74";
         };
         libName = "signal_curriculum_nexus";
         dependencies = [
@@ -3054,7 +3106,7 @@ rec {
         buildDependencies = [
           {
             name = "ethos-zero";
-            packageId = "ethos-zero 27.0.0";
+            packageId = "ethos-zero 28.0.0";
           }
         ];
         features = {

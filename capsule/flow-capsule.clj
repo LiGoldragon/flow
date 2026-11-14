@@ -899,7 +899,15 @@
 
    ["5 Send during Refresh"
     (fn []
-      (let [_ (send "Wake" (str "Soft.Order.«" brief " Tag s5a.»") (sender-pane))
+      ;; The Haiku starts Asleep with nothing queued, so Tag s5a wakes the
+      ;; flow that is refreshed and Tag s5b alone waits for its successor. A
+      ;; Refresh scenario 4 queued on a working flow is carried out at that
+      ;; flow's rest first; Tag s5a sent before then joins the queue the
+      ;; successor is handed, and a Simplified successor takes its oldest
+      ;; request alone.
+      (let [asleep (watch 90 #(let [m (current quaternary)]
+                                (when (and (= :asleep (:state m)) (empty? (:queue m))) m)))
+            _ (send "Wake" (str "Soft.Order.«" brief " Tag s5a.»") (sender-pane))
             old (str (watch 60 #(awake-flow quaternary)))
             old-pane (bound-pane (inspect quaternary))
             refresh (flow-process (str "Refresh." quaternary) @driver-pane)
@@ -910,11 +918,13 @@
             fresh (str (watch 60 #(let [f (awake-flow quaternary)] (when (and f (not= (str f) old)) f))))
             first-prompt (await-transcript 30 #(transcript-first-user (native-session (inspect quaternary))))]
         {:reply (str "Refresh: " refresh-reply " / Send: " send-reply)
-         :pass (boolean (and (str/starts-with? send-reply "SendAccepted.")
+         :pass (boolean (and asleep
+                             (str/starts-with? send-reply "SendAccepted.")
                              (seq fresh)
                              (str/includes? (str first-prompt) "Tag s5b")
                              (zero? (occurrences old-text "Tag s5b"))))
-         :watched (str "old flow " old " pane " old-pane (if old-text " readable" " gone")
+         :watched (str "Haiku Asleep with an empty queue before " (boolean asleep)
+                       "; old flow " old " pane " old-pane (if old-text " readable" " gone")
                        "; fresh flow " fresh " first prompt " (if (str/includes? (str first-prompt) "Tag s5b") "holds" "lacks") " Tag s5b")}))]
 
    ["6 Maintained Refresh"

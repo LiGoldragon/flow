@@ -163,4 +163,10 @@ Operation
            LaunchRefused.NativeLaunchRefusal
            Restarting ] ]
 [ HarnessArguments.Vector<String>
-  PaneLaunch.{ ComposedLaunch Root HerdrPaneBinding Option<FlowId> Option<NativeSessionId> HarnessArguments } ]
+  PaneLaunch.{ ComposedLaunch Root HerdrPaneBinding Option<FlowId> Option<NativeSessionId> HarnessArguments }
+  ; Who called a Refresh, as the Nexus reads the calling process: a flow of
+  ; the refreshed Address, current or past, which refreshes only itself; or
+  ; any other caller, a flow of another Address or a process in no flow,
+  ; which refreshes the flow the Address is Awake as.
+  RefreshCaller.[ AddressFlow.FlowId
+                  Elsewhere.Origin ] ]

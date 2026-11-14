@@ -22,6 +22,13 @@ pub struct PaneLaunch {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum RefreshCaller {
+    AddressFlow(signal_flow::FlowId),
+    Elsewhere(signal_flow::Origin),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Reserve_Data {
     pub composed_launch: signal_flow::ComposedLaunch,
     pub origin: signal_flow::Origin,

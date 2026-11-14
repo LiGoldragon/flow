@@ -201,9 +201,12 @@ impl RunsFakeAppServer for FakeAppServer {
         for (index, connection) in connections.iter().enumerate() {
             let run = 2 * index + 1;
             std::fs::write(root.join(format!("frames-{run}")), &probe).unwrap();
+            // The resume answers the cut, a thread with no turn; the
+            // terminal list after it names no process.
             let frames = [
                 initialized.clone(),
                 frame(&serde_json::json!({ "id": 2, "result": { "thread": {} } })),
+                frame(&serde_json::json!({ "id": 3, "result": { "data": [] } })),
             ];
             std::fs::write(root.join(format!("frames-{}", run + 1)), frames.concat()).unwrap();
             let calls = connection.requests.iter().map(frame).collect::<String>();
@@ -2720,7 +2723,7 @@ fn a_completion_on_another_thread_drains_nothing() {
 /// it; `first_event` is the thread's last turn event. Returns the fake
 /// app-server and the fixture.
 fn codex_resolved_absent(
-    first_event: crate::codex_turns::TurnEvent,
+    first_events: Vec<crate::generated::turn_ledger::LedgerEvent>,
 ) -> (NexusFixture, FakeAppServer, TestRequest) {
     use crate::DispatchesSerially;
     use crate::codex_turns::TracksCodexTurns;
@@ -2735,7 +2738,9 @@ fn codex_resolved_absent(
         .nexus
         .store
         .test_outstanding_queue_attempt_id(&seat_at());
-    fixture.nexus.codex_turns.observe(SEAT_THREAD, first_event);
+    for event in first_events {
+        fixture.nexus.codex_turns.apply(SEAT_THREAD, event);
+    }
     fake.accept_queued_turns(SEAT_THREAD, 1..=2);
     let response = fixture.nexus.dispatch_meta_serially(
         meta_signal_flow::Input::ResolveQueueDelivery(QueueDeliveryResolution {
@@ -2758,9 +2763,8 @@ fn codex_resolved_absent(
 /// its pane once, and never starts a native turn.
 #[test]
 fn a_resting_codex_seat_resolved_absent_is_handed_the_request_at_once_exactly_once() {
-    use crate::codex_turns::{ThreadStatus, TurnEvent};
     use crate::waking::SleepsAndWakesSeats;
-    let (fixture, fake, first) = codex_resolved_absent(TurnEvent::Status(ThreadStatus::Idle));
+    let (fixture, fake, first) = codex_resolved_absent(vec![super::codex_turns::idle()]);
     assert!(fake.queued_turn_texts().is_empty());
     assert_eq!(fixture.typed_count(&first), 1);
     let typed = fixture.typed().unwrap_or_default();
@@ -2774,7 +2778,7 @@ fn a_resting_codex_seat_resolved_absent_is_handed_the_request_at_once_exactly_on
 /// thread once.
 #[test]
 fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
-    use crate::codex_turns::{ThreadStatus, TracksCodexTurns, TurnEvent};
+    use crate::codex_turns::TracksCodexTurns;
     use crate::waking::SleepsAndWakesSeats;
     let mut fixture = NexusFixture::new();
     fixture.awake_codex_seat(vec![]);
@@ -2784,7 +2788,7 @@ fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
     fixture
         .nexus
         .codex_turns
-        .observe(SEAT_THREAD, TurnEvent::Status(ThreadStatus::Idle));
+        .apply(SEAT_THREAD, super::codex_turns::idle());
     fixture.nexus.wake_due(seat_at());
     assert!(
         fake.queued_turn_texts().is_empty(),
@@ -2822,8 +2826,8 @@ fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
 /// queued for its idle event, and starts no native turn for it.
 #[test]
 fn a_working_codex_seat_resolved_absent_waits_for_its_idle_event() {
-    use crate::codex_turns::TurnEvent;
-    let (fixture, fake, first) = codex_resolved_absent(TurnEvent::Started("turn-running".into()));
+    use super::codex_turns::{idle, started};
+    let (fixture, fake, first) = codex_resolved_absent(vec![idle(), started("turn-running")]);
     assert!(fake.queued_turn_texts().is_empty());
     assert_eq!(fixture.seat_queue(), vec![first.clone()]);
     assert_eq!(fixture.typed_count(&first), 0);

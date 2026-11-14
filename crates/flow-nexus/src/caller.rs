@@ -549,6 +549,120 @@ impl RecordsOriginOfProcess for RunningNexus {
     }
 }
 
+/// Who calls a Refresh: read from the calling process whether or not the
+/// flow it runs in is still current, since a flow its Address no longer
+/// runs as may still call.
+pub trait ReadsRefreshCaller {
+    /// A flow of `address`, current or past, the caller runs in; else the
+    /// caller's origin, a flow of another Address or Unbound.
+    fn refresh_caller(
+        &self,
+        peer: Option<&Process>,
+        address: &Address,
+    ) -> crate::generated::operation::RefreshCaller;
+    /// The same, for a caller whose origin was already read.
+    fn origin_refresh_caller(
+        &self,
+        origin: signal_flow::Origin,
+        address: &Address,
+    ) -> crate::generated::operation::RefreshCaller;
+}
+
+/// The flow a calling process runs in, live or ended, and the Addresses a
+/// flow belongs to.
+trait ResolvesEndedCaller {
+    /// The one flow whose Codex thread the process descends from, or whose
+    /// recorded pane holds it, whatever its lifecycle.
+    fn ended_caller_flow(&self, peer: &Process) -> Option<FlowId>;
+    /// Whether the flow ran as `address`: its current flow, one of its
+    /// Past, or the flow a launch of that Address started.
+    fn flow_of_address(&self, flow_id: &FlowId, address: &Address) -> bool;
+}
+
+impl ResolvesEndedCaller for RunningNexus {
+    fn ended_caller_flow(&self, peer: &Process) -> Option<FlowId> {
+        let process = CallerProcess {
+            process_id: u32::try_from(peer.pid.0).ok()?,
+        };
+        let unique = |flows: Vec<FlowId>| match flows.as_slice() {
+            [flow] => Some(flow.clone()),
+            _ => None,
+        };
+        let app_servers = self.store.codex_app_servers().ok()?;
+        if process.has_codex_app_server_ancestor(&app_servers)
+            && let Some(thread) = process.codex_thread(&app_servers)
+        {
+            let root_thread = self.codex_endpoints.current().root_thread(&thread);
+            let flows = self
+                .store
+                .flow_nodes()
+                .ok()?
+                .into_iter()
+                .filter(|node| {
+                    node.harness_kind == HarnessKind::Codex && node.session_id.0 == root_thread
+                })
+                .map(|node| node.flow_id)
+                .collect::<Vec<_>>();
+            return unique(flows);
+        }
+        let pane = process.caller_pane(&self.herdr)?;
+        let flows = self
+            .store
+            .flows_in_pane(&pane.herdr_session_name, &pane.herdr_pane_id)
+            .ok()?
+            .into_iter()
+            .map(|node| node.flow_id)
+            .collect::<Vec<_>>();
+        unique(flows)
+    }
+
+    fn flow_of_address(&self, flow_id: &FlowId, address: &Address) -> bool {
+        use crate::store::NamesPendingReplies;
+        let metaflow_holds = matches!(
+            self.store.metaflow(address),
+            Ok(Some(metaflow))
+                if metaflow.state == flow_ethos::State::Awake(flow_id.clone())
+                    || metaflow.past.0.contains(flow_id)
+        );
+        metaflow_holds || self.store.launched_address(&flow_id.0).as_ref() == Some(address)
+    }
+}
+
+impl ReadsRefreshCaller for RunningNexus {
+    fn refresh_caller(
+        &self,
+        peer: Option<&Process>,
+        address: &Address,
+    ) -> crate::generated::operation::RefreshCaller {
+        use crate::generated::operation::RefreshCaller;
+        let origin = self.origin_of_process(peer);
+        let flow = match &origin {
+            signal_flow::Origin::Flow(bound) => Some(bound.flow_id.clone()),
+            signal_flow::Origin::Unbound => peer.and_then(|peer| self.ended_caller_flow(peer)),
+        };
+        match flow {
+            Some(flow_id) if self.flow_of_address(&flow_id, address) => {
+                RefreshCaller::AddressFlow(flow_id)
+            }
+            _ => RefreshCaller::Elsewhere(origin),
+        }
+    }
+
+    fn origin_refresh_caller(
+        &self,
+        origin: signal_flow::Origin,
+        address: &Address,
+    ) -> crate::generated::operation::RefreshCaller {
+        use crate::generated::operation::RefreshCaller;
+        match &origin {
+            signal_flow::Origin::Flow(bound) if self.flow_of_address(&bound.flow_id, address) => {
+                RefreshCaller::AddressFlow(bound.flow_id.clone())
+            }
+            _ => RefreshCaller::Elsewhere(origin),
+        }
+    }
+}
+
 /// Answers ResolveCaller for the pane a connection's peer runs in.
 pub trait ResolvesCaller {
     fn resolve_caller(&self, pane: Option<CallerPane>, claim: Option<FlowId>) -> Output;

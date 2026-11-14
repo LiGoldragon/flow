@@ -250,6 +250,13 @@ impl AdaptsFlowConnection for FlowConnectionAdapter<'_> {
                 let origin = nexus.origin_of_process(caller.process.as_ref());
                 nexus.dispatch_serially(query, origin)
             }
+            // A Refresh is bound to its caller: a flow of the Address,
+            // still current or not, refreshes only itself.
+            Input::Refresh(address) => {
+                use crate::caller::ReadsRefreshCaller;
+                let refresh_caller = nexus.refresh_caller(caller.process.as_ref(), &address);
+                nexus.dispatch_refresh(address, refresh_caller)
+            }
             query => nexus.dispatch_serially(query, Origin::Unbound),
         };
         response.reply(Completion::OnSuccessfulWrite(

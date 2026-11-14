@@ -1,0 +1,66 @@
+; A Codex thread's turn ledger: what Flow holds of one app-server thread's
+; turns, work items and typed letters. Every fact only moves up, Unseen to
+; Open to Ended, so the ledger reads the same whatever order its events
+; reach Flow in, from whichever of Flow's connections. A thread rests when
+; its ledger is Established and holds no open turn, no running item and no
+; letter without its receipt; no status, no pane and no timer is read as
+; its rest.
+;
+; A turn ends only by native evidence: its own turn/completed, a cut that
+; shows it not running, or thread/closed. A thread status moves nothing. A
+; cut is the thread/resume answer on the connection it subscribes, with its
+; newest turn: it lists the turn with its status, and every open turn less than a listed one is not
+; running, one turn being active at a time; an open turn greater than every
+; listed one is kept, started after the cut. A letter Flow typed is pending
+; until a userMessage item whose one text is exactly the letter's payload
+; takes it, or until the queue settles its attempt without one; two pending
+; letters of one text take none, and one item takes at most one letter.
+;
+; A ledger keeps its newest TurnRetentionBound ended turns, and the
+; greatest it let go as its watermark. A start or an end at or below the
+; watermark that the ledger does not hold is never taken for a repeat or
+; for a fresh turn: the ledger stands Unreconciled until the next cut.
+
+Library
+[ meta_signal_flow:[ QueueAttemptId ] ]
+[ CodexTurnId.String                                    ; a Codex turn id, UUIDv7: a later turn's is greater
+  CodexItemId.String                                    ; a thread item's id
+  UnifiedExecProcessId.String                           ; a commandExecution's processId: the process the app-server keeps for it
+  PayloadText.String                                    ; exactly what Flow typed
+  CodexTurnStatus.[ Completed Interrupted Failed InProgress ]
+  Interrupt.[ Pressed NotPressed ]                      ; whether Flow pressed the interrupt keys before it typed
+  WorkItem.[ TurnBound.{ CodexItemId CodexTurnId }                          ; ends no later than its turn
+             ProcessBacked.{ CodexItemId CodexTurnId UnifiedExecProcessId } ] ; may outlive its turn
+  PendingLetter.{ QueueAttemptId PayloadText Interrupt }
+  TurnReport.{ CodexTurnId CodexTurnStatus }            ; a turn as an end or a cut reports it
+  SeenLetter.{ CodexTurnId CodexItemId PayloadText }    ; a userMessage item whose only content is one text
+  CutItem.[ Running.WorkItem Ended.WorkItem ]
+  BackgroundTerminal.{ CodexItemId UnifiedExecProcessId }
+  ThreadCut.{ Vector<TurnReport> Vector<SeenLetter> Vector<CutItem> }   ; the newest turn, its letters and its work items
+  LedgerEvidence.[ Unestablished                        ; no cut of the open subscription has been applied
+                   Established ]                        ; a cut was applied and its subscription is open
+  LedgerEvent.[ TurnOpened.CodexTurnId                  ; turn/started, or turn/start's answer in progress
+                TurnClosed.TurnReport                   ; turn/completed with its own status
+                ItemOpened.WorkItem                     ; item/started
+                ItemClosed.WorkItem                     ; item/completed, whatever its status
+                LetterTyped.PendingLetter               ; Flow typed a payload
+                LetterSeen.SeenLetter                   ; a userMessage item, on any connection or in a cut
+                LetterReceived.{ QueueAttemptId CodexTurnId }   ; the queue recorded the letter's receipt in that turn
+                LetterSettled.QueueAttemptId            ; the queue settled the attempt with no receipt
+                Cut.ThreadCut                           ; the subscribing thread/resume answer
+                BackgroundTerminals.Vector<BackgroundTerminal>  ; thread/backgroundTerminals/list after a cut
+                SubscriptionEnded                       ; the subscribing connection closed
+                ThreadClosed ]                          ; thread/closed
+  ThreadStanding.[ AtRest                               ; Established; no open turn, item or pending letter
+                   Working.Vector<CodexTurnId>
+                   LetterAwaited.Vector<QueueAttemptId>
+                   ItemsOrphaned.Vector<CodexItemId>    ; the thread closed with process-backed items not seen ending
+                   ItemsRunning.Vector<CodexItemId>     ; no turn open; process-backed items still running
+                   Unreconciled ]                       ; no cut since the subscription, or a fact below the watermark
+  LedgerReading.{ ThreadStanding
+                  RestReached.Boolean                   ; this event stepped the thread into AtRest
+                  TurnsEnded.Vector<CodexTurnId>        ; turns this event ended for the first time
+                  Reconcile.Boolean                     ; Flow is to take a new cut
+                  RetentionExceeded.Option<CodexTurnId> } ]
+[]
+[]

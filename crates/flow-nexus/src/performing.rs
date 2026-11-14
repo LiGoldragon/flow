@@ -595,20 +595,35 @@ impl Performs for RunningNexus {
                 let submission = match composed_launch.harness_kind {
                     // The part's turn may call the send tool at once: the
                     // launch, holding the gate, answers it meanwhile.
-                    HarnessKind::Codex => self.serving_launch_calls(|| {
-                        self.codex_endpoints
-                            .current()
-                            .adapter_for(&composed_launch.launch_profile.model_name.0)
-                            .map_err(|_| Failed_Data::CodexRefused)
-                            .and_then(|adapter| {
-                                adapter
-                                    .submit_bound_codex_part(
-                                        &composed_launch,
-                                        &prompt_delivery_intent,
-                                    )
-                                    .map_err(|_| Failed_Data::CodexRefused)
-                            })
-                    }),
+                    HarnessKind::Codex => self
+                        .serving_launch_calls(|| {
+                            self.codex_endpoints
+                                .current()
+                                .adapter_for(&composed_launch.launch_profile.model_name.0)
+                                .map_err(|_| Failed_Data::CodexRefused)
+                                .and_then(|adapter| {
+                                    adapter
+                                        .submit_bound_codex_part(
+                                            &composed_launch,
+                                            &prompt_delivery_intent,
+                                        )
+                                        .map_err(|_| Failed_Data::CodexRefused)
+                                })
+                        })
+                        .map(|submitted| {
+                            // The part's own turn, as `turn/start` answered
+                            // it: the thread works until that turn's end,
+                            // whatever status or idle the app-server sent
+                            // before the turn began.
+                            if let Some(turn) = submitted.opened_turn {
+                                use crate::codex_turns::TracksCodexTurns;
+                                self.codex_turns.apply(
+                                    &prompt_delivery_intent.native_session_id.0,
+                                    crate::generated::turn_ledger::LedgerEvent::TurnOpened(turn),
+                                );
+                            }
+                            submitted.prompt_delivery_result
+                        }),
                     HarnessKind::Claude => self
                         .herdr
                         .submit_startup_part(&composed_launch, &prompt_delivery_intent)

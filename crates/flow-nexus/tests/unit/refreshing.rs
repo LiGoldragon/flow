@@ -1790,3 +1790,114 @@ fn the_ordered_replacement_survives_a_nexus_restart() {
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
     assert_eq!(stored(&fixture).state, State::Asleep);
 }
+
+/// primary-k7jy: a Refresh is bound to its caller. A flow of the Address
+/// that is no longer the one it is Awake as, a past flow among them,
+/// refreshes nothing: it is refused CallerNotCurrent, naming itself and
+/// the flow the Address is Awake as, None while it is Asleep.
+#[test]
+fn a_flow_no_longer_current_is_refused_caller_not_current() {
+    use crate::caller::ReadsRefreshCaller;
+    use crate::generated::operation::RefreshCaller;
+    use crate::waking::RefreshesMetaflows;
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 40_000);
+    let ended = flow_ethos::FlowId("0e068b".into());
+    let current = flow_ethos::FlowId(CLAUDE_SEAT.into());
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: seat_address(),
+        state: State::Awake(current.clone()),
+        past: flow_ethos::Past(vec![ended.clone()]),
+        queue: flow_ethos::Queue(vec![]),
+    });
+    let caller = fixture.nexus.origin_refresh_caller(
+        Origin::Flow(signal_flow::FlowOrigin {
+            flow_id: ended.clone(),
+            session_id: signal_flow::SessionId("0e068b-thread".into()),
+        }),
+        &seat_address(),
+    );
+    assert_eq!(caller, RefreshCaller::AddressFlow(ended.clone()));
+    assert_eq!(
+        fixture.nexus.refresh(&seat_address(), &caller),
+        Output::RefreshRejected(RefreshRejection::CallerNotCurrent(
+            signal_flow::CallerNotCurrent_Data {
+                flow_id: ended.clone(),
+                flow_id_option: Some(current.clone()),
+            }
+        ))
+    );
+    assert!(!closed(&fixture), "the current flow is untouched");
+    assert_eq!(stored(&fixture).state, State::Awake(current));
+
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: seat_address(),
+        state: State::Asleep,
+        past: flow_ethos::Past(vec![ended.clone()]),
+        queue: flow_ethos::Queue(vec![]),
+    });
+    assert_eq!(
+        fixture.nexus.refresh(&seat_address(), &caller),
+        Output::RefreshRejected(RefreshRejection::CallerNotCurrent(
+            signal_flow::CallerNotCurrent_Data {
+                flow_id: ended,
+                flow_id_option: None,
+            }
+        ))
+    );
+}
+
+/// primary-k7jy: the current flow refreshes itself, and any other caller,
+/// a flow of another Address or a process in no flow, refreshes the flow
+/// the Address is Awake as.
+#[test]
+fn the_current_flow_and_any_other_caller_refresh_the_current_flow() {
+    use crate::caller::ReadsRefreshCaller;
+    use crate::generated::operation::RefreshCaller;
+    use crate::waking::RefreshesMetaflows;
+    let elsewhere = signal_flow::FlowOrigin {
+        flow_id: flow_ethos::FlowId("c0ffee".into()),
+        session_id: signal_flow::SessionId("c0ffee-session".into()),
+    };
+    for caller in [
+        RefreshCaller::AddressFlow(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        RefreshCaller::Elsewhere(Origin::Unbound),
+        RefreshCaller::Elsewhere(Origin::Flow(elsewhere.clone())),
+    ] {
+        let fixture = NexusFixture::new();
+        fixture.accept_pane_operations(
+            vec![claude_agent(&fixture)],
+            PromptFixture::Prompted("w1:p3"),
+        );
+        awake_seat(&fixture, vec![]);
+        declare(&fixture, seat_address());
+        assert_eq!(
+            fixture.nexus.refresh(&seat_address(), &caller),
+            Output::Refreshed(Refreshed {
+                address: seat_address(),
+                flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+            }),
+            "{caller:?}"
+        );
+        assert!(closed(&fixture));
+    }
+    // A flow of another Address is no flow of this one.
+    let fixture = NexusFixture::new();
+    awake_seat(&fixture, vec![]);
+    assert_eq!(
+        fixture
+            .nexus
+            .origin_refresh_caller(Origin::Flow(elsewhere.clone()), &seat_address()),
+        RefreshCaller::Elsewhere(Origin::Flow(elsewhere))
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .origin_refresh_caller(Origin::Unbound, &seat_address()),
+        RefreshCaller::Elsewhere(Origin::Unbound)
+    );
+}

@@ -104,7 +104,7 @@ use crate::delivery::{DeliversMessages, FindsDeliveryTarget, ReadsLeasedPane};
 use crate::generated::memory::{Device, Inode, Offset};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
-    Record_Data_Context_Data,
+    Record_Data_Context_Data, RefreshCaller,
 };
 use crate::generated::starter::ProfilesFreshSeat;
 use crate::herdr::pane::{PaneAgent, WritesPane};
@@ -1322,6 +1322,21 @@ impl ReconcilesQueueDelivery for RunningNexus {
         native_receipt: String,
         seat_after: SeatAfter,
     ) -> Reconciled {
+        // A Codex letter's receipt in a turn its ledger knows takes the
+        // letter there too; a turn it has not seen will show the letter's
+        // own item.
+        if attempt.harness_kind == HarnessKind::Codex {
+            use crate::generated::turn_ledger::{CodexTurnId, LedgerEvent, LetterReceived_Data};
+            for member in run {
+                self.codex_turns.apply(
+                    &member.thread_id.0,
+                    LedgerEvent::LetterReceived(LetterReceived_Data {
+                        queue_attempt_id: member.queue_attempt_id.clone(),
+                        codex_turn_id: CodexTurnId(turn_id.clone()),
+                    }),
+                );
+            }
+        }
         for member in run {
             let receipt = NativeDeliveryReceipt {
                 native_request_id: member.native_request_id,
@@ -1840,7 +1855,13 @@ pub trait RefreshesMetaflows {
     /// queue kept. The successor's context is what any wake composes: the
     /// metaflow's declaration, else the last launch's modules, remembering
     /// the ending flow.
-    fn refresh(&self, address: &Address) -> Output;
+    ///
+    /// A caller that is a flow of the Address refreshes only itself: while
+    /// the Address is no longer Awake as that flow, the refresh is refused
+    /// CallerNotCurrent, naming it and the flow the Address is Awake as.
+    /// Any other caller refreshes the flow the Address is Awake as. Every
+    /// refresh is logged with its caller.
+    fn refresh(&self, address: &Address, caller: &RefreshCaller) -> Output;
     /// A Replace, as a Launch addressed to an Awake metaflow names one: a
     /// refresh whose successor is the profile's. Under the metaflow's lock
     /// the successor is started and confirmed, then the flow it replaces is
@@ -1851,13 +1872,37 @@ pub trait RefreshesMetaflows {
 }
 
 impl RefreshesMetaflows for RunningNexus {
-    fn refresh(&self, address: &Address) -> Output {
+    fn refresh(&self, address: &Address, caller: &RefreshCaller) -> Output {
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
-        use signal_flow::{RefreshRejection, Refusal, Unknown_Data};
+        use signal_flow::{CallerNotCurrent_Data, RefreshRejection, Refusal, Unknown_Data};
         let turn = self
             .dispatch_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        eprintln!(
+            "flow-nexus: Refresh of {address:?} called by {caller:?}",
+            address = address
+        );
+        // A flow of the Address refreshes only itself: a flow its Address
+        // no longer runs as is refused, whatever else holds the Address.
+        if let RefreshCaller::AddressFlow(own) = caller {
+            let current = match self.store.metaflow(address) {
+                Ok(Some(Metaflow {
+                    state: flow_ethos::State::Awake(current),
+                    ..
+                })) => Some(current),
+                Ok(_) => None,
+                Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
+            };
+            if current.as_ref() != Some(own) {
+                return Output::RefreshRejected(RefreshRejection::CallerNotCurrent(
+                    CallerNotCurrent_Data {
+                        flow_id: own.clone(),
+                        flow_id_option: current,
+                    },
+                ));
+            }
+        }
         let Some(lock) = self.waking.hold(address) else {
             return Output::RefreshRejected(RefreshRejection::Locked);
         };
@@ -2502,12 +2547,8 @@ impl DrainsHeldSeats for RunningNexus {
                     {
                         // Only this bound seat's turn can hold its work.
                         // A predecessor's receipt never marks its successor busy.
-                        // The settled turn may still run: what follows waits
-                        // for its end.
-                        self.codex_turns.delivered(
-                            &node.session_id.0,
-                            &meta_signal_flow::InterruptWitness::NotRequested,
-                        );
+                        // The settled turn may still run: its ledger holds it
+                        // open until its own end, and what follows waits.
                         return Outcome::Drained(vec![queued]);
                     }
                     drained.push(queued);
@@ -2730,18 +2771,32 @@ impl DrainsHeldSeats for RunningNexus {
             .mark_delivery_uncertain(&attempt.queue_attempt_id.0);
         let typed = self.park_cohort(&attempt, &cohort);
         let _ = self.reconcile_delivery(&attempt);
-        // A payload typed into a Codex pane is work its thread holds, whose
-        // turn may not have begun, whether or not history shows it yet:
-        // the seat is in its turn until that turn's own events end it, so
-        // the rest that typed it neither closes it nor hands it more. An
-        // interrupt pressed before typing cut short the turn it was in,
-        // whose completion is then no rest of the seat.
+        // A payload typed into a Codex pane is a letter its thread holds
+        // until a user message of exactly its text takes it, whether or not
+        // a turn has begun: the seat does not rest meanwhile, so the rest
+        // that typed it neither closes it nor hands it more. No turn's start
+        // or end, interrupted or not, takes the letter.
         if node.harness_kind == HarnessKind::Codex {
-            let interrupt = match &result {
-                meta_signal_flow::Output::Delivered(delivery) => delivery.interrupt_witness.clone(),
-                _ => meta_signal_flow::InterruptWitness::NotRequested,
+            use crate::generated::turn_ledger::{
+                Interrupt, LedgerEvent, PayloadText, PendingLetter,
             };
-            self.codex_turns.delivered(&node.session_id.0, &interrupt);
+            let interrupt = match &result {
+                meta_signal_flow::Output::Delivered(delivery)
+                    if delivery.interrupt_witness
+                        != meta_signal_flow::InterruptWitness::NotRequested =>
+                {
+                    Interrupt::Pressed
+                }
+                _ => Interrupt::NotPressed,
+            };
+            self.codex_turns.apply(
+                &node.session_id.0,
+                LedgerEvent::LetterTyped(PendingLetter {
+                    queue_attempt_id: attempt.queue_attempt_id.clone(),
+                    payload_text: PayloadText(cohort.prompt_text(&address)),
+                    interrupt,
+                }),
+            );
         }
         drained.extend(typed);
         Outcome::Drained(drained)
@@ -3072,6 +3127,27 @@ impl ParksCohort for RunningNexus {
                         .iter()
                         .map(|member| member.native_request_id),
                 );
+                // A letter typed before this Nexus started is pending in its
+                // thread's ledger until a receipt or the queue settles it.
+                if attempt.harness_kind == HarnessKind::Codex
+                    && let Some((_, payload)) = self.cohort_runs(&attempt).into_iter().next()
+                {
+                    use crate::generated::turn_ledger::{
+                        Interrupt, LedgerEvent, PayloadText, PendingLetter,
+                    };
+                    let _turn = self
+                        .dispatch_gate
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    self.codex_turns.apply(
+                        &attempt.thread_id.0,
+                        LedgerEvent::LetterTyped(PendingLetter {
+                            queue_attempt_id: attempt.queue_attempt_id.clone(),
+                            payload_text: PayloadText(payload),
+                            interrupt: Interrupt::NotPressed,
+                        }),
+                    );
+                }
                 // Read off the gate; settle under it.
                 let Ok((run, turn_id, native_receipt, seat_after)) = self.find_receipt(&attempt)
                 else {
@@ -4020,12 +4096,11 @@ impl WakesInParts for RunningNexus {
         // Stop names no background work, since closing it would end that
         // work.
         let closable = match node.harness_kind {
-            // A seat due a refresh, or ordered refreshed or restarted, is
-            // closed at this idle event whatever it runs.
-            _ if refresh_due || ordered_now => true,
-            // A Codex seat is handed work through its app-server, so only
-            // the app-server's thread status says it rests, whatever its
-            // screen shows.
+            // A Codex seat is closed only at its thread's native rest, as
+            // its turn ledger shows it: no turn, process or letter open.
+            // A seat due a refresh, or ordered refreshed or restarted, waits
+            // for that rest as any other; work that never ends keeps it
+            // until it is stopped, and nothing interrupts it.
             HarnessKind::Codex => {
                 if self.codex_in_turn(flow_id) {
                     return AtStop::Kept(KeptAtStop::InTurn);
@@ -4035,6 +4110,9 @@ impl WakesInParts for RunningNexus {
                 }
                 true
             }
+            // A Claude seat due a refresh, or ordered refreshed or
+            // restarted, is closed at this idle event whatever it runs.
+            _ if refresh_due || ordered_now => true,
             HarnessKind::Claude => {
                 let pane_agent = self.herdr.pane_agent(&node);
                 let native_resting = matches!(

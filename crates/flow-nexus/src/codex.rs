@@ -232,7 +232,16 @@ pub trait SubmitsBoundCodexPart {
         &self,
         launch: &ComposedLaunch,
         durable_intent: &PromptDeliveryIntent,
-    ) -> Result<PromptDeliveryResult, CodexAdapterUnavailable>;
+    ) -> Result<BoundPartSubmission, CodexAdapterUnavailable>;
+}
+
+/// What submitting one bound part came to: its delivery result, and the
+/// turn the app-server's `turn/start` answer names in progress, the part's
+/// own turn, which the thread's ledger opens before any of its events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundPartSubmission {
+    pub prompt_delivery_result: PromptDeliveryResult,
+    pub opened_turn: Option<crate::generated::turn_ledger::CodexTurnId>,
 }
 
 /// The app-server receipt for one queued request submitted as a new turn.
@@ -1206,7 +1215,8 @@ impl SubmitsBoundCodexPart for CodexAdapter {
         &self,
         launch: &ComposedLaunch,
         intent: &PromptDeliveryIntent,
-    ) -> Result<PromptDeliveryResult, CodexAdapterUnavailable> {
+    ) -> Result<BoundPartSubmission, CodexAdapterUnavailable> {
+        use crate::codex_turns::ReadsTurnReport;
         let params = Self::bound_turn_params(launch, intent);
         if launch.harness_kind != HarnessKind::Codex
             || intent.harness_kind != HarnessKind::Codex
@@ -1248,8 +1258,19 @@ impl SubmitsBoundCodexPart for CodexAdapter {
             // The first part is the thread's first turn, started on the idle
             // thread the TUI attached to; a later part follows the turn the
             // transcript showed completed.
-            session.request(4, "turn/start", params, self.timeout)?;
-            Ok(PromptDeliveryResult::Ambiguous(intent.clone()))
+            let started = session.request(4, "turn/start", params, self.timeout)?;
+            let opened_turn = started
+                .get("turn")
+                .and_then(ReadsTurnReport::turn_report)
+                .filter(|report| {
+                    report.codex_turn_status
+                        == crate::generated::turn_ledger::CodexTurnStatus::InProgress
+                })
+                .map(|report| report.codex_turn_id);
+            Ok(BoundPartSubmission {
+                prompt_delivery_result: PromptDeliveryResult::Ambiguous(intent.clone()),
+                opened_turn,
+            })
         })();
         session.stop_proxy();
         result
@@ -1382,8 +1403,7 @@ impl ReadsCodexTurnHistory for CodexAdapter {
                 ));
             }
             let status = read.pointer("/thread/status").cloned().unwrap_or_default();
-            let resting = crate::codex_turns::ReadsThreadStatus::thread_status(&status)
-                == Some(crate::codex_turns::ThreadStatus::Idle);
+            let resting = status.get("type").and_then(serde_json::Value::as_str) == Some("idle");
             let mut matched = Vec::new();
             let mut anchor_seen = anchor.is_none();
             let mut read_turns = 0_u64;
@@ -1605,13 +1625,16 @@ pub(crate) enum SubscriptionEnd {
 /// carries no model content. `early` holds the server requests and
 /// notifications that arrived while a request of its own was answered.
 /// `thread` is the one thread it is subscribed to, once known; `resumed`
-/// is the thread status the app-server answered its `thread/resume` with.
+/// is the app-server's `thread/resume` answer with the thread's newest
+/// turn, the cut its turn ledger is established by, and `terminals` the
+/// `thread/backgroundTerminals/list` answer read right after it.
 pub(crate) struct ThreadSubscription {
     pub(crate) proxy: ProxyChild,
     pub(crate) generation: u64,
     pub(crate) early: Vec<serde_json::Value>,
     pub(crate) thread: Option<String>,
     pub(crate) resumed: Option<serde_json::Value>,
+    pub(crate) terminals: Option<serde_json::Value>,
     timeout: Duration,
 }
 
@@ -1782,6 +1805,7 @@ impl SubscribesThread for CodexAdapter {
             early: Vec::new(),
             thread: None,
             resumed: None,
+            terminals: None,
             timeout: self.timeout,
         };
         let connected = (|| {
@@ -1828,15 +1852,35 @@ impl SubscribesThread for CodexAdapter {
     ) -> Result<ThreadSubscription, SubscriptionEnd> {
         self.probe_send_tool().map_err(SubscriptionEnd::Failed)?;
         let mut subscription = self.connect_experimental(generation, signals, inbox, notes)?;
-        match subscription.exchange(
-            inbox,
-            2,
-            "thread/resume",
-            serde_json::json!({ "threadId": thread, "excludeTurns": true }),
-        ) {
-            Ok(response) => {
+        // The answer is the thread as its listener holds it when it
+        // subscribes this connection, with its newest turn whole: the cut.
+        // The processes the app-server keeps for the thread are read after
+        // it on the same connection.
+        let subscribed = subscription
+            .exchange(
+                inbox,
+                2,
+                "thread/resume",
+                serde_json::json!({
+                    "threadId": thread,
+                    "excludeTurns": true,
+                    "initialTurnsPage": { "limit": 1, "sortDirection": "desc", "itemsView": "full" }
+                }),
+            )
+            .and_then(|resumed| {
+                let terminals = subscription.exchange(
+                    inbox,
+                    3,
+                    "thread/backgroundTerminals/list",
+                    serde_json::json!({ "threadId": thread }),
+                )?;
+                Ok((resumed, terminals))
+            });
+        match subscribed {
+            Ok((resumed, terminals)) => {
                 subscription.thread = Some(thread.to_owned());
-                subscription.resumed = response.pointer("/thread/status").cloned();
+                subscription.resumed = Some(resumed);
+                subscription.terminals = Some(terminals);
                 Ok(subscription)
             }
             Err(end) => {
@@ -2988,14 +3032,21 @@ mod tests {
                 r#"{"id":2,"result":{"thread":{"id":"thread-lean"},"model":"gpt-6-astra","reasoningEffort":"medium","instructionSources":[]}}"#,
             ),
             fake.websocket_frame(r#"{"id":3,"result":{}}"#),
-            fake.websocket_frame(r#"{"id":4,"result":{"turn":{"id":"turn-1"}}}"#),
+            fake.websocket_frame(
+                r#"{"id":4,"result":{"turn":{"id":"turn-1","status":"inProgress"}}}"#,
+            ),
         ];
         let (_directory, executable, record) = RecordingFakeProxy.install(&frames);
+        // The part's turn, as turn/start answers it, is the submission's
+        // own: the ledger opens it before any of its events arrive.
         assert_eq!(
             lean_adapter_at(executable, &launch)
                 .submit_bound_codex_part(&launch, &intent)
                 .unwrap(),
-            PromptDeliveryResult::Ambiguous(intent.clone())
+            BoundPartSubmission {
+                prompt_delivery_result: PromptDeliveryResult::Ambiguous(intent.clone()),
+                opened_turn: Some(crate::generated::turn_ledger::CodexTurnId("turn-1".into())),
+            }
         );
         let requests = record.requests(5);
         let methods = requests

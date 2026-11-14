@@ -420,7 +420,8 @@ fn an_idle_maintained_claude_flow_keeps_its_pane_and_stays_awake() {
 /// then leaves the seat as it is.
 #[test]
 fn an_idle_maintained_codex_flow_keeps_its_pane_and_stays_awake() {
-    use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
+    use super::codex_turns::idle;
+    use crate::codex_turns::SettlesRestingCodexSeats;
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.settled_agent()],
@@ -443,9 +444,7 @@ fn an_idle_maintained_codex_flow_keeps_its_pane_and_stays_awake() {
     // and a Maintained seat with nothing queued stays Idle.
     let thread = fixture.node().session_id;
     assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&thread.0, vec![TurnEvent::Status(ThreadStatus::Idle)]),
+        fixture.nexus.codex_events(&thread.0, vec![idle()]),
         Some(AtStop::Idle)
     );
     assert!(!closes(&fixture), "the idle seat keeps its pane");
@@ -520,7 +519,8 @@ fn an_idle_on_demand_claude_flow_closes_its_harness_and_keeps_its_address() {
 /// resting with nothing queued.
 #[test]
 fn an_idle_on_demand_codex_flow_closes_its_harness() {
-    use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
+    use super::codex_turns::idle;
+    use crate::codex_turns::SettlesRestingCodexSeats;
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.settled_agent()],
@@ -542,9 +542,7 @@ fn an_idle_on_demand_codex_flow_closes_its_harness() {
     // Test 4: the thread's rest settles the seat itself; it sleeps.
     let thread = fixture.node().session_id;
     assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&thread.0, vec![TurnEvent::Status(ThreadStatus::Idle)]),
+        fixture.nexus.codex_events(&thread.0, vec![idle()]),
         Some(AtStop::Slept(address(Model::Sol)))
     );
     assert!(closes(&fixture), "the idle seat's harness is closed");
@@ -7450,8 +7448,9 @@ pub(super) fn codex_seat_in_fresh_world(fixture: &mut NexusFixture) -> FreshWorl
 /// out at the thread's rest with nothing queued.
 #[test]
 fn a_codex_ordered_refresh_with_nothing_queued_is_carried_out_at_its_rest() {
+    use super::codex_turns::{completed, idle, started};
     use crate::Dispatches;
-    use crate::codex_turns::{SettlesRestingCodexSeats, TurnEvent};
+    use crate::codex_turns::SettlesRestingCodexSeats;
     use signal_flow::{Input, Output};
     let fixture = NexusFixture::new();
     let thread = codex_rest_seat(
@@ -7462,7 +7461,7 @@ fn a_codex_ordered_refresh_with_nothing_queued_is_carried_out_at_its_rest() {
     assert_eq!(
         fixture
             .nexus
-            .codex_events(&thread, vec![TurnEvent::Started("turn-1".into())]),
+            .codex_events(&thread, vec![idle(), started("turn-1")]),
         None,
         "a turn that starts is no rest"
     );
@@ -7472,7 +7471,7 @@ fn a_codex_ordered_refresh_with_nothing_queued_is_carried_out_at_its_rest() {
     ));
     let at_rest = fixture
         .nexus
-        .codex_events(&thread, vec![TurnEvent::Completed("turn-1".into())]);
+        .codex_events(&thread, vec![completed("turn-1")]);
     assert!(
         matches!(&at_rest, Some(AtStop::Refreshed(at)) if *at == address(Model::Sol)),
         "{at_rest:?}"
@@ -7488,7 +7487,8 @@ fn a_codex_ordered_refresh_with_nothing_queued_is_carried_out_at_its_rest() {
 /// spent. The rest answers the reap pending, never a refusal.
 #[test]
 fn a_codex_ordered_refresh_of_a_maintained_seat_starts_its_successor_at_its_rest() {
-    use crate::codex_turns::{SettlesRestingCodexSeats, TurnEvent};
+    use super::codex_turns::{completed, idle, started};
+    use crate::codex_turns::SettlesRestingCodexSeats;
     use crate::store::ordered_replacement::OrdersReplacements;
     use crate::store::pending_reap::RecordsPendingReaps;
     use crate::{Dispatches, store::ReadsFlowRows};
@@ -7497,10 +7497,9 @@ fn a_codex_ordered_refresh_of_a_maintained_seat_starts_its_successor_at_its_rest
     let world = codex_seat_in_fresh_world(&mut fixture);
     let at = address(Model::Sol);
     assert_eq!(
-        fixture.nexus.codex_events(
-            WORKING_CODEX_THREAD,
-            vec![TurnEvent::Started("turn-1".into())]
-        ),
+        fixture
+            .nexus
+            .codex_events(WORKING_CODEX_THREAD, vec![idle(), started("turn-1")]),
         None,
         "a turn that starts is no rest"
     );
@@ -7508,10 +7507,9 @@ fn a_codex_ordered_refresh_of_a_maintained_seat_starts_its_successor_at_its_rest
     assert!(matches!(ordered, Output::RefreshQueued(_)), "{ordered:?}");
     assert_eq!(world.claude_starts(), 0, "nothing starts while it works");
 
-    let at_rest = fixture.nexus.codex_events(
-        WORKING_CODEX_THREAD,
-        vec![TurnEvent::Completed("turn-1".into())],
-    );
+    let at_rest = fixture
+        .nexus
+        .codex_events(WORKING_CODEX_THREAD, vec![completed("turn-1")]);
     let Some(AtStop::ReapPending(pending)) = &at_rest else {
         panic!("{at_rest:?}; Herdr calls: {}", world.calls());
     };
@@ -7559,7 +7557,8 @@ fn a_codex_ordered_refresh_of_a_maintained_seat_starts_its_successor_at_its_rest
 /// rest with nothing queued.
 #[test]
 fn a_codex_seat_past_its_threshold_is_refreshed_at_its_rest_with_nothing_queued() {
-    use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
+    use super::codex_turns::idle;
+    use crate::codex_turns::SettlesRestingCodexSeats;
     use crate::store::SeedsRole;
     use crate::store::context::RecordsContextSize;
     let fixture = NexusFixture::new();
@@ -7588,9 +7587,7 @@ fn a_codex_seat_past_its_threshold_is_refreshed_at_its_rest_with_nothing_queued(
         .store
         .record_context_size("908786", 500)
         .unwrap();
-    let at_rest = fixture
-        .nexus
-        .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]);
+    let at_rest = fixture.nexus.codex_events(&thread, vec![idle()]);
     assert!(
         matches!(&at_rest, Some(AtStop::Refreshed(at)) if *at == address(Model::Sol)),
         "{at_rest:?}"
@@ -7601,20 +7598,17 @@ fn a_codex_seat_past_its_threshold_is_refreshed_at_its_rest_with_nothing_queued(
 /// rest: a second Status(Idle) while resting settles nothing.
 #[test]
 fn a_second_idle_status_of_a_resting_codex_seat_settles_nothing() {
-    use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
+    use super::codex_turns::idle;
+    use crate::codex_turns::SettlesRestingCodexSeats;
     let fixture = NexusFixture::new();
     let thread = codex_rest_seat(&fixture, None, vec![]);
     maintain(&fixture, address(Model::Sol));
     assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]),
+        fixture.nexus.codex_events(&thread, vec![idle()]),
         Some(AtStop::Idle)
     );
     assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]),
+        fixture.nexus.codex_events(&thread, vec![idle()]),
         None,
         "a second Status(Idle) while resting is no new rest"
     );
@@ -7628,7 +7622,8 @@ fn a_second_idle_status_of_a_resting_codex_seat_settles_nothing() {
 /// second Status(Idle) then settles nothing.
 #[test]
 fn a_warned_codex_seat_is_refreshed_at_the_rest_after_its_warning() {
-    use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
+    use super::codex_turns::{completed, idle, seen, started};
+    use crate::codex_turns::SettlesRestingCodexSeats;
     use crate::store::SeedsRole;
     use crate::store::handover_reminders::SchedulesHandoverReminders;
     const WORDS: &str = "Write your handover now.";
@@ -7677,9 +7672,7 @@ fn a_warned_codex_seat_is_refreshed_at_the_rest_after_its_warning() {
 
     // The rest that opens the warning: the warning is typed and the seat,
     // handed it, is in the turn it opens; it is not refreshed.
-    let warned_at = fixture
-        .nexus
-        .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]);
+    let warned_at = fixture.nexus.codex_events(&thread, vec![idle()]);
     assert_eq!(warned_at, Some(AtStop::Kept(KeptAtStop::InTurn)));
     let reminder = fixture
         .nexus
@@ -7697,12 +7690,15 @@ fn a_warned_codex_seat_is_refreshed_at_the_rest_after_its_warning() {
         "the warning is typed, never a native turn"
     );
 
-    // The warning's turn runs and ends: that rest refreshes the seat.
+    // The warning's turn runs, its user message the warning typed, and
+    // ends: that rest refreshes the seat.
+    let payload = super::codex_turns::typed_payload(&fixture.nexus, &address(Model::Sol));
     let refreshed_at = fixture.nexus.codex_events(
         &thread,
         vec![
-            TurnEvent::Started("turn-warned".into()),
-            TurnEvent::Completed("turn-warned".into()),
+            started("turn-warned"),
+            seen("turn-warned", "warning-item", &payload),
+            completed("turn-warned"),
         ],
     );
     assert_eq!(refreshed_at, Some(AtStop::Refreshed(address(Model::Sol))));
@@ -7714,9 +7710,7 @@ fn a_warned_codex_seat_is_refreshed_at_the_rest_after_its_warning() {
         flow_ethos::Past(vec![flow_ethos::FlowId("908786".into())])
     );
     assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]),
+        fixture.nexus.codex_events(&thread, vec![idle()]),
         None,
         "a second Status(Idle) of the refreshed seat settles nothing"
     );
@@ -7728,7 +7722,8 @@ fn a_warned_codex_seat_is_refreshed_at_the_rest_after_its_warning() {
 /// queue left empty and no native turn started.
 #[test]
 fn a_resting_codex_seat_with_work_queued_is_handed_the_oldest_request() {
-    use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
+    use super::codex_turns::idle;
+    use crate::codex_turns::SettlesRestingCodexSeats;
     use crate::store::SeedsRole;
     let mut fixture = NexusFixture::new();
     let queued = |id: &str, text: &str| signal_flow::QueueEntry {
@@ -7753,9 +7748,7 @@ fn a_resting_codex_seat_with_work_queued_is_handed_the_oldest_request() {
     let codex = super::send_tool::accepting_codex_endpoint(&mut fixture, "gpt-sol", &thread);
     assert!(fixture.typed().is_none(), "nothing typed before the rest");
 
-    let at_rest = fixture
-        .nexus
-        .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]);
+    let at_rest = fixture.nexus.codex_events(&thread, vec![idle()]);
     assert_eq!(at_rest, Some(AtStop::Drained(oldest)), "{at_rest:?}");
     let typed = fixture.typed().expect("the queue is typed into the pane");
     assert!(
@@ -7780,12 +7773,11 @@ fn a_resting_codex_seat_with_work_queued_is_handed_the_oldest_request() {
 /// stays Awake, its sleep alone declined, and is told nothing.
 #[test]
 fn an_on_demand_codex_seat_whose_successor_cannot_compose_stays_awake_untold() {
-    use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
+    use super::codex_turns::idle;
+    use crate::codex_turns::SettlesRestingCodexSeats;
     let fixture = NexusFixture::new();
     let thread = codex_rest_seat(&fixture, None, vec![]);
-    let at_rest = fixture
-        .nexus
-        .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]);
+    let at_rest = fixture.nexus.codex_events(&thread, vec![idle()]);
     assert_eq!(at_rest, Some(AtStop::Kept(KeptAtStop::SleepUnplaceable)));
     assert!(!closes(&fixture), "the seat stays Awake");
     assert!(fixture.typed().is_none(), "no successor-refused notice");
@@ -7795,269 +7787,34 @@ fn an_on_demand_codex_seat_whose_successor_cannot_compose_stays_awake_untold() {
     );
 }
 
-/// Test 9 (ruling 1): the first authoritative Resumed(Idle) after a Nexus
-/// start settles a Codex seat once; a re-subscription's Idle with no turn
-/// seen in between settles nothing; a turn seen running then a Resumed(Idle)
-/// does.
+/// Test 9, on the ledger: a cut settles a resting seat; a second cut of
+/// the same subscription settles nothing; a subscription's end keeps the
+/// seat from rest until the next subscription's cut, which settles it.
 #[test]
-fn the_first_resumed_idle_after_a_start_settles_a_codex_seat_once() {
-    use crate::codex_turns::{CodexTurns, ThreadStatus, TracksCodexTurns, TurnEvent};
-    let turns = CodexTurns::default();
-    let thread = "resumed-thread";
-    assert!(
-        turns
-            .observe(thread, TurnEvent::Resumed(ThreadStatus::Idle))
-            .rested
-    );
-    assert!(
-        !turns
-            .observe(thread, TurnEvent::Resumed(ThreadStatus::Idle))
-            .rested
-    );
-    turns.observe(thread, TurnEvent::Resumed(ThreadStatus::Unavailable));
-    assert!(
-        !turns
-            .observe(thread, TurnEvent::Resumed(ThreadStatus::Idle))
-            .rested,
-        "a reconnect's Idle after Unknown is no new rest"
-    );
-    turns.observe(thread, TurnEvent::Started("t1".into()));
-    assert!(
-        turns
-            .observe(thread, TurnEvent::Completed("t1".into()))
-            .rested
-    );
-    turns.observe(thread, TurnEvent::Resumed(ThreadStatus::Active));
-    assert!(
-        turns
-            .observe(thread, TurnEvent::Resumed(ThreadStatus::Idle))
-            .rested,
-        "a turn seen running, then Idle, is a rest"
-    );
-    // Through the Nexus: the first Resumed(Idle) settles the seat once.
+fn a_cut_settles_a_resting_codex_seat_and_a_new_subscription_s_cut_again() {
+    use super::codex_turns::idle;
     use crate::codex_turns::SettlesRestingCodexSeats;
+    use crate::generated::turn_ledger::LedgerEvent;
     let fixture = NexusFixture::new();
     let seat = codex_rest_seat(&fixture, None, vec![]);
     maintain(&fixture, address(Model::Sol));
     assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&seat, vec![TurnEvent::Resumed(ThreadStatus::Idle)]),
-        Some(AtStop::Idle)
+        fixture.nexus.codex_events(&seat, vec![idle()]),
+        Some(AtStop::Idle),
+        "the first cut rests the seat"
     );
+    assert_eq!(fixture.nexus.codex_events(&seat, vec![idle()]), None);
     assert_eq!(
         fixture
             .nexus
-            .codex_events(&seat, vec![TurnEvent::Resumed(ThreadStatus::Idle)]),
+            .codex_events(&seat, vec![LedgerEvent::SubscriptionEnded]),
         None
     );
-}
-
-/// primary-oumv, on CodexTurns: the turn a HardAbrupt cut short to be typed
-/// ends late and rests nothing; the turn the delivery started rests the
-/// thread. The cut turn's completion may follow the new turn's start, and
-/// a turn of no known id is cut as well.
-#[test]
-fn a_turn_flow_interrupts_to_deliver_is_no_rest_of_its_thread() {
-    use crate::codex_turns::{CodexTurns, ThreadStatus, ThreadTurn, TracksCodexTurns, TurnEvent};
-    use meta_signal_flow::InterruptWitness;
-    let turns = CodexTurns::default();
-
-    // The interrupt was seen taking: A's completion, interrupted, is late.
-    let thread = "cut-thread";
-    turns.observe(thread, TurnEvent::Started("a".into()));
-    turns.delivered(thread, &InterruptWitness::Observed);
-    let late = turns.observe(thread, TurnEvent::Interrupted("a".into()));
-    assert!(!late.rested, "the cut turn's end is no rest");
-    assert!(late.ended, "it is still a turn end");
-    assert_eq!(turns.turn(thread), ThreadTurn::Delivered);
-    assert!(
-        !turns
-            .observe(thread, TurnEvent::Status(ThreadStatus::Idle))
-            .rested,
-        "the idle after the cut turn is no rest either"
-    );
-    assert!(!turns.observe(thread, TurnEvent::Started("b".into())).rested);
-    assert_eq!(turns.turn(thread), ThreadTurn::Running(Some("b".into())));
-    assert!(
-        turns
-            .observe(thread, TurnEvent::Completed("b".into()))
-            .rested,
-        "the delivery's own turn rests the thread"
-    );
-
-    // A that ended on its own as the keys were pressed: the letter still
-    // starts the next turn, so A's completion is late however it reads.
-    let thread = "ended-as-pressed";
-    turns.observe(thread, TurnEvent::Started("a".into()));
-    turns.delivered(thread, &InterruptWitness::Observed);
-    assert!(
-        !turns
-            .observe(thread, TurnEvent::Completed("a".into()))
-            .rested
-    );
-    assert_eq!(turns.turn(thread), ThreadTurn::Delivered);
-
-    // A's completion read after B's start.
-    let thread = "late-after-start";
-    turns.observe(thread, TurnEvent::Started("a".into()));
-    turns.delivered(thread, &InterruptWitness::Observed);
-    turns.observe(thread, TurnEvent::Started("b".into()));
-    assert!(
-        !turns
-            .observe(thread, TurnEvent::Interrupted("a".into()))
-            .rested
-    );
-    assert_eq!(turns.turn(thread), ThreadTurn::Running(Some("b".into())));
-    assert!(
-        turns
-            .observe(thread, TurnEvent::Completed("b".into()))
-            .rested
-    );
-
-    // A's completion read after B's `active` status, before B's start.
-    let thread = "late-after-active";
-    turns.observe(thread, TurnEvent::Started("a".into()));
-    turns.delivered(thread, &InterruptWitness::Observed);
-    turns.observe(thread, TurnEvent::Status(ThreadStatus::Active));
-    assert!(
-        !turns
-            .observe(thread, TurnEvent::Interrupted("a".into()))
-            .rested
-    );
-    turns.observe(thread, TurnEvent::Started("b".into()));
-    assert!(
-        turns
-            .observe(thread, TurnEvent::Completed("b".into()))
-            .rested
-    );
-
-    // The thread was shown in a turn only by its status: the turn that
-    // completes before any starts is the cut one.
-    let thread = "unnamed";
-    turns.observe(thread, TurnEvent::Resumed(ThreadStatus::Active));
-    turns.delivered(thread, &InterruptWitness::Observed);
-    assert!(
-        !turns
-            .observe(thread, TurnEvent::Interrupted("a".into()))
-            .rested
-    );
-    assert_eq!(turns.turn(thread), ThreadTurn::Delivered);
-    turns.observe(thread, TurnEvent::Started("b".into()));
-    assert!(
-        turns
-            .observe(thread, TurnEvent::Completed("b".into()))
-            .rested
-    );
-
-    // An interrupt not seen taking: the turn's own `interrupted` says it
-    // was cut short.
-    let thread = "unobserved-cut";
-    turns.observe(thread, TurnEvent::Started("a".into()));
-    turns.delivered(thread, &InterruptWitness::Unobserved);
-    assert!(
-        !turns
-            .observe(thread, TurnEvent::Interrupted("a".into()))
-            .rested
-    );
-    turns.observe(thread, TurnEvent::Started("b".into()));
-    assert!(
-        turns
-            .observe(thread, TurnEvent::Completed("b".into()))
-            .rested
-    );
-}
-
-/// primary-oumv, on CodexTurns: a plain letter typed after the cut leaves
-/// the cut turn still to end late; a cut turn of no known id is told only
-/// until a turn starts, so a letter steered into that turn rests at its end.
-#[test]
-fn a_cut_turn_outlives_a_steered_letter_and_an_unnamed_one_ends_at_a_start() {
-    use crate::codex_turns::{CodexTurns, ThreadStatus, TracksCodexTurns, TurnEvent};
-    use meta_signal_flow::InterruptWitness;
-    let turns = CodexTurns::default();
-    let thread = "cut-then-steered";
-    turns.observe(thread, TurnEvent::Started("a".into()));
-    turns.delivered(thread, &InterruptWitness::Observed);
-    turns.delivered(thread, &InterruptWitness::NotRequested);
-    assert!(
-        !turns
-            .observe(thread, TurnEvent::Interrupted("a".into()))
-            .rested
-    );
-    turns.observe(thread, TurnEvent::Started("b".into()));
-    assert!(
-        turns
-            .observe(thread, TurnEvent::Completed("b".into()))
-            .rested
-    );
-
-    let thread = "unnamed-then-steered";
-    turns.observe(thread, TurnEvent::Resumed(ThreadStatus::Active));
-    turns.delivered(thread, &InterruptWitness::Observed);
-    turns.observe(thread, TurnEvent::Started("b".into()));
-    turns.delivered(thread, &InterruptWitness::NotRequested);
-    assert!(
-        turns
-            .observe(thread, TurnEvent::Completed("b".into()))
-            .rested
-    );
-}
-
-/// primary-oumv control, on CodexTurns: a letter steered into the running
-/// turn (no interrupt pressed), or one an unseen interrupt left steered into
-/// a turn that then ran to its end, rests the thread at that turn's
-/// completion.
-#[test]
-fn a_letter_steered_into_the_running_turn_rests_at_its_completion() {
-    use crate::codex_turns::{CodexTurns, ThreadTurn, TracksCodexTurns, TurnEvent};
-    use meta_signal_flow::InterruptWitness;
-    let turns = CodexTurns::default();
-    let thread = "steered";
-    turns.observe(thread, TurnEvent::Started("a".into()));
-    turns.delivered(thread, &InterruptWitness::NotRequested);
-    assert!(
-        turns
-            .observe(thread, TurnEvent::Completed("a".into()))
-            .rested
-    );
-    assert_eq!(turns.turn(thread), ThreadTurn::Resting);
-
-    let thread = "unobserved-steered";
-    turns.observe(thread, TurnEvent::Started("a".into()));
-    turns.delivered(thread, &InterruptWitness::Unobserved);
-    assert!(
-        turns
-            .observe(thread, TurnEvent::Completed("a".into()))
-            .rested
-    );
-    assert_eq!(turns.turn(thread), ThreadTurn::Resting);
-}
-
-/// A `turn/completed` whose turn reads `interrupted` is read as an
-/// interrupted turn's end; any other status as a completion.
-#[test]
-fn a_turn_completion_reads_its_status() {
-    use crate::codex_turns::{ReadsTurnEvent, TurnEvent};
-    let completed = |status: &str| {
-        serde_json::json!({
-            "method": "turn/completed",
-            "params": {
-                "threadId": "t",
-                "turn": { "id": "a", "items": [], "status": status, "error": null }
-            }
-        })
-        .turn_event("t")
-    };
+    assert!(!fixture.nexus.codex_resting("908786"));
     assert_eq!(
-        completed("interrupted"),
-        Some(TurnEvent::Interrupted("a".into()))
+        fixture.nexus.codex_events(&seat, vec![idle()]),
+        Some(AtStop::Idle)
     );
-    assert_eq!(
-        completed("completed"),
-        Some(TurnEvent::Completed("a".into()))
-    );
-    assert_eq!(completed("failed"), Some(TurnEvent::Completed("a".into())));
 }
 
 /// Every Herdr operation the fixture logged, in order.
@@ -8084,7 +7841,8 @@ fn codex_seat_in_a_turn(
     fixture: &mut NexusFixture,
     queue: Vec<QueueEntry>,
 ) -> (String, super::send_tool::FakeAppServer) {
-    use crate::codex_turns::{SettlesRestingCodexSeats, TurnEvent};
+    use super::codex_turns::{idle, started};
+    use crate::codex_turns::SettlesRestingCodexSeats;
     use crate::store::SeedsRole;
     let thread = codex_rest_seat(fixture, Some(meta_signal_flow::Continuity::OnDemand), queue);
     fixture.accept_pane_operations(
@@ -8110,26 +7868,28 @@ fn codex_seat_in_a_turn(
     assert_eq!(
         fixture
             .nexus
-            .codex_events(&thread, vec![TurnEvent::Started("turn-a".into())]),
+            .codex_events(&thread, vec![idle(), started("turn-a")]),
         None,
         "a turn that starts is no rest"
     );
     (thread, codex)
 }
 
-/// primary-oumv, through the Nexus: an OnDemand Codex seat in turn A is
-/// sent a HardAbrupt, which interrupts it and is typed. A's completion,
-/// interrupted, neither sleeps the seat nor marks it resting, and a send
-/// from its thread is sent as its Address. B, the turn the letter started,
-/// ends with nothing queued, and the seat sleeps.
+/// primary-k7jy, afc2ca through the Nexus: an OnDemand Codex seat in turn
+/// A is sent a HardAbrupt, which interrupts it and is typed. A's end,
+/// interrupted, neither sleeps the seat nor rests it: the letter waits for
+/// its receipt. A send from its thread is sent as its Address. B, the turn
+/// that carries the letter's user message, ends with nothing queued, and
+/// the seat sleeps.
 #[test]
-fn a_codex_turn_flow_interrupts_to_deliver_does_not_sleep_its_seat() {
-    use super::send_tool::RunsFakeAppServer;
-    use crate::codex_turns::{SettlesRestingCodexSeats, ThreadTurn, TracksCodexTurns, TurnEvent};
+fn a_hard_abrupt_after_a_steered_letter_does_not_sleep_its_seat() {
+    use super::codex_turns::{completed, interrupted, seen, started, typed_payload};
+    use crate::codex_turns::SettlesRestingCodexSeats;
     use crate::generated::send_tool::{HandlesSendCall, SendOutcome};
     use crate::store::send_call::KeepsSendCalls;
     let mut fixture = NexusFixture::new();
     let (thread, codex) = codex_seat_in_a_turn(&mut fixture, vec![hard_abrupt_queued()]);
+    use super::send_tool::RunsFakeAppServer;
 
     fixture.nexus.wake_due(address(Model::Sol));
     let operations = herdr_operations(&fixture);
@@ -8141,17 +7901,14 @@ fn a_codex_turn_flow_interrupts_to_deliver_does_not_sleep_its_seat() {
     assert!(typed.contains("Stop and read this."), "{typed}");
     assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
     assert!(codex.queued_turn_texts().is_empty());
-    assert_eq!(
-        fixture.nexus.codex_turns.turn(&thread),
-        ThreadTurn::Delivered
-    );
+    let payload = typed_payload(&fixture.nexus, &address(Model::Sol));
 
-    // A's late end: interrupted, read once the delivery let the gate go.
+    // A's end: interrupted, read once the delivery let the gate go.
     let at_cut = fixture
         .nexus
-        .codex_events(&thread, vec![TurnEvent::Interrupted("turn-a".into())]);
+        .codex_events(&thread, vec![interrupted("turn-a")]);
     assert_eq!(at_cut, None, "the cut turn's end settles nothing");
-    assert_ne!(fixture.nexus.codex_turns.turn(&thread), ThreadTurn::Resting);
+    assert!(!fixture.nexus.codex_resting("908786"));
     assert!(!closes(&fixture), "the seat is not closed");
     assert_eq!(
         stored(&fixture, Model::Sol).state,
@@ -8172,11 +7929,11 @@ fn a_codex_turn_flow_interrupts_to_deliver_does_not_sleep_its_seat() {
             if accepted.sent_by == SentBy::Sender(address(Model::Sol))),
         "{sent:?}"
     );
-
     assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&thread, vec![TurnEvent::Started("turn-b".into())]),
+        fixture.nexus.codex_events(
+            &thread,
+            vec![started("turn-b"), seen("turn-b", "item-b", &payload)]
+        ),
         None
     );
     fixture.accept_pane_operations(
@@ -8186,19 +7943,20 @@ fn a_codex_turn_flow_interrupts_to_deliver_does_not_sleep_its_seat() {
     assert_eq!(
         fixture
             .nexus
-            .codex_events(&thread, vec![TurnEvent::Completed("turn-b".into())]),
+            .codex_events(&thread, vec![completed("turn-b")]),
         Some(AtStop::Slept(address(Model::Sol))),
-        "the delivery's own turn rests the seat, and it sleeps"
+        "the letter's own turn rests the seat, and it sleeps"
     );
     assert!(closes(&fixture));
     assert_eq!(stored(&fixture, Model::Sol).state, State::Asleep);
 }
 
-/// primary-oumv, the same through the Nexus with A's completion read after
-/// B's start: neither A's end nor B's start rests the seat; B's end does.
+/// primary-k7jy, the same with A's end read after B's start: neither A's
+/// end, B's start nor the letter's receipt rests the seat; B's end does.
 #[test]
-fn a_cut_turn_whose_end_follows_the_next_start_does_not_sleep_its_seat() {
-    use crate::codex_turns::{SettlesRestingCodexSeats, ThreadTurn, TracksCodexTurns, TurnEvent};
+fn a_hard_abrupt_whose_cut_turn_ends_after_the_next_start_does_not_sleep_its_seat() {
+    use super::codex_turns::{completed, interrupted, seen, started, typed_payload};
+    use crate::codex_turns::SettlesRestingCodexSeats;
     let mut fixture = NexusFixture::new();
     let (thread, _codex) = codex_seat_in_a_turn(&mut fixture, vec![hard_abrupt_queued()]);
     fixture.nexus.wake_due(address(Model::Sol));
@@ -8207,21 +7965,19 @@ fn a_cut_turn_whose_end_follows_the_next_start_does_not_sleep_its_seat() {
             .typed()
             .is_some_and(|typed| typed.contains("Stop and read this."))
     );
-
+    let payload = typed_payload(&fixture.nexus, &address(Model::Sol));
     assert_eq!(
         fixture.nexus.codex_events(
             &thread,
             vec![
-                TurnEvent::Started("turn-b".into()),
-                TurnEvent::Interrupted("turn-a".into()),
+                started("turn-b"),
+                interrupted("turn-a"),
+                seen("turn-b", "item-b", &payload),
             ]
         ),
         None
     );
-    assert_eq!(
-        fixture.nexus.codex_turns.turn(&thread),
-        ThreadTurn::Running(Some("turn-b".into()))
-    );
+    assert!(!fixture.nexus.codex_resting("908786"));
     assert!(!closes(&fixture));
     fixture.accept_pane_operations(
         vec![fixture.settled_agent()],
@@ -8230,18 +7986,19 @@ fn a_cut_turn_whose_end_follows_the_next_start_does_not_sleep_its_seat() {
     assert_eq!(
         fixture
             .nexus
-            .codex_events(&thread, vec![TurnEvent::Completed("turn-b".into())]),
+            .codex_events(&thread, vec![completed("turn-b")]),
         Some(AtStop::Slept(address(Model::Sol)))
     );
 }
 
-/// primary-oumv control, through the Nexus: a MiddleAbrupt typed into the
-/// seat's running turn A presses no interrupt and is steered into A; A's
-/// completion ends the delivered work, and with nothing queued the seat
-/// sleeps.
+/// primary-k7jy: a MiddleAbrupt typed into the seat's running turn A
+/// presses no interrupt and is steered into A, its user message there; A's
+/// end rests the seat, and with nothing queued it sleeps. A letter with no
+/// receipt keeps the seat: A's end alone rests nothing.
 #[test]
-fn a_letter_steered_into_a_codex_turn_sleeps_its_seat_at_that_turn_end() {
-    use crate::codex_turns::{SettlesRestingCodexSeats, ThreadTurn, TracksCodexTurns, TurnEvent};
+fn a_steered_letter_sleeps_its_seat_at_its_turn_end_only_with_its_receipt() {
+    use super::codex_turns::{completed, seen, typed_payload};
+    use crate::codex_turns::SettlesRestingCodexSeats;
     let mut fixture = NexusFixture::new();
     let mut steered = hard_abrupt_queued();
     steered.message = Message::MiddleAbrupt(Request::Notice("Read this next.".into()));
@@ -8258,11 +8015,35 @@ fn a_letter_steered_into_a_codex_turn_sleeps_its_seat_at_that_turn_end() {
             .typed()
             .is_some_and(|typed| typed.contains("Read this next."))
     );
-    assert_eq!(
-        fixture.nexus.codex_turns.turn(&thread),
-        ThreadTurn::Delivered
-    );
+    let payload = typed_payload(&fixture.nexus, &address(Model::Sol));
+    assert!(!fixture.nexus.codex_resting("908786"));
 
+    fixture.accept_pane_operations(
+        vec![fixture.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    assert_eq!(
+        fixture.nexus.codex_events(
+            &thread,
+            vec![seen("turn-a", "item-a", &payload), completed("turn-a")]
+        ),
+        Some(AtStop::Slept(address(Model::Sol))),
+        "the turn the letter was steered into rests the seat"
+    );
+    assert!(closes(&fixture));
+}
+
+/// primary-k7jy: a letter whose receipt never comes keeps its seat awake
+/// past its turn's end; nothing interrupts it, and the seat is not closed.
+#[test]
+fn a_letter_without_a_receipt_keeps_its_seat() {
+    use super::codex_turns::completed;
+    use crate::codex_turns::SettlesRestingCodexSeats;
+    let mut fixture = NexusFixture::new();
+    let mut steered = hard_abrupt_queued();
+    steered.message = Message::MiddleAbrupt(Request::Notice("Read this next.".into()));
+    let (thread, _codex) = codex_seat_in_a_turn(&mut fixture, vec![steered]);
+    fixture.nexus.wake_due(address(Model::Sol));
     fixture.accept_pane_operations(
         vec![fixture.settled_agent()],
         PromptFixture::Prompted("w1:p3"),
@@ -8270,9 +8051,125 @@ fn a_letter_steered_into_a_codex_turn_sleeps_its_seat_at_that_turn_end() {
     assert_eq!(
         fixture
             .nexus
-            .codex_events(&thread, vec![TurnEvent::Completed("turn-a".into())]),
-        Some(AtStop::Slept(address(Model::Sol))),
-        "the turn the letter was steered into rests the seat"
+            .codex_events(&thread, vec![completed("turn-a")]),
+        None
+    );
+    assert!(!fixture.nexus.codex_resting("908786"));
+    assert!(!closes(&fixture));
+    assert_eq!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(flow_ethos::FlowId("908786".into()))
+    );
+}
+
+/// primary-k7jy, F2: the first turn, opened from turn/start's answer, is
+/// kept by a stale cut that shows the thread idle: the OnDemand seat does
+/// not sleep, and sleeps at that turn's end.
+#[test]
+fn a_stale_resume_idle_after_the_first_turn_started_does_not_sleep() {
+    use super::codex_turns::{completed, idle, started};
+    use crate::codex_turns::SettlesRestingCodexSeats;
+    let fixture = NexusFixture::new();
+    let thread = codex_rest_seat(
+        &fixture,
+        Some(meta_signal_flow::Continuity::OnDemand),
+        vec![],
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .codex_events(&thread, vec![started("turn-1"), idle()]),
+        None,
+        "a cut that does not list the turn keeps it"
+    );
+    assert!(!closes(&fixture));
+    assert_eq!(
+        fixture
+            .nexus
+            .codex_events(&thread, vec![completed("turn-1")]),
+        Some(AtStop::Slept(address(Model::Sol)))
+    );
+}
+
+/// primary-k7jy: an OnDemand Codex seat with its turn open is kept, a
+/// refresh ordered for it included: the order waits for the turn's end,
+/// and a cut that lists the turn running settles nothing.
+#[test]
+fn an_on_demand_codex_seat_with_its_turn_open_is_kept() {
+    use super::codex_turns::{completed, cut, idle, started};
+    use crate::Dispatches;
+    use crate::codex_turns::SettlesRestingCodexSeats;
+    use crate::generated::turn_ledger::CodexTurnStatus;
+    use signal_flow::{Input, Output};
+    let fixture = NexusFixture::new();
+    let thread = codex_rest_seat(
+        &fixture,
+        Some(meta_signal_flow::Continuity::OnDemand),
+        vec![],
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .codex_events(&thread, vec![idle(), started("turn-1")]),
+        None
+    );
+    assert!(matches!(
+        fixture.nexus.dispatch(Input::Refresh(address(Model::Sol))),
+        Output::RefreshQueued(_)
+    ));
+    assert_eq!(
+        fixture.nexus.codex_events(
+            &thread,
+            vec![cut(&[("turn-1", CodexTurnStatus::InProgress)])]
+        ),
+        None
+    );
+    assert!(!closes(&fixture), "a refresh never closes a working seat");
+    let at_rest = fixture
+        .nexus
+        .codex_events(&thread, vec![completed("turn-1")]);
+    assert!(
+        matches!(&at_rest, Some(AtStop::Refreshed(at)) if *at == address(Model::Sol)),
+        "{at_rest:?}"
     );
     assert!(closes(&fixture));
+}
+
+/// primary-k7jy: an end that reaches below the ledger's watermark is
+/// never taken for rest: with retention 0 a late repeat of an ended turn
+/// leaves the seat unreconciled until the next cut, which settles it.
+#[test]
+fn retention_exceeded_is_logged_and_reconciles() {
+    use super::codex_turns::{completed, idle, started};
+    use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
+    let fixture = NexusFixture::new();
+    let thread = codex_rest_seat(&fixture, None, vec![]);
+    maintain(&fixture, address(Model::Sol));
+    fixture
+        .nexus
+        .codex_turns
+        .retain(meta_signal_flow::TurnRetentionBound(0));
+    assert_eq!(
+        fixture
+            .nexus
+            .codex_events(&thread, vec![idle(), started("turn-1")]),
+        None
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .codex_events(&thread, vec![completed("turn-1")]),
+        Some(AtStop::Idle)
+    );
+    assert_eq!(
+        fixture.nexus.codex_events(&thread, vec![started("turn-1")]),
+        None,
+        "a start below the watermark is no turn and no rest"
+    );
+    assert!(!fixture.nexus.codex_resting("908786"));
+    assert_eq!(
+        fixture.nexus.codex_events(&thread, vec![idle()]),
+        Some(AtStop::Idle),
+        "the next cut reconciles the ledger"
+    );
 }

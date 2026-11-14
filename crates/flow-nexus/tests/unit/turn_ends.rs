@@ -3,12 +3,14 @@
 //! Stop in its own session or a Codex thread's turn completed, and nothing
 //! for any other event.
 
+use super::codex_turns::{completed, idle, started};
 use super::waking::{
     CLAUDE_SEAT, address, background_task, claude_agent, claude_seat, claude_stop, claude_stop_with,
 };
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::Dispatches;
-use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
+use crate::codex_turns::SettlesRestingCodexSeats;
+use crate::generated::turn_ledger::LedgerEvent;
 use crate::reporting::RecordsReports;
 use crate::store::metaflow::SeedsMetaflow;
 use crate::store::{FlowStore, ReadsFlowRows};
@@ -76,7 +78,7 @@ fn report(fixture: &NexusFixture, event: Event) {
     );
 }
 
-fn codex(fixture: &NexusFixture, events: Vec<TurnEvent>) {
+fn codex(fixture: &NexusFixture, events: Vec<LedgerEvent>) {
     fixture.nexus.codex_events(CODEX_THREAD, events);
 }
 
@@ -170,12 +172,13 @@ fn a_turn_end_subscriber_receives_the_state_on_open_then_each_turn_end_and_nothi
                 background_work: signal_flow::BackgroundWork(vec![]),
             }),
         );
-        codex(&fixture, vec![TurnEvent::Started("turn-1".into())]);
-        codex(&fixture, vec![TurnEvent::Completed("turn-1".into())]);
+        codex(&fixture, vec![idle(), started("turn-1")]);
+        codex(&fixture, vec![completed("turn-1")]);
         turn_end(next(), CODEX_SEAT, Model::Luna, HarnessKind::Codex);
 
-        codex(&fixture, vec![TurnEvent::Completed("turn-1".into())]);
-        codex(&fixture, vec![TurnEvent::Status(ThreadStatus::Idle)]);
+        // A repeated end and a cut end no turn.
+        codex(&fixture, vec![completed("turn-1")]);
+        codex(&fixture, vec![idle()]);
         report(&fixture, claude_stop(&fixture));
         turn_end(next(), CLAUDE_SEAT, Model::Sol, HarnessKind::Claude);
 
@@ -189,13 +192,7 @@ fn a_turn_end_subscriber_receives_the_state_on_open_then_each_turn_end_and_nothi
         );
         let claude = turn_end(next(), CLAUDE_SEAT, Model::Sol, HarnessKind::Claude);
 
-        codex(
-            &fixture,
-            vec![
-                TurnEvent::Started("turn-2".into()),
-                TurnEvent::Completed("turn-2".into()),
-            ],
-        );
+        codex(&fixture, vec![started("turn-2"), completed("turn-2")]);
         let codex_end = turn_end(next(), CODEX_SEAT, Model::Luna, HarnessKind::Codex);
 
         drop(goes);

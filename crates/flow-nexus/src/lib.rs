@@ -1,4 +1,9 @@
 //! Flow Nexus dispatches typed ordinary and privileged Signal requests.
+// signal-flow 64's CompositionRefusal carries RecoveryPredecessorMismatch
+// whole, two Addresses and three FlowIds, as the contract spells it: every
+// error that holds a CompositionRefusal (CompositionError, an operation's
+// Failed) is that wide, and is returned as it is.
+#![allow(clippy::result_large_err)]
 
 use crate::store::ManagesMetaflowState;
 use crate::store::ReadsFlowMemory;
@@ -495,8 +500,12 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
 
     // Off the gate: the refresh takes it for each of its steps.
     fn refresh(&self, address: &signal_flow::Address) -> Result<signal_flow::Refreshed, Output> {
+        use crate::caller::ReadsRefreshCaller;
         use crate::waking::RefreshesMetaflows;
-        match self.nexus.refresh(address) {
+        let caller = self
+            .nexus
+            .origin_refresh_caller(self.origin.clone(), address);
+        match self.nexus.refresh(address, &caller) {
             Output::Refreshed(refreshed) => Ok(refreshed),
             other => Err(other),
         }
@@ -1326,7 +1335,11 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         address: &signal_flow::Address,
     ) -> Result<signal_flow::Refreshed, meta_signal_flow::Output> {
         use crate::waking::RefreshesMetaflows;
-        match self.nexus.refresh(address).into_meta() {
+        // A meta peer is no flow of the Address: it refreshes the current
+        // flow.
+        let caller =
+            crate::generated::operation::RefreshCaller::Elsewhere(signal_flow::Origin::Unbound);
+        match self.nexus.refresh(address, &caller).into_meta() {
             meta_signal_flow::Output::Refreshed(refreshed) => Ok(refreshed),
             other => Err(other),
         }
@@ -1745,6 +1758,15 @@ impl AppliesConfiguration for RunningNexus {
         if composing_changed {
             self.composer
                 .replace(configured.composer(self.store.clone()));
+        }
+        // Every Codex thread's ledger keeps the configured retention from
+        // now on.
+        if before.is_none_or(|before| {
+            before.configured_ended_turn_retention != now.configured_ended_turn_retention
+        }) {
+            use crate::codex_turns::TracksCodexTurns;
+            self.codex_turns
+                .retain(now.configured_ended_turn_retention.0);
         }
         Ok(())
     }
@@ -2498,6 +2520,13 @@ trait DispatchesSerially {
     /// Restart, a bind, a delivery, a Cancel, a Clear, a Push) runs off it,
     /// as a wake does.
     fn dispatch_serially(&self, query: Input, origin: Origin) -> Output;
+    /// A Refresh from the caller read off its connection, off the gate as
+    /// any Refresh is dispatched.
+    fn dispatch_refresh(
+        &self,
+        address: signal_flow::Address,
+        caller: crate::generated::operation::RefreshCaller,
+    ) -> Output;
     fn dispatch_meta_serially(
         &self,
         query: meta_signal_flow::Input,
@@ -2506,6 +2535,27 @@ trait DispatchesSerially {
 }
 
 impl DispatchesSerially for RunningNexus {
+    fn dispatch_refresh(
+        &self,
+        address: signal_flow::Address,
+        caller: crate::generated::operation::RefreshCaller,
+    ) -> Output {
+        use crate::waking::RefreshesMetaflows;
+        let response = self.refresh(&address, &caller);
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Err(error) =
+            store::request_id_upgrade::RunsRequestIdAnnouncements::run_request_id_announcements(
+                &*self.store,
+            )
+        {
+            eprintln!("flow-nexus: request-id announcement pass failed: {error}");
+        }
+        response
+    }
+
     fn dispatch_serially(&self, query: Input, origin: Origin) -> Output {
         if let Input::Refresh(_)
         | Input::Replace(_)
@@ -2792,6 +2842,7 @@ mod tests {
     use crate::herdr::ReadsHerdrPanes;
     use crate::live::{HoldsLiveValue, Live};
     mod admission;
+    pub(crate) mod codex_turns;
     mod configuring;
     mod counters;
     mod curriculum;

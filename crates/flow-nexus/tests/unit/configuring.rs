@@ -655,8 +655,9 @@ fn each_family_is_its_last_declaration() {
             configured_harness_hook: meta_signal_flow::ConfiguredHarnessHook(
                 meta_signal_flow::HarnessHookConfiguration::Unconfigured
             ),
-            configured_context_warning_policies:
-                meta_signal_flow::ConfiguredContextWarningPolicies(Vec::new()),
+            configured_context_warning_policies: meta_signal_flow::ConfiguredContextWarningPolicies(
+                Vec::new()
+            ),
             configured_harness_hook_events: meta_signal_flow::ConfiguredHarnessHookEvents(
                 Vec::new()
             ),

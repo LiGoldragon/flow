@@ -63,10 +63,10 @@ pub(crate) use crate::generated::memory::{
     FlowStoreConfiguration, FlowStoreState, NextFlowNumber, StoredLaunchAttempt,
     StoredMetaDefaultMinutesConfiguration, StoredMetaHarnessFlagsConfiguration,
     StoredMetaHarnessHookConfiguration, StoredMetaHeartbeatConfiguration,
-    StoredMetaTurnRetentionConfiguration,
     StoredMetaInvestigationConfiguration, StoredMetaModelConfiguration,
     StoredMetaProtectedAddressConfiguration, StoredMetaRequestPolicyConfiguration,
-    StoredMetaThresholdConfiguration, StoredMetaflow, StoredMetaflowLock, StoredRole,
+    StoredMetaThresholdConfiguration, StoredMetaTurnRetentionConfiguration, StoredMetaflow,
+    StoredMetaflowLock, StoredRole,
 };
 use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
@@ -1935,8 +1935,9 @@ impl CompletesSnapshot for ConfiguredFamilies {
             // The context-warning, hook-event and recovery-text families of
             // meta-signal-flow 80 to 82 are the warning lane's; this Flow
             // holds none of them and reports them empty.
-            configured_context_warning_policies:
-                meta_signal_flow::ConfiguredContextWarningPolicies(Vec::new()),
+            configured_context_warning_policies: meta_signal_flow::ConfiguredContextWarningPolicies(
+                Vec::new(),
+            ),
             configured_harness_hook_events: meta_signal_flow::ConfiguredHarnessHookEvents(
                 Vec::new(),
             ),

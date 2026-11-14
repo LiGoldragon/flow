@@ -38,7 +38,9 @@ use crate::codex::{
     CodexAdapter, ExchangesOnSubscription, ProxyEvent, ResponderSignal, SelectsCodexEndpoint,
     SubscribesThread, SubscriptionEnd, ThreadConnection, ThreadSubscription,
 };
-use crate::codex_turns::{ReadsThreadStatus, ReadsTurnEvent, SettlesRestingCodexSeats, TurnEvent};
+use crate::codex_turns::{
+    ReadsLedgerEvents, ReadsThreadCut, SettlesRestingCodexSeats, TracksCodexTurns,
+};
 use crate::compacting::{ReadsCodexContextSignal, WatchesCompactions};
 use crate::event_wait::{NameWatch, WatchesName};
 use crate::generated::send_tool::{
@@ -46,6 +48,7 @@ use crate::generated::send_tool::{
     ReadsToolCall, SendArguments, SendCall, SendInvocation, SendKind, SendOutcome, SendPriority,
     SendRefusal, ToolCall, ToolCallCarrying, ToolCallKey, ToolName,
 };
+use crate::generated::turn_ledger::{LedgerEvent, ThreadStanding};
 use crate::launching::NamesTopic;
 use crate::live::HoldsLiveValue;
 use crate::sending::{AdmitsSendPayload, MintsId};
@@ -772,19 +775,29 @@ impl RespondsToSendCalls for RunningNexus {
                             })
                             .is_ok()
                     });
-                    // The thread's status as the resume answered it: newer
-                    // than every event that came before the answer.
-                    if let Some(status) = subscription
+                    // The cut the resume answered, then the processes the
+                    // app-server keeps for the thread: they establish the
+                    // thread's ledger, every later event of this connection
+                    // reaching it after them.
+                    let mut cut = Vec::new();
+                    if let Some(resumed) = subscription
                         .resumed
                         .take()
-                        .and_then(|status| status.thread_status())
+                        .and_then(|resumed| resumed.thread_cut())
                     {
-                        self.codex_events(thread, vec![TurnEvent::Resumed(status)]);
+                        cut.push(LedgerEvent::Cut(resumed));
                     }
+                    if let Some(terminals) = subscription.terminals.take() {
+                        cut.push(LedgerEvent::BackgroundTerminals(
+                            terminals.background_terminals(),
+                        ));
+                    }
+                    self.codex_events(thread, cut);
                     while open {
                         match subscription.next_event(&inbox, None) {
                             Err(SubscriptionEnd::Stopped) => {
                                 subscription.close();
+                                self.codex_events(thread, vec![LedgerEvent::SubscriptionEnded]);
                                 return;
                             }
                             Err(SubscriptionEnd::WorkEnded) => {}
@@ -805,9 +818,11 @@ impl RespondsToSendCalls for RunningNexus {
                             }
                         }
                     }
-                    // The connection closed: the next attempt is made at
+                    // The connection closed: the ledger waits for the next
+                    // subscription's cut, and the next attempt is made at
                     // once, its own watch armed first.
                     subscription.close();
+                    self.codex_events(thread, vec![LedgerEvent::SubscriptionEnded]);
                 }
             }
         }
@@ -818,11 +833,19 @@ impl RespondsToSendCalls for RunningNexus {
         subscription: &mut ThreadSubscription,
         request: serde_json::Value,
     ) -> Result<(), crate::codex::CodexAdapterUnavailable> {
-        if let Some(thread) = subscription.thread.clone()
-            && let Some(event) = request.turn_event(&thread)
-        {
-            self.codex_events(&thread, vec![event]);
-            return Ok(());
+        if let Some(thread) = subscription.thread.clone() {
+            let events = request.ledger_events(&thread);
+            if !events.is_empty() {
+                self.codex_events(&thread, events);
+                // A fact below the ledger's watermark: a new cut is taken
+                // on a new subscription.
+                if self.codex_turns.standing(&thread) == ThreadStanding::Unreconciled {
+                    return Err(crate::codex::CodexAdapterUnavailable::Protocol(
+                        "the thread's turn ledger takes a new cut".into(),
+                    ));
+                }
+                return Ok(());
+            }
         }
         if let Some(thread) = subscription.thread.clone()
             && let Some(signal) = request.context_signal(&thread)
@@ -979,11 +1002,12 @@ impl ServesLaunchCalls for RunningNexus {
     ) -> Result<(), crate::codex::CodexAdapterUnavailable> {
         // The launch holds the dispatch gate: its thread's turn events are
         // observed as the gate's holder.
-        if let Some(thread) = responder.subscription.thread.clone()
-            && let Some(event) = request.turn_event(&thread)
-        {
-            self.observe_codex_events(&thread, vec![event]);
-            return Ok(());
+        if let Some(thread) = responder.subscription.thread.clone() {
+            let events = request.ledger_events(&thread);
+            if !events.is_empty() {
+                self.observe_codex_events(&thread, events);
+                return Ok(());
+            }
         }
         // A first turn's context size is kept as any turn's is. A
         // compaction in it is not raised: raising starts a flow, which

@@ -281,6 +281,21 @@ impl RecordsReports for RunningNexus {
                     "flow-nexus: a queued delivery was resolved {:?} by the owner",
                     resolution.queue_resolution_outcome
                 );
+                // The owner settled it: a Codex letter leaves its thread's
+                // ledger, and the seat it leaves at rest is settled.
+                if attempt.harness_kind == signal_flow::HarnessKind::Codex {
+                    use crate::codex_turns::TracksCodexTurns;
+                    let reading = self.codex_turns.apply(
+                        &attempt.thread_id.0,
+                        crate::generated::turn_ledger::LedgerEvent::LetterSettled(
+                            attempt.queue_attempt_id.clone(),
+                        ),
+                    );
+                    if reading.rest_reached.0 {
+                        use crate::waking::NotesStopsAtConfirmation;
+                        self.stopped_at_confirmation.note(&attempt.flow_id.0);
+                    }
+                }
                 meta_signal_flow::Output::QueueDeliveryResolved(QueueDeliveryResolved_Data {
                     address: attempt.address,
                     visible_queue_delivery_resolution:

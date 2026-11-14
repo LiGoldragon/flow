@@ -116,7 +116,7 @@ impl RetiresHandoverGenerations for RunningNexus {
         for closed in rows {
             let publication = match publisher.publish(HandoverArchiveRequest {
                 address: address.clone(),
-                flow_id: closed.predecessor.clone(),
+                flow_id: closed.predecessor.clone().0,
                 document: closed.archive_document(),
             }) {
                 Ok(publication) => publication,
@@ -150,7 +150,11 @@ impl RendersArchiveDocument for ClosedHandover {
     fn archive_document(&self) -> String {
         format!(
             "generation={} predecessor={} successor={} sections={:?} touch={:?}\n",
-            self.generation, self.predecessor, self.successor, self.sections, self.touch
+            self.handover_generation.0,
+            self.predecessor.0,
+            self.successor.0.0,
+            self.section_vector,
+            self.touch_option
         )
     }
 }

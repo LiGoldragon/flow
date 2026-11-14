@@ -650,7 +650,8 @@ impl RestartsInSteps for RunningNexus {
         let flow = signal_flow::FlowId(flow_id.to_owned());
         match self.store.ordered_replacement(address) {
             Ok(Some(order))
-                if order.predecessor == flow_id && order.order == ReplacementOrder::Restart =>
+                if order.predecessor.0 == flow_id
+                    && order.replacement_order == ReplacementOrder::Restart =>
             {
                 return Response::RestartQueued(flow);
             }
@@ -660,8 +661,8 @@ impl RestartsInSteps for RunningNexus {
         }
         if let Err(error) = self.store.order_replacement(OrderedReplacement {
             address: address.clone(),
-            predecessor: flow_id.to_owned(),
-            order: ReplacementOrder::Restart,
+            predecessor: crate::generated::memory::Predecessor(flow_id.to_owned()),
+            replacement_order: ReplacementOrder::Restart,
         }) {
             return error.refused();
         }

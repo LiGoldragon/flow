@@ -94,7 +94,6 @@ use meta_signal_flow::{
     ConfigureLeaveOut, ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureOutcome,
     ConfigureSendServer, ConfigureThreshold, CountersRefusal, HeartbeatConfig,
 };
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, Engine, EngineOpen, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition,
     MemoryVersion, QueryPlan, RecordKey, Retraction, SchemaHash, SchemaVersion, TableDescriptor,
@@ -4959,9 +4958,9 @@ impl RecordsFlowLifecycle for FlowStore {
                     self,
                     successor::SuccessorIntent {
                         address: metaflow.address,
-                        predecessor: flow_id.to_owned(),
-                        cause: successor::SuccessionCause::Exit,
-                        launch_request_id: String::new(),
+                        predecessor: crate::generated::memory::Predecessor(flow_id.to_owned()),
+                        succession_cause: successor::SuccessionCause::Exit,
+                        launch_request_id: signal_flow::LaunchRequestId(String::new()),
                     },
                     commit,
                 )?
@@ -8956,24 +8955,24 @@ mod tests {
         };
         let sibling = HandoverMemory {
             address: address.clone(),
-            current: vec![Section {
+            section_vector: vec![Section {
                 title: signal_flow::Title("Live".into()),
                 description: signal_flow::Description("current generation".into()),
                 body: signal_flow::Body("live bytes".into()),
             }],
-            touch: Some(Touch::Unknown),
-            generation: 8,
-            current_flow_id: Some("successor".into()),
-            closed: vec![ClosedHandover {
-                generation: 7,
-                predecessor: "predecessor".into(),
-                successor: "successor".into(),
-                sections: vec![Section {
+            touch_option: Some(Touch::Unknown),
+            handover_generation: signal_flow::HandoverGeneration(8),
+            flow_id_option: Some(flow_ethos::FlowId("successor".into())),
+            closed_handover_vector: vec![ClosedHandover {
+                handover_generation: signal_flow::HandoverGeneration(7),
+                predecessor: crate::generated::memory::Predecessor("predecessor".into()),
+                successor: signal_flow::Successor(flow_ethos::FlowId("successor".into())),
+                section_vector: vec![Section {
                     title: signal_flow::Title("Closed".into()),
                     description: signal_flow::Description("archived generation".into()),
                     body: signal_flow::Body("closed bytes".into()),
                 }],
-                touch: Some(Touch::Unknown),
+                touch_option: Some(Touch::Unknown),
             }],
         };
         {

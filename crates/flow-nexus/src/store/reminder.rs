@@ -9,7 +9,7 @@
 
 use super::AnnouncesLaunchChanges;
 use super::{FlowStore, StoreError};
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+pub(crate) use crate::generated::memory::{Due, Reminder, Sent};
 use sema_engine::{
     Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,
     RecordKey, Retraction, SchemaHash, TableDescriptor, TableName,
@@ -53,29 +53,9 @@ impl RulesMinutes for i64 {
     }
 }
 
-/// One task Flow holds open: the order its sender sent `recipient`,
-/// `minutes` long.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Reminder {
-    /// The task's LogicalDeliveryId.
-    pub key: String,
-    /// The metaflow reminded: the task's sender.
-    pub address: Address,
-    /// The metaflow the task was sent to.
-    pub recipient: Address,
-    /// The task's Minutes: its first deadline and every interval after.
-    pub minutes: i64,
-    /// When the next reminder is due, in Unix seconds; None once a task has
-    /// had all its reminders, or set none (its sender unknown), and stays
-    /// open for its Done.
-    pub due: Option<i64>,
-    /// The reminders sent so far.
-    pub sent: i64,
-}
-
 impl EngineRecord for Reminder {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.key.clone())
+        RecordKey::new(self.logical_delivery_id.0.clone())
     }
 }
 
@@ -121,27 +101,27 @@ pub trait AdvancesReminder {
 
 impl AdvancesReminder for Reminder {
     fn advanced(&self, task_words: &str, now: i64) -> (DueReminder, Option<Reminder>) {
-        let sent = self.sent + 1;
+        let sent = self.sent.0 + 1;
         let last = sent >= TASK_REMINDERS;
         let notice = format!(
             "Reminder {sent} of {TASK_REMINDERS}: the task of {} minutes, {}, to {} has no Done after {} minutes.",
-            self.minutes,
+            self.minutes.0,
             task_words,
-            self.recipient.named(),
-            self.minutes * sent,
+            self.recipient.0.named(),
+            self.minutes.0 * sent,
         );
         let failure = last.then(|| {
             format!(
                 "Failure: the task of {} minutes, {}, from {} to {} has no Done after {TASK_REMINDERS} reminders.",
-                self.minutes,
+                self.minutes.0,
                 task_words,
                 self.address.named(),
-                self.recipient.named(),
+                self.recipient.0.named(),
             )
         });
         let next = Reminder {
-            due: (!last).then(|| now + self.minutes * 60),
-            sent,
+            due_option: (!last).then(|| Due(now + self.minutes.0 * 60)),
+            sent: Sent(sent),
             ..self.clone()
         };
         (
@@ -182,8 +162,8 @@ pub trait RecordsReminders {
 
 impl RecordsReminders for FlowStore {
     fn hold_reminder(&self, reminder: Reminder) -> Result<(), StoreError> {
-        if self.reminder(&reminder.key)?.is_some() {
-            let key = RecordKey::new(reminder.key.clone());
+        if self.reminder(&reminder.logical_delivery_id.0)?.is_some() {
+            let key = RecordKey::new(reminder.logical_delivery_id.0.clone());
             self.engine
                 .mutate_keyed(KeyedMutation::new(self.reminders, key, reminder))?;
         } else {
@@ -224,7 +204,7 @@ impl RecordsReminders for FlowStore {
             .match_records(QueryPlan::all(self.reminders))?
             .records()
             .iter()
-            .filter(|reminder| reminder.due.is_some_and(|due| due <= now))
+            .filter(|reminder| reminder.due_option.is_some_and(|due| due.0 <= now))
             .cloned()
             .collect())
     }
@@ -235,7 +215,7 @@ impl RecordsReminders for FlowStore {
             .match_records(QueryPlan::all(self.reminders))?
             .records()
             .iter()
-            .filter_map(|reminder| reminder.due)
+            .filter_map(|reminder| reminder.due_option.map(|due| due.0))
             .filter(|due| *due > now)
             .min())
     }
@@ -258,16 +238,16 @@ mod tests {
     #[test]
     fn a_task_is_reminded_four_times_and_its_sender_told_its_failure_with_the_last() {
         let mut reminder = Reminder {
-            key: "logical-delivery-1".into(),
+            logical_delivery_id: flow_ethos::LogicalDeliveryId("logical-delivery-1".into()),
             address: address(Model::Sonnet),
-            recipient: Address {
+            recipient: crate::generated::memory::Recipient(Address {
                 aspect: Aspect::Field,
                 topic: flow_ethos::Topic("core".into()),
                 model: Model::Sol,
-            },
-            minutes: 10,
-            due: Some(600),
-            sent: 0,
+            }),
+            minutes: flow_ethos::Minutes(10),
+            due_option: Some(crate::generated::memory::Due(600)),
+            sent: crate::generated::memory::Sent(0),
         };
         let mut notices = Vec::new();
         let mut failures = Vec::new();
@@ -280,8 +260,8 @@ mod tests {
             reminder = next.expect("a task stays open for its Done");
             now += 600;
         }
-        assert_eq!(reminder.sent, 4);
-        assert_eq!(reminder.due, None);
+        assert_eq!(reminder.sent, crate::generated::memory::Sent(4));
+        assert_eq!(reminder.due_option, None);
         assert!(failures[..3].iter().all(Option::is_none));
         assert_eq!(
             notices[0],
@@ -310,12 +290,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("flow.sema");
         let reminder = Reminder {
-            key: "logical-delivery-1".into(),
+            logical_delivery_id: flow_ethos::LogicalDeliveryId("logical-delivery-1".into()),
             address: address(Model::Opus),
-            recipient: address(Model::Sonnet),
-            minutes: 10,
-            due: Some(5),
-            sent: 0,
+            recipient: crate::generated::memory::Recipient(address(Model::Sonnet)),
+            minutes: flow_ethos::Minutes(10),
+            due_option: Some(crate::generated::memory::Due(5)),
+            sent: crate::generated::memory::Sent(0),
         };
         {
             let store = FlowStore::open(&path).unwrap();

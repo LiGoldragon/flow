@@ -899,8 +899,8 @@ impl ReconcilesInterruptedLaunches for RunningNexus {
             }
         };
         for opened in opened {
-            let launch_request_id = opened.launch_request_id;
-            let thread = opened.native_session_id;
+            let launch_request_id = opened.launch_request_id.0;
+            let thread = opened.native_session_id.0;
             let Ok(Some(attempt)) = self.store.launch_attempt(&launch_request_id) else {
                 continue;
             };

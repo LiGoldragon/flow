@@ -5,7 +5,7 @@
 //! turn end of its flows, which `Hot` reads.
 
 use super::{FlowStore, StoreError};
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+pub(crate) use crate::generated::memory::TurnEndRecord;
 use sema_engine::{
     Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,
     RecordKey, SchemaHash, TableDescriptor, TableName,
@@ -16,16 +16,9 @@ pub(super) const TURN_END_TABLE_NAME: TableName = TableName::new("flow_nexus_tur
 pub(super) const TURN_END_FAMILY: &str = "flow-nexus-turn-end";
 pub(super) const TURN_END_SCHEMA: &str = "flow-nexus-turn-end-v1";
 
-/// The last turn end of one harness, keyed by the harness.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct TurnEndRecord {
-    pub key: String,
-    pub turn_end: TurnEnd,
-}
-
 impl EngineRecord for TurnEndRecord {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.key.clone())
+        RecordKey::new(self.turn_end_key.0.clone())
     }
 }
 
@@ -101,7 +94,7 @@ pub(crate) trait RecordsTurnEnds {
 impl RecordsTurnEnds for FlowStore {
     fn record_turn_end_under(&self, key: &str, turn_end: TurnEnd) -> Result<(), StoreError> {
         let record = TurnEndRecord {
-            key: key.to_owned(),
+            turn_end_key: crate::generated::memory::TurnEndKey(key.to_owned()),
             turn_end,
         };
         let held = self
@@ -131,9 +124,10 @@ impl RecordsTurnEnds for FlowStore {
             .records()
             .to_vec();
         records.retain(|record| {
-            [HarnessKind::Claude.key(), HarnessKind::Codex.key()].contains(&record.key.as_str())
+            [HarnessKind::Claude.key(), HarnessKind::Codex.key()]
+                .contains(&record.turn_end_key.0.as_str())
         });
-        records.sort_by(|left, right| left.key.cmp(&right.key));
+        records.sort_by(|left, right| left.turn_end_key.cmp(&right.turn_end_key));
         Ok(records.into_iter().map(|record| record.turn_end).collect())
     }
 

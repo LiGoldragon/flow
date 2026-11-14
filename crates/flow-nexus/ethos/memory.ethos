@@ -20,9 +20,10 @@
 Memory
 [ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection FlowId HerdrRoute Process NativeSessionId TranscriptPath BackgroundWork NativePrompt Address ReapStanding HandoverCloseRefusal HandoverOwner Successor ]
   flow_nexus:[ LaunchedRecord ReplacedRecord ]
-  signal_flow:[ LogicalDeliveryId Metaflow Lock CallerIdentity LaunchAttempt StoreIdentity OrdinarySocketPath MetaSocketPath FlowType Origin HarnessKind EndpointSelection FlowLifecycle SessionId HerdrPaneId DeliverKey SendAcceptance DeliverySnapshot DeliveryCursor RequestId SentBy VisibleNativeInput ]
-  meta_signal_flow:[ ConfigureNexus ConfigureModel ConfigureThreshold ConfigureLeaveOut ConfigureSendServer ConfigureMetaflow ConfigureHarnessFlags HeartbeatConfig DrawBound TryBound HandoverPoliciesConfiguration HandoverArchiveConfiguration HandoverCountConfiguration Duration RestartRecord SendOutcomeRecord Delivery ProcessId ProcessUserId ProcessStartToken DeliveryId HarnessProfile MetaAspects MessageNexusPath RequestDigest QueueRequestId QueueAttemptId QueueEvidence AbsenceProof Undecided QueueResolutionRecord ]
+  signal_flow:[ LogicalDeliveryId Metaflow Lock CallerIdentity LaunchAttempt StoreIdentity OrdinarySocketPath MetaSocketPath FlowType Origin HarnessKind EndpointSelection FlowLifecycle SessionId HerdrPaneId DeliverKey SendAcceptance DeliverySnapshot DeliveryCursor RequestId SentBy VisibleNativeInput Section Touch HerdrPaneBinding LaunchProfile TurnEnd UndecodableFrame Tokens ModelName HandoverGeneration ]
+  meta_signal_flow:[ ConfigureNexus ConfigureModel ConfigureThreshold ConfigureLeaveOut ConfigureSendServer ConfigureMetaflow ConfigureHarnessFlags HeartbeatConfig DrawBound TryBound HandoverPoliciesConfiguration HandoverArchiveConfiguration HandoverCountConfiguration Duration RestartRecord SendOutcomeRecord Delivery ProcessId ProcessUserId ProcessStartToken DeliveryId HarnessProfile MetaAspects MessageNexusPath RequestDigest QueueRequestId QueueAttemptId QueueEvidence AbsenceProof Undecided QueueResolutionRecord EveryMinutes ReminderText ]
   :meta_signal_flow:generated:signal:[ Path ]
+  :std:boxed:[ Box ]
   flow_ethos:[ Minutes SourceRoot CodexEndpoint ] ]
 [ LaunchOutcome.[ Started.LaunchedRecord
                   Replaced.ReplacedRecord
@@ -246,4 +247,80 @@ Memory
   KeptAnswer.{ RequestId VisibleNativeInput }
   ; One reminder asked for and not yet sent, keyed by its request id: whom it
   ; reminds, who asked, when it falls due in Unix seconds, and its words.
-  ScheduledReminder.{ RequestId Address SentBy Due.Integer Text.String } ]
+  ScheduledReminder.{ RequestId Address SentBy Due.Integer Text.String }
+  ; What became of a compaction's investigation: the Investigation seat was
+  ; started fresh with it as its brief; it was Awake and the investigation
+  ; was queued for it; no Investigation seat is configured and the warning
+  ; was logged only; or it could not be started or queued, and why.
+  Investigation.[ Started.String Queued NotConfigured Refused.String ]
+  ; One compaction a flow's harness reported, keyed by the flow and the
+  ; harness's own id for it (a Claude compact_boundary row's uuid, a Codex
+  ; contextCompaction item's id).
+  Compaction.{ FlowId Boundary.String Option<Address> Investigation }
+  ; A flow's context size, keyed by its FlowId.
+  FlowContextSize.{ FlowId Tokens }
+  ; The exact pane created for a launch before its harness is asked to
+  ; start, keyed by the launch request.
+  StoredLaunchPane.{ HerdrPaneBinding HarnessStartRequested.Boolean Orphaned.Boolean }
+  ; An Address's handover, keyed by the Address: the sections now written,
+  ; their touch, the generation, the flow writing it, and the generations
+  ; closed before.
+  HandoverMemory.{ Address
+                   Vector<Section>
+                   Option<Touch>
+                   HandoverGeneration
+                   Option<FlowId>
+                   Vector<ClosedHandover> }
+  ; One closed handover generation: its predecessor and successor and what
+  ; it held.
+  ClosedHandover.{ HandoverGeneration Predecessor Successor Vector<Section> Option<Touch> }
+  ; The handover reminders of one generation at an Address, keyed by both:
+  ; the model, when the warning window opened (Unix seconds), when the next
+  ; reminder is due (the first at the opening, inclusive), how many were
+  ; admitted, their interval and their words. A successor uses a new row.
+  HandoverReminder.{ Address
+                     HandoverGeneration
+                     ModelName
+                     OpenedAt.Integer
+                     NextDue.Integer
+                     Sent.Integer
+                     EveryMinutes
+                     ReminderText }
+  ; Whether a launch cleanup step has succeeded: Pending is taken again by
+  ; the next start, Done never.
+  CleanupStep.[ Pending Done ]
+  ; What a launch's cleanup owes, keyed by the launch request: the thread it
+  ; opened, and whether that thread and its pane are cleaned up.
+  LaunchCleanup.{ LaunchRequestId NativeSessionId ThreadStep.CleanupStep PaneStep.CleanupStep }
+  ; The thread a launch opened, keyed by the launch request.
+  OpenedLaunchThread.{ LaunchRequestId NativeSessionId }
+  ; A launch ordered as a replacement's successor, with the first prompt's
+  ; digest as its profile composed it when ordered.
+  OrderedLaunch.{ LaunchProfile Origin PromptSha256.String }
+  ; What a replacement was ordered as: a Refresh, whose successor is what
+  ; any refresh starts; a Launch or Replace, its own profile the successor;
+  ; or a Restart, the flow's harness closed and its own session resumed.
+  ReplacementOrder.[ Refresh Launch.Box<OrderedLaunch> Restart ]
+  ; A replacement ordered at an Address, keyed by the Address.
+  OrderedReplacement.{ Address Predecessor ReplacementOrder }
+  ; One open Task's reminders, keyed by the task's LogicalDeliveryId: the
+  ; metaflow reminded (its sender), the metaflow it was sent to, its Minutes
+  ; (its first deadline and every interval after), when the next reminder
+  ; is due in Unix seconds (None once it has had all its reminders, or set
+  ; none, its sender unknown), and how many were sent.
+  Reminder.{ LogicalDeliveryId Address Recipient Minutes Option<Due> Sent }
+  ; Why a successor is owed: its flow passed its refresh threshold and
+  ; rested; it ended without Flow or an owner ending it, its pane gone; a
+  ; Refresh ordered from outside ended it; or a Replace ended it, its
+  ; successor the Replace's own launch.
+  SuccessionCause.[ Refresh Exit Ordered Replace ]
+  ; The successor an Address is owed, keyed by the Address.
+  SuccessorIntent.{ Address Predecessor SuccessionCause LaunchRequestId }
+  ; One turn end a harness reported, keyed by its turn.
+  TurnEndRecord.{ TurnEndKey.String TurnEnd }
+  ; One frame a caller sent that did not decode, keyed by the nanoseconds
+  ; since the Unix epoch, zero-padded, then the caller's process id.
+  UndecodableRecord.{ UndecodableKey.String UndecodableFrame }
+  ; The flow a launch holds an Address for, keyed by its FlowId, with the
+  ; metaflow found there when it was held.
+  AddressHold.{ FlowId Address Option<Metaflow> } ]

@@ -61,11 +61,11 @@ fn recurrence_advances_from_each_due_instant() {
             .unwrap();
     assert_eq!(r.advanced_due(), Some(300));
     r = r.advanced().unwrap();
-    assert_eq!(r.next_due, 300);
+    assert_eq!(r.next_due, crate::generated::memory::NextDue(300));
     r = r.advanced().unwrap();
-    assert_eq!(r.next_due, 600);
+    assert_eq!(r.next_due, crate::generated::memory::NextDue(600));
     r = r.advanced().unwrap();
-    assert_eq!(r.next_due, 900);
+    assert_eq!(r.next_due, crate::generated::memory::NextDue(900));
 }
 
 /// The warning holds the configured words and the flow's handover path,
@@ -180,8 +180,8 @@ fn runtime_tick_admits_due_middle_abrupt_notice_and_wakes_recipient() {
         .handover_reminder(&address, 0)
         .unwrap()
         .unwrap();
-    assert_eq!(held.sent, 1);
-    assert_eq!(held.next_due, 310);
+    assert_eq!(held.sent, crate::generated::memory::Sent(1));
+    assert_eq!(held.next_due, crate::generated::memory::NextDue(310));
     let metaflow = fixture.nexus.store.metaflow(&address).unwrap().unwrap();
     assert!(metaflow.queue.0.iter().any(|entry| matches!(
         &entry.message,
@@ -204,7 +204,7 @@ fn runtime_tick_admits_due_middle_abrupt_notice_and_wakes_recipient() {
             .unwrap()
             .unwrap()
             .sent,
-        1
+        crate::generated::memory::Sent(1)
     );
 }
 
@@ -302,7 +302,7 @@ fn runtime_tick_drains_due_middle_abrupt_notice_past_threshold_into_the_pane() {
         .handover_reminder(&address, 0)
         .unwrap()
         .unwrap();
-    assert_eq!(reminder.sent, 1);
+    assert_eq!(reminder.sent, crate::generated::memory::Sent(1));
 }
 
 #[test]
@@ -428,8 +428,14 @@ fn reminder_snapshot_closed_before_admission_creates_no_notice() {
         .handover_memory(&address)
         .unwrap()
         .unwrap();
-    assert_eq!(memory.generation, 1);
-    assert_eq!(memory.current_flow_id.as_deref(), Some("successor"));
+    assert_eq!(
+        memory.handover_generation,
+        signal_flow::HandoverGeneration(1)
+    );
+    assert_eq!(
+        memory.flow_id_option.as_ref().map(|value| value.0.as_str()),
+        Some("successor")
+    );
 }
 
 #[test]
@@ -502,9 +508,9 @@ fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
             assert!(reminder.is_none());
         } else {
             let row = reminder.expect("Stop measurement opens the warning");
-            assert_eq!(row.sent, 1);
+            assert_eq!(row.sent, crate::generated::memory::Sent(1));
             let opened_at = row.opened_at;
-            fixture.nexus.send_due_handover_reminders(opened_at + 1);
+            fixture.nexus.send_due_handover_reminders(opened_at.0 + 1);
             assert_eq!(
                 fixture
                     .nexus
@@ -513,7 +519,7 @@ fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
                     .unwrap()
                     .unwrap()
                     .sent,
-                1
+                crate::generated::memory::Sent(1)
             );
         }
     }
@@ -598,7 +604,7 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
         .handover_reminder(&address, 0)
         .unwrap()
         .unwrap();
-    assert_eq!(row.sent, 1);
+    assert_eq!(row.sent, crate::generated::memory::Sent(1));
     let public = fixture.nexus.store.metaflow(&address).unwrap().unwrap();
     assert!(public.queue.0.iter().any(|entry| matches!(
         &entry.message,
@@ -613,7 +619,7 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
             .unwrap()
             .unwrap()
             .sent,
-        1
+        crate::generated::memory::Sent(1)
     );
     fixture.nexus.send_due_handover_reminders(320);
     assert_eq!(
@@ -624,7 +630,7 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
             .unwrap()
             .unwrap()
             .sent,
-        2
+        crate::generated::memory::Sent(2)
     );
 }
 
@@ -752,8 +758,8 @@ fn atomic_same_expected_reminder_state_rejects_duplicate_admission() {
         HandoverReminder::open_handover_reminder(address.clone(), 0, "m".into(), 0, 5, "x".into())
             .unwrap();
     let mut advanced = reminder.clone();
-    advanced.sent = 1;
-    advanced.next_due = 300;
+    advanced.sent = crate::generated::memory::Sent(1);
+    advanced.next_due = crate::generated::memory::NextDue(300);
     let message = Message::HardAbrupt(Request::Notice("flow-nexus 'Notice'".into()));
     let first = fixture
         .nexus
@@ -803,8 +809,8 @@ fn reminder_state_reopens_with_anchored_due_without_duplicate_initial() {
     .unwrap();
     store.hold_handover_reminder(reminder.clone()).unwrap();
     let mut advanced = reminder.clone();
-    advanced.sent = 1;
-    advanced.next_due = 400;
+    advanced.sent = crate::generated::memory::Sent(1);
+    advanced.next_due = crate::generated::memory::NextDue(400);
     let accepted = store
         .accept_handover_reminder(
             &address,
@@ -841,6 +847,6 @@ fn reminder_state_reopens_with_anchored_due_without_duplicate_initial() {
             .unwrap()
             .unwrap()
             .next_due,
-        400
+        crate::generated::memory::NextDue(400)
     );
 }

@@ -899,12 +899,18 @@ fn a_reap_is_answered_pending_as_soon_as_it_is_owed_and_closed_outside_the_gate(
         .handover_memory(&world.launch.profile.address)
         .unwrap()
         .expect("the generation closed");
-    assert_eq!(generation.current_flow_id.as_deref(), Some(SUCCESSOR));
+    assert_eq!(
+        generation
+            .flow_id_option
+            .as_ref()
+            .map(|value| value.0.as_str()),
+        Some(SUCCESSOR)
+    );
     assert!(
         generation
-            .closed
+            .closed_handover_vector
             .iter()
-            .any(|closed| closed.predecessor == PREDECESSOR && closed.successor == SUCCESSOR)
+            .any(|closed| closed.predecessor.0 == PREDECESSOR && closed.successor.0.0 == SUCCESSOR)
     );
     assert!(
         ends.iter()
@@ -1751,7 +1757,9 @@ fn a_stale_worker_writes_nothing_and_the_address_keeps_one_receiving_flow() {
         .handover_memory(&world.launch.profile.address)
         .unwrap();
     assert!(
-        generation.is_none_or(|row| row.current_flow_id.as_deref() != Some(SUCCESSOR)),
+        generation.is_none_or(
+            |row| row.flow_id_option.as_ref().map(|value| value.0.as_str()) != Some(SUCCESSOR)
+        ),
         "the generation is not handed to a successor that no longer receives"
     );
     assert!(!vetted(&world.vet(SUCCESSOR)) && !vetted(&world.vet(PREDECESSOR)));
@@ -2452,9 +2460,9 @@ impl SeatsLaunches for HandoverWorld {
             .handover_memory(&self.address)
             .unwrap()
             .map(|row| {
-                row.closed
+                row.closed_handover_vector
                     .into_iter()
-                    .map(|closed| (closed.predecessor, closed.successor))
+                    .map(|closed| (closed.predecessor.0, closed.successor.0.0))
                     .collect()
             })
             .unwrap_or_default()
@@ -2466,7 +2474,8 @@ impl SeatsLaunches for HandoverWorld {
             .store
             .handover_memory(&self.address)
             .unwrap()
-            .and_then(|row| row.current_flow_id)
+            .and_then(|row| row.flow_id_option)
+            .map(|flow| flow.0)
     }
 
     fn keep(&self, title: &str) -> Response {

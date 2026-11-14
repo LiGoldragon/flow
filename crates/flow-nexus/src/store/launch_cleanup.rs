@@ -9,20 +9,12 @@
 //! table.
 
 use super::*;
+pub(crate) use crate::generated::memory::{CleanupStep, LaunchCleanup};
 
 pub(super) const LAUNCH_CLEANUP_TABLE_NAME: TableName =
     TableName::new("flow_nexus_launch_cleanups");
 pub(super) const LAUNCH_CLEANUP_FAMILY: &str = "flow-nexus-launch-cleanup";
 pub(super) const LAUNCH_CLEANUP_SCHEMA: &str = "flow-nexus-launch-cleanup-v1";
-
-/// Where one step of a launch's cleanup stands.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CleanupStep {
-    /// Not yet succeeded: the next start takes it again.
-    Pending,
-    /// Succeeded; never taken again.
-    Done,
-}
 
 /// The parts of a launch's cleanup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,19 +27,9 @@ pub enum CleanupPart {
     Pane,
 }
 
-/// The cleanup of one interrupted launch.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct LaunchCleanup {
-    pub launch_request_id: String,
-    /// The thread the launch opened.
-    pub native_session_id: String,
-    pub thread_step: CleanupStep,
-    pub pane_step: CleanupStep,
-}
-
 impl EngineRecord for LaunchCleanup {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.launch_request_id.clone())
+        RecordKey::new(self.launch_request_id.0.clone())
     }
 }
 
@@ -59,13 +41,14 @@ pub trait CompletesCleanup {
 
 impl CompletesCleanup for LaunchCleanup {
     fn is_complete(&self) -> bool {
-        self.thread_step == CleanupStep::Done && self.pane_step == CleanupStep::Done
+        self.thread_step == crate::generated::memory::ThreadStep(CleanupStep::Done)
+            && self.pane_step == crate::generated::memory::PaneStep(CleanupStep::Done)
     }
 
     fn step(&self, part: CleanupPart) -> CleanupStep {
         match part {
-            CleanupPart::Thread => self.thread_step,
-            CleanupPart::Pane => self.pane_step,
+            CleanupPart::Thread => self.thread_step.0.clone(),
+            CleanupPart::Pane => self.pane_step.0.clone(),
         }
     }
 }
@@ -112,10 +95,10 @@ impl KeepsLaunchCleanups for FlowStore {
             return Ok(held);
         }
         let cleanup = LaunchCleanup {
-            launch_request_id: launch_request_id.to_owned(),
-            native_session_id: native_session_id.to_owned(),
-            thread_step: CleanupStep::Pending,
-            pane_step: CleanupStep::Pending,
+            launch_request_id: signal_flow::LaunchRequestId(launch_request_id.to_owned()),
+            native_session_id: signal_flow::NativeSessionId(native_session_id.to_owned()),
+            thread_step: crate::generated::memory::ThreadStep(CleanupStep::Pending),
+            pane_step: crate::generated::memory::PaneStep(CleanupStep::Pending),
         };
         self.engine
             .assert(Assertion::new(self.launch_cleanups, cleanup.clone()))?;
@@ -150,8 +133,12 @@ impl KeepsLaunchCleanups for FlowStore {
             return Ok(Some(cleanup));
         }
         match part {
-            CleanupPart::Thread => cleanup.thread_step = CleanupStep::Done,
-            CleanupPart::Pane => cleanup.pane_step = CleanupStep::Done,
+            CleanupPart::Thread => {
+                cleanup.thread_step = crate::generated::memory::ThreadStep(CleanupStep::Done)
+            }
+            CleanupPart::Pane => {
+                cleanup.pane_step = crate::generated::memory::PaneStep(CleanupStep::Done)
+            }
         }
         self.engine.mutate_keyed(KeyedMutation::new(
             self.launch_cleanups,

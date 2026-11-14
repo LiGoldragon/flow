@@ -458,7 +458,8 @@ impl HandsOverGenerations for RunningNexus {
                 .handover_memory(address)
                 .ok()
                 .flatten()
-                .and_then(|row| row.current_flow_id)
+                .and_then(|row| row.flow_id_option)
+                .map(|flow| flow.0)
                 .unwrap_or_else(|| predecessor.clone())
         };
         let refusal = match self.store.handover_closing(address, &predecessor, &flow_id) {

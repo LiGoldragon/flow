@@ -276,7 +276,7 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
         .reminder(&open_task.logical_delivery_id.0)
         .unwrap()
         .expect("the Task's reminder is held");
-    assert!(deadline.due.is_some(), "{deadline:?}");
+    assert!(deadline.due_option.is_some(), "{deadline:?}");
 
     let refreshed = fixture.nexus.dispatch(Query::Refresh(at.clone()));
     // The successor started; its predecessor's reap is pending.

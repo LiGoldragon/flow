@@ -304,6 +304,139 @@ mod frozen {
         pub(super) queue_evidence: meta_signal_flow::QueueEvidence,
         pub(super) phase: QueueDeliveryPhase,
     }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) enum Investigation {
+        Started(String),
+        Queued,
+        NotConfigured,
+        Refused(String),
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct Compaction {
+        pub(super) flow_id: String,
+        pub(super) boundary: String,
+        pub(super) address: Option<Address>,
+        pub(super) investigation: Investigation,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct FlowContextSize {
+        pub(super) flow_id: String,
+        pub(super) tokens: i64,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct ClosedHandover {
+        pub(super) generation: i64,
+        pub(super) predecessor: String,
+        pub(super) successor: String,
+        pub(super) sections: Vec<signal_flow::Section>,
+        pub(super) touch: Option<signal_flow::Touch>,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct HandoverMemory {
+        pub(super) address: Address,
+        pub(super) current: Vec<signal_flow::Section>,
+        pub(super) touch: Option<signal_flow::Touch>,
+        pub(super) generation: i64,
+        pub(super) current_flow_id: Option<String>,
+        pub(super) closed: Vec<ClosedHandover>,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct HandoverReminder {
+        pub(super) address: Address,
+        pub(super) generation: i64,
+        pub(super) model_name: String,
+        pub(super) opened_at: i64,
+        pub(super) next_due: i64,
+        pub(super) sent: i64,
+        pub(super) every_minutes: i64,
+        pub(super) reminder_text: String,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) enum CleanupStep {
+        Pending,
+        Done,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct LaunchCleanup {
+        pub(super) launch_request_id: String,
+        pub(super) native_session_id: String,
+        pub(super) thread_step: CleanupStep,
+        pub(super) pane_step: CleanupStep,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct OpenedLaunchThread {
+        pub(super) launch_request_id: String,
+        pub(super) native_session_id: String,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) enum ReplacementOrder {
+        Refresh,
+        Launch(Box<OrderedLaunch>),
+        Restart,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct OrderedLaunch {
+        pub(super) launch_profile: signal_flow::LaunchProfile,
+        pub(super) origin: signal_flow::Origin,
+        pub(super) prompt_sha256: String,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct OrderedReplacement {
+        pub(super) address: Address,
+        pub(super) predecessor: String,
+        pub(super) order: ReplacementOrder,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct Reminder {
+        pub(super) key: String,
+        pub(super) address: Address,
+        pub(super) recipient: Address,
+        pub(super) minutes: i64,
+        pub(super) due: Option<i64>,
+        pub(super) sent: i64,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) enum SuccessionCause {
+        Refresh,
+        Exit,
+        Ordered,
+        Replace,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct SuccessorIntent {
+        pub(super) address: Address,
+        pub(super) predecessor: String,
+        pub(super) cause: SuccessionCause,
+        pub(super) launch_request_id: String,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct UndecodableRecord {
+        pub(super) key: String,
+        pub(super) frame: signal_flow::UndecodableFrame,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct AddressHold {
+        pub(super) flow_id: String,
+        pub(super) address: Address,
+        pub(super) found: Option<signal_flow::Metaflow>,
+    }
 }
 
 /// An Address the samples share.
@@ -848,5 +981,243 @@ mod tests {
                 });
             }
         }
+    }
+
+    #[test]
+    fn compaction_handover_and_reminder_records_archive_as_they_did() {
+        use crate::generated::memory as generated;
+        for (frozen_investigation, investigation) in [
+            (
+                frozen::Investigation::Started("brief".into()),
+                generated::Investigation::Started("brief".into()),
+            ),
+            (
+                frozen::Investigation::Queued,
+                generated::Investigation::Queued,
+            ),
+            (
+                frozen::Investigation::NotConfigured,
+                generated::Investigation::NotConfigured,
+            ),
+            (
+                frozen::Investigation::Refused("why".into()),
+                generated::Investigation::Refused("why".into()),
+            ),
+        ] {
+            frozen::Compaction {
+                flow_id: "flow-c".into(),
+                boundary: "boundary-uuid".into(),
+                address: Some(Address::sample("compacted")),
+                investigation: frozen_investigation,
+            }
+            .archives_alike(&generated::Compaction {
+                flow_id: signal_flow::FlowId("flow-c".into()),
+                boundary: generated::Boundary("boundary-uuid".into()),
+                address_option: Some(Address::sample("compacted")),
+                investigation,
+            });
+        }
+        frozen::FlowContextSize {
+            flow_id: "flow-c".into(),
+            tokens: 180_000,
+        }
+        .archives_alike(&generated::FlowContextSize {
+            flow_id: signal_flow::FlowId("flow-c".into()),
+            tokens: signal_flow::Tokens(180_000),
+        });
+        frozen::HandoverMemory {
+            address: Address::sample("handover"),
+            current: Vec::new(),
+            touch: None,
+            generation: 3,
+            current_flow_id: Some("flow-now".into()),
+            closed: vec![frozen::ClosedHandover {
+                generation: 2,
+                predecessor: "flow-before".into(),
+                successor: "flow-now".into(),
+                sections: Vec::new(),
+                touch: None,
+            }],
+        }
+        .archives_alike(&generated::HandoverMemory {
+            address: Address::sample("handover"),
+            section_vector: Vec::new(),
+            touch_option: None,
+            handover_generation: signal_flow::HandoverGeneration(3),
+            flow_id_option: Some(signal_flow::FlowId("flow-now".into())),
+            closed_handover_vector: vec![generated::ClosedHandover {
+                handover_generation: signal_flow::HandoverGeneration(2),
+                predecessor: generated::Predecessor("flow-before".into()),
+                successor: signal_flow::Successor(signal_flow::FlowId("flow-now".into())),
+                section_vector: Vec::new(),
+                touch_option: None,
+            }],
+        });
+        frozen::HandoverReminder {
+            address: Address::sample("handover"),
+            generation: 3,
+            model_name: "sonnet".into(),
+            opened_at: 1_700_000_000,
+            next_due: 1_700_000_600,
+            sent: 1,
+            every_minutes: 10,
+            reminder_text: "hand over".into(),
+        }
+        .archives_alike(&generated::HandoverReminder {
+            address: Address::sample("handover"),
+            handover_generation: signal_flow::HandoverGeneration(3),
+            model_name: signal_flow::ModelName("sonnet".into()),
+            opened_at: generated::OpenedAt(1_700_000_000),
+            next_due: generated::NextDue(1_700_000_600),
+            sent: generated::Sent(1),
+            every_minutes: meta_signal_flow::EveryMinutes(10),
+            reminder_text: meta_signal_flow::ReminderText("hand over".into()),
+        });
+        for (due, generated_due) in [
+            (Some(1_700_000_900), Some(generated::Due(1_700_000_900))),
+            (None, None),
+        ] {
+            frozen::Reminder {
+                key: "logical-task".into(),
+                address: Address::sample("sender"),
+                recipient: Address::sample("recipient"),
+                minutes: 15,
+                due,
+                sent: 2,
+            }
+            .archives_alike(&generated::Reminder {
+                logical_delivery_id: signal_flow::LogicalDeliveryId("logical-task".into()),
+                address: Address::sample("sender"),
+                recipient: generated::Recipient(Address::sample("recipient")),
+                minutes: flow_ethos::Minutes(15),
+                due_option: generated_due,
+                sent: generated::Sent(2),
+            });
+        }
+    }
+
+    #[test]
+    fn launch_and_succession_records_archive_as_they_did() {
+        use crate::generated::memory as generated;
+        for (frozen_thread, frozen_pane, thread, pane) in [
+            (
+                frozen::CleanupStep::Pending,
+                frozen::CleanupStep::Done,
+                generated::CleanupStep::Pending,
+                generated::CleanupStep::Done,
+            ),
+            (
+                frozen::CleanupStep::Done,
+                frozen::CleanupStep::Pending,
+                generated::CleanupStep::Done,
+                generated::CleanupStep::Pending,
+            ),
+        ] {
+            frozen::LaunchCleanup {
+                launch_request_id: "launch-l".into(),
+                native_session_id: "thread-l".into(),
+                thread_step: frozen_thread,
+                pane_step: frozen_pane,
+            }
+            .archives_alike(&generated::LaunchCleanup {
+                launch_request_id: signal_flow::LaunchRequestId("launch-l".into()),
+                native_session_id: signal_flow::NativeSessionId("thread-l".into()),
+                thread_step: generated::ThreadStep(thread),
+                pane_step: generated::PaneStep(pane),
+            });
+        }
+        frozen::OpenedLaunchThread {
+            launch_request_id: "launch-l".into(),
+            native_session_id: "thread-l".into(),
+        }
+        .archives_alike(&generated::OpenedLaunchThread {
+            launch_request_id: signal_flow::LaunchRequestId("launch-l".into()),
+            native_session_id: signal_flow::NativeSessionId("thread-l".into()),
+        });
+        for (frozen_order, order) in [
+            (
+                frozen::ReplacementOrder::Refresh,
+                generated::ReplacementOrder::Refresh,
+            ),
+            (
+                frozen::ReplacementOrder::Restart,
+                generated::ReplacementOrder::Restart,
+            ),
+        ] {
+            frozen::OrderedReplacement {
+                address: Address::sample("replaced"),
+                predecessor: "flow-old".into(),
+                order: frozen_order,
+            }
+            .archives_alike(&generated::OrderedReplacement {
+                address: Address::sample("replaced"),
+                predecessor: generated::Predecessor("flow-old".into()),
+                replacement_order: order,
+            });
+        }
+        for (frozen_cause, cause) in [
+            (
+                frozen::SuccessionCause::Refresh,
+                generated::SuccessionCause::Refresh,
+            ),
+            (
+                frozen::SuccessionCause::Exit,
+                generated::SuccessionCause::Exit,
+            ),
+            (
+                frozen::SuccessionCause::Ordered,
+                generated::SuccessionCause::Ordered,
+            ),
+            (
+                frozen::SuccessionCause::Replace,
+                generated::SuccessionCause::Replace,
+            ),
+        ] {
+            frozen::SuccessorIntent {
+                address: Address::sample("succeeded"),
+                predecessor: "flow-old".into(),
+                cause: frozen_cause,
+                launch_request_id: "launch-s".into(),
+            }
+            .archives_alike(&generated::SuccessorIntent {
+                address: Address::sample("succeeded"),
+                predecessor: generated::Predecessor("flow-old".into()),
+                succession_cause: cause,
+                launch_request_id: signal_flow::LaunchRequestId("launch-s".into()),
+            });
+        }
+        let frame = signal_flow::UndecodableFrame {
+            flow_id_option: Some(signal_flow::FlowId("flow-u".into())),
+            seat_evidence: signal_flow::SeatEvidence {
+                seat_pane_option: None,
+                pane_label_option: None,
+                native_session_id_option: None,
+                observed_at: signal_flow::ObservedAt(1_700_000_000),
+                process: signal_flow::Process {
+                    pid: flow_ethos::Pid(99),
+                    started: flow_ethos::Started(12),
+                },
+            },
+        };
+        frozen::UndecodableRecord {
+            key: "000000001700000000000000000-0000000099".into(),
+            frame: frame.clone(),
+        }
+        .archives_alike(&generated::UndecodableRecord {
+            undecodable_key: generated::UndecodableKey(
+                "000000001700000000000000000-0000000099".into(),
+            ),
+            undecodable_frame: frame,
+        });
+        frozen::AddressHold {
+            flow_id: "flow-h".into(),
+            address: Address::sample("held"),
+            found: None,
+        }
+        .archives_alike(&generated::AddressHold {
+            flow_id: signal_flow::FlowId("flow-h".into()),
+            address: Address::sample("held"),
+            metaflow_option: None,
+        });
     }
 }

@@ -1998,19 +1998,22 @@ impl RecordsLogicalDeliveries for FlowStore {
             let Some(live) = self.handover_memory(&expected.address)? else {
                 return Ok(stale());
             };
-            if live.generation != expected.generation || live.current_flow_id.is_none() {
+            if live.handover_generation != expected.handover_generation
+                || live.flow_id_option.is_none()
+            {
                 return Ok(stale());
             }
             // Revalidate green while holding the same logical write gate as
             // admission. A Keep/Drop that won the gate before this call
             // therefore suppresses the stale warning rather than queueing it.
-            if let Some(flow_id) = live.current_flow_id.as_deref()
-                && let Some(threshold) = self.configured_threshold(&expected.model_name)?
+            if let Some(flow_id) = live.flow_id_option.as_ref().map(|value| value.0.as_str())
+                && let Some(threshold) = self.configured_threshold(&expected.model_name.0)?
                 && self.handover_green(&expected.address, flow_id, threshold.refresh_threshold.0)?
             {
                 return Ok(stale());
             }
-            if let Some(held) = self.handover_reminder(&expected.address, expected.generation)?
+            if let Some(held) =
+                self.handover_reminder(&expected.address, expected.handover_generation.0)?
                 && held.sent >= expected.sent
             {
                 return Ok(stale());
@@ -2222,12 +2225,12 @@ impl RecordsLogicalDeliveries for FlowStore {
                 commit.assert(
                     self.reminders,
                     super::reminder::Reminder {
-                        key: id.clone(),
+                        logical_delivery_id: flow_ethos::LogicalDeliveryId(id.clone()),
                         address: reminded,
-                        recipient: address.clone(),
-                        minutes: task.minutes.0,
-                        due,
-                        sent: 0,
+                        recipient: crate::generated::memory::Recipient(address.clone()),
+                        minutes: task.minutes,
+                        due_option: due.map(crate::generated::memory::Due),
+                        sent: crate::generated::memory::Sent(0),
                     },
                 )
             }

@@ -69,7 +69,7 @@ impl RemindsCallers for RunningNexus {
             };
             for reminder in due {
                 let Some(task_words) = retained.iter().find_map(|request| {
-                    if request.entry.logical_delivery_id.0 != reminder.key {
+                    if request.entry.logical_delivery_id != reminder.logical_delivery_id {
                         return None;
                     }
                     let request = match &request.entry.message {
@@ -110,7 +110,10 @@ impl RemindsCallers for RunningNexus {
                 }
                 let kept = match next {
                     Some(next) => self.store.hold_reminder(next),
-                    None => self.store.close_reminder(&reminder.key).map(|_| ()),
+                    None => self
+                        .store
+                        .close_reminder(&reminder.logical_delivery_id.0)
+                        .map(|_| ()),
                 };
                 if let Err(error) = kept {
                     eprintln!("flow-nexus: a reminder was not advanced: {error}");

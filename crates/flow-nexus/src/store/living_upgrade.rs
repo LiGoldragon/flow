@@ -253,9 +253,9 @@ impl UpgradeFrom<AddressHoldBeforeLiving> for super::address_hold::AddressHold {
     type Refusal = std::convert::Infallible;
     fn upgrade_from(before: AddressHoldBeforeLiving) -> Decision<Self, Self::Refusal> {
         Decision::Ready(super::address_hold::AddressHold {
-            flow_id: before.flow_id,
+            flow_id: flow_ethos::FlowId(before.flow_id),
             address: before.address,
-            found: before.found.map(BecomesLiving::living),
+            metaflow_option: before.found.map(BecomesLiving::living),
         })
     }
 }

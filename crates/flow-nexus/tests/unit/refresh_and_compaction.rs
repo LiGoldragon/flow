@@ -223,9 +223,9 @@ pub(super) fn owe_staged_successor(fixture: &NexusFixture) {
         .store
         .owe_successor(SuccessorIntent {
             address: seat_address(),
-            predecessor: CLAUDE_SEAT.into(),
-            cause: SuccessionCause::Refresh,
-            launch_request_id: SUCCESSOR_REQUEST.into(),
+            predecessor: crate::generated::memory::Predecessor(CLAUDE_SEAT.into()),
+            succession_cause: SuccessionCause::Refresh,
+            launch_request_id: signal_flow::LaunchRequestId(SUCCESSOR_REQUEST.into()),
         })
         .expect("successor owed");
 }
@@ -539,7 +539,7 @@ fn a_busy_flow_is_warned_and_then_refreshed_at_its_next_stop() {
         .handover_reminder(&seat_address(), 0)
         .unwrap()
         .expect("the warning opened");
-    assert_eq!(reminder.sent, 1);
+    assert_eq!(reminder.sent, crate::generated::memory::Sent(1));
     assert!(!closed(&fixture), "the warned seat is not refreshed yet");
     assert_eq!(
         seat_metaflow_now(&fixture).state,
@@ -790,12 +790,21 @@ fn a_maintained_seat_refreshed_with_nothing_queued_starts_its_successor_first() 
         .handover_memory(&seat_address())
         .unwrap()
         .unwrap();
-    assert_eq!(handover.current_flow_id.as_deref(), Some("908786"));
-    assert_eq!(handover.touch, None);
-    assert_eq!(handover.closed.len(), 1);
-    assert_eq!(handover.closed[0].predecessor, CLAUDE_SEAT);
     assert_eq!(
-        handover.closed[0].sections,
+        handover
+            .flow_id_option
+            .as_ref()
+            .map(|value| value.0.as_str()),
+        Some("908786")
+    );
+    assert_eq!(handover.touch_option, None);
+    assert_eq!(handover.closed_handover_vector.len(), 1);
+    assert_eq!(
+        handover.closed_handover_vector[0].predecessor.0,
+        CLAUDE_SEAT
+    );
+    assert_eq!(
+        handover.closed_handover_vector[0].section_vector,
         vec![
             Section {
                 title: signal_flow::Title("fixture".into()),
@@ -922,10 +931,19 @@ fn an_on_demand_seat_refreshed_with_a_waking_request_starts_its_successor_first(
         .handover_memory(&seat_address())
         .unwrap()
         .unwrap();
-    assert_eq!(handover.current_flow_id.as_deref(), Some("908786"));
-    assert_eq!(handover.touch, None);
-    assert_eq!(handover.closed.len(), 1);
-    assert_eq!(handover.closed[0].predecessor, CLAUDE_SEAT);
+    assert_eq!(
+        handover
+            .flow_id_option
+            .as_ref()
+            .map(|value| value.0.as_str()),
+        Some("908786")
+    );
+    assert_eq!(handover.touch_option, None);
+    assert_eq!(handover.closed_handover_vector.len(), 1);
+    assert_eq!(
+        handover.closed_handover_vector[0].predecessor.0,
+        CLAUDE_SEAT
+    );
 }
 
 /// A successor whose launch is refused leaves the predecessor Awake and
@@ -1069,12 +1087,12 @@ fn a_compaction_during_continuous_work_is_recorded_once_without_an_order() {
     assert_eq!(
         compactions
             .iter()
-            .map(|compaction| compaction.boundary.as_str())
+            .map(|compaction| compaction.boundary.0.as_str())
             .collect::<Vec<_>>(),
         ["continuous"]
     );
     assert_eq!(compactions[0].investigation, Investigation::NotConfigured);
-    assert_eq!(compactions[0].address, Some(seat_address()));
+    assert_eq!(compactions[0].address_option, Some(seat_address()));
 }
 
 /// With no Investigation seat configured the warning is logged and the
@@ -1125,7 +1143,7 @@ fn a_codex_compaction_is_raised_unless_a_compact_asked_for_it() {
     assert_eq!(
         compactions
             .iter()
-            .map(|compaction| compaction.boundary.as_str())
+            .map(|compaction| compaction.boundary.0.as_str())
             .collect::<Vec<_>>(),
         ["item-own"]
     );

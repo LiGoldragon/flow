@@ -36,10 +36,10 @@ impl RendersHandoverWarning for HandoverReminderNotice {
 
 impl DecidesHandoverReminder for HandoverReminder {
     fn notice_if_due(&self, now: i64) -> Option<HandoverReminderNotice> {
-        (now >= self.next_due).then(|| HandoverReminderNotice {
+        (now >= self.next_due.0).then(|| HandoverReminderNotice {
             address: self.address.clone(),
-            text: self.reminder_text.clone(),
-            generation: self.generation,
+            text: self.reminder_text.clone().0,
+            generation: self.handover_generation.0,
         })
     }
     fn advanced_due(&self) -> Option<i64> {
@@ -47,8 +47,8 @@ impl DecidesHandoverReminder for HandoverReminder {
     }
     fn advanced(&self) -> Option<HandoverReminder> {
         let mut next = self.clone();
-        next.sent = next.sent.checked_add(1)?;
-        next.next_due = next.next_due().ok()?;
+        next.sent = crate::generated::memory::Sent(next.sent.0.checked_add(1)?);
+        next.next_due = crate::generated::memory::NextDue(next.next_due().ok()?);
         Some(next)
     }
 }
@@ -142,7 +142,7 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             else {
                 continue;
             };
-            let generation = live.generation;
+            let generation = live.handover_generation;
             let Ok(green) = self.store.handover_green(
                 &metaflow.address,
                 &flow_id.0,
@@ -152,14 +152,14 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             };
             let existing = self
                 .store
-                .handover_reminder(&metaflow.address, generation)
+                .handover_reminder(&metaflow.address, generation.0)
                 .ok()
                 .flatten();
             if green {
                 if existing.is_some() {
                     let _ = self
                         .store
-                        .close_handover_reminder(&metaflow.address, generation);
+                        .close_handover_reminder(&metaflow.address, generation.0);
                 }
                 continue;
             }
@@ -171,14 +171,14 @@ impl RemindsHandoverCallers for crate::RunningNexus {
                 if existing.is_some() {
                     let _ = self
                         .store
-                        .close_handover_reminder(&metaflow.address, generation);
+                        .close_handover_reminder(&metaflow.address, generation.0);
                 }
                 continue;
             }
             if existing.is_none() {
                 let Ok(reminder) = HandoverReminder::open_handover_reminder(
                     metaflow.address.clone(),
-                    generation,
+                    generation.0,
                     model_name,
                     now,
                     policy.every_minutes.0,
@@ -197,13 +197,15 @@ impl RemindsHandoverCallers for crate::RunningNexus {
                 continue;
             };
             let Some(live) = live else { continue };
-            if live.generation != reminder.generation || live.current_flow_id.is_none() {
+            if live.handover_generation != reminder.handover_generation
+                || live.flow_id_option.is_none()
+            {
                 let _ = self
                     .store
-                    .close_handover_reminder(&reminder.address, reminder.generation);
+                    .close_handover_reminder(&reminder.address, reminder.handover_generation.0);
                 continue;
             }
-            let Some(flow_id) = live.current_flow_id.as_deref() else {
+            let Some(flow_id) = live.flow_id_option.as_ref().map(|value| value.0.as_str()) else {
                 continue;
             };
             let Ok(Some(model_name)) = self.store.flow_model(flow_id) else {
@@ -256,16 +258,16 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             // MiddleAbrupt reaches the flow at its next tool boundary.
             let base = HandoverReminderNotice {
                 address: reminder.address.clone(),
-                text: reminder.reminder_text.clone(),
-                generation: reminder.generation,
+                text: reminder.reminder_text.clone().0,
+                generation: reminder.handover_generation.0,
             };
             let mut admitted = reminder.clone();
-            admitted.sent = match admitted.sent.checked_add(1) {
-                Some(value) => value,
+            admitted.sent = match admitted.sent.0.checked_add(1) {
+                Some(value) => crate::generated::memory::Sent(value),
                 None => continue,
             };
             admitted.next_due = match admitted.next_due() {
-                Ok(value) => value,
+                Ok(value) => crate::generated::memory::NextDue(value),
                 Err(_) => continue,
             };
             let accepted = self.store.accept_handover_reminder(

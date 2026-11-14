@@ -283,11 +283,11 @@ impl DerivesOwedHandover for FlowStore {
         };
         let Some(owner) = self
             .handover_memory(address)?
-            .and_then(|row| row.current_flow_id)
+            .and_then(|row| row.flow_id_option)
         else {
             return Ok(None);
         };
-        if owner == receiving.0 {
+        if owner == receiving {
             return Ok(None);
         }
         if self
@@ -308,7 +308,7 @@ impl DerivesOwedHandover for FlowStore {
         {
             return Ok(None);
         }
-        Ok(Some((receiving, launch_request_id, owner)))
+        Ok(Some((receiving, launch_request_id, owner.0)))
     }
 }
 

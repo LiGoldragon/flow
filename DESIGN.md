@@ -587,13 +587,17 @@ between the commit and the wake leaves none owed. A wake already running for
 the metaflow absorbs the request: it drains what arrives during it.
 
 A wake's fresh flow takes the queued batch in its first prompt. Its launch
-answers `Started` once that prompt is submitted, and Claude may write it to
-the transcript later; a batch whose receipt is not yet seen leaves the queue
-as Uncertain attempts of the woken session, anchored at the session's start,
-so nothing types it again, and the wake answers `Woken`. The launch's
-receipt, the first prompt the session reports or the transcript showing the
-prompt and the flow's first answer, settles every request the prompt
-carried, at the first event that reads it. A direct Send that woke its
+answers `Started` once that prompt is submitted, and the harness may show it
+taken only later: Claude may write it to the transcript after `Started`, and
+a Codex rollout shows the flow's first answer, which a Codex receipt needs,
+after the first turn has run. A batch whose receipt is not yet seen leaves
+the queue as Uncertain attempts of the woken session, of either harness,
+anchored at the session's start (a Claude transcript before it holds
+anything, a Codex thread before its first turn), so nothing types it again,
+and the wake answers `Woken`. The launch's receipt, the first prompt the
+session reports or the transcript showing the prompt and the flow's first
+answer, settles every request the prompt carried, at the first event that
+reads it. A direct Send that woke its
 recipient waits for that receipt and is never typed into the new pane a
 second time.
 

@@ -858,6 +858,25 @@ impl StartsSessionHistory for NativeTranscriptCursor {
     }
 }
 
+/// Where a harness's session history begins, as the anchor of the input a
+/// launch's first prompt carried: a Claude session's transcript before it
+/// holds anything, a Codex thread before its first turn. Input anchored
+/// here is read for in the session's whole history.
+pub(crate) trait AnchorsSessionStart {
+    fn session_start_anchor(&self) -> NativeHistoryAnchor;
+}
+
+impl AnchorsSessionStart for HarnessKind {
+    fn session_start_anchor(&self) -> NativeHistoryAnchor {
+        match self {
+            HarnessKind::Claude => {
+                NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor::session_start())
+            }
+            HarnessKind::Codex => NativeHistoryAnchor::CodexTurns(None),
+        }
+    }
+}
+
 /// Whether a launch opens its seat with no first prompt: a Simplified seat
 /// with no instruction, whose first model turn is the queued request a
 /// drain types.
@@ -3089,8 +3108,10 @@ impl ParksCohort for RunningNexus {
 }
 
 /// A fresh wake's first prompt carries the queued batch. `Started` proves
-/// that prompt was submitted; the receipt that proves Claude took it can
-/// land after `Started`. Until it does, the batch is typed input awaiting
+/// that prompt was submitted; the receipt that proves the harness took it
+/// can land after `Started`: Claude may write the prompt to its transcript
+/// later, and a Codex receipt is the rollout showing the prompt and the
+/// flow's first answer. Until it lands, the batch is typed input awaiting
 /// its receipt: each request leaves the queue as an Uncertain attempt
 /// anchored at the start of the woken session, so it is never typed again,
 /// and the launch's own receipt settles it.
@@ -3105,15 +3126,17 @@ pub(crate) trait CarriesStartup {
         launch_request_id: &str,
     ) -> Option<signal_flow::NativeReceipt>;
     /// Under the dispatch gate the caller holds: parks the batch, oldest
-    /// first, as Uncertain attempts of the woken Claude session anchored at
-    /// its start. False when the store refused, the seat is no Claude seat,
-    /// or the batch is not the queue's head.
+    /// first, as Uncertain attempts of the woken session anchored at its
+    /// start. False when the store refused or the batch is not the queue's
+    /// head.
     fn carry_startup(&self, address: &Address, flow_id: &str, startup: &[QueueEntry]) -> bool;
-    /// The launch whose first prompt carried `attempt`, when one did: a
-    /// Claude attempt anchored at its session's start, in a flow whose
-    /// launch typed a first prompt. A request typed by a drain is anchored
-    /// at the transcript as it stood, and at the session's start only in a
-    /// flow that opened with no prompt.
+    /// The launch whose first prompt carried `attempt`, when one did: an
+    /// attempt anchored at its session's start, in a flow whose launch
+    /// typed a first prompt whose brief ends with the run of requests the
+    /// attempt was parked in. A request typed by a drain is anchored at the
+    /// history as it stood: a Claude transcript's cursor, a Codex thread's
+    /// newest turn. A Codex thread whose history lists no turn yet anchors
+    /// a drain's run at its start too; that run is no launch's brief.
     fn startup_launch(&self, attempt: &QueueDeliveryAttempt) -> Option<String>;
 }
 
@@ -3178,15 +3201,15 @@ impl CarriesStartup for RunningNexus {
             return true;
         };
         let node = match self.store.flow_node(flow_id) {
-            Ok(Some(node)) if node.harness_kind == HarnessKind::Claude => node,
+            Ok(Some(node)) => node,
             _ => return false,
         };
         let head = match self.store.prepare_oldest_delivery(
             address,
             flow_id,
             &node.session_id.0,
-            HarnessKind::Claude,
-            NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor::session_start()),
+            node.harness_kind.clone(),
+            node.harness_kind.session_start_anchor(),
         ) {
             Ok(PrepareQueueDelivery::Prepared(head))
                 if head.queue_evidence
@@ -3212,10 +3235,7 @@ impl CarriesStartup for RunningNexus {
     }
 
     fn startup_launch(&self, attempt: &QueueDeliveryAttempt) -> Option<String> {
-        if attempt.harness_kind != HarnessKind::Claude
-            || attempt.native_history_anchor
-                != NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor::session_start())
-        {
+        if attempt.native_history_anchor != attempt.harness_kind.session_start_anchor() {
             return None;
         }
         let launch_request_id = self
@@ -3227,7 +3247,23 @@ impl CarriesStartup for RunningNexus {
             .store
             .composable_launch_profile(&launch_request_id)
             .ok()??;
-        (!profile.opens_without_prompt()).then_some(launch_request_id)
+        // The launch's brief ends with the batch its first prompt carried,
+        // as the wake rendered it; a run a drain typed at the same anchor
+        // is no part of it.
+        let carried = self
+            .typed_group(attempt)
+            .into_iter()
+            .filter_map(|member| match member.queue_evidence {
+                meta_signal_flow::QueueEvidence::Logical(entry) => Some(entry),
+                meta_signal_flow::QueueEvidence::Legacy(_) => None,
+            })
+            .collect::<Vec<_>>();
+        (!profile.opens_without_prompt()
+            && profile
+                .instruction_prompt
+                .0
+                .ends_with(&carried.prompt_text(&attempt.address)))
+        .then_some(launch_request_id)
     }
 }
 

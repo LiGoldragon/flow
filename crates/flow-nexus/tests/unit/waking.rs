@@ -4479,6 +4479,235 @@ fn configure_secondary_model(fixture: &NexusFixture, native: &str) {
         .expect("model configured");
 }
 
+/// A sleeping Codex address at Sol, its wake to start in the fresh world:
+/// the old Codex flow 908786 Stopped on thread OLD, with its launch of
+/// record and its rollout; `queue` queued; the model configured; and the
+/// new thread's FlowId claim installed. The new thread's rollout is the
+/// test's to write.
+struct SleepingCodex {
+    world: FreshWorld,
+    old: FlowNode,
+    old_rollout: std::path::PathBuf,
+    old_bytes: Vec<u8>,
+    /// The rollout the new thread writes.
+    fresh_rollout: std::path::PathBuf,
+    /// The first prompt part the wake gives the new thread.
+    first_part: String,
+    /// The title the new thread is named with.
+    title: String,
+}
+
+trait SleepsCodex {
+    fn sleeping_codex(&mut self, queue: Vec<Request>) -> SleepingCodex;
+}
+
+impl SleepsCodex for NexusFixture {
+    fn sleeping_codex(&mut self, queue: Vec<Request>) -> SleepingCodex {
+        use crate::title::{ShowsNativeTitle, TitlesFlow};
+        let fixture = self;
+        // The old Codex flow 908786 on thread OLD, Stopped, its launch of record.
+        let old = fixture.node();
+        let old_thread = old.session_id.0.clone();
+        let profile = LaunchProfile {
+            launch_request_id: signal_flow::LaunchRequestId("old-codex-request".into()),
+            system_modules: signal_flow::SystemModules(vec![
+                signal_flow::ModuleIdentity("spirit:core:0".into()),
+                signal_flow::ModuleIdentity("intent:flow:0".into()),
+            ]),
+            prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
+                "operation:main-flow:0".into(),
+            )]),
+            address: address(Model::Sol),
+            model_name: flow_ethos::ModelName("fixture-model".into()),
+            effort: signal_flow::Effort("medium".into()),
+            flow_kind: signal_flow::FlowKind::Regular,
+            tool_set: signal_flow::ToolSet::Default,
+            flow_id_option: None,
+            remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(0)),
+            herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
+            leave_outs_option: None,
+            instruction_prompt: signal_flow::InstructionPrompt("fixture instruction".into()),
+        };
+        let composed = fixture
+            .nexus
+            .composer
+            .current()
+            .compose(
+                crate::composition::HarnessedProfile {
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
+                    harness_kind: HarnessKind::Codex,
+                    launch_profile: profile.clone(),
+                },
+                Vec::<signal_flow::LeaveOut>::new(),
+            )
+            .unwrap();
+        fixture
+            .nexus
+            .store
+            .reserve_launch_attempt(&composed, Origin::Unbound)
+            .unwrap();
+        assert!(
+            fixture
+                .nexus
+                .store
+                .record_native_launch_intent(NativeLaunchIntent {
+                    launch_request_id: profile.launch_request_id.clone(),
+                    prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
+                    harness_kind: HarnessKind::Codex,
+                    model_name: profile.model_name.clone(),
+                    effort: profile.effort.clone(),
+                    system_prompt_sha256: composed.system_prompt.system_prompt_sha256.clone(),
+                    prompt_sha256_vector: composed.part_hashes(),
+                })
+                .unwrap()
+        );
+        assert!(
+            fixture
+                .nexus
+                .store
+                .record_native_launch_binding(NativeLaunchBinding {
+                    launch_request_id: profile.launch_request_id.clone(),
+                    flow_id: old.flow_id.clone(),
+                    native_session_id: signal_flow::NativeSessionId(old_thread.clone()),
+                    harness_kind: HarnessKind::Codex,
+                    herdr_pane_binding: signal_flow::HerdrPaneBinding {
+                        launch_request_id: profile.launch_request_id.clone(),
+                        herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
+                        herdr_agent_name: signal_flow::HerdrAgentName(composed.launch_agent_name()),
+                        herdr_workspace_id: signal_flow::HerdrWorkspaceId("w1".into()),
+                        herdr_pane_id: signal_flow::HerdrPaneId("w1:p3".into()),
+                        herdr_terminal_id: signal_flow::HerdrTerminalId("term-old".into()),
+                    },
+                })
+                .unwrap()
+        );
+        let mut old_node = old.clone();
+        old_node.herdr_route_selection = HerdrRouteSelection::Available(HerdrRoute {
+            herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
+            herdr_agent_name: signal_flow::HerdrAgentName(composed.launch_agent_name()),
+            herdr_pane_id: signal_flow::HerdrPaneId("w1:p3".into()),
+            herdr_terminal_id: signal_flow::HerdrTerminalId("term-old".into()),
+        });
+        fixture.nexus.store.register_flow(old_node).unwrap();
+        assert!(fixture.nexus.store.record_stopped(&old.flow_id.0).unwrap());
+        let rollouts = fixture.directory.path().join("native-transcripts/codex");
+        fs::create_dir_all(&rollouts).unwrap();
+        let old_rollout = rollouts.join(format!("rollout-{old_thread}.jsonl"));
+        fs::write(
+            &old_rollout,
+            format!(
+                "{}\n",
+                serde_json::json!({"type":"session_meta","payload":{"id":old_thread}})
+            ),
+        )
+        .unwrap();
+        let old_bytes = fs::read(&old_rollout).unwrap();
+        fixture.nexus.store.seed_metaflow(metaflow(
+            Model::Sol,
+            State::Asleep,
+            vec![old.flow_id.0.as_str()],
+            queue.clone(),
+        ));
+        configure_secondary_model(fixture, "fixture-model");
+        let at = address(Model::Sol);
+
+        // The fresh seat the wake composes, and so the first turn the new thread
+        // holds, and the title it is named with.
+        let fresh = FreshSeat {
+            address: at.clone(),
+            launch_request_id: "any".into(),
+            model_name: "fixture-model".into(),
+            effort: "medium".into(),
+            herdr_session_name: "fixture-session".into(),
+            system_modules: profile.system_modules.clone(),
+            prompt_modules: profile.prompt_modules.clone(),
+            leave_outs_option: None,
+            flow_kind: signal_flow::FlowKind::Regular,
+            tool_set: signal_flow::ToolSet::Default,
+            prompt: queue.clone().unsent().prompt_text(&address(Model::Sol)),
+        }
+        .fresh_profile();
+        let title = fresh.native_title(FRESH_CODEX_FLOW).unwrap();
+        let first_part = fixture
+            .nexus
+            .composer
+            .current()
+            .compose(
+                crate::composition::HarnessedProfile {
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
+                    harness_kind: HarnessKind::Codex,
+                    launch_profile: fresh,
+                },
+                Vec::<signal_flow::LeaveOut>::new(),
+            )
+            .unwrap()
+            .first_prompt_payload
+            .prompt_part_vector[0]
+            .prompt_part_text
+            .clone();
+        let world = fixture.fresh_world(title.as_str());
+        // The new thread's FlowId claim, as `flow-id codex` makes it.
+        FixtureExecutable {
+            path: fixture.directory.path().join("native-transcripts/flow-id"),
+        }
+        .install(&format!(
+            "#!/bin/sh\n[ \"$1\" = codex ] && [ \"$CODEX_SESSION_ID\" = '{FRESH_THREAD}' ] || exit 2\nprintf 'version=1\\nharness=codex\\nidentity={identity}\\nalias={FRESH_CODEX_FLOW}\\n' > \"$3/.{FRESH_CODEX_FLOW}.flow-id\"\nprintf '{FRESH_CODEX_FLOW}\\n'\n",
+            identity = FRESH_THREAD.replace('-', ""),
+        ));
+        SleepingCodex {
+            world,
+            old,
+            old_rollout,
+            old_bytes,
+            fresh_rollout: rollouts.join(format!("rollout-{FRESH_THREAD}.jsonl")),
+            first_part: first_part.0,
+            title: title.as_str().to_owned(),
+        }
+    }
+}
+
+/// The new thread's rollout as Codex writes it: its meta, its first turn's
+/// context and the first prompt as the user message, then, once Codex has
+/// answered, the flow's first answer.
+trait WritesFreshRollout {
+    /// Writes the rollout through the first prompt, and the first answer
+    /// when `answered`.
+    fn rollout(&self, answered: bool);
+    /// Appends the flow's first answer.
+    fn answer_lands(&self);
+}
+
+impl WritesFreshRollout for SleepingCodex {
+    fn rollout(&self, answered: bool) {
+        let rows = [
+            serde_json::json!({"type":"session_meta","payload":{"id":FRESH_THREAD}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"medium","turn_id":"turn-fresh"}}),
+            serde_json::json!({"type":"event_msg","payload":{"thread_id":FRESH_THREAD,"turn_id":"turn-fresh","item":{"type":"UserMessage","content":[{"type":"text","text":self.first_part}]}}}),
+        ];
+        fs::write(
+            &self.fresh_rollout,
+            rows.iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        if answered {
+            self.answer_lands();
+        }
+    }
+
+    fn answer_lands(&self) {
+        use std::io::Write;
+        let answer = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Woken."}]}});
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&self.fresh_rollout)
+            .expect("the new thread's rollout")
+            .write_all(format!("{answer}\n").as_bytes())
+            .expect("the answer lands");
+    }
+}
+
 /// A sleeping Codex address wakes fresh: the Nexus opens a new
 /// thread through the app-server, attaches a TUI to it in a new pane, binds
 /// the flow to that thread although Herdr reports no session, names it,
@@ -4488,171 +4717,22 @@ fn configure_secondary_model(fixture: &NexusFixture, native: &str) {
 /// the old flow stays Stopped on it.
 #[test]
 fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
-    use crate::title::{ShowsNativeTitle, TitlesFlow};
     let mut fixture = NexusFixture::new();
-    // The old Codex flow 908786 on thread OLD, Stopped, its launch of record.
-    let old = fixture.node();
-    let old_thread = old.session_id.0.clone();
-    let profile = LaunchProfile {
-        launch_request_id: signal_flow::LaunchRequestId("old-codex-request".into()),
-        system_modules: signal_flow::SystemModules(vec![
-            signal_flow::ModuleIdentity("spirit:core:0".into()),
-            signal_flow::ModuleIdentity("intent:flow:0".into()),
-        ]),
-        prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
-            "operation:main-flow:0".into(),
-        )]),
-        address: address(Model::Sol),
-        model_name: flow_ethos::ModelName("fixture-model".into()),
-        effort: signal_flow::Effort("medium".into()),
-        flow_kind: signal_flow::FlowKind::Regular,
-        tool_set: signal_flow::ToolSet::Default,
-        flow_id_option: None,
-        remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(0)),
-        herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
-        leave_outs_option: None,
-        instruction_prompt: signal_flow::InstructionPrompt("fixture instruction".into()),
-    };
-    let composed = fixture
-        .nexus
-        .composer
-        .current()
-        .compose(
-            crate::composition::HarnessedProfile {
-                remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
-                harness_kind: HarnessKind::Codex,
-                launch_profile: profile.clone(),
-            },
-            Vec::<signal_flow::LeaveOut>::new(),
-        )
-        .unwrap();
-    fixture
-        .nexus
-        .store
-        .reserve_launch_attempt(&composed, Origin::Unbound)
-        .unwrap();
-    assert!(
-        fixture
-            .nexus
-            .store
-            .record_native_launch_intent(NativeLaunchIntent {
-                launch_request_id: profile.launch_request_id.clone(),
-                prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
-                harness_kind: HarnessKind::Codex,
-                model_name: profile.model_name.clone(),
-                effort: profile.effort.clone(),
-                system_prompt_sha256: composed.system_prompt.system_prompt_sha256.clone(),
-                prompt_sha256_vector: composed.part_hashes(),
-            })
-            .unwrap()
-    );
-    assert!(
-        fixture
-            .nexus
-            .store
-            .record_native_launch_binding(NativeLaunchBinding {
-                launch_request_id: profile.launch_request_id.clone(),
-                flow_id: old.flow_id.clone(),
-                native_session_id: signal_flow::NativeSessionId(old_thread.clone()),
-                harness_kind: HarnessKind::Codex,
-                herdr_pane_binding: signal_flow::HerdrPaneBinding {
-                    launch_request_id: profile.launch_request_id.clone(),
-                    herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
-                    herdr_agent_name: signal_flow::HerdrAgentName(composed.launch_agent_name()),
-                    herdr_workspace_id: signal_flow::HerdrWorkspaceId("w1".into()),
-                    herdr_pane_id: signal_flow::HerdrPaneId("w1:p3".into()),
-                    herdr_terminal_id: signal_flow::HerdrTerminalId("term-old".into()),
-                },
-            })
-            .unwrap()
-    );
-    let mut old_node = old.clone();
-    old_node.herdr_route_selection = HerdrRouteSelection::Available(HerdrRoute {
-        herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
-        herdr_agent_name: signal_flow::HerdrAgentName(composed.launch_agent_name()),
-        herdr_pane_id: signal_flow::HerdrPaneId("w1:p3".into()),
-        herdr_terminal_id: signal_flow::HerdrTerminalId("term-old".into()),
-    });
-    fixture.nexus.store.register_flow(old_node).unwrap();
-    assert!(fixture.nexus.store.record_stopped(&old.flow_id.0).unwrap());
-    let rollouts = fixture.directory.path().join("native-transcripts/codex");
-    fs::create_dir_all(&rollouts).unwrap();
-    let old_rollout = rollouts.join(format!("rollout-{old_thread}.jsonl"));
-    fs::write(
-        &old_rollout,
-        format!(
-            "{}\n",
-            serde_json::json!({"type":"session_meta","payload":{"id":old_thread}})
-        ),
-    )
-    .unwrap();
-    let old_bytes = fs::read(&old_rollout).unwrap();
     let queue = vec![Request::Order("A".into())];
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Model::Sol,
-        State::Asleep,
-        vec![old.flow_id.0.as_str()],
-        queue.clone(),
-    ));
-    configure_secondary_model(&fixture, "fixture-model");
+    let SleepingCodex {
+        world,
+        old,
+        old_rollout,
+        old_bytes,
+        title,
+        ..
+    } = {
+        let sleeping = fixture.sleeping_codex(queue);
+        sleeping.rollout(true);
+        sleeping
+    };
+    let old_thread = old.session_id.0.clone();
     let at = address(Model::Sol);
-
-    // The fresh seat the wake composes, and so the first turn the new thread
-    // holds, and the title it is named with.
-    let fresh = FreshSeat {
-        address: at.clone(),
-        launch_request_id: "any".into(),
-        model_name: "fixture-model".into(),
-        effort: "medium".into(),
-        herdr_session_name: "fixture-session".into(),
-        system_modules: profile.system_modules.clone(),
-        prompt_modules: profile.prompt_modules.clone(),
-        leave_outs_option: None,
-        flow_kind: signal_flow::FlowKind::Regular,
-        tool_set: signal_flow::ToolSet::Default,
-        prompt: queue.clone().unsent().prompt_text(&address(Model::Sol)),
-    }
-    .fresh_profile();
-    let title = fresh.native_title(FRESH_CODEX_FLOW).unwrap();
-    let first_part = fixture
-        .nexus
-        .composer
-        .current()
-        .compose(
-            crate::composition::HarnessedProfile {
-                remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
-                harness_kind: HarnessKind::Codex,
-                launch_profile: fresh,
-            },
-            Vec::<signal_flow::LeaveOut>::new(),
-        )
-        .unwrap()
-        .first_prompt_payload
-        .prompt_part_vector[0]
-        .prompt_part_text
-        .clone();
-    let world = fixture.fresh_world(title.as_str());
-    let rows = [
-        serde_json::json!({"type":"session_meta","payload":{"id":FRESH_THREAD}}),
-        serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"medium","turn_id":"turn-fresh"}}),
-        serde_json::json!({"type":"event_msg","payload":{"thread_id":FRESH_THREAD,"turn_id":"turn-fresh","item":{"type":"UserMessage","content":[{"type":"text","text":first_part.0}]}}}),
-        serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Woken."}]}}),
-    ];
-    fs::write(
-        rollouts.join(format!("rollout-{FRESH_THREAD}.jsonl")),
-        rows.iter()
-            .map(|row| format!("{row}\n"))
-            .collect::<String>(),
-    )
-    .unwrap();
-    // The new thread's FlowId claim, as `flow-id codex` makes it.
-    FixtureExecutable {
-        path: fixture.directory.path().join("native-transcripts/flow-id"),
-    }
-    .install(&format!(
-        "#!/bin/sh\n[ \"$1\" = codex ] && [ \"$CODEX_SESSION_ID\" = '{FRESH_THREAD}' ] || exit 2\nprintf 'version=1\\nharness=codex\\nidentity={identity}\\nalias={FRESH_CODEX_FLOW}\\n' > \"$3/.{FRESH_CODEX_FLOW}.flow-id\"\nprintf '{FRESH_CODEX_FLOW}\\n'\n",
-        identity = FRESH_THREAD.replace('-', ""),
-    ));
 
     let outcome = fixture.nexus.perform(Operation::Wake(at.clone()));
     assert_eq!(
@@ -4698,6 +4778,100 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
     assert_eq!(
         fs::read_to_string(world.state.join("label")).unwrap(),
         title.as_str()
+    );
+}
+
+/// A sleeping Codex address wakes fresh, and the new thread's first prompt
+/// carries the queued A. The receipt of a Codex first prompt is the rollout
+/// showing it and the flow's first answer, which Codex writes after the
+/// launch answers `Started`: the wake finds no receipt, and A leaves the
+/// queue as typed input awaiting it, so the wake answers `Woken`. Once the
+/// answer lands, the next drain settles A on the launch's receipt; no drain
+/// types A again, into the pane or through the app-server.
+#[test]
+fn a_codex_wake_carries_its_batch_until_its_first_answer_receipts_it() {
+    use crate::store::queue_delivery::AccountsQueueDelivery;
+    let mut fixture = NexusFixture::new();
+    let sleeping = fixture.sleeping_codex(vec![Request::Order("A".into())]);
+    sleeping.rollout(false);
+    let at = address(Model::Sol);
+    let carried = stored(&fixture, Model::Sol).queue.0[0].clone();
+    let fresh = flow_ethos::FlowId(FRESH_CODEX_FLOW.into());
+
+    let outcome = fixture.nexus.perform(Operation::Wake(at.clone()));
+    assert_eq!(
+        outcome,
+        Outcome::Woken(fresh.clone()),
+        "Herdr calls: {}; app-server invocations: {:?}",
+        sleeping.world.calls(),
+        fs::read_to_string(&sleeping.world.codex_invocations).ok()
+    );
+    let woken = stored(&fixture, Model::Sol);
+    assert_eq!(woken.state, State::Awake(fresh.clone()));
+    assert!(
+        woken.queue.0.is_empty(),
+        "the first prompt carried A: {woken:?}"
+    );
+    let awaiting = fixture.nexus.store.unsettled_deliveries(&at).unwrap();
+    assert!(
+        matches!(awaiting.as_slice(), [attempt]
+            if attempt.harness_kind == HarnessKind::Codex
+                && attempt.thread_id.0 == FRESH_THREAD
+                && attempt.native_history_anchor
+                    == crate::generated::memory::NativeHistoryAnchor::CodexTurns(None)),
+        "A awaits its receipt, anchored at the thread's start: {awaiting:?}"
+    );
+    let snapshot = |fixture: &NexusFixture| {
+        fixture
+            .nexus
+            .store
+            .logical_delivery_snapshot(&carried.logical_delivery_id)
+            .unwrap()
+            .expect("A is held")
+            .delivery_state
+    };
+    assert_eq!(snapshot(&fixture), signal_flow::DeliveryState::Uncertain);
+
+    // A drain before the answer lands finds nothing to type and settles
+    // nothing.
+    assert_eq!(
+        fixture.nexus.perform(Operation::Drain(at.clone())),
+        Outcome::Drained(Vec::new())
+    );
+    assert_eq!(snapshot(&fixture), signal_flow::DeliveryState::Uncertain);
+
+    // The flow's first answer lands; each drain after it types nothing.
+    sleeping.answer_lands();
+    for _ in 0..2 {
+        assert_eq!(
+            fixture.nexus.perform(Operation::Drain(at.clone())),
+            Outcome::Drained(Vec::new())
+        );
+    }
+    assert!(
+        matches!(snapshot(&fixture), signal_flow::DeliveryState::Delivered(_)),
+        "A settles on its first prompt's receipt: {:?}",
+        snapshot(&fixture)
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .unsettled_deliveries(&at)
+            .unwrap()
+            .is_empty(),
+        "nothing awaits a receipt"
+    );
+    assert!(
+        !sleeping.world.calls().contains("agent prompt"),
+        "A is never typed into the pane: {}",
+        sleeping.world.calls()
+    );
+    // The probe, the opening, the naming and the readback with the first
+    // turn: no later connection gave A a turn of its own.
+    assert_eq!(
+        fs::read_to_string(&sleeping.world.codex_invocations).unwrap(),
+        "4"
     );
 }
 

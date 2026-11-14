@@ -49,5 +49,5 @@ ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "1976e45
 # The published signal-flow 60, whose peers the ordinary greeting refuses and
 # whose launch outcomes the 0.54.7 Memory step upgrades from.
 signal-flow-60 = { package = "signal-flow", git = "https://github.com/LiGoldragon/signal-flow", rev = "04a72fd", features = ["datom"] }
-# The published meta-signal-flow 76, whose peers the meta greeting refuses.
-meta-signal-flow-76 = { package = "meta-signal-flow", git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "3b1f6f0bfa77acd751c17a490db6a24cba728520", features = ["datom"] }
+# The published meta-signal-flow 77, whose peers the meta greeting refuses.
+meta-signal-flow-77 = { package = "meta-signal-flow", git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "e72f5552816477e1acfaab6cd7515bc5f807edff", features = ["datom"] }

@@ -269,28 +269,44 @@ mod tests {
     #[test]
     fn a_family_declaration_is_one_inline_datom_carrying_the_whole_family() {
         let client = FlowMetaClient;
-        let datom = "Configure.LeaveOuts.[ { { Field core Astra } Codex [ CodexAgentsMd CodexSkillListing ] } { { Psyche flow Opus } Claude [ SkillTool ClaudeMd ] } ]";
+        let datom = "Configure.Metaflows.[ { { Field core Astra } None [ CodexAgentsMd CodexSkillListing ] [ spirit:core:0 ] [] Regular Default OnDemand «» [] } { { Psyche flow Opus } None [ SkillTool WorkflowTool ClaudeMd ] [ spirit:core:0 ] [] Regular Default OnDemand «» [] } ]";
         let query = client
             .parse_query([datom.to_owned()].into_iter())
-            .expect("LeaveOuts declaration parses");
-        let Query::Configure(ConfigurationChange::LeaveOuts(leave_outs)) = &query else {
-            panic!("a LeaveOuts declaration must stay one Configure query")
+            .expect("Metaflows declaration parses");
+        let Query::Configure(ConfigurationChange::Metaflows(metaflows)) = &query else {
+            panic!("a Metaflows declaration must stay one Configure query")
         };
-        assert_eq!(leave_outs.len(), 2);
-        assert_eq!(leave_outs[0].harness_kind, signal_flow::HarnessKind::Codex);
+        assert_eq!(metaflows.len(), 2);
+        assert_eq!(
+            metaflows[0].leave_outs.0,
+            [
+                signal_flow::LeaveOut::CodexAgentsMd,
+                signal_flow::LeaveOut::CodexSkillListing
+            ]
+        );
         assert_eq!(query.datomize(vec![]).protosize().compact(), datom);
-        // An entry that names no harness is not a leave-out default.
+        // The leave-out family is gone: a permaflow carries its own.
         assert!(
             client
                 .parse_query(
                     [
-                        "Configure.LeaveOuts.[ { { Psyche flow Opus } [ SkillTool ClaudeMd ] } ]"
+                        "Configure.LeaveOuts.[ { { Psyche flow Opus } Claude [ SkillTool ClaudeMd ] } ]"
                             .to_owned()
                     ]
                     .into_iter()
                 )
                 .is_err()
         );
+        // One value of one permaflow is one inline datom too.
+        let amend = "Configure.Amend.{ { Psyche flow Opus } Add.LeaveOut.GitInstructions }";
+        let query = client
+            .parse_query([amend.to_owned()].into_iter())
+            .expect("Amend parses");
+        assert!(matches!(
+            &query,
+            Query::Configure(ConfigurationChange::Amend(_))
+        ));
+        assert_eq!(query.datomize(vec![]).protosize().compact(), amend);
         // Reconfigure is not a request: Configure.Nexus replaces the Nexus.
         assert!(
             client
@@ -359,6 +375,10 @@ mod tests {
         let rows: Vec<_> = (0..31)
             .map(|index| ConfigureMetaflow {
                 root_option: None,
+                leave_outs: signal_flow::LeaveOuts(match index % 2 {
+                    0 => vec![],
+                    _ => vec![signal_flow::LeaveOut::CodexAgentsMd],
+                }),
                 address: Address {
                     aspect: Aspect::Mind,
                     topic: flow_ethos::Topic(format!("printer{index}")),
@@ -403,7 +423,6 @@ mod tests {
             }),
             configured_models: meta_signal_flow::ConfiguredModels(vec![]),
             configured_thresholds: meta_signal_flow::ConfiguredThresholds(vec![]),
-            default_leave_outs: meta_signal_flow::DefaultLeaveOuts(vec![]),
             configured_send_servers: meta_signal_flow::ConfiguredSendServers(vec![]),
             configured_metaflows: meta_signal_flow::ConfiguredMetaflows(rows.clone()),
             configured_harness_flags: meta_signal_flow::ConfiguredHarnessFlags(vec![]),

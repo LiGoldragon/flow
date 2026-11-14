@@ -39,7 +39,7 @@
     }:
     let
       lib = base.inputs.nixpkgs.lib;
-      version = "0.54.7";
+      version = "0.55.0";
       forSystems = function: lib.genAttrs base.lib.systems function;
       # The revision the process checks bind their binaries to, given to the
       # test at run time: the committed revision, or the dirty one a working
@@ -399,9 +399,9 @@
               pkgs.runCommand "flow-request-id-immutable-contract-pins" { nativeBuildInputs = [ pkgs.gnugrep ]; }
                 ''
                   grep -F 'rev = "4871bb8"' ${./Cargo.toml}
-                  grep -F 'rev = "e72f5552816477e1acfaab6cd7515bc5f807edff"' ${./Cargo.toml}
+                  grep -F 'rev = "3d4cf0a3f82272280ab1901ce4c1f0c6dca65fb8"' ${./Cargo.toml}
                   grep -F 'signal-flow?rev=4871bb8#4871bb81c1119fe72dc76168a97e1e576411b831' ${./Cargo.lock}
-                  grep -F 'meta-signal-flow?rev=e72f5552816477e1acfaab6cd7515bc5f807edff#e72f5552816477e1acfaab6cd7515bc5f807edff' ${./Cargo.lock}
+                  grep -F 'meta-signal-flow?rev=3d4cf0a3f82272280ab1901ce4c1f0c6dca65fb8#3d4cf0a3f82272280ab1901ce4c1f0c6dca65fb8' ${./Cargo.lock}
                   touch "$out"
                 '';
 

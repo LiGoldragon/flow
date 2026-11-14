@@ -71,6 +71,7 @@ fn declare(fixture: &NexusFixture, at: Address) {
         .nexus
         .store
         .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+            leave_outs: signal_flow::LeaveOuts(Vec::new()),
             root_option: None,
             address: at,
             system_modules: signal_flow::SystemModules(vec![

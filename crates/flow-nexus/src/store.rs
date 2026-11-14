@@ -20,6 +20,7 @@ pub(crate) mod handover_configuration;
 pub(crate) mod handover_reminders;
 pub(crate) mod kept_answer;
 pub(crate) mod launch_cleanup;
+pub(crate) mod leave_out_upgrade;
 pub(crate) mod living_upgrade;
 pub(crate) mod logical_delivery;
 pub(crate) mod metaflow;
@@ -71,8 +72,8 @@ use std::{
 
 use meta_signal_flow::{
     ConfigurationChange, ConfigurationSnapshot, ConfigureCounters, ConfigureHarnessFlags,
-    ConfigureLeaveOut, ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureOutcome,
-    ConfigureSendServer, ConfigureThreshold, CountersRefusal, HeartbeatConfig,
+    ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureOutcome, ConfigureSendServer,
+    ConfigureThreshold, CountersRefusal, HeartbeatConfig,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -190,8 +191,12 @@ const HEARTBEAT_STANDING_SCHEMA: &str = "flow-nexus-heartbeat-standing-v2";
 /// The default Minutes a new Memory holds until Configure declares one:
 /// the Minutes Flow gives a request that carries none of its own.
 pub(crate) const SEEDED_DEFAULT_MINUTES: i64 = 30;
+/// The leave-out family 0.55.0 retires: a store 0.54.7 wrote holds it, and
+/// after its upgrade still holds it, empty and read by nothing; a new store
+/// never has it.
 const META_LEAVE_OUT_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_leave_out_configuration");
+const RETIRED_LEAVE_OUT_TABLE: &str = "flow_nexus_meta_leave_out_configuration";
 /// The tables a configuration-only store holds, all of them.
 const CONFIGURATION_ONLY_TABLES: &[&str] = &[
     "flow_nexus_state",
@@ -200,7 +205,6 @@ const CONFIGURATION_ONLY_TABLES: &[&str] = &[
     "flow_nexus_delivery_configuration",
     "flow_nexus_meta_nexus_configuration",
     "flow_nexus_meta_model_configuration",
-    "flow_nexus_meta_leave_out_configuration",
     "flow_nexus_meta_send_server_configuration",
     "flow_nexus_meta_model_threshold_configuration",
     "flow_nexus_meta_investigation_configuration",
@@ -236,7 +240,6 @@ const RUNNING_TABLES: &[&str] = &[
     "flow_nexus_native_owner_proofs",
     "flow_nexus_flow_context_sizes",
     "flow_nexus_address_holds",
-    "flow_nexus_meta_leave_out_configuration",
     "flow_nexus_launch_opened_threads",
     "flow_nexus_send_calls",
     "flow_nexus_launch_cleanups",
@@ -1130,32 +1133,6 @@ impl DescribesHeartbeatStandingTable for StoredHeartbeatStanding {
     }
 }
 
-/// One metaflow's default leave-outs on one harness, keyed by its Address
-/// and that harness.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredMetaLeaveOutConfiguration {
-    leave_out: ConfigureLeaveOut,
-}
-
-impl EngineRecord for StoredMetaLeaveOutConfiguration {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::leave_out_record_key(
-            &self.leave_out.address,
-            &self.leave_out.harness_kind,
-        ))
-    }
-}
-
-impl MemoryDefinition for StoredMetaLeaveOutConfiguration {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v3")
-    }
-}
-
 /// The native model a seat runs is the one configured for its Address's
 /// Model, named exactly; nothing else is launched.
 pub(crate) trait NamesConfiguredModel {
@@ -1173,21 +1150,6 @@ impl NamesConfiguredModel for FlowStore {
             .first()
             .map(|stored| stored.model.native.clone()))
         .map(|value| value.0))
-    }
-}
-
-/// The leave-out family's descriptor, from v1 on.
-pub(crate) trait DescribesLeaveOutTable {
-    fn descriptor() -> TableDescriptor<StoredMetaLeaveOutConfiguration>;
-}
-
-impl DescribesLeaveOutTable for StoredMetaLeaveOutConfiguration {
-    fn descriptor() -> TableDescriptor<StoredMetaLeaveOutConfiguration> {
-        TableDescriptor::new(
-            META_LEAVE_OUT_CONFIGURATION_TABLE_NAME,
-            FamilyName::new("flow-nexus-meta-leave-out-configuration"),
-            StoredMetaLeaveOutConfiguration::schema_hash(),
-        )
     }
 }
 
@@ -1762,6 +1724,8 @@ pub enum StoreError {
     EventUpgrade(String),
     #[error("0.54.6 launch-outcome Memory upgrade refused: {0}")]
     ReapUpgrade(String),
+    #[error("0.54.7 permaflow and leave-out Memory upgrade refused: {0}")]
+    LeaveOutUpgrade(String),
     #[error("heartbeat period must be positive")]
     InvalidHeartbeatPeriod,
     #[error("store path must be an absolute file path")]
@@ -1772,8 +1736,14 @@ pub enum StoreError {
     MissingDefaultConfiguration,
     #[error("a Codex model names both the stable and the next endpoint")]
     CodexModelsOverlap,
-    #[error("a leave-out default names a leave-out of another harness than its own")]
-    LeaveOutNotForHarness,
+    #[error("the leave-out {0:?} is not a feature of the harness its permaflow runs on")]
+    UnknownFeature(signal_flow::LeaveOut),
+    #[error("no permaflow is declared at {0:?}")]
+    UnknownPermaflow(Address),
+    #[error("the module {0:?} is not one Curriculum holds")]
+    UnknownModule(signal_flow::ModuleIdentity),
+    #[error("the Curriculum Nexus cannot be asked")]
+    CurriculumUnavailable,
     #[error("the topic {0} is not an uncapitalized camelCase identifier")]
     TopicRefused(String),
     #[error("the default Minutes is refused: {0:?}")]
@@ -1803,7 +1773,6 @@ pub(crate) struct MetaConfigurationTables {
     nexus: TableReference<StoredMetaNexusConfiguration>,
     models: TableReference<StoredMetaModelConfiguration>,
     thresholds: TableReference<StoredMetaThresholdConfiguration>,
-    leave_outs: TableReference<StoredMetaLeaveOutConfiguration>,
     pub(crate) send_servers: TableReference<send_server::StoredMetaSendServerConfiguration>,
     pub(crate) metaflows: TableReference<metaflow_declaration::StoredMetaMetaflowConfiguration>,
     investigation: TableReference<StoredMetaInvestigationConfiguration>,
@@ -1826,7 +1795,6 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             nexus: engine.register_table(StoredMetaNexusConfiguration::descriptor())?,
             models: engine.register_table(StoredMetaModelConfiguration::descriptor())?,
             thresholds: engine.register_table(StoredMetaThresholdConfiguration::descriptor())?,
-            leave_outs: engine.register_table(StoredMetaLeaveOutConfiguration::descriptor())?,
             send_servers: engine.register_table(
                 <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor(),
             )?,
@@ -2044,7 +2012,6 @@ pub struct ConfiguredFamilies {
     pub nexus: ConfigureNexus,
     pub models: Vec<ConfigureModel>,
     pub thresholds: Vec<ConfigureThreshold>,
-    pub default_leave_outs: Vec<ConfigureLeaveOut>,
     pub send_servers: Vec<ConfigureSendServer>,
     pub metaflows: Vec<ConfigureMetaflow>,
     pub investigation: Option<Address>,
@@ -2072,7 +2039,6 @@ impl CompletesSnapshot for ConfiguredFamilies {
             configured_nexus: meta_signal_flow::ConfiguredNexus(self.nexus),
             configured_models: meta_signal_flow::ConfiguredModels(self.models),
             configured_thresholds: meta_signal_flow::ConfiguredThresholds(self.thresholds),
-            default_leave_outs: meta_signal_flow::DefaultLeaveOuts(self.default_leave_outs),
             configured_send_servers: meta_signal_flow::ConfiguredSendServers(self.send_servers),
             configured_metaflows: meta_signal_flow::ConfiguredMetaflows(self.metaflows),
             configured_investigation: meta_signal_flow::ConfiguredInvestigation(self.investigation),
@@ -2176,7 +2142,6 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let meta_protected_addresses_descriptor =
             StoredMetaProtectedAddressConfiguration::descriptor();
         let meta_harness_hook_descriptor = StoredMetaHarnessHookConfiguration::descriptor();
-        let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         let meta_metaflows_descriptor = <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor();
         // Family identities are part of the open request, so Engine validates
@@ -2191,7 +2156,6 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_nexus_descriptor)
                 .with_family(&meta_models_descriptor)
                 .with_family(&meta_thresholds_descriptor)
-                .with_family(&meta_leave_outs_descriptor)
                 .with_family(&meta_send_servers_descriptor)
                 .with_family(&meta_investigation_descriptor)
                 .with_family(&meta_default_minutes_descriptor)
@@ -2209,6 +2173,11 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         <FlowStore as living_upgrade::UpgradesBeforeLiving>::upgrade_configuration_before_living(
             &mut engine,
         )?;
+        // The permaflows 0.54.7 declared take their leave-outs, in one
+        // evolution, before the family is registered.
+        <FlowStore as leave_out_upgrade::UpgradesLeaveOutMemory>::upgrade_leave_out_memory(
+            &mut engine,
+        )?;
         let state = engine.register_table(state_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
         let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
@@ -2219,7 +2188,6 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             nexus: engine.register_table(meta_nexus_descriptor)?,
             models: engine.register_table(meta_models_descriptor)?,
             thresholds: engine.register_table(meta_thresholds_descriptor)?,
-            leave_outs: engine.register_table(meta_leave_outs_descriptor)?,
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
             investigation: engine.register_table(meta_investigation_descriptor)?,
             default_minutes: engine.register_table(meta_default_minutes_descriptor)?,
@@ -2272,11 +2240,18 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         FlowStore::meta_configuration_snapshot(&self.engine, &self.meta_configuration_tables)
     }
 
+    /// A store opened for configuration only runs no context composer: a
+    /// module an Amend adds cannot be resolved there.
     fn configure_change(
         &self,
         change: ConfigurationChange,
     ) -> Result<ConfigureOutcome, StoreError> {
-        FlowStore::configure_meta_change(&self.engine, &self.meta_configuration_tables, change)
+        FlowStore::configure_meta_change(
+            &self.engine,
+            &self.meta_configuration_tables,
+            change,
+            &crate::context::NoContextComposer,
+        )
     }
 
     /// Reads either a wholly unconfigured store (using its declared defaults
@@ -2725,7 +2700,6 @@ impl OpensFlowStore for FlowStore {
             <reminder::Reminder as reminder::DescribesReminderTable>::descriptor();
         let successor_intents_descriptor =
             <successor::SuccessorIntent as successor::DescribesSuccessorIntentTable>::descriptor();
-        let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let events_descriptor = <events::FlowEvents as events::DescribesEventTable>::descriptor();
         let context_sizes_descriptor =
             <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor();
@@ -2768,7 +2742,6 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&meta_nexus_descriptor)
                 .with_family(&meta_models_descriptor)
                 .with_family(&meta_thresholds_descriptor)
-                .with_family(&meta_leave_outs_descriptor)
                 .with_family(&<send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor())
                 .with_family(&meta_investigation_descriptor)
                 .with_family(&StoredMetaDefaultMinutesConfiguration::descriptor())
@@ -2870,6 +2843,11 @@ impl OpensFlowStore for FlowStore {
         // What 0.54.6 stored of a refused reap is upgraded, in one evolution,
         // before anything is registered.
         <FlowStore as reap_upgrade::UpgradesReapMemory>::upgrade_reap_memory(&mut engine)?;
+        // The permaflows 0.54.7 declared take their leave-outs, in one
+        // evolution, before anything is registered.
+        <FlowStore as leave_out_upgrade::UpgradesLeaveOutMemory>::upgrade_leave_out_memory(
+            &mut engine,
+        )?;
 
         let flows = engine.register_table(flows_descriptor)?;
         let native_owner_proofs = engine.register_table(native_owner_proofs_descriptor)?;
@@ -3302,8 +3280,13 @@ pub(crate) trait ManagesMetaflowState: Sized {
     /// change one declaration alone.
     fn configure_change(&self, change: ConfigurationChange)
     -> Result<ConfigureOutcome, StoreError>;
-    /// A Configure or a Remove, committed.
-    fn edit_configuration(&self, edit: ConfigurationEdit) -> Result<ConfigureOutcome, StoreError>;
+    /// A Configure or a Remove, committed. A module an Amend adds is first
+    /// resolved by `modules`, the context composer the Nexus runs with.
+    fn edit_configuration(
+        &self,
+        edit: ConfigurationEdit,
+        modules: &dyn crate::context::ResolvesModule,
+    ) -> Result<ConfigureOutcome, StoreError>;
     /// Whether ProtectedAddresses names `address`.
     fn protects(&self, address: &Address) -> Result<bool, StoreError>;
     /// The refresh threshold configured for one model, if any.
@@ -3311,13 +3294,9 @@ pub(crate) trait ManagesMetaflowState: Sized {
         &self,
         model_name: &str,
     ) -> Result<Option<ConfigureThreshold>, StoreError>;
-    /// The leave-outs a metaflow's Start on one harness takes when it names
-    /// none; empty when none are configured for that harness.
-    fn default_leave_outs(
-        &self,
-        address: &Address,
-        harness_kind: &HarnessKind,
-    ) -> Result<Vec<LeaveOut>, StoreError>;
+    /// The leave-outs a permaflow's Start takes when it names none: its
+    /// declaration's, as it stands now; none when no permaflow is declared.
+    fn declared_leave_outs(&self, address: &Address) -> Result<Vec<LeaveOut>, StoreError>;
     /// Extra native argv configured for this metaflow; empty when absent.
     fn harness_flags(&self, address: &Address) -> Result<String, StoreError>;
     fn stored_metaflow(&self, address: &Address) -> Result<Option<StoredMetaflow>, StoreError>;
@@ -3353,25 +3332,35 @@ impl ManagesMetaflowState for FlowStore {
     }
 
     /// The counters are the running store's; every other family is
-    /// declared as a configuration-only store declares it.
+    /// declared as a configuration-only store declares it. Declared with no
+    /// context composer, a module an Amend adds cannot be resolved: the
+    /// meta socket declares through `edit_configuration` with the Nexus's.
     fn configure_change(
         &self,
         change: ConfigurationChange,
     ) -> Result<ConfigureOutcome, StoreError> {
-        use counters::ConfiguresCounters;
-        match change {
-            ConfigurationChange::Counters(declared) => self.configure_counters(declared),
-            change => FlowStore::configure_meta_change(
-                &self.engine,
-                &self.meta_configuration_tables,
-                change,
-            ),
-        }
+        self.edit_configuration(
+            ConfigurationEdit::Declare(Box::new(change)),
+            &crate::context::NoContextComposer,
+        )
     }
 
-    fn edit_configuration(&self, edit: ConfigurationEdit) -> Result<ConfigureOutcome, StoreError> {
+    fn edit_configuration(
+        &self,
+        edit: ConfigurationEdit,
+        modules: &dyn crate::context::ResolvesModule,
+    ) -> Result<ConfigureOutcome, StoreError> {
+        use counters::ConfiguresCounters;
         match edit {
-            ConfigurationEdit::Declare(change) => self.configure_change(*change),
+            ConfigurationEdit::Declare(change) => match *change {
+                ConfigurationChange::Counters(declared) => self.configure_counters(declared),
+                change => FlowStore::configure_meta_change(
+                    &self.engine,
+                    &self.meta_configuration_tables,
+                    change,
+                    modules,
+                ),
+            },
             ConfigurationEdit::Remove(removal) => {
                 FlowStore::remove_meta_entry(&self.engine, &self.meta_configuration_tables, removal)
             }
@@ -3405,20 +3394,12 @@ impl ManagesMetaflowState for FlowStore {
         }
     }
 
-    fn default_leave_outs(
-        &self,
-        address: &Address,
-        harness_kind: &HarnessKind,
-    ) -> Result<Vec<LeaveOut>, StoreError> {
-        let rows = self.engine.match_records(QueryPlan::key(
-            self.meta_configuration_tables.leave_outs,
-            RecordKey::new(FlowStore::leave_out_record_key(address, harness_kind)),
-        ))?;
-        match rows.records() {
-            [] => Ok(Vec::new()),
-            [stored] => Ok(stored.leave_out.leave_outs.clone().0),
-            _ => Err(StoreError::StateInvariant),
-        }
+    fn declared_leave_outs(&self, address: &Address) -> Result<Vec<LeaveOut>, StoreError> {
+        use metaflow_declaration::ReadsMetaflowDeclarations;
+        Ok(self
+            .metaflow_declaration(address)?
+            .map(|declaration| declaration.leave_outs.0)
+            .unwrap_or_default())
     }
 
     fn harness_flags(&self, address: &Address) -> Result<String, StoreError> {
@@ -5604,11 +5585,10 @@ pub(crate) trait ReadsFlowMemory {
                 pending_handover::PENDING_HANDOVER_FAMILY,
                 pending_handover::PENDING_HANDOVER_SCHEMA,
             ),
-            "flow_nexus_meta_leave_out_configuration" => {
-                return Some((
-                    "flow-nexus-meta-leave-out-configuration",
-                    StoredMetaLeaveOutConfiguration::schema_hash(),
-                ));
+            // Retired in 0.55.0: a store keeps it, empty, after its upgrade.
+            RETIRED_LEAVE_OUT_TABLE => {
+                use leave_out_upgrade::NamesRetiredLeaveOutFamily;
+                return Some(FlowStore::retired_leave_out_identity());
             }
             "flow_nexus_meta_send_server_configuration" => (
                 send_server::META_SEND_SERVER_CONFIGURATION_FAMILY,
@@ -5707,6 +5687,12 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_flow_events" => {
                 Some(("flow-nexus-flow-events", "flow-nexus-flow-events-v4"))
             }
+            // Unchanged from 0.53.2 until 0.55.0 gave a permaflow its
+            // leave-outs.
+            "flow_nexus_meta_metaflow_configuration" => Some((
+                metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
+                leave_out_upgrade::META_METAFLOW_CONFIGURATION_SCHEMA_V6,
+            )),
             OPTIONAL_REQUEST_ID_TABLE
             | OPTIONAL_DELIVER_CALL_TABLE
             | OPTIONAL_STORE_IDENTITY_TABLE
@@ -5758,9 +5744,18 @@ pub(crate) trait ReadsFlowMemory {
             && identity.family().as_str() == "flow-nexus-launch-outcome"
             && identity.schema_hash()
                 == SchemaHash::for_label(reap_upgrade::LAUNCH_OUTCOME_SCHEMA_V9);
+        // The permaflows as 0.54.7 declared them, upgraded on open.
+        let before_leave_outs = table_key == "flow_nexus_meta_metaflow_configuration"
+            && identity.table_name() == table_key
+            && {
+                use leave_out_upgrade::NamesMetaflowDeclarationV6;
+                let (family, schema_hash) = FlowStore::metaflow_declaration_v6_identity();
+                identity.family().as_str() == family && identity.schema_hash() == schema_hash
+            };
         before_living
             || before_event_metadata
             || before_pending_reaps
+            || before_leave_outs
             || FlowStore::current_flow_family_identity(table_key).is_some_and(
                 |(family, schema_hash)| {
                     let predecessor_handover = table_key == OPTIONAL_HANDOVER_TABLE
@@ -5780,6 +5775,7 @@ pub(crate) trait ReadsFlowMemory {
         let is = |tables: &[&str]| {
             actual.iter().all(|name| {
                 tables.contains(&name.as_str())
+                    || *name == RETIRED_LEAVE_OUT_TABLE
                     || *name == OPTIONAL_HANDOVER_TABLE
                     || *name == OPTIONAL_HANDOVER_RUNTIME_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
@@ -6029,7 +6025,6 @@ pub(crate) trait ReadsFlowMemory {
         };
         let models_rows = engine.match_records(QueryPlan::all(tables.models))?;
         let thresholds_rows = engine.match_records(QueryPlan::all(tables.thresholds))?;
-        let leave_out_rows = engine.match_records(QueryPlan::all(tables.leave_outs))?;
         let send_server_rows = engine.match_records(QueryPlan::all(tables.send_servers))?;
         let investigation_rows = engine.match_records(QueryPlan::all(tables.investigation))?;
         let default_minutes_rows = engine.match_records(QueryPlan::all(tables.default_minutes))?;
@@ -6048,7 +6043,6 @@ pub(crate) trait ReadsFlowMemory {
         if models_rows.database_marker() != marker
             || metaflow_rows.database_marker() != marker
             || thresholds_rows.database_marker() != marker
-            || leave_out_rows.database_marker() != marker
             || send_server_rows.database_marker() != marker
             || investigation_rows.database_marker() != marker
             || default_minutes_rows.database_marker() != marker
@@ -6106,14 +6100,6 @@ pub(crate) trait ReadsFlowMemory {
             [stored] => Some(stored.heartbeat.clone()),
             _ => return Err(StoreError::StateInvariant),
         };
-        let mut default_leave_outs = leave_out_rows
-            .records()
-            .iter()
-            .map(|stored| stored.leave_out.clone())
-            .collect::<Vec<_>>();
-        default_leave_outs.sort_by_key(|leave_out| {
-            FlowStore::leave_out_record_key(&leave_out.address, &leave_out.harness_kind)
-        });
         let mut send_servers = send_server_rows
             .records()
             .iter()
@@ -6146,7 +6132,6 @@ pub(crate) trait ReadsFlowMemory {
             nexus,
             models,
             thresholds,
-            default_leave_outs,
             send_servers,
             investigation,
             metaflows,
@@ -6350,22 +6335,168 @@ pub(crate) trait ReadsFlowMemory {
         }
     }
 
+    /// The harness a permaflow at `address` runs on, derived as a launch
+    /// derives it: the native model the Models family names for its Model,
+    /// on Codex when one of the declared Nexus's Codex endpoints lists it,
+    /// on Claude otherwise. None while no native model is configured for
+    /// the Model or no Nexus is declared.
+    fn configured_harness(
+        engine: &Engine,
+        tables: &MetaConfigurationTables,
+        address: &Address,
+    ) -> Result<Option<HarnessKind>, StoreError> {
+        use crate::generated::starter::DerivesHarness as _;
+        let nexus = engine
+            .match_records(QueryPlan::all(tables.nexus))?
+            .records()
+            .first()
+            .map(|stored| stored.nexus.clone());
+        let native = engine
+            .match_records(QueryPlan::key(
+                tables.models,
+                RecordKey::new(FlowStore::model_record_key(&address.model)),
+            ))?
+            .records()
+            .first()
+            .map(|stored| stored.model.native.0.clone());
+        Ok(match (nexus, native) {
+            (Some(nexus), Some(native)) => Some(
+                crate::codex::CodexEndpoints::from(&RuntimeConfiguration::from(&nexus))
+                    .harness_for(native.as_str()),
+            ),
+            _ => None,
+        })
+    }
+
+    /// A permaflow's leave-outs are each a feature of the harness its Model
+    /// runs on; the first that is not is refused UnknownFeature. While that
+    /// harness is not known they are left to the launch to check.
+    fn check_leave_outs(
+        engine: &Engine,
+        tables: &MetaConfigurationTables,
+        address: &Address,
+        leave_outs: &[LeaveOut],
+    ) -> Result<(), StoreError> {
+        use crate::lean::BelongsToHarness;
+        let Some(harness) = FlowStore::configured_harness(engine, tables, address)? else {
+            return Ok(());
+        };
+        match leave_outs
+            .iter()
+            .find(|leave_out| leave_out.harness() != harness)
+        {
+            Some(foreign) => Err(StoreError::UnknownFeature(foreign.clone())),
+            None => Ok(()),
+        }
+    }
+
+    /// One value of one permaflow changed alone: the permaflow is read by
+    /// its Address, the one change applied, and the whole written back by
+    /// the single-entry commit Permaflow takes, so nothing else in the store
+    /// changes. A value the permaflow already holds, an element added that
+    /// it holds, or an element removed that it does not, writes nothing. A
+    /// module added is resolved by `modules` first, a leave-out added
+    /// checked against the permaflow's harness. The read and the write are
+    /// one turn of the meta socket, which serves one dispatch at a time.
+    fn amend_permaflow(
+        engine: &Engine,
+        tables: &MetaConfigurationTables,
+        amendment: meta_signal_flow::Amend_Data,
+        modules: &dyn crate::context::ResolvesModule,
+    ) -> Result<ConfigureOutcome, StoreError> {
+        use crate::composition::NamesVersionedModule;
+        use crate::context::ModuleStanding;
+        use meta_signal_flow::{Change, Element};
+        let address = amendment.address;
+        let stored = engine
+            .match_records(QueryPlan::key(
+                tables.metaflows,
+                RecordKey::new(FlowStore::address_record_key(&address)),
+            ))?
+            .records()
+            .to_vec();
+        let mut metaflow = match stored.as_slice() {
+            [] => return Err(StoreError::UnknownPermaflow(address)),
+            [stored] => stored.metaflow.clone(),
+            _ => return Err(StoreError::StateInvariant),
+        };
+        let committed = metaflow.clone();
+        // A module is held when it names a versioned identity Curriculum
+        // resolves.
+        let resolved = |identity: &signal_flow::ModuleIdentity| -> Result<(), StoreError> {
+            if !identity.0.as_str().is_versioned_module_identity() {
+                return Err(StoreError::UnknownModule(identity.clone()));
+            }
+            match modules.resolve_module(identity) {
+                ModuleStanding::Held => Ok(()),
+                ModuleStanding::Unknown => Err(StoreError::UnknownModule(identity.clone())),
+                ModuleStanding::Unreachable => Err(StoreError::CurriculumUnavailable),
+            }
+        };
+        match amendment.change {
+            Change::Workspace(root_option) => metaflow.root_option = root_option,
+            Change::Purpose(purpose) => metaflow.purpose = purpose,
+            Change::Kind(flow_kind) => metaflow.flow_kind = flow_kind,
+            Change::Continuity(continuity) => metaflow.continuity = continuity,
+            Change::Add(Element::SystemModule(identity)) => {
+                if !metaflow.system_modules.0.contains(&identity) {
+                    resolved(&identity)?;
+                    metaflow.system_modules.0.push(identity);
+                }
+            }
+            Change::Add(Element::PromptModule(identity)) => {
+                if !metaflow.user_modules.0.contains(&identity) {
+                    resolved(&identity)?;
+                    metaflow.user_modules.0.push(identity);
+                }
+            }
+            Change::Add(Element::LeaveOut(leave_out)) => {
+                if !metaflow.leave_outs.0.contains(&leave_out) {
+                    FlowStore::check_leave_outs(
+                        engine,
+                        tables,
+                        &address,
+                        std::slice::from_ref(&leave_out),
+                    )?;
+                    metaflow.leave_outs.0.push(leave_out);
+                }
+            }
+            Change::Remove(Element::SystemModule(identity)) => {
+                metaflow.system_modules.0.retain(|held| held != &identity)
+            }
+            Change::Remove(Element::PromptModule(identity)) => {
+                metaflow.user_modules.0.retain(|held| held != &identity)
+            }
+            Change::Remove(Element::LeaveOut(leave_out)) => {
+                metaflow.leave_outs.0.retain(|held| held != &leave_out)
+            }
+        }
+        if metaflow == committed {
+            return Ok(ConfigureOutcome::Unchanged);
+        }
+        FlowStore::declare_configuration_entry(
+            engine,
+            tables.metaflows,
+            metaflow_declaration::StoredMetaMetaflowConfiguration { metaflow },
+        )
+    }
+
     /// One declared configuration family replaces the committed family
     /// whole, or one declaration (Permaflow, Harness, Refresh) is added or
-    /// replaced alone. A Nexus whose Codex endpoints share a model is
-    /// refused before any write.
+    /// replaced alone, or one value of one permaflow is changed (Amend). A
+    /// Nexus whose Codex endpoints share a model, and a permaflow naming a
+    /// leave-out of another harness than its Model runs on, are refused
+    /// before any write.
     fn configure_meta_change(
         engine: &Engine,
         tables: &MetaConfigurationTables,
         change: ConfigurationChange,
+        modules: &dyn crate::context::ResolvesModule,
     ) -> Result<ConfigureOutcome, StoreError> {
         use crate::launching::NamesTopic;
         // Every Address a declaration names has a camelCase topic, checked
         // before anything is written.
         let addresses: Vec<&Address> = match &change {
-            ConfigurationChange::LeaveOuts(entries) => {
-                entries.iter().map(|entry| &entry.address).collect()
-            }
             ConfigurationChange::Metaflows(entries) => {
                 entries.iter().map(|entry| &entry.address).collect()
             }
@@ -6378,6 +6509,7 @@ pub(crate) trait ReadsFlowMemory {
             }
             ConfigurationChange::ProtectedAddresses(addresses) => addresses.iter().collect(),
             ConfigurationChange::Permaflow(entry) => vec![&entry.address],
+            ConfigurationChange::Amend(amendment) => vec![&amendment.address],
             _ => Vec::new(),
         };
         if let Some(refused) = addresses
@@ -6532,31 +6664,22 @@ pub(crate) trait ReadsFlowMemory {
                     .map(|threshold| StoredMetaThresholdConfiguration { threshold })
                     .collect(),
             ),
-            ConfigurationChange::LeaveOuts(leave_outs) => {
-                use crate::lean::BelongsToHarness;
-                if leave_outs.iter().any(|entry| {
-                    entry
-                        .leave_outs
-                        .0
-                        .iter()
-                        .any(|leave_out| leave_out.harness() != entry.harness_kind)
-                }) {
-                    return Err(StoreError::LeaveOutNotForHarness);
-                }
-                FlowStore::replace_configuration_family(
+            ConfigurationChange::Permaflow(metaflow) => {
+                FlowStore::check_leave_outs(
                     engine,
-                    tables.leave_outs,
-                    leave_outs
-                        .into_iter()
-                        .map(|leave_out| StoredMetaLeaveOutConfiguration { leave_out })
-                        .collect(),
+                    tables,
+                    &metaflow.address,
+                    &metaflow.leave_outs.0,
+                )?;
+                FlowStore::declare_configuration_entry(
+                    engine,
+                    tables.metaflows,
+                    metaflow_declaration::StoredMetaMetaflowConfiguration { metaflow },
                 )
             }
-            ConfigurationChange::Permaflow(metaflow) => FlowStore::declare_configuration_entry(
-                engine,
-                tables.metaflows,
-                metaflow_declaration::StoredMetaMetaflowConfiguration { metaflow },
-            ),
+            ConfigurationChange::Amend(amendment) => {
+                FlowStore::amend_permaflow(engine, tables, amendment, modules)
+            }
             ConfigurationChange::Refresh(threshold) => FlowStore::declare_configuration_entry(
                 engine,
                 tables.thresholds,
@@ -6573,18 +6696,28 @@ pub(crate) trait ReadsFlowMemory {
                     }
                 })
             }
-            ConfigurationChange::Metaflows(metaflows) => FlowStore::replace_configuration_family(
-                engine,
-                tables.metaflows,
-                metaflows
-                    .into_iter()
-                    .map(
-                        |metaflow| metaflow_declaration::StoredMetaMetaflowConfiguration {
-                            metaflow,
-                        },
-                    )
-                    .collect(),
-            ),
+            ConfigurationChange::Metaflows(metaflows) => {
+                for metaflow in &metaflows {
+                    FlowStore::check_leave_outs(
+                        engine,
+                        tables,
+                        &metaflow.address,
+                        &metaflow.leave_outs.0,
+                    )?;
+                }
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.metaflows,
+                    metaflows
+                        .into_iter()
+                        .map(
+                            |metaflow| metaflow_declaration::StoredMetaMetaflowConfiguration {
+                                metaflow,
+                            },
+                        )
+                        .collect(),
+                )
+            }
             ConfigurationChange::HarnessFlags(configured) => {
                 FlowStore::replace_configuration_family(
                     engine,

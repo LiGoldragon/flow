@@ -235,16 +235,16 @@ impl Performs for RunningNexus {
                 ))
             }
             Operation::Compose(profile) => {
-                // A Start naming no leave-outs takes its metaflow's default
-                // for the harness it starts on, and none when that harness
-                // has no default.
+                // A Start naming no leave-outs takes its permaflow's, from
+                // its declaration as it stands now; the composition checks
+                // them against the harness it starts on.
                 let harness_kind = self
                     .codex_endpoints
                     .current()
                     .harness_for(&profile.model_name.0);
                 let default = self
                     .store
-                    .default_leave_outs(&profile.address, &harness_kind)
+                    .declared_leave_outs(&profile.address)
                     .unwrap_or_default();
                 let request = profile.launch_request_id.clone();
                 // The launch's Remembering, resolved to the flows whose raw

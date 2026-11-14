@@ -69,14 +69,88 @@ impl OpensCurriculumComposer for CurriculumComposer {
 }
 
 /// Anything that composes a flow's context for a request: the Curriculum
-/// Nexus in production, whatever a caller injects otherwise.
-pub trait ComposesContext: std::fmt::Debug + Send + Sync {
+/// Nexus in production, whatever a caller injects otherwise. It also
+/// answers whether it holds one module, which a module added to a
+/// permaflow is asked before it is written.
+pub trait ComposesContext: ResolvesModule + std::fmt::Debug + Send + Sync {
     fn compose(&self, request: &ContextRequest) -> Result<StartupComposition, ContextRefusal>;
 }
 
-impl<T: ComposesFlowContext + std::fmt::Debug + Send + Sync> ComposesContext for T {
+impl<T: ComposesFlowContext + ResolvesModule + std::fmt::Debug + Send + Sync> ComposesContext
+    for T
+{
     fn compose(&self, request: &ContextRequest) -> Result<StartupComposition, ContextRefusal> {
         self.compose_flow_context(request)
+    }
+}
+
+/// What a context composer answers for one module identity: it holds the
+/// module, it does not, or it could not be asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleStanding {
+    Held,
+    Unknown,
+    Unreachable,
+}
+
+/// Whether the context composer holds one module.
+pub trait ResolvesModule {
+    fn resolve_module(&self, identity: &signal_flow::ModuleIdentity) -> ModuleStanding;
+}
+
+/// The composer of a store opened with none, for configuration only: it
+/// can be asked nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoContextComposer;
+
+impl ResolvesModule for NoContextComposer {
+    fn resolve_module(&self, _identity: &signal_flow::ModuleIdentity) -> ModuleStanding {
+        ModuleStanding::Unreachable
+    }
+}
+
+impl ResolvesModule for ContextComposer {
+    fn resolve_module(&self, identity: &signal_flow::ModuleIdentity) -> ModuleStanding {
+        self.0.resolve_module(identity)
+    }
+}
+
+/// The Curriculum Nexus resolves the one module by `ResolveSources`, as
+/// composition does: an answer naming it is Held; Curriculum's own
+/// "missing module" refusal is Unknown; a socket that cannot be reached, an
+/// answer that cannot be read, or any other refusal is Unreachable.
+impl ResolvesModule for CurriculumComposer {
+    fn resolve_module(&self, identity: &signal_flow::ModuleIdentity) -> ModuleStanding {
+        match self.exchange(CurriculumQuery::ResolveSources(vec![
+            crate::generated::curriculum::ModuleIdentity(identity.0.clone()),
+        ])) {
+            Ok(CurriculumOutcome::ResolvedSources(modules))
+                if modules
+                    .iter()
+                    .any(|module| module.module_identity.0 == identity.0) =>
+            {
+                ModuleStanding::Held
+            }
+            Ok(CurriculumOutcome::ResolvedSources(_)) => ModuleStanding::Unknown,
+            Ok(CurriculumOutcome::Rejected(reason)) if reason.starts_with("missing module") => {
+                ModuleStanding::Unknown
+            }
+            Ok(CurriculumOutcome::Rejected(reason)) => {
+                eprintln!(
+                    "flow-nexus: Curriculum could not resolve {}: {reason}",
+                    identity.0
+                );
+                ModuleStanding::Unreachable
+            }
+            Ok(_) => ModuleStanding::Unreachable,
+            Err(error) => {
+                eprintln!(
+                    "flow-nexus: Curriculum unreachable resolving {}: {error}",
+                    identity.0
+                );
+                ModuleStanding::Unreachable
+            }
+        }
     }
 }
 
@@ -389,6 +463,16 @@ impl From<&[(&str, &str)]> for FixtureComposer {
                 .map(|(identity, body)| ((*identity).to_owned(), (*body).to_owned()))
                 .collect(),
             records: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl ResolvesModule for FixtureComposer {
+    fn resolve_module(&self, identity: &signal_flow::ModuleIdentity) -> ModuleStanding {
+        match self.bodies.contains_key(&identity.0) {
+            true => ModuleStanding::Held,
+            false => ModuleStanding::Unknown,
         }
     }
 }

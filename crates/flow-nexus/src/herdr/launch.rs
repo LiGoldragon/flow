@@ -13,11 +13,11 @@ use crate::codex::SelectsCodexEndpoint;
 use crate::composition::HERDR_REQUEST_LINE_LIMIT;
 use crate::emission::{AddressesHerdrSession, ReadsProcessReply};
 use crate::generated::emission::{
-    AgentStatus, AgentTarget, AgentWait, CodexExecutable, CreateWorkspace_Data, Emittable, Focus,
-    HarnessCommandLine, HerdrCommand, HerdrSessionCommand, Label, LineCount, MetadataSource,
-    Milliseconds, OutputMatch, OutputSource, ProcessReply, RenamePane_Data, RenameWorkspace_Data,
-    ReportPaneMetadata_Data, RunInPane_Data, ShellLine, StartAgent_Data, WaitForAgent_Data,
-    WaitForPaneOutput_Data, WorkingDirectory,
+    AgentStatus, AgentTarget, AgentWait, CodexExecutable, CreateWorkspace_Data, Emittable,
+    FlowIdentityClaim, FlowsRoot, Focus, HarnessCommandLine, HerdrCommand, HerdrSessionCommand,
+    Label, LineCount, MetadataSource, Milliseconds, OutputMatch, OutputSource, ProcessReply,
+    RenamePane_Data, RenameWorkspace_Data, ReportPaneMetadata_Data, RunInPane_Data, ShellLine,
+    StartAgent_Data, WaitForAgent_Data, WaitForPaneOutput_Data, WorkingDirectory,
 };
 pub use crate::generated::starter::StartupProgress;
 use crate::generated::starter::{
@@ -43,7 +43,6 @@ use std::{
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     os::unix::{fs::MetadataExt, net::UnixStream},
     path::{Path, PathBuf},
-    process::Command,
     time::Duration,
 };
 
@@ -721,32 +720,28 @@ impl ClaimsNativeIdentity for HerdrCli {
         harness: &HarnessKind,
         native_session_id: &str,
     ) -> Result<String, String> {
-        let harness_name = harness.expected_harness();
-        let mut command = Command::new(&self.flow_id_executable);
-        command
-            .arg(harness_name)
-            .arg("--flows-root")
-            .arg(&*self.flows_root.current());
-        match harness {
-            HarnessKind::Codex => {
-                command.env("CODEX_SESSION_ID", native_session_id);
+        let printed = match (FlowIdentityClaim {
+            harness_kind: harness.clone(),
+            flows_root: FlowsRoot(self.flows_root.current().to_string_lossy().into_owned()),
+            native_session_id: signal_flow::NativeSessionId(native_session_id.to_owned()),
+        })
+        .emit(self)
+        {
+            ProcessReply::Succeeded(printout) => printout.stdout.0,
+            ProcessReply::Failed(printout) => {
+                return Err(format!(
+                    "flow-id claim helper refused the native identity: {}",
+                    printout.stderr.0.trim()
+                ));
             }
-            HarnessKind::Claude => {
-                command.arg("--parent-session").arg(native_session_id);
+            ProcessReply::Unstarted(error) => {
+                return Err(format!("flow-id claim helper could not start: {error}"));
             }
-        }
-        let output = command
-            .output()
-            .map_err(|error| format!("flow-id claim helper could not start: {error}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "flow-id claim helper refused the native identity: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        let flow_id = String::from_utf8(output.stdout)
-            .map_err(|_| "flow-id claim helper returned non-UTF-8 output".to_owned())?;
-        let flow_id = flow_id.trim_end_matches(['\r', '\n']);
+            ProcessReply::Cancelled => {
+                return Err("flow-id claim helper was cancelled".into());
+            }
+        };
+        let flow_id = printed.trim_end_matches(['\r', '\n']);
         if flow_id.is_empty()
             || flow_id.contains(char::is_whitespace)
             || !flow_id
